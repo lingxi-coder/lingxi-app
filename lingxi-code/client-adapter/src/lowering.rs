@@ -453,6 +453,10 @@ pub fn lower_doctor_report(report: &DoctorReport) -> DoctorReportDto {
 #[must_use]
 pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
     TaskRowDto {
+        unread: rec.status == "completed" && !rec.notified,
+        model: rec.model.clone(),
+        effort: rec.effort.clone(),
+        kind: rec.kind.clone(),
         awaiting_plan_approval: rec.awaiting_plan_approval,
         task_id: rec.task_id.clone(),
         task_type: rec.task_type.clone(),

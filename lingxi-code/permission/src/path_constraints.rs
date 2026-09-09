@@ -1431,7 +1431,9 @@ mod tests {
     #[test]
     fn redirect_into_additional_working_dir_passes() {
         let extra = vec![PathBuf::from("/tmp/scratch")];
-        assert!(check_path_constraints("echo x > /tmp/scratch/out", &roots(), &extra, None).is_none());
+        assert!(
+            check_path_constraints("echo x > /tmp/scratch/out", &roots(), &extra, None).is_none()
+        );
         // Outside both cwd and the extra dir → still asks, and the dir list
         // includes both.
         let a = check_path_constraints("echo x > /etc/foo", &roots(), &extra, None).expect("ask");

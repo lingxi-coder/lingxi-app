@@ -4389,6 +4389,11 @@ async fn build_mobile_inner_with_ask(
     // forever and the client never sees its terminal state. The output-pool
     // cells are published after the orchestrator is built.
     let plugin_workflow_registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+    // Pre-create the shared command-registry slot before the tool registry and
+    // the orchestrator so the Skill tool, slash dispatcher, and per-turn skill
+    // listing all observe one live command set.
+    let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
+        Arc::new(RwLock::new(command_api::CommandRegistry::new()));
     let local_workflow_invoker = Arc::new(crate::workflow_support::DeferredToolInvoker::new());
     let local_workflow_status_sink =
         Arc::new(crate::workflow_support::MobileWorkflowStatusSink::new(
@@ -4422,7 +4427,25 @@ async fn build_mobile_inner_with_ask(
         tasks::TaskType::LocalWorkflow,
         local_workflow_handler.clone(),
     );
+    let local_agent_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    let agent_resume_gate = Arc::new(crate::agent_resume::MobileForkResumeGate {
+        spawner: subagent_spawner.clone(), commands: shared_command_registry.clone(),
+    });
+    task_registry_inner.register_handler(
+        tasks::TaskType::LocalAgent,
+        Arc::new(tasks::handlers::LocalAgentHandler::new(
+            subagent_spawner.clone(),
+            local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+            budget_enforcer.clone(), task_registry_inner.output_manager.clone(),
+        )
+            .with_streaming_spawner(subagent_spawner_arc.clone())
+            .with_status_sink(local_agent_status_sink.clone())
+            .with_worktree_manager(worktree.clone())
+            .with_fork_resume_gate(agent_resume_gate)),
+    );
     let task_registry = Arc::new(task_registry_inner);
+    subagent_spawner_arc.set_task_registry(task_registry.clone());
+    local_agent_status_sink.bind(task_registry.clone());
     let tool_ctx = BuiltinToolContext {
         // No session: this context never persists tool output.
         session_id: None,
@@ -4551,11 +4574,6 @@ async fn build_mobile_inner_with_ask(
         "mobile sets sandbox_available=false because it has no live SandboxRuntimeRunner; \
          enabling sandboxing requires injecting one (see the sandbox_runner coupling note)"
     );
-    // Pre-create the shared command-registry slot before the tool registry and
-    // the orchestrator so the Skill tool, slash dispatcher, and per-turn skill
-    // listing all observe one live command set.
-    let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
-        Arc::new(RwLock::new(command_api::CommandRegistry::new()));
     // P1.8 (§19.2): compose the mobile `PluginManager` — P1.6 registered the
     // one compiled-in plugin through `register_verified_builtin`, but nothing
     // called that composition from `build_mobile_inner` yet, and the manager
@@ -5365,6 +5383,7 @@ async fn build_mobile_inner_with_ask(
         workflow_status_sink: local_workflow_status_sink,
         workflow_launcher,
         active_session_uuid,
+        plan_files,
         app_agent_executor,
     })
 }
@@ -5377,7 +5396,6 @@ async fn build_mobile_inner_with_ask(
 /// the `uniffi` feature (F3-01) this becomes `#[derive(uniffi::Error)]`-able; it
 /// is intentionally flat (no embedded engine types) so it marshals across the
 /// boundary unchanged.
-        plan_files,
 #[derive(Debug, Clone, thiserror::Error)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum MobileEngineError {
@@ -5428,6 +5446,7 @@ pub enum MobileEngineError {
 /// commands and drives the turn on the owned runtime.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
+    task_notification_watcher: tokio::task::AbortHandle,
     /// The handle-owned multi-thread tokio runtime. Owned (not borrowed) so the
     /// engine outlives any single FFI call and F3-05's `submit(SendPrompt)` can
     /// `spawn` a streaming turn that returns promptly while results stream to the
@@ -5520,6 +5539,7 @@ pub struct MobileEngineHandle {
 
 impl Drop for MobileEngineHandle {
     fn drop(&mut self) {
+        self.task_notification_watcher.abort();
         if let Some(profile) = &self.profile_apps {
             if let Some(subscription) = self.app_client_subscription.take() {
                 profile.client_events.unsubscribe(subscription);
@@ -6711,18 +6731,6 @@ impl MobileEngineHandle {
         let session_uuid = session_id.as_uuid().to_string();
         if let Ok(mut guard) = self.inner.active_session_uuid.lock() {
             *guard = session_uuid.clone();
-            self.inner
-                .permission_gate
-                .set_session_id(Some(session_uuid.clone()));
-            self.inner
-                .task_registry
-                .set_workflow_session_filter(Some(session_uuid.clone()));
-        }
-        if let Err(error) = self
-            .local_apps_host
-            .activate_managed_mcp_conversation(&session_uuid, cwd)
-            .await
-        {
             // Re-point the plan-file carve-out at the new session, with a fresh
             // slug — a retarget is a new plan file, not a rename of the old one.
             if let Some(identity) = self.inner.plan_files.identity() {
@@ -6736,6 +6744,18 @@ impl MobileEngineHandle {
                         ..identity
                     });
             }
+            self.inner
+                .permission_gate
+                .set_session_id(Some(session_uuid.clone()));
+            self.inner
+                .task_registry
+                .set_workflow_session_filter(Some(session_uuid.clone()));
+        }
+        if let Err(error) = self
+            .local_apps_host
+            .activate_managed_mcp_conversation(&session_uuid, cwd)
+            .await
+        {
             tracing::warn!(
                 session_id = %session_uuid,
                 %error,
@@ -7184,6 +7204,14 @@ impl MobileEngineHandle {
         };
         let permission_count = cancelled_permissions.len();
         drop(cancelled_permissions);
+        if !platform_api::env::background_tasks_disabled() {
+            self.inner
+                .task_registry
+                .background_all_tasks_with_reason(
+                    platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                )
+                .await;
+        }
         turn.cancel.cancel();
         self.wait_for_turn_release(&turn, true).await;
         // AskUserQuestion's Block resolver observes the turn cancellation
@@ -7338,6 +7366,14 @@ impl MobileEngineHandle {
                 self.message_queue
                     .enqueue(mobile_prompt_command(text))
                     .await;
+                if !platform_api::env::background_tasks_disabled() {
+                    self.inner
+                        .task_registry
+                        .background_all_tasks_with_reason(
+                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                        )
+                        .await;
+                }
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -8463,6 +8499,10 @@ impl MobileEngineHandle {
     // and `engine_desktop::build`).
     #[allow(clippy::too_many_lines)]
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
+        if matches!(&command, ClientCommand::SendPrompt { .. } | ClientCommand::RunSlashCommand { .. } | ClientCommand::TaskMessage { .. }) {
+            let busy = self.active_cancel.lock().await.is_some();
+            self.inner.task_registry.update_shell_session_activity(true, busy, true);
+        }
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
             ClientCommand::SendPrompt {
@@ -9752,6 +9792,15 @@ impl MobileEngineHandle {
                         truncated,
                     })
                     .await;
+                Ok(())
+            }
+            ClientCommand::TaskMessage { task_id, message } => {
+                if !self.inner.orchestrator.workspace_trusted().await {
+                    return Err(ClientError::Rejected { message: "Trust this workspace before messaging a task".into() });
+                }
+                let registry: &dyn platform_api::task_registry::TaskRegistryHandle = &*self.inner.task_registry;
+                registry.send_human_task_message(&task_id, &message).await.map_err(|error| ClientError::Rejected { message: format!("task message failed: {error}") })?;
+                self.event_sink.emit(ClientEvent::SystemNotice { message: format!("Message accepted for task {task_id}"), is_error: false }).await;
                 Ok(())
             }
             ClientCommand::TaskStop { task_id } => {
@@ -12761,7 +12810,108 @@ pub fn build_mobile_engine_inner(
     }
 
     let settings_write_lock = mobile_settings_write_lock(&lingxi_home.join("settings.json"));
+    // Use the native turn slot and permission owner, exactly like SendPrompt.
+    // Capture runtime components, never the handle itself: retaining/upgrading
+    // the FFI Arc on a runtime worker can make that worker drop its own Runtime.
+    let task_notification_watcher = {
+        let registry = inner.task_registry.clone();
+        let orch = inner.orchestrator.clone();
+        let permission_gate = inner.permission_gate.clone();
+        let session_uuid = inner.active_session_uuid.clone();
+        let message_output = inner.message_output.clone();
+        let sink = event_sink.clone();
+        let active_cancel = active_cancel.clone();
+        let message_queue = message_queue.clone();
+        let cancel_reason = cancel_reason.clone();
+        runtime
+            .spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let turn_busy = active_cancel.lock().await.is_some();
+                    if turn_busy
+                        && message_queue.has_main_thread_commands().await
+                        && !platform_api::env::background_tasks_disabled()
+                    {
+                        registry
+                            .background_all_tasks_with_reason(
+                                platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                            )
+                            .await;
+                        continue;
+                    }
+                    if !registry.has_pending_task_notifications_for(None).await {
+                        continue;
+                    }
+                    let mut active = active_cancel.lock().await;
+                    if active.is_some() {
+                        continue;
+                    }
+                    let session_id = session_uuid.lock().map(|id| id.clone()).unwrap_or_default();
+                    let permission_owner_id =
+                        permission_gate.begin_main_turn(Some(session_id.clone()), None);
+                    let turn =
+                        Arc::new(ActiveTurn::new_owned(None, session_id, permission_owner_id));
+                    *active = Some(turn.clone());
+                    drop(active);
+                    cancel_reason.reset();
+                    message_queue
+                        .register_active_turn(turn.cancel.clone())
+                        .await;
+                    message_output.reset_message_buffer().await;
+                    // The orchestrator's notification entry emits TurnStarted; no
+                    // empty prompt or synthetic durable user checkpoint is created.
+                    let (
+                        orch,
+                        registry,
+                        active_cancel,
+                        permission_gate,
+                        message_queue,
+                        message_output,
+                        sink,
+                        task_turn,
+                    ) = (
+                        orch.clone(),
+                        registry.clone(),
+                        active_cancel.clone(),
+                        permission_gate.clone(),
+                        message_queue.clone(),
+                        message_output.clone(),
+                        sink.clone(),
+                        turn.clone(),
+                    );
+                    let task = tokio::spawn(async move {
+                        if let Err(error) = orch
+                            .run_task_notification_rewake(
+                                registry.as_ref(),
+                                task_turn.cancel.clone(),
+                            )
+                            .await
+                        {
+                            message_output.reset_message_buffer().await;
+                            sink.emit(client_adapter::map_orchestrator_error(&error))
+                                .await;
+                        }
+                        let mut active = active_cancel.lock().await;
+                        if active
+                            .as_ref()
+                            .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
+                        {
+                            *active = None;
+                        }
+                        drop(active);
+                        if let Some(owner_id) = task_turn.permission_owner_id {
+                            permission_gate.end_main_turn(owner_id);
+                        }
+                        message_queue.clear_active_turn().await;
+                        task_turn.mark_completed();
+                    });
+                    turn.set_task_handle(task);
+                }
+            })
+            .abort_handle()
+    };
     let handle = Arc::new(MobileEngineHandle {
+        task_notification_watcher,
         runtime,
         inner,
         event_sink,
@@ -17157,6 +17307,260 @@ mod tests {
                         }))
             )));
         });
+    }
+
+    #[test]
+    fn submit_task_message_reaches_registry_after_workspace_trust() {
+        for trusted in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut cfg = test_config(tmp.path());
+            cfg.workspace_trusted = trusted;
+            let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+            handle.runtime().block_on(async {
+                let error = handle
+                    .submit(ClientCommand::TaskMessage {
+                        task_id: "missing-task".into(),
+                        message: "continue".into(),
+                    })
+                    .await
+                    .unwrap_err();
+                if trusted {
+                    assert!(
+                        error.to_string().contains("task message failed:"),
+                        "trusted request must reach the task registry: {error}"
+                    );
+                } else {
+                    assert!(error.to_string().contains("Trust this workspace"));
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn submit_task_message_enters_the_real_human_inbox_without_using_model_send() {
+        struct ModelInbox;
+        #[async_trait::async_trait]
+        impl platform_api::task_registry::TaskMessageReceiver for ModelInbox {
+            async fn send(
+                &self,
+                _: String,
+            ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+                panic!("human command must use the dedicated human inbox");
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(tmp.path());
+        cfg.workspace_trusted = true;
+        let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
+        handle.runtime().block_on(async {
+            use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+            let registry = handle.inner.task_registry.as_ref();
+            let task = TaskRegistryHandle::create(registry, TaskCreateInput { task_type: "local_agent".into(), description: "active agent fixture".into() }).await.unwrap();
+            let agent_id = protocol::AgentId::new();
+            registry.bind_agent_id(&task.task_id, agent_id).await.unwrap();
+            registry.bind_agent_message_receiver(&task.task_id, Arc::new(ModelInbox)).await.unwrap();
+            handle.submit(ClientCommand::TaskMessage { task_id: task.task_id.clone(), message: "  continue with care\nnext line".into() }).await.unwrap();
+            assert_eq!(registry.take_human_task_messages_for(agent_id).await, vec!["  continue with care\nnext line"]);
+            assert!(listener.received.lock().await.iter().any(|event| matches!(event, Ev::SystemNotice { message, is_error: false } if message.contains(&task.task_id))));
+        });
+    }
+
+    #[test]
+    fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_history() {
+        use std::io::{Read, Write};
+        struct NoWork;
+        #[async_trait::async_trait]
+        impl platform_api::ToolInvoker for NoWork {
+            async fn invoke(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: platform_api::tool_invoker::SubagentInvocationContext,
+            ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError>
+            {
+                unreachable!("fixture model never calls tools")
+            }
+        }
+        #[async_trait::async_trait]
+        impl platform_api::BudgetEnforcerHandle for NoWork {
+            async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::BudgetError> {
+                Ok(())
+            }
+            async fn snapshot_total_nano_usd(&self) -> u64 {
+                0
+            }
+        }
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let server_thread = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut socket = loop {
+                match server.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("local provider was never called: {error}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+                if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&bytes[..header_end]);
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':')
+                        .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                        .map(|(_, value)| value.trim().parse().unwrap())
+                })
+                .expect("JSON request content length");
+            while bytes.len() < header_end + length {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+            let _ = captured_tx.send(body);
+            let events = [
+                serde_json::json!({"type":"message_start","message":{"id":"fixture-response","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":0}}}),
+                serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"continued"}}),
+                serde_json::json!({"type":"content_block_stop","index":0}),
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}),
+                serde_json::json!({"type":"message_stop"}),
+            ];
+            let body = events
+                .iter()
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().unwrap()
+                    )
+                })
+                .collect::<String>();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(tmp.path());
+        cfg.workspace_trusted = true;
+        cfg.api_base = base;
+        cfg.api_key = "test-fixture-key".into();
+        cfg.default_model = "claude-sonnet-4-5".into();
+        let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+        // Observe the resumed child itself; no unrelated main-loop wake request
+        // is needed to prove this targeted producer reaches a real model turn.
+        handle.task_notification_watcher.abort();
+        handle.runtime().block_on(async {
+            use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+            let registry = handle.inner.task_registry.as_ref();
+            let task = TaskRegistryHandle::create(
+                registry,
+                TaskCreateInput {
+                    task_type: "local_agent".into(),
+                    description: "stopped original agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let id = protocol::AgentId::new();
+            registry.bind_agent_id(&task.task_id, id).await.unwrap();
+            let session_id = handle.inner.orchestrator.current_session_id().await;
+            let dir = orchestrator::transcript_paths::subagents_dir(
+                &handle.lingxi_home,
+                &handle.session_cwd,
+                &session_id.as_uuid().to_string(),
+            );
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            let transcript = session::forked_skill::agent_transcript_path(&dir, &id.to_string());
+            let previous = protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "original review context".into(),
+            );
+            tokio::fs::write(
+                &transcript,
+                format!(
+                    "{}\n",
+                    serde_json::json!({"model":"claude-sonnet-4-5","message":previous})
+                ),
+            )
+            .await
+            .unwrap();
+            TaskRegistryHandle::register_agent_resume_recipe(
+                registry,
+                &task.task_id,
+                platform_api::SubagentSpawnRequest {
+                    subagent_type: "general-purpose".into(),
+                    prompt: "do not replay this initial prompt".into(),
+                    cwd: Some(tmp.path().display().to_string()),
+                    model: Some("claude-sonnet-4-5".into()),
+                    ..Default::default()
+                },
+                platform_api::SubagentInheritance {
+                    tool_invoker: Arc::new(NoWork),
+                    budget: Arc::new(NoWork),
+                },
+            )
+            .await
+            .unwrap();
+            handle
+                .submit(ClientCommand::TaskStop {
+                    task_id: task.task_id.clone(),
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                handle.submit(ClientCommand::TaskMessage {
+                    task_id: task.task_id.clone(),
+                    message: "  finish the review".into(),
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let body = tokio::time::timeout(std::time::Duration::from_secs(5), captured_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                body["stream"], true,
+                "restoration must reach an actual streaming model request"
+            );
+            let messages = body["messages"].to_string();
+            assert!(
+                messages.contains("original review context"),
+                "restored turn lost prior transcript: {messages}"
+            );
+            assert!(
+                messages.contains("finish the review"),
+                "human follow-up did not reach provider: {messages}"
+            );
+            assert!(!messages.contains("do not replay this initial prompt"));
+            let tasks::TaskState::LocalAgent(restored) = registry.get(&task.task_id).await.unwrap()
+            else {
+                panic!("restored task changed type")
+            };
+            assert_eq!(restored.agent_id, id);
+        });
+        server_thread.join().unwrap();
     }
 
     #[test]

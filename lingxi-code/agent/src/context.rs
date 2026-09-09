@@ -25,6 +25,8 @@ use tool_api::content_replacement::ContentReplacementState;
 pub struct SubagentContext {
     /// Stable identifier for this spawn — every event carries this id.
     pub agent_id: AgentId,
+    /// Shared registry used for recipient-scoped notification folding.
+    pub task_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
     /// Parent agent id, when this agent was dispatched by another agent.
     pub parent_agent_id: Option<AgentId>,
     /// DISPLAY NAME of this agent when it is an in-process teammate in a swarm

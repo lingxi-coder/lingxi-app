@@ -3465,6 +3465,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 "NoopTool",
                 serde_json::json!({}),
                 platform_api::tool_invoker::SubagentInvocationContext {
+                    permission_pause_observer: None,
                     parent_agent_id: None,
                     origin_session_id: None,
                     agent_name: None,

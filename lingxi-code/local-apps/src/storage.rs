@@ -2159,10 +2159,8 @@ mod tests {
     fn backdate_creating_marker(root: &Path, id: &str, age_ms: u64) {
         let path = root.join(APPS_DIR).join(id).join(CREATING_MARKER_FILE);
         let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.set_modified(
-            std::time::SystemTime::now() - std::time::Duration::from_millis(age_ms),
-        )
-        .unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_millis(age_ms))
+            .unwrap();
     }
 
     #[test]
@@ -2528,7 +2526,9 @@ mod tests {
         let loaded = load_all(dir.path()).unwrap();
         assert_eq!(loaded.len(), 1, "the live app must still load");
         assert!(
-            !dir.path().join(scaffold_recovery_journal_rel("live1")).exists(),
+            !dir.path()
+                .join(scaffold_recovery_journal_rel("live1"))
+                .exists(),
             "the per-record recovery path (not the sweep) must have resolved this journal"
         );
     }

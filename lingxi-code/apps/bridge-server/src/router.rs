@@ -3842,6 +3842,16 @@ impl CommandRouter for EngineCommandRouter {
             // UI/control-channel `stopTask` passes `source:"user"` and inherits
             // the stop helper's `killedBy = "user"` default, so the killed
             // notification reads "was stopped by user".
+            ClientCommand::TaskMessage { task_id, message } => {
+                if !self.handle.workspace_trusted().await {
+                    sink.emit(ClientEvent::Error { kind: ErrorKindDto::Rejected, message: "Trust this workspace before messaging a task".into() }).await;
+                } else {
+                    match self.tasks.send_human_task_message(&task_id, &message).await {
+                        Ok(()) => sink.emit(ClientEvent::SystemNotice { message: format!("Message accepted for task {task_id}"), is_error: false }).await,
+                        Err(error) => sink.emit(ClientEvent::Error { kind: ErrorKindDto::Rejected, message: format!("task message failed: {error}") }).await,
+                    }
+                }
+            }
             ClientCommand::TaskStop { task_id } => {
                 match self.tasks.kill_with_reason(&task_id, "user").await {
                     Ok(rec) => {
@@ -4181,9 +4191,14 @@ mod fusion_catalog_refresh_tests {
         }
     }
 
-    struct MockTaskRegistry;
+    #[derive(Default)]
+    struct MockTaskRegistry { human_messages: std::sync::Mutex<Vec<(String, String)>> }
     #[async_trait::async_trait]
     impl TaskRegistryHandle for MockTaskRegistry {
+        async fn send_human_task_message(&self, task_id: &str, message: &str) -> Result<(), TaskRegistryError> {
+            self.human_messages.lock().unwrap().push((task_id.into(), message.into()));
+            Ok(())
+        }
         async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
@@ -4222,6 +4237,28 @@ mod fusion_catalog_refresh_tests {
         }
     }
 
+    #[derive(Default)]
+    struct TaskMessageSink(std::sync::Mutex<Vec<ClientEvent>>);
+    #[async_trait::async_trait]
+    impl ClientEventSink for TaskMessageSink {
+        async fn emit(&self, event: ClientEvent) { self.0.lock().unwrap().push(event); }
+    }
+
+    #[tokio::test]
+    async fn task_message_uses_trusted_registry_route_and_preserves_workspace_gate() {
+        let handle = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let registry = Arc::new(MockTaskRegistry::default());
+        let router = EngineCommandRouter::new(handle.clone(), Arc::new(MockAuth), registry.clone(), None, None);
+        let sink = Arc::new(TaskMessageSink::default());
+        router.route(ClientCommand::TaskMessage { task_id: "a123".into(), message: "  continue\nnext".into() }, sink.clone()).await;
+        assert_eq!(*registry.human_messages.lock().unwrap(), vec![("a123".into(), "  continue\nnext".into())]);
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(event, ClientEvent::SystemNotice { is_error: false, .. })));
+        handle.set_workspace_trusted(false);
+        router.route(ClientCommand::TaskMessage { task_id: "a123".into(), message: "denied".into() }, sink.clone()).await;
+        assert_eq!(registry.human_messages.lock().unwrap().len(), 1);
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(event, ClientEvent::Error { kind: client_protocol::events::ErrorKindDto::Rejected, .. })));
+    }
+
     async fn router_with_credentials(
         credentials: Arc<secret::CredentialManager>,
         ephemeral: bool,
@@ -4230,7 +4267,7 @@ mod fusion_catalog_refresh_tests {
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::new())
                 as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
             Arc::new(MockAuth) as Arc<dyn AuthHandle>,
-            Arc::new(MockTaskRegistry) as Arc<dyn TaskRegistryHandle>,
+            Arc::new(MockTaskRegistry::default()) as Arc<dyn TaskRegistryHandle>,
             None,
             None,
         )

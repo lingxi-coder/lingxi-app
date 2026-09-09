@@ -128,8 +128,10 @@ fn fusion_completion_notice_other_session(result: &FusionResult, conversation_id
     // `parse_prefixed` accepts both the prefixed display form and a bare uuid,
     // so this stays correct if a caller ever hands over an unprefixed id; a
     // string that is neither falls back to being truncated as-is.
-    let body = protocol::SessionId::parse_prefixed(conversation_id)
-        .map_or_else(|| conversation_id.to_string(), |id| id.as_uuid().to_string());
+    let body = protocol::SessionId::parse_prefixed(conversation_id).map_or_else(
+        || conversation_id.to_string(),
+        |id| id.as_uuid().to_string(),
+    );
     let short: String = body.chars().take(8).collect();
     let what = match result.status {
         FusionStatus::Completed => "its result",
@@ -387,7 +389,10 @@ mod tests {
     fn description_truncates_a_long_first_line_at_eighty_chars() {
         let long_line = "x".repeat(200);
         let desc = fusion_task_description("fast", "same-provider", &long_line);
-        assert_eq!(desc, format!("Fusion fast same-provider: {}…", "x".repeat(80)));
+        assert_eq!(
+            desc,
+            format!("Fusion fast same-provider: {}…", "x".repeat(80))
+        );
     }
 
     #[test]
@@ -481,7 +486,10 @@ mod tests {
             session_id: &str,
             _text: &str,
         ) -> Result<(), platform_api::HandleError> {
-            self.appended_to.lock().unwrap().push(session_id.to_string());
+            self.appended_to
+                .lock()
+                .unwrap()
+                .push(session_id.to_string());
             Ok(())
         }
         async fn emit_background_system_notice(&self, body: &str) {

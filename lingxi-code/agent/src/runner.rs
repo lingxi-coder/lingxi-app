@@ -1155,7 +1155,7 @@ fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<S
     reason = "imperative multi-turn agentic loop — splitting the turn body hurts readability"
 )]
 async fn run_subagent_loop(
-    ctx: SubagentContext,
+    mut ctx: SubagentContext,
     mut event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
     live_hook_transcript: &mut hooks::PromptHookTranscript,
@@ -1389,6 +1389,14 @@ async fn run_subagent_loop(
         }
     }
 
+    // A restored human-owned turn drains its typed inbox before the first API
+    // request. The persisted-history watermark above excludes these new inputs.
+    if ctx.resumed_history.is_some() {
+        if fold_task_notifications(&ctx, history).await {
+            flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
+        }
+    }
+
     let max_turns = ctx.agent_definition.max_turns;
 
     // Once the cancellation channel closes, no UserExit / UserInterrupt can
@@ -1414,6 +1422,10 @@ async fn run_subagent_loop(
     // `tengu_cache_eviction_hint`.
     let mut assistant_message_count: u64 = 0;
     let mut last_request_id: Option<String> = None;
+    let mut notification_changes = ctx
+        .task_registry
+        .as_ref()
+        .and_then(|registry| registry.subscribe_task_notifications());
 
     // Outer loop: one iteration per turn-set. In non-persistent mode the
     // turn-set runs exactly once (we `return` after it). In persistent mode the
@@ -1427,7 +1439,9 @@ async fn run_subagent_loop(
         // already emitted its `Completed`). Stays `false` if the loop instead falls
         // through by exhausting `max_turns`, which needs the max-turns `Completed`.
         let mut terminated_cleanly = false;
+        let mut foreground_parked = false;
         for turn_idx in 0..max_turns {
+            fold_task_notifications(&ctx, history).await;
             // Per-turn budget gate. This is the achievable analog of
             // `QueryEngine.ts`'s `error_max_budget_usd` loop-terminator, built on
             // the same frozen seam `AgentTool`'s pre-spawn gate uses
@@ -1685,10 +1699,11 @@ async fn run_subagent_loop(
                                 // future, append the message to history (above), and
                                 // re-issue the round-trip NOW — previously this fell
                                 // into the catch-all below and silently DISCARDED the
-                                // text. Persistent (teammate) runners only; one-shot
-                                // subagents keep the legacy drop-and-retry semantics.
+                                // text. A registry-backed foreground runner can also
+                                // become resumable after Ctrl+B, so preserve intentional
+                                // messages there. Task notifications never use this arm.
                                 Some(lingxi_core::Event::UserMessage { content, .. })
-                                    if ctx.persistent =>
+                                    if ctx.persistent || ctx.task_registry.is_some() =>
                                 {
                                     wake_message = Some(content);
                                     continue;
@@ -2009,7 +2024,15 @@ async fn run_subagent_loop(
                         continue;
                     }
                     let inv_ctx = platform_api::tool_invoker::SubagentInvocationContext {
-                        parent_agent_id: ctx.parent_agent_id,
+                        permission_pause_observer: ctx.task_registry.clone().map(|registry| {
+                            platform_api::permission_gate::PermissionPauseObserver::new(move |ms| {
+                                registry.add_permission_paused_ms(agent_id, ms);
+                            })
+                        }),
+                        // The tools run on behalf of THIS agent. The field is
+                        // named parent because it becomes the parent of any
+                        // recursively spawned child, not this agent's parent.
+                        parent_agent_id: Some(agent_id),
                         origin_session_id: ctx.origin_session_id,
                         // Swarm identity (claude-code `getAgentName()` /
                         // `getTeammateContext()?.teamName`): a teammate's dispatched
@@ -2282,6 +2305,11 @@ async fn run_subagent_loop(
                     .await;
                     return;
                 }
+                // A completion that arrived during the model request is folded only
+                // after its stream finished, before publishing a terminal event.
+                if turn_idx + 1 < max_turns && fold_task_notifications(&ctx, history).await {
+                    continue;
+                }
                 // claude `finalizeAgentTool`: the result's `content` is the LAST
                 // assistant message's text blocks, with a backward-scan fallback to
                 // the most recent assistant message that has text when the final turn
@@ -2297,6 +2325,22 @@ async fn run_subagent_loop(
                 // Persist all messages before publishing the terminal event; the
                 // consumer is allowed to tear down a one-shot runner immediately.
                 flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
+                foreground_parked = park_foreground_owner(
+                    &ctx,
+                    &result,
+                    &last_usage,
+                    total_tool_use_count,
+                    elapsed_ms(run_start),
+                )
+                .await;
+                if foreground_parked {
+                    ctx.is_async = true;
+                    if let Some(writer) = transcript.as_ref() {
+                        let _ = writer.record_terminal("idle", None).await;
+                    }
+                    terminated_cleanly = true;
+                    break;
+                }
                 // Keep lifecycle state alongside the transcript so clients that
                 // discover an agent after completion can distinguish it from a
                 // still-running child. Persistent agents retain their parked row
@@ -2389,19 +2433,34 @@ async fn run_subagent_loop(
                 );
                 obj.insert("max_turns".to_string(), serde_json::json!(max_turns));
             }
-            let _ = out_tx
-                .send(SubagentEvent::Completed {
-                    agent_id,
-                    result,
-                    usage: last_usage.clone(),
-                    total_tool_use_count,
-                    total_duration_ms: elapsed_ms(run_start),
-                    assistant_message_count,
-                    last_request_id: last_request_id.clone(),
-                    cumulative_usage: cumulative_usage.clone(),
-                    usage_complete: true,
-                })
-                .await;
+            foreground_parked = park_foreground_owner(
+                &ctx,
+                &result,
+                &last_usage,
+                total_tool_use_count,
+                elapsed_ms(run_start),
+            )
+            .await;
+            if foreground_parked {
+                ctx.is_async = true;
+                if let Some(writer) = transcript.as_ref() {
+                    let _ = writer.record_terminal("idle", None).await;
+                }
+            } else {
+                let _ = out_tx
+                    .send(SubagentEvent::Completed {
+                        agent_id,
+                        result,
+                        usage: last_usage.clone(),
+                        total_tool_use_count,
+                        total_duration_ms: elapsed_ms(run_start),
+                        assistant_message_count,
+                        last_request_id: last_request_id.clone(),
+                        cumulative_usage: cumulative_usage.clone(),
+                        usage_complete: true,
+                    })
+                    .await;
+            }
         }
 
         // Flush the turn-set's messages to the per-agent transcript. Runs for
@@ -2415,7 +2474,7 @@ async fn run_subagent_loop(
         // Non-persistent (batch-8) behavior: end after one turn-set. This preserves
         // today's exact semantics — every existing call site sets `persistent`
         // false, so they `return` here as before.
-        if !ctx.persistent {
+        if !ctx.persistent && !foreground_parked {
             return;
         }
 
@@ -2429,7 +2488,35 @@ async fn run_subagent_loop(
             return;
         }
         loop {
-            match event_rx.recv().await {
+            // Subscribe was established before the turn; checking after registering
+            // the revision prevents a notification between check and park being lost.
+            // Completed is consumed asynchronously by the handler. Wait for
+            // its rest acknowledgement before starting a notification turn,
+            // otherwise the old Completed can park a newly running owner.
+            let handler_rested = match &ctx.task_registry {
+                Some(registry) => {
+                    registry
+                        .can_wake_agent_for_task_notification(agent_id)
+                        .await
+                }
+                None => true,
+            };
+            if handler_rested && fold_task_notifications(&ctx, history).await {
+                break;
+            }
+            let event = tokio::select! {
+                event = event_rx.recv() => event,
+                changed = async {
+                    match notification_changes.as_mut() {
+                        Some(receiver) => receiver.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed.is_err() { notification_changes = None; }
+                    continue;
+                }
+            };
+            match event {
                 Some(lingxi_core::Event::UserMessage { content, .. }) => {
                     if let Some(writer) = transcript.as_ref() {
                         let _ = writer.record_terminal("running", None).await;
@@ -2468,6 +2555,71 @@ async fn run_subagent_loop(
             }
         }
     }
+}
+
+async fn park_foreground_owner(
+    ctx: &SubagentContext,
+    result: &serde_json::Value,
+    usage: &llm_client::Usage,
+    tool_uses: u64,
+    duration_ms: u64,
+) -> bool {
+    if ctx.persistent {
+        return false;
+    }
+    let Some(registry) = &ctx.task_registry else {
+        return false;
+    };
+    registry
+        .park_foreground_agent(
+            ctx.agent_id,
+            platform_api::task_registry::AgentTerminalOutcome {
+                result: result
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                usage: Some(platform_api::task_registry::AgentRunUsage {
+                    subagent_tokens: crate::handle::subagent_usage_from_llm_usage(usage)
+                        .total_tokens,
+                    tool_uses,
+                    duration_ms,
+                }),
+                max_turns_reached: result.get("max_turns").and_then(serde_json::Value::as_u64),
+                ..Default::default()
+            },
+        )
+        .await
+}
+
+/// Fold only at model boundaries or while parked, never racing the provider future.
+async fn fold_task_notifications(
+    ctx: &SubagentContext,
+    history: &mut Vec<ConversationMessage>,
+) -> bool {
+    let Some(registry) = &ctx.task_registry else {
+        return false;
+    };
+    let notifications = registry
+        .take_pending_task_notifications_for(Some(ctx.agent_id))
+        .await
+        .unwrap_or_default();
+    let reminders = platform_api::task_notification::render_reminders_with_options(
+        &notifications,
+        false,
+        telemetry::push_notifications_enabled(),
+    );
+    let human = registry.take_human_task_messages_for(ctx.agent_id).await;
+    let any = !reminders.is_empty() || !human.is_empty();
+    if any {
+        registry
+            .activate_agent_for_task_notification(ctx.agent_id)
+            .await;
+    }
+    for reminder in reminders {
+        history.push(ConversationMessage::user_meta(MessageId::new(), reminder));
+    }
+    for message in human { history.push(ConversationMessage::user_meta(MessageId::new(), message)); }
+    any
 }
 
 /// Legacy reducer-driven stub.

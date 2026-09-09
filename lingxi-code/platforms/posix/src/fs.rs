@@ -238,6 +238,16 @@ impl FileSystem for PosixFileSystem {
         platform_api::rooted_fs::append_file_pinned(root, relative, content, expected)
     }
 
+    async fn append_file_rooted_staged(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+    ) -> Result<(), platform_api::filesystem::FileAppendError> {
+        platform_api::rooted_fs::append_file_staged(root, relative, content, expected)
+    }
+
     async fn append_file_with_mode(
         &self,
         path: &str,
@@ -296,6 +306,10 @@ impl FileSystem for PosixFileSystem {
     ) -> Result<FileContent, FsError> {
         let content = platform_api::rooted_fs::read_to_string_pinned(root, relative, expected)?;
         Ok(platform_api::apply_line_window(content, offset, limit))
+    }
+
+    async fn read_file_rooted_byte_window_pinned(&self, root: &Path, relative: &Path, expected: Option<&platform_api::rooted_fs::RootIdentity>, offset: u64, limit: u64) -> Result<Vec<u8>, FsError> {
+        platform_api::rooted_fs::read_byte_window_pinned(root, relative, expected, offset, limit)
     }
 
     async fn write_file_rooted_atomic(
@@ -438,6 +452,17 @@ mod tests {
 
     fn fs_at(root: &std::path::Path) -> PosixFileSystem {
         PosixFileSystem::new(root.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn staged_task_append_reports_open_failure_without_writing_symlink_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "unchanged").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("output")).unwrap();
+        let error = fs_at(dir.path()).append_file_rooted_staged(dir.path(), Path::new("output"), "payload", None).await.unwrap_err();
+        assert_eq!(error.stage, platform_api::filesystem::FileAppendStage::Open);
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "unchanged");
     }
 
     #[test]

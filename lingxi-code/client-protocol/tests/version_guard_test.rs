@@ -841,6 +841,9 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::TaskStop", "task_stop");
     put("ClientCommand::TaskStop.task_id", "String");
+    put("ClientCommand::TaskMessage", "task_message");
+    put("ClientCommand::TaskMessage.task_id", "String");
+    put("ClientCommand::TaskMessage.message", "String");
 
     put("ClientCommand::ListApps", "list_apps");
 
@@ -3168,6 +3171,8 @@ fn contract_index_covers_every_dto() {
             },
         },
         TaskRowDto {
+            unread: false, model: None, effort: None,
+        kind: None,
             awaiting_plan_approval: false,
             task_id: String::new(),
             task_type: String::new(),

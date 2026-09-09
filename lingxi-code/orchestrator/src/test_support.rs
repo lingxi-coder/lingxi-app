@@ -291,6 +291,7 @@ pub fn mock_message_response(
 /// the orchestrator's emitted output after wrapping the stream in an `Arc`.
 #[derive(Clone)]
 pub struct MockOutputStream {
+    lifecycle_events: Arc<Mutex<Vec<serde_json::Value>>>,
     events: Arc<Mutex<Vec<OutputEvent>>>,
     /// Denial provenance observed via `emit_tool_result_denied`, as
     /// `(tool_use_id, denial_kind)` in emission order.
@@ -312,11 +313,16 @@ pub struct MockOutputStream {
 }
 
 impl MockOutputStream {
+    pub async fn lifecycle_event_snapshot(&self) -> Vec<serde_json::Value> {
+        self.lifecycle_events.lock().await.clone()
+    }
+
     /// Construct an empty mock.
     #[must_use]
     pub fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
+            lifecycle_events: Arc::new(Mutex::new(Vec::new())),
             denials: Arc::new(Mutex::new(Vec::new())),
             attachments: Arc::new(Mutex::new(Vec::new())),
             compaction_phases: Arc::new(Mutex::new(Vec::new())),
@@ -391,6 +397,10 @@ impl Default for MockOutputStream {
 
 #[async_trait]
 impl OutputStream for MockOutputStream {
+    async fn emit_task_lifecycle(&self, event: &serde_json::Value) {
+        self.lifecycle_events.lock().await.push(event.clone());
+    }
+
     async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
         self.events.lock().await.push(OutputEvent::MessageIdentity {
             message_id: *message_id,

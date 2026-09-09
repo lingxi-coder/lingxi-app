@@ -229,6 +229,8 @@ pub enum PermissionAction {
 /// id is not secret, so the derived `Debug` is fine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskAction {
+    /// A typed human follow-up from `/tasks message`, never a model tool call.
+    Message { task_id: String, message: String },
     /// Stop the running background task with this 9-char id.
     Kill {
         /// The `[bartwmdksf][0-9a-z]{8}` task id to stop.
@@ -379,6 +381,8 @@ pub enum CommandAction {
     OpenConnectPicker,
     /// Exit the app (`/exit`, `/quit`).
     Quit,
+    /// Persist a new background session before exiting the foreground process.
+    BackgroundAndExit,
     /// Apply (and persist) this theme setting (`/theme` picker commit).
     SetTheme(tui_core::theme::ThemeSetting),
 }

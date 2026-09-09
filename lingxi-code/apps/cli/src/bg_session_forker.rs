@@ -23,12 +23,13 @@ use async_trait::async_trait;
 use platform_api::bg_session_forker::{BgForkError, BgSessionForker};
 use platform_api::FileSystem;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Concrete `/fork`-to-background forker bound to the resolved config/runtime
 /// dirs. Constructed in `init::resolve_desktop_config` and set on
 /// `DesktopConfig.bg_session_forker`.
 pub struct CliBgSessionForker {
+    task_registry: RwLock<Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>>,
     /// `<config-home>` (`~/.lingxi`) — anchors `projects/<cwd>/<uuid>.jsonl` and
     /// the `jobs/<short>/state.json` writes.
     config_home: PathBuf,
@@ -52,6 +53,7 @@ impl CliBgSessionForker {
         resolved_permission_mode: permission::PermissionMode,
     ) -> Self {
         Self {
+            task_registry: RwLock::new(None),
             config_home,
             runtime_dir,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -108,6 +110,19 @@ impl CliBgSessionForker {
         let mut launch_context = self.launch_context();
         launch_context.model = Some(model.to_string());
         launch_context.handoff = handoff.cloned();
+        let registry = self
+            .task_registry
+            .read()
+            .expect("background registry lock")
+            .clone();
+        if handoff.is_some() {
+            if let Some(registry) = &registry {
+                launch_context.shell_handoff = registry
+                    .export_shell_handoff()
+                    .await
+                    .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
+            }
+        }
         if let Some(system_prompt) = system_prompt {
             launch_context.system_prompt = Some(system_prompt.to_string());
         }
@@ -118,8 +133,37 @@ impl CliBgSessionForker {
             &new_session_id,
             prompt,
             &launch_context,
-        )
-        .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
+        );
+        let short = match short {
+            Ok(short) => short,
+            Err(error) => {
+                if let Some(registry) = &registry {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        return Err(BgForkError::Dispatch(error.to_string()));
+                    }
+                    registry
+                        .rollback_shell_handoff(&launch_context.shell_handoff)
+                        .await
+                        .map_err(|rollback| {
+                            BgForkError::Dispatch(format!(
+                                "{error}; shell export recovery failed: {rollback}"
+                            ))
+                        })?;
+                }
+                return Err(BgForkError::Dispatch(error.to_string()));
+            }
+        };
+
+        if let Some(registry) = &registry {
+            crate::shell_handoff::finish_source(
+                &self.config_home,
+                &short,
+                registry.as_ref(),
+                &launch_context.shell_handoff,
+            )
+            .await
+            .map_err(BgForkError::Dispatch)?;
+        }
 
         // 4. The live-session system line. No oracle string is recoverable — the
         //    2.1.212 `vAd` command has no `load` handler (the TUI special
@@ -133,6 +177,16 @@ impl CliBgSessionForker {
 
 #[async_trait]
 impl BgSessionForker for CliBgSessionForker {
+    fn set_task_registry(
+        &self,
+        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    ) {
+        *self
+            .task_registry
+            .write()
+            .expect("background registry lock") = Some(registry);
+    }
+
     async fn fork_to_background(
         &self,
         history: &[protocol::ConversationMessage],

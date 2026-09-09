@@ -48,6 +48,17 @@ impl RegistryTaskNotifications {
 
 #[async_trait]
 impl TaskNotificationProvider for RegistryTaskNotifications {
+    fn subscribe_task_lifecycle(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>> {
+        self.registry.subscribe_task_lifecycle()
+    }
+
+    fn update_shell_session_activity(&self, interactive: bool, busy: bool, user_interaction: bool) {
+        self.registry
+            .update_shell_session_activity(interactive, busy, user_interaction);
+    }
+
     async fn take_pending_task_notifications(&self) -> Vec<TaskNotification> {
         // Best-effort: an error degrades to "nothing to surface" so a transient
         // registry failure never breaks the turn.
@@ -70,10 +81,34 @@ mod tests {
 
     /// A `TaskRegistryHandle` whose only meaningful method is the
     /// notification drain — every other method is unreachable in these tests.
-    struct FakeRegistry(Mutex<Vec<TaskNotification>>);
+    struct FakeRegistry(Mutex<Vec<TaskNotification>>, Mutex<Vec<(bool, bool, bool)>>);
+    impl FakeRegistry {
+        fn new(notes: Vec<TaskNotification>) -> Self {
+            Self(Mutex::new(notes), Mutex::new(Vec::new()))
+        }
+        fn complete(&self) {
+            self.0.lock().unwrap().push(TaskNotification {
+                task_id: "done".into(),
+                task_type: "local_bash".into(),
+                status: "completed".into(),
+                description: "background result".into(),
+                ..Default::default()
+            });
+        }
+    }
 
     #[async_trait]
     impl TaskRegistryHandle for FakeRegistry {
+        fn update_shell_session_activity(&self, interactive: bool, busy: bool, human: bool) {
+            self.1.lock().unwrap().push((interactive, busy, human));
+        }
+        async fn has_pending_task_notifications_for(
+            &self,
+            recipient: Option<protocol::AgentId>,
+        ) -> bool {
+            recipient.is_none() && !self.0.lock().unwrap().is_empty()
+        }
+
         async fn create(&self, _i: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
             unreachable!()
         }
@@ -112,6 +147,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sdk_lifecycle_relay_emits_without_a_model_turn_and_stops_on_drop() {
+        use crate::test_support::*;
+        struct Provider(Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>>);
+        #[async_trait]
+        impl TaskNotificationProvider for Provider {
+            fn subscribe_task_lifecycle(
+                &self,
+            ) -> Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>> {
+                self.0.lock().unwrap().take()
+            }
+            async fn take_pending_task_notifications(&self) -> Vec<TaskNotification> {
+                vec![]
+            }
+        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let output = Arc::new(MockOutputStream::new());
+        let orch = crate::ConversationOrchestrator::new_with_streaming(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(MockStreamingApiClient::with_turns(vec![])),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_task_notifications(Arc::new(Provider(Mutex::new(Some(receiver)))));
+        let event =
+            serde_json::json!({"type":"system", "subtype":"task_started", "task_id":"b12345678"});
+        sender.send(event.clone()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while output.lifecycle_event_snapshot().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(output.lifecycle_event_snapshot().await, vec![event]);
+        drop(orch);
+        tokio::time::timeout(std::time::Duration::from_secs(2), sender.closed())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn forwards_drain_to_registry_then_empty() {
         let n = TaskNotification {
             task_id: "b1".into(),
@@ -134,10 +215,128 @@ mod tests {
             workflow_duration_ms: None,
             ..Default::default()
         };
-        let reg = Arc::new(FakeRegistry(Mutex::new(vec![n.clone()])));
+        let reg = Arc::new(FakeRegistry::new(vec![n.clone()]));
         let provider = RegistryTaskNotifications::new(reg);
         assert_eq!(provider.take_pending_task_notifications().await, vec![n]);
         // Consume-once: the registry drained, so the second call is empty.
         assert!(provider.take_pending_task_notifications().await.is_empty());
+    }
+    fn wake_orchestrator(
+        registry: Arc<FakeRegistry>,
+    ) -> (
+        Arc<crate::ConversationOrchestrator>,
+        Arc<crate::test_support::MockStreamingApiClient>,
+    ) {
+        use crate::test_support::*;
+        let api = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("wake", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "received"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        let orch = crate::ConversationOrchestrator::new_with_streaming(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            api.clone(),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_task_notifications(Arc::new(RegistryTaskNotifications::new(registry)));
+        (Arc::new(orch), api)
+    }
+
+    #[tokio::test]
+    async fn idle_wake_delivers_preexisting_completion_without_a_human_prompt() {
+        let registry = Arc::new(FakeRegistry::new(vec![]));
+        registry.complete(); // No subscriber yet: startup must check existing state.
+        let (orch, api) = wake_orchestrator(registry.clone());
+        orch.run_task_notification_rewake(
+            registry.as_ref(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let calls = api.captured_calls().await;
+        assert_eq!(calls.len(), 1);
+        let content = calls[0]
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(content.contains(platform_api::task_notification::NON_USER_INPUT_HEADER));
+        assert!(!content.contains(platform_api::task_notification::IN_HUMAN_TURN_HEADER));
+        assert!(calls[0]
+            .messages
+            .iter()
+            .all(|m| m.is_meta() || !m.text_content().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn idle_wake_waits_for_active_turn_and_rechecks_consumed_completion() {
+        let registry = Arc::new(FakeRegistry::new(vec![]));
+        let (orch, api) = wake_orchestrator(registry.clone());
+        let gate = orch.turn_gate.lock().await;
+        registry.complete();
+        let wake_orch = orch.clone();
+        let wake_registry = registry.clone();
+        let wake = tokio::spawn(async move {
+            wake_orch
+                .run_task_notification_rewake(
+                    wake_registry.as_ref(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(
+            api.captured_calls().await.is_empty(),
+            "busy owner must not be interrupted"
+        );
+        registry.take_pending_task_notifications().await.unwrap();
+        drop(gate);
+        wake.await.unwrap();
+        assert!(
+            api.captured_calls().await.is_empty(),
+            "active turn already consumed the completion"
+        );
+        registry.complete();
+        orch.run_task_notification_rewake(
+            registry.as_ref(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(api.captured_calls().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn human_turn_completion_uses_the_same_turn_provenance_header() {
+        let registry = Arc::new(FakeRegistry::new(vec![]));
+        registry.complete();
+        let (orch, api) = wake_orchestrator(registry.clone());
+        orch.run_turn_streaming("a genuine user message")
+            .await
+            .unwrap();
+        let calls = api.captured_calls().await;
+        let texts = calls[0]
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(texts.contains(platform_api::task_notification::IN_HUMAN_TURN_HEADER));
+        assert!(!texts.contains(platform_api::task_notification::NON_USER_INPUT_HEADER));
+        assert!(texts.contains("a genuine user message"));
+        let activity = registry.1.lock().unwrap();
+        assert!(activity.first().unwrap().1 && activity.first().unwrap().2);
+        assert!(!activity.last().unwrap().1 && !activity.last().unwrap().2);
     }
 }

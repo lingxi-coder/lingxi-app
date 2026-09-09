@@ -1005,8 +1005,7 @@ impl FusionSettingsJson {
         {
             if idle > panel_total {
                 return Err(SchemaViolation(
-                    "fusion.panelIdleTimeoutMs must not exceed fusion.panelTotalTimeoutMs"
-                        .into(),
+                    "fusion.panelIdleTimeoutMs must not exceed fusion.panelTotalTimeoutMs".into(),
                 ));
             }
         }

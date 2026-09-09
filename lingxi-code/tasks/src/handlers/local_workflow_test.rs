@@ -2644,6 +2644,91 @@ fn make_handler(
 }
 
 #[tokio::test]
+async fn workflow_process_owners_use_allocation_receipts_without_async_progress() {
+    struct ReceiptSpawner;
+    #[async_trait]
+    impl SubagentSpawner for ReceiptSpawner {
+        async fn spawn(
+            &self,
+            _: SubagentSpawnRequest,
+            _: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            panic!("the ownership wrapper must always provide an observer")
+        }
+        async fn spawn_with_observer(
+            &self,
+            _: SubagentSpawnRequest,
+            _: SubagentInheritance,
+            _: Option<mpsc::Sender<String>>,
+            observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            let id = protocol::AgentId::new();
+            observer.expect("ungated process observer").on_allocated(
+                &platform_api::subagent_spawn::SubagentObservation::Allocated {
+                    agent_id: id,
+                    agent_type: "general-purpose".into(),
+                    name: None,
+                    model: "mock".into(),
+                    model_profile: None,
+                    persistent: false,
+                    initial_message_index: 0,
+                },
+            );
+            // No on_event, journal entry or progress callback is emitted.
+            Ok(SubagentResult::Killed { agent_id: id })
+        }
+    }
+    use platform_api::task_registry::TaskRegistryHandle;
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(dir.path().to_path_buf(), fs.clone()));
+    let sink = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
+    let handler = Arc::new(make_handler(
+        Arc::new(ReceiptSpawner),
+        mgr.clone(),
+        sink.clone(),
+    ));
+    let mut registry =
+        crate::registry::TaskRegistry::new(Arc::new(MockRuntimeSpawner::default()), fs, mgr);
+    registry.register_handler(TaskType::LocalWorkflow, handler);
+    let registry = Arc::new(registry);
+    sink.bind(registry.clone());
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let task = registry
+            .spawn(
+                TaskType::LocalWorkflow,
+                workflow_input("return await agent('ownership probe');"),
+                "probe".into(),
+            )
+            .await
+            .unwrap();
+        let owners = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let ids =
+                    TaskRegistryHandle::process_owners_for_task(registry.as_ref(), &task).await;
+                if !ids.is_empty() {
+                    break ids;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("allocation receipt reaches the workflow record");
+        assert_eq!(owners.len(), 1);
+        assert_ne!(
+            owners[0], task,
+            "owner identity comes from the child pool, not the workflow id"
+        );
+        results.push(owners);
+    }
+    assert_ne!(
+        results[0], results[1],
+        "separate workflows cannot claim each other's processes"
+    );
+}
+
+#[tokio::test]
 async fn local_workflow_scopes_budget_to_its_origin_session_at_spawn() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempfile::tempdir().unwrap();
@@ -3570,6 +3655,7 @@ async fn workflow_isolation_spawner_creates_worktree_and_threads_cwd() {
     let inner = Arc::new(EchoSpawner::default());
     let worktree = Arc::new(RecordingWorktreeManager::default());
     let spawner = WorkflowIsolationSpawner {
+        process_owners: Default::default(),
         inner: inner.clone(),
         worktree: Some(worktree.clone()),
         slug_prefix: "w123".to_string(),
@@ -3612,6 +3698,7 @@ async fn workflow_isolation_spawner_creates_worktree_and_threads_cwd() {
 async fn workflow_isolation_spawner_forwards_live_observer_and_watchdog() {
     let inner = Arc::new(WorkflowForwardingProbeSpawner::default());
     let spawner = WorkflowIsolationSpawner {
+        process_owners: Default::default(),
         inner: inner.clone(),
         worktree: None,
         slug_prefix: "workflow".to_string(),

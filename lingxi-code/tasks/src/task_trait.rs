@@ -5,6 +5,20 @@ use platform_api::{FileSystem, RuntimeSpawner, SubagentInheritance, SubagentSpaw
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Socket input holds the transport injected by the tool's host.
+#[derive(Clone)]
+pub struct WebSocketMonitorInput {
+    /// Source and common task metadata.
+    pub registration: platform_api::task_registry::WebSocketMonitorRegistration,
+    /// Native network transport.
+    pub http: Arc<dyn platform_api::HttpTransport>,
+}
+impl std::fmt::Debug for WebSocketMonitorInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebSocketMonitorInput").field("registration", &self.registration).finish_non_exhaustive()
+    }
+}
+
 /// Generic interface implemented by per-type task handlers.
 #[async_trait]
 pub trait Task: Send + Sync {
@@ -17,6 +31,15 @@ pub trait Task: Send + Sync {
         -> Result<TaskHandle, TaskError>;
     /// Kill a running task instance.
     async fn kill(&self, task_id: &str, ctx: TaskContext) -> Result<(), TaskError>;
+    /// Whether the task's execution loop still has a cancellable worker.
+    async fn has_live_worker(&self, _task_id: &str) -> bool { false }
+    /// Real child agent identities whose processes belong to this task.
+    async fn process_owner_ids(&self, _task_id: &str) -> Vec<protocol::AgentId> { Vec::new() }
+
+    fn forget_resume_recipe(&self, _task_id: &str) {}
+    async fn register_resume_recipe(&self, _task_id: &str, _request: SubagentSpawnRequest, _inheritance: SubagentInheritance) -> Result<(), TaskError> { Err(TaskError::Unsupported) }
+    async fn prepare_human_resume(&self, _task_id: &str, _agent_id: protocol::AgentId, _epoch: u64, _ctx: TaskContext) -> Result<HumanResumePrepared, TaskError> { Err(TaskError::Unsupported) }
+
     /// Whether this task type supports inbound messages.
     fn supports_messages(&self) -> bool {
         false
@@ -45,12 +68,16 @@ pub trait Task: Send + Sync {
 /// Spawn-time input — one variant per task type.
 #[derive(Debug, Clone)]
 pub enum TaskSpawnInput {
+    /// Passive WebSocket monitor.
+    MonitorWs(WebSocketMonitorInput),
     /// Spawn a local bash command.
     LocalBash {
         /// Bash command string.
         command: String,
         /// Optional time-out.
         timeout: Option<std::time::Duration>,
+        /// Originating tool call, when the shell was launched from a tool.
+        tool_use_id: Option<String>,
     },
     /// Spawn an in-process agent.
     LocalAgent {
@@ -239,6 +266,8 @@ pub enum TaskSpawnInput {
         /// Persistent identity of the creator agent, when available.
         creator_agent_id: Option<protocol::AgentId>,
     },
+    /// Environment scan; its owning command drives execution.
+    AutoModeScan,
     /// Spawn a dream loop.
     Dream {
         /// Initial prompt.
@@ -262,6 +291,11 @@ pub struct TaskContext {
     pub fs: Arc<dyn FileSystem>,
     /// Runtime spawner trait object.
     pub runtime: Arc<dyn RuntimeSpawner>,
+}
+
+pub struct HumanResumePrepared {
+    pub handle: TaskHandle,
+    pub ready: tokio::sync::oneshot::Receiver<Result<(), TaskError>>,
 }
 
 /// Handle returned by [`Task::spawn`].

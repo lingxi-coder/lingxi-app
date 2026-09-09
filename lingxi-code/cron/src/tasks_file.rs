@@ -89,8 +89,9 @@ pub const RUNTIME_EXCLUDE_PATTERNS: [&str; 10] = [
     "**/.lingxi/assistant-daemon-state.json",
 ];
 
-static RUNTIME_EXCLUDE_ENSURED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static RUNTIME_EXCLUDE_ENSURED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 /// Resolve the git directory that owns `project_root` (a `.git` directory, or
 /// a `.git` file pointing at a worktree's git dir, whose `commondir` is the
@@ -111,15 +112,17 @@ fn git_common_dir(project_root: &Path) -> Option<std::path::PathBuf> {
     } else {
         return None;
     };
-    let common = std::fs::read_to_string(git_dir.join("commondir")).ok().map(|s| {
-        let s = s.trim();
-        let p = Path::new(s);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            git_dir.join(p)
-        }
-    });
+    let common = std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|s| {
+            let s = s.trim();
+            let p = Path::new(s);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                git_dir.join(p)
+            }
+        });
     Some(common.unwrap_or(git_dir))
 }
 
@@ -158,7 +161,11 @@ pub fn ensure_runtime_files_excluded(project_root: &Path) {
             return;
         }
     };
-    let lead = if !existing.is_empty() && !existing.ends_with('\n') { "\n" } else { "" };
+    let lead = if !existing.is_empty() && !existing.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
     let mut block = String::from(RUNTIME_EXCLUDE_MARKER);
     for pattern in RUNTIME_EXCLUDE_PATTERNS {
         block.push('\n');
@@ -325,7 +332,13 @@ pub fn parse_tasks_strict(body: &str) -> Result<ScheduledTasks, String> {
             // `0` / a negative / `NaN` would normalise to `Some(0)`, which every
             // reader tests as `expiry <= now` and deletes the task. Treat those
             // the way `lastFiredAt` is treated downstream — as absent.
-            let ms = |v: f64| if v.is_finite() && v > 0.0 { v as u64 } else { 0 };
+            let ms = |v: f64| {
+                if v.is_finite() && v > 0.0 {
+                    v as u64
+                } else {
+                    0
+                }
+            };
             Some(CronTask {
                 id: id.to_string(),
                 cron: cron.to_string(),
@@ -484,7 +497,10 @@ mod tests {
         assert_eq!(parse_tasks(""), ScheduledTasks::default());
         assert_eq!(parse_tasks("not json"), ScheduledTasks::default());
         assert_eq!(parse_tasks("{}"), ScheduledTasks::default());
-        assert_eq!(parse_tasks(r#"{"tasks":"nope"}"#), ScheduledTasks::default());
+        assert_eq!(
+            parse_tasks(r#"{"tasks":"nope"}"#),
+            ScheduledTasks::default()
+        );
     }
 
     // PARITY 2.1.263 `Q7e`: malformed entries and invalid crons are skipped
@@ -504,7 +520,10 @@ mod tests {
         assert_eq!(ok.id, "ok");
         assert_eq!(ok.created_at, 1, "JS numbers are accepted, truncated to ms");
         assert_eq!(ok.last_fired_at, Some(2));
-        assert_eq!(ok.recurring, None, "`recurring: false` normalises to absent");
+        assert_eq!(
+            ok.recurring, None,
+            "`recurring: false` normalises to absent"
+        );
         assert_eq!(ok.permanent, None);
         assert_eq!(doc.unmodeled.len(), 4, "the four skipped entries are kept");
         assert_eq!(
@@ -589,7 +608,10 @@ mod tests {
         ensure_runtime_files_excluded(&root);
         RUNTIME_EXCLUDE_ENSURED.lock().unwrap().remove(&root);
         ensure_runtime_files_excluded(&root);
-        assert_eq!(std::fs::read_to_string(root.join(".git/info/exclude")).unwrap(), expected);
+        assert_eq!(
+            std::fs::read_to_string(root.join(".git/info/exclude")).unwrap(),
+            expected
+        );
         // A worktree `.git` FILE resolves through `gitdir:` and `commondir`.
         let wt = tmp.path().join("wt");
         std::fs::create_dir_all(&wt).unwrap();

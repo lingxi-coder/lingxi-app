@@ -154,8 +154,8 @@ use std::sync::OnceLock;
 use cron::{
     get_autonomous_loop_preamble, is_loop_default_prompt_enabled, is_loop_dynamic_enabled,
     log_autonomous_loop_activation, note_loop_invoked, read_loop_file, LoopFile,
-    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
-    AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
+    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
+    LOOP_FILE_SENTINEL,
 };
 use regex::Regex;
 
@@ -239,7 +239,6 @@ const CRON_TABLE: &str = "| Interval pattern      | Cron expression     | Notes 
 
 **If the interval doesn't cleanly divide its unit** (e.g. `7m` → `*/7 * * * *` gives uneven gaps at :56→:00; `90m` → 1.5h which cron can't express), pick the nearest clean interval and tell the user what you rounded to before scheduling.";
 
-
 /// 2.1.263 `A(e)` — the `/loop <input>` prompt builder: parsing rules, the
 /// fixed-interval (cron) mode and the dynamic (ScheduleWakeup) mode. `${T()}`
 /// (cloud offer) and `${I()}` (session-only line) are claude.ai-only and
@@ -314,7 +313,9 @@ Then:
 /// builder. With a loop.md the file contents are inlined; otherwise the
 /// activation is logged and the autonomous preamble is inlined.
 fn build_autonomous(loop_file: Option<&LoopFile>, dynamic: bool, interval: &str) -> String {
-    let path = loop_file.map(|f| f.path.display().to_string()).unwrap_or_default();
+    let path = loop_file
+        .map(|f| f.path.display().to_string())
+        .unwrap_or_default();
     // `s` — the inlined-instructions section header.
     let header = match loop_file {
         Some(_) => format!("## Loop tasks (from {path})"),
@@ -354,7 +355,8 @@ The user invoked `/loop` with no prompt and no interval. Run the autonomous chec
         let confirm = if loop_file.is_some() {
             format!("that you're running tasks from `{path}` in dynamic-pacing mode, that you ran the first tick now")
         } else {
-            "that this is the autonomous default in dynamic-pacing mode, that you ran the check now".to_string()
+            "that this is the autonomous default in dynamic-pacing mode, that you ran the check now"
+                .to_string()
         };
         let action = format!(
             "1. **Run {what} now**, following the instructions inlined below.
@@ -370,7 +372,8 @@ The user invoked `/loop` with no prompt and no interval. Run the autonomous chec
 6. **To stop the loop** — the task is complete, further iterations can't make progress, or the user asked you to stop — call {SCHEDULE_WAKEUP} with `stop: true` (no other fields) and {TASK_STOP} any {MONITOR} you armed (use {TASK_LIST} to find the task ID if it is no longer in context). Stopping is the loop's normal ending — the user can restart it anytime with /loop.{kpc}",
             kpc = push_outcome_line(),
         );
-        return format!("{heading}
+        return format!(
+            "{heading}
 
 ## Action
 
@@ -378,7 +381,8 @@ The user invoked `/loop` with no prompt and no interval. Run the autonomous chec
 
 {header}
 
-{body}");
+{body}"
+        );
     }
 
     let sentinel = if loop_file.is_some() {
@@ -674,8 +678,13 @@ mod tests {
         // test sandbox → the `None` builder); interval-only → the autonomous
         // default on a cron; any other input → the dynamic prompt builder.
         let empty = LoopPromptFn.build("");
-        assert!(empty.starts_with("# /loop — autonomous default with dynamic pacing"), "{empty}");
-        assert!(LoopPromptFn.build("   ").starts_with("# /loop — autonomous default with dynamic pacing"));
+        assert!(
+            empty.starts_with("# /loop — autonomous default with dynamic pacing"),
+            "{empty}"
+        );
+        assert!(LoopPromptFn
+            .build("   ")
+            .starts_with("# /loop — autonomous default with dynamic pacing"));
         let interval_only = LoopPromptFn.build("5m");
         assert!(interval_only.starts_with("# /loop — schedule the autonomous default"));
         let with_prompt = LoopPromptFn.build("check the deploy");

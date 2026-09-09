@@ -14,10 +14,6 @@ permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 # Monitor's lJr() push-notification splice reuses the shared `Yke()` predicate.
 cron = { path = "../../cron" }
-# Monitor's `Ys()` gate reuses the Bash tool's Git-Bash discovery (`_1()`)
-# rather than duplicating the Windows probe order, and its spawn reuses the
-# Bash tool's `shouldUseSandbox` decision (`jS`).
-tool-shell = { path = "../shell" }
 sandbox = { path = "../../sandbox" }
 task-store = { path = "../../task-store" }
 async-trait.workspace = true

@@ -659,6 +659,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .map_err(|e| HandleError::ActionFailed(e.to_string()))
     }
 
+    async fn can_background_conversation_on_exit(&self) -> bool {
+        if self.bg_session_forker.is_none()
+            || !platform_api::agent_view::is_enabled()
+            || std::env::var("LINGXI_DISABLE_ADOPT").is_ok_and(|value| !value.is_empty())
+        {
+            return false;
+        }
+        self.session.lock().await.history.iter().any(|message| {
+            matches!(message, protocol::ConversationMessage::User { .. })
+                && !message.is_meta()
+                && !message.text_content().trim().is_empty()
+        })
+    }
+
     async fn background_conversation(
         &self,
         snapshot: platform_api::BackgroundingSnapshot,
@@ -1531,6 +1545,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
             }
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
+    }
+
+    async fn run_queued_turn_streaming(
+        &self,
+        prompt: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        in_human_turn: bool,
+    ) -> Result<platform_api::TurnOutcome, HandleError> {
+        self.run_turn_streaming_with_origin(prompt, Vec::new(), cancel, None, in_human_turn)
+            .await
+            .map(|outcome| match outcome {
+                crate::conversation::TurnOutcome::EndTurn => platform_api::TurnOutcome::EndTurn,
+                crate::conversation::TurnOutcome::Cancelled => platform_api::TurnOutcome::Cancelled,
+                crate::conversation::TurnOutcome::MaxTurns => platform_api::TurnOutcome::MaxTurns,
+            })
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))
     }
 
     async fn run_turn_streaming_with_images(

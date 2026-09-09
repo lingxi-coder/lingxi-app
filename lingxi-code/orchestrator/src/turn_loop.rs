@@ -580,7 +580,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // oracle's per-notification enqueue. Empty when no registry is wired /
     // nothing finished.
     // See [`ConversationOrchestrator::task_notification_reminder_messages`].
-    for reminder in orch.task_notification_reminder_messages().await {
+    for reminder in orch.task_notification_reminder_messages_in_turn(true).await {
         // A completion notification is a real conversation event, not a
         // transient reminder: claude-code enqueues it onto the command queue and
         // it becomes a durable user message. The port used to render it into the
@@ -9328,6 +9328,7 @@ mod tool_hook_wiring_tests {
         let invoker =
             RegistryToolInvoker::new(Arc::new(registry)).with_gate(Arc::new(NoOpPermissionGate));
         let ctx = SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             agent_name: Some("researcher".into()),

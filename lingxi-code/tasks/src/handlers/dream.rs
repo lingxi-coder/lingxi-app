@@ -661,8 +661,8 @@ mod tests {
                         response_char_count: 0,
                         last_request_id: None,
                         cumulative_usage: SubagentUsage::default(),
-                                        usage_complete: true,
-})
+                        usage_complete: true,
+                    })
                 }
                 Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
                     agent_id: protocol::AgentId::new(),

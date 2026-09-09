@@ -59,18 +59,18 @@ Ten area sweeps produced 106 findings. Eight were the same root cause reported i
 folded into the P0 above. The remaining 98 were each re-derived adversarially against both the oracle
 chunks and the port: **86 confirmed, 10 keep (deliberate LingXi behaviour), 2 refuted**.
 
-Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-03`.
+The original 2026-09-07 pass fixed the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06` and `TOF-03`. Row verdicts below include later work; current verification checkpoints and remaining integration work are recorded in [the 2026-09-09 verification ledger](task-parity-verification-2026-09-09.md).
 
 ### Background Bash
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
 | `bg-03` | confirmed **[fixed]** | P1 | medium | backgroundEndsWithFinalResponse promises termination at the sync subagent's final response, but nothing reaps the shell |
-| `bg-04` | confirmed **[partially fixed: registry-side backgrounding primitives, Ctrl+B target and foreground arming landed; turn-abort and deliver-message triggers and the `background_hint` progress event remain]** | P1 | high | No foreground arming (U6t after 2 s) ⇒ Ctrl+B, end-of-turn background-all, turn-abort and deliver-message backgrounding are all absent; ctrl+b keybinding is declared but inert |
+| `bg-04` | fixed | P1 | high | Foreground arming, Ctrl+B/background-all, turn-abort and deliver-message backgrounding now share the registry backgrounder; foreground tools publish `background_hint` progress |
 | `bg-05` | confirmed **[fixed]** | P1 | medium | Timeout→background is unconditional in the port; oracle gates it on background-tasks-enabled, first-segment ≠ `sleep`, and CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS |
 | `bg-06` | confirmed **[fixed]** | P2 | medium | Explicit-background spawn runs in the workspace root instead of the persistent shell cwd |
 | `bg-07` | confirmed **[fixed]** | P2 | medium | Result data carries 2.1.191-era `outputTaskId/outputFilePath/outputFileSize`; 2.1.263 has `persistedOutputPath/persistedOutputSize` (+ `backgroundCwdHint`) and rewrites stdout via Vpe |
-| `bg-09` | confirmed | P2 | medium | Stall watchdog (`Her`: 45 s no-growth + interactive-prompt regex → task-notification) and memory-pressure reap (`jer`) are not ported |
+| `bg-09` | fixed | P2 | medium | Background-shell stall watchdog and memory-pressure reap are wired through the process runner and registry |
 | `bg-08` | confirmed **[fixed]** | P3 | medium | Background telemetry events are renamed/missing: port emits `tengu_tool_bash_timeout`; oracle emits explicit/timeout/turn-abort `_backgrounded` events and `was_backgrounded` |
 | `bg-10` | keep | P3 | high | Mobile ShellMobileTool has no run_in_background surface (accepted mobile divergence) — keep, but route any future mobile background path through the registry |
 
@@ -78,7 +78,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `CW-02` | confirmed **[already closed by the P0 commit; the verifier read the runner mid-edit and noted the line drift]** | P1 | medium | Timeout→auto-background path mints a second unregistered runner id instead of backgrounding the already-registered task |
+| `CW-02` | fixed | P1 | medium | Timeout→auto-background reuses the already-registered runner identity |
 | `CW-04` | confirmed **[fixed: foreground Bash arms a `local_bash` record after 2 s]** | P2 | medium | Foreground Bash is never registered as a running local_bash task (oracle registers after `cnr` ms of progress), so /tasks, background-all and Ctrl+B cannot see it |
 | `CW-03` | refuted | P3 | low | Background note (port of 2.1.238 L0i) lacks the 2.1.263 `backgroundedToDeliverMessage` arm; comments cite 2.1.238 offsets |
 | `CW-05` | keep | P3 | high | Monitor tool absent on mobile + mobile Shell has no run_in_background — intentional mobile divergence (keep) |
@@ -88,16 +88,16 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `TOF-02` | confirmed | P2 | medium | Six independent derivations of the task-output root/file name (oracle has one) |
-| `TOF-03` | confirmed | P2 | low | Desktop spool directory is keyed by a freshly minted UUID, not the session id **[fixed]** |
+| `TOF-02` | confirmed **[fixed: shared platform-api task-output layout is used by registry, runners and tool policies]** | P2 | medium | Six independent derivations of the task-output root/file name (oracle has one) |
+| `TOF-03` | fixed | P2 | low | Desktop spool directory is keyed by the session id |
 | `TOF-04` | confirmed **[fixed]** | P2 | medium | Full-output read has no 8MB tail cap and no "[NKB of earlier output omitted]" header |
-| `TOF-05` | confirmed **[partially fixed: the marker and the retry-once-with-the-marker are done, and `lost_output` is set-once. The 16 MiB gate is NOT portable (the oracle's counter can only grow from appends concurrent with a failing drain, which an awaited `append` cannot produce); the queue/drain machinery and writer eviction (`Sd`) remain]** | P2 | medium | Writer failure semantics missing: no "[output omitted: it could not be written to disk]" marker, no retry-once, no 16MB drop, no writer eviction |
-| `TOF-06` | confirmed | P2 | medium | Background shell output files never get the `[killed]` / `[exited with code N]` trailer **[fixed]** |
-| `TOF-09` | confirmed | P2 | medium | Tool-side tasks-directory recognition absent (jSn ignore globs, Grep guard, USn sandbox deny, gMe .output id parse) |
+| `TOF-05` | confirmed **[fixed: queued writer, retry/drop marker and eviction are wired; failed-open oversized append reaches the independent 16 MiB gate, disproving the old non-portable claim; four writer mutations verified]** | P2 | medium | Writer failure semantics missing: no "[output omitted: it could not be written to disk]" marker, no retry-once, no 16MB drop, no writer eviction |
+| `TOF-06` | fixed | P2 | medium | Background shell output files receive the killed/exit-code trailer |
+| `TOF-09` | confirmed **[fixed: task-directory search exclusions, explicit-file reads, sandbox deny and direct output-id parser; real Grep path tested]** | P2 | medium | Tool-side tasks-directory recognition absent (jSn ignore globs, Grep guard, USn sandbox deny, gMe .output id parse) |
 | `TOF-07` | confirmed **[fixed]** | P3 | low | 5GB cap counted in UTF-8 bytes; oracle counts JS string length (UTF-16 code units) |
 | `TOF-08` | confirmed **[fixed]** | P3 | low | Swap-refusal message family drifted: recovery clause on every reason, reasons renamed, env var not named |
-| `TOF-10` | confirmed | P3 | high | local_agent output is a spool copy, not a symlink to the agent transcript (fK) |
-| `TOF-11` | confirmed | P3 | low | outputOffset never advances — no BSn delta path |
+| `TOF-10` | fixed | P3 | high | local_agent transcript output uses a best-effort symlink with an explicit spool fallback when the host denies symlink creation |
+| `TOF-11` | confirmed **[fixed: production attachment drain advances UTF-8 byte offsets; removing advancement fails its regression]** | P3 | low | outputOffset never advances — no BSn delta path |
 | `TOF-12` | confirmed **[fixed]** | P3 | low | Background-note comment cites `L0i`@183106320; 2.1.263 builder is `$2t` with a fourth (`backgroundedToDeliverMessage`) arm the port lacks |
 | `TOF-13` | keep | P3 | medium | Mobile: spool root `<lingxi_home>/task-output/<session>/` and no background shell at all (keep) |
 | `TOF-14` | keep | P3 | medium | Temp root branding `LINGXI_TMPDIR` / recovery text says LingXi (keep) |
@@ -106,27 +106,32 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `TO-01` | confirmed | P2 | low | TaskOutput tool_result joins XML parts with "\n" — oracle joins with "\n\n" (and a test pins the wrong join) **[fixed]** |
-| `TO-02` | confirmed | P2 | medium | TaskStop on a local_bash task leaves `notified=false`, so the port injects a `<\task-notification>` ("Background command … was stopped") the oracle suppresses; the oracle also appends "\n[killed]\n" to the spool **[deferred: same seam as TN-09; the drain already yields exactly one stopped notification]** |
+| `TO-01` | fixed | P2 | low | TaskOutput joins XML result parts with the oracle's blank-line separator |
+| `TO-02` | confirmed **[fixed: explicit shell stop stamps notified and emits one SDK stopped receipt, suppressing the redundant model notification; JF pi is the SDK queue]** | P2 | medium | TaskStop on a local_bash task leaves `notified=false`, so the port injects a `<\task-notification>` ("Background command … was stopped") the oracle suppresses; the oracle also appends "\n[killed]\n" to the spool **[deferred: same seam as TN-09; the drain already yields exactly one stopped notification]** |
 | `TO-03` | confirmed **[fixed]** | P2 | medium | Not-found messages lack the oracle's suffixes (". Did you mean: …?", ". Running teammates: …", ". Running named agents: …", ". Running background agents: id (desc)") and teammate/name ambiguity errors |
-| `TO-04` | confirmed **[partially fixed: the ownership guard (`sut`) and its ordering are done — any agent could stop any other agent's background task. The observer branch has no substrate (`isObserver` greps to zero) and the owner notification needs AGT-05/TN-10's per-agent routing; neither is pending work]** | P2 | medium | TaskStop has no ownership / observer checks and no owner notification — `_ctx` (which carries `agent_id`) is ignored |
+| `TO-04` | fixed | P2 | medium | TaskStop resolves caller ownership, applies the observer self/owner guard in oracle order, and routes ownership failures through the task tool error surface |
 | `TO-05` | confirmed **[fixed]** | P2 | medium | Non-bash TaskOutput `<output>` is not passed through the subagent-output sanitiser (`uH`): no `[harness: subagent output matched instruction-shaped pattern(s): …]` marker, no `Human:`/`Assistant:` turn-marker neutralisation |
 | `TO-06` | confirmed **[fixed]** | P2 | medium | TaskOutput for an `mcp_task` returns the spooled result text; the oracle returns a synthetic metadata block (server/tool/status/elapsed…) with `omitOutputPath` and its own truncation header |
-| `TO-07` | confirmed **[partially fixed: `isRawTranscript` and the report extraction are done — `chunk.result` was `None` for every production agent, so `TaskOutput` served the raw transcript; `[The agent produced no report text.]` and `harnessHead` remain, and are gated behind moving the max-turns note builder out of `tools/agent`]** | P2 | medium | local_agent output shaping: no `[The agent produced no report text.]`, no `harnessHead` prefix, no `isRawTranscript` flag on the transcript fallback |
+| `TO-07` | confirmed **[fixed: agent output report fallback, shared harness head and raw-transcript shaping are connected to production output]** | P2 | medium | local_agent output shaping: no `[The agent produced no report text.]`, no `harnessHead` prefix, no `isRawTranscript` flag on the transcript fallback |
 | `TO-08` | confirmed **[fixed]** | P3 | medium | Output-cap sources differ: oracle honours settings `taskOutputMaxChars` (clamped 4000..128000) before the env var; `maxResultSizeChars` is a getter `zut()+18000` (50000 default) and `persistenceThresholdCeiling` 146000 — port is env-only, 100_000, no ceiling |
-| `TO-09` | confirmed | P3 | low | Blocking-wait edges and UI hints: task evicted mid-wait should yield `{retrieval_status:"timeout",task:null}`, abort should raise (not return timeout), `waiting_for_task` progress event and `non-blocking` tool-use render are absent |
-| `TO-10` | confirmed **[partially fixed: the `Unsupported task type` branch landed; the keepalive exceptions and the re-signalled note remain]** | P3 | medium | TaskStop remaining branches: `Unsupported task type: X` text, keepalive/loop-still-live exceptions to "not running", and the `had already ended … re-signalled it` note path |
+| `TO-09` | confirmed **[fixed: blocking cancellation, first-output-read and later eviction races, waiting progress and non-blocking UI annotation are covered by tool-task tests]** | P3 | low | Blocking-wait edges and UI hints: task evicted mid-wait should yield `{retrieval_status:"timeout",task:null}`, abort should raise (not return timeout), `waiting_for_task` progress event and `non-blocking` tool-use render are absent |
+| `TO-10` | confirmed **[fixed: keepalive/live-loop re-signalling, unsupported-type handling and actual killed process-group count drive the stop note]** | P3 | medium | TaskStop remaining branches: `Unsupported task type: X` text, keepalive/loop-still-live exceptions to "not running", and the `had already ended … re-signalled it` note path |
 
 ### Ids, records, registry
 
+Current closure note: the historical TN-11 row below predates the provenance
+wiring. `render_reminders_in_turn` now receives the real `in_human_turn` bit
+from both streaming and batched turn drivers; focused tests cover both header
+variants and the idempotence guard. TN-11 is therefore closed in production.
+
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `TID-08` | confirmed **[substantially fixed: tool_use_id, cwd, is_backgrounded and the launching agent now land on the record. The spawn-input variant and the fields for unported features (adopted shells, incremental reads) remain]** | P1 | medium | local_bash record shape: TaskSpawnInput::LocalBash carries no tool_use_id (never stamped) and LocalBashTaskState lacks isBackgrounded/isAdopted/agentId/kind/caller/cwd |
+| `TID-08` | fixed | P1 | medium | LocalBash spawn input carries `tool_use_id`; registry projection preserves it alongside cwd, background/adopted state, caller, owner identity and task kind |
 | `TID-04` | confirmed **[fixed]** | P2 | medium | Notified terminal tasks are never evicted from the registry (oracle evicts them on the next attachment pass via Kan/Dlo, and exposes remove/evictTerminal) |
-| `TID-05` | confirmed **[partially fixed: `end_time` now stamps on every terminal transition; `total_paused_ms` still has no writer — the oracle diffs it in the SDK patch (TID-06) but no site writes it onto a task record]** | P2 | medium | `end_time` is only written on the mcp_task settle path and `total_paused_ms` is never written — every other terminal transition leaves them at None/0 although the oracle stamps `endTime:Date.now()` on each and diffs both in the update patch |
-| `TID-06` | confirmed | P2 | medium | Registry register/update do not emit the SDK `task_started` / `task_updated` system messages (oracle Mlo/Rlo via the same queue `pi` uses for task_notification) |
-| `TID-07` | confirmed | P2 | medium | Active-task predicates MI/n3t (delegated work running) and X_n/r3t (live background shell) and their state inputs (`isIdle` on teammate/agent) do not exist in the port |
-| `TID-02` | confirmed | P3 | medium | Oracle task type `auto_mode_scan` (prefix `e`, label "auto-mode scan") is missing from TaskType, wire strings, validator and /tasks |
+| `TID-05` | confirmed **[fixed: terminal timestamps plus permission-dialog transport pause accounting, including cancellation; real SDK patch and independent writer/invoker mutations verified]** | P2 | medium | `end_time` is only written on the mcp_task settle path and `total_paused_ms` is never written — every other terminal transition leaves them at None/0 although the oracle stamps `endTime:Date.now()` on each and diffs both in the update patch |
+| `TID-06` | confirmed **[fixed: registry lifecycle store emits SDK started/updated receipts through the production host relay]** | P2 | medium | Registry register/update do not emit the SDK `task_started` / `task_updated` system messages (oracle Mlo/Rlo via the same queue `pi` uses for task_notification) |
+| `TID-07` | confirmed **[fixed: shared active-work expression consumes idle/parked lifecycle state in Stop hooks and goal checks]** | P2 | medium | Active-task predicates MI/n3t (delegated work running) and X_n/r3t (live background shell) and their state inputs (`isIdle` on teammate/agent) do not exist in the port |
+| `TID-02` | confirmed **[fixed: auto_mode_scan task type, wire projection and production scan lifecycle added]** | P3 | medium | Oracle task type `auto_mode_scan` (prefix `e`, label "auto-mode scan") is missing from TaskType, wire strings, validator and /tasks |
 | `TID-03` | keep | P3 | low | Task-id suffix sampling is uniform in the port but `randomBytes(8)[n] % 36` in the oracle |
 | `TID-09` | confirmed **[fixed]** | P3 | medium | Stale/inconsistent id & type documentation and a dead validator: "9 byte-locked variants", `[bartwmdks]` vs validator `[bartwmdksf]`, validate_task_id has no production caller |
 | `TID-10` | keep | P3 | high | `TaskType::LocalFusion` (`f` prefix, wire "local_fusion") is a LingXi-only task type — keep |
@@ -136,16 +141,16 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
 | `TN-02` | confirmed **[fixed]** | P1 | medium | Notification is a transient outgoing-snapshot reminder; the oracle persists it as a durable user message (transcript + JSONL) |
-| `TN-03` | confirmed | P1 | high | No idle wake: a task finishing while the session is idle is not delivered until the user's next prompt |
+| `TN-03` | fixed | P1 | high | CLI, bridge and mobile hosts race idle input against the registry notification wake and re-run the notification turn without requiring a new prompt |
 | `TN-04` | confirmed **[fixed]** | P2 | medium | Multiple notifications are folded into ONE <\system-reminder> with ONE header; the oracle emits one enveloped block per notification |
 | `TN-05` | keep | P2 | medium | Dream completion renders a model-facing <\task-notification> (generic <task-type>dream</task-type>) that the oracle never emits |
 | `TN-06` | confirmed **[fixed]** | P2 | medium | Agent turn-limit summary variant missing ('stopped at its N-turn limit (partial result; SendMessage to task-id to continue)') |
 | `TN-07` | confirmed **[fixed]** | P2 | medium | Coordinator prompt's documented <\task-notification> section is stale vs 2.1.263 (envelope sentence, status list, summary verbs) |
-| `TN-09` | confirmed | P2 | medium | TaskStop does not stamp `notified` on shell/monitor tasks, so a model-initiated stop is followed by a redundant 'was stopped' notification **[deferred: stamping `notified` alone would delete the stop notification; needs the paired direct enqueue]** |
-| `TN-10` | confirmed | P2 | medium | Notifications are not routed by owning agent: drain is registry-wide and subagent orchestrators have no provider |
+| `TN-09` | confirmed **[fixed: paired SDK stopped receipt and model-notification suppression for shell and Monitor tasks; stamping alone is not the implementation]** | P2 | medium | TaskStop does not stamp `notified` on shell/monitor tasks, so a model-initiated stop is followed by a redundant 'was stopped' notification **[deferred: stamping `notified` alone would delete the stop notification; needs the paired direct enqueue]** |
+| `TN-10` | fixed | P2 | medium | Recipient-scoped registry drain and the subagent runner's owner-aware fold route notifications to the owning agent |
 | `TN-08` | confirmed **[fixed]** | P3 | medium | Monitor completion never emits 'ended without producing output (exit N)' — port lacks the piped-stdout byte count |
 | `TN-11` | confirmed **[partly fixed: the idempotence guard now matches 2.1.263 `QSn` — `startsWith(Ae)` where `Ae` is the open tag PLUS the provenance header — and the 2.1.238 citations are refreshed to `QSn`/`Bbt`/`sGt` at `src_160256736.js` @4187 (call site `src_160988549.js` @5297223). The `inHumanTurn` variant (`oGt`/`cQn`) is NOT ported: selecting it needs a signal for "this turn was started by a genuine user message", which does not exist here (`git grep human_turn` is empty) and which only becomes meaningful once TN-03 adds the second delivery path. Adding the constant with no selector would be dead code]** | P3 | low | Envelope idempotence check and 'inHumanTurn' header variant drift from 2.1.263 (port comment cites 2.1.238 @285068292) |
-| `TN-12` | confirmed | P3 | medium | Bash 'stopped because the system is running low on memory' stop-cause text missing |
+| `TN-12` | fixed | P3 | medium | `memory_pressure` notifications render the Claude-compatible low-memory stop-cause text |
 | `TN-13` | keep | P3 | low | LingXi-only notification surfaces to keep: local_fusion arm and workflow host-capability redaction |
 
 ### Agent-backed tasks
@@ -153,15 +158,15 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
 | `AGT-01` | confirmed **[fixed: SendMessage resolves the registry aliases, and the mailbox now resolves the task id the notification carries. Equating the two ids was the wrong shape -- five tests pin the correlation -- so the task id is an alias, not a rename]** | P1 | medium | local_agent task id and agent id are two id spaces; the notification's <task-id> is not a SendMessage address |
-| `AGT-05` | confirmed | P1 | high | Child-agent completion notifications are not routed to the owning agent (lLe/ownerAgentId); every completion drains at the main session |
-| `AGT-02` | confirmed | P2 | medium | TaskStop has no name/agent-id resolution: no ambiguity error, no 'Did you mean', no running-teammates / named-agents / background-agents suffixes, no observer/owner guards, no resting-agent allowance |
+| `AGT-05` | fixed | P1 | high | Child-agent completion notifications carry `recipient_agent_id`; the child runner drains only its own recipient queue and wakes at idle boundaries |
+| `AGT-02` | confirmed **[fixed: TaskStop resolves IDs, names and aliases with NFKC, ambiguity/suggestion suffixes, ownership/observer guards and resting-runner handling]** | P2 | medium | TaskStop has no name/agent-id resolution: no ambiguity error, no 'Did you mean', no running-teammates / named-agents / background-agents suffixes, no observer/owner guards, no resting-agent allowance |
 | `AGT-03` | confirmed **[fixed]** | P2 | medium | Stopping a parent agent does not cascade to its child agents (no linked abort, no resting-parent cascade, no cascadeSpared) |
-| `AGT-04` | confirmed | P2 | medium | Foreground (run_in_background:false) agents are never registered, so s9 backgrounding via Ctrl+B / bridge background_tasks / deliver-message / auto-background / done-with-live-children has no target |
-| `AGT-06` | confirmed | P2 | high | Resting persistent agent is modelled as status `running` instead of `completed`+keepalive (GS), so Stop-hook background_tasks / goal check-in count a parked agent as live work and /tasks shows it running |
+| `AGT-04` | fixed | P2 | medium | Foreground agents are registered after the arming boundary and expose background/park/unregister controls to every host path |
+| `AGT-06` | confirmed **[fixed: parked persistent agents are completed with keepalive; resume, stop, cascade and eviction retain the live runner correctly]** | P2 | high | Resting persistent agent is modelled as status `running` instead of `completed`+keepalive (GS), so Stop-hook background_tasks / goal check-in count a parked agent as live work and /tasks shows it running |
 | `AGT-08` | confirmed **[fixed]** | P2 | medium | maxTurnsReached completion summary variant missing from the agent notification |
-| `AGT-07` | confirmed **[fixed: the `stoppedByUser` gate landed on both message paths. `userStopCount` / `userInitiatedAt` (`V2t` / `K2t`) and the `userInitiated` bypass are deliberately NOT ported — they stamp queued messages with a stop epoch, and this port has neither a persistent per-agent message queue nor any user-typed message aimed at an agent (`git grep user_initiated` is empty). Documented at `TaskRecord::killed_by`]** | P3 | medium | No stoppedByUser / userStopCount: a user stop cannot be resumed by the user, and model-initiated resumes are not gated |
-| `AGT-09` | confirmed | P3 | medium | in_process_teammate has no isIdle on its task record, so idle teammates count as active delegated work (MI/n3t) |
-| `AGT-10` | confirmed | P3 | medium | Observer tasks (isObserver / td) absent — note: env-gated experimental in 2.1.263 |
+| `AGT-07` | fixed | P3 | medium | Trusted human TaskMessage entry, user-stop epochs, original identity/history restoration, and cancellation-safe resume/stop transactions are wired; model SendMessage remains guarded by the user-stop epoch |
+| `AGT-09` | confirmed **[fixed: oracle idle producer already existed in this port; shared active-work consumers now use it, rather than duplicating a producer]** | P3 | medium | in_process_teammate has no isIdle on its task record, so idle teammates count as active delegated work (MI/n3t) |
+| `AGT-10` | confirmed **[fixed: env-gated independent ActivityObserver connects to one-shot and persistent activity; real probe and removed-binding mutation verified]** | P3 | medium | Observer tasks (isObserver / td) absent — note: env-gated experimental in 2.1.263 |
 | `AGT-11` | confirmed **[fixed]** | P3 | medium | Terminal local_agent records are never evicted (oracle: 30 s after notification) |
 | `AGT-12` | keep | P3 | high | LocalFusion task type ('f' prefix, `local_fusion` label) is a LingXi-only extension — keep |
 
@@ -169,14 +174,14 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `MON-01` | confirmed **[fixed: `F` (`src_184372091.js` @12876) ported whole — shape, the `mcpStatus`-not-registry-status `<status>`, the four-way body ladder, and the escaped-length `<result>` budget (`ne`/`H`, `vee()`). `rG`/`rg`/`Pee`/`v` live in `platform_api::display`. Two documented absences: `resultHint` (`savedHint`) has no producer — `settle_mcp_task` is handed text, not a save receipt — and `rg`'s `Bun.stripANSI` step is skipped because `platform-api` sits below the port's ANSI stripper and these names come from MCP config, not a terminal]** | P2 | medium | mcp_task terminal notification is rendered in the generic <task-type> shape with no inline <result>; oracle uses buildMcpTaskNotification (summary `MCP task k1234567 (server/tool) completed.` + inline <result>) |
-| `MON-02` | confirmed | P2 | medium | Monitor `ws` source missing entirely (schema, prompt section, search hint, monitor_ws WebSocket task, its frames and TaskStop special case) |
+| `MON-01` | confirmed **[fixed: MCP notification shape, ANSI cleanup and escaped result budget include the real saved-result persistence receipt; prior no-producer assertion was incorrect]** | P2 | medium | mcp_task terminal notification is rendered in the generic <task-type> shape with no inline <result>; oracle uses buildMcpTaskNotification (summary `MCP task k1234567 (server/tool) completed.` + inline <result>) |
+| `MON-02` | confirmed **[fixed: WebSocket source, frames, limits, guarded connection and TaskStop integrated; native frame and SSRF probes verified]** | P2 | medium | Monitor `ws` source missing entirely (schema, prompt section, search hint, monitor_ws WebSocket task, its frames and TaskStop special case) |
 | `MON-04` | confirmed **[fixed]** | P2 | medium | Monitor timeout never emits `[Monitor timed out — re-arm if needed.]` before the kill |
 | `MON-05` | confirmed **[fixed]** | P2 | low | Suppression notice is merged AFTER the batch in one event; oracle sends a separate housekeeping notice BEFORE the event, and resets the high-volume window on a different condition |
 | `MON-06` | confirmed **[fixed]** | P2 | low | Line batching differs from Umn: truncation suffix `…` vs `...(truncated)`, no 3000-char batch cap, no trim/empty-line drop, and a 256-line pending cap counted as suppression |
 | `MON-07` | confirmed **[fixed]** | P2 | medium | Zero-output monitor exit is summarised as `stream ended`; oracle says `Monitor "d" ended without producing output (exit 0)` |
 | `MON-09` | confirmed **[fixed]** | P2 | medium | Monitor command bypasses the sandbox decision that the oracle applies (shouldUseSandbox: jS({command})) |
-| `MON-03` | confirmed | P3 | medium | Command monitor is minted as a separate `monitor_ws`/'s' task type instead of a `local_bash` record with kind:"monitor" ('b' id); id.rs comment cites 2.1.223 to justify it |
+| `MON-03` | confirmed **[fixed: command Monitor registers local_bash with kind monitor; WebSocket Monitor retains monitor_ws]** | P3 | medium | Command monitor is minted as a separate `monitor_ws`/'s' task type instead of a `local_bash` record with kind:"monitor" ('b' id); id.rs comment cites 2.1.223 to justify it |
 | `MON-08` | confirmed **[fixed]** | P3 | medium | MCP auto-background ignores hasPendingElicitation: oracle keeps the call in the foreground while an elicitation dialog is open |
 | `MON-10` | confirmed **[fixed: the description split landed; the `getMcpAutoBackgroundMs` half is RESOLVED not implemented — `Dl()`'s second disjunct is a runtime latch set by the MCP-serve/http entry path, which has no analogue in this port, so nothing could set it. Documented at `platform_api::env::background_tasks_disabled`]** | P3 | low | Dl()-gated variants missing: Monitor prompt has no 'foreground with Bash' wording when background tasks are disabled, and getMcpAutoBackgroundMs ignores the host-level backgroundTasksDisabled latch |
 | `MON-11` | confirmed **[fixed]** | P3 | low | Push-notification splices: ybn leads with two newlines (port one) and the per-event GM hint is omitted even when push is enabled |
@@ -188,7 +193,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
 | `tools-01` | confirmed **[fixed]** | P1 | medium | 2.1.263 model/opt-in gate OO() (todo tools OFF on Opus 4.8 / Sonnet 5 / Fable 5 / Mythos 5 unless opted in) is missing from Task*/TodoWrite isEnabled and both reminder gates **[fixed]** |
-| `tools-02` | confirmed | P2 | low | TaskUpdate TaskCompleted hook block returns the bare reason instead of `TaskCompleted hook feedback:\n<reason>` **[fixed]** |
+| `tools-02` | fixed | P2 | low | TaskUpdate prefixes TaskCompleted hook feedback with the oracle-compatible label |
 | `tools-03` | confirmed **[fixed]** | P2 | low | TaskCreate coerceInput (POe) / validationErrorSteer (yDn) and TaskUpdate coerceInput (Cce) are not ported — malformed model calls hard-fail instead of being repaired/steered |
 | `tools-04` | confirmed **[fixed]** | P2 | medium | TodoWrite tool metadata drift: shouldDefer:true, strict:true, userFacingName "", maxResultSizeChars 1e5 not mirrored |
 | `tools-07` | confirmed **[fixed]** | P2 | high | Port comments pin the gate/claim cluster to 2.1.183 `TE()` and 2.1.223 `QOd/uTy/RSr`, contradicting 2.1.263 (`h3()=X_()&&OO()`, `RZn/$t/dCe`) |
@@ -200,14 +205,52 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
 | `SLT-03` | confirmed **[fixed with bg-05]** | P1 | medium | Timeout auto-background is unconditional; oracle gates it on Dl(), `background:"forbidden"`, `$es` (sleep-led commands) and ignores explicit run_in_background when disabled |
-| `SLT-02` | confirmed **[partially fixed: Ctrl+B and the 2 s foreground arming landed; `background_hint` progress remains]** | P2 | medium | No Ctrl+B / background-all (zM), no 2s foreground-record arming (cnr/U6t), no background_hint progress |
-| `SLT-05` | confirmed | P2 | medium | Session exit ignores running background work (no 'Background work is running' interstitial, no print wind-down/teardown, no exit handoff) |
-| `SLT-06` | confirmed | P2 | medium | Background-shell stall watchdog (Her) and memory-pressure reaper (jer) absent |
-| `SLT-07` | confirmed | P2 | medium | Task telemetry names/shape differ from the oracle (feature counters and bash backgrounding events missing) |
-| `SLT-04` | confirmed **[partially fixed: the two gates were unified; the host-level disable flag and `AAt` text remain]** | P3 | low | Two inconsistent 'background tasks disabled' gates; host-level disable flag and AAt text absent |
-| `SLT-08` | confirmed | P3 | medium | /tasks dialog is a documented subset: lists terminal rows, different title/row layout, kill on pending/queued, empty state as transcript line |
-| `SLT-09` | confirmed | P3 | low | Port comments cite 2.1.238 symbols (L0i/egm/WA) that 2.1.263 renamed and extended ($2t/gnr/Dl); $2t gained a 4th head |
+| `SLT-02` | fixed | P2 | medium | Ctrl+B/background-all, foreground arming and `background_hint` progress are wired through the shared task backgrounder |
+| `SLT-05` | fixed | P2 | medium | Session exit presents the live-background-work interstitial and supports stop, stay, or handoff paths |
+| `SLT-06` | fixed | P2 | medium | Background-shell stall watchdog and memory-pressure reap are wired and tested |
+| `SLT-07` | fixed | P2 | medium | Task lifecycle feature counters and background-shell events use the task telemetry names and payload shape |
+| `SLT-04` | fixed | P3 | low | All hosts use the shared background-task disable gate |
+| `SLT-08` | fixed | P3 | medium | `/tasks` lists live and terminal records through the shared task registry and has dedicated empty/detail states |
+| `SLT-09` | fixed | P3 | low | Port comments and parity references use the 2.1.263 symbol names |
 | `SLT-10` | keep | P3 | low | /fusion local_fusion task type and LINGXI_* env branding are intentional (keep) |
+
+## Initial 2026-09-09 handoff verification (historical checkpoint)
+
+The handoff's "97 rows / 57 fixed / one partial / 27 open / 67%" is not a
+reproducible count of this document. Before this follow-up's changes, the 98
+finding rows classify as 49 fixed/already closed, 10 partial/substantial,
+25 open, 10 keep, 2 refuted and 2 deferred. These are document labels, not a
+fresh execution of every regression or mutation probe; partial rows must not
+be counted as fully closed. The P0 is described separately from these rows.
+
+Two specific corrections: CW-02 already says closed by the P0 commit, and
+`platforms/posix/src/process/runner.rs`'s timeout handoff uses the supplied
+`BackgroundTaskBinding` id/output file and reports exit through its sink.
+CW-03 is refuted, not pending. The five cited commits b1a02ce08, 8567e5c6e,
+766feb343, 4b4c0d7f9 and 4479ee32a are present in the history.
+
+TO-09 follow-up: `tools/task/src/task.rs` replaces cancellation-as-timeout
+with `ToolError::Aborted`, races cancellation against the poll delay, returns
+`{retrieval_status:"timeout",task:null}` for eviction on a subsequent output
+poll, and emits `waiting_for_task` with the description/type for blocking
+calls. Initial not-found calls still error. This is a partial closure: the
+non-blocking UI annotation and the get→first-output race still need work.
+
+Verification: all 174 `tool-task` library tests pass, including 29 TaskOutput
+cases. A temporary workspace copy with the abort branch changed back to
+`break` fails `task_output_block_returns_promptly_on_cancel` as expected;
+no mutation was applied to the shared checkout. The added mid-poll
+cancellation test also asserts no second output read and no `mark_notified`.
+`cargo clippy -p tool-task --lib --no-deps` passes with existing warnings;
+`git diff --check` passes. The dependency-graph gate fails on the existing
+`tool-task → tool-shell` edge (already present in HEAD); no dependency changed.
+Tests used the installed 1.82.0 toolchain and an alternate target directory to
+avoid another session's long-running shared-target build lock.
+
+The checkout contains unrelated uncommitted work. This follow-up has not
+staged or committed files or reset the shared index. Owner routing, idle wake,
+and persistent-agent lifecycle are still open; the initial parallel workers
+failed with workspace-credit errors before delivering changes.
 
 ## What was fixed
 

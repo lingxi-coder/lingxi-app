@@ -120,8 +120,16 @@ pub async fn run_due_jobs(
     };
     let mut tasks: HashMap<String, CronTaskDef> = HashMap::new();
     for t in parse_tasks(&body).tasks {
-        if t.expires_at.is_some_and(|expiry| expiry <= system_time_to_epoch_ms(now)) {
-            remove_task_from_file(fs.as_ref(), project_root, &t.id, Some(system_time_to_epoch_ms(now))).await;
+        if t.expires_at
+            .is_some_and(|expiry| expiry <= system_time_to_epoch_ms(now))
+        {
+            remove_task_from_file(
+                fs.as_ref(),
+                project_root,
+                &t.id,
+                Some(system_time_to_epoch_ms(now)),
+            )
+            .await;
             continue;
         }
         let schedule = match parse_cron(&t.cron) {
@@ -238,7 +246,9 @@ pub async fn next_fire_epoch_ms(
             t.recurring.unwrap_or(false),
             now,
         ) {
-            if t.expires_at.is_none_or(|expiry| expiry > system_time_to_epoch_ms(now) && next < expiry) {
+            if t.expires_at
+                .is_none_or(|expiry| expiry > system_time_to_epoch_ms(now) && next < expiry)
+            {
                 earliest = Some(earliest.map_or(next, |e| e.min(next)));
             }
         }
@@ -302,14 +312,23 @@ fn system_time_to_epoch_ms(t: SystemTime) -> u64 {
 
 /// Remove `id` from the single tasks file (read-modify-write via `fs`). A missing
 /// file / id is a no-op. Mirrors `CronScheduler::remove_task_from_file`.
-async fn remove_task_from_file(fs: &dyn FileSystem, project_root: &Path, id: &str, expired_at: Option<u64>) {
+async fn remove_task_from_file(
+    fs: &dyn FileSystem,
+    project_root: &Path,
+    id: &str,
+    expired_at: Option<u64>,
+) {
     let _guard = CRON_FILE_LOCK.lock().await;
     let Ok(_file_guard) = crate::tasks_file::lock_scheduled_tasks(fs, project_root).await else {
         return;
     };
     if let Ok(body) = crate::tasks_file::read_tasks_body(fs, project_root).await {
         if let Some(now) = expired_at {
-            if !parse_tasks(&body).tasks.iter().any(|task| task.id == id && task.expires_at.is_some_and(|expiry| expiry <= now)) {
+            if !parse_tasks(&body)
+                .tasks
+                .iter()
+                .any(|task| task.id == id && task.expires_at.is_some_and(|expiry| expiry <= now))
+            {
                 return;
             }
         }
@@ -701,13 +720,25 @@ mod tests {
     async fn per_task_expiration_blocks_mobile_fire_and_absent_expiration_has_no_age_limit() {
         for expired in [false, true] {
             let created_ms = (NOW - 30 * 24 * 60 * 60) * 1000;
-            let expiry = if expired { format!(",\"expiresAt\":{}", (NOW - 1) * 1000) } else { String::new() };
-            let body = format!(r#"{{"tasks":[{{"id":"dmobile01","cron":"* * * * *","prompt":"test","createdAt":{created_ms},"recurring":true{expiry}}}]}}"#);
+            let expiry = if expired {
+                format!(",\"expiresAt\":{}", (NOW - 1) * 1000)
+            } else {
+                String::new()
+            };
+            let body = format!(
+                r#"{{"tasks":[{{"id":"dmobile01","cron":"* * * * *","prompt":"test","createdAt":{created_ms},"recurring":true{expiry}}}]}}"#
+            );
             let fs = file_with(&body);
             let firer = RecordingFirer::new("done");
-            let fired = run_due_jobs(Path::new(PATH), fs, FixedClock::at_secs(NOW), &firer, default_recurring_max_age()).await;
+            let fired = run_due_jobs(
+                Path::new(PATH),
+                fs,
+                FixedClock::at_secs(NOW),
+                &firer,
+                default_recurring_max_age(),
+            )
+            .await;
             assert_eq!(fired.len(), usize::from(!expired));
         }
     }
-
 }

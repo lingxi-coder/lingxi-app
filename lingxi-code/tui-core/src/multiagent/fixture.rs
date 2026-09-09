@@ -43,6 +43,7 @@ mod tests {
         vec![MultiAgentEvent::TasksRefreshed(
             (0..n)
                 .map(|i| TaskRow {
+            unread: false, model: None, effort: None,
                     awaiting_plan_approval: false,
                     task_id: format!("b{i:08}"),
                     task_type: "local_bash".into(),

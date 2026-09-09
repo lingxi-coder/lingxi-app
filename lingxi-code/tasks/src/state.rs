@@ -124,11 +124,25 @@ pub enum TaskState {
     McpTask(McpTaskState),
     /// Dream loop.
     Dream(DreamTaskState),
+    /// Environment scan owned by /auto-mode-setup.
+    AutoModeScan(AutoModeScanTaskState),
     /// Fusion multi-model deliberation.
     LocalFusion(LocalFusionTaskState),
 }
 
 impl TaskState {
+    /// Whether a completed local-agent turn retains a resumable runner.
+    #[must_use]
+    pub fn is_parked(&self) -> bool {
+        matches!(self, Self::LocalAgent(agent) if agent.is_parked)
+    }
+
+    /// Terminal task status does not imply the persistent runner has exited.
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        self.base().status.is_terminal() && !self.is_parked()
+    }
+
     /// Borrow the common base fields regardless of variant.
     #[must_use]
     pub fn base(&self) -> &TaskStateBase {
@@ -142,6 +156,7 @@ impl TaskState {
             Self::Monitor(s) => &s.base,
             Self::McpTask(s) => &s.base,
             Self::Dream(s) => &s.base,
+            Self::AutoModeScan(s) => &s.base,
             Self::LocalFusion(s) => &s.base,
         }
     }
@@ -159,6 +174,7 @@ impl TaskState {
             Self::Monitor(s) => &mut s.base,
             Self::McpTask(s) => &mut s.base,
             Self::Dream(s) => &mut s.base,
+            Self::AutoModeScan(s) => &mut s.base,
             Self::LocalFusion(s) => &mut s.base,
         }
     }
@@ -167,6 +183,12 @@ impl TaskState {
 /// State specific to a local bash task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalBashTaskState {
+    /// This host adopted a supervised shell launched by an earlier host.
+    #[serde(default)]
+    pub is_adopted: bool,
+    /// Origin of the shell invocation (oracle Bft/U6t): turn, agent or inner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
@@ -193,6 +215,17 @@ pub struct LocalBashTaskState {
 /// State specific to an in-process agent task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalAgentTaskState {
+    /// The turn has completed while the persistent runner remains resumable.
+    /// Separate from task status so parked agents are not counted as active work.
+    #[serde(default)]
+    pub is_parked: bool,
+    /// An independent activity observer; never a user-facing completion.
+    #[serde(default)]
+    pub is_observer: bool,
+    /// Activity source for a sidecar; separate from task ownership so ending the
+    /// observed agent does not cascade-stop its independent observer.
+    #[serde(default)]
+    pub observed_agent_id: Option<AgentId>,
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
@@ -247,6 +280,12 @@ pub struct LocalAgentTaskState {
 /// run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentOutcomeState {
+    /// Concrete model and string effort selected for the current runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+
     /// Final text response → the notification's `<result>` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
@@ -465,6 +504,10 @@ pub struct MonitorTaskState {
 /// detached `tools/call`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTaskState {
+    /// Full-result persistence receipt for the terminal notification.
+    #[serde(default)]
+    pub saved_hint: Option<String>,
+
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
@@ -715,4 +758,12 @@ mod taskstate_scope_readback_tripwire {
             "the rest of the row must still serialize normally. Got: {json}"
         );
     }
+}
+
+/// A cancellable environment scan; it never produces a conversation completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoModeScanTaskState {
+    /// Shared task identity and lifecycle.
+    #[serde(flatten)]
+    pub base: TaskStateBase,
 }

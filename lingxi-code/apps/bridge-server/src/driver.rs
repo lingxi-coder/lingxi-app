@@ -274,8 +274,7 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
                         let streak = loop_runtime.noop_streak();
-                        let (message, companion) =
-                            tool_cron::loop_wakeup_lines(now_ms, streak);
+                        let (message, companion) = tool_cron::loop_wakeup_lines(now_ms, streak);
                         // EVERY wakeup carries this event, streak or not, so the
                         // client can mark the group boundary without reading the
                         // copy. A non-zero streak tells it how many preceding
@@ -557,6 +556,8 @@ impl OrchestratorTurnDriver {
         prompt: String,
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
+        notification_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+        in_human_turn: bool,
     ) {
         platform_api::live_sessions::set_process_status("busy", None);
         if let Some(output) = &self.message_output {
@@ -581,10 +582,15 @@ impl OrchestratorTurnDriver {
             queue.register_active_turn(cancel.clone()).await;
         }
         let cancel_probe = cancel.clone();
-        let result = self
-            .orchestrator
-            .run_turn_streaming_with_cancel_image_sources(&prompt, sources, cancel)
-            .await;
+        let result = if let Some(registry) = notification_registry {
+            self.orchestrator
+                .run_task_notification_rewake(registry.as_ref(), cancel)
+                .await
+        } else {
+            self.orchestrator
+                .run_turn_streaming_with_origin(&prompt, sources, cancel, None, in_human_turn)
+                .await
+        };
         // Clear the active-turn token at turn end (graceful OR error): a later
         // `Now` enqueue between turns then has nothing to abort and simply waits
         // for the between-turn drain. No-op when no queue is wired.
@@ -705,10 +711,29 @@ impl OrchestratorTurnDriver {
 
 #[async_trait]
 impl TurnDriver for OrchestratorTurnDriver {
+    async fn run_queued_turn(
+        &self,
+        prompt: String,
+        in_human_turn: bool,
+        cancel: CancellationToken,
+    ) {
+        self.drive_turn(prompt, Vec::new(), cancel, None, in_human_turn)
+            .await;
+    }
+
+    async fn run_task_notification_turn(
+        &self,
+        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        cancel: CancellationToken,
+    ) {
+        self.drive_turn(String::new(), Vec::new(), cancel, Some(registry), false)
+            .await;
+    }
+
     async fn run_turn(&self, prompt: String) {
         // No images: drive with an empty source set — identical to routing through
         // `run_turn_streaming_with_cancel` (which decodes `&[]` to an empty vec).
-        self.drive_turn(prompt, Vec::new(), CancellationToken::new())
+        self.drive_turn(prompt, Vec::new(), CancellationToken::new(), None, true)
             .await;
     }
 
@@ -718,12 +743,13 @@ impl TurnDriver for OrchestratorTurnDriver {
     /// user message via `ConversationMessage::user_with_images`.
     async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
         let sources = Self::to_image_sources(images);
-        self.drive_turn(prompt, sources, CancellationToken::new())
+        self.drive_turn(prompt, sources, CancellationToken::new(), None, true)
             .await;
     }
 
     async fn run_turn_with_cancel(&self, prompt: String, cancel: CancellationToken) {
-        self.drive_turn(prompt, Vec::new(), cancel).await;
+        self.drive_turn(prompt, Vec::new(), cancel, None, true)
+            .await;
     }
 
     async fn run_turn_with_images_and_cancel(
@@ -732,7 +758,7 @@ impl TurnDriver for OrchestratorTurnDriver {
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
-        self.drive_turn(prompt, Self::to_image_sources(images), cancel)
+        self.drive_turn(prompt, Self::to_image_sources(images), cancel, None, true)
             .await;
     }
 }
@@ -1328,7 +1354,11 @@ mod tests {
         tally.note_assistant_response(9);
         tally.note_denial("user-rejected");
         tally.note_compaction();
-        assert_eq!(tally.snapshot().tool_uses, 9, "the leftovers are really there");
+        assert_eq!(
+            tally.snapshot().tool_uses,
+            9,
+            "the leftovers are really there"
+        );
 
         driver.run_turn("hello".to_string()).await;
 

@@ -732,6 +732,18 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
                         return exit_codes::RUNTIME_ERROR;
                     }
                 };
+            if let Err(error) = crate::shell_handoff::restore_destination(
+                &config_home,
+                &cli.short,
+                tui_build.runtime.task_registry.as_ref(),
+                &launch.shell_handoff,
+            )
+            .await
+            {
+                eprintln!("lingxi-cli: shell handoff restore failed: {error}");
+                registration.deregister();
+                return exit_codes::RUNTIME_ERROR;
+            }
             crate::mode::run_ratatui_with_initial_state(
                 tui_build,
                 Some(registration.clone()),
@@ -757,6 +769,7 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
                 registration.clone(),
                 initial_prompt,
                 launch.handoff.clone(),
+                &launch,
             )
             .await
         }
@@ -879,6 +892,7 @@ mod tests {
                 worktree_path: None,
                 worktree_ownership_token: None,
                 initial_prompt: Some(prompt.to_string()),
+                shell_handoff: Vec::new(),
                 handoff: None,
                 options: crate::background_launch::BackgroundLaunchOptions::default(),
                 env: std::collections::BTreeMap::new(),

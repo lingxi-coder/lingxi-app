@@ -59,6 +59,27 @@ pub trait HookOutputObserver: Send + Sync {
 /// pipeline has already been consulted.
 #[async_trait]
 pub trait ProcessRunner: Send + Sync {
+    /// Export a supervised shell without changing its current owner.
+    async fn export_shell(&self, _handle: &ProcessHandle) -> Result<ShellProcessHandoff, ProcessError> { Err(ProcessError::Unsupported) }
+    /// Authenticate the live supervisor and its held child/output identities.
+    async fn validate_shell(&self, _handoff: &ShellProcessHandoff) -> Result<(), ProcessError> { Err(ProcessError::Unsupported) }
+    /// Attach this host's completion observer to an authenticated supervisor.
+    async fn adopt_shell(&self, _handoff: &ShellProcessHandoff, _sink: Arc<dyn BackgroundExitSink>) -> Result<ProcessHandle, ProcessError> { Err(ProcessError::Unsupported) }
+    /// Detach only this host's observer; never signal the supervised child.
+    async fn release_shell(&self, _handoff: &ShellProcessHandoff) -> Result<(), ProcessError> { Err(ProcessError::Unsupported) }
+
+    /// Whether the foreground runner observes `BackgroundTaskBinding::on_demand`
+    /// and can detach the existing OS child without respawning it.
+    fn supports_foreground_backgrounding(&self) -> bool {
+        false
+    }
+
+    /// SIGKILL the live process groups launched by one agent. Returns the
+    /// pre-signal PID snapshot, not a count of retained background task rows.
+    async fn kill_owner_processes(&self, _owner: &str) -> Vec<u32> {
+        Vec::new()
+    }
+
     /// Run a sandboxed command to completion and collect its output.
     ///
     /// # Errors
@@ -101,6 +122,8 @@ pub trait ProcessRunner: Send + Sync {
     /// # Errors
     /// Returns [`ProcessError`] when the process cannot be terminated.
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError>;
+    /// Confirm that the returned shell handle has been registered by its tool.
+    async fn acknowledge_shell(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> { Ok(()) }
 
     /// Whether this runner can spawn processes on the current host.
     fn is_available(&self) -> bool;
@@ -195,7 +218,7 @@ pub trait ProcessRunner: Send + Sync {
 }
 
 /// Outcome of [`ProcessRunner::run_foreground`].
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum ForegroundOutcome {
     /// The command finished within its timeout; carries its collected output.
     Completed(ProcessOutput),
@@ -210,7 +233,7 @@ pub enum ForegroundOutcome {
 /// file used when the command's captured output exceeded the caller's inline
 /// limit.  The metadata is intentionally provider-neutral so tool and
 /// orchestration layers do not need to know which platform opened the file.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ForegroundRunResult {
     /// Whether the process completed inline or moved to the background.
     pub outcome: ForegroundOutcome,
@@ -324,11 +347,84 @@ impl std::fmt::Debug for BackgroundTaskBinding {
 /// Receives the one-shot exit report for a backgrounded child.
 #[async_trait]
 pub trait BackgroundExitSink: Send + Sync {
+    /// Report the live OS child before waiting for output or completion.
+    async fn on_spawn(&self, _task_id: &str, _pid: u32) -> Result<(), ProcessError> { Ok(()) }
+    /// A process owner can request stop without signaling a possibly reused PID.
+    fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> { None }
+    /// Output ownership moved to an independent supervisor before handle publication.
+    async fn on_supervised_start(&self, _task_id: &str) {}
+    /// Completion from a supervisor that owns the terminal output trailer.
+    async fn on_supervised_exit(&self, task_id: &str, code: Option<i32>) { self.on_exit(task_id,code).await; }
+    /// Distinguish an explicit stop from an unknown/signaled exit.
+    async fn on_exit_with_status(&self, task_id: &str, code: Option<i32>, _killed: bool) { self.on_exit(task_id,code).await; }
+
+    /// The independent supervisor and its durable receipt are both unavailable.
+    async fn on_supervision_lost(&self, task_id: &str) { self.on_exit(task_id, Some(-1)).await; }
+
+    /// Whether captured background output is owned by this sink. Legacy sinks
+    /// retain direct runner-file output.
+    fn manages_output(&self) -> bool {
+        false
+    }
+
+    /// Append already-decoded, stderr-framed output through the task writer.
+    async fn append_output(&self, _task_id: &str, _content: &str) -> Result<(), ProcessError> {
+        Ok(())
+    }
+
+    /// Wait for accepted output before the terminal notification is published.
+    async fn flush_output(&self, _task_id: &str) -> Result<(), ProcessError> {
+        Ok(())
+    }
+
+    /// Cap a completed persisted copy and return its PRE-truncation stat size
+    /// (oracle Ibt/N7e), which may exceed the retained file's byte length.
+    async fn finalize_persisted_output(&self, _task_id: &str, _max_bytes: u64) -> Result<Option<u64>, ProcessError> { Ok(None) }
+
     /// Called exactly once after the background child is reaped.
     ///
     /// `exit_code` is `None` when the platform could not report one (signalled
     /// death, or a reaper that lost the child).
     async fn on_exit(&self, task_id: &str, exit_code: Option<i32>);
+
+    /// A background shell has stopped producing output at an interactive prompt.
+    /// This is advisory: it neither settles the task nor consumes its completion.
+    async fn on_stall(&self, _task_id: &str, _tail: &str) {}
+
+    /// Atomically claim a memory-pressure stop if the owning session is idle and
+    /// this shell is eligible. The runner kills its held child only after `true`.
+    /// Hosts without the necessary session state conservatively decline.
+    async fn on_memory_pressure(&self, _task_id: &str) -> bool {
+        false
+    }
+}
+
+/// Authenticated supervisor capability used for a shell handoff. Paths and PIDs
+/// are corroborated by the supervisor's held state; never authorize kill by PID.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellProcessHandoff {
+    pub task_id: String,
+    pub pid: u32,
+    pub supervisor_pid: u32,
+    /// Birth of the independent writer; absent legacy receipts cannot prove death.
+    #[serde(default)]
+    pub supervisor_start_identity: Option<String>,
+    #[serde(default)]
+    pub supervisor_directory_identity: Option<crate::rooted_fs::RootIdentity>,
+    #[serde(default)]
+    pub output_root_identity: Option<crate::rooted_fs::RootIdentity>,
+    #[serde(default)]
+    pub output_file_identity: Option<crate::rooted_fs::RootIdentity>,
+    /// Birth identity used only for guarded cleanup if the supervisor disappears.
+    #[serde(default)]
+    pub process_start_identity: Option<String>,
+    /// Agent whose live process ownership follows this shell.
+    #[serde(default)]
+    pub owner: Option<String>,
+    pub socket_path: String,
+    pub receipt_path: String,
+    pub output_path: String,
+    pub nonce: String,
 }
 
 /// Handle to a background process previously spawned by

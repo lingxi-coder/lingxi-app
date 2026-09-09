@@ -704,7 +704,10 @@ impl CronScheduler {
             // as a silent fire on the next reload.
             tracing::error!("[ScheduledTasks] failed to surface missed tasks: {e}");
         }
-        tracing::info!("[ScheduledTasks] surfaced {} missed one-shot task(s)", ids.len());
+        tracing::info!(
+            "[ScheduledTasks] surfaced {} missed one-shot task(s)",
+            ids.len()
+        );
     }
 
     /// Drop `ids` from the tasks file under both cron locks. `false` means the
@@ -1025,29 +1028,25 @@ impl CronScheduler {
         // may have landed in between. Recording THIS body as the applied
         // generation is what makes the gate above safe — a write that lands
         // after it must also change the bytes.
-        let (snapshot, doc) = match crate::tasks_file::read_tasks_body(
-            self.fs.as_ref(),
-            project_root,
-        )
-        .await
-        {
-            Ok(body) => match crate::tasks_file::parse_tasks_strict(&body) {
-                Ok(doc) => (TasksFileSnapshot::Body(body), doc),
-                Err(error) => {
-                    tracing::warn!("cron: cannot refresh invalid durable state: {error}");
-                    // Remember the bad generation so this warns once per broken
-                    // document instead of once per second, and re-reads as soon
-                    // as anything rewrites the file.
-                    *self.applied_snapshot.lock().await = Some(TasksFileSnapshot::Body(body));
-                    return;
-                }
-            },
-            Err(FsError::NotFound(_)) => (
-                TasksFileSnapshot::Absent,
-                crate::tasks_file::ScheduledTasks::default(),
-            ),
-            Err(_) => return,
-        };
+        let (snapshot, doc) =
+            match crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
+                Ok(body) => match crate::tasks_file::parse_tasks_strict(&body) {
+                    Ok(doc) => (TasksFileSnapshot::Body(body), doc),
+                    Err(error) => {
+                        tracing::warn!("cron: cannot refresh invalid durable state: {error}");
+                        // Remember the bad generation so this warns once per broken
+                        // document instead of once per second, and re-reads as soon
+                        // as anything rewrites the file.
+                        *self.applied_snapshot.lock().await = Some(TasksFileSnapshot::Body(body));
+                        return;
+                    }
+                },
+                Err(FsError::NotFound(_)) => (
+                    TasksFileSnapshot::Absent,
+                    crate::tasks_file::ScheduledTasks::default(),
+                ),
+                Err(_) => return,
+            };
         // Keep identity reconciliation atomic with live registration. Registration
         // releases the tasks lock before taking this lock, so this order is safe.
         let mut durable_ids = self.durable_ids.write().await;
@@ -2544,14 +2543,21 @@ mod scheduler_tick_tests {
         let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler.load_persisted().await;
 
-        assert_eq!(handler.spawn_count(), 1, "one confirmation prompt, not a fire");
+        assert_eq!(
+            handler.spawn_count(),
+            1,
+            "one confirmation prompt, not a fire"
+        );
         let prompt = handler.prompts().remove(0);
         assert!(prompt.starts_with("The following one-shot scheduled task was missed while Claude was not running. It has already been removed from .lingxi/scheduled_tasks.json.\n\nDo NOT execute this prompt yet. First use the AskUserQuestion tool to ask whether to run it now. Only execute if the user confirms.\n\n[Every minute, created "), "{prompt}");
         assert!(prompt.ends_with("]\ndeploy it"), "{prompt}");
         assert!(!scheduler.tasks.read().await.contains_key("dmissed01"));
         assert!(scheduler.tasks.read().await.contains_key("dkeep0001"));
         let doc = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
-        assert_eq!(doc.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["dkeep0001"]);
+        assert_eq!(
+            doc.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["dkeep0001"]
+        );
 
         // Subsequent ticks never fire it (the file no longer lists it).
         scheduler.tick().await;
@@ -2570,18 +2576,39 @@ mod scheduler_tick_tests {
         let (registry, handler) = registry_with_failing_dream_handler(fs.clone());
         let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler.load_persisted().await;
-        assert_eq!(handler.attempt_count(), 1, "one delivery attempt for both tasks");
+        assert_eq!(
+            handler.attempt_count(),
+            1,
+            "one delivery attempt for both tasks"
+        );
         let doc = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
-        assert!(doc.tasks.is_empty(), "missed tasks are removed even when delivery fails");
+        assert!(
+            doc.tasks.is_empty(),
+            "missed tasks are removed even when delivery fails"
+        );
         assert!(scheduler.tasks.read().await.is_empty());
         let text = super::missed_one_shots_prompt(&[
             crate::tasks_file::CronTask {
-                id: "a".into(), cron: "* * * * *".into(), prompt: "a".into(), created_at: created_ms,
-                last_fired_at: None, recurring: None, permanent: None, expires_at: None, session_id: None,
+                id: "a".into(),
+                cron: "* * * * *".into(),
+                prompt: "a".into(),
+                created_at: created_ms,
+                last_fired_at: None,
+                recurring: None,
+                permanent: None,
+                expires_at: None,
+                session_id: None,
             },
             crate::tasks_file::CronTask {
-                id: "b".into(), cron: "0 9 * * 1-5".into(), prompt: "b".into(), created_at: created_ms,
-                last_fired_at: None, recurring: None, permanent: None, expires_at: None, session_id: None,
+                id: "b".into(),
+                cron: "0 9 * * 1-5".into(),
+                prompt: "b".into(),
+                created_at: created_ms,
+                last_fired_at: None,
+                recurring: None,
+                permanent: None,
+                expires_at: None,
+                session_id: None,
             },
         ]);
         assert!(text.starts_with("The following one-shot scheduled tasks were missed while Claude was not running. They have already been removed from .lingxi/scheduled_tasks.json.\n\nDo NOT execute these prompts yet. First use the AskUserQuestion tool to ask whether to run each one now. Only execute if the user confirms.\n\n[Every minute, created "));
@@ -2976,7 +3003,8 @@ mod scheduler_tick_tests {
             .prompt = "doctored".into();
         scheduler.tick().await;
         assert_eq!(
-            scheduler.tasks.read().await["dgate"].prompt, "doctored",
+            scheduler.tasks.read().await["dgate"].prompt,
+            "doctored",
             "an unchanged document must not be re-applied"
         );
 

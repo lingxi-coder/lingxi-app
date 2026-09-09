@@ -15,7 +15,7 @@ pub struct TaskCreateInput {
     /// variants (`local_bash`, `local_agent`, `remote_agent`,
     /// `in_process_teammate`, `local_workflow`, `monitor_mcp`, `monitor_ws`,
     /// `mcp_task`, `dream`) plus LingXi's own `local_fusion`. The oracle's
-    /// tenth, `auto_mode_scan` (prefix `e`), has no port.
+    /// tenth, `auto_mode_scan` (prefix `e`), tracks environment reconnaissance.
     pub task_type: String,
     /// Human-readable description shown in UI listings.
     pub description: String,
@@ -75,6 +75,17 @@ pub struct MonitorRegistration {
     pub creator_agent_id: Option<protocol::AgentId>,
 }
 
+/// Passive WebSocket event monitor registration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketMonitorRegistration {
+    /// Public ASCII ws/wss endpoint.
+    pub url: String,
+    /// Optional ordered RFC 6455 subprotocols.
+    pub protocols: Vec<String>,
+    /// Common task metadata; command/cwd fields are unused for sockets.
+    pub task: MonitorRegistration,
+}
+
 /// Filter for [`TaskRegistryHandle::list`].
 /// A background shell command the caller is about to spawn.
 ///
@@ -130,17 +141,59 @@ pub struct TaskNotFoundRosters {
     pub background_agents: Vec<String>,
 }
 
+/// Registry identity and output path for an allocated foreground agent.
+#[derive(Debug, Clone)]
+pub struct ForegroundAgentHandle {
+    pub task_id: String,
+    pub output_path: String,
+}
+
+/// Metadata for a foreground agent allocated by the Agent tool.
+#[derive(Debug, Clone)]
+pub struct ForegroundAgentRegistration {
+    pub agent_id: protocol::AgentId,
+    pub agent_type: String,
+    pub prompt: String,
+    pub description: String,
+    pub tool_use_id: Option<String>,
+    pub creator_agent_id: Option<protocol::AgentId>,
+    pub creator_teammate_name: Option<String>,
+    pub creator_team_name: Option<String>,
+}
+
+/// Delivers an intentional message to a retained externally driven agent.
+#[async_trait]
+pub trait TaskMessageReceiver: Send + Sync {
+    async fn send(&self, message: String) -> Result<(), TaskRegistryError>;
+}
+
 /// Moves a still-running FOREGROUND task to the background on request.
 ///
 /// The port of claude-code `I_t`'s first act, `t.background(e)` on the live
 /// `shellCommand`. The registry holds one of these per armed foreground row so
 /// Ctrl+B, background-all and the SDK `background_tasks` request can reach a
 /// child the registry did not spawn.
+/// Why foreground work is being detached from its owning turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TaskBackgroundReason {
+    /// Explicit Ctrl+B/background-all request.
+    User = 1,
+    /// Preserve work while the foreground turn is cancelled.
+    TurnAbort = 2,
+    /// Allow an arriving message to reach the model without interrupting work.
+    DeliverMessage = 3,
+}
+
 #[async_trait]
 pub trait TaskBackgrounder: Send + Sync {
     /// Ask the in-flight command to detach. Best-effort and idempotent: the
     /// runner takes the same path a timeout would.
     async fn background(&self);
+    /// Preserve reason-aware result text; old backgrounders remain compatible.
+    async fn background_with_reason(&self, _reason: TaskBackgroundReason) {
+        self.background().await;
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,16 +209,57 @@ pub struct TaskUpdatePatch {
     pub status: Option<String>,
 }
 
+/// TaskStop lookup preserves ambiguity rather than choosing a namesake.
+#[derive(Debug, Clone)]
+pub enum TaskStopResolution {
+    Found(TaskRecord),
+    Ambiguous(String),
+    NotFound { suggestion: Option<String> },
+}
+
 /// One task as surfaced to the tool layer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskRecord {
+    /// Running shell inherited from an acknowledged host handoff.
+    #[serde(default)]
+    pub is_adopted: bool,
+    /// Shell invocation origin, retained when a foreground shell backgrounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    /// Whether a completed agent satisfies the task-dialog Cj predicate.
+    #[serde(default)]
+    pub completed_agent_visible: bool,
+    /// Completion has been delivered or consumed.
+    #[serde(default)]
+    pub notified: bool,
+    /// Concrete agent model and optional string effort for task presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+
+    /// An internal observer sidecar, excluded from user-facing task notices.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_observer: bool,
+    /// Teammate address (`name@team`) used by TaskStop name resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teammate_agent_id: Option<String>,
+    /// Teammate display name, independent of the task description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teammate_name: Option<String>,
+    /// Shell specialization; command event monitors use `monitor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// A completed local agent whose persistent runner is still resumable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_parked: bool,
     /// Authoritative persistent-teammate idle state, used by goal deferral.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_idle: bool,
     /// A persistent teammate is waiting for the leader's plan decision.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub awaiting_plan_approval: bool,
-    /// 9-char `[bartwmdksf][0-9a-z]{8}` task id.
+    /// 9-char `[bartwmdksfe][0-9a-z]{8}` task id.
     pub task_id: String,
     /// Task type wire string.
     pub task_type: String,
@@ -225,11 +319,15 @@ pub struct TaskRecord {
     ///
     /// * `userStopCount` / `userInitiatedAt` (`V2t` / `K2t`) stamp each queued
     ///   message with the stop epoch it was enqueued in, so a user stop
-    ///   invalidates messages queued before it. The port has no persistent
-    ///   per-agent message queue to stamp.
+    ///   invalidates older user messages. Persistent observer/notification
+    ///   queues now exist here, but carry only automatic/model-originated work.
     /// * the `userInitiated` bypass needs a USER-typed message aimed at an
-    ///   agent. Every message-to-an-agent path here is model-initiated
-    ///   (`SendMessage`, the mailbox pump); `git grep user_initiated` is empty.
+    ///   agent. The port has no trusted human agent-address input surface;
+    ///   `SendMessage`, mailbox delivery and observer digests cannot assert it.
+    ///   Upstream DOES produce this flag: `src_180597926.js` @1393158 calls
+    ///   resume with `userInitiated:true`; @1393281 queues a typed message when
+    ///   the resume lock is busy. Porting that input surface requires the epoch
+    ///   guard too, not simply granting existing model messages a bypass.
     ///
     /// Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -456,6 +554,9 @@ pub struct WorkflowTerminalOutcome {
 /// omits the corresponding clause/tag.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskNotification {
+    /// Recipient agent; None denotes the main session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_agent_id: Option<protocol::AgentId>,
     /// 9-char task id → `<task-id>`.
     pub task_id: String,
     /// Task type wire string (one of the ten — see [`TaskRecord::task_type`]).
@@ -587,6 +688,9 @@ pub struct TaskNotification {
 /// One chunk of a task's accumulated stdout/stderr spool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskOutputChunk {
+    /// Harness turn-limit note, rendered before the task output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_head: Option<String>,
     /// 9-char task id.
     pub task_id: String,
     /// Spooled content for this chunk.
@@ -642,6 +746,10 @@ pub struct TaskOutputChunk {
 /// task types need.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpTaskNotificationMeta {
+    /// Receipt explaining where the complete result was saved, or why it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_hint: Option<String>,
+
     /// `serverName` — the left half of the `(server/tool)` clause.
     pub server_name: String,
     /// `toolName` — the right half.
@@ -712,11 +820,91 @@ pub enum TaskRegistryError {
 /// CRUD surface used by the 6 `Task*` tools.
 #[async_trait]
 pub trait TaskRegistryHandle: Send + Sync {
+    /// Trusted host input only. Model tools must keep using their guarded message path.
+    async fn send_human_task_message(&self, _task_id: &str, _message: &str) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal("human task messages unavailable".into()))
+    }
+    /// Runtime boundary drain; the registry checks current stop epochs.
+    async fn take_human_task_messages_for(&self, _agent_id: protocol::AgentId) -> Vec<String> { Vec::new() }
+    /// Last startup check for a trusted stopped-agent restoration.
+    async fn begin_human_task_resume(&self, _task_id: &str, _epoch: u64) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal("human task resume unavailable".into()))
+    }
+    /// Preserve a foreground launch's exact configuration for explicit human resume.
+    async fn register_agent_resume_recipe(&self, _task_id: &str, _request: crate::SubagentSpawnRequest, _inheritance: crate::SubagentInheritance) -> Result<(), TaskRegistryError> { Ok(()) }
+
+    async fn export_shell_handoff(&self) -> Result<Vec<crate::shell_handoff::ShellTaskHandoff>, TaskRegistryError> { Ok(Vec::new()) }
+    async fn prepare_shell_handoff(&self, records: &[crate::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> {
+        if records.is_empty() { Ok(()) } else { Err(TaskRegistryError::Internal("shell adoption unsupported".into())) }
+    }
+    async fn commit_shell_handoff(&self, _ids: &[String]) -> Result<Vec<String>, TaskRegistryError> { Ok(Vec::new()) }
+    async fn adopt_shell_handoff(&self, records: &[crate::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> {
+        if records.is_empty() { Ok(()) } else { Err(TaskRegistryError::Internal("shell adoption unsupported".into())) }
+    }
+    async fn rollback_shell_handoff(&self, records: &[crate::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> { self.adopt_shell_handoff(records).await }
+
+    /// Add actual permission prompt wait time to an attributed task.
+    fn add_permission_paused_ms(&self, _agent_id: protocol::AgentId, _milliseconds: u64) {}
+
+    /// Bind an allocated output to the trusted spawner's transcript path.
+    async fn link_agent_output(
+        &self,
+        _id: &str,
+        _target: &std::path::Path,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "transcript output links are not wired".into(),
+        ))
+    }
+
+    /// Feed an observed agent's activity to its independent persistent sidecar.
+    /// Running observers queue digests and resume only after their current turn.
+    async fn observe_agent_activity(
+        &self,
+        _request: crate::SubagentSpawnRequest,
+        _inheritance: crate::SubagentInheritance,
+        _observed_agent_id: protocol::AgentId,
+        _digest: String,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::InvalidInput(
+            "observer tasks are unavailable".into(),
+        ))
+    }
+    /// Session output root used by file search and output display.
+    async fn task_output_directory(&self) -> Option<String> {
+        None
+    }
+
     /// Create a new task, returning the freshly generated record.
     async fn create(&self, input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError>;
 
     /// Look up a task by id.
     async fn get(&self, id: &str) -> Result<Option<TaskRecord>, TaskRegistryError>;
+
+    /// Agent identities whose live OS process groups belong to this task loop.
+    async fn process_owners_for_task(&self, id: &str) -> Vec<String> {
+        match self.get(id).await {
+            Ok(Some(record)) if record.task_type == "local_agent" => record.owner_agent_id.into_iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A terminal agent/workflow may still have an execution loop to stop.
+    async fn has_live_task_loop(&self, _id: &str) -> bool {
+        false
+    }
+
+    /// Resolve task ids and agent names for TaskStop.
+    async fn resolve_stop_target(
+        &self,
+        requested: &str,
+        _named_agents: &[(String, String)],
+    ) -> Result<TaskStopResolution, TaskRegistryError> {
+        Ok(match self.get(requested).await? {
+            Some(record) => TaskStopResolution::Found(record),
+            None => TaskStopResolution::NotFound { suggestion: None },
+        })
+    }
 
     /// List tasks, optionally filtered.
     async fn list(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError>;
@@ -814,6 +1002,17 @@ pub trait TaskRegistryHandle: Send + Sync {
     async fn set_workflow_outcome(&self, _id: &str, _outcome: WorkflowTerminalOutcome) {}
 
     /// Spawn a real background monitor and return its registry task id.
+    /// Start a passive WebSocket monitor using the host's vetted transport.
+    async fn spawn_websocket_monitor(
+        &self,
+        _registration: WebSocketMonitorRegistration,
+        _http: std::sync::Arc<dyn crate::http::HttpTransport>,
+    ) -> Result<String, TaskRegistryError> {
+        Err(TaskRegistryError::InvalidInput(
+            "WebSocket monitoring is unavailable on this host".into(),
+        ))
+    }
+
     /// Hosts without a task runtime fail closed rather than minting a fake id.
     async fn spawn_monitor(&self, reg: MonitorRegistration) -> Result<String, TaskRegistryError> {
         let _ = reg;
@@ -930,6 +1129,12 @@ pub trait TaskRegistryHandle: Send + Sync {
         Ok(false)
     }
 
+    /// Settle with the receipt from persisting a truncated MCP result. The hint
+    /// and terminal status must become visible atomically.
+    async fn settle_mcp_task_with_hint(&self, id: &str, text: &str, failed: bool, _saved_hint: Option<&str>) -> Result<bool, TaskRegistryError> {
+        self.settle_mcp_task(id, text, failed).await
+    }
+
     /// Read the task's spool starting at `offset` (or from 0 if `None`).
     /// Mint the task identity for a shell command: a task id and an
     /// already-created output file for the process runner to append to.
@@ -1008,6 +1213,26 @@ pub trait TaskRegistryHandle: Send + Sync {
         ))
     }
 
+    /// Bind messaging for a foreground runner the registry did not spawn.
+    async fn bind_agent_message_receiver(&self, _id: &str, _receiver: std::sync::Arc<dyn TaskMessageReceiver>) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal("external agent messaging unwired".into()))
+    }
+
+    async fn set_agent_display(&self, _id: &str, _model: String, _effort: Option<String>) {}
+
+    /// Register an allocated foreground agent before it begins model work.
+    async fn register_foreground_agent(
+        &self,
+        _registration: ForegroundAgentRegistration,
+    ) -> Result<ForegroundAgentHandle, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "foreground agent registration unwired".into(),
+        ))
+    }
+
+    /// Remove a finished foreground agent; preserve rows already backgrounded.
+    async fn unregister_foreground_agent(&self, _task_id: &str) {}
+
     /// Withdraw an armed foreground row because the command finished in the
     /// foreground (claude-code `W6t`: `if(!bp(o)||o.isBackgrounded||o.notified)
     /// return; r.remove(e)`).
@@ -1071,6 +1296,11 @@ pub trait TaskRegistryHandle: Send + Sync {
         0
     }
 
+    /// Detach work with the trigger that caused the transition.
+    async fn background_all_tasks_with_reason(&self, _reason: TaskBackgroundReason) -> usize {
+        self.background_all_tasks().await
+    }
+
     /// Whether anything is currently backgroundable (claude-code `H_t`), i.e.
     /// whether a Ctrl+B hint should be offered at all.
     async fn has_backgroundable_tasks(&self) -> bool {
@@ -1090,6 +1320,11 @@ pub trait TaskRegistryHandle: Send + Sync {
     ) -> Result<(), TaskRegistryError> {
         let _ = (id, killer);
         Ok(())
+    }
+
+    /// Bind the actual OS identity together with the stop capability.
+    async fn bind_background_process(&self, id: &str, _pid: u32, killer: std::sync::Arc<dyn TaskKiller>) -> Result<(), TaskRegistryError> {
+        self.bind_background_killer(id, killer).await
     }
 
     /// Kill the background shells a finishing agent started, returning how many
@@ -1113,6 +1348,44 @@ pub trait TaskRegistryHandle: Send + Sync {
     ///
     /// # Errors
     /// Returns [`TaskRegistryError`] when the id is unknown.
+    /// Append captured shell output through the registry's bounded writer.
+    async fn append_bash_output(&self, _task_id: &str, _content: &str) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal("background output writer unwired".into()))
+    }
+
+    /// Wait for an existing shell-output drain; do not restart a failed drain.
+    /// Finalize a completed output copy, returning its pre-truncation size.
+    async fn finalize_persisted_output(&self, _id: &str, _max_bytes: u64) -> Result<Option<u64>, TaskRegistryError> { Ok(None) }
+
+    async fn flush_bash_output(&self, _task_id: &str) -> Result<(), TaskRegistryError> { Ok(()) }
+
+    /// Session-scoped SDK lifecycle events, emitted at each task mutation.
+    fn subscribe_task_lifecycle(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>> {
+        None
+    }
+
+    /// Main-host state used to protect active sessions from pressure reaping.
+    fn update_shell_session_activity(
+        &self,
+        _interactive: bool,
+        _busy: bool,
+        _user_interaction: bool,
+    ) {
+    }
+
+    /// Emit an advisory prompt-stall notice without consuming completion.
+    async fn notify_bash_stall(&self, _task_id: &str, _tail: &str) {}
+
+    /// Atomically claim an eligible shell stop; unwired hosts decline.
+    async fn claim_bash_memory_pressure_stop(&self, _task_id: &str) -> bool {
+        false
+    }
+
+    /// The native supervisor is the sole terminal-output writer for this ID.
+    async fn mark_shell_supervised(&self, _id: &str) {}
+
     async fn settle_background_bash(
         &self,
         id: &str,
@@ -1179,6 +1452,55 @@ pub trait TaskRegistryHandle: Send + Sync {
         &self,
     ) -> Result<Vec<TaskNotification>, TaskRegistryError> {
         Ok(Vec::new())
+    }
+
+    /// Keep a foreground runner alive after Ctrl+B or while its owned tasks
+    /// still owe work/results. A true result means the caller must park rather
+    /// than publish its final Completed event and deallocate the runner.
+    async fn park_foreground_agent(&self, _agent_id: protocol::AgentId, _outcome: AgentTerminalOutcome) -> bool { false }
+
+    /// Whether the handler has acknowledged the runner's completed turn-set.
+    /// A taskless/mock runner has no asynchronous lifecycle acknowledgement.
+    async fn can_wake_agent_for_task_notification(&self, _agent_id: protocol::AgentId) -> bool { true }
+
+    /// Reactivate a parked owner before a notification starts its next turn.
+    async fn activate_agent_for_task_notification(&self, agent_id: protocol::AgentId) {
+        if let Ok(rows) = self.list(TaskListFilter::default()).await {
+            let id = agent_id.to_string();
+            for row in rows {
+                if row.is_parked && row.owner_agent_id.as_deref() == Some(id.as_str()) {
+                    let _ = self.set_status(&row.task_id, "running").await;
+                }
+            }
+        }
+    }
+
+    /// Finish a monitor quietly while publishing its once-only SDK stopped event.
+    async fn publish_task_stopped(&self, _task_id: &str) {}
+
+    /// Revision subscription for pending notifications; subscribe before checking pending.
+    fn subscribe_task_notifications(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+
+    /// Non-consuming recipient-scoped readiness check.
+    async fn has_pending_task_notifications_for(
+        &self,
+        _recipient: Option<protocol::AgentId>,
+    ) -> bool {
+        false
+    }
+
+    /// Drain only this recipient. Legacy mocks remain main-session-only.
+    async fn take_pending_task_notifications_for(
+        &self,
+        recipient: Option<protocol::AgentId>,
+    ) -> Result<Vec<TaskNotification>, TaskRegistryError> {
+        if recipient.is_none() {
+            self.take_pending_task_notifications().await
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// Total number of subagents spawned so far this session (claude 2.1.212

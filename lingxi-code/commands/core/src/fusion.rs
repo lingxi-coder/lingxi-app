@@ -128,7 +128,11 @@ fn consume_fusion_flag(
             let value = tokens
                 .get(i + 1)
                 .ok_or_else(|| "--dimensions requires a value".to_string())?;
-            set_once(&mut acc.dimensions, parse_dimensions(value)?, "--dimensions")?;
+            set_once(
+                &mut acc.dimensions,
+                parse_dimensions(value)?,
+                "--dimensions",
+            )?;
             Ok(FlagStep::Consumed {
                 next_i: i + 2,
                 next_cursor: advance_past_token(raw, next_cursor, value),
@@ -153,7 +157,9 @@ fn consume_fusion_flag(
                 next_cursor: advance_past_token(raw, next_cursor, value),
             })
         }
-        flag if flag.starts_with("--") => Err(format!("unknown flag `{flag}`\n{FUSION_SLASH_USAGE}")),
+        flag if flag.starts_with("--") => {
+            Err(format!("unknown flag `{flag}`\n{FUSION_SLASH_USAGE}"))
+        }
         _ => Ok(FlagStep::Stop),
     }
 }
@@ -178,7 +184,10 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     let mut i = 0;
     while i < tokens.len() {
         match consume_fusion_flag(tokens, raw, i, cursor, &mut acc)? {
-            FlagStep::Consumed { next_i, next_cursor } => {
+            FlagStep::Consumed {
+                next_i,
+                next_cursor,
+            } => {
                 i = next_i;
                 cursor = next_cursor;
             }
@@ -388,10 +397,7 @@ fn parse_csv(raw: &str, flag: &str) -> Result<Vec<String>, String> {
 fn parse_models(raw: &str) -> Result<Vec<FusionModelRef>, String> {
     let mut out = Vec::new();
     for item in parse_csv(raw, "--models")? {
-        out.push(
-            platform_api::parse_fusion_model_ref(&item)
-                .map_err(|error| error.to_string())?,
-        );
+        out.push(platform_api::parse_fusion_model_ref(&item).map_err(|error| error.to_string())?);
     }
     if out.len() < usize::from(FUSION_MIN_PANEL) {
         return Err("explicit --models must contain at least 2 entries".into());
@@ -427,10 +433,8 @@ mod tests {
 
     #[test]
     fn quoted_flag_value_does_not_leak_its_closing_quote_into_the_prompt() {
-        let args = parse(
-            "/fusion --models \"openai:gpt-5,anthropic:opus\" review the plan",
-        )
-        .unwrap();
+        let args =
+            parse("/fusion --models \"openai:gpt-5,anthropic:opus\" review the plan").unwrap();
         assert_eq!(args.prompt, "review the plan");
     }
 
@@ -622,26 +626,23 @@ mod tests {
         // fall back to a plain whitespace boundary, landing INSIDE the
         // quoted span and splicing its tail (plus the stray closing quote)
         // onto the front of the prompt.
-        let args = parse(
-            "/fusion --models=\"openai:gpt-5, anthropic:opus\" summarize this design",
-        )
-        .unwrap();
+        let args = parse("/fusion --models=\"openai:gpt-5, anthropic:opus\" summarize this design")
+            .unwrap();
         assert_eq!(args.prompt, "summarize this design");
         assert_eq!(args.models.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]
     fn escaped_space_in_equals_flag_value_does_not_leak_into_prompt() {
-        let args = parse("/fusion --models=openai:gpt-5,\\ anthropic:opus review the plan")
-            .unwrap();
+        let args =
+            parse("/fusion --models=openai:gpt-5,\\ anthropic:opus review the plan").unwrap();
         assert_eq!(args.prompt, "review the plan");
         assert_eq!(args.models.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]
     fn quoted_equals_dimensions_with_internal_whitespace_does_not_leak_into_prompt() {
-        let args = parse("/fusion --dimensions=\"coverage, reasoning\" review the plan")
-            .unwrap();
+        let args = parse("/fusion --dimensions=\"coverage, reasoning\" review the plan").unwrap();
         assert_eq!(args.prompt, "review the plan");
         assert_eq!(
             args.dimensions.as_deref(),

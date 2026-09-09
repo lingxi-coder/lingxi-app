@@ -2140,3 +2140,5 @@ Options:
         assert_eq!(reorder_help_sections(input), input);
     }
 }
+
+mod shell_handoff;

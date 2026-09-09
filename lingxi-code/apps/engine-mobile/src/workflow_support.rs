@@ -7333,6 +7333,7 @@ mod workspace_lease_forwarding_tests {
 
     fn bare_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             agent_name: None,

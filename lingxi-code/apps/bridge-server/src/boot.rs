@@ -439,8 +439,17 @@ fn load_settings_blocks() -> (
 }
 
 #[must_use]
-fn settings_credential_sources_allowed(args: &BridgeArgs) -> bool {
-    args.trusted_workspace && !args.packaged_credential_stdin_only
+fn without_settings_credentials(
+    profiles: Option<BTreeMap<String, serde_json::Value>>,
+) -> Option<BTreeMap<String, serde_json::Value>> {
+    profiles.map(|mut profiles| {
+        for profile in profiles.values_mut() {
+            if let Some(fields) = profile.as_object_mut() {
+                fields.remove("apiKeyEnv");
+            }
+        }
+        profiles
+    })
 }
 
 /// User config-home: `$LINGXI_CONFIG_DIR` when set (including an empty value),
@@ -486,10 +495,16 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
 
     let (provider_profiles, routing, api_key_helper) = if args.trusted_workspace {
         let (provider_profiles, routing, api_key_helper) = load_settings_blocks();
-        if settings_credential_sources_allowed(args) {
+        if !args.packaged_credential_stdin_only {
             (provider_profiles, routing, api_key_helper)
         } else {
-            (None, routing, None)
+            // Keep routes available for credentials supplied by the parent,
+            // without permitting settings to introduce credential sources.
+            (
+                without_settings_credentials(provider_profiles),
+                routing,
+                None,
+            )
         }
     } else {
         (None, None, None)
@@ -1362,8 +1377,13 @@ pub async fn assemble_with_provider_keys(
         // `cfg.audio` above — this is what makes an inbound `AudioResponse` on
         // this connection resolve a call the engine parked on this connection,
         // and a disconnect drain them.
-        .bind_audio(audio_responder)
-        .with_queue_wakeup();
+        .bind_audio(audio_responder);
+    let connection = if credential_required {
+        connection
+    } else {
+        connection.with_task_notification_registry(runtime.task_registry.clone())
+    }
+    .with_queue_wakeup();
     Ok(BoundServer {
         connection,
         runtime,
@@ -1838,6 +1858,27 @@ mod tests {
     }
 
     #[test]
+    fn packaged_provider_routes_survive_without_settings_credentials() {
+        let profiles = BTreeMap::from([(
+            "custom".to_string(),
+            serde_json::json!({
+                "type": "openai",
+                "baseUrl": "http://127.0.0.1:12345/v1",
+                "models": [{"id": "smoke-model"}],
+                "apiKeyEnv": "CUSTOM_SECRET"
+            }),
+        )]);
+        let filtered = without_settings_credentials(Some(profiles)).unwrap();
+        let (parsed, warnings) = provider_config::parse_user_providers(&filtered);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].profile.profile_name, "custom");
+        assert_eq!(parsed[0].profile.models[0].request_model, "smoke-model");
+        assert_eq!(parsed[0].env_var, None);
+        assert!(without_settings_credentials(None).is_none());
+    }
+
+    #[test]
     fn packaged_boundary_keeps_trusted_customizations_but_rejects_settings_credentials() {
         let cfg = resolve_desktop_config(&BridgeArgs {
             trusted_workspace: true,
@@ -1852,8 +1893,12 @@ mod tests {
         assert_eq!(cfg.mcp_paths.len(), 2);
         assert!(cfg.memory_provider.is_some());
         assert!(cfg.api_key_helper.is_none());
-        assert!(cfg.provider_profiles.is_none());
-        assert!(has_no_credential_source(&cfg));
+        assert!(cfg
+            .provider_profiles
+            .as_ref()
+            .is_none_or(|profiles| profiles
+                .values()
+                .all(|profile| profile.get("apiKeyEnv").is_none())));
         assert_eq!(
             cfg.credential_storage_policy,
             CredentialStoragePolicy::NativeOrMemory,

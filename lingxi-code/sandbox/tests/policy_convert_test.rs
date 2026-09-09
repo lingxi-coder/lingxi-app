@@ -610,3 +610,12 @@ fn an_honored_false_overrides_a_merged_true() {
     let cfg = convert_settings_to_runtime_config(&strict_settings(true), &c);
     assert!(!cfg.network.strict_allowlist);
 }
+
+#[test]
+fn task_output_root_is_protected_even_when_temp_root_is_writable() {
+    let mut context = ctx();
+    context.lingxi_temp_dir = Some("/tmp/claude-1/".into());
+    context.task_output_dir = Some("/tmp/claude-1/project/session/tasks".into());
+    let config = convert_settings_to_runtime_config(&SettingsJson::default(), &context);
+    assert!(config.filesystem.deny_write.contains(&"/tmp/claude-1/project/session/tasks".into()));
+}

@@ -13,7 +13,7 @@
 //!   `lingxi_core::TodoState` = `pending`/`in_progress`/`completed`). They do NOT use
 //!   `validate_task_id`, `TASK_TYPES`, or `TASK_STATUSES`.
 //! - **Product-B (background-registry):** `TaskStop` / `TaskOutput` dispatch the
-//!   M1 background `TaskRegistry` (9-char `[bartwmdksf][0-9a-z]{8}` ids).
+//!   M1 background `TaskRegistry` (9-char `[bartwmdksfe][0-9a-z]{8}` ids).
 //!
 //! `validate_task_id` / `TASK_TYPES` / `TASK_STATUSES` are Product-B SHAPES,
 //! not Product-B code paths: neither `TaskStop` nor `TaskOutput` calls them.
@@ -84,6 +84,7 @@ pub const TASK_TYPES: &[&str] = &[
     "monitor_ws",
     "mcp_task",
     "dream",
+    "auto_mode_scan",
     "local_fusion",
 ];
 
@@ -92,7 +93,7 @@ pub const TASK_TYPES: &[&str] = &[
 // Product-B SHAPE — no production caller; see the module header.
 pub const TASK_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "killed"];
 
-/// Validate the task-id format `[bartwmdksf][0-9a-z]{8}` (9 chars total) —
+/// Validate the task-id format `[bartwmdksfe][0-9a-z]{8}` (9 chars total) —
 /// nine claude-code type prefixes plus LingXi's `f` (`local_fusion`).
 ///
 /// NO production caller: this pins the id grammar for the locked
@@ -105,20 +106,20 @@ pub const TASK_STATUSES: &[&str] = &["pending", "running", "completed", "failed"
 pub fn validate_task_id(s: &str) -> Result<(), String> {
     if s.chars().count() != 9 {
         return Err(format!(
-            "Task: malformed task_id '{s}' (expected 9-char [bartwmdksf][0-9a-z]{{8}})"
+            "Task: malformed task_id '{s}' (expected 9-char [bartwmdksfe][0-9a-z]{{8}})"
         ));
     }
     let mut chars = s.chars();
     let prefix = chars.next().expect("len==9");
-    if !"bartwmdksf".contains(prefix) {
+    if !"bartwmdksfe".contains(prefix) {
         return Err(format!(
-            "Task: malformed task_id '{s}' (expected 9-char [bartwmdksf][0-9a-z]{{8}})"
+            "Task: malformed task_id '{s}' (expected 9-char [bartwmdksfe][0-9a-z]{{8}})"
         ));
     }
     for c in chars {
         if !(c.is_ascii_digit() || (c.is_ascii_lowercase() && c.is_ascii_alphabetic())) {
             return Err(format!(
-                "Task: malformed task_id '{s}' (expected 9-char [bartwmdksf][0-9a-z]{{8}})"
+                "Task: malformed task_id '{s}' (expected 9-char [bartwmdksfe][0-9a-z]{{8}})"
             ));
         }
     }
@@ -126,7 +127,7 @@ pub fn validate_task_id(s: &str) -> Result<(), String> {
 }
 
 /// Generate a fresh task-id matching the task-registry format
-/// (`[bartwmdksf][0-9a-z]{8}`).
+/// (`[bartwmdksfe][0-9a-z]{8}`).
 ///
 /// Mirrors `tasks::id::generate_task_id` without taking the
 /// cyclic dep on `lingxi-tasks`. Retained for test fixtures + parity
@@ -253,12 +254,15 @@ async fn not_found_rosters(
     if let Some(names) = ctx.agent_name_registry.as_ref() {
         for (name, agent_id) in names.list().await {
             let id = agent_id.to_string();
-            if matches!(registry.get(&id).await, Ok(Some(record))
-                if record.task_type == "local_agent" && record.status == "running")
-            {
-                named_agents.push(name);
+            match registry.get(&id).await {
+                Ok(Some(record)) => {
+                    if record.task_type == "local_agent" && (record.status == "running" || record.is_parked) {
+                        named_agents.push(name);
+                    }
+                    named_ids.push(record.task_id);
+                }
+                _ => named_ids.push(id),
             }
-            named_ids.push(id);
         }
     }
     named_agents.sort();
@@ -272,9 +276,7 @@ async fn not_found_rosters(
 ///
 /// Four independent appends in a fixed order; each clause is its own `if`, not
 /// an else-if, so a message can carry all of them. The `. Did you mean: X?`
-/// clause needs the `XFe`/`Szo` fuzzy resolver, which is AGT-02 and not ported
-/// yet — `suggestion` is threaded so that lands as one argument change rather
-/// than a rewrite here.
+/// clause comes from the registry's `XFe`/`Szo` name resolver.
 async fn task_stop_not_found_message(
     ctx: &tool_api::BuiltinToolContext,
     registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
@@ -2397,50 +2399,54 @@ impl Tool for TaskStopTool {
             }
         };
 
-        // Pre-validation against the pre-kill record (`stopTask.ts:44-55`):
-        // missing → "No task found with ID: {id}"; non-running →
-        // "Task {id} is not running (status: {status})".
-        let record = match registry.get(&task_id).await {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                emit_failed(
-                    &bus,
-                    TASK_STOP_FAILED,
-                    &invocation_id,
-                    "not_found",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(ToolError::InvalidInput(
-                    task_stop_not_found_message(
-                        &self.ctx,
-                        &registry,
-                        &task_id,
-                        // AGT-02: the `XFe`/`Szo` fuzzy resolver is not ported.
-                        None,
-                        caller_agent_id.as_deref(),
-                    )
-                    .await,
-                ));
-            }
-            Err(e) => {
-                emit_failed(
-                    &bus,
-                    TASK_STOP_FAILED,
-                    &invocation_id,
-                    "registry_error",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(registry_err_to_tool_err("TaskStop", e));
-            }
+        let named_agents = match self.ctx.agent_name_registry.as_ref() {
+            Some(names) => names.list().await.into_iter().map(|(name, id)| (name, id.to_string())).collect(),
+            None => Vec::new(),
         };
+        let record = match registry.resolve_stop_target(&task_id, &named_agents).await {
+            Ok(platform_api::task_registry::TaskStopResolution::Found(record)) => record,
+            Ok(platform_api::task_registry::TaskStopResolution::Ambiguous(message)) => {
+                return Err(ToolError::InvalidInput(message));
+            }
+            Ok(platform_api::task_registry::TaskStopResolution::NotFound { suggestion }) => {
+                emit_failed(&bus, TASK_STOP_FAILED, &invocation_id, "not_found", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::InvalidInput(task_stop_not_found_message(
+                    &self.ctx, &registry, &task_id, suggestion.as_deref(), caller_agent_id.as_deref(),
+                ).await));
+            }
+            Err(error) => return Err(registry_err_to_tool_err("TaskStop", error)),
+        };
+        let display_id = if record.task_id == task_id { task_id.clone() } else {
+            format!("{} ({})", platform_api::display::sanitize_display(&task_id), record.task_id)
+        };
+        let task_id = record.task_id.clone();
+        let may_stop = caller_may_stop(caller_agent_id.as_deref(), record.owner_agent_id.as_deref());
+        let owner_refusal = || ToolError::InvalidInput(format!(
+            "Task {display_id} is owned by {}; agent {} cannot stop it.",
+            platform_api::display::sanitize_display(record.owner_agent_id.as_deref().unwrap_or(NO_OWNER_DISPLAY)),
+            platform_api::display::sanitize_display(caller_agent_id.as_deref().unwrap_or_default()),
+        ));
+        // `td` observers check self-stop and ownership BEFORE status. An
+        // observer cannot shut off its own observation loop through TaskStop.
+        if record.is_observer {
+            if caller_agent_id.is_some() && caller_agent_id == record.owner_agent_id {
+                return Err(ToolError::InvalidInput(format!("Observer {display_id} cannot stop itself; use the task UI or a main-session TaskStop.")));
+            }
+            if !may_stop { return Err(owner_refusal()); }
+        }
         // ORDER IS THE ORACLE'S: not-running first, ownership second
         // (`src_160988549.js` @3597258 —
         // `if(I.status!=="running"&&…)throw not_running; if(!td(I)&&!sut(p,I.agentId))throw not_owner`).
         // Swapping them would tell a non-owner that a finished task is theirs to
         // stop, or refuse on ownership a task that was never running.
+        let ended_with_live_loop = !record.is_parked
+            && matches!(record.status.as_str(), "completed" | "failed" | "killed")
+            && matches!(record.task_type.as_str(), "local_agent" | "local_workflow")
+            && registry.has_live_task_loop(&task_id).await;
         if record.status != "running"
+            && !record.is_observer
+            && !ended_with_live_loop
+            && !record.is_parked
             && !(record.task_type == "in_process_teammate"
                 && registry.has_pending_teammate_departure(&task_id).await)
         {
@@ -2453,7 +2459,7 @@ impl Tool for TaskStopTool {
             )
             .await;
             return Err(ToolError::InvalidInput(format!(
-                "Task {task_id} is not running (status: {})",
+                "Task {display_id} is not running (status: {})",
                 record.status
             )));
         }
@@ -2462,24 +2468,9 @@ impl Tool for TaskStopTool {
         // or by the main session. Without this, ANY subagent could stop ANY
         // other agent's background work — the `_ctx` that carries the caller's
         // identity was resolved and then ignored.
-        if !caller_may_stop(caller_agent_id.as_deref(), record.owner_agent_id.as_deref()) {
-            emit_failed(
-                &bus,
-                TASK_STOP_FAILED,
-                &invocation_id,
-                "not_owner",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(ToolError::InvalidInput(format!(
-                "Task {task_id} is owned by {}; agent {} cannot stop it.",
-                platform_api::display::sanitize_display(
-                    record.owner_agent_id.as_deref().unwrap_or(NO_OWNER_DISPLAY)
-                ),
-                platform_api::display::sanitize_display(
-                    caller_agent_id.as_deref().unwrap_or_default()
-                ),
-            )));
+        if !record.is_observer && !may_stop {
+            emit_failed(&bus, TASK_STOP_FAILED, &invocation_id, "not_owner", started.elapsed().as_millis() as u64).await;
+            return Err(owner_refusal());
         }
 
         // Capture command + type from the pre-kill record. claude-code
@@ -2498,7 +2489,17 @@ impl Tool for TaskStopTool {
         // `killedBy:"parent"` (2.1.220, byte-visible) — a PARENT AGENT stopping
         // one of its background children, so a killed `local_agent` notification
         // reads "was stopped by Claude" rather than the bare "was stopped".
-        if let Err(e) = registry.kill_with_reason(&task_id, "parent").await {
+        let stopped_process_groups = if ended_with_live_loop {
+            let owners = registry.process_owners_for_task(&task_id).await;
+            let mut groups = HashSet::new();
+            for owner in owners {
+                groups.extend(self.ctx.process.kill_owner_processes(&owner).await);
+            }
+            groups.len()
+        } else { 0 };
+        let already_idle_observer = record.is_observer && record.status != "running" && !record.is_parked && !ended_with_live_loop;
+        let stopped = if already_idle_observer { Ok(record.clone()) } else { registry.kill_with_reason(&task_id, "parent").await };
+        if let Err(e) = stopped {
             emit_failed(
                 &bus,
                 TASK_STOP_FAILED,
@@ -2530,15 +2531,16 @@ impl Tool for TaskStopTool {
         )
         .await;
 
-        // No `content` key → the orchestrator JSON-stringifies the whole data
-        // (matches TS `mapToolResultToToolResultBlockParam` → `jsonStringify`).
+        // No `content` key → the orchestrator JSON-stringifies the whole data.
+        let mut data = json!({
+            "message": format!("Successfully stopped task: {task_id} ({command})"),
+            "task_id": task_id, "task_type": task_type, "command": command,
+        });
+        if ended_with_live_loop {
+            data["note"] = json!(format!("had already ended ({}) but its loop had not exited; re-signalled it and killed {stopped_process_groups} process group(s). The record remains listed while the loop is still live.", record.status));
+        }
         Ok(ToolCallResult {
-            data: json!({
-                "message": format!("Successfully stopped task: {task_id} ({command})"),
-                "task_id": task_id,
-                "task_type": task_type,
-                "command": command,
-            }),
+            data,
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
@@ -2739,7 +2741,7 @@ fn max_task_output_length() -> usize {
 fn task_output_path(task_id: &str, output_path: Option<&str>) -> String {
     match output_path {
         Some(p) if !p.is_empty() => p.to_string(),
-        _ => format!("{task_id}.output"),
+        _ => platform_api::task_output::output_filename(task_id),
     }
 }
 
@@ -2850,7 +2852,9 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
                 )
                 .sanitized
             };
-            parts.push(format!("<output>\n{body}\n</output>"));
+            let head = t.harness_head.as_deref().filter(|s| !s.is_empty())
+                .map(|s| format!("{}\n\n", s.trim_end())).unwrap_or_default();
+            parts.push(format!("<output>\n{head}{body}\n</output>"));
         }
         // `<error>` AFTER `<output>` (TS `mapToolResultToToolResultBlockParam`
         // lines 299-301: `if (data.task.error) parts.push(\`<error>…</error>\`)`).
@@ -2929,7 +2933,7 @@ fn render_mcp_task_output(
     }
     lines.push(format!(
         "elapsed: {}",
-        tool_shell::bash::format_duration_ms(meta.elapsed_ms)
+        platform_api::shell_support::format_duration_ms(meta.elapsed_ms)
     ));
     if meta.mcp_status == "input_required" && status == "running" {
         lines.push("waiting on the user: an elicitation dialog is open".to_string());
@@ -2959,6 +2963,7 @@ struct TaskOutputView {
     /// the subagent-guard marker (`prependMarker: !isRawTranscript`);
     /// neutralisation still runs. `false` for every non-agent type.
     is_raw_transcript: bool,
+    harness_head: Option<String>,
     /// claude `TaskOutput.omitOutputPath` — the body is synthetic (the
     /// `mcp_task` metadata block), so there is no spool path worth naming in a
     /// truncation header. `false` for every other type.
@@ -2974,9 +2979,7 @@ struct TaskOutputView {
 ///   `success`, otherwise (still running/pending) → `timeout`.
 ///
 /// `done` is the chunk's terminal flag (`status` ∈ {completed, failed, killed});
-/// the Rust registry `output()` is a single read (the `block`/`timeout` poll
-/// loop is Batch 3), so the blocking branch resolves against the chunk's
-/// current `done` rather than re-polling.
+/// the blocking call supplies the latest chunk observed by its poll loop.
 fn task_output_retrieval_status(done: bool, block: bool) -> &'static str {
     if done {
         "success"
@@ -2987,7 +2990,24 @@ fn task_output_retrieval_status(done: bool, block: bool) -> &'static str {
     }
 }
 
-/// Reads a task's spool file (surface stub).
+/// A task can disappear after the initial existence check, including before
+/// the first output read. Both races have the same zqo timeout/null shape.
+fn missing_waited_task_output() -> ToolCallResult {
+    ToolCallResult {
+        data: json!({
+            "retrieval_status": "timeout",
+            "task": null,
+            "content": render_task_output("timeout", None),
+        }),
+        model_content: None,
+        new_messages: vec![],
+        context_modifier: None,
+        is_error: false,
+        mcp_meta: None,
+    }
+}
+
+/// Reads a task's report or spool, optionally waiting for completion.
 pub struct TaskOutputTool {
     ctx: BuiltinToolContext,
 }
@@ -3086,7 +3106,7 @@ impl Tool for TaskOutputTool {
         &self,
         input: Value,
         ctx: ToolUseContext,
-        _progress: ToolProgressSender,
+        progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let invocation_id = fresh_invocation_id();
@@ -3175,9 +3195,30 @@ impl Tool for TaskOutputTool {
             }
         };
 
+        if block {
+            let _ = progress
+                .send(tool_api::ToolProgress {
+                    tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+                    data: json!({
+                        "type": "waiting_for_task",
+                        "taskDescription": record.description,
+                        "taskType": record.task_type,
+                    }),
+                })
+                .await;
+        }
+
+        // zqo checks abort before observing even an already completed task.
+        if block && timeout_ms > 0 && ctx.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            return Err(ToolError::Aborted);
+        }
+
         // First (and, for `block==false`, only) read.
         let mut chunk = match registry.output(&task_id, None).await {
             Ok(c) => c,
+            Err(TaskRegistryError::NotFound(_)) if block => {
+                return Ok(missing_waited_task_output());
+            }
             Err(e) => {
                 emit_failed(
                     &bus,
@@ -3200,18 +3241,34 @@ impl Tool for TaskOutputTool {
                 if (wait_started.elapsed().as_millis() as u64) >= timeout_ms {
                     break;
                 }
-                // Honour user cancellation mid-wait (TS `waitForTaskCompletion`
-                // checks `abortController?.signal.aborted` at the top of each
-                // poll iteration). The per-call `cancel` token fires when the
-                // user interrupts (or a sibling tool errors); on cancellation we
-                // stop polling and return the current (still-`timeout`) state
-                // rather than blocking out the full timeout.
-                if ctx.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
-                    break;
+                // 2.1.263 `zqo`: abort is an error, never a timeout result.
+                // Race the poll delay too, so cancellation cannot trigger one
+                // more output read (or mark a newly completed task notified).
+                if let Some(cancel) = ctx.cancel.as_ref() {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return Err(ToolError::Aborted),
+                        () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    }
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 chunk = match registry.output(&task_id, None).await {
                     Ok(c) => c,
+                    // The initial existence check still errors. Only a task
+                    // disappearing after the blocking wait began maps to null
+                    // (`zqo` → `kWn.call` in 2.1.263).
+                    Err(TaskRegistryError::NotFound(_)) => {
+                        emit_completed(
+                            &bus,
+                            TASK_OUTPUT_COMPLETED,
+                            &invocation_id,
+                            started.elapsed().as_millis() as u64,
+                            &[],
+                        )
+                        .await;
+                        return Ok(missing_waited_task_output());
+                    }
                     Err(e) => {
                         emit_failed(
                             &bus,
@@ -3268,7 +3325,10 @@ impl Tool for TaskOutputTool {
                     .unwrap_or_else(|| record.status.as_str()),
             )
         });
-        let clean_result = chunk.result.clone().filter(|r| !r.is_empty());
+        let clean_result = chunk.result.clone().filter(|r| !r.is_empty()).or_else(|| {
+            chunk.harness_head.as_ref().filter(|head| !head.is_empty())
+                .map(|_| "[The agent produced no report text.]".to_string())
+        });
         // claude `isRawTranscript: !ue` — true exactly when the clean report was
         // empty and the body fell back to the transcript. Set ONLY in the
         // oracle's `local_agent` branch; every other type leaves it undefined,
@@ -3296,6 +3356,7 @@ impl Tool for TaskOutputTool {
             // `[Truncated. Full output: <path>]` header.
             output_path: chunk.output_path.clone(),
             is_raw_transcript,
+            harness_head: chunk.harness_head.clone(),
             omit_output_path,
         };
         let content = render_task_output(retrieval_status, Some(&view));
@@ -3310,14 +3371,18 @@ impl Tool for TaskOutputTool {
         task_obj.insert("status".into(), json!(view.status));
         task_obj.insert("description".into(), json!(view.description));
         task_obj.insert("output".into(), json!(view.output));
+        if let Some(head) = &view.harness_head {
+            task_obj.insert("harnessHead".into(), json!(head));
+        }
         if let Some(code) = view.exit_code {
             task_obj.insert("exit_code".into(), json!(code));
         }
         if let Some(prompt) = &chunk.prompt {
             task_obj.insert("prompt".into(), json!(prompt));
         }
-        if let Some(result) = chunk.result.as_deref().filter(|r| !r.is_empty()) {
-            task_obj.insert("result".into(), json!(result));
+        if view.task_type == "local_agent" {
+            task_obj.insert("result".into(), json!(view.output));
+            task_obj.insert("isRawTranscript".into(), json!(view.is_raw_transcript));
         }
         if let Some(error) = view.error.as_deref().filter(|e| !e.is_empty()) {
             task_obj.insert("error".into(), json!(error));

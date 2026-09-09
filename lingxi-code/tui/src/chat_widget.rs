@@ -99,6 +99,8 @@ pub enum ChatOutcome {
     Detach,
     /// Exit the app.
     Quit,
+    /// A durable background session was created; print its receipt after unmount.
+    BackgroundedExit(String),
     /// The user submitted `prompt`; the caller should drive a turn for it,
     /// honoring the paired [`CancellationToken`] (the widget cancels it on
     /// Ctrl-C). Carries the image files queued for this turn (pasted paths,
@@ -958,6 +960,11 @@ impl ChatWidget {
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
+        if key.kind == crossterm::event::KeyEventKind::Press {
+            if let Some(registry) = &self.task_registry {
+                registry.update_shell_session_activity(true, self.current_turn.is_some(), true);
+            }
+        }
         self.bottom_pane.set_task_running(self.pane_status());
         // Ctrl-L is the conventional terminal redraw chord. The background
         // attach server injects this once after acquiring the controller lease
@@ -3513,17 +3520,24 @@ impl ChatWidget {
     /// throwaway current-thread runtime (the sync render loop is off the async
     /// runtime, and `TaskRegistryHandle::list` is a pure in-memory read — the
     /// same proven-safe `block_on` idiom as `run_core_command`). An empty list
-    /// or a missing handle renders a system line instead of an empty picker.
+    /// stays inside the dialog; only a missing handle renders an error line.
     /// Stopping a task goes off-loop via [`ChatOutcome::TaskAction`].
-    pub(crate) fn cmd_tasks(&mut self, _args: &str) -> ChatOutcome {
+    pub(crate) fn cmd_tasks(&mut self, args: &str) -> ChatOutcome {
+        if let Some(parsed) = platform_api::human_task_message::parse(args) {
+            return match parsed {
+                Ok((task_id, message)) => ChatOutcome::TaskAction(TaskAction::Message { task_id: task_id.into(), message: message.into() }),
+                Err(error) => self.show_system_text(error, true),
+            };
+        }
         let rows = match self.task_snapshot() {
             Ok(rows) => rows,
             Err(message) => return self.show_system_text(&message, true),
         };
-        if rows.is_empty() {
-            return self.show_system_text("No tasks currently running", false);
+        if let Some(registry) = self.task_registry.clone() {
+            self.bottom_pane.show_live_tasks(rows, registry);
+        } else {
+            self.bottom_pane.show_tasks(rows);
         }
-        self.bottom_pane.show_tasks(rows);
         ChatOutcome::Continue
     }
 
@@ -4619,8 +4633,50 @@ impl ChatWidget {
     /// in its teardown after `run_app` returns. Behaves identically whether or
     /// not a handle is wired (the quit is handle-independent).
     pub(crate) fn cmd_stop(&mut self, _args: &str) -> ChatOutcome {
-        self.show_system_text("Session stopped.", false);
-        ChatOutcome::Quit
+        let outcome = self.request_quit();
+        if matches!(outcome, ChatOutcome::Quit) {
+            self.show_system_text("Session stopped.", false);
+        }
+        outcome
+    }
+
+    fn request_quit(&mut self) -> ChatOutcome {
+        let items = self
+            .task_registry
+            .as_ref()
+            .and_then(|registry| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                runtime
+                    .block_on(registry.list(platform_api::task_registry::TaskListFilter::default()))
+                    .ok()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|task| matches!(task.status.as_str(), "running" | "pending" | "paused" | "queued") || task.is_parked)
+            .map(|task| task.description)
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            return ChatOutcome::Quit;
+        }
+        let can_background = self.orchestrator.as_ref().is_some_and(|handle| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()
+                .is_some_and(|runtime| {
+                    runtime.block_on(handle.can_background_conversation_on_exit())
+                })
+        });
+        self.bottom_pane.show_view(Box::new(
+            crate::bottom_pane::exit_background_view::ExitBackgroundView::new(
+                items,
+                can_background,
+            ),
+        ));
+        ChatOutcome::Continue
     }
 
     /// `/sandbox [exclude "<pattern>"]`: toggle sandbox mode for bash commands.
@@ -5149,7 +5205,7 @@ impl ChatWidget {
             // holds.
             BottomPaneOutcome::OpenAgentsView => self.request_open_agents(),
             BottomPaneOutcome::Detach => ChatOutcome::Detach,
-            BottomPaneOutcome::Quit => ChatOutcome::Quit,
+            BottomPaneOutcome::Quit => self.request_quit(),
             BottomPaneOutcome::Interrupt => {
                 let turn_was_cancelled = self
                     .current_turn
@@ -5179,6 +5235,18 @@ impl ChatWidget {
                 if let Some(token) = self.current_turn.as_ref() {
                     if turn_was_cancelled {
                         return ChatOutcome::Continue;
+                    }
+                    if !platform_api::env::background_tasks_disabled() {
+                        if let Some(registry) = &self.task_registry {
+                            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                            {
+                                runtime.block_on(registry.background_all_tasks_with_reason(
+                                    platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                                ));
+                            }
+                        }
                     }
                     token.cancel();
                 }
@@ -5371,6 +5439,26 @@ impl ChatWidget {
             }
             CommandAction::OpenConnectPicker => self.cmd_connect(""),
             CommandAction::Quit => ChatOutcome::Quit,
+            CommandAction::BackgroundAndExit => {
+                let Some(handle) = self.orchestrator.clone() else {
+                    return ChatOutcome::Continue;
+                };
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return ChatOutcome::Continue;
+                };
+                match runtime
+                    .block_on(handle.background_conversation(self.backgrounding_snapshot()))
+                {
+                    Ok(display) => ChatOutcome::BackgroundedExit(format!(
+                        "{display}\nLocal tasks that could not be moved will be stopped."
+                    )),
+                    Err(error) => self
+                        .show_system_text(&format!("Could not move to background: {error}"), true),
+                }
+            }
             CommandAction::SetTheme(setting) => {
                 // Applied live here; the caller persists it (best-effort).
                 self.set_theme(setting);
@@ -5965,7 +6053,17 @@ mod tests {
             Vec<platform_api::task_registry::TaskRecord>,
             platform_api::task_registry::TaskRegistryError,
         > {
-            Ok(Vec::new())
+            Ok(if self.backgroundable {
+                vec![platform_api::task_registry::TaskRecord {
+                    task_id: "b1".into(),
+                    task_type: "local_bash".into(),
+                    status: "running".into(),
+                    description: "live build".into(),
+                    ..Default::default()
+                }]
+            } else {
+                Vec::new()
+            })
         }
         async fn update(
             &self,
@@ -6016,9 +6114,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn typed_tasks_message_emits_a_human_task_action_with_original_payload() {
+        match widget().cmd_tasks("message a123  preserve indent") {
+            ChatOutcome::TaskAction(TaskAction::Message { task_id, message }) => {
+                assert_eq!(task_id, "a123");
+                assert_eq!(message, " preserve indent");
+            }
+            _ => panic!("expected human message task action"),
+        }
+        let mut view = widget();
+        assert!(matches!(view.cmd_tasks("message a123"), ChatOutcome::Continue));
+        assert!(!cells(&view).is_empty(), "invalid input surfaces usage rather than sending an empty message");
+    }
+
+    #[test]
+    fn assistant_text_that_looks_like_task_message_does_not_become_user_input() {
+        let mut view = widget();
+        view.apply_turn_event(TurnEvent::TurnStarted);
+        view.apply_turn_event(TurnEvent::TextDelta("/tasks message a123 resume stopped work".into()));
+        view.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        assert!(view.bottom_pane.composer().text().is_empty());
+        assert!(matches!(view.handle_key(press(KeyCode::Enter)), ChatOutcome::Continue));
+        assert!(view.bottom_pane.view_stack().active().is_none());
+    }
+
+    #[test]
+    fn tasks_empty_registry_opens_dialog_without_transcript_noise() {
+        let registry = std::sync::Arc::new(BackgroundStubRegistry {
+            backgroundable: false,
+            background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut w = widget();
+        w.set_task_registry(registry);
+        w.cmd_tasks("");
+        assert!(cells(&w).is_empty());
+        assert!(w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .unwrap()
+            .as_any()
+            .is::<crate::bottom_pane::tasks_view::TasksView>());
+    }
+
     /// claude-code `mie`: Ctrl+B runs `zM` only when `H_t` says there is
     /// something to background; otherwise the chord is NOT consumed, so it
     /// still reaches the composer.
+    #[test]
+    fn quitting_with_live_tasks_requires_an_explicit_exit_choice() {
+        let registry = std::sync::Arc::new(BackgroundStubRegistry {
+            backgroundable: true,
+            background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut w = widget();
+        w.set_task_registry(registry);
+        assert!(matches!(w.cmd_stop(""), ChatOutcome::Continue));
+        assert!(w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .unwrap()
+            .as_any()
+            .is::<crate::bottom_pane::exit_background_view::ExitBackgroundView>());
+        assert!(matches!(
+            w.handle_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(cells(&w).is_empty());
+    }
+
     #[test]
     fn ctrl_b_backgrounds_running_work_and_is_otherwise_not_consumed() {
         for backgroundable in [true, false] {
@@ -7863,6 +8028,22 @@ mod tests {
         let mut widget = widget();
         widget.set_orchestrator(mock.clone());
         (widget, mock)
+    }
+
+    #[test]
+    fn background_exit_returns_the_durable_receipt_to_the_host() {
+        let (mut view, _mock) = widget_with_orchestrator();
+        match view.run_command(CommandAction::BackgroundAndExit) {
+            ChatOutcome::BackgroundedExit(receipt) => {
+                assert!(receipt.contains("mock-bg-abcd"));
+                assert!(receipt.contains("could not be moved"));
+            }
+            _ => panic!("successful handoff must exit with its receipt"),
+        }
+        assert!(matches!(
+            widget().run_command(CommandAction::BackgroundAndExit),
+            ChatOutcome::Continue
+        ));
     }
 
     /// (a) With a live handle wired, the interactive read-only commands open

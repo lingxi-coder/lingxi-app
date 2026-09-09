@@ -693,6 +693,30 @@ impl ConversationOrchestrator {
         mut self,
         provider: Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>,
     ) -> Self {
+        if let (Ok(runtime), Some(mut events)) = (
+            tokio::runtime::Handle::try_current(), provider.subscribe_task_lifecycle()
+        ) {
+            let output = Arc::downgrade(&self.output);
+            let analytics_bus = self.model_runtime.analytics_bus.clone();
+            self.prompt_runtime.task_lifecycle_relay = Some(tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
+                while let Some(event) = events.recv().await {
+                    let Some(output) = output.upgrade() else { break; };
+                    if event.get("type").and_then(serde_json::Value::as_str) == Some("task_feature") {
+                        if let Some(bus) = analytics_bus.as_ref() {
+                            let mut metadata = telemetry::LogEventMetadata::new();
+                            if let Some(feature) = event.get("feature_name").and_then(serde_json::Value::as_str) {
+                                metadata.insert("feature_name".into(), telemetry::AnalyticsValue::String(feature.into()));
+                                let error = event.get("error_code").and_then(serde_json::Value::as_str);
+                                if let Some(error) = error { metadata.insert("error_code".into(), telemetry::AnalyticsValue::String(error.into())); }
+                                bus.log_event(if error.is_some() { "tengu_feature_bad" } else { "tengu_feature_ok" }, metadata).await;
+                            }
+                        }
+                    } else {
+                        output.emit_task_lifecycle(&event).await;
+                    }
+                }
+            })));
+        }
         self.prompt_runtime.task_notifications = Some(provider);
         self
     }

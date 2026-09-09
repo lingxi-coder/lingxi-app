@@ -344,7 +344,10 @@ mod tests {
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
-        let doc = cron::tasks_file::ScheduledTasks { tasks, ..Default::default() };
+        let doc = cron::tasks_file::ScheduledTasks {
+            tasks,
+            ..Default::default()
+        };
         tokio::fs::write(&path, cron::tasks_file::serialize_tasks(&doc))
             .await
             .unwrap();

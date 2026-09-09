@@ -14,6 +14,9 @@ use std::sync::Arc;
 #[must_use]
 pub fn task_row_from_record(r: TaskRecord) -> TaskRow {
     TaskRow {
+        unread: !r.notified,
+        model: r.model,
+        effort: r.effort,
         awaiting_plan_approval: r.awaiting_plan_approval,
         task_id: r.task_id,
         task_type: r.task_type,

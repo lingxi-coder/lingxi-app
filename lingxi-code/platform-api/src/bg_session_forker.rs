@@ -47,6 +47,9 @@ pub enum BgForkError {
 /// `ActionFailed` rather than panicking.
 #[async_trait]
 pub trait BgSessionForker: Send + Sync {
+    /// Late binding after the host has constructed its session registry.
+    fn set_task_registry(&self, _registry: Arc<dyn crate::task_registry::TaskRegistryHandle>) {}
+
     /// Snapshot `history` (+ the parent's rendered `system_prompt`, when the
     /// live session has completed a turn) into a new background session and
     /// dispatch a detached worker that resumes it. `prompt` is the OPTIONAL

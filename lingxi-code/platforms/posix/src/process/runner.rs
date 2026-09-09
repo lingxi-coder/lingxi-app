@@ -220,11 +220,22 @@ const TASK_OUTPUT_COLLISION_RETRIES: usize = 16;
 /// while inline, then the first over-limit chunk converts the buffered prefix
 /// into `stdout + "[stderr] " + stderr`; later stderr chunks each carry their
 /// own marker in observed read order.
+use platform_api::task_output::Utf8StreamDecoder;
+
+#[derive(Default)]
+struct BackgroundOutput {
+    initial: Vec<u8>,
+    stdout_decoder: Utf8StreamDecoder,
+    stderr_decoder: Utf8StreamDecoder,
+}
+
 struct FramedOutputCapture {
     limit: usize,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     spilled: Option<Vec<u8>>,
+    stdout_decoder: Utf8StreamDecoder,
+    stderr_decoder: Utf8StreamDecoder,
 }
 
 impl FramedOutputCapture {
@@ -234,6 +245,8 @@ impl FramedOutputCapture {
             stdout: Vec::new(),
             stderr: Vec::new(),
             spilled: None,
+            stdout_decoder: Utf8StreamDecoder::default(),
+            stderr_decoder: Utf8StreamDecoder::default(),
         }
     }
 
@@ -246,6 +259,15 @@ impl FramedOutputCapture {
     }
 
     fn observe(&mut self, chunk: &[u8], stderr: bool) {
+        let decoded = if stderr {
+            self.stderr_decoder.decode(chunk, false)
+        } else {
+            self.stdout_decoder.decode(chunk, false)
+        };
+        self.observe_decoded(decoded.as_bytes(), stderr);
+    }
+
+    fn observe_decoded(&mut self, chunk: &[u8], stderr: bool) {
         if chunk.is_empty() {
             return;
         }
@@ -273,11 +295,29 @@ impl FramedOutputCapture {
         self.spilled = Some(spilled);
     }
 
-    fn into_spilled(self) -> Option<Vec<u8>> {
+    fn into_spilled(mut self) -> Option<Vec<u8>> {
+        let stdout = self.stdout_decoder.decode(&[], true);
+        let stderr = self.stderr_decoder.decode(&[], true);
+        self.observe_decoded(stdout.as_bytes(), false);
+        self.observe_decoded(stderr.as_bytes(), true);
         self.spilled
     }
 
+    fn into_background(mut self) -> BackgroundOutput {
+        let stdout_decoder = std::mem::take(&mut self.stdout_decoder);
+        let stderr_decoder = std::mem::take(&mut self.stderr_decoder);
+        BackgroundOutput {
+            initial: self.force_spilled(),
+            stdout_decoder,
+            stderr_decoder,
+        }
+    }
+
     fn force_spilled(mut self) -> Vec<u8> {
+        let stdout = self.stdout_decoder.decode(&[], true);
+        let stderr = self.stderr_decoder.decode(&[], true);
+        self.observe_decoded(stdout.as_bytes(), false);
+        self.observe_decoded(stderr.as_bytes(), true);
         if let Some(spilled) = self.spilled.take() {
             return spilled;
         }
@@ -297,56 +337,129 @@ fn append_framed_chunk(output: &mut Vec<u8>, chunk: &[u8], stderr: bool) {
     output.extend_from_slice(chunk);
 }
 
+async fn publish_background_output(
+    file: &mut Option<tokio::fs::File>,
+    binding: Option<&platform_api::BackgroundTaskBinding>,
+    content: &str,
+) -> std::io::Result<()> {
+    if content.is_empty() {
+        return Ok(());
+    }
+    if let Some(bound) = binding {
+        if let Some(sink) = bound.on_exit.as_ref().filter(|sink| sink.manages_output()) {
+            return sink
+                .append_output(&bound.task_id, content)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()));
+        }
+    }
+    match file.as_mut() {
+        Some(file) => file.write_all(content.as_bytes()).await,
+        None => Err(std::io::Error::other("background output has no writer")),
+    }
+}
+
 async fn drain_framed_output<SO, SE>(
     stdout: &mut SO,
     stderr: &mut SE,
-    file: &mut tokio::fs::File,
-    initial: &[u8],
+    file: &mut Option<tokio::fs::File>,
+    mut output: BackgroundOutput,
+    health: Option<(&platform_api::BackgroundTaskBinding, u32)>,
+    child: &mut tokio::process::Child,
 ) -> std::io::Result<()>
 where
     SO: AsyncRead + Unpin,
     SE: AsyncRead + Unpin,
 {
-    let mut first_write_error = None;
-    if let Err(error) = file.write_all(initial).await {
-        first_write_error = Some(error);
-    }
+    let binding = health.map(|(binding, _)| binding);
+    let managed = binding
+        .and_then(|bound| bound.on_exit.as_ref())
+        .is_some_and(|sink| sink.manages_output());
+    let stop_notify = binding.and_then(|b| b.on_exit.as_ref()).and_then(|s| s.stop_notify());
+    let mut stop_handled = false;
+    let mut watchdog = super::watchdog::ShellWatchdog::new(tokio::time::Instant::now());
+    watchdog.observe(&output.initial);
+    let mut health_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + super::watchdog::POLL_INTERVAL,
+        super::watchdog::POLL_INTERVAL,
+    );
+    health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pressure_stopped = false;
+    let mut first_write_error =
+        publish_background_output(file, binding, &String::from_utf8_lossy(&output.initial))
+            .await
+            .err();
     let mut stdout_done = false;
     let mut stderr_done = false;
     let mut stdout_chunk = vec![0u8; 8192];
     let mut stderr_chunk = vec![0u8; 8192];
-    while !(stdout_done && stderr_done) {
-        tokio::select! {
-            result = stdout.read(&mut stdout_chunk), if !stdout_done => {
-                match result {
-                    Ok(0) | Err(_) => stdout_done = true,
-                    Ok(count) if first_write_error.is_none() => {
-                        if let Err(error) = file.write_all(&stdout_chunk[..count]).await {
-                            first_write_error = Some(error);
+    loop {
+        if stdout_done && stderr_done && (health.is_none() || !matches!(child.try_wait(), Ok(None)))
+        {
+            break;
+        }
+        let framed = tokio::select! {
+            _ = async { if let Some(stop) = &stop_notify { stop.notified().await; } else { std::future::pending::<()>().await; } }, if !stop_handled => {
+                stop_handled = true;
+                // The same task owns wait/reap and signaling. No await between
+                // checking this live Child handle and signaling its group.
+                if matches!(child.try_wait(), Ok(None)) { if let Some(pid) = child.id() { let _ = kill_tree_force(pid); } }
+                continue;
+            }
+            _ = child.wait(), if stdout_done && stderr_done => break,
+            _ = health_tick.tick(), if health.is_some() && !pressure_stopped => {
+                if let Some((binding, pid)) = health {
+                    if let Some(sink) = binding.on_exit.as_ref() {
+                        if let Some(tail) = watchdog.poll(tokio::time::Instant::now()) {
+                            sink.on_stall(&binding.task_id, &tail).await;
+                        }
+                        if super::watchdog::memory_pressure().await
+                            && sink.on_memory_pressure(&binding.task_id).await {
+                            pressure_stopped = true;
+                            let _ = kill_tree_force(pid);
                         }
                     }
-                    Ok(_) => {}
+                }
+                continue;
+            }
+            result = stdout.read(&mut stdout_chunk), if !stdout_done => {
+                match result {
+                    Ok(0) | Err(_) => { stdout_done = true; output.stdout_decoder.decode(&[], true) }
+                    Ok(count) => output.stdout_decoder.decode(&stdout_chunk[..count], false),
                 }
             }
             result = stderr.read(&mut stderr_chunk), if !stderr_done => {
-                match result {
-                    Ok(0) | Err(_) => stderr_done = true,
-                    Ok(count) if first_write_error.is_none() => {
-                        if let Err(error) = file.write_all(STDERR_FILE_PREFIX).await {
-                            first_write_error = Some(error);
-                        } else if let Err(error) = file.write_all(&stderr_chunk[..count]).await {
-                            first_write_error = Some(error);
-                        }
-                    }
-                    Ok(_) => {}
-                }
+                let decoded = match result {
+                    Ok(0) | Err(_) => { stderr_done = true; output.stderr_decoder.decode(&[], true) }
+                    Ok(count) => output.stderr_decoder.decode(&stderr_chunk[..count], false),
+                };
+                if decoded.is_empty() { decoded } else { format!("[stderr] {decoded}") }
+            }
+        };
+        watchdog.observe(framed.as_bytes());
+        // The bounded task writer retries later generations after a failure;
+        // do not silently discard all subsequent output in the process runner.
+        if managed || first_write_error.is_none() {
+            if let Err(error) = publish_background_output(file, binding, &framed).await {
+                first_write_error.get_or_insert(error);
             }
         }
     }
-    if first_write_error.is_none() {
-        if let Err(error) = file.flush().await {
-            first_write_error = Some(error);
+    let flushed = if managed {
+        match binding.and_then(|bound| bound.on_exit.as_ref().map(|sink| (bound, sink))) {
+            Some((bound, sink)) => sink
+                .flush_output(&bound.task_id)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string())),
+            None => Ok(()),
         }
+    } else if let Some(file) = file.as_mut() {
+        file.flush().await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = flushed {
+        first_write_error.get_or_insert(error);
     }
     first_write_error.map_or(Ok(()), Err)
 }
@@ -522,7 +635,7 @@ impl PosixProcess {
         use std::io::Write as _;
 
         let (task_id, path, mut file) = self.create_task_output_file()?;
-        file.write_all(framed_output)
+        file.write_all(&framed_output[..framed_output.len().min(platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize)])
             .and_then(|()| file.flush())
             .map_err(|error| ProcessError::Io(format!("write task output: {error}")))?;
         let size = u64::try_from(framed_output.len()).unwrap_or(u64::MAX);
@@ -673,6 +786,19 @@ impl PosixProcess {
 
 #[async_trait]
 impl ProcessRunner for PosixProcess {
+    fn supports_foreground_backgrounding(&self) -> bool {
+        true
+    }
+
+    async fn kill_owner_processes(&self,owner:&str)->Vec<u32>{
+        let owned=platform_api::agent_processes::snapshot_entries(owner);
+        for &entry in &owned {
+            if platform_api::shell_supervisor::kill_owned_registration(owner,entry).await.is_none()
+                && platform_api::agent_processes::is_current(owner,entry){let _=kill_tree_force(entry.pid);}
+        }
+        owned.into_iter().map(|entry|entry.pid).collect()
+    }
+
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
@@ -696,11 +822,12 @@ impl ProcessRunner for PosixProcess {
         // — `kill_on_drop` alone never fires on an abrupt signal. Interactive mode
         // leaves this off, so its spawn path is byte-identical to before.
         let print_mode_cleanup = active_children::print_mode_child_cleanup_enabled();
-        if print_mode_cleanup {
+        if print_mode_cleanup || cmd.process_owner().is_some() {
             attach_setsid(&mut tcmd);
         }
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let _agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
         // Register the setsid child's pgid (== pid) for the duration of this run;
         // the guard unregisters it on completion OR on future-drop (cancel).
         let _child_registration = if print_mode_cleanup {
@@ -751,6 +878,7 @@ impl ProcessRunner for PosixProcess {
         attach_setsid(&mut tcmd);
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let _agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
         let pid = child
             .id()
             .ok_or_else(|| ProcessError::Io("streaming child has no pid".into()))?;
@@ -865,6 +993,7 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         max_output_bytes: Option<usize>,
     ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+        if super::supervisor::enabled(cmd) { return super::supervisor::execute(cmd, max_output_bytes, false).await; }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -877,11 +1006,12 @@ impl ProcessRunner for PosixProcess {
             .kill_on_drop(true);
 
         let print_mode_cleanup = active_children::print_mode_child_cleanup_enabled();
-        if print_mode_cleanup {
+        if print_mode_cleanup || cmd.process_owner().is_some() {
             attach_setsid(&mut tcmd);
         }
 
-        let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let mut child = super::spawn_unsafe::spawn_with_capability(tcmd, cmd.background_task()).await?;
+        let agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
         // Capture this before polling `wait()`: Tokio clears `Child::id()` once
         // the direct child has been reaped. A busy executor can observe the
         // timeout and the already-completed child in the same poll, so looking
@@ -1079,23 +1209,31 @@ impl ProcessRunner for PosixProcess {
         // copying both pipes to the same confined file handles until EOF.
         let binding = cmd.background_task().cloned();
         let (task_id, std_file) = match binding.as_ref() {
-            Some(bound) => (bound.task_id.clone(), self.open_bound_output_file(bound)?),
+            Some(bound) => (
+                bound.task_id.clone(),
+                if bound
+                    .on_exit
+                    .as_ref()
+                    .is_some_and(|sink| sink.manages_output())
+                {
+                    None
+                } else {
+                    Some(self.open_bound_output_file(bound)?)
+                },
+            ),
             None => {
                 let (task_id, _out_path, std_file) = self.create_task_output_file()?;
-                (task_id, std_file)
+                (task_id, Some(std_file))
             }
         };
-        let initial_output = framed_output.map_or_else(
-            || {
-                let mut output = out_buf;
-                if !err_buf.is_empty() {
-                    output.extend_from_slice(STDERR_FILE_PREFIX);
-                    output.extend_from_slice(&err_buf);
-                }
-                output
-            },
-            FramedOutputCapture::force_spilled,
-        );
+        let initial_output = framed_output
+            .unwrap_or_else(|| {
+                let mut capture = FramedOutputCapture::new(usize::MAX);
+                capture.observe_stdout(&out_buf);
+                capture.observe_stderr(&err_buf);
+                capture
+            })
+            .into_background();
         let pid = spawned_pid;
         let exit_task_id = task_id.clone();
 
@@ -1103,9 +1241,18 @@ impl ProcessRunner for PosixProcess {
             // Hold the print-mode registration for the child's remaining life so
             // an abrupt process SIGTERM can still `killpg` the backgrounded tree.
             let _child_registration = child_registration;
+            let _agent_registration = agent_registration;
             let mut child = child;
-            let mut file = tokio::fs::File::from_std(std_file);
-            let _ = drain_framed_output(&mut sout, &mut serr, &mut file, &initial_output).await;
+            let mut file = std_file.map(tokio::fs::File::from_std);
+            let _ = drain_framed_output(
+                &mut sout,
+                &mut serr,
+                &mut file,
+                initial_output,
+                binding.as_ref().map(|binding| (binding, pid)),
+                &mut child,
+            )
+            .await;
             let status = child.wait().await;
             // Same one-shot exit report as the explicit-background path, so an
             // auto-backgrounded (timed-out) command settles its task record.
@@ -1305,6 +1452,12 @@ impl ProcessRunner for PosixProcess {
         &self,
         cmd: &SandboxedCommand,
     ) -> Result<ProcessHandle, ProcessError> {
+        if super::supervisor::enabled(cmd) {
+            return match super::supervisor::execute(cmd, None, true).await?.outcome {
+                platform_api::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
+                _ => Err(ProcessError::Io("supervisor returned foreground result".into())),
+            };
+        }
         // When the caller bound a task identity (the Bash tool does, so the
         // model-facing id, the registry record and this file are one identity —
         // claude-code `vV`/`Xne`), write into the caller's already-created file
@@ -1316,10 +1469,21 @@ impl ProcessRunner for PosixProcess {
         // fails closed instead of redirecting command output.
         let binding = cmd.background_task().cloned();
         let (task_id, file) = match binding.as_ref() {
-            Some(bound) => (bound.task_id.clone(), self.open_bound_output_file(bound)?),
+            Some(bound) => (
+                bound.task_id.clone(),
+                if bound
+                    .on_exit
+                    .as_ref()
+                    .is_some_and(|sink| sink.manages_output())
+                {
+                    None
+                } else {
+                    Some(self.open_bound_output_file(bound)?)
+                },
+            ),
             None => {
                 let (task_id, _out_path, file) = self.create_task_output_file()?;
-                (task_id, file)
+                (task_id, Some(file))
             }
         };
 
@@ -1328,10 +1492,9 @@ impl ProcessRunner for PosixProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         attach_setsid(&mut tcmd);
+        if binding.as_ref().and_then(|b|b.on_exit.as_ref()).and_then(|s|s.stop_notify()).is_some(){tcmd.kill_on_drop(true);}
 
-        let mut child = tcmd
-            .spawn()
-            .map_err(|e| ProcessError::Io(format!("spawn_background: {e}")))?;
+        let mut child = super::spawn_unsafe::spawn_with_capability(tcmd, binding.as_ref()).await?;
         let pid = child
             .id()
             .ok_or_else(|| ProcessError::Io("spawn_background: child has no pid".into()))?;
@@ -1347,10 +1510,20 @@ impl ProcessRunner for PosixProcess {
         // Drain both pipes in one task so stderr chunks receive the oracle's
         // marker and the file reflects the order in which reads become ready.
         // The task also reaps the child to avoid zombies.
+        let agent_registration = super::agent_processes::register(cmd.process_owner(), Some(pid));
         let exit_task_id = task_id.clone();
         tokio::spawn(async move {
-            let mut file = tokio::fs::File::from_std(file);
-            let _ = drain_framed_output(&mut stdout, &mut stderr, &mut file, &[]).await;
+            let _agent_registration = agent_registration;
+            let mut file = file.map(tokio::fs::File::from_std);
+            let _ = drain_framed_output(
+                &mut stdout,
+                &mut stderr,
+                &mut file,
+                BackgroundOutput::default(),
+                binding.as_ref().map(|binding| (binding, pid)),
+                &mut child,
+            )
+            .await;
             let status = child.wait().await;
             // One-shot exit report so the caller can settle the task record
             // (claude-code `Ger`: terminal status from the child's result, then
@@ -1364,7 +1537,13 @@ impl ProcessRunner for PosixProcess {
         Ok(ProcessHandle { task_id, pid })
     }
 
+    async fn acknowledge_shell(&self, handle: &ProcessHandle)->Result<(),ProcessError>{platform_api::shell_supervisor::acknowledge(handle).await}
+    async fn export_shell(&self, handle: &ProcessHandle) -> Result<platform_api::process::ShellProcessHandoff, ProcessError> { self.acknowledge_shell(handle).await?;super::supervisor::export(handle) }
+    async fn validate_shell(&self, handoff: &platform_api::process::ShellProcessHandoff) -> Result<(), ProcessError> { super::supervisor::validate(handoff).await }
+    async fn adopt_shell(&self, handoff: &platform_api::process::ShellProcessHandoff, sink: std::sync::Arc<dyn platform_api::BackgroundExitSink>) -> Result<ProcessHandle, ProcessError> { super::supervisor::adopt(handoff,sink).await }
+    async fn release_shell(&self, handoff: &platform_api::process::ShellProcessHandoff) -> Result<(), ProcessError> { super::supervisor::release(handoff).await }
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+        if let Some(result) = super::supervisor::kill(handle).await { return result; }
         // Parity: claude-code's `#doKill` calls `treeKill(pid, 'SIGKILL')` directly
         // (ShellCommand.ts:337-343) — no SIGTERM grace period. Use kill_tree_force
         // (immediate SIGKILL) instead of kill_tree_unix (SIGTERM + 5 s + SIGKILL).
@@ -1435,6 +1614,81 @@ mod async_hook_tests {
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
+    #[test]
+    fn background_utf8_decoder_preserves_every_multibyte_boundary() {
+        for text in ["中", "🦀", "é", "a中🦀éz"] {
+            for split in 0..=text.len() {
+                let mut decoder = Utf8StreamDecoder::default();
+                let first = decoder.decode(&text.as_bytes()[..split], false);
+                let second = decoder.decode(&text.as_bytes()[split..], false);
+                assert_eq!(
+                    format!("{first}{second}{}", decoder.decode(&[], true)),
+                    text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn background_transition_retains_partial_characters_before_stderr_framing() {
+        let mut capture = FramedOutputCapture::new(0);
+        capture.observe_stdout(&[0xe4, 0xb8]);
+        capture.observe_stderr(&[0xf0, 0x9f]);
+        let mut background = capture.into_background();
+        assert!(background.initial.is_empty());
+        assert_eq!(background.stdout_decoder.decode(&[0xad], false), "中");
+        assert_eq!(background.stderr_decoder.decode(&[0xa6, 0x80], false), "🦀");
+        let mut complete = FramedOutputCapture::new(0);
+        complete.observe_stderr(&[0xe4, 0xb8]);
+        complete.observe_stderr(&[0xad]);
+        assert_eq!(complete.into_spilled().unwrap(), "[stderr] 中".as_bytes());
+    }
+
+    #[test]
+    fn foreground_spill_flushes_incomplete_utf8_at_eof() {
+        let mut capture = FramedOutputCapture::new(0);
+        capture.observe_stdout(b"prefix\xe4\xb8");
+        assert_eq!(capture.force_spilled(), "prefix\u{fffd}".as_bytes());
+        let mut capture = FramedOutputCapture::new(0);
+        capture.observe_stderr(&[0xf0, 0x9f]);
+        assert_eq!(capture.into_spilled().unwrap(), "[stderr] \u{fffd}".as_bytes());
+    }
+
+    #[tokio::test]
+    async fn managed_background_drain_calls_sink_and_flushes_before_exit() {
+        #[derive(Default)]
+        struct Sink {
+            chunks: std::sync::Mutex<String>,
+            flushed: std::sync::atomic::AtomicBool,
+            done: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl platform_api::BackgroundExitSink for Sink {
+            fn manages_output(&self) -> bool { true }
+            async fn append_output(&self, _: &str, content: &str) -> Result<(), ProcessError> {
+                self.chunks.lock().unwrap().push_str(content); Ok(())
+            }
+            async fn flush_output(&self, _: &str) -> Result<(), ProcessError> {
+                self.flushed.store(true, Ordering::SeqCst); Ok(())
+            }
+            async fn on_exit(&self, _: &str, _: Option<i32>) { self.done.notify_one(); }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let path = dir.path().join("no-direct-file/output");
+        let command = sh("printf routed").with_background_task(platform_api::BackgroundTaskBinding {
+            task_id: "bmanaged1".into(), output_path: path.clone(), on_exit: Some(sink.clone()), on_demand: None,
+        });
+        let process = PosixProcess::new();
+        let handle = process.spawn_background(&command).await.unwrap();
+        let done = tokio::time::timeout(Duration::from_secs(5), sink.done.notified()).await;
+        if done.is_err() { let _ = process.kill(&handle).await; }
+        done.unwrap();
+        assert_eq!(*sink.chunks.lock().unwrap(), "routed");
+        assert!(sink.flushed.load(Ordering::SeqCst));
+        assert!(!path.exists(), "managed output must not also be written directly");
+    }
+
     fn sh(script: &str) -> SandboxedCommand {
         let pcmd = ProcessCommand {
             command: "/bin/sh".to_string(),
@@ -1450,6 +1704,17 @@ mod async_hook_tests {
                 reason: HOOK_COMMAND_AUDIT_REASON.to_string(),
             },
         )
+    }
+
+    #[test]
+    fn completed_output_copy_caps_bytes_but_reports_original_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = PosixProcess::with_task_output_dir(dir.path().join("tasks"));
+        let cap = platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize;
+        let bytes = vec![b'x'; cap + 3];
+        let output = process.spill_completed_output(&bytes).unwrap();
+        assert_eq!(output.size, cap as u64 + 3);
+        assert_eq!(std::fs::metadata(output.path).unwrap().len(), cap as u64);
     }
 
     #[cfg(unix)]

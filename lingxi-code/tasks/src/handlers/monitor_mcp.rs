@@ -799,6 +799,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "echo".into(),
                     timeout: None,
+                    tool_use_id: None,
                 },
                 ctx(fs, runtime),
             )

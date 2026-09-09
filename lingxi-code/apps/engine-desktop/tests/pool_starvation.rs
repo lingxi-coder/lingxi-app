@@ -124,6 +124,7 @@ impl BudgetEnforcerHandle for OpenBudget {
 /// its pool slot for the life of the test.
 fn parked_teammate_ctx() -> SubagentContext {
     SubagentContext {
+        task_registry: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_name: None,

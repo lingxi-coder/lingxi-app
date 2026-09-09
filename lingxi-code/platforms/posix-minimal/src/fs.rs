@@ -252,6 +252,13 @@ impl FileSystem for PosixFileSystem {
         platform_api::rooted_fs::append_file_pinned(root, relative, content, expected)
     }
 
+    async fn append_file_rooted_staged(
+        &self, root: &Path, relative: &Path, content: &str,
+        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+    ) -> Result<(), platform_api::filesystem::FileAppendError> {
+        platform_api::rooted_fs::append_file_staged(root, relative, content, expected)
+    }
+
     async fn read_file_rooted_no_follow(
         &self,
         root: &Path,

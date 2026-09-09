@@ -20,6 +20,8 @@ use thiserror::Error;
 
 /// Current persisted observer schema version.
 pub const OBSERVER_SCHEMA_VERSION: u32 = 1;
+/// Internal query-source identity for independent observer sidecars.
+pub const OBSERVER_QUERY_SOURCE: &str = "observer_activity";
 
 const fn observer_schema_version() -> u32 {
     OBSERVER_SCHEMA_VERSION
@@ -504,6 +506,14 @@ pub enum SubagentObservation {
 /// Structured observer for a spawned subagent's live lifecycle.
 #[async_trait]
 pub trait SubagentSpawnObserver: Send + Sync {
+    /// Selected model/effort after definition inheritance, before model work.
+    async fn on_model_selected(&self, _event: &SubagentObservation, _effort: Option<&str>) {}
+
+    /// Acknowledged startup hook after allocation, before any model/tool work.
+    /// Unlike the asynchronous UI observer, foreground task registration must
+    /// finish here so a fast child cannot outrun its owner record.
+    async fn before_start(&self, _event: &SubagentObservation) -> Result<(), SubagentSpawnError> { Ok(()) }
+
     /// Synchronous receipt emitted at the allocation boundary, before the
     /// normal asynchronous lifecycle stream.  Hosts use this for facts that
     /// affect accounting (for example, Fusion spawn-quota settlement) and
@@ -870,6 +880,16 @@ pub fn max_subagent_spawn_depth() -> u32 {
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
+    /// Deliver an intentional user message to a retained foreground runner.
+    async fn resume_foreground(&self, _agent_id: &AgentId, _message: String) -> Result<(), SubagentSpawnError> {
+        Err(SubagentSpawnError::Internal("foreground resume is not wired".into()))
+    }
+    /// Connect the allocated foreground runner to the host's mailbox router.
+    async fn connect_foreground_route(&self, _agent_id: AgentId, _task_id: &str, _name: Option<&str>) -> Result<(), SubagentSpawnError> { Ok(()) }
+
+    /// Trusted transcript path for a child when this spawner persists it.
+    fn transcript_path(&self, _agent_id: protocol::AgentId) -> Option<std::path::PathBuf> { None }
+
     /// Normalize a recipient for the Agent schema's reserved-name refinement.
     /// Hosts with a Unicode-aware catalog override this with the same canonical
     /// normalizer used by live name resolution, avoiding a second name policy.
@@ -1073,6 +1093,15 @@ pub trait SubagentSpawner: Send + Sync {
         inherit: SubagentInheritance,
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
         self.spawn_async(request, inherit).await
+    }
+
+    /// Restore the persisted agent identity and its previously exposed task
+    /// address. Durable implementations install the task alias before startup.
+    async fn restore_async_task(
+        &self, _task_id: &str, agent_id: protocol::AgentId,
+        request: SubagentSpawnRequest, inherit: SubagentInheritance,
+    ) -> Result<AsyncLaunch, SubagentSpawnError> {
+        self.restore_async(agent_id, request, inherit).await
     }
 
     /// Register `name → agent_id` for `SendMessage` routing of a spawned ASYNC

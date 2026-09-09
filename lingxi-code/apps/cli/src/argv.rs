@@ -1257,9 +1257,7 @@ impl Argv {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         }
-        let named = |name: &str| {
-            platform_api::session_flags::TODO_TOOL_NAMES.contains(&name)
-        };
+        let named = |name: &str| platform_api::session_flags::TODO_TOOL_NAMES.contains(&name);
         // `re.includes(un)` — bare names only.
         entries(self.tools.as_ref()).any(named)
             // `Fr(kn).toolName === un` — rule-parsed.

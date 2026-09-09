@@ -54,3 +54,61 @@ fn task_row_dto_stage_field_carries_a_uniffi_none_default() {
         stage_field.default,
     );
 }
+
+#[test]
+fn task_row_kind_is_appended_and_optional_in_generated_constructors() {
+    let metadata =
+        uniffi_meta::read_metadata(&UNIFFI_META_CLIENT_PROTOCOL_RECORD_TASKROWDTO).unwrap();
+    let Metadata::Record(record) = metadata else {
+        panic!("record metadata")
+    };
+    let field = record
+        .fields
+        .iter()
+        .find(|field| field.name == "kind")
+        .unwrap();
+    assert_eq!(
+        record.fields[9].name, "kind",
+        "later additions must preserve kind's positional index"
+    );
+    assert_eq!(field.default, Some(LiteralMetadata::None));
+}
+
+#[test]
+fn task_row_display_fields_are_trailing_and_have_generated_constructor_defaults() {
+    let metadata =
+        uniffi_meta::read_metadata(&UNIFFI_META_CLIENT_PROTOCOL_RECORD_TASKROWDTO).unwrap();
+    let Metadata::Record(record) = metadata else {
+        panic!("record metadata")
+    };
+    let names = record
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "task_id",
+            "task_type",
+            "status",
+            "description",
+            "can_resume",
+            "started_at_ms",
+            "error",
+            "stage",
+            "awaiting_plan_approval",
+            "kind",
+            "unread",
+            "model",
+            "effort"
+        ],
+        "new display fields may only extend the existing Kotlin/Swift constructor order"
+    );
+    assert_eq!(
+        record.fields[10].default,
+        Some(LiteralMetadata::Boolean(false))
+    );
+    assert_eq!(record.fields[11].default, Some(LiteralMetadata::None));
+    assert_eq!(record.fields[12].default, Some(LiteralMetadata::None));
+}

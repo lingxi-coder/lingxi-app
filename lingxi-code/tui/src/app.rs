@@ -49,6 +49,8 @@ use crate::RataTerminal;
 pub enum AppExit {
     /// The user quit (`/exit`, `/stop`, Ctrl-C twice): the embedder tears down.
     Quit,
+    /// Exit after a successful durable background handoff.
+    Backgrounded(String),
     /// The `/resume` picker resolved to this session uuid: the embedder must
     /// re-mount that session in-process (writer retargeted via the startup
     /// resume seam).
@@ -363,6 +365,9 @@ impl<'cb> RataApp<'cb> {
                 };
                 match outcome {
                     ChatOutcome::Quit => return Ok(AppExit::Quit),
+                    ChatOutcome::BackgroundedExit(receipt) => {
+                        return Ok(AppExit::Backgrounded(receipt))
+                    }
                     ChatOutcome::Detach => {
                         if let Ok(token) =
                             std::env::var(tui_core::background_detach::DETACH_TOKEN_ENV)
@@ -963,7 +968,9 @@ pub fn run_app(
             (app.callbacks.on_submit)(prompt, images, token);
         }
     }
-    app.run_with_session(&mut terminal, &mut session_guard)
+    let result = app.run_with_session(&mut terminal, &mut session_guard);
+    app.chat_widget.cancel_active_turn();
+    result
 }
 
 #[cfg(test)]

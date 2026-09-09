@@ -40,12 +40,37 @@ impl RegistryStatusSink {
 
     /// Bind the registry handle. Idempotent — a second bind is ignored.
     pub fn bind(&self, registry: Arc<TaskRegistry>) {
+        registry.bind_self(&registry);
         let _ = self.registry.set(registry);
     }
 }
 
 #[async_trait]
 impl TaskStatusSink for RegistryStatusSink {
+    async fn set_agent_display(&self, id: &str, model: String, effort: Option<String>) {
+        if let Some(registry) = self.registry.get() {
+            registry.set_agent_display(id, model, effort).await;
+        }
+    }
+
+    async fn bind_agent_id(
+        &self,
+        task_id: &str,
+        agent_id: protocol::AgentId,
+    ) -> Result<(), String> {
+        if let Some(registry) = self.registry.get() {
+            registry
+                .bind_agent_id(task_id, agent_id)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    fn task_registry(&self) -> Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>> {
+        self.registry.get().map(|registry| {
+            registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+        })
+    }
     fn requires_explicit_activation(&self) -> bool {
         true
     }
@@ -215,7 +240,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn is_terminal(&self, task_id: &str) -> bool {
         if let Some(reg) = self.registry.get() {
             if let Some(rec) = reg.get(task_id).await {
-                return rec.base().status.is_terminal();
+                return rec.is_terminated();
             }
         }
         false

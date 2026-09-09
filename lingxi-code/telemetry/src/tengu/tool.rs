@@ -62,9 +62,8 @@ pub const BASH_TIMEOUT_BACKGROUNDED: &str = "tengu_bash_command_timeout_backgrou
 /// command to the background rather than killing it
 /// (`wn("tengu_bash_command_turn_abort_backgrounded")`, @4344733).
 ///
-/// NO EMITTER YET: turn-abort backgrounding is the unported half of `bg-04`.
-/// The constant is here so the event name is settled in one place when that
-/// trigger lands, not because anything fires it today.
+/// Emitted by the Bash runner after a cancelled foreground command has
+/// actually detached; ordinary timeout/manual transitions do not emit it.
 pub const BASH_TURN_ABORT_BACKGROUNDED: &str = "tengu_bash_command_turn_abort_backgrounded";
 /// `tengu_tool_edit_started` — Edit tool began applying a replacement.
 pub const EDIT_STARTED: &str = "tengu_tool_edit_started";

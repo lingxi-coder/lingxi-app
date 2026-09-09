@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn task_id_regex_matches_fresh_generated() {
         use regex::Regex;
-        let re = Regex::new(r"^[bartwmdksf][0-9a-z]{8}$").unwrap();
+        let re = Regex::new(r"^[bartwmdksfe][0-9a-z]{8}$").unwrap();
         for c in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k', 'f'] {
             let id = fresh_task_id(c);
             assert!(re.is_match(&id), "generated id {id} fails regex");
@@ -118,6 +118,7 @@ mod tests {
                 "monitor_ws",
                 "mcp_task",
                 "dream",
+                "auto_mode_scan",
                 "local_fusion"
             ]
         );
@@ -2367,6 +2368,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
             pending_departure: StdMutex<bool>,
             departure_failures: StdMutex<u32>,
             output_calls: StdMutex<u32>,
+            evict_after_first_read: bool,
+            live_loop: bool,
             /// Ids passed to `mark_notified`, in call order (T9).
             notified_ids: StdMutex<Vec<String>>,
         }
@@ -2388,6 +2391,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
         #[async_trait]
         impl TaskRegistryHandle for MockRegistry {
+            async fn has_live_task_loop(&self, _: &str) -> bool { self.live_loop }
+
             async fn create(
                 &self,
                 _input: TaskCreateInput,
@@ -2448,7 +2453,11 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 id: &str,
                 _offset: Option<u64>,
             ) -> Result<TaskOutputChunk, TaskRegistryError> {
-                *self.output_calls.lock().unwrap() += 1;
+                let mut calls = self.output_calls.lock().unwrap();
+                *calls += 1;
+                if self.evict_after_first_read && *calls > 1 {
+                    return Err(TaskRegistryError::NotFound(id.into()));
+                }
                 let mut q = self.chunks.lock().unwrap();
                 if q.len() > 1 {
                     Ok(q.pop_front().unwrap())
@@ -2527,6 +2536,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 error: error.map(str::to_string),
                 prompt: Some("do the thing".into()),
                 result: result.map(str::to_string),
+                harness_head: None,
                 output_path: None,
                 mcp: None,
             }
@@ -3021,17 +3031,184 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     fresh_tx(),
                 )
                 .await
-                .expect("ok");
+                .expect_err("cancellation is an abort, not a timeout");
             // Returns well under the 600s timeout.
             assert!(
                 started.elapsed().as_secs() < 5,
                 "cancelled wait returns promptly"
             );
-            assert_eq!(res.data["retrieval_status"], "timeout");
-            assert_eq!(res.data["task"]["status"], "running");
-            // The cancel fires BEFORE the first 100ms sleep, so the loop body
-            // never issues a second poll: exactly the initial read.
+            assert!(matches!(res, ToolError::Aborted));
+            assert!(reg.notified_ids().is_empty());
+            // Oracle checks cancellation before even looking up completion.
+            assert_eq!(*reg.output_calls.lock().unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn task_output_cancel_during_poll_does_not_consume_completion() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            reg.push_chunk(chunk("running", false, None, "still going\n"));
+            reg.push_chunk(chunk("completed", true, Some(0), "done\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let mut ctx = fresh_ctx();
+            ctx.cancel = Some(Default::default());
+            let cancel = ctx.cancel.clone().unwrap();
+            let call = tool.call(
+                json!({"task_id": "b12345678", "block": true, "timeout": 600_000}),
+                ctx,
+                fresh_tx(),
+            );
+            tokio::pin!(call);
+            tokio::select! {
+                result = &mut call => panic!("wait ended before cancellation: {result:?}"),
+                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+            cancel.cancel();
+            assert!(matches!(call.await, Err(ToolError::Aborted)));
             assert_eq!(*reg.output_calls.lock().unwrap(), 1);
+            assert!(reg.notified_ids().is_empty());
+        }
+
+        #[tokio::test]
+        async fn task_output_evicted_during_wait_returns_null_and_emits_progress() {
+            let reg = Arc::new(MockRegistry {
+                record: StdMutex::new(Some(rec("running"))),
+                evict_after_first_read: true,
+                ..Default::default()
+            });
+            reg.push_chunk(chunk("running", false, None, "still going\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let mut ctx = fresh_ctx();
+            ctx.tool_use_id = Some(Default::default());
+            let expected_id = ctx.tool_use_id.clone().unwrap();
+            let (tx, mut rx) = tool_api::progress_channel();
+            let result = tool
+                .call(
+                    json!({"task_id": "b12345678", "block": true, "timeout": 1000}),
+                    ctx,
+                    tx,
+                )
+                .await
+                .expect("eviction during wait is a timeout");
+            assert_eq!(result.data["retrieval_status"], "timeout");
+            assert!(result.data["task"].is_null());
+            assert_eq!(
+                result.data["content"],
+                "<retrieval_status>timeout</retrieval_status>"
+            );
+            assert!(reg.notified_ids().is_empty());
+            let event = rx.try_recv().expect("waiting progress");
+            assert_eq!(event.tool_use_id, expected_id);
+            assert_eq!(
+                event.data,
+                json!({
+                    "type": "waiting_for_task", "taskDescription": "echo hi", "taskType": "local_bash"
+                })
+            );
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn task_output_note_without_report_uses_placeholder_not_transcript() {
+            let mut record = rec("completed");
+            record.task_type = "local_agent".into();
+            let reg = MockRegistry::with_record(Some(record));
+            let mut output = chunk("completed", true, None, "raw transcript");
+            output.harness_head = Some("NOTE: trusted harness note\n".into());
+            reg.push_chunk(output);
+            let result = TaskOutputTool::new(bctx(reg))
+                .call(json!({"task_id": "b12345678", "block": false}), fresh_ctx(), fresh_tx())
+                .await.unwrap();
+            assert_eq!(result.data["task"]["output"], "[The agent produced no report text.]");
+            assert!(result.data["content"].as_str().unwrap().contains(
+                "<output>\nNOTE: trusted harness note\n\n[The agent produced no report text.]\n</output>"));
+        }
+
+        #[tokio::test]
+        async fn task_stop_observer_checks_self_and_owner_before_terminal_status() {
+            let owner = protocol::AgentId::new();
+            let mut record = agent_rec("completed");
+            record.owner_agent_id = Some(owner.to_string()); record.is_observer = true;
+            let reg = MockRegistry::with_record(Some(record));
+            let tool = TaskStopTool::new(bctx(reg.clone()));
+            let mut caller = fresh_ctx(); caller.agent_id = Some(owner);
+            let error = tool.call(json!({"task_id": "a12345678"}), caller, fresh_tx()).await.unwrap_err();
+            assert!(err_msg(error).starts_with("Observer a12345678 cannot stop itself;"));
+            let mut other = fresh_ctx(); other.agent_id = Some(protocol::AgentId::new());
+            let error = tool.call(json!({"task_id": "a12345678"}), other, fresh_tx()).await.unwrap_err();
+            assert!(err_msg(error).contains("is owned by"));
+            tool.call(json!({"task_id": "a12345678"}), fresh_ctx(), fresh_tx()).await.unwrap();
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 0, "already terminal observer DO path is idempotent");
+        }
+
+        #[tokio::test]
+        async fn task_stop_live_loop_note_counts_process_groups_not_task_rows() {
+            struct Processes(StdMutex<Vec<String>>);
+            #[async_trait]
+            impl platform_api::ProcessRunner for Processes {
+                async fn run(&self, _: &platform_api::SandboxedCommand) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> { unreachable!() }
+                async fn spawn_background(&self, _: &platform_api::SandboxedCommand) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> { unreachable!() }
+                async fn kill(&self, _: &platform_api::ProcessHandle) -> Result<(), platform_api::ProcessError> { unreachable!() }
+                fn is_available(&self) -> bool { true }
+                async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+                    self.0.lock().unwrap().push(owner.into()); vec![101, 202]
+                }
+            }
+            let mut record = agent_rec("completed");
+            record.owner_agent_id = Some("the-real-child".into());
+            let reg = Arc::new(MockRegistry { record: StdMutex::new(Some(record)), live_loop: true, ..Default::default() });
+            let processes = Arc::new(Processes(StdMutex::new(Vec::new())));
+            let mut context = bctx(reg.clone()); context.process = processes.clone();
+            let result = TaskStopTool::new(context)
+                .call(json!({"task_id": "a12345678"}), fresh_ctx(), fresh_tx()).await.unwrap();
+            assert_eq!(*processes.0.lock().unwrap(), ["the-real-child"]);
+            assert!(result.data["note"].as_str().unwrap().contains("killed 2 process group(s)"));
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn task_stop_ended_live_loop_resignals_and_explains_retained_record() {
+            let mut record = rec("completed");
+            record.task_type = "local_agent".into();
+            let reg = Arc::new(MockRegistry { record: StdMutex::new(Some(record)), live_loop: true, ..Default::default() });
+            let result = TaskStopTool::new(bctx(reg.clone()))
+                .call(json!({"task_id": "b12345678"}), fresh_ctx(), fresh_tx()).await.unwrap();
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 1);
+            assert_eq!(result.data["note"], "had already ended (completed) but its loop had not exited; re-signalled it and killed 0 process group(s). The record remains listed while the loop is still live.");
+        }
+
+        #[tokio::test]
+        async fn task_stop_parked_completed_agent_is_stoppable() {
+            let mut record = rec("completed");
+            record.task_type = "local_agent".into();
+            record.is_parked = true;
+            let reg = MockRegistry::with_record(Some(record));
+            TaskStopTool::new(bctx(reg.clone()))
+                .call(json!({"task_id": "b12345678"}), fresh_ctx(), fresh_tx())
+                .await.unwrap();
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn task_output_evicted_before_first_read_returns_null() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            let result = TaskOutputTool::new(bctx(reg.clone()))
+                .call(json!({"task_id": "b12345678", "block": true}), fresh_ctx(), fresh_tx())
+                .await.expect("eviction after existence check is a timeout");
+            assert_eq!(result.data["retrieval_status"], "timeout");
+            assert!(result.data["task"].is_null());
+            assert!(reg.notified_ids().is_empty());
+        }
+
+        #[tokio::test]
+        async fn task_output_cancelled_before_terminal_read_does_not_notify() {
+            let reg = MockRegistry::with_record(Some(rec("completed")));
+            reg.push_chunk(chunk("completed", true, Some(0), "done"));
+            let result = TaskOutputTool::new(bctx(reg.clone()))
+                .call(json!({"task_id": "b12345678", "block": true}), fresh_ctx_cancelled(), fresh_tx())
+                .await;
+            assert!(matches!(result, Err(ToolError::Aborted)));
+            assert_eq!(*reg.output_calls.lock().unwrap(), 0);
+            assert!(reg.notified_ids().is_empty());
         }
 
         #[tokio::test]
@@ -3484,6 +3661,7 @@ waiting on the user: an elicitation dialog is open"
                 error: None,
                 output_path: None,
                 is_raw_transcript: false,
+                harness_head: None,
                 omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
@@ -3507,6 +3685,7 @@ waiting on the user: an elicitation dialog is open"
                 error: None,
                 output_path: None,
                 is_raw_transcript: false,
+                harness_head: None,
                 omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
@@ -3535,6 +3714,7 @@ waiting on the user: an elicitation dialog is open"
                 error: None,
                 output_path: None,
                 is_raw_transcript: false,
+                harness_head: None,
                 omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
@@ -3562,6 +3742,7 @@ waiting on the user: an elicitation dialog is open"
                 error: None,
                 output_path: None,
                 is_raw_transcript: true,
+                harness_head: None,
                 omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
@@ -3589,6 +3770,7 @@ waiting on the user: an elicitation dialog is open"
                 error: None,
                 output_path: Some(abs.into()),
                 is_raw_transcript: false,
+                harness_head: None,
                 omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));

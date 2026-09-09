@@ -52,12 +52,12 @@ pub use defer::{
     mode_from_env, mode_from_values, DeferralState, ToolSearchMode, ENTER_WORKTREE_TOOL_NAME,
 };
 pub use model_prompt_gate::dh_simple_system_prompt;
-pub use todo_tools_gate::todo_tools_enabled;
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
 pub use read_file_state::{ReadFileEntry, ReadFileStateMap};
 pub use registry::ToolRegistry;
 pub use sandbox_runner::{default_sandbox_runner, LegacyWrapRunner, SandboxRunner};
 pub use session_cwd::SessionCwd;
+pub use todo_tools_gate::todo_tools_enabled;
 pub use tool_invoker_impl::RegistryToolInvoker;
 pub use tool_search_view::{
     SharedToolSearchView, StaticRegistryView, ToolRegistryView, ToolSearchEntry,
@@ -69,3 +69,6 @@ pub use worktree_session::{
 
 /// Shared current SendMessage schema, prose, and input coercion.
 pub mod send_message_contract;
+
+// Native sandbox adapters implement this without depending on a concrete HTTP client.
+pub use platform_api::http::{MonitorSocketIo, MonitorWebSocketProxy};

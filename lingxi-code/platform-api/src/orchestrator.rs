@@ -2544,6 +2544,16 @@ pub trait OrchestratorHandle: Send + Sync {
         ))
     }
 
+    /// Preserve queued-command provenance when driving a text-only follow-up.
+    async fn run_queued_turn_streaming(
+        &self,
+        prompt: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        _in_human_turn: bool,
+    ) -> Result<TurnOutcome, HandleError> {
+        self.run_turn_streaming_with_cancel(prompt, cancel).await
+    }
+
     /// Streaming turn carrying pasted image file paths (TUI paste→image). Each
     /// path is read + base64-encoded into a `ContentBlock::Image` on the
     /// outgoing user message.
@@ -2608,6 +2618,11 @@ pub trait OrchestratorHandle: Send + Sync {
     async fn fork_conversation(&self, directive: &str) -> Result<ForkOutcome, HandleError> {
         let _ = directive;
         Err(HandleError::Unimplemented("fork_conversation".into()))
+    }
+
+    /// Whether an exit handoff has a persistent backend and a genuine user seed.
+    async fn can_background_conversation_on_exit(&self) -> bool {
+        false
     }
 
     /// Copy the CURRENT conversation into a NEW BACKGROUND session and keep the
@@ -3022,6 +3037,9 @@ pub struct ContextPressureBanner {
 /// for unit tests.
 #[async_trait]
 pub trait OutputStream: Send + Sync {
+    /// Emit a session-scoped SDK `system/task_started` or `task_updated` frame.
+    async fn emit_task_lifecycle(&self, _event: &serde_json::Value) {}
+
     /// Identify the assistant response immediately before its completion boundary.
     async fn emit_assistant_message_identity(&self, _message_id: &protocol::MessageId) {}
 

@@ -118,6 +118,39 @@ impl BackgroundAgentSpawner {
             })
     }
 
+    async fn connect_agent_route(&self, agent_id: AgentId, task_id: &str, name: Option<&str>) -> Result<(), SubagentSpawnError> {
+        let mailbox = Arc::new(TeammateMailbox::new(agent_id));
+        self.mailbox_router
+            .register(agent_id, mailbox.clone())
+            .await;
+        if let Some(name) = name {
+            self.mailbox_router.register_name(name, agent_id).await;
+        }
+        // The completion `<task-notification>` carries the TASK id, and the
+        // coordinator prompt tells the model to continue the agent by sending to
+        // that id. Register it as an additional address so the send resolves;
+        // an alias is not a display name, so this adds no `ListAgents` row and
+        // no second copy of a broadcast.
+        self.mailbox_router.register_alias(task_id, agent_id).await;
+
+        let seam: Arc<dyn TeamSpawnSeam> = self.registry.clone();
+        let router = self.mailbox_router.clone();
+        let pump_task_id = task_id.to_string();
+        let pump = Box::pin(async move {
+            run_teammate_pump(mailbox, pump_task_id, seam).await;
+            router.unregister(&agent_id).await;
+        });
+        if let Err(e) = self.runtime.spawn("bg-agent-pump", pump).await {
+            self.mailbox_router.unregister(&agent_id).await;
+            let _ = self.registry.kill(task_id).await;
+            return Err(SubagentSpawnError::Runtime(format!(
+                "failed to start background agent pump: {e}"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Shared async launch body. Fresh launches mint an id; cold restores pass
     /// the persisted one so transcript, mailbox, and parked-row identities stay
     /// stable across the process boundary.
@@ -126,6 +159,7 @@ impl BackgroundAgentSpawner {
         agent_id: AgentId,
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
+        restored_task_id: Option<&str>,
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
         let description = request.description.clone().unwrap_or_default();
 
@@ -136,7 +170,7 @@ impl BackgroundAgentSpawner {
 
         let task_id = self
             .registry
-            .spawn(
+            .spawn_with_aliases(
                 TaskType::LocalAgent,
                 TaskSpawnInput::LocalAgent {
                     agent_id,
@@ -151,38 +185,13 @@ impl BackgroundAgentSpawner {
                     inheritance: Some(inherit),
                 },
                 description,
+                &restored_task_id.map(str::to_string).into_iter().collect::<Vec<_>>(),
             )
             .await
             .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
 
-        let mailbox = Arc::new(TeammateMailbox::new(agent_id));
-        self.mailbox_router
-            .register(agent_id, mailbox.clone())
-            .await;
-        if let Some(name) = request.name.as_deref() {
-            self.mailbox_router.register_name(name, agent_id).await;
-        }
-        // The completion `<task-notification>` carries the TASK id, and the
-        // coordinator prompt tells the model to continue the agent by sending to
-        // that id. Register it as an additional address so the send resolves;
-        // an alias is not a display name, so this adds no `ListAgents` row and
-        // no second copy of a broadcast.
-        self.mailbox_router.register_alias(&task_id, agent_id).await;
-
-        let seam: Arc<dyn TeamSpawnSeam> = self.registry.clone();
-        let router = self.mailbox_router.clone();
-        let pump_task_id = task_id.clone();
-        let pump = Box::pin(async move {
-            run_teammate_pump(mailbox, pump_task_id, seam).await;
-            router.unregister(&agent_id).await;
-        });
-        if let Err(e) = self.runtime.spawn("bg-agent-pump", pump).await {
-            self.mailbox_router.unregister(&agent_id).await;
-            let _ = self.registry.kill(&task_id).await;
-            return Err(SubagentSpawnError::Runtime(format!(
-                "failed to start background agent pump: {e}"
-            )));
-        }
+        self.connect_agent_route(agent_id, &task_id, request.name.as_deref()).await?;
+        if let Some(old_task_id) = restored_task_id { self.mailbox_router.register_alias(old_task_id, agent_id).await; }
 
         let output_file = self
             .registry
@@ -200,6 +209,13 @@ impl BackgroundAgentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for BackgroundAgentSpawner {
+    async fn resume_foreground(&self, agent_id: &AgentId, message: String) -> Result<(), SubagentSpawnError> {
+        self.inner.resume_foreground(agent_id, message).await
+    }
+    async fn connect_foreground_route(&self, agent_id: AgentId, task_id: &str, name: Option<&str>) -> Result<(), SubagentSpawnError> {
+        self.connect_agent_route(agent_id, task_id, name).await
+    }
+
     fn teammate_enabled(&self) -> bool {
         self.teammate_spawner.is_some()
     }
@@ -303,7 +319,7 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
-        self.spawn_async_with_id(AgentId::new(), request, inherit)
+        self.spawn_async_with_id(AgentId::new(), request, inherit, None)
             .await
     }
 
@@ -313,7 +329,15 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
-        self.spawn_async_with_id(agent_id, request, inherit).await
+        self.spawn_async_with_id(agent_id, request, inherit, None).await
+    }
+
+    async fn restore_async_task(
+        &self, task_id: &str, agent_id: AgentId, request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<AsyncLaunch, SubagentSpawnError> {
+        if request.resumed_history.is_none() { return Err(SubagentSpawnError::Runtime("stable restore requires recovered history".into())); }
+        self.spawn_async_with_id(agent_id, request, inherit, Some(task_id)).await
     }
 
     async fn concurrent_subagent_count(&self) -> usize {

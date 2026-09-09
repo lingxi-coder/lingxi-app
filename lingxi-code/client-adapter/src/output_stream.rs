@@ -215,6 +215,10 @@ impl AdapterOutputStream {
 
 #[async_trait]
 impl OutputStream for AdapterOutputStream {
+    async fn emit_task_lifecycle(&self, event: &serde_json::Value) {
+        self.sink.emit(ClientEvent::TaskLifecycle { event_json: event.to_string() }).await;
+    }
+
     async fn emit_text(&self, text: &str) {
         let mut blocks = self.message_blocks.lock().await;
         if let Some(MessageBlockDto::Text { text: current }) = blocks.last_mut() {
@@ -547,6 +551,15 @@ mod tests {
     use crate::test_support::MockSink;
 
     /// `emit_text` → exactly one `TextDelta` carrying the payload verbatim.
+    #[tokio::test]
+    async fn task_lifecycle_reaches_client_event_sink() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let event = serde_json::json!({"type":"system", "subtype":"task_updated", "task_id":"b12345678", "patch":{"status":"completed"}});
+        stream.emit_task_lifecycle(&event).await;
+        assert_eq!(sink.events().await, vec![ClientEvent::TaskLifecycle { event_json: event.to_string() }]);
+    }
+
     #[tokio::test]
     async fn emit_text_produces_text_delta() {
         let sink = MockSink::arc();

@@ -233,10 +233,11 @@ pub struct SandboxedCommand {
     plan: Option<BackendPlanHandle>,
     background: Option<crate::process::BackgroundTaskBinding>,
     auto_background_on_timeout: bool,
+    process_owner: Option<String>,
 }
 
 /// Provenance of a [`SandboxedCommand`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SandboxedTag {
     /// Command was wrapped by a real sandbox backend.
     Wrapped {
@@ -252,6 +253,13 @@ pub enum SandboxedTag {
 }
 
 impl SandboxedCommand {
+    /// Attribute this OS process group to the subagent that launched it.
+    #[must_use]
+    pub fn with_process_owner(mut self, owner: Option<String>) -> Self { self.process_owner = owner; self }
+    /// The subagent owning this command's process group.
+    #[must_use]
+    pub fn process_owner(&self) -> Option<&str> { self.process_owner.as_deref() }
+
     /// INTERNAL constructor for [`Sandbox`] implementations.
     ///
     /// Only [`Sandbox::prepare`] and [`Sandbox::bypass_with_audit`] impls
@@ -267,6 +275,7 @@ impl SandboxedCommand {
             plan: None,
             background: None,
             auto_background_on_timeout: true,
+            process_owner: None,
         }
     }
 
@@ -286,6 +295,7 @@ impl SandboxedCommand {
             plan: Some(plan),
             background: None,
             auto_background_on_timeout: true,
+            process_owner: None,
         }
     }
 
@@ -297,10 +307,7 @@ impl SandboxedCommand {
     /// registry records, and the file the child writes to as ONE identity
     /// (claude-code mints all three together in its single shell spawn).
     #[must_use]
-    pub fn with_background_task(
-        mut self,
-        binding: crate::process::BackgroundTaskBinding,
-    ) -> Self {
+    pub fn with_background_task(mut self, binding: crate::process::BackgroundTaskBinding) -> Self {
         self.background = Some(binding);
         self
     }

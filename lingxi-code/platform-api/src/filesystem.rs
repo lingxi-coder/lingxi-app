@@ -32,6 +32,25 @@ impl FileSystemCacheIdentity {
     }
 }
 
+/// Which phase of an append failed. An open failure retains queued output;
+/// a write failure may have consumed bytes and cannot safely replay the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileAppendStage {
+    /// No payload write was attempted.
+    Open,
+    /// Payload write was attempted and may have partially succeeded.
+    Write,
+}
+
+/// Append failure with its observable consumption phase.
+#[derive(Debug)]
+pub struct FileAppendError {
+    /// Failed phase.
+    pub stage: FileAppendStage,
+    /// Underlying filesystem failure.
+    pub error: FsError,
+}
+
 /// Sandboxed read/write access to the workspace.
 ///
 /// Engine and tool code receive an `Arc<dyn FileSystem>` rather than calling
@@ -89,6 +108,20 @@ pub trait FileSystem: Send + Sync {
         &self,
         dir: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = FileEvent> + Send>>, FsError>;
+
+    /// Append with open/write distinction for a retrying task-output queue.
+    /// Compatibility adapters conservatively classify errors as writes; native
+    /// implementations override this to prove that open failures consumed nothing.
+    async fn append_file_rooted_staged(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        expected: Option<&crate::rooted_fs::RootIdentity>,
+    ) -> Result<(), FileAppendError> {
+        self.append_file_rooted_no_follow_pinned(root, relative, content, expected)
+            .await.map_err(|error| FileAppendError { stage: FileAppendStage::Write, error })
+    }
 
     /// Append `content` to `path`, creating the file if it does not exist.
     ///
@@ -256,6 +289,15 @@ pub trait FileSystem: Send + Sync {
     ) -> Result<FileContent, FsError> {
         self.read_file_rooted_no_follow_window(root, relative, offset, limit)
             .await
+    }
+
+    /// Read a bounded byte window for task-output deltas. Physical platforms
+    /// override this with seek/read; virtual filesystems preserve their backend.
+    async fn read_file_rooted_byte_window_pinned(&self, root: &Path, relative: &Path, expected: Option<&crate::rooted_fs::RootIdentity>, offset: u64, limit: u64) -> Result<Vec<u8>, FsError> {
+        let content = self.read_file_rooted_no_follow_window_pinned(root, relative, None, None, expected).await?.content;
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(content.len());
+        let end = start.saturating_add(usize::try_from(limit).unwrap_or(usize::MAX)).min(content.len());
+        Ok(content.as_bytes()[start..end].to_vec())
     }
 
     /// Atomically replace a file addressed relative to a trusted `root`,

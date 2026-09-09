@@ -360,6 +360,12 @@ impl tool_api::Tool for PromptAgentTool {
 ///    Those two cases therefore changed wholesale (10_449 -> 10_204 and
 ///    9_755 -> 10_206), not by 4 bytes.
 ///
+/// THIRD MOVE, 2026-09-07 — Fable identity (`nss`) aligned to Claude Code
+/// 2.1.263. `FABLE_IDENTITY_SECTION` grew 241 bytes (Glasswing / platform-docs
+/// rewrite replaced by the binary paragraph + anthropic.com/claude/fable).
+/// Only `claude-fable-5-1` (10_204 -> 10_445) and `claude-mythos-5-1`
+/// (10_206 -> 10_447) moved.
+///
 /// Nothing outside `main` contributed: the only non-test edit under
 /// `orchestrator/src/prompt/` that is not on `main` is `task_notification.rs`,
 /// a module `assemble_system_prompt` (prompt/mod.rs) never calls. When a future
@@ -379,8 +385,8 @@ fn production_prompt_bodies_match_normalized_2_1_238_manifests() {
     let cases = [
         (
             "claude-fable-5-1",
-            10_204,
-            "f79eca286b15dbe26ff7ca7859915f401a10e6cb02d5cd3fdb482a7f28ff1ee2",
+            10_445,
+            "7e1b337d4a2d3ca13eaaba084a0a6a3b68e5dc1801d203c0ba5c5df5d5af0601",
         ),
         (
             "claude-haiku-4-5-20251001",
@@ -389,8 +395,8 @@ fn production_prompt_bodies_match_normalized_2_1_238_manifests() {
         ),
         (
             "claude-mythos-5-1",
-            10_206,
-            "47789ec1aacaff7191eb00e77718191a172428cb1f4b9b36aa0386196404563b",
+            10_447,
+            "c59056333e9ccbbe6547a8e9cd9bc51bf33a479d5aae7f603c6841abfc0d8d63",
         ),
         (
             "claude-opus-4-5",

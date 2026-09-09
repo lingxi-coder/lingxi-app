@@ -123,7 +123,9 @@ impl PermissionView {
     /// keyboard, so nothing else would ever clear it.
     #[must_use]
     pub fn is_asker_gone(&self) -> bool {
-        self.resp_tx.as_ref().is_some_and(oneshot::Sender::is_closed)
+        self.resp_tx
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed)
     }
 
     /// Build the prompt for `exchange` (dialog shape mirrors the request

@@ -343,6 +343,7 @@ impl ToolInvoker for RegistryToolInvoker {
             // a gate that only overrides `check_with_worker` (or `check`) is
             // unchanged. Behavior is identical when `updated_input` is `None`.
             let check_ctx = platform_api::permission_gate::PermissionCheckContext {
+                pause_observer: ctx.permission_pause_observer.clone(),
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
                 requires_user_interaction: tool.requires_user_interaction(),
@@ -918,6 +919,7 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    permission_pause_observer: None,
                     parent_agent_id: None,
                     origin_session_id: Some(origin_session_id),
                     agent_name: Some("researcher".to_string()),
@@ -1097,6 +1099,7 @@ mod tests {
 
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             agent_name: None,
@@ -1283,6 +1286,7 @@ mod tests {
 
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             agent_name: Some("researcher".to_string()),
@@ -1424,6 +1428,7 @@ mod tests {
 
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             agent_name: Some("researcher".to_string()),
@@ -1460,11 +1465,14 @@ mod tests {
             },
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let pause = platform_api::permission_gate::PermissionPauseObserver::new(|_| {});
+        let mut invocation_context = ctx_with_tool_use_id("toolu_abc123");
+        invocation_context.permission_pause_observer = Some(pause.clone());
         invoker
             .invoke(
                 "TestEcho",
                 json!({ "a": 1 }),
-                ctx_with_tool_use_id("toolu_abc123"),
+                invocation_context,
             )
             .await
             .expect("allow dispatches");
@@ -1478,6 +1486,7 @@ mod tests {
             Some("toolu_abc123"),
             "the dispatching call's real tool_use_id reaches PermissionCheckContext.tool_use_id"
         );
+        assert_eq!(ctx.pause_observer, Some(pause), "real worker pause sink must reach the transport");
         assert!(!ctx.requires_user_interaction);
         let worker = ctx
             .worker

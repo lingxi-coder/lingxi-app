@@ -297,6 +297,8 @@ pub struct BackgroundLaunchSpec {
     /// Older launch specs omit it and resume with an empty composer/queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<platform_api::BackgroundingSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shell_handoff: Vec<platform_api::shell_handoff::ShellTaskHandoff>,
     pub options: BackgroundLaunchOptions,
     /// Allowlisted environment inherited by the PTY child. `launch.json` is
     /// owner-only because this map may contain provider credentials.
@@ -475,6 +477,102 @@ pub fn write_launch_spec(
         AtomicWriteOptions::default(),
     )
     .map_err(rooted_error_to_io)
+}
+
+/// Cross-process shell ownership acknowledgement. Each phase has a separate
+/// file so a failed prepare cannot overwrite a committed ownership decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ShellHandoffAck {
+    pub task_ids: Vec<String>,
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ShellHandoffSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ShellHandoffSource {
+    pub pid: i32,
+    pub process_start: String,
+}
+
+fn shell_ack_file(phase: &str) -> std::io::Result<String> {
+    if !matches!(phase, "intent" | "ready" | "commit" | "adopted" | "abort") {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "invalid shell handoff phase",
+        ));
+    }
+    Ok(format!("shell-handoff-{phase}.json"))
+}
+
+pub(crate) fn write_shell_handoff_ack(
+    home: &Path,
+    short: &str,
+    phase: &str,
+    ack: &ShellHandoffAck,
+) -> std::io::Result<()> {
+    validate_short(short)?;
+    let file = shell_ack_file(phase)?;
+    let body =
+        serde_json::to_vec(ack).map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
+    rooted_fs::atomic_write(
+        home,
+        &background_relative_path(short, &file),
+        &body,
+        AtomicWriteOptions::default(),
+    )
+    .map_err(rooted_error_to_io)
+}
+
+pub(crate) fn read_shell_handoff_ack(
+    home: &Path,
+    short: &str,
+    phase: &str,
+) -> std::io::Result<Option<ShellHandoffAck>> {
+    validate_short(short)?;
+    let file = shell_ack_file(phase)?;
+    let relative = background_relative_path(short, &file);
+    let body = match rooted_fs::read_to_string_limited(home, &relative, MAX_LAUNCH_SPEC_BYTES)
+        .map_err(rooted_error_to_io)
+    {
+        Ok(body) => body,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata =
+        validate_private_regular_path(&home.join(&relative), "shell handoff acknowledgement")?;
+    reject_insecure_mode(&metadata, "shell handoff acknowledgement")?;
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|error| Error::new(ErrorKind::InvalidData, error))
+}
+
+pub(crate) async fn wait_shell_handoff_ack(
+    home: &Path,
+    short: &str,
+    phase: &str,
+) -> std::io::Result<ShellHandoffAck> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(abort) = read_shell_handoff_ack(home, short, "abort")? {
+            return Err(Error::new(
+                ErrorKind::Interrupted,
+                abort
+                    .error
+                    .unwrap_or_else(|| "shell handoff aborted".into()),
+            ));
+        }
+        if let Some(ack) = read_shell_handoff_ack(home, short, phase)? {
+            return Ok(ack);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::new(
+                ErrorKind::TimedOut,
+                format!("shell handoff {phase} acknowledgement timed out"),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 /// Read and validate an owner-controlled launch spec. Symlinks and
@@ -719,6 +817,7 @@ fn from_legacy_dispatch(
             .initial_prompt
             .clone()
             .filter(|prompt| !prompt.trim().is_empty()),
+        shell_handoff: Vec::new(),
         handoff: None,
         options,
         env: dispatch.env.clone(),
@@ -833,6 +932,7 @@ mod tests {
             worktree_path: None,
             worktree_ownership_token: None,
             initial_prompt: Some("hello".to_string()),
+            shell_handoff: Vec::new(),
             handoff: None,
             options: BackgroundLaunchOptions {
                 model: Some("test-model".to_string()),
@@ -1476,5 +1576,42 @@ mod tests {
             after, before,
             "worker-side migration must not rewrite roster"
         );
+    }
+    #[tokio::test]
+    async fn shell_handoff_acknowledgements_are_phase_scoped_and_abort_wakes_waiter() {
+        let home = tempfile::tempdir().unwrap();
+        let short = "cafe1234";
+        let ready = ShellHandoffAck {
+            source: None,
+            task_ids: vec!["b12345678".into()],
+            error: None,
+        };
+        write_shell_handoff_ack(home.path(), short, "ready", &ready).unwrap();
+        assert_eq!(
+            wait_shell_handoff_ack(home.path(), short, "ready")
+                .await
+                .unwrap(),
+            ready
+        );
+        assert!(read_shell_handoff_ack(home.path(), short, "commit")
+            .unwrap()
+            .is_none());
+        write_shell_handoff_ack(
+            home.path(),
+            short,
+            "abort",
+            &ShellHandoffAck {
+                source: None,
+                task_ids: Vec::new(),
+                error: Some("source kept ownership".into()),
+            },
+        )
+        .unwrap();
+        let error = wait_shell_handoff_ack(home.path(), short, "commit")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Interrupted);
+        assert!(write_shell_handoff_ack(home.path(), "../escape", "ready", &ready).is_err());
+        assert!(write_shell_handoff_ack(home.path(), short, "../escape", &ready).is_err());
     }
 }

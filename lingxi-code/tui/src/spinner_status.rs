@@ -84,7 +84,11 @@ pub(crate) fn format_number(n: u64) -> String {
 /// `↓` while receiving (any response/thinking delta seen, or a tool running).
 #[must_use]
 pub(crate) fn mode_arrow(receiving: bool) -> &'static str {
-    if receiving { ARROW_DOWN } else { ARROW_UP }
+    if receiving {
+        ARROW_DOWN
+    } else {
+        ARROW_UP
+    }
 }
 
 /// Build the trailing status parenthetical for the spinner: `"(5s)"` early, or

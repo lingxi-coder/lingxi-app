@@ -23,7 +23,7 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 
-use platform_api::task_registry::MonitorRegistration;
+use platform_api::task_registry::{MonitorRegistration, WebSocketMonitorRegistration};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -127,6 +127,80 @@ Stdout lines within 200ms are batched into a single notification, so multiline o
 
 The script runs in the same shell environment as Bash. Exit ends the watch (exit code is reported). Timeout → killed. Set `persistent: true` for session-length watches (PR monitoring, log tails) — the monitor runs until you call TaskStop or the session ends. Use TaskStop to cancel early."#;
 
+const WS_DESCRIPTION: &str = r#"
+**ws source** — open a WebSocket and stream each incoming text frame as an event. No shell, no polling: the server pushes, you get notified.
+
+  Monitor({
+    ws: {url: 'wss://events.example.com/stream', protocols: ['v1']},
+    description: 'deploy events',
+  })
+
+Each text frame becomes one notification (multiline frames stay as one event). Binary frames are reported as `[binary frame, N bytes]` rather than passed through. Socket close ends the watch with the close code surfaced; errors are surfaced before close. Same rate limiting as bash — a firehose will be suppressed and eventually stopped, so subscribe to a filtered feed where one exists.
+
+Prefer this over `command: 'websocat wss://…'` — it avoids the extra process and line-buffering pitfalls. Use bash when you need to transform or filter frames with shell tools before they become events."#;
+
+fn websocket_host(ws: &Value) -> Result<String, ValidationError> {
+    let invalid = || {
+        ValidationError(
+            "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace".into(),
+        )
+    };
+    let raw = ws.get("url").and_then(Value::as_str).ok_or_else(invalid)?;
+    if !raw.is_ascii() || raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(invalid());
+    }
+    let rest = raw
+        .strip_prefix("wss://")
+        .or_else(|| raw.strip_prefix("ws://"))
+        .ok_or_else(invalid)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return Err(invalid());
+    }
+    let host = if let Some(ipv6) = authority.strip_prefix('[') {
+        let (host, suffix) = ipv6.split_once(']').ok_or_else(invalid)?;
+        host.parse::<std::net::Ipv6Addr>().map_err(|_| invalid())?;
+        if !suffix.is_empty()
+            && suffix
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .is_none()
+        {
+            return Err(invalid());
+        }
+        host
+    } else {
+        let (host, port) = authority
+            .split_once(':')
+            .map_or((authority, None), |(h, p)| (h, Some(p)));
+        if host.is_empty() || port.is_some_and(|p| p.parse::<u16>().is_err()) || host.contains('%')
+        {
+            return Err(invalid());
+        }
+        host
+    };
+    if let Some(protocols) = ws.get("protocols") {
+        let values = protocols
+            .as_array()
+            .ok_or_else(|| ValidationError("protocols must be an array".into()))?;
+        let mut seen = std::collections::HashSet::new();
+        for value in values {
+            let token = value.as_str().unwrap_or("");
+            if token.is_empty()
+                || !token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+            {
+                return Err(ValidationError("protocol must be an RFC 6455 token".into()));
+            }
+            if !seen.insert(token) {
+                return Err(ValidationError("protocols must be unique".into()));
+            }
+        }
+    }
+    Ok(host.to_ascii_lowercase())
+}
+
 /// Assemble the description for the current background-tasks setting.
 fn cjr() -> String {
     let disabled = platform_api::env::background_tasks_disabled();
@@ -172,7 +246,7 @@ fn amber_sentinel_enabled() -> bool {
 ///
 /// NOT unconditional: on Windows the tool is withdrawn unless a bash can be
 /// found. `_1()` is the Git-Bash discovery the Bash tool already ports as
-/// [`tool_shell::bash::git_bash_path`], so this reuses it instead of repeating
+/// [`platform_api::shell_support::git_bash_path`], so this reuses it instead of repeating
 /// the probe order (env override → Program Files → git-on-PATH). Every other
 /// platform answers `true`, which is why the previous unconditional `true` was
 /// right everywhere except a Windows host with no Git Bash — there it offered a
@@ -181,7 +255,7 @@ fn shell_available() -> bool {
     if !cfg!(windows) {
         return true;
     }
-    tool_shell::bash::git_bash_path().is_some()
+    platform_api::shell_support::git_bash_path().is_some()
 }
 
 /// Binary `Mnl` (`applyCcrTimeoutCap`): under `LINGXI_REMOTE` a persistent
@@ -223,9 +297,19 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "command": {
                 "type": "string",
                 "description": "Shell command or script. Each stdout line is an event; exit ends the watch."
+            },
+            "ws": {
+                "type": "object", "additionalProperties": false,
+                "properties": {
+                    "url": {"type": "string"},
+                    "protocols": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+                },
+                "required": ["url"],
+                "description": "WebSocket to open. Each text frame is an event; binary frames are reported as a placeholder line. Socket close ends the watch. Cannot be combined with command."
             }
         },
-        "required": ["description", "command"]
+        "required": ["description"],
+        "oneOf": [{"required": ["command"]}, {"required": ["ws"]}]
     })
 });
 
@@ -251,6 +335,7 @@ impl MonitorTool {
     /// Construct the tool over the builtin context.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
+        tool_api::builtin_context::install_shell_discovery_logging();
         Self { ctx }
     }
 }
@@ -262,7 +347,7 @@ impl Tool for MonitorTool {
     }
 
     fn search_hint(&self) -> Option<&str> {
-        Some("watch, monitor, or keep an eye on a process/log/command — stream each stdout line as a live notification")
+        Some("watch, monitor, or keep an eye on a process/log/command or WebSocket — stream each stdout line as a live notification")
     }
 
     fn user_facing_name(&self) -> Option<&str> {
@@ -305,6 +390,16 @@ impl Tool for MonitorTool {
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
+        let command_present = input
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|c| !c.is_empty());
+        if command_present == input.get("ws").is_some() {
+            return Err(ValidationError("exactly one of command or ws".into()));
+        }
+        if let Some(ws) = input.get("ws") {
+            websocket_host(ws)?;
+        }
         let command = input.get("command").and_then(Value::as_str).unwrap_or("");
         // Binary `fVp` refine (`mVp`): reject control chars hidden in the approval dialog.
         if command
@@ -333,7 +428,75 @@ impl Tool for MonitorTool {
         Ok(())
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        if let Some(ws) = input.get("ws") {
+            let host = match websocket_host(ws) {
+                Ok(host) => host,
+                Err(error) => {
+                    return PermissionResult::Deny {
+                        reason: PermissionDecisionReason::Other {
+                            reason: error.0.clone(),
+                        },
+                        explanation: Some(error.0),
+                        metadata: PermissionMetadata::default(),
+                    }
+                }
+            };
+            if host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| !platform_api::http::is_public_monitor_address(ip))
+            {
+                return PermissionResult::Deny {
+                    reason: PermissionDecisionReason::Other { reason: "SSRF-blocked address range".into() },
+                    explanation: Some(format!("Monitor cannot open a WebSocket to {host}: the address is in a private, link-local, or cloud-metadata range.")),
+                    metadata: PermissionMetadata::default(),
+                };
+            }
+            let policy = self.ctx.effective_sandbox_runtime().network;
+            let matches = |domain: &String| {
+                domain == "*"
+                    || domain == &host
+                    || domain
+                        .strip_prefix("*.")
+                        .is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
+            };
+            if policy.denied_domains.iter().any(matches)
+                || (policy.allow_managed_domains_only
+                    && !policy.allowed_domains.iter().any(matches))
+            {
+                return PermissionResult::Deny {
+                    reason: PermissionDecisionReason::Other {
+                        reason: "sandbox network policy".into(),
+                    },
+                    explanation: Some(format!(
+                        "Monitor cannot open a WebSocket to {host}: denied by network policy."
+                    )),
+                    metadata: PermissionMetadata::default(),
+                };
+            }
+            let suffix = ws
+                .get("protocols")
+                .and_then(Value::as_array)
+                .filter(|protocols| !protocols.is_empty())
+                .map(|protocols| format!(" (subprotocols: {})", json!(protocols)))
+                .unwrap_or_default();
+            let message = format!(
+                "Monitor will open a WebSocket to {}{suffix}",
+                ws["url"].as_str().unwrap_or("")
+            );
+            return PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other {
+                    reason: message.clone(),
+                },
+                prompt: permission::result::PermissionPrompt {
+                    title: "Monitor".into(),
+                    message,
+                    options: vec!["Allow".into(), "Deny".into()],
+                },
+                pending_classifier_check: None,
+                metadata: PermissionMetadata::default(),
+            };
+        }
         // The oracle routes a command-Monitor through the FULL Bash resolver
         // (`Lon({...e,command},t)`). In the port that routing lives in the
         // PERMISSION GATE, which rewrites the effective tool name "Monitor"→"Bash"
@@ -353,12 +516,12 @@ impl Tool for MonitorTool {
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
         // PARITY: `description(){return cJr+lJr()}`.
-        format!("{}{}", cjr(), ljr())
+        format!("{}{}{}", cjr(), WS_DESCRIPTION, ljr())
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
         // PARITY: `prompt(){return cJr+lJr()}` (identical to description).
-        format!("{}{}", cjr(), ljr())
+        format!("{}{}{}", cjr(), WS_DESCRIPTION, ljr())
     }
 
     async fn call(
@@ -384,6 +547,58 @@ impl Tool for MonitorTool {
         // PARITY: `Mnl(t)` — CCR timeout cap.
         let (timeout_ms, persistent) =
             apply_ccr_timeout_cap(requested_timeout, requested_persistent);
+
+        if let Some(ws) = input.get("ws") {
+            websocket_host(ws).map_err(|error| ToolError::InvalidInput(error.0))?;
+            if input.get("command").is_some() {
+                return Err(ToolError::InvalidInput(
+                    "exactly one of command or ws".into(),
+                ));
+            }
+            let registry = self.ctx.task_registry.as_ref().ok_or_else(|| {
+                ToolError::Internal("Monitor: task registry is not configured".into())
+            })?;
+            self.ctx
+                .http
+                .preflight_monitor_websocket(ws["url"].as_str().unwrap_or_default())
+                .await
+                .map_err(|error| ToolError::InvalidInput(format!("Monitor: {error}")))?;
+            let timeout_field = if persistent { 0 } else { timeout_ms };
+            let task_id = registry
+                .spawn_websocket_monitor(
+                    WebSocketMonitorRegistration {
+                        url: ws["url"].as_str().unwrap_or_default().into(),
+                        protocols: ws
+                            .get("protocols")
+                            .and_then(Value::as_array)
+                            .map(|v| {
+                                v.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        task: MonitorRegistration {
+                            description,
+                            timeout_ms: timeout_field,
+                            persistent,
+                            tool_use_id: ctx.tool_use_id.map(|id| id.to_string()),
+                            creator_teammate_name: ctx.agent_name,
+                            creator_team_name: ctx.team_name,
+                            creator_agent_id: ctx.agent_id,
+                            ..Default::default()
+                        },
+                    },
+                    self.ctx.http.clone(),
+                )
+                .await
+                .map_err(|error| ToolError::Internal(format!("Monitor: {error}")))?;
+            return Ok(ToolCallResult {
+                data: json!({"taskId":task_id,"timeoutMs":timeout_field,"persistent":persistent}),
+                model_content: Some(format!("Monitor started (task {task_id}, {}). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply.", if persistent { "persistent — runs until TaskStop or session end".into() } else { format!("timeout {timeout_ms}ms") })),
+                is_error:false,new_messages:vec![],context_modifier:None,mcp_meta:None,
+            });
+        }
 
         let command = input
             .get("command")
@@ -447,7 +662,7 @@ impl Tool for MonitorTool {
         let spawn_command = match decision {
             sandbox::decision::SandboxDecision::NoSandbox => None,
             sandbox::decision::SandboxDecision::Sandbox { .. } => {
-                let shell = tool_shell::bash::resolve_shell_path().to_string();
+                let shell = platform_api::shell_support::resolve_shell_path().to_string();
                 match self
                     .ctx
                     .sandbox_runner
@@ -524,6 +739,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingRegistry {
+        websocket: Mutex<Option<WebSocketMonitorRegistration>>,
         monitor: Mutex<Option<MonitorRegistration>>,
     }
 
@@ -564,6 +780,14 @@ mod tests {
             unreachable!("not used by MonitorTool")
         }
 
+        async fn spawn_websocket_monitor(
+            &self,
+            reg: WebSocketMonitorRegistration,
+            _: Arc<dyn platform_api::HttpTransport>,
+        ) -> Result<String, TaskRegistryError> {
+            *self.websocket.lock().unwrap() = Some(reg);
+            Ok("s12345678".into())
+        }
         async fn spawn_monitor(
             &self,
             reg: MonitorRegistration,
@@ -624,7 +848,11 @@ mod tests {
         let mut ctx = fresh_ctx();
         ctx.cwd = Some(std::path::PathBuf::from("/definitely/not/here/monitor"));
         let recovered = t
-            .call(json!({"command": "tail -f log", "description": "d"}), ctx, fresh_tx())
+            .call(
+                json!({"command": "tail -f log", "description": "d"}),
+                ctx,
+                fresh_tx(),
+            )
             .await;
         assert!(
             recovered.is_ok(),
@@ -659,14 +887,16 @@ mod tests {
         let mut ctx = fresh_ctx();
         ctx.cwd = Some(std::path::PathBuf::from("/definitely/not/here/monitor"));
         let err = t
-            .call(json!({"command": "tail -f log", "description": "d"}), ctx, fresh_tx())
+            .call(
+                json!({"command": "tail -f log", "description": "d"}),
+                ctx,
+                fresh_tx(),
+            )
             .await
             .expect_err("a monitor with no usable cwd must be refused");
         let message = format!("{err}");
         assert!(
-            message.contains(
-                "no longer exists. Please restart Claude from an existing directory."
-            ),
+            message.contains("no longer exists. Please restart Claude from an existing directory."),
             "byte-exact upstream copy, got: {message}"
         );
         // The telemetry label must NOT reach the model.
@@ -692,7 +922,14 @@ mod tests {
         let t = tool();
 
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
-        let enabled = t.description(&json!({}), &DescriptionOptions { is_non_interactive_session: false }).await;
+        let enabled = t
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
         assert!(enabled.contains(
             "use **Bash with `run_in_background`** and a command that exits when the condition is true"
         ));
@@ -702,7 +939,14 @@ mod tests {
         assert!(!enabled.contains("foreground with Bash"));
 
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
-        let disabled = t.description(&json!({}), &DescriptionOptions { is_non_interactive_session: false }).await;
+        let disabled = t
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
         assert!(disabled.contains(
             "run the command in the **foreground with Bash**, exiting when the condition is true"
         ));
@@ -744,7 +988,9 @@ mod tests {
             },
         ));
         assert!(d.starts_with("Start a background monitor that streams events"));
-        assert!(d.trim_end().ends_with("Use TaskStop to cancel early."));
+        assert!(d.contains("Use TaskStop to cancel early."));
+        assert!(d.contains("**ws source**"));
+        assert!(d.trim_end().ends_with("Use bash when you need to transform or filter frames with shell tools before they become events."));
         // Yke() off by default → no lJr splice.
         assert!(!d.contains("send a PushNotification"));
     }
@@ -786,10 +1032,8 @@ mod tests {
     async fn a_monitor_command_is_wrapped_by_the_shared_sandbox_decision() {
         let _g = guard();
         let registry = Arc::new(RecordingRegistry::default());
-        let monitor_cwd = std::env::temp_dir().join(format!(
-            "lingxi-monitor-sbx-{}",
-            std::process::id()
-        ));
+        let monitor_cwd =
+            std::env::temp_dir().join(format!("lingxi-monitor-sbx-{}", std::process::id()));
         std::fs::create_dir_all(&monitor_cwd).expect("create the monitor cwd");
 
         let spawn_command_for = |available: bool| {
@@ -847,10 +1091,8 @@ mod tests {
         // A REAL directory: the pre-spawn guard recovers a cwd that does not
         // exist, so a fictitious path here would silently assert the wrong
         // thing.
-        let monitor_cwd = std::env::temp_dir().join(format!(
-            "lingxi-monitor-cwd-{}",
-            std::process::id()
-        ));
+        let monitor_cwd =
+            std::env::temp_dir().join(format!("lingxi-monitor-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&monitor_cwd).expect("create the monitor cwd");
         call_ctx.cwd = Some(monitor_cwd.clone());
         call_ctx.tool_use_id = Some(protocol::ToolUseId::new());
@@ -932,5 +1174,92 @@ mod tests {
             )
             .await
             .is_ok());
+    }
+    #[tokio::test]
+    async fn websocket_schema_validation_permission_and_dispatch_are_connected() {
+        let _g = guard();
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut context = shell_test_ctx(dummy_out());
+        context.task_registry = Some(registry.clone());
+        context.http = Arc::new(PreflightHttp { allow: true });
+        let t = MonitorTool::new(context);
+        let input = json!({"ws":{"url":"wss://events.example.com/feed","protocols":["v1"]},"description":"deploy","persistent":true});
+        t.validate_input(&input, &fresh_ctx()).await.unwrap();
+        assert!(matches!(
+            t.check_permissions(&input, &fresh_ctx()).await,
+            PermissionResult::Ask { .. }
+        ));
+        let result = t.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
+        assert_eq!(result.data["taskId"], "s12345678");
+        let reg = registry.websocket.lock().unwrap().clone().unwrap();
+        assert_eq!(reg.url, "wss://events.example.com/feed");
+        assert_eq!(reg.protocols, vec!["v1"]);
+        assert!(reg.task.persistent);
+        assert_eq!(reg.task.timeout_ms, 0);
+        assert!(
+            registry.monitor.lock().unwrap().is_none(),
+            "a socket never spawns Bash"
+        );
+        for bad in [
+            json!({"description":"x"}),
+            json!({"description":"x","command":"echo hi","ws":{"url":"wss://example.com"}}),
+            json!({"description":"x","ws":{"url":"https://example.com"}}),
+            json!({"description":"x","ws":{"url":"wss://u:p@example.com"}}),
+            json!({"description":"x","ws":{"url":"wss://example.com","protocols":["v1","v1"]}}),
+        ] {
+            assert!(t.validate_input(&bad, &fresh_ctx()).await.is_err(), "{bad}");
+        }
+        assert!(matches!(
+            t.check_permissions(&json!({"ws":{"url":"ws://169.254.169.254"}}), &fresh_ctx())
+                .await,
+            PermissionResult::Deny { .. }
+        ));
+    }
+    struct PreflightHttp {
+        allow: bool,
+    }
+    #[async_trait]
+    impl platform_api::HttpTransport for PreflightHttp {
+        async fn request(
+            &self,
+            _: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            unreachable!()
+        }
+        async fn stream_sse(
+            &self,
+            _: protocol::HttpRequest,
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            unreachable!()
+        }
+        async fn preflight_monitor_websocket(
+            &self,
+            _: &str,
+        ) -> Result<(), platform_api::HttpError> {
+            if self.allow {
+                Ok(())
+            } else {
+                Err(platform_api::HttpError::InvalidRequest(
+                    "DNS resolved private address".into(),
+                ))
+            }
+        }
+    }
+    #[tokio::test]
+    async fn websocket_dns_refusal_never_registers_a_task() {
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut context = shell_test_ctx(dummy_out());
+        context.task_registry = Some(registry.clone());
+        context.http = Arc::new(PreflightHttp { allow: false });
+        let tool = MonitorTool::new(context);
+        let result = tool
+            .call(
+                json!({"ws":{"url":"wss://internal.example.com"},"description":"x"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(registry.websocket.lock().unwrap().is_none());
     }
 }

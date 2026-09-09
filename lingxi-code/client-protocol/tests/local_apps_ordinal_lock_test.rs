@@ -122,13 +122,8 @@ const APP_EVENT_DTO_ORDINALS_AT_12_0_0: &[&str] = &[
 /// `Unavailable`. (It does have a producer now,
 /// `apps/engine-mobile/src/local_apps_host.rs:2016-2036`, but this lock does
 /// not depend on that and must outlive it.)
-const LOCAL_APP_VERIFICATION_STATUS_DTO_ORDINALS_AT_12_0_0: &[&str] = &[
-    "Pending",
-    "Passed",
-    "Failed",
-    "Unverified",
-    "Unavailable",
-];
+const LOCAL_APP_VERIFICATION_STATUS_DTO_ORDINALS_AT_12_0_0: &[&str] =
+    &["Pending", "Passed", "Failed", "Unverified", "Unavailable"];
 
 /// `LocalAppCreateConfirmationRequestDto`'s fields in declaration order as of
 /// the 12.0.0 bless (`0c313e1b9`), minus the `receipt` field removed by
@@ -447,7 +442,8 @@ fn the_local_app_ordinal_locks_fire_against_a_mutated_copy_of_the_real_source() 
         LOCAL_APP_CREATE_CONFIRMATION_REQUEST_DTO_FIELDS_AT_12_0_0,
     );
     assert!(
-        message.contains("fewer than the") && message.contains("LocalAppCreateConfirmationRequestDto"),
+        message.contains("fewer than the")
+            && message.contains("LocalAppCreateConfirmationRequestDto"),
         "removing the last field must be reported as a member count shortfall, by type name; \
          got: {message}"
     );

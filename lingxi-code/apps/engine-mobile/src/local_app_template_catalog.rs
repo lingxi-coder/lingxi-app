@@ -623,8 +623,10 @@ mod tests {
         let second_duplicate = issue_selector_capability(root.path(), app_id, run_id);
         assert_eq!(
             second_duplicate,
-            Err("selector_capability_exists: create run already has a selector capability"
-                .to_string()),
+            Err(
+                "selector_capability_exists: create run already has a selector capability"
+                    .to_string()
+            ),
             "the rotation must leave exactly one live token behind, got {second_duplicate:?}"
         );
     }

@@ -31,6 +31,7 @@ fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
         "monitor" | "monitor_ws" => TaskType::Monitor,
         "mcp_task" => TaskType::McpTask,
         "dream" => TaskType::Dream,
+        "auto_mode_scan" => TaskType::AutoModeScan,
         "local_fusion" => TaskType::LocalFusion,
         other => {
             return Err(TaskRegistryError::InvalidInput(format!(
@@ -51,6 +52,7 @@ pub(crate) fn task_type_to_wire(t: TaskType) -> &'static str {
         TaskType::Monitor => "monitor_ws",
         TaskType::McpTask => "mcp_task",
         TaskType::Dream => "dream",
+        TaskType::AutoModeScan => "auto_mode_scan",
         TaskType::LocalFusion => "local_fusion",
     }
 }
@@ -82,7 +84,7 @@ pub(crate) fn status_to_wire(s: TaskStatus) -> &'static str {
     }
 }
 
-fn state_to_record(s: &TaskState) -> TaskRecord {
+pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
     let b = s.base();
     let started_at_ms = b
         .start_time
@@ -95,7 +97,9 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
     // (`stopTask.ts:97`); every other task type reports `None`.
     let command = match s {
         TaskState::LocalBash(bash) => Some(bash.command.clone()),
-        TaskState::Monitor(monitor) => Some(monitor.command.clone()),
+        TaskState::Monitor(monitor) if b.task_type == TaskType::LocalBash => {
+            Some(monitor.command.clone())
+        }
         _ => None,
     };
     // Per-task-type extras consumed by the `Stop` / `SubagentStop` hook
@@ -171,6 +175,33 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         _ => None,
     };
     TaskRecord {
+        completed_agent_visible: false,
+        notified: b.notified,
+        model: match s { TaskState::LocalAgent(agent) => agent.outcome.model.clone(), _ => None },
+        effort: match s { TaskState::LocalAgent(agent) => agent.outcome.effort.clone(), _ => None },
+        is_observer: matches!(s, TaskState::LocalAgent(agent) if agent.is_observer),
+        teammate_name: if matches!(s, TaskState::InProcessTeammate(_)) {
+            b.creator_teammate_name.clone()
+        } else {
+            None
+        },
+        teammate_agent_id: if matches!(s, TaskState::InProcessTeammate(_)) {
+            b.creator_teammate_name.as_ref().map(|name| {
+                match b
+                    .creator_team_name
+                    .as_deref()
+                    .filter(|team| !team.is_empty())
+                {
+                    Some(team) => format!("{name}@{team}"),
+                    None => name.clone(),
+                }
+            })
+        } else {
+            None
+        },
+        kind: matches!(s, TaskState::Monitor(_) if b.task_type == TaskType::LocalBash)
+            .then(|| "monitor".into()),
+        is_parked: matches!(s, TaskState::LocalAgent(agent) if agent.is_parked),
         is_idle: matches!(s, TaskState::InProcessTeammate(teammate) if teammate.is_idle),
         awaiting_plan_approval: matches!(s, TaskState::InProcessTeammate(teammate) if teammate.awaiting_plan_approval && !b.status.is_terminal()),
         task_id: b.id.clone(),
@@ -187,6 +218,8 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         name,
         forked_skill_name,
         is_backgrounded,
+        is_adopted: matches!(s, TaskState::LocalBash(bash) if bash.is_adopted),
+        caller: match s { TaskState::LocalBash(bash) => bash.caller.clone(), _ => None },
         error,
         stage,
     }
@@ -277,6 +310,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         TaskType::LocalBash => TaskSpawnInput::LocalBash {
             command: String::new(),
             timeout: None,
+            tool_use_id: None,
         },
         TaskType::LocalAgent => TaskSpawnInput::LocalAgent {
             agent_id: protocol::AgentId::nil(),
@@ -347,6 +381,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             creator_team_name: None,
             creator_agent_id: None,
         },
+        TaskType::AutoModeScan => TaskSpawnInput::AutoModeScan,
         TaskType::Dream => TaskSpawnInput::Dream {
             prompt: String::new(),
             max_iterations: None,
@@ -374,6 +409,73 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
 
 #[async_trait]
 impl TaskRegistryHandle for TaskRegistry {
+    async fn send_human_task_message(&self, id: &str, message: &str) -> Result<(), TaskRegistryError> {
+        TaskRegistry::send_human_task_message(self, id, message).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+    async fn take_human_task_messages_for(&self, id: protocol::AgentId) -> Vec<String> {
+        TaskRegistry::take_human_task_messages_for(self, id).await
+    }
+    async fn begin_human_task_resume(&self, id: &str, epoch: u64) -> Result<(), TaskRegistryError> {
+        TaskRegistry::begin_human_task_resume(self, id, epoch).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+    async fn register_agent_resume_recipe(&self, id: &str, request: platform_api::SubagentSpawnRequest, inheritance: platform_api::SubagentInheritance) -> Result<(), TaskRegistryError> {
+        TaskRegistry::register_agent_resume_recipe(self, id, request, inheritance).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
+    async fn export_shell_handoff(&self) -> Result<Vec<platform_api::shell_handoff::ShellTaskHandoff>, TaskRegistryError> {
+        TaskRegistry::export_shell_handoff(self).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+    async fn prepare_shell_handoff(&self, records: &[platform_api::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> {
+        TaskRegistry::prepare_shell_handoff(self, records).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+    async fn commit_shell_handoff(&self, ids: &[String]) -> Result<Vec<String>, TaskRegistryError> {
+        TaskRegistry::commit_shell_handoff(self, ids).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+    async fn adopt_shell_handoff(&self, records: &[platform_api::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> {
+        TaskRegistry::adopt_shell_handoff(self, records).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+    async fn rollback_shell_handoff(&self, records: &[platform_api::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> {
+        TaskRegistry::rollback_shell_handoff(self, records).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+    fn add_permission_paused_ms(&self, agent_id: protocol::AgentId, milliseconds: u64) {
+        self.record_permission_pause(agent_id, milliseconds);
+    }
+
+    async fn link_agent_output(
+        &self,
+        id: &str,
+        target: &std::path::Path,
+    ) -> Result<(), TaskRegistryError> {
+        let state = self
+            .get(id)
+            .await
+            .ok_or_else(|| TaskRegistryError::NotFound(id.into()))?;
+        self.output_manager
+            .link_transcript(&state.base().output_file, target)
+            .await
+            .map_err(|e| TaskRegistryError::Internal(e.to_string()))
+    }
+
+    async fn observe_agent_activity(
+        &self,
+        request: platform_api::SubagentSpawnRequest,
+        inheritance: platform_api::SubagentInheritance,
+        observed_agent_id: protocol::AgentId,
+        digest: String,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::observe_agent_activity(self, request, inheritance, observed_agent_id, digest)
+            .await
+            .map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+    async fn task_output_directory(&self) -> Option<String> {
+        Some(
+            self.output_manager
+                .output_dir()
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
     // Per-session subagent-spawn counter (claude 2.1.212 `getTotalAgentSpawns` /
     // `incrementTotalAgentSpawns`) — delegate the trait surface the `Agent` tool
     // reads to the concrete registry's atomic counter.
@@ -428,6 +530,25 @@ impl TaskRegistryHandle for TaskRegistry {
         })
     }
 
+    async fn resolve_stop_target(
+        &self,
+        requested: &str,
+        named_agents: &[(String, String)],
+    ) -> Result<platform_api::task_registry::TaskStopResolution, TaskRegistryError> {
+        let mut canonical_names = Vec::new();
+        for (name, id) in named_agents {
+            if let Some(state) = self.get(id).await {
+                canonical_names.push((name.clone(), state.base().id.clone()));
+            }
+        }
+        let records = <Self as TaskRegistryHandle>::list(self, TaskListFilter::default()).await?;
+        Ok(crate::resolve::resolve_stop_target(
+            requested,
+            records,
+            &canonical_names,
+        ))
+    }
+
     async fn get(&self, id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
         Ok(self.get(id).await.as_ref().map(state_to_record))
     }
@@ -447,7 +568,9 @@ impl TaskRegistryHandle for TaskRegistry {
                     continue;
                 }
             }
-            out.push(state_to_record(&state));
+            let mut record = state_to_record(&state);
+            record.completed_agent_visible = self.completed_agent_visible(&record.task_id).await;
+            out.push(record);
         }
         Ok(out)
     }
@@ -529,6 +652,14 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::set_workflow_outcome(self, id, outcome).await;
     }
 
+    async fn has_live_task_loop(&self, id: &str) -> bool {
+        TaskRegistry::has_live_task_loop(self, id).await
+    }
+
+    async fn process_owners_for_task(&self, id: &str) -> Vec<String> {
+        TaskRegistry::process_owner_ids(self, id).await.into_iter().map(|id| id.to_string()).collect()
+    }
+
     async fn has_pending_teammate_departure(&self, id: &str) -> bool {
         TaskRegistry::has_pending_teammate_departure(self, id).await
     }
@@ -562,6 +693,25 @@ impl TaskRegistryHandle for TaskRegistry {
         outcome: platform_api::task_registry::AgentTerminalOutcome,
     ) {
         TaskRegistry::set_agent_outcome(self, id, outcome).await;
+    }
+
+    async fn spawn_websocket_monitor(
+        &self,
+        registration: platform_api::task_registry::WebSocketMonitorRegistration,
+        http: std::sync::Arc<dyn platform_api::HttpTransport>,
+    ) -> Result<String, TaskRegistryError> {
+        let description = registration.task.description.clone();
+        TaskRegistry::spawn(
+            self,
+            TaskType::Monitor,
+            TaskSpawnInput::MonitorWs(crate::task_trait::WebSocketMonitorInput {
+                registration,
+                http,
+            }),
+            description,
+        )
+        .await
+        .map_err(task_err_to_registry_err)
     }
 
     async fn spawn_monitor(&self, reg: MonitorRegistration) -> Result<String, TaskRegistryError> {
@@ -610,6 +760,10 @@ impl TaskRegistryHandle for TaskRegistry {
         )
         .await
         .map_err(task_err_to_registry_err)
+    }
+
+    async fn settle_mcp_task_with_hint(&self, id: &str, text: &str, failed: bool, saved_hint: Option<&str>) -> Result<bool, TaskRegistryError> {
+        TaskRegistry::settle_mcp_task_with_hint(self,id,text,failed,saved_hint).await.map_err(task_err_to_registry_err)
     }
 
     async fn settle_mcp_task(
@@ -677,9 +831,16 @@ impl TaskRegistryHandle for TaskRegistry {
         // (matching the TS shape, where only `local_agent` adds these keys).
         let (error, prompt, result) = match &state {
             TaskState::LocalAgent(a) => {
-                let clean = agent_content_from_spool(&out.content)
-                    .map(|content| extract_text_content(&content))
-                    .filter(|s| !s.is_empty());
+                let clean = a
+                    .outcome
+                    .result
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        agent_content_from_spool(&out.content)
+                            .map(|content| extract_text_content(&content))
+                            .filter(|s| !s.is_empty())
+                    });
                 (a.error.clone(), Some(a.prompt.clone()), clean)
             }
             _ => (None, None, None),
@@ -711,7 +872,29 @@ impl TaskRegistryHandle for TaskRegistry {
             }
             _ => None,
         };
+        let harness_head = match &state {
+            TaskState::LocalAgent(agent) if status != TaskStatus::Killed => {
+                agent.outcome.max_turns_reached.map(|limit| {
+                    platform_api::subagent_output::max_turns_harness_note(
+                        limit,
+                        &agent.subagent_type,
+                        result.as_ref().is_some_and(|text| !text.is_empty()),
+                    )
+                })
+            }
+            _ => None,
+        };
+        // Recheck after the filesystem await. Export fences a running shell
+        // under the task-row lock; a completion that arrived during this read
+        // must stay waiting until transfer commits or rolls back. A terminal
+        // row cannot become newly exportable after this check.
+        let effective = self.output_completion_status(id).await.map_err(task_err_to_registry_err)?;
+        let waiting_for_transfer = matches!(&state, TaskState::LocalBash(_)) && effective == TaskStatus::Running;
+        let status = if waiting_for_transfer { TaskStatus::Running } else { status };
+        let done = done && !waiting_for_transfer;
+        let exit_code = if waiting_for_transfer { None } else { exit_code };
         Ok(TaskOutputChunk {
+            harness_head,
             task_id: state.base().id.clone(),
             content: out.content,
             total_lines: out.total_lines,
@@ -778,8 +961,37 @@ impl TaskRegistryHandle for TaskRegistry {
             .map_err(task_err_to_registry_err)
     }
 
+    async fn bind_background_process(&self, id: &str, pid: u32, killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>) -> Result<(), TaskRegistryError> {
+        TaskRegistry::bind_background_bash_process(self, id, Some(pid), killer).await.map_err(task_err_to_registry_err)
+    }
+
     async fn kill_background_shells_for_agent(&self, agent_id: protocol::AgentId) -> usize {
         TaskRegistry::kill_background_shells_for_agent(self, agent_id).await
+    }
+
+    async fn bind_agent_message_receiver(&self, id: &str, receiver: std::sync::Arc<dyn platform_api::task_registry::TaskMessageReceiver>) -> Result<(), TaskRegistryError> {
+        TaskRegistry::bind_agent_message_receiver(self, id, receiver).await.map_err(task_err_to_registry_err)
+    }
+
+    async fn set_agent_display(&self, id: &str, model: String, effort: Option<String>) {
+        TaskRegistry::set_agent_display(self, id, model, effort).await;
+    }
+
+    async fn register_foreground_agent(
+        &self,
+        registration: platform_api::task_registry::ForegroundAgentRegistration,
+    ) -> Result<platform_api::task_registry::ForegroundAgentHandle, TaskRegistryError> {
+        TaskRegistry::register_foreground_agent(self, registration)
+            .await
+            .map(|state| platform_api::task_registry::ForegroundAgentHandle {
+                task_id: state.base().id.clone(),
+                output_path: state.base().output_file.to_string_lossy().into_owned(),
+            })
+            .map_err(task_err_to_registry_err)
+    }
+
+    async fn unregister_foreground_agent(&self, id: &str) {
+        TaskRegistry::unregister_foreground_agent(self, id).await;
     }
 
     async fn register_foreground_bash(
@@ -826,9 +1038,52 @@ impl TaskRegistryHandle for TaskRegistry {
     async fn background_all_tasks(&self) -> usize {
         TaskRegistry::background_all_tasks(self).await
     }
+    async fn background_all_tasks_with_reason(
+        &self,
+        reason: platform_api::task_registry::TaskBackgroundReason,
+    ) -> usize {
+        TaskRegistry::background_all_tasks_with_reason(self, reason).await
+    }
 
     async fn has_backgroundable_tasks(&self) -> bool {
         TaskRegistry::has_backgroundable_tasks(self).await
+    }
+
+    async fn append_bash_output(&self, task_id: &str, content: &str) -> Result<(), TaskRegistryError> {
+        let path = self.output_manager.path_for(task_id).map_err(|error| TaskRegistryError::Internal(error.to_string()))?;
+        self.output_manager.append(&path, content).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
+    async fn finalize_persisted_output(&self, id: &str, max_bytes: u64) -> Result<Option<u64>, TaskRegistryError> {
+        let path = self.output_manager.path_for(id).map_err(|error| TaskRegistryError::Internal(error.to_string()))?;
+        self.output_manager.finalize_persisted_output(&path, max_bytes).await.map(Some).map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
+    async fn flush_bash_output(&self, task_id: &str) -> Result<(), TaskRegistryError> {
+        let path = self.output_manager.path_for(task_id).map_err(|error| TaskRegistryError::Internal(error.to_string()))?;
+        self.output_manager.flush_writer(&path).await.map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
+    fn subscribe_task_lifecycle(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>> {
+        Some(TaskRegistry::subscribe_task_lifecycle(self))
+    }
+
+    fn update_shell_session_activity(&self, interactive: bool, busy: bool, user_interaction: bool) {
+        TaskRegistry::update_shell_session_activity(self, interactive, busy, user_interaction);
+    }
+
+    async fn notify_bash_stall(&self, task_id: &str, tail: &str) {
+        TaskRegistry::notify_bash_stall(self, task_id, tail).await;
+    }
+
+    async fn claim_bash_memory_pressure_stop(&self, task_id: &str) -> bool {
+        TaskRegistry::claim_bash_memory_pressure_stop(self, task_id).await
+    }
+
+    async fn mark_shell_supervised(&self, id: &str) {
+        TaskRegistry::mark_shell_supervised(self, id).await;
     }
 
     async fn settle_background_bash(
@@ -868,6 +1123,60 @@ impl TaskRegistryHandle for TaskRegistry {
         // level (the lock is always acquirable), so the seam result is always
         // `Ok`.
         Ok(TaskRegistry::take_pending_task_notifications(self).await)
+    }
+
+    async fn park_foreground_agent(&self, agent_id: protocol::AgentId, outcome: platform_api::task_registry::AgentTerminalOutcome) -> bool {
+        TaskRegistry::park_foreground_agent(self, agent_id, outcome).await
+    }
+
+    async fn can_wake_agent_for_task_notification(&self, agent_id: protocol::AgentId) -> bool {
+        for state in TaskRegistry::list(self).await {
+            match state {
+                TaskState::LocalAgent(agent) if agent.agent_id == agent_id => {
+                    return agent.is_parked
+                }
+                TaskState::InProcessTeammate(agent) if agent.agent_id == agent_id => {
+                    return agent.is_idle
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    async fn activate_agent_for_task_notification(&self, agent_id: protocol::AgentId) {
+        for state in TaskRegistry::list(self).await {
+            let resting_owner = match &state {
+                TaskState::LocalAgent(agent) => agent.agent_id == agent_id && agent.is_parked,
+                TaskState::InProcessTeammate(agent) => agent.agent_id == agent_id && agent.is_idle,
+                _ => false,
+            };
+            if resting_owner {
+                let _ = TaskRegistry::set_status(self, &state.base().id, TaskStatus::Running).await;
+            }
+        }
+    }
+
+    async fn publish_task_stopped(&self, task_id: &str) {
+        TaskRegistry::publish_task_stopped(self, task_id).await;
+    }
+
+    fn subscribe_task_notifications(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(TaskRegistry::subscribe_task_notifications(self))
+    }
+
+    async fn has_pending_task_notifications_for(
+        &self,
+        recipient: Option<protocol::AgentId>,
+    ) -> bool {
+        TaskRegistry::has_pending_task_notifications_for(self, recipient).await
+    }
+
+    async fn take_pending_task_notifications_for(
+        &self,
+        recipient: Option<protocol::AgentId>,
+    ) -> Result<Vec<platform_api::task_registry::TaskNotification>, TaskRegistryError> {
+        Ok(TaskRegistry::take_pending_task_notifications_for(self, recipient).await)
     }
 
     fn web_search_calls(&self) -> u32 {
@@ -1060,7 +1369,7 @@ mod tests {
                 },
                 command: "tail -f build.log".into(),
                 exit_code: None,
-                            stdout_bytes: None,
+                stdout_bytes: None,
             }))
             .await;
 
@@ -1203,6 +1512,9 @@ mod tests {
                 creator_agent_id: None,
             };
             let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+                is_parked: false,
+                is_observer: false,
+                observed_agent_id: None,
                 base,
                 agent_id: protocol::AgentId::nil(),
                 subagent_type: String::new(),
@@ -1322,6 +1634,8 @@ mod tests {
         };
         registry
             .insert_state_for_test(TaskState::LocalBash(crate::state::LocalBashTaskState {
+                is_adopted: false,
+                caller: None,
                 base,
                 command: "cargo build".into(),
                 pid: None,
@@ -1414,6 +1728,8 @@ mod tests {
 
         registry
             .insert_state_for_test(TaskState::LocalBash(crate::state::LocalBashTaskState {
+                is_adopted: false,
+                caller: None,
                 base: crate::state::TaskStateBase {
                     id: "bvisible01".into(),
                     task_type: crate::id::TaskType::LocalBash,
@@ -1483,6 +1799,8 @@ mod tests {
             creator_agent_id: None,
         };
         let state = TaskState::LocalBash(crate::state::LocalBashTaskState {
+            is_adopted: false,
+            caller: None,
             base,
             command: "cargo build --release".into(),
             pid: None,
@@ -1527,6 +1845,9 @@ mod tests {
             creator_agent_id: None,
         };
         let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            is_parked: false,
+            is_observer: false,
+            observed_agent_id: None,
             base,
             agent_id: protocol::AgentId::nil(),
             subagent_type: String::new(),

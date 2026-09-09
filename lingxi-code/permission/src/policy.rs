@@ -545,11 +545,7 @@ impl PermissionPolicy {
         mode: PermissionMode,
         rules: impl IntoIterator<Item = PermissionRule>,
     ) -> Self {
-        Self::from_rules_confined(
-            mode,
-            rules,
-            platform_api::env::is_eval_confined_session(),
-        )
+        Self::from_rules_confined(mode, rules, platform_api::env::is_eval_confined_session())
     }
 
     /// [`Self::from_rules`] with the confinement flag passed in rather than read
@@ -966,11 +962,11 @@ impl PermissionPolicy {
             roots: self.roots.clone(),
             stripped_dangerous: self.stripped_dangerous.clone(),
             stripped_positions: self.stripped_positions.clone(),
-            plan_files: self.plan_files.clone(),
             additional_working_dirs,
             block_reads_outside_working_directories: self.block_reads_outside_working_directories,
             sandbox_runtime: self.sandbox_runtime.clone(),
             pwsh_parser: self.pwsh_parser.clone(),
+            plan_files: self.plan_files.clone(),
             allow_managed_permission_rules_only: self.allow_managed_permission_rules_only,
             classify_all_shell: self.classify_all_shell,
             workspace_leases: self.workspace_leases.clone(),
@@ -1098,6 +1094,10 @@ impl PermissionPolicy {
         //     protects a read-denied file from being edited, so it must not be
         //     overridable by an allow rule / bypass. Roots-gated.
         if file_tool_kind(tool_name) == FileToolKind::Editor
+            && self.edit_covered_by_read_deny(tool_name, input)
+        {
+            return ask_edit_read_deny_covered(tool_name);
+        }
         // PLAN-FILE-01 (2.1.266 `LZe` @351498 / the read resolver @352778): the
         //     session's own plan file is ALLOWED for reading and writing. Order
         //     is load-bearing — upstream places both allows after the edit
@@ -1128,10 +1128,6 @@ impl PermissionPolicy {
                     }
                 }
             }
-        }
-            && self.edit_covered_by_read_deny(tool_name, input)
-        {
-            return ask_edit_read_deny_covered(tool_name);
         }
         // Over-length bash input cannot be statically validated by the 10k-char
         // parser path, so it must force an Ask before any allow-like shortcut
@@ -3185,6 +3181,10 @@ fn allow_with_mode(mode: PermissionMode) -> PermissionResult {
 
 /// Sandbox auto-allow grant (claude-code `checkSandboxAutoAllow`'s final
 /// `behavior: 'allow'`, `decisionReason: { type: 'other', reason: 'Auto-allowed
+/// with sandbox (autoAllowBashIfSandboxed enabled)' }`). Tagged
+/// [`PermissionDecisionReason::Other`] carrying the byte-faithful reason (TS
+/// uses `type: 'other'` here, NOT a sandbox-specific reason — preserved so the
+/// existing `SandboxOverrideReason` enum is untouched).
 /// The plan-file carve-out allow — `Oe(n, …)` in 2.1.266 `LZe` (write) and the
 /// read resolver, whose reasons are byte-locked in [`crate::plan_files`].
 fn allow_plan_file(writing: bool) -> PermissionResult {
@@ -3202,10 +3202,6 @@ fn allow_plan_file(writing: bool) -> PermissionResult {
     }
 }
 
-/// with sandbox (autoAllowBashIfSandboxed enabled)' }`). Tagged
-/// [`PermissionDecisionReason::Other`] carrying the byte-faithful reason (TS
-/// uses `type: 'other'` here, NOT a sandbox-specific reason — preserved so the
-/// existing `SandboxOverrideReason` enum is untouched).
 fn allow_sandbox_auto() -> PermissionResult {
     PermissionResult::Allow {
         reason: PermissionDecisionReason::Other {

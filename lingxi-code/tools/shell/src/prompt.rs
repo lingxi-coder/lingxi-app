@@ -103,17 +103,11 @@ fn is_env_truthy(name: &str) -> bool {
     platform_api::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
-/// Port of claude-code `areBackgroundTasksDisabled` (2.1.238 `WA()`:
-/// `getSettings().backgroundTasksDisabled || env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`).
-///
-/// LingXi has no `backgroundTasksDisabled` settings key in this crate, so only
-/// the env half is modelled (the settings half defaults to `false`, so the env
-/// check is the sole observable gate here).
-///
-/// Two call sites depend on it, exactly as the oracle does: the prompt's
-/// `run_in_background` bullet (`getBackgroundUsageNote`) and the Bash INPUT
-/// SCHEMA, which drops the `run_in_background` property entirely when background
-/// tasks are off (oracle `egm`: `WA() ? Qhm().omit({run_in_background:!0, …}) : …`).
+/// Port of claude-code 2.1.263 `Dl()`: the runtime disable latch OR
+/// `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`. The latch is set by the MCP-serve
+/// HTTP host, which this port does not expose; it is not a settings key.
+/// The shared platform gate is also consumed by SDK controls, the prompt, and
+/// `gnr`'s input schema (`Dl() ? dnr().omit({run_in_background:!0, …}) : …`).
 pub(crate) fn background_tasks_disabled() -> bool {
     // Single source of truth: the SDK `background_tasks` control request in
     // `apps/cli` reads the same gate and cannot reach this crate.

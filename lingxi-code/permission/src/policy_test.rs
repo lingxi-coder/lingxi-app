@@ -4278,7 +4278,6 @@ mod tests {
         }
     }
 
-
     /// PARITY 2.1.263 `ppo`: under the read block a `cd` to a directory outside
     /// the working dirs asks with the read block's own copy and keeps `PE`'s
     /// `outsideReadsBlocked` safetyCheck — not the generic containment ask.
@@ -4350,7 +4349,6 @@ mod tests {
             "a projectSettings dir must not satisfy the read block for cd"
         );
     }
-
 
     /// PARITY 2.1.263 `ppo`: `pushd` and `env -C|--chdir` change where later
     /// reads resolve, so the read block validates their target exactly like
@@ -4542,7 +4540,6 @@ mod tests {
         );
     }
 
-
     /// PARITY 2.1.263: the positional-path walkers report the read block with
     /// TWO different shapes — `ln`/`link` (`mpo`) and `cp`/`mv` use the bare
     /// `names a path outside …` form, everything else goes through the generic
@@ -4585,7 +4582,8 @@ mod tests {
         use crate::working_dirs::AdditionalWorkingDirs;
         // Baseline: the generic containment ask, `type:"other"`.
         let plain = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        let PermissionResult::Ask { reason, prompt, .. } = plain.authorize("Bash", &bash("cat /etc/passwd"))
+        let PermissionResult::Ask { reason, prompt, .. } =
+            plain.authorize("Bash", &bash("cat /etc/passwd"))
         else {
             panic!("cat outside the working dirs must ask even without the block");
         };
@@ -4611,7 +4609,8 @@ mod tests {
             assert!(!crate::read_block::is_outside_reads_blocked(&reason));
         }
         // projectSettings-sourced does not.
-        let out = with(PermissionRuleSource::ProjectSettings).authorize("Bash", &bash("cat /extra/x"));
+        let out =
+            with(PermissionRuleSource::ProjectSettings).authorize("Bash", &bash("cat /extra/x"));
         let PermissionResult::Ask { reason, .. } = &out else {
             panic!("expected an ask, got {out:?}");
         };
@@ -4620,7 +4619,6 @@ mod tests {
             "a projectSettings dir must not satisfy the read block for the path walker"
         );
     }
-
 
     /// PARITY 2.1.263 `ymo`'s git branch: the path-bearing GLOBAL flags move
     /// where later git reads resolve, so the read block validates them. They
@@ -4652,8 +4650,7 @@ mod tests {
                 "{cmd}: expected the outsideReadsBlocked safetyCheck, got {reason:?}"
             );
             assert!(
-                prompt.message.starts_with("git names '/etc")
-                    && prompt.message.ends_with(TAIL),
+                prompt.message.starts_with("git names '/etc") && prompt.message.ends_with(TAIL),
                 "{cmd}: wrong copy: {}",
                 prompt.message
             );
@@ -4687,7 +4684,6 @@ mod tests {
         }
     }
 
-
     /// PARITY 2.1.263 `ymo` + `Pmo`: an interpreter that runs code the shell
     /// parser never sees can read anywhere, so the read block escalates it via
     /// `zU`. Three distinct reasons, each byte-locked.
@@ -4700,17 +4696,44 @@ mod tests {
         const TAIL: &str = "; under the read block (permissions.blockReadsOutsideWorkingDirectories) a command the shell parser cannot analyze asks the person";
         for (cmd, head) in [
             // `args.includes("-")` → reads its program from stdin.
-            ("python -", "python runs code from stdin, which cannot be checked against the read block"),
-            ("node -", "node runs code from stdin, which cannot be checked against the read block"),
+            (
+                "python -",
+                "python runs code from stdin, which cannot be checked against the read block",
+            ),
+            (
+                "node -",
+                "node runs code from stdin, which cannot be checked against the read block",
+            ),
             // an inline-code flag.
-            ("python -c 'import os'", "python runs inline code, which cannot be checked against the read block"),
-            ("node -e 1", "node runs inline code, which cannot be checked against the read block"),
-            ("perl -E 1", "perl runs inline code, which cannot be checked against the read block"),
-            ("ruby -e 1", "ruby runs inline code, which cannot be checked against the read block"),
-            ("php -r 1", "php runs inline code, which cannot be checked against the read block"),
-            ("bash -c ls", "bash runs inline code, which cannot be checked against the read block"),
+            (
+                "python -c 'import os'",
+                "python runs inline code, which cannot be checked against the read block",
+            ),
+            (
+                "node -e 1",
+                "node runs inline code, which cannot be checked against the read block",
+            ),
+            (
+                "perl -E 1",
+                "perl runs inline code, which cannot be checked against the read block",
+            ),
+            (
+                "ruby -e 1",
+                "ruby runs inline code, which cannot be checked against the read block",
+            ),
+            (
+                "php -r 1",
+                "php runs inline code, which cannot be checked against the read block",
+            ),
+            (
+                "bash -c ls",
+                "bash runs inline code, which cannot be checked against the read block",
+            ),
             // the trailing version suffix is stripped before the table lookup.
-            ("python3.11 -c 1", "python3.11 runs inline code, which cannot be checked against the read block"),
+            (
+                "python3.11 -c 1",
+                "python3.11 runs inline code, which cannot be checked against the read block",
+            ),
         ] {
             let out = blocked().authorize("Bash", &bash(cmd));
             let PermissionResult::Ask { reason, prompt, .. } = &out else {
@@ -4749,7 +4772,12 @@ mod tests {
     #[test]
     fn interpreter_guards_are_untouched_without_the_read_block() {
         let plain = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        for cmd in ["python -c 'import os'", "node -", "cat x | python", "xargs cat"] {
+        for cmd in [
+            "python -c 'import os'",
+            "node -",
+            "cat x | python",
+            "xargs cat",
+        ] {
             let out = plain.authorize("Bash", &bash(cmd));
             if let PermissionResult::Ask { reason, .. } = &out {
                 assert!(
@@ -4775,7 +4803,6 @@ mod tests {
             "xargs names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
         );
     }
-
 
     /// PARITY `ymo`: a glob whose segment could match `..` is refused outright
     /// under the read block — the base-directory reduction proves nothing when
@@ -4811,7 +4838,6 @@ mod tests {
         }
     }
 
-
     /// PARITY 2.1.263 `OG(e)` — the other half of the confined-session gate:
     /// a confined eval run drops every `allow`-behavior rule regardless of tier,
     /// so `permissions.allow` from a settings file cannot grant anything. Deny
@@ -4823,7 +4849,8 @@ mod tests {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let settings = r#"{ "permissions": { "allow": ["Bash(ls:*)"], "deny": ["Bash(curl:*)"] } }"#;
+        let settings =
+            r#"{ "permissions": { "allow": ["Bash(ls:*)"], "deny": ["Bash(curl:*)"] } }"#;
         let build = |confined: bool| {
             let rules = crate::loader::permission_rules_from_settings_json(
                 settings,
@@ -4864,5 +4891,4 @@ mod tests {
             "a confined session must still honour deny rules"
         );
     }
-
 }

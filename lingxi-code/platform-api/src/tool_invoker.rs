@@ -22,6 +22,7 @@ use thiserror::Error;
 /// concrete `ToolUseContext` from `lingxi-tools`.
 #[derive(Debug, Clone)]
 pub struct SubagentInvocationContext {
+    pub permission_pause_observer: Option<crate::permission_gate::PermissionPauseObserver>,
     /// Parent agent id (the agent that is dispatching the child).
     pub parent_agent_id: Option<AgentId>,
     /// Trusted originating session for nested Agent/Fusion budget scoping.

@@ -369,6 +369,14 @@ impl ConversationOrchestrator {
     /// enqueue lands. The queue is drained separately by
     /// [`Self::memory_update_reminder_messages`].
     pub(crate) async fn task_notification_reminder_messages(&self) -> Vec<ConversationMessage> {
+        self.task_notification_reminder_messages_in_turn(false)
+            .await
+    }
+
+    pub(crate) async fn task_notification_reminder_messages_in_turn(
+        &self,
+        in_human_turn: bool,
+    ) -> Vec<ConversationMessage> {
         let Some(provider) = self.prompt_runtime.task_notifications.as_ref() else {
             return Vec::new();
         };
@@ -378,7 +386,7 @@ impl ConversationOrchestrator {
         // per notification and the envelope is applied per message, so two
         // tasks finishing in the same turn are two user messages. Folding them
         // into one envelope also folded two provenance headers into one.
-        crate::prompt::task_notification::render_reminders(&notifications)
+        crate::prompt::task_notification::render_reminders_in_turn(&notifications, in_human_turn)
             .into_iter()
             .map(|content| ConversationMessage::user_meta(MessageId::new(), content))
             .collect()

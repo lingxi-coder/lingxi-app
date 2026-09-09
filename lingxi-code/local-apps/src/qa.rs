@@ -3664,8 +3664,8 @@ mod tests {
             },
         )
         .unwrap();
-        let error =
-            qa_read_evidence_from_loaded_session(&layout, &session, &write.evidence_id).unwrap_err();
+        let error = qa_read_evidence_from_loaded_session(&layout, &session, &write.evidence_id)
+            .unwrap_err();
         assert!(error.to_string().contains("integrity"));
     }
 

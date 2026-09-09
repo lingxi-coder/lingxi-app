@@ -31,6 +31,8 @@ const TOOL_WEBFETCH: &str = "WebFetch";
 /// Mirrors the seed application in sandbox-adapter.ts:225-299.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxConvertContext {
+    /// Protect the registry-owned task output directory against child writes.
+    pub task_output_dir: Option<String>,
     /// Claude temp dir (`getClaudeTempDir()`), seeded into `allow_write` right
     /// after `.` (sandbox-adapter.ts:225). Needed for Shell.ts cwd tracking
     /// files. `None` => not seeded (only `.`).
@@ -185,6 +187,9 @@ pub fn convert_settings_to_runtime_config(
     filesystem
         .deny_write
         .extend(ctx.skills_dirs.iter().cloned());
+    if let Some(dir) = &ctx.task_output_dir {
+        filesystem.deny_write.push(dir.clone());
+    }
     // Git worktree main repo path needs write access for index.lock etc.
     if let Some(main_repo) = &ctx.worktree_main_repo_path {
         filesystem.allow_write.push(main_repo.clone());

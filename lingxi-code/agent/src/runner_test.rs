@@ -482,6 +482,7 @@ fn loop_ctx(
 /// Build a `SubagentContext` with the minimum fields the runner reads.
 fn fresh_subagent_ctx() -> SubagentContext {
     SubagentContext {
+        task_registry: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_name: None,
@@ -5223,4 +5224,252 @@ fn cap_input_bytes_rejects_an_oversized_head_without_sending_it() {
     let error = super::cap_input_bytes(&history, Some(max))
         .expect_err("an oversized mandatory prompt must be rejected before sending");
     assert!(error.contains("mandatory initial prompt exceeds"));
+}
+
+struct OwnerNotificationRegistry {
+    rest_acknowledged: AtomicBool,
+    wake_checked: tokio::sync::Notify,
+    drains: AtomicUsize,
+    parked_fold: tokio::sync::Notify,
+    owner: protocol::AgentId,
+    pending: Mutex<Vec<platform_api::task_registry::TaskNotification>>,
+    revision: tokio::sync::watch::Sender<u64>,
+}
+impl OwnerNotificationRegistry {
+    fn publish(&self) {
+        self.pending
+            .lock()
+            .unwrap()
+            .push(platform_api::task_registry::TaskNotification {
+                task_id: "achild".into(),
+                task_type: "local_agent".into(),
+                status: "completed".into(),
+                recipient_agent_id: Some(self.owner),
+                description: "child finished".into(),
+                ..Default::default()
+            });
+        self.revision.send_modify(|n| *n += 1);
+    }
+}
+#[async_trait]
+impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegistry {
+    async fn create(
+        &self,
+        _: platform_api::task_registry::TaskCreateInput,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn get(
+        &self,
+        _: &str,
+    ) -> Result<
+        Option<platform_api::task_registry::TaskRecord>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn list(
+        &self,
+        _: platform_api::task_registry::TaskListFilter,
+    ) -> Result<
+        Vec<platform_api::task_registry::TaskRecord>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        Ok(vec![])
+    }
+    async fn update(
+        &self,
+        _: &str,
+        _: platform_api::task_registry::TaskUpdatePatch,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn set_status(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn kill(
+        &self,
+        _: &str,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn output(
+        &self,
+        _: &str,
+        _: Option<u64>,
+    ) -> Result<
+        platform_api::task_registry::TaskOutputChunk,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn can_wake_agent_for_task_notification(&self, _: protocol::AgentId) -> bool {
+        let acknowledged = self.rest_acknowledged.load(Ordering::SeqCst);
+        self.wake_checked.notify_one();
+        acknowledged
+    }
+    fn subscribe_task_notifications(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.revision.subscribe())
+    }
+    async fn take_pending_task_notifications_for(
+        &self,
+        recipient: Option<protocol::AgentId>,
+    ) -> Result<
+        Vec<platform_api::task_registry::TaskNotification>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        assert_eq!(recipient, Some(self.owner));
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap());
+        if self.drains.fetch_add(1, Ordering::SeqCst) >= 2 {
+            self.parked_fold.notify_one();
+        }
+        Ok(pending)
+    }
+}
+
+#[tokio::test]
+async fn owner_notification_wakes_parked_runner_without_user_message() {
+    let api = MockSubagentApiClient::new(vec![
+        Ok(text_response("first", Some("end_turn"))),
+        Ok(text_response("second", Some("end_turn"))),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.persistent = true;
+    let registry = Arc::new(OwnerNotificationRegistry {
+        rest_acknowledged: AtomicBool::new(true),
+        wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0),
+        parked_fold: tokio::sync::Notify::new(),
+        owner: ctx.agent_id,
+        pending: Mutex::new(vec![]),
+        revision: tokio::sync::watch::channel(0).0,
+    });
+    ctx.task_registry = Some(registry.clone());
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+        registry.parked_fold.notified().await;
+        registry.publish();
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(api.call_count(), 2);
+    let json = serde_json::to_string(&api.last_messages()).unwrap();
+    assert_eq!(json.matches("<task-id>achild</task-id>").count(), 1);
+    drop(event_tx);
+    runner.await.unwrap();
+}
+
+struct NotificationDuringRequestApi {
+    registry: Arc<OwnerNotificationRegistry>,
+    completed: AtomicBool,
+    calls: AtomicUsize,
+    last_messages: Mutex<Vec<ConversationMessage>>,
+}
+#[async_trait]
+impl crate::api::SubagentApiClient for NotificationDuringRequestApi {
+    async fn messages_create(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        *self.last_messages.lock().unwrap() = messages;
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.registry.publish();
+            // Notification arrives with a genuinely pending provider future.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            self.completed.store(true, Ordering::SeqCst);
+        }
+        Ok(text_response("done", Some("end_turn")))
+    }
+}
+#[tokio::test]
+async fn owner_notification_folds_after_inflight_request_without_cancelling_it() {
+    let mut ctx = fresh_subagent_ctx();
+    let registry = Arc::new(OwnerNotificationRegistry {
+        rest_acknowledged: AtomicBool::new(true),
+        wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0),
+        parked_fold: tokio::sync::Notify::new(),
+        owner: ctx.agent_id,
+        pending: Mutex::new(vec![]),
+        revision: tokio::sync::watch::channel(0).0,
+    });
+    let api = Arc::new(NotificationDuringRequestApi {
+        registry: registry.clone(),
+        completed: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+        last_messages: Mutex::new(vec![]),
+    });
+    ctx.api_client = Some(api.clone());
+    ctx.task_registry = Some(registry);
+    ctx.agent_definition.max_turns = 4;
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+    })
+    .await
+    .unwrap();
+    assert!(
+        api.completed.load(Ordering::SeqCst),
+        "original provider future survived notification"
+    );
+    assert_eq!(api.calls.load(Ordering::SeqCst), 2);
+    assert!(serde_json::to_string(&*api.last_messages.lock().unwrap())
+        .unwrap()
+        .contains("<task-id>achild</task-id>"));
+    drop(event_tx);
+    runner.await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_notification_waits_for_handler_rest_acknowledgement() {
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("first", Some("end_turn"))), Ok(text_response("second", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.persistent = true;
+    let registry = Arc::new(OwnerNotificationRegistry {
+        rest_acknowledged: AtomicBool::new(false), wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0), parked_fold: tokio::sync::Notify::new(), owner: ctx.agent_id,
+        pending: Mutex::new(vec![]), revision: tokio::sync::watch::channel(0).0,
+    });
+    ctx.task_registry = Some(registry.clone());
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+        registry.wake_checked.notified().await;
+        registry.publish();
+        registry.wake_checked.notified().await;
+        assert_eq!(api.call_count(), 1, "pending notification cannot outrun handler rest acknowledgement");
+        registry.rest_acknowledged.store(true, Ordering::SeqCst);
+        registry.revision.send_modify(|revision| *revision += 1);
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+    }).await.unwrap();
+    assert_eq!(api.call_count(), 2);
+    drop(event_tx);
+    runner.await.unwrap();
 }

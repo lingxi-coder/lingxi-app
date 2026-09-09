@@ -270,6 +270,7 @@ pub(crate) struct PromptRuntime {
     /// `None` ⇒ [`Self::task_notification_reminder_messages`] is a strict no-op (the
     /// default — keeps fixtures byte-identical). Wired at the desktop composition
     /// root from the `TaskRegistry`.
+    pub(crate) task_lifecycle_relay: Option<tokio_util::task::AbortOnDropHandle<()>>,
     pub(crate) task_notifications:
         Option<Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>>,
     /// Finding #73: source of the V2 task list for the per-turn `task_reminder`
@@ -434,6 +435,7 @@ impl PromptRuntime {
             skill_listing: None,
             async_hook_responses: None,
             task_notifications: None,
+            task_lifecycle_relay: None,
             todo_reminder_tasks: None,
             conditional_rules_cache: Arc::new(std::sync::Mutex::new(None)),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),

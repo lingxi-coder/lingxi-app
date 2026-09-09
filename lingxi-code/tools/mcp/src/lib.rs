@@ -70,3 +70,5 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
     reg.register_builtin(Arc::new(McpAuthTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(WaitForMcpServersTool::new(ctx)));
 }
+
+mod task_result;

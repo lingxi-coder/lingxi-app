@@ -69,6 +69,113 @@ async fn stop_background_agents_at_budget(
     stopped
 }
 
+/// Print mode remains alive for delegated work and shells, then tears down
+/// connection-owned monitors/parked workers before returning to its caller.
+async fn wind_down_print_tasks(
+    runtime: &Runtime,
+    max_budget_usd: Option<f64>,
+    shutdown: tokio_util::sync::CancellationToken,
+    control_plane: Option<&Arc<StdioControlPlane>>,
+) -> Result<(), orchestrator::OrchestratorError> {
+    use platform_api::task_registry::TaskRegistryHandle as _;
+    loop {
+        if shutdown.is_cancelled() {
+            break;
+        }
+        let cost = runtime.orchestrator.snapshot_cost().await;
+        if max_budget_usd.is_some_and(|limit| budget_reached(limit, cost.total_nano_usd)) {
+            break;
+        }
+        let records = platform_api::task_registry::TaskRegistryHandle::list(
+            runtime.task_registry.as_ref(),
+            platform_api::task_registry::TaskListFilter::default(),
+        )
+        .await
+        .unwrap_or_default();
+        let has_work = records.iter().any(print_task_keeps_session_alive);
+        // Monitors are subscriptions, not jobs that can finish naturally. Stop
+        // them before draining their final batch once no finite work remains.
+        if !has_work {
+            stop_print_subscriptions(runtime).await;
+        }
+        if runtime
+            .task_registry
+            .has_pending_task_notifications_for(None)
+            .await
+        {
+            let cancel = shutdown.child_token();
+            if let Some(plane) = control_plane {
+                plane.set_active_turn(cancel.clone()).await;
+            }
+            let result = runtime
+                .orchestrator
+                .run_task_notification_rewake(runtime.task_registry.as_ref(), cancel)
+                .await;
+            if let Some(plane) = control_plane {
+                plane.clear_active_turn().await;
+            }
+            match result {
+                Err(error) => {
+                    stop_print_tasks(runtime).await;
+                    return Err(error);
+                }
+                Ok(orchestrator::conversation::TurnOutcome::Cancelled) => break,
+                Ok(_) => {}
+            }
+            continue;
+        }
+        if !has_work {
+            break;
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+        }
+    }
+    stop_print_tasks(runtime).await;
+    Ok(())
+}
+
+fn print_task_keeps_session_alive(task: &platform_api::task_registry::TaskRecord) -> bool {
+    platform_api::task_activity::is_active_delegated_task(task)
+        || (platform_api::task_activity::is_live_shell_task(task)
+            && task.kind.as_deref() != Some("monitor"))
+}
+
+async fn stop_print_subscriptions(runtime: &Runtime) {
+    stop_print_tasks_matching(runtime, true).await;
+}
+
+async fn stop_print_tasks(runtime: &Runtime) {
+    stop_print_tasks_matching(runtime, false).await;
+}
+
+async fn stop_print_tasks_matching(runtime: &Runtime, subscriptions_only: bool) {
+    use platform_api::task_registry::TaskRegistryHandle as _;
+    if let Ok(records) = platform_api::task_registry::TaskRegistryHandle::list(
+        runtime.task_registry.as_ref(),
+        platform_api::task_registry::TaskListFilter::default(),
+    )
+    .await
+    {
+        for task in records.into_iter().filter(|task| {
+            (matches!(
+                task.status.as_str(),
+                "running" | "pending" | "paused" | "queued"
+            ) || task.is_parked)
+                && (!subscriptions_only
+                    || task.kind.as_deref() == Some("monitor")
+                    || matches!(task.task_type.as_str(), "monitor_mcp" | "monitor_ws"))
+        }) {
+            let _ = runtime.task_registry.mark_notified(&task.task_id).await;
+            let _ = runtime
+                .task_registry
+                .kill_with_reason(&task.task_id, "user")
+                .await;
+        }
+    }
+}
+
 fn budget_reached(max_budget_usd: f64, total_nano_usd: u64) -> bool {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let budget_nano_usd = (max_budget_usd.max(0.0) * 1_000_000_000.0) as u64;
@@ -218,6 +325,33 @@ fn install_print_mode_process_cleanup() {
     });
 }
 
+/// Every branch that can invoke tools owns the same print shutdown boundary.
+async fn finish_print_branch(
+    runtime: &Runtime,
+    budget: Option<f64>,
+    sink: &dyn OutputSink,
+    code: i32,
+) -> i32 {
+    if code != exit_codes::SUCCESS {
+        stop_print_tasks(runtime).await;
+        return code;
+    }
+    match wind_down_print_tasks(
+        runtime,
+        budget,
+        tokio_util::sync::CancellationToken::new(),
+        None,
+    )
+    .await
+    {
+        Ok(()) => code,
+        Err(error) => {
+            sink.error("runtime", &error.to_string()).await;
+            exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
 /// Drive a one-shot conversation: either a `/slash-command` or a normal
 /// prompt that runs through the orchestrator turn loop.
 pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
@@ -232,9 +366,43 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
         return exit_codes::ARGV_ERROR;
     }
 
+    // This producer is the actual print-mode user prompt, before generic
+    // slash dispatch (which is also used by non-human internal callers).
+    let (command, args) = prompt
+        .split_once(char::is_whitespace)
+        .unwrap_or((&prompt, ""));
+    if command == "/tasks" {
+        if let Some(parsed) = platform_api::human_task_message::parse(args) {
+            let result = match parsed {
+                Ok((task_id, message)) if runtime.orchestrator.workspace_trusted().await => {
+                    use platform_api::task_registry::TaskRegistryHandle as _;
+                    runtime
+                        .task_registry
+                        .send_human_task_message(task_id, message)
+                        .await
+                        .map(|()| format!("Message accepted for task {task_id}"))
+                        .map_err(|error| error.to_string())
+                }
+                Ok(_) => Err("Trust this workspace before messaging a task".into()),
+                Err(error) => Err(error.into()),
+            };
+            let code = match result {
+                Ok(display) => {
+                    sink.command_output(&prompt, &display).await;
+                    exit_codes::SUCCESS
+                }
+                Err(error) => {
+                    sink.error("task_message", &error).await;
+                    exit_codes::RUNTIME_ERROR
+                }
+            };
+            return finish_print_branch(runtime, argv.max_budget_usd, sink, code).await;
+        }
+    }
     // Slash branch — bypasses the API entirely.
     if prompt.starts_with('/') {
-        return run_slash_command_with_budget(&prompt, runtime, argv.max_budget_usd, sink).await;
+        let code = run_slash_command_with_budget(&prompt, runtime, argv.max_budget_usd, sink).await;
+        return finish_print_branch(runtime, argv.max_budget_usd, sink, code).await;
     }
 
     // Structured-output branch (`--json-schema`): `engine_desktop::build` wires
@@ -248,15 +416,10 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
             .as_ref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         {
-            return run_structured_output(
-                runtime,
-                &prompt,
-                &slot,
-                &schema,
-                argv.max_budget_usd,
-                sink,
-            )
-            .await;
+            let code =
+                run_structured_output(runtime, &prompt, &slot, &schema, argv.max_budget_usd, sink)
+                    .await;
+            return finish_print_branch(runtime, argv.max_budget_usd, sink, code).await;
         }
     }
 
@@ -264,6 +427,20 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
     // ANTHROPIC_API_KEY this returns 401; we surface the error verbatim.
     sink.turn_start().await;
     let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+    let turn_result = match turn_result {
+        Ok(outcome) => wind_down_print_tasks(
+            runtime,
+            argv.max_budget_usd,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .await
+        .map(|()| outcome),
+        Err(error) => {
+            stop_print_tasks(runtime).await;
+            Err(error)
+        }
+    };
     stop_background_agents_at_budget(
         argv.max_budget_usd,
         runtime.orchestrator.as_ref(),
@@ -500,6 +677,20 @@ pub async fn run_stream_json_print(
     // ③ Run the turn — streaming callbacks (emit_text / emit_tool_call /
     //    emit_message_start / emit_message_boundary) fire on the stream.
     let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+    let turn_result = match turn_result {
+        Ok(outcome) => wind_down_print_tasks(
+            runtime,
+            argv.max_budget_usd,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .await
+        .map(|()| outcome),
+        Err(error) => {
+            stop_print_tasks(runtime).await;
+            Err(error)
+        }
+    };
 
     // ④ Emit the result frame.
     let cost = runtime.orchestrator.snapshot_cost().await;
@@ -1493,7 +1684,9 @@ async fn dispatch_control_request(
             }
         }
         "end_session" => {
-            // §2.2 #2: abort the in-flight turn, ack, then break the loop.
+            // Cancel the actual owner too: idle notification turns do not use
+            // the normal input turn's watch bridge.
+            control_plane.cancel_active_turn().await;
             let _ = cancel_tx.send(true);
             writer.reply_success(request_id, None);
             end_notify.notify_one();
@@ -2145,10 +2338,25 @@ pub async fn run_stream_json_input_loop(
     // dropped) so a perpetually-ready `recv() → None` can't busy-spin the loop.
     let mut orphan_closed = false;
 
+    let mut explicit_end_session = false;
     loop {
         let turn = tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                if runtime.task_registry.has_pending_task_notifications_for(None).await {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    control_plane.set_active_turn(cancel.clone()).await;
+                    let result = runtime.orchestrator.run_task_notification_rewake(runtime.task_registry.as_ref(), cancel).await;
+                    control_plane.clear_active_turn().await;
+                    if let Err(error) = result { last_turn_err = Some(error); break; }
+                    let cost = runtime.orchestrator.snapshot_cost().await;
+                    let result_text = stream.get_last_result_text().await;
+                    let model = runtime.orchestrator.session().lock().await.model.clone();
+                    stream.emit_result_success(&result_text, "end_turn", &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas).await;
+                }
+                continue;
+            },
             // `end_session` (§2.2 #2): the host asked us to drain + exit.
-            _ = end_notify.notified() => break,
+            _ = end_notify.notified() => { explicit_end_session = true; break; },
             // ORPHANED PERMISSION recovery, drained BETWEEN turns (the `select!`
             // is not polled while `run_turn_streaming_with_cancel` runs, so an
             // orphan that arrives mid-turn is buffered and recovered after — never
@@ -2399,6 +2607,31 @@ pub async fn run_stream_json_input_loop(
                 last_turn_err = Some(e);
                 break;
             }
+        }
+    }
+
+    if explicit_end_session || last_turn_err.is_some() {
+        stop_print_tasks(runtime).await;
+    } else {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let winding_down = wind_down_print_tasks(
+            runtime,
+            argv.max_budget_usd,
+            shutdown.clone(),
+            Some(&control_plane),
+        );
+        tokio::pin!(winding_down);
+        let result = tokio::select! {
+            result = &mut winding_down => result,
+            _ = end_notify.notified() => {
+                shutdown.cancel();
+                control_plane.cancel_active_turn().await;
+                // Keep polling so Block tools unwind under their normal policy.
+                winding_down.await
+            }
+        };
+        if let Err(error) = result {
+            last_turn_err = Some(error);
         }
     }
 
@@ -3717,7 +3950,17 @@ async fn mount_resumed_tui(
     messages: Vec<JsonlMessage>,
     carried_state: Option<crate::mode::RemountState>,
 ) -> crate::mode::RunOutcome {
-    mount_resumed_tui_inner(argv, session_id, messages, carried_state, None, None, None).await
+    mount_resumed_tui_inner(
+        argv,
+        session_id,
+        messages,
+        carried_state,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Mount a resumed conversation inside a background worker's real PTY.
@@ -3731,6 +3974,7 @@ pub(crate) async fn mount_background_resumed_tui(
     registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
     initial_prompt: Option<String>,
     handoff: Option<platform_api::BackgroundingSnapshot>,
+    shell_launch: &crate::background_launch::BackgroundLaunchSpec,
 ) -> crate::mode::RunOutcome {
     mount_resumed_tui_inner(
         argv,
@@ -3740,6 +3984,7 @@ pub(crate) async fn mount_background_resumed_tui(
         Some(registration),
         initial_prompt,
         handoff,
+        Some(shell_launch),
     )
     .await
 }
@@ -3752,6 +3997,7 @@ async fn mount_resumed_tui_inner(
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
     initial_prompt: Option<String>,
     handoff: Option<platform_api::BackgroundingSnapshot>,
+    shell_launch: Option<&crate::background_launch::BackgroundLaunchSpec>,
 ) -> crate::mode::RunOutcome {
     // A cold resume inherits the last persisted assistant effort unless the
     // caller explicitly supplied a new `--effort`. Resolve this before build:
@@ -3870,6 +4116,19 @@ async fn mount_resumed_tui_inner(
         }
         boot_notice = state.notice;
     }
+    if let Some(launch) = shell_launch {
+        if let Err(error) = crate::shell_handoff::restore_destination(
+            &daemon_runtime_dir(),
+            &launch.short,
+            tui_build.runtime.task_registry.as_ref(),
+            &launch.shell_handoff,
+        )
+        .await
+        {
+            eprintln!("lingxi-cli: shell handoff restore failed: {error}");
+            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+        }
+    }
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
     // launch the ratatui backend with that replayed scrollback. Cold `--resume`
     // has no SessionRegistration (fresh launches register). In-process `/resume`
@@ -3959,7 +4218,17 @@ async fn remount_tui(
     state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
 ) -> crate::mode::RunOutcome {
-    mount_resumed_tui_inner(argv, session_id, messages, state, registration, None, None).await
+    mount_resumed_tui_inner(
+        argv,
+        session_id,
+        messages,
+        state,
+        registration,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7549,5 +7818,135 @@ mod tests {
             std::time::Duration::MAX,
         )
         .is_none());
+    }
+    #[test]
+    fn print_winddown_waits_for_jobs_but_not_monitor_subscriptions_or_parked_agents() {
+        let mut task = platform_api::task_registry::TaskRecord {
+            task_type: "local_bash".into(),
+            status: "running".into(),
+            ..Default::default()
+        };
+        assert!(print_task_keeps_session_alive(&task));
+        task.kind = Some("monitor".into());
+        assert!(!print_task_keeps_session_alive(&task));
+        task.task_type = "local_agent".into();
+        task.kind = None;
+        assert!(print_task_keeps_session_alive(&task));
+        task.status = "completed".into();
+        task.is_parked = true;
+        assert!(!print_task_keeps_session_alive(&task));
+    }
+
+    #[tokio::test]
+    async fn end_session_cancels_idle_notification_owner_without_a_watch_bridge() {
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let orch = &build.runtime.orchestrator;
+        let tasks = &build.runtime.task_registry;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let out_tx = std::sync::Arc::new(tx);
+        let writer = ControlPlaneWriter::new(out_tx.clone());
+        let lifecycle = crate::queued_commands::QueueLifecycle::new(out_tx, "sess-int".to_string());
+        // Seed: u1 dequeued for the in-flight turn; u2/u3 queue-resident.
+        lifecycle.queued.on_queued("u1");
+        lifecycle.queued.on_queued("u2");
+        lifecycle.queued.on_queued("u3");
+        assert!(lifecycle.queued.on_dequeued("u1"));
+
+        let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
+        let end_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let session_cwd = std::sync::Arc::new(tool_api::SessionCwd::new(
+            std::env::temp_dir(),
+            vec![std::env::temp_dir()],
+        ));
+        let plane = std::sync::Arc::new(crate::control_plane::StdioControlPlane::new(
+            std::sync::Arc::new(tokio::sync::mpsc::unbounded_channel().0),
+        ));
+        // `u1` represents a genuinely in-flight turn, so register the same
+        // owner token the production turn loop installs before dispatching an
+        // interrupt. An idle control plane deliberately does not emit a sticky
+        // watch cancellation, because that would poison the next queued turn.
+        let active_cancel = tokio_util::sync::CancellationToken::new();
+        plane.set_active_turn(active_cancel.clone()).await;
+
+        let pending_cancel = active_cancel.clone();
+        let provider = tokio::spawn(async move {
+            tokio::select! {
+                _ = std::future::pending::<()>() => panic!("provider must remain pending"),
+                _ = pending_cancel.cancelled() => {},
+            }
+        });
+        dispatch_control_request(
+            "end_session",
+            "end",
+            &req("end_session", json!({})),
+            &writer,
+            &cancel_tx,
+            &lifecycle,
+            orch,
+            tasks,
+            &session_cwd,
+            &plane,
+            &end_notify,
+            &[],
+            &[],
+            &[],
+            &json!({}),
+            "off",
+            None,
+            &StreamFileSuggestionIndex::default(),
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), provider)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(active_cancel.is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), end_notify.notified())
+            .await
+            .unwrap();
+        let receipt: serde_json::Value =
+            serde_json::from_str(&outbound_line(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(receipt["response"]["subtype"], "success");
+    }
+    #[tokio::test]
+    async fn print_branch_boundary_tears_down_tasks_on_error_and_budget_exit() {
+        use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("runtime");
+        let registry = build.runtime.task_registry.as_ref();
+        for (code, budget) in [
+            (exit_codes::RUNTIME_ERROR, None),
+            (exit_codes::SUCCESS, Some(0.0)),
+        ] {
+            let task = TaskRegistryHandle::create(
+                registry,
+                TaskCreateInput {
+                    task_type: "local_bash".into(),
+                    description: "branch cleanup fixture".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let actual = finish_print_branch(
+                &build.runtime,
+                budget,
+                &crate::output::PlainSink::new(),
+                code,
+            )
+            .await;
+            assert_eq!(actual, code);
+            let record = TaskRegistryHandle::get(registry, &task.task_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                record.status, "killed",
+                "every print branch must settle its live registry work"
+            );
+        }
     }
 }

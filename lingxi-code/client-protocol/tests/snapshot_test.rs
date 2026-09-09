@@ -209,6 +209,12 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/task_lifecycle.json",
+            ClientEvent::TaskLifecycle {
+                event_json: r#"{"type":"system","subtype":"task_started","task_id":"b12345678","description":"background job","task_type":"local_bash"}"#.to_string(),
+            },
+        ),
+        (
             "event/loop_wakeup.json",
             ClientEvent::LoopWakeup {
                 message: "Claude resuming /loop wakeup (Sep 7 3:04pm) \u{b7} 3 no-op ticks since Sep 7 2:14pm".to_string(),
@@ -1331,6 +1337,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        ("command/task_message.json", ClientCommand::TaskMessage { task_id: "a12345678".into(), message: "Please continue the review.".into() }),
         ("command/cron_manage.json", ClientCommand::CronManage {
             request_id: "cron-1".into(),
             request: client_protocol::commands::CronRequestDto {
@@ -2348,6 +2355,8 @@ fn canonical_doctor() -> DoctorReportDto {
 
 fn canonical_task_row() -> TaskRowDto {
     TaskRowDto {
+            unread: false, model: None, effort: None,
+        kind: None,
         awaiting_plan_approval: false,
         task_id: "b12345678".to_string(),
         task_type: "bash".to_string(),

@@ -47,6 +47,7 @@ pub struct ForkLaunchContext {
     pub transcript_path: Option<String>,
     /// Mid-turn UI boundary restored by the hidden background TUI.
     pub handoff: Option<platform_api::BackgroundingSnapshot>,
+    pub shell_handoff: Vec<platform_api::shell_handoff::ShellTaskHandoff>,
     /// Foreground-resolved, safety-checked permission mode. When present this
     /// replaces raw CLI/settings authority in the durable launch options.
     pub resolved_permission_mode: Option<permission::PermissionMode>,
@@ -408,6 +409,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
             .as_ref()
             .map(|_| uuid::Uuid::new_v4().to_string()),
         initial_prompt: argv.prompt.clone(),
+        shell_handoff: Vec::new(),
         handoff: None,
         options,
         env: launch_env(),
@@ -662,25 +664,49 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
             .as_ref()
             .map(|_| uuid::Uuid::new_v4().to_string()),
         initial_prompt: seed_prompt.clone(),
+        shell_handoff: context.shell_handoff.clone(),
         handoff: context.handoff.clone(),
         options,
         env: launch_env(),
         terminal,
     };
     let _job_lock = agents_registry::lock_job_state(config_home, &short)?;
-    crate::background_launch::write_launch_spec(config_home, &short, &launch_spec)?;
-    agents_registry::write_job_state_with_lock_held(config_home, &short, &job)?;
-    agents_registry::patch_job_state_with_lock_held(
-        config_home,
-        &short,
-        agents_registry::JobStatePatch {
-            phase: Some(Some("queued")),
-            claim_owner: Some(None),
-            claim_created_at: Some(None),
-            claim_lease_ms: Some(None),
-            ..Default::default()
-        },
-    )?;
+    let publication: std::io::Result<()> = (|| {
+        crate::background_launch::write_launch_spec(config_home, &short, &launch_spec)?;
+        crate::shell_handoff::write_source_intent(config_home, &short, &launch_spec.shell_handoff)?;
+        agents_registry::write_job_state_with_lock_held(config_home, &short, &job)?;
+        agents_registry::patch_job_state_with_lock_held(
+            config_home,
+            &short,
+            agents_registry::JobStatePatch {
+                phase: Some(Some("queued")),
+                claim_owner: Some(None),
+                claim_created_at: Some(None),
+                claim_lease_ms: Some(None),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = publication {
+        if !launch_spec.shell_handoff.is_empty() {
+            if let Err(fence) = crate::background_launch::write_shell_handoff_ack(
+                config_home,
+                &short,
+                "abort",
+                &crate::background_launch::ShellHandoffAck {
+                    task_ids: Vec::new(),
+                    error: Some(error.to_string()),
+                    source: None,
+                },
+            ) {
+                // The caller must retain its export fence when publication's
+                // effect is uncertain; a queued daemon may already see intent.
+                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, format!("background publication failed ({error}); cannot fence shell handoff ({fence})")));
+            }
+        }
+        return Err(error);
+    }
     ensure_daemon(runtime_dir, lock_probe, spawner);
     Ok(short)
 }

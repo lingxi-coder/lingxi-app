@@ -77,7 +77,7 @@ fn truncate_utf16(value: &str, limit: usize) -> Option<String> {
 
 struct WorkerCancel {
     handle: BackgroundTaskHandle,
-    flush_handle: BackgroundTaskHandle,
+    flush_handle: Option<BackgroundTaskHandle>,
     runtime: Arc<dyn RuntimeSpawner>,
 }
 
@@ -142,8 +142,10 @@ impl BatchState {
         self.tokens = (self.tokens + elapsed / TOKEN_REFILL_SECS).min(TOKEN_CAPACITY);
         self.last_refill = now;
         // Oracle `C=o.join("\n"); if(C.length>SHn) C=C.slice(0,SHn)+"\n...(truncated)"`.
-        let batch = truncate_utf16(&self.pending.join("\n"), MAX_BATCH_CHARS)
-            .map_or_else(|| self.pending.join("\n"), |cut| format!("{cut}\n{TRUNCATION_SUFFIX}"));
+        let batch = truncate_utf16(&self.pending.join("\n"), MAX_BATCH_CHARS).map_or_else(
+            || self.pending.join("\n"),
+            |cut| format!("{cut}\n{TRUNCATION_SUFFIX}"),
+        );
         self.pending.clear();
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -212,8 +214,10 @@ impl MonitorStreamSink {
     /// Oracle `if(I.length>cFe) I=I.slice(0,cFe)+"...(truncated)"`, applied to
     /// the ALREADY-TRIMMED line.
     fn truncate_line(line: &str) -> String {
-        truncate_utf16(line, MAX_EVENT_CHARS)
-            .map_or_else(|| line.to_string(), |cut| format!("{cut}{TRUNCATION_SUFFIX}"))
+        truncate_utf16(line, MAX_EVENT_CHARS).map_or_else(
+            || line.to_string(),
+            |cut| format!("{cut}{TRUNCATION_SUFFIX}"),
+        )
     }
 
     async fn flush(&self) {
@@ -261,10 +265,8 @@ impl ProcessStreamSink for MonitorStreamSink {
     async fn stdout_line(&self, line: String) -> Result<(), ProcessError> {
         let mut spool = line.clone();
         spool.push('\n');
-        self.stdout_bytes.fetch_add(
-            spool.len() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        self.stdout_bytes
+            .fetch_add(spool.len() as u64, std::sync::atomic::Ordering::Relaxed);
         self.output_manager
             .append(&self.output_file, &spool)
             .await
@@ -283,7 +285,9 @@ impl ProcessStreamSink for MonitorStreamSink {
         // by line count, and counting an over-cap line as "suppressed" fed the
         // high-volume auto-stop with events the model was never rate-limited
         // out of.
-        state.pending.push(MonitorStreamSink::truncate_line(trimmed));
+        state
+            .pending
+            .push(MonitorStreamSink::truncate_line(trimmed));
         // Oracle `if(o.length>0&&!d) d=t(p)` — schedule only once something is
         // actually queued.
         let notify = !state.flush_scheduled;
@@ -380,6 +384,144 @@ impl MonitorHandler {
     }
 }
 
+impl MonitorHandler {
+    async fn spawn_websocket(
+        &self,
+        source: crate::task_trait::WebSocketMonitorInput,
+        ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        use platform_api::http::MonitorWebSocketFrame;
+        let task_id = crate::id::generate_task_id(TaskType::Monitor);
+        let output_file = self
+            .output_manager
+            .allocate(&task_id)
+            .await
+            .map_err(|e| TaskError::Io(e.to_string()))?;
+        let cancel = CancellationToken::new();
+        let sink = Arc::new(MonitorStreamSink {
+            task_id: task_id.clone(),
+            output_file,
+            output_manager: self.output_manager.clone(),
+            status_sink: self.status_sink.clone(),
+            cancel: cancel.clone(),
+            batch: Arc::new(Mutex::new(BatchState::default())),
+            flush_notify: Arc::new(Notify::new()),
+            stdout_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        });
+        let worker_id = task_id.clone();
+        let worker_cancel = cancel.clone();
+        let workers = self.workers.clone();
+        let status = self.status_sink.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let future = async move {
+            if ready_rx.await.is_err() {
+                workers.lock().await.remove(&worker_id);
+                return;
+            }
+            let reg = source.registration;
+            let timed = !reg.task.persistent && reg.task.timeout_ms != 0;
+            let deadline = tokio::time::sleep(Duration::from_millis(if timed {
+                reg.task.timeout_ms
+            } else {
+                3_600_000
+            }));
+            tokio::pin!(deadline);
+            let result = tokio::select! {
+                biased;
+                _ = worker_cancel.cancelled() => None,
+                _ = &mut deadline, if timed => {
+                    status.notify_monitor_event(&worker_id, TIMEOUT_MARKER, true).await;
+                    None
+                },
+                result = source.http.monitor_websocket(reg.url, reg.protocols) => Some(result),
+            };
+            if let Some(result) = result {
+                match result {
+                    Err(error) => {
+                        let event = match error {
+                            platform_api::HttpError::Status { status, .. } => {
+                                format!("[WebSocket upgrade rejected: HTTP {status}]")
+                            }
+                            other => format!("[WebSocket error: {other}]"),
+                        };
+                        status.notify_monitor_event(&worker_id, &event, true).await;
+                        status
+                            .notify_monitor_event(&worker_id, "[WebSocket closed: 1006]", true)
+                            .await;
+                    }
+                    Ok(mut socket) => {
+                        let mut flush = tokio::time::interval(BATCH_WINDOW);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = worker_cancel.cancelled() => break,
+                                _ = &mut deadline, if timed => {
+                                    status.notify_monitor_event(&worker_id, TIMEOUT_MARKER, true).await;
+                                    break;
+                                },
+                                _ = flush.tick() => sink.flush().await,
+                                frame = socket.recv() => match frame {
+                                    Some(Ok(MonitorWebSocketFrame::Text(text))) => {
+                                        let _ = sink.stdout_line(text).await;
+                                    },
+                                    Some(Ok(MonitorWebSocketFrame::Oversized(size))) => {
+                                        status.notify_monitor_event(&worker_id, &format!("[Dropped {size}-byte frame (exceeds 1048576); closing]"), true).await;
+                                        break;
+                                    },
+                                    Some(Ok(MonitorWebSocketFrame::Binary(size))) => {
+                                        let _ = sink.stdout_line(format!("[binary frame, {size} bytes]")).await;
+                                    },
+                                    Some(Ok(MonitorWebSocketFrame::Closed(code, reason))) => {
+                                        sink.flush().await;
+                                        let reason = if reason.is_empty() { reason } else { format!(" {reason}") };
+                                        status.notify_monitor_event(&worker_id, &format!("[WebSocket closed: {code}{reason}]"), true).await;
+                                        break;
+                                    },
+                                    Some(Err(error)) => {
+                                        status.notify_monitor_event(&worker_id, &format!("[WebSocket error: {error}]"), true).await;
+                                        status.notify_monitor_event(&worker_id, "[WebSocket closed: 1006]", true).await;
+                                        break;
+                                    },
+                                    None => break,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            sink.flush().await;
+            // The close/timeout event is the whole notification; no second generic completion.
+            if let Some(registry) = status.task_registry() {
+                let _ = registry.publish_task_stopped(&worker_id).await;
+            } else {
+                status.set_status(&worker_id, TaskStatus::Killed).await;
+            }
+            workers.lock().await.remove(&worker_id);
+        };
+        let mut workers = self.workers.lock().await;
+        let handle = ctx
+            .runtime
+            .spawn(&format!("{HANDLER_NAME}:ws:{task_id}"), Box::pin(future))
+            .await
+            .map_err(|error| TaskError::Internal(error.to_string()))?;
+        workers.insert(
+            task_id.clone(),
+            WorkerCancel {
+                handle,
+                flush_handle: None,
+                runtime: ctx.runtime,
+            },
+        );
+        Ok(
+            TaskHandle::new(task_id, Some(Arc::new(move || cancel.cancel()))).with_activation(
+                move || {
+                    let _ = ready_tx.send(());
+                },
+            ),
+        )
+    }
+}
+
 #[async_trait]
 impl Task for MonitorHandler {
     fn name(&self) -> &str {
@@ -395,6 +537,9 @@ impl Task for MonitorHandler {
         input: TaskSpawnInput,
         ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
+        if let TaskSpawnInput::MonitorWs(source) = input {
+            return self.spawn_websocket(source, ctx).await;
+        }
         let TaskSpawnInput::Monitor {
             command,
             spawn_command,
@@ -410,7 +555,9 @@ impl Task for MonitorHandler {
                 "monitor handler received a non-Monitor input".into(),
             ));
         };
-        let task_id = crate::id::generate_task_id(TaskType::Monitor);
+        // 2.1.263 command monitors are local_bash tasks; Monitor remains
+        // the internal handler key so TaskStop cancels the streaming worker.
+        let task_id = crate::id::generate_task_id(TaskType::LocalBash);
         let output_file = self
             .output_manager
             .allocate(&task_id)
@@ -583,7 +730,7 @@ impl Task for MonitorHandler {
             task_id.clone(),
             WorkerCancel {
                 handle,
-                flush_handle,
+                flush_handle: Some(flush_handle),
                 runtime: ctx.runtime.clone(),
             },
         );
@@ -602,7 +749,11 @@ impl Task for MonitorHandler {
         let worker = { self.workers.lock().await.remove(task_id) };
         if let Some(worker) = worker {
             let main_result = worker.runtime.cancel(&worker.handle).await;
-            let flush_result = worker.runtime.cancel(&worker.flush_handle).await;
+            let flush_result = if let Some(flush_handle) = worker.flush_handle {
+                worker.runtime.cancel(&flush_handle).await
+            } else {
+                Ok(())
+            };
             if let Err(error) = main_result.or(flush_result) {
                 return Err(TaskError::Io(error.to_string()));
             }
@@ -690,7 +841,11 @@ mod tests {
         assert_eq!(s.flush_decision(now), FlushOutcome::Nothing);
         assert_eq!(s.suppressed, 1);
         assert!(s.high_volume_since.is_some(), "high-volume window started");
-        assert_eq!(s.last_suppressed, Some(now), "and the suppression is stamped");
+        assert_eq!(
+            s.last_suppressed,
+            Some(now),
+            "and the suppression is stamped"
+        );
     }
 
     #[test]
@@ -733,7 +888,10 @@ mod tests {
         s.pending = vec!["x".into()];
         assert!(matches!(
             s.flush_decision(now),
-            FlushOutcome::Deliver { notice: Some(_), .. }
+            FlushOutcome::Deliver {
+                notice: Some(_),
+                ..
+            }
         ));
         assert_eq!(s.high_volume_since, None, "forgiven after a 7s quiet gap");
 
@@ -884,7 +1042,10 @@ mod tests {
 
     #[test]
     fn the_timeout_marker_is_byte_exact() {
-        assert_eq!(TIMEOUT_MARKER, "[Monitor timed out \u{2014} re-arm if needed.]");
+        assert_eq!(
+            TIMEOUT_MARKER,
+            "[Monitor timed out \u{2014} re-arm if needed.]"
+        );
         // An em dash, not a hyphen — the two look alike in a diff.
         assert!(TIMEOUT_MARKER.contains('\u{2014}'));
         assert!(!TIMEOUT_MARKER.contains(" - "));
@@ -1223,7 +1384,12 @@ mod tests {
     async fn natural_completion_reports_completed_and_delivers_events() {
         let sink = Arc::new(RecordingSink::default());
         let (handler, ctx) = make_handler(MockRunner::new("hello\nworld\n", 0), sink.clone());
-        let _handle = handler.spawn(monitor_input(), ctx).await.unwrap();
+        let handle = handler.spawn(monitor_input(), ctx).await.unwrap();
+        assert!(
+            handle.task_id.starts_with('b'),
+            "command monitor must use bash id: {}",
+            handle.task_id
+        );
         assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
         let events = sink.events();
         assert!(
@@ -1283,5 +1449,87 @@ mod tests {
             tokio::task::yield_now().await;
         }
         panic!("worker never exited the registration wait after cancellation");
+    }
+    struct SocketHttp;
+    #[async_trait]
+    impl platform_api::HttpTransport for SocketHttp {
+        async fn request(
+            &self,
+            _: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            unreachable!()
+        }
+        async fn stream_sse(
+            &self,
+            _: protocol::HttpRequest,
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            unreachable!()
+        }
+        async fn monitor_websocket(
+            &self,
+            url: String,
+            protocols: Vec<String>,
+        ) -> Result<platform_api::http::MonitorWebSocketReceiver, platform_api::HttpError> {
+            assert_eq!(url, "wss://events.example.com/feed");
+            assert_eq!(protocols, vec!["v1"]);
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tx.send(Ok(platform_api::http::MonitorWebSocketFrame::Text(
+                "one\ntwo".into(),
+            )))
+            .await
+            .unwrap();
+            tx.send(Ok(platform_api::http::MonitorWebSocketFrame::Binary(17)))
+                .await
+                .unwrap();
+            tx.send(Ok(platform_api::http::MonitorWebSocketFrame::Closed(
+                1000,
+                "done".into(),
+            )))
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_handler_streams_frames_and_reports_close_after_events() {
+        let sink = Arc::new(RecordingSink::default());
+        let (handler, ctx) = make_handler(BlockingRunner::new(), sink.clone());
+        let mut handle = handler
+            .spawn(
+                TaskSpawnInput::MonitorWs(crate::task_trait::WebSocketMonitorInput {
+                    registration: platform_api::task_registry::WebSocketMonitorRegistration {
+                        url: "wss://events.example.com/feed".into(),
+                        protocols: vec!["v1".into()],
+                        task: platform_api::task_registry::MonitorRegistration {
+                            persistent: true,
+                            ..Default::default()
+                        },
+                    },
+                    http: Arc::new(SocketHttp),
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(handle.task_id.starts_with('s'));
+        assert!(
+            sink.events().is_empty(),
+            "socket cannot open before registry activation"
+        );
+        handle.activate();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Killed);
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("one\ntwo")
+                    && event.contains("[binary frame, 17 bytes]")),
+            "{events:?}"
+        );
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("[WebSocket closed: 1000 done]")
+        );
     }
 }

@@ -815,38 +815,24 @@ fn should_run_in_background(d: BackgroundDecision) -> bool {
         && !d.caller_is_in_process_teammate
 }
 
-/// claude `pRe` (src_160528463.js @870) — the prefix of the harness NOTE that
-/// fronts a turn-limited agent's result.
-const MAX_TURNS_NOTE_PREFIX: &str = "NOTE: this agent stopped at its ";
-
-/// Build the harness NOTE `bft` prepends when the run ended on its turn budget
-/// (src_162329786.js @3532630):
-///
-/// ```js
-/// let en=PKt.has(C)?"":` Send the agent a message (${Yr}) to let it continue from where it stopped.`,
-///     Dt=ye.length>0?"The text below is PARTIAL output; treat it as incomplete."
-///                   :"It was still calling tools and had produced no report.";
-/// Le.push({type:"text",text:`${pRe}${Fe}-turn limit before finishing. ${Dt}${en}\n`})
-/// ```
-///
-/// `Fe` is the exhausted budget (`N2n`, the `max_turns_reached` attachment),
-/// `ye` the agent's own final text blocks BEFORE the output guard runs, and
-/// `PKt` the one-shot built-ins — `Explore` / `Plan` cannot be continued, so
-/// they get no "send it a message" tail. The note is a harness block, not agent
-/// output, so it is NOT passed through the subagent output guard.
-fn max_turns_harness_note(max_turns: u64, agent_type: &str, has_partial_output: bool) -> String {
-    let continuation = if ONE_SHOT_BUILTIN_AGENT_TYPES.contains(&agent_type) {
-        ""
+fn async_launch_result(launch: platform_api::subagent_spawn::AsyncLaunch, task_id: Option<String>, prompt: &str, description: &str, resolved_model: &str, can_read_output_file: bool) -> ToolCallResult {
+    let agent_id_str = launch.agent_id.as_uuid().to_string();
+    let prefix = format!("Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime.");
+    let tail = if can_read_output_file {
+        format!("Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification.", launch.output_file)
     } else {
-        " Send the agent a message (SendMessage) to let it continue from where it stopped."
+        "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running.".to_string()
     };
-    let body = if has_partial_output {
-        "The text below is PARTIAL output; treat it as incomplete."
-    } else {
-        "It was still calling tools and had produced no report."
-    };
-    format!("{MAX_TURNS_NOTE_PREFIX}{max_turns}-turn limit before finishing. {body}{continuation}\n")
+    let mut data = json!({"isAsync": true, "status": "async_launched", "agentId": agent_id_str, "prompt": prompt, "description": description, "resolvedModel": resolved_model,
+        "outputFile": launch.output_file, "canReadOutputFile": can_read_output_file, "model_content": format!("{prefix}\n{tail}")});
+    if let Some(task_id) = task_id { data["task_id"] = json!(task_id); }
+    ToolCallResult {data, model_content: None, new_messages: vec![], context_modifier: None, is_error: false, mcp_meta: None}
 }
+
+#[path = "foreground_task.rs"]
+mod foreground_task;
+
+use platform_api::subagent_output::max_turns_harness_note;
 
 /// `N2n(e)` (@3530xxx) reduced to the shape the port's runner publishes: the
 /// max-turns fall-through is the only completion that stamps
@@ -3089,7 +3075,6 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
 
         match spawner.spawn_async(request, inherit).await {
             Ok(launch) => {
-                let agent_id_str = launch.agent_id.as_uuid().to_string();
                 // (G14) Register name → agentId for SendMessage routing — ASYNC
                 // ONLY, post-launch so a failed spawn leaves no stale entry
                 // (claude AgentTool.tsx:700-712). Prefer the ctx-level registry
@@ -3107,47 +3092,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 let can_read_output_file = ctx.subagent_registry.as_ref().is_some_and(|reg| {
                     reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
                 });
-                // claude `async_launched` tool_result text, byte-for-byte
-                // (2.1.223 @251729190: prefix `n` + `canReadOutputFile`-branched
-                // tail `o`, joined by `\n`). The 223 prefix appends the
-                // don't-fabricate sentence ("You know nothing about its
-                // results…"), and the non-readable tail appends the
-                // still-running sentence — both new since the 2.1.207 lock.
-                let output_file = &launch.output_file;
-                let prefix = format!(
-                    "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime."
-                );
-                let instructions = if can_read_output_file {
-                    // claude `canReadOutputFile` branch: warn the model NOT to
-                    // read the `.output` file — it is the full subagent JSONL
-                    // transcript and would overflow context. (`${ys}` = `Read`.)
-                    format!(
-                        "Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {output_file}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification."
-                    )
-                } else {
-                    "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running.".to_string()
-                };
-                let model_content = format!("{prefix}\n{instructions}");
-                Ok(ToolCallResult {
-                    data: json!({
-                        "isAsync": true,
-                        "status": "async_launched",
-                        "agentId": agent_id_str,
-                        "description": parsed.description,
-                        // claude `async_launched` payload includes the resolved
-                        // model id (`resolvedModel: U`).
-                        "resolvedModel": selected.resolved_model.clone(),
-                        "prompt": parsed.prompt,
-                        "outputFile": launch.output_file,
-                        "canReadOutputFile": can_read_output_file,
-                        "model_content": model_content,
-                    }),
-                    model_content: None,
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: false,
-                    mcp_meta: None,
-                })
+                Ok(async_launch_result(launch, None, &parsed.prompt, &parsed.description, &selected.resolved_model, can_read_output_file))
             }
             Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {
                 self.release_spawn_reservation();
@@ -4522,9 +4467,21 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
         });
 
-        let outcome = spawner
-            .spawn_with_progress(request, inherit, Some(prog_tx))
-            .await;
+        let (outcome, foreground_worktree_result) = if let Some(registry) = self.ctx.task_registry.clone() {
+            match foreground_task::run(spawner.clone(), request, inherit, prog_tx, progress.clone(), ctx.tool_use_id.clone(), registry, self.ctx.clone()).await {
+                foreground_task::ForegroundResult::Finished(result, worktree) => (result, Some(worktree)),
+                foreground_task::ForegroundResult::Backgrounded(launch, task_id) => {
+                    if let Some(name) = parsed.name.as_deref() {
+                        if let Some(names) = self.ctx.agent_name_registry.as_ref() { names.register(name, launch.agent_id).await; }
+                        else { spawner.register_name(name, launch.agent_id).await; }
+                    }
+                    let can_read = ctx.subagent_registry.as_ref().is_some_and(|reg| reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some());
+                    return Ok(async_launch_result(launch, Some(task_id), &parsed.prompt, &parsed.description, &selected.resolved_model, can_read));
+                }
+            }
+        } else {
+            (spawner.spawn_with_progress(request, inherit, Some(prog_tx)).await, None)
+        };
         // `prog_tx` is now dropped → the forwarder drains and exits.
         let _ = forwarder.await;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -4555,12 +4512,15 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // in `platform_api::worktree::agent_worktree_result` (shared with the ASYNC
         // lifecycle owner in the local_agent task handler); it runs for ANY
         // outcome so a worktree never leaks on a failed/killed agent.
-        let worktree_result: Option<(String, String)> = match &agent_worktree {
+        let worktree_result: Option<(String, String)> = match foreground_worktree_result {
+            Some(result) => result,
+            None => match &agent_worktree {
             Some(handle) => {
                 platform_api::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle)
                     .await
             }
             None => None,
+            },
         };
 
         match outcome {

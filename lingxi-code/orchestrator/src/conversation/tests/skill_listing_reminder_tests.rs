@@ -656,7 +656,10 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
     // `<task-notification>` inside one `<system-reminder>`.
     let mut t0_messages = orch.task_notification_reminder_messages().await;
     assert_eq!(t0_messages.len(), 1, "one completion ⇒ one message");
-    let t0 = t0_messages.pop().expect("turn-0 task notification").text_content();
+    let t0 = t0_messages
+        .pop()
+        .expect("turn-0 task notification")
+        .text_content();
     // 2.1.238 `b_a` (@285068292): the provenance header sits INSIDE the
     // `<system-reminder>` envelope.
     let body = "<task-notification>\n\

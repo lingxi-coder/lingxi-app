@@ -783,6 +783,7 @@ async fn non_teammate_input_is_rejected() {
             TaskSpawnInput::LocalBash {
                 command: "echo".into(),
                 timeout: None,
+                tool_use_id: None,
             },
             ctx(fs, rt),
         )
@@ -2031,6 +2032,7 @@ impl platform_api::mailbox::MailboxRouterHandle for PlanReviewTransport {
 }
 fn plan_invocation() -> platform_api::tool_invoker::SubagentInvocationContext {
     platform_api::tool_invoker::SubagentInvocationContext {
+        permission_pause_observer: None,
         parent_agent_id: None,
         origin_session_id: None,
         agent_name: Some("planner".into()),

@@ -35,6 +35,9 @@ use std::sync::Arc;
 
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
+    /// Unit-test credential fixture lifetime; never compiled into a host build.
+    #[cfg(test)]
+    test_home: Option<tempfile::TempDir>,
     /// Session team registry and leader inbox shared with Agent/SendMessage.
     pub coordinator: Arc<engine_desktop::TeamRegistry>,
     /// The fully-constructed orchestrator.
@@ -1205,6 +1208,36 @@ pub async fn build_runtime(
     Ok(runtime)
 }
 
+/// Unit tests exercise the real engine assembly with the existing explicit
+/// isolated-store seam. Each boot owns a fresh directory, so no native broker,
+/// login keychain or ambient provider credential can affect a fixture.
+#[cfg(test)]
+fn isolate_test_runtime_config(
+    cfg: &mut DesktopConfig,
+) -> Result<Option<tempfile::TempDir>, InitError> {
+    if cfg.isolated_credential_storage {
+        return Ok(None);
+    }
+    // Respect a fixture's explicit temporary home: settings, saved profiles,
+    // and resumed transcripts may intentionally already live there.
+    let temporary_home = cfg.lingxi_home.starts_with(std::env::temp_dir())
+        || cfg.lingxi_home.starts_with(std::path::Path::new("/tmp"))
+        || cfg
+            .lingxi_home
+            .starts_with(std::path::Path::new("/private/tmp"));
+    if temporary_home {
+        cfg.isolated_credential_storage = true;
+        return Ok(None);
+    }
+    let home = tempfile::Builder::new()
+        .prefix("lingxi-cli-runtime-test-")
+        .tempdir()
+        .map_err(|error| InitError::SecureStorage(format!("test credential directory: {error}")))?;
+    cfg.lingxi_home = home.path().to_path_buf();
+    cfg.isolated_credential_storage = true;
+    Ok(Some(home))
+}
+
 /// Shared engine assembly: build the runtime from an already-resolved
 /// [`DesktopConfig`] + output sink. Lets the TUI path inject a permission gate
 /// derived from the SAME `cfg` without resolving config twice.
@@ -1212,6 +1245,12 @@ pub async fn build_runtime_from_config(
     cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
 ) -> Result<Runtime, InitError> {
+    #[cfg(test)]
+    let (cfg, test_home) = {
+        let mut cfg = cfg;
+        let home = isolate_test_runtime_config(&mut cfg)?;
+        (cfg, home)
+    };
     crate::startup_trace::mark("runtime_build_start");
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(NoopPermissionRequestSink);
@@ -1229,6 +1268,8 @@ pub async fn build_runtime_from_config(
         );
     }
     Ok(Runtime {
+        #[cfg(test)]
+        test_home,
         coordinator: rt.coordinator,
         orchestrator: rt.orchestrator,
         dispatcher: rt.dispatcher,
@@ -1333,6 +1374,10 @@ pub async fn build_runtime_for_tui_inner_with_parent(
     // (TUI-PERM) Resolve config ONCE so the gate's persist paths come from the
     // SAME cfg the engine builds with (no double resolve, no lost paths).
     let mut cfg = resolve_desktop_config(argv, permission_mode);
+    // Apply fixture paths before constructing the permission gate, so its
+    // persistence root agrees with the engine's resolved configuration.
+    #[cfg(test)]
+    let test_home = isolate_test_runtime_config(&mut cfg)?;
 
     // RESUME: name the JSONL writer's file by the RESUMED session id so new turns
     // append to `<id>.jsonl` (the same file the history loaded from) rather than
@@ -1374,6 +1419,10 @@ pub async fn build_runtime_for_tui_inner_with_parent(
 
     let flag_settings = cfg.flag_settings.clone();
     let mut runtime = build_runtime_from_config(cfg, bridge).await?;
+    #[cfg(test)]
+    {
+        runtime.test_home = test_home;
+    }
     auto_connect_ide_if_requested(argv, &runtime).await;
     let workflow_events = runtime.workflow_events.take();
     crate::startup_trace::mark("tui_runtime_build_end");
@@ -1494,6 +1543,45 @@ mod tests {
             "a --mcp-config server must never wait on the .mcp.json project \
              approval gate, which owns Project scope only"
         );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_credentials_preserve_explicit_fixture_home_and_never_use_broker() {
+        let home = tempfile::tempdir().unwrap();
+        let marker = home.path().join("settings.json");
+        std::fs::write(&marker, "{}\n").unwrap();
+        let mut cfg = DesktopConfig {
+            lingxi_home: home.path().to_path_buf(),
+            ..Default::default()
+        };
+        let policy = cfg.credential_storage_policy;
+        let guard = isolate_test_runtime_config(&mut cfg).unwrap();
+        assert!(
+            guard.is_none(),
+            "explicit fixture keeps ownership of its directory"
+        );
+        assert_eq!(cfg.lingxi_home, home.path());
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "{}\n");
+        assert_eq!(
+            cfg.credential_storage_policy, policy,
+            "fixture isolation does not relax production policy"
+        );
+        let stack = engine_desktop::build_shared_credential_stack_with_policy(
+            &cfg.lingxi_home,
+            cfg.isolated_credential_storage,
+            cfg.credential_storage_policy,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stack.storage.backend(),
+            platform_api::SecureStorageBackend::PlainText
+        );
+        assert!(!stack
+            .storage
+            .contains("cli-fixture", "fresh")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

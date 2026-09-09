@@ -76,6 +76,7 @@ pub mod permission_gate;
 pub mod plan_files;
 pub mod plan_slug;
 pub mod platform;
+pub mod agent_processes;
 pub mod process;
 pub mod prompting_gate;
 pub mod repo_root_reload;
@@ -88,11 +89,13 @@ pub mod session_flags;
 pub mod share;
 pub mod skill_loader;
 pub mod stt;
+pub mod subagent_output;
 pub mod subagent_output_guard;
 pub mod subagent_spawn;
 pub mod subscription;
 pub mod swarm;
 pub mod task_registry;
+pub mod task_activity;
 pub mod team_registry;
 pub mod team_spawn;
 pub mod teammate_worker;
@@ -142,8 +145,8 @@ pub use fusion::{
     FusionLatencyClass, FusionModelHints, FusionModelRef, FusionNeedsParentReason, FusionOrigin,
     FusionPreset, FusionProgress, FusionRecommendation, FusionRequest, FusionResult, FusionStage,
     FusionStatus, FusionTiming, FusionUniqueInsight, FusionUsage, NoopFusionCompletionSink,
-    PanelClaim, PanelEvidence, PanelOutcome, PanelPosition, PanelReport, PanelRisk,
-    PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
+    PanelClaim, PanelEvidence, PanelOutcome, PanelPosition, PanelReport, PanelRisk, PanelRunStatus,
+    RiskSeverity, DEFAULT_FUSION_DIMENSIONS, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
     FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
     FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT,
 };
@@ -244,3 +247,21 @@ pub use worktree::*;
 pub use worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 
 pub mod teammate_plan;
+
+pub mod task_notification;
+mod task_notification_sanitize;
+
+/// Shared task output layout and direct-child display parsing.
+pub mod task_output;
+
+/// Shared shell discovery and duration formatting.
+pub mod shell_support;
+
+pub mod shell_handoff;
+
+/// Shared acknowledged shell supervision protocol.
+pub mod shell_supervisor;
+/// Platform-independent shell stall detector.
+pub mod shell_watchdog;
+
+pub mod human_task_message;

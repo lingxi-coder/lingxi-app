@@ -1800,7 +1800,9 @@ impl Tool for MCPTool {
         let cancel = tokio_util::sync::CancellationToken::new();
         let parent_cancel = ctx.cancel.clone();
         let bound_output_schema = self.bound_output_schema.clone();
+        let task_raw_content = Arc::new(std::sync::Mutex::new(None));
         let mut call_task = {
+            let task_raw_content = task_raw_content.clone();
             let registry = registry.clone();
             let bus = bus.clone();
             let output_dir = output_dir.clone();
@@ -1845,6 +1847,11 @@ impl Tool for MCPTool {
                     biased;
                     () = cancelled => Err(ToolError::Aborted),
                     res = &mut call_fut => {
+                        if let Ok(dto) = &res {
+                            if !dto.is_error {
+                                *task_raw_content.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dto.structured_content.as_ref().map_or_else(|| dto.content.clone(), |value| Value::String(value.to_string())));
+                            }
+                        }
                         process_mcp_call_result(
                             bus,
                             output_dir,
@@ -1982,8 +1989,16 @@ impl Tool for MCPTool {
                         // this settle won the terminal transition (the binary's
                         // `!k` guard — a killed / already-settled task never
                         // re-emits). `settle_mcp_task` reports that via `Ok(true)`.
+                        let raw = task_raw_content.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                        let receipt = if !failed {
+                            raw.map(|raw| {
+                                let (now, random) = persist_id_seed();
+                                crate::task_result::prepare(&raw, &output_dir, &format!("{now}-{random}"))
+                            })
+                        } else { None };
+                        let (text, hint) = receipt.map_or((text, None), |receipt| (receipt.text, receipt.saved_hint));
                         if let Ok(true) =
-                            task_registry.settle_mcp_task(&task_id, &text, failed).await
+                            task_registry.settle_mcp_task_with_hint(&task_id, &text, failed, hint.as_deref()).await
                         {
                             emit_auto_background_outcome(&bus, outcome).await;
                         }
@@ -4921,6 +4936,7 @@ mod auto_background_race_tests {
     struct RecordingRegistry {
         registered: StdMutex<Vec<McpTaskRegistration>>,
         settled: StdMutex<Vec<(String, String, bool)>>,
+        saved_hints: StdMutex<Vec<String>>,
         /// The cancel token handed to the most recent `register_mcp_task` — a
         /// test fires it to simulate a `TaskStop` (F3-2 regression).
         captured_cancel: StdMutex<Option<tokio_util::sync::CancellationToken>>,
@@ -4966,6 +4982,11 @@ mod auto_background_race_tests {
             *self.captured_cancel.lock().unwrap() = Some(cancel);
             Ok("ktest0001".to_string())
         }
+        async fn settle_mcp_task_with_hint(&self, id: &str, text: &str, failed: bool, hint: Option<&str>) -> Result<bool, TaskRegistryError> {
+            if let Some(hint) = hint { self.saved_hints.lock().unwrap().push(hint.to_string()); }
+            self.settle_mcp_task(id,text,failed).await
+        }
+
         async fn settle_mcp_task(
             &self,
             id: &str,
@@ -5474,6 +5495,32 @@ mod auto_background_race_tests {
                 .any(|e| e.name == TENGU_FEATURE_SAD || e.name == TENGU_FEATURE_BAD),
             "completed path emits ONLY feature_ok: {events:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backgrounded_call_produces_saved_hint_from_raw_persisted_result() {
+        let (conn, peer_tx, mut peer_rx) = paired_with_timeout(std::time::Duration::from_secs(600));
+        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry,Some(recorder.clone()));
+        let output_dir = ctx.tool_results_dir();
+        let tool = MCPTool::new(ctx);
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-saved"));
+        tool.call(call_input(),use_ctx,tool_api::test_support::fresh_tx()).await.unwrap();
+        let raw = "&".repeat(30_000); // Under generic token threshold; over escaped notification budget.
+        answer_call(&mut peer_rx,&peer_tx,json!({"result":{"content":[{"type":"text","text":raw}],"isError":false}})).await;
+        for _ in 0..200 { if !recorder.settled.lock().unwrap().is_empty() { break; } tokio::task::yield_now().await; }
+        let hints = recorder.saved_hints.lock().unwrap();
+        assert_eq!(hints.len(),1);
+        assert!(hints[0].contains("complete 30000-character output was saved"));
+        let path = hints[0].split("output was saved to ").nth(1).unwrap().split(';').next().unwrap();
+        assert!(std::path::Path::new(path).starts_with(&output_dir));
+        assert_eq!(std::fs::read_to_string(path).unwrap(),raw);
+        assert!(recorder.settled.lock().unwrap()[0].1.ends_with("… [truncated]"));
+        std::fs::remove_file(path).unwrap();
     }
 
     // F3-3: a backgrounded call whose result carries `isError:true` settles the

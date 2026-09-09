@@ -34,14 +34,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Outbound events the engine streams to a client.
-///
-/// Each live-turn variant notes its engine source (from the area maps).
-/// `ThinkingDelta` and `UsageUpdate` are now LIVE-FED by the §0.7 "light up
-/// thinking/usage" follow-up: `event_router` emits them via
-/// `OutputStream::emit_thinking` / `emit_usage`. The remaining reserved
-/// variants (e.g. `CoordinatorStatus`) are defined so the contract freezes now
-/// but still have no live engine source in the foundation (decisions §0.7 /
-/// §0.9) and round-trip only.
+//
+// Each live-turn variant notes its engine source (from the area maps).
+// `ThinkingDelta` and `UsageUpdate` are now LIVE-FED by the §0.7 "light up
+// thinking/usage" follow-up: `event_router` emits them via
+// `OutputStream::emit_thinking` / `emit_usage`. The remaining reserved
+// variants (e.g. `CoordinatorStatus`) are defined so the contract freezes now
+// but still have no live engine source in the foundation (decisions §0.7 /
+// §0.9) and round-trip only.
 // Boxing the app payload would change the generated Swift/Kotlin protocol API.
 #[allow(clippy::large_enum_variant)]
 // UniFFI 0.28 stores an enum's variant/field documentation in the same
@@ -619,6 +619,12 @@ pub enum ClientEvent {
         companion: Option<String>,
         streak: u32,
         since_ms: u64,
+    },
+
+    // Additive SDK task lifecycle receipt. Keep new variants after the
+    // frozen prefix so existing UniFFI variant ordinals remain unchanged.
+    TaskLifecycle {
+        event_json: String,
     },
 }
 

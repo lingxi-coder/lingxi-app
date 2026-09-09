@@ -412,7 +412,11 @@ async fn drain_teammate_prompts(
         let _ = turn_tx.send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()));
         queue.register_active_turn(cancel.clone()).await;
         if let Err(error) = orchestrator
-            .run_turn_streaming_with_cancel(text, cancel)
+            .run_queued_turn_streaming(
+                text,
+                cancel,
+                command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
+            )
             .await
         {
             let _ = turn_tx.send(tui::TurnEvent::TextDelta(error.to_string()));
@@ -982,6 +986,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     initial_prompt: Option<String>,
     handoff: Option<platform_api::BackgroundingSnapshot>,
 ) -> RunOutcome {
+    let exit_task_registry = tui_build.runtime.task_registry.clone();
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
     let teammate_turn_gate = Arc::new(tokio::sync::Mutex::new(()));
     let pending_slashes = Arc::new(HostPromptQueueState::default());
@@ -1408,6 +1413,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let queued_prompt_queue = prompt_queue.clone();
     let queued_prompt_handle = tokio::runtime::Handle::current();
     let queued_prompt_tx = web_turn_tx.clone();
+    let queued_task_registry = tui_build.runtime.task_registry.clone();
     let on_queue_prompt =
         move |prompt: String, images: Vec<std::path::PathBuf>, owner: CancellationToken| {
             let queue = queued_prompt_queue.clone();
@@ -1416,9 +1422,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
             let pending_slashes = queued_pending_slashes.clone();
             let tx = queued_prompt_tx.clone();
             let command = tui_prompt_command(prompt);
+            let task_registry = queued_task_registry.clone();
             let publication = PendingPromptEnqueue::new(&pending_slashes, &command.uuid, owner);
             queued_prompt_handle.spawn(async move {
                 queue.enqueue(command).await;
+                if !platform_api::env::background_tasks_disabled() {
+                    task_registry
+                        .background_all_tasks_with_reason(
+                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                        )
+                        .await;
+                }
                 drop(publication);
                 discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
                 if !images.is_empty() {
@@ -1775,16 +1789,33 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // off-loop shape as `on_permission_action`. The result lands in the
     // transcript via `TurnEvent::SystemNotice`.
     let task_registry_effect = task_registry_handle.clone();
+    let task_message_orchestrator = orchestrator.clone();
     let on_task_action = move |action: tui::bottom_pane::TaskAction| {
         let registry = task_registry_effect.clone();
+        let task_message_orchestrator = task_message_orchestrator.clone();
         let tx = task_turn_tx.clone();
         task_handle.spawn(async move {
-            let tui::bottom_pane::TaskAction::Kill { task_id } = action;
-            // The `/tasks` picker is a USER gesture, so the killed agent's
-            // notification reads "was stopped by user" (claude `killedBy` default).
-            let (body, is_error) = match registry.kill_with_reason(&task_id, "user").await {
-                Ok(_) => (format!("Stopped task {task_id}"), false),
-                Err(e) => (format!("Could not stop task {task_id}: {e}"), true),
+            let (body, is_error) = match action {
+                tui::bottom_pane::TaskAction::Kill { task_id } => {
+                    // The picker is a USER gesture, retaining the user-stop reason.
+                    match registry.kill_with_reason(&task_id, "user").await {
+                        Ok(_) => (format!("Stopped task {task_id}"), false),
+                        Err(error) => (format!("Could not stop task {task_id}: {error}"), true),
+                    }
+                }
+                tui::bottom_pane::TaskAction::Message { task_id, message } => {
+                    if !task_message_orchestrator.workspace_trusted().await {
+                        let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                            body: "Trust this workspace before messaging a task".into(),
+                            is_error: true,
+                        });
+                        return;
+                    }
+                    match registry.send_human_task_message(&task_id, &message).await {
+                        Ok(()) => (format!("Message accepted for task {task_id}"), false),
+                        Err(error) => (format!("Could not message task {task_id}: {error}"), true),
+                    }
+                }
             };
             let _ =
                 tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
@@ -2140,6 +2171,62 @@ pub(crate) async fn run_ratatui_with_initial_state(
             }
         }
     });
+    let pump_shutdown = CancellationToken::new();
+    let exit_turn_gate = teammate_turn_gate.clone();
+    let notification_pump = {
+        let registry = tui_build.runtime.task_registry.clone();
+        let orch = concrete_orchestrator.clone();
+        let gate = teammate_turn_gate.clone();
+        let queue = prompt_queue.clone();
+        let tx = teammate_turn_tx.clone();
+        let cancel_reason = queue_cancel_reason.clone();
+        let shutdown = pump_shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                }
+                if queue.has_main_thread_commands().await
+                    && !platform_api::env::background_tasks_disabled()
+                {
+                    registry
+                        .background_all_tasks_with_reason(
+                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                        )
+                        .await;
+                }
+                if !registry.has_pending_task_notifications_for(None).await {
+                    continue;
+                }
+                let Ok(_guard) = gate.try_lock() else {
+                    continue;
+                };
+                if !registry.has_pending_task_notifications_for(None).await {
+                    continue;
+                }
+                let cancel = shutdown.child_token();
+                cancel_reason.reset();
+                queue.register_active_turn(cancel.clone()).await;
+                if tx
+                    .send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()))
+                    .is_err()
+                {
+                    break;
+                }
+                if let Err(error) = orch
+                    .run_task_notification_rewake(registry.as_ref(), cancel)
+                    .await
+                {
+                    let _ = tx.send(tui::TurnEvent::TextDelta(error.to_string()));
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(
+                        platform_api::TurnOutcome::EndTurn,
+                    ));
+                }
+                queue.clear_active_turn().await;
+            }
+        })
+    };
     let teammate_prompt_pumps = leader_mailbox.map(|inbox| {
         let incoming_queue = prompt_queue.clone();
         let incoming = tokio::spawn(async move {
@@ -2159,9 +2246,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
         });
         let queue = prompt_queue.clone();
         let orch = concrete_orchestrator.clone();
+        let shutdown = pump_shutdown.clone();
         let drain = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                }
                 if let Ok(_guard) = teammate_turn_gate.try_lock() {
                     drain_teammate_prompts(&queue, orch.as_ref(), &teammate_turn_tx, &pending_slashes).await;
                 }
@@ -2220,10 +2311,49 @@ pub(crate) async fn run_ratatui_with_initial_state(
         )
     })
     .await;
-    if let Some((incoming, drain)) = teammate_prompt_pumps {
+    pump_shutdown.cancel();
+    let drain_to_join = teammate_prompt_pumps.map(|(incoming, drain)| {
         incoming.abort();
-        drain.abort();
+        drain
+    });
+    prompt_queue.clear().await;
+    if let Some(drain) = drain_to_join {
+        let _ = drain.await;
     }
+    let _ = notification_pump.await;
+    // Turn-abort backgrounding may register a child while unwinding. Wait
+    // before taking the final task snapshot so that child cannot escape exit.
+    let exit_turn_guard = exit_turn_gate.lock().await;
+    if matches!(
+        &run_result,
+        Ok(Ok(
+            tui::app::AppExit::Quit | tui::app::AppExit::Backgrounded(_)
+        )) | Ok(Err(_))
+            | Err(_)
+    ) {
+        use platform_api::task_registry::TaskRegistryHandle as _;
+        if let Ok(tasks) = platform_api::task_registry::TaskRegistryHandle::list(
+            exit_task_registry.as_ref(),
+            platform_api::task_registry::TaskListFilter::default(),
+        )
+        .await
+        {
+            for task in tasks.into_iter().filter(|task| {
+                matches!(
+                    task.status.as_str(),
+                    "running" | "pending" | "paused" | "queued"
+                ) || task.is_parked
+            }) {
+                if let Err(error) = exit_task_registry
+                    .kill_with_reason(&task.task_id, "user")
+                    .await
+                {
+                    eprintln!("Could not stop task {} during exit: {error}", task.task_id);
+                }
+            }
+        }
+    }
+    drop(exit_turn_guard);
     status_pump.abort();
     agent_status_pump.abort();
     // (/stop, and clean shutdown) The render loop has torn down; close the
@@ -2270,6 +2400,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
         })
     };
     match run_result {
+        Ok(Ok(tui::app::AppExit::Backgrounded(receipt))) => {
+            println!("\n{receipt}");
+            RunOutcome::Exit(exit_codes::SUCCESS)
+        }
         Ok(Ok(tui::app::AppExit::Quit)) => {
             // Print the BARE uuid (not the `sess:`-prefixed SessionId Display):
             // it matches the on-disk `<uuid>.jsonl` and what `--resume` resolves
@@ -5413,7 +5547,7 @@ filter in THIS process — /model and the turn loop already route it"
                 loop {
                     match rx.recv().await {
                         Some(TurnEvent::ProviderConnected { provider_id }) => {
-                            return Some(provider_id)
+                            return Some(provider_id);
                         }
                         Some(_) => continue,
                         None => return None,

@@ -9,6 +9,11 @@
 /// maps one-to-one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskRow {
+    /// Result is still unread by its owner.
+    pub unread: bool,
+    /// Concrete agent model and optional string effort.
+    pub model: Option<String>,
+    pub effort: Option<String>,
     /// Plan approval waits take precedence over the task lifecycle label.
     pub awaiting_plan_approval: bool,
     /// 9-char `[bartwmdksf][0-9a-z]{8}` task id.

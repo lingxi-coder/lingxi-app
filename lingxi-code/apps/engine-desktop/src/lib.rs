@@ -8222,13 +8222,15 @@ fn merge_agent_frontmatter_mcp_servers(
 /// Its `Drop` mirrors `agent::handle::McpCleanupGuard`'s: best-effort teardown
 /// on the current runtime, nothing to do once no runtime is left.
 struct AgentMcpConnectLoopGuard {
+    lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
     cleanups: Vec<agent::agent_mcp_tools::AgentMcpCleanupHandle>,
     agent_type: String,
 }
 
 impl AgentMcpConnectLoopGuard {
-    fn new(agent_type: String) -> Self {
+    fn new(agent_type: String, lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>) -> Self {
         Self {
+            lease,
             cleanups: Vec::new(),
             agent_type,
         }
@@ -8252,9 +8254,11 @@ impl Drop for AgentMcpConnectLoopGuard {
             return;
         }
         let cleanups = std::mem::take(&mut self.cleanups);
+        let lease = self.lease.take();
         let agent_type = std::mem::take(&mut self.agent_type);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
+                let _lease = lease;
                 agent::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &agent_type).await;
             });
         }
@@ -8281,6 +8285,7 @@ async fn build_agent_mcp_tool_set(
     strict_mcp_config: bool,
     agent_id: protocol::AgentId,
     def: agent::AgentDefinition,
+    lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
 ) -> agent::agent_mcp_tools::AgentMcpToolSet {
     if def.mcp_servers.is_empty() {
         return agent::agent_mcp_tools::AgentMcpToolSet::default();
@@ -8298,7 +8303,7 @@ async fn build_agent_mcp_tool_set(
     let mut tools: Vec<Arc<dyn tool_api::Tool>> = Vec::new();
     // Armed BEFORE the first dial: every await inside the loop is a window in
     // which the caller can drop this future (round-5 review item 11).
-    let mut cleanups = AgentMcpConnectLoopGuard::new(def.agent_type.clone());
+    let mut cleanups = AgentMcpConnectLoopGuard::new(def.agent_type.clone(), lease);
     for entry in scoped {
         let plain_name = entry.config.name.clone();
         let config_role = entry.config.metadata.role;
@@ -8336,6 +8341,25 @@ async fn build_agent_mcp_tool_set(
                 }
             }
         };
+        // Record ownership before the first post-connect await. Cancellation
+        // while waiting for the catalog read must still close this connection.
+        if entry.is_newly_created {
+            let cleanup_registry = mcp_registry.clone();
+            let cleanup_key = table_key.clone();
+            cleanups.push(agent::agent_mcp_tools::AgentMcpCleanupHandle {
+                server_name: plain_name.clone(),
+                run: Arc::new(move || {
+                    let registry = cleanup_registry.clone();
+                    let key = cleanup_key.clone();
+                    Box::pin(async move {
+                        registry
+                            .disconnect_agent_scoped(&key)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                }),
+            });
+        }
         let dtos: Vec<platform_api::McpToolDto> = {
             let conns = mcp_registry.connections.read().await;
             match conns.get(&table_key) {
@@ -8385,23 +8409,7 @@ async fn build_agent_mcp_tool_set(
             );
             tools.push(Arc::new(tool) as Arc<dyn tool_api::Tool>);
         }
-        if entry.is_newly_created {
-            let cleanup_registry = mcp_registry.clone();
-            let cleanup_key = table_key.clone();
-            cleanups.push(agent::agent_mcp_tools::AgentMcpCleanupHandle {
-                server_name: plain_name,
-                run: Arc::new(move || {
-                    let registry = cleanup_registry.clone();
-                    let key = cleanup_key.clone();
-                    Box::pin(async move {
-                        registry
-                            .disconnect_agent_scoped(&key)
-                            .await
-                            .map_err(|error| error.to_string())
-                    })
-                }),
-            });
-        }
+
     }
     agent::agent_mcp_tools::AgentMcpToolSet {
         tools,
@@ -9061,10 +9069,7 @@ fn sanitize_path_component(name: &str) -> String {
 /// `checkReadableInternalPath`.
 #[must_use]
 pub fn session_task_output_dir(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
-    lingxi_temp_dir_path()
-        .join(sanitize_path_component(&cwd.to_string_lossy()))
-        .join(session_id)
-        .join("tasks")
+    platform_api::task_output::session_output_dir(&lingxi_temp_dir_path(), cwd, session_id)
 }
 
 /// # Errors
@@ -9396,7 +9401,9 @@ pub async fn build_shared_credential_stack_with_policy(
     isolated_credential_storage: bool,
     credential_storage_policy: CredentialStoragePolicy,
 ) -> Result<SharedCredentialStack, BuildError> {
-    let http = Arc::new(PosixHttp::new());
+    let http = Arc::new(PosixHttp::new().with_monitor_proxy(Arc::new(
+        sandbox_runtime_runner::MonitorProxyConnector,
+    )));
     let clock = Arc::new(PosixClock::new());
     let credentials_path = lingxi_home.join(".credentials.json");
     let storage = if isolated_credential_storage {
@@ -11236,7 +11243,7 @@ pub async fn build(
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
-    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> = subagent_spawner_arc;
+    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> = subagent_spawner_arc.clone();
 
     //       The budget enforcer shares both the process `CostTracker` and the
     //       CLI `--max-budget` ceiling with the main orchestrator. Claude Code
@@ -12798,6 +12805,7 @@ pub async fn build(
     );
 
     let task_registry = Arc::new(task_registry_inner);
+    subagent_spawner_arc.set_task_registry(task_registry.clone());
     teammate_registry_status_sink.bind(task_registry.clone());
 
     // (5.46f) Bind the deferred LocalAgent status sink now that the registry
@@ -13011,6 +13019,7 @@ pub async fn build(
         let deny_seed = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
         let ctx = sandbox::policy_convert::SandboxConvertContext {
             lingxi_temp_dir: Some(lingxi_temp_dir()),
+            task_output_dir: Some(session_task_output_dir(&cwd, &main_session_uuid).to_string_lossy().into_owned()),
             settings_file_paths: vec![
                 deny_seed(cfg.lingxi_home.join("settings.json")),
                 deny_seed(cwd.join(branding::DOT_DIR).join("settings.json")),
@@ -13955,7 +13964,7 @@ pub async fn build(
     {
         let mcp_registry_for_agents = mcp_registry.clone();
         let mcp_tool_ctx_for_agents = mcp_tool_ctx.clone();
-        let _ = subagent_mcp_tool_builder_cell.set(Arc::new(move |agent_id, def| {
+        let _ = subagent_mcp_tool_builder_cell.set(Arc::new(move |agent_id, def, lease| {
             let mcp_registry = mcp_registry_for_agents.clone();
             let mcp_tool_ctx = mcp_tool_ctx_for_agents.clone();
             Box::pin(build_agent_mcp_tool_set(
@@ -13965,6 +13974,7 @@ pub async fn build(
                 cfg.strict_mcp_config,
                 agent_id,
                 def,
+                lease,
             ))
                 as std::pin::Pin<
                     Box<
@@ -14260,10 +14270,9 @@ pub async fn build(
     // the `ScheduleWakeup` that armed a wakeup (binary's lone-wakeup arm). Same
     // `Arc` the tool raises.
     let orch_builder = orch_builder.with_loop_wakeup_armed_slot(loop_wakeup_armed);
-    let orch_builder = orch_builder.with_coordinator_mode(
-        coordinator_mode.clone()
-            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>,
-    );
+    let orch_builder = orch_builder
+        .with_coordinator_mode(coordinator_mode.clone()
+            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
     let orch_builder = match end_conversation_slot.clone() {
         Some(slot) => orch_builder.with_end_conversation_slot(slot),
         None => orch_builder,
@@ -14275,7 +14284,10 @@ pub async fn build(
     // non-CLI hosts) leaves that `/fork` variant failing with a clear
     // `ActionFailed`, byte-identical to before this seam existed.
     let orch_builder = match cfg.bg_session_forker.clone() {
-        Some(forker) => orch_builder.with_bg_session_forker(forker),
+        Some(forker) => {
+            forker.set_task_registry(task_registry.clone());
+            orch_builder.with_bg_session_forker(forker)
+        }
         None => orch_builder,
     };
 
@@ -14616,6 +14628,7 @@ pub async fn build(
             cfg.cwd.clone(),
             cfg.lingxi_home.clone(),
             transcript_dir,
+            task_registry.clone(),
         ));
         let apply = std::sync::Arc::new(auto_mode_propose::DesktopApplyRunner::new(
             command_core::auto_mode_setup::apply_file_roots(&cfg.lingxi_home),
@@ -18187,7 +18200,7 @@ still flip to available"
             vec![std::path::PathBuf::from("/tmp")],
         );
         ctx.mcp_registry = Some(registry.clone());
-        let set = super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def).await;
+        let set = super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def, None).await;
         assert_eq!(set.tools.len(), 3);
 
         let deny = set
@@ -25575,6 +25588,7 @@ mod workspace_lease_forwarding_tests {
 
     fn bare_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             agent_name: None,
@@ -25657,11 +25671,12 @@ mod desktop_agent_mcp_cleanup_guard_tests {
     /// server is already live and its cleanup handle already sits in the
     /// function's local `cleanups` vec. Dropping the future there is exactly
     /// the Fusion `join_set.abort_all()` race the finding describes.
-    struct HangingConnectTransport;
+    struct HangingConnectTransport { entered: Arc<tokio::sync::Notify> }
 
     #[async_trait::async_trait]
     impl McpTransport for HangingConnectTransport {
         async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            self.entered.notify_one();
             std::future::pending::<()>().await;
             unreachable!("pending() never resolves")
         }
@@ -25673,6 +25688,7 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         ) -> Result<McpConnectResult, McpError> {
             // Overridden: the trait default wraps `connect` in a DEADLINE, and
             // a deadline would let the loop move on instead of parking.
+            self.entered.notify_one();
             std::future::pending::<()>().await;
             unreachable!("pending() never resolves")
         }
@@ -25761,11 +25777,11 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         agent::AgentMcpServerSpec::Record(server)
     }
 
-    #[tokio::test]
-    async fn a_dropped_connect_loop_tears_down_the_servers_it_already_opened() {
+    async fn connect_loop_fixture() -> (protocol::AgentId, String, Arc<mcp::McpRegistry>, tool_api::BuiltinToolContext, agent::AgentDefinition, Arc<tokio::sync::Notify>) {
         let agent_id = protocol::AgentId::new();
         let opened_key = mcp::registry::agent_scope_table_key(agent_id, "opened");
-        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport)));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport { entered: entered.clone() })));
         // `opened` is already live, so `connect_agent_scoped` short-circuits
         // on it and the loop pushes its cleanup handle; `hangs` is not, so
         // its connect parks in the transport forever.
@@ -25816,9 +25832,15 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         );
         ctx.mcp_registry = Some(registry.clone());
 
+        (agent_id, opened_key, registry, ctx, def, entered)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connect_loop_tears_down_the_servers_it_already_opened() {
+        let (agent_id, opened_key, registry, ctx, def, _) = connect_loop_fixture().await;
         let outcome = tokio::time::timeout(
             Duration::from_millis(300),
-            super::build_agent_mcp_tool_set(registry.clone(), ctx, false, false, agent_id, def),
+            super::build_agent_mcp_tool_set(registry.clone(), ctx, false, false, agent_id, def, None),
         )
         .await;
         assert!(
@@ -25844,4 +25866,187 @@ disconnected when the future is dropped mid-loop — the half-built `cleanups` v
 a plain local that no caller has ever seen, so nothing else can ever tear it down"
         );
     }
+
+    #[tokio::test]
+    async fn restored_identity_stays_reserved_until_cancelled_connect_loop_cleanup_finishes() {
+        use agent::StreamingSubagentSpawner;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct NoWork;
+        #[async_trait::async_trait]
+        impl platform_api::ToolInvoker for NoWork {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            async fn invoke(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: platform_api::tool_invoker::SubagentInvocationContext,
+            ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError>
+            {
+                Ok(serde_json::Value::Null)
+            }
+        }
+        #[async_trait::async_trait]
+        impl platform_api::BudgetEnforcerHandle for NoWork {
+            async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::BudgetError> {
+                Ok(())
+            }
+            async fn snapshot_total_nano_usd(&self) -> u64 {
+                0
+            }
+        }
+        #[async_trait::async_trait]
+        impl platform_api::subagent_spawn::SubagentSpawnObserver for NoWork {
+            async fn on_event(&self, _: platform_api::subagent_spawn::SubagentObservation) {}
+        }
+        struct LeaseProbe {
+            _lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
+            released: Arc<AtomicBool>,
+        }
+        impl Drop for LeaseProbe {
+            fn drop(&mut self) {
+                drop(self._lease.take());
+                self.released.store(true, Ordering::SeqCst);
+            }
+        }
+        let (id, opened_key, registry, ctx, definition, entered) = connect_loop_fixture().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let build_calls = calls.clone();
+        let release_probe = released.clone();
+        let build_registry = registry.clone();
+        let builder: agent::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |actual, _, lease| {
+                assert_eq!(actual, id);
+                build_calls.fetch_add(1, Ordering::SeqCst);
+                let lease = Arc::new(LeaseProbe {
+                    _lease: Some(lease
+                        .expect("restored construction must carry its identity reservation")),
+                    released: release_probe.clone(),
+                }) as agent::agent_mcp_tools::AgentMcpConstructionLease;
+                Box::pin(super::build_agent_mcp_tool_set(
+                    build_registry.clone(),
+                    ctx.clone(),
+                    false,
+                    false,
+                    actual,
+                    definition.clone(),
+                    Some(lease),
+                ))
+            });
+        let pool = Arc::new(agent::StateMachinePool::new(
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+            2,
+        ));
+        let spawner =
+            Arc::new(agent::PoolSubagentSpawner::new(pool).with_mcp_tool_builder(builder));
+        let request = platform_api::SubagentSpawnRequest {
+            subagent_type: "general-purpose".into(),
+            resumed_history: Some(vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "restored history".into(),
+            )]),
+            ..Default::default()
+        };
+        let inherit = || platform_api::SubagentInheritance {
+            tool_invoker: Arc::new(NoWork),
+            budget: Arc::new(NoWork),
+        };
+        let worker_spawner = spawner.clone();
+        let worker_request = request.clone();
+        let worker_inherit = inherit();
+        let worker = tokio::spawn(async move {
+            worker_spawner
+                .restore_persistent_with_observer(
+                    id,
+                    worker_request,
+                    worker_inherit,
+                    Arc::new(NoWork),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        // The first connection has a cleanup receipt; the second dial is held.
+        // Block that real cleanup, then cancel the builder before it returns.
+        let connection_gate = registry.connections.write().await;
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        assert!(
+            !released.load(Ordering::SeqCst),
+            "the construction lease must move into the asynchronous cleanup"
+        );
+        let collision = tokio::time::timeout(
+            Duration::from_secs(1),
+            spawner.restore_persistent_with_observer(
+                id,
+                request.clone(),
+                inherit(),
+                Arc::new(NoWork),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(collision, Ok(Err(_))),
+            "retry must fail before entering the builder while old cleanup is pending"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(connection_gate);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !released.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!registry.connections.read().await.contains_key(&opened_key));
+        let retry_spawner = spawner.clone();
+        let retry_inherit = inherit();
+        let retry = tokio::spawn(async move {
+            retry_spawner
+                .restore_persistent_with_observer(id, request, retry_inherit, Arc::new(NoWork))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "identity must become reusable after cleanup, not leak forever"
+        );
+        retry.abort();
+        let _ = retry.await;
+    }
+}
+
+/// Platform supervisor selected by the desktop composition root. Hosts use
+/// this alias so bridge startup does not need another platform dependency.
+#[cfg(unix)]
+pub use platform_posix::process::supervisor as shell_supervisor;
+#[cfg(windows)]
+pub use platform_windows::process::supervisor as shell_supervisor;
+
+/// Shared CLI/bridge factory for the independent shell supervisor. Its writer
+/// uses the same rooted spool, framing, caps and flush boundary as live tasks.
+#[cfg(any(unix, windows))]
+pub fn supervisor_exit_sink(
+    path: &std::path::Path,
+) -> std::sync::Arc<dyn platform_api::BackgroundExitSink> {
+    let root = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/"))
+        .to_path_buf();
+    #[cfg(unix)]
+    let fs = std::sync::Arc::new(platform_posix::PosixFileSystem::new(root.clone()));
+    #[cfg(windows)]
+    let fs = std::sync::Arc::new(platform_windows::WindowsFileSystem::new(root.clone()));
+    let manager = std::sync::Arc::new(tasks::output_manager::TaskOutputManager::new(root, fs));
+    std::sync::Arc::new(tasks::output_manager::TaskOutputSink::new(
+        manager,
+        path.to_path_buf(),
+    ))
+
 }

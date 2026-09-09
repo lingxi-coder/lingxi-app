@@ -526,10 +526,7 @@ pub enum SubstitutionRemoval {
     /// `> 64` substitutions and the text mentions `rm`/`rmdir`.
     TooManySubstitutions { count: usize },
     /// A possibly-empty `$VAR` removal target found inside a substitution.
-    VariablePath {
-        cmd: &'static str,
-        target: String,
-    },
+    VariablePath { cmd: &'static str, target: String },
 }
 
 impl SubstitutionRemoval {

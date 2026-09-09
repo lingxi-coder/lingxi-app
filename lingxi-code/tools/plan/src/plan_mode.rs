@@ -1497,6 +1497,7 @@ mod tests {
         let invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry))
             .with_gate(gate);
         let context = || platform_api::tool_invoker::SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: Some(id),
             origin_session_id: None,
             agent_name: Some("planner".into()),

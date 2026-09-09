@@ -130,11 +130,7 @@ pub enum OutsidePathShape {
 /// builder below and by the shell path walkers, which produce a
 /// `PathConstraintAsk` instead.
 #[must_use]
-pub fn outside_path_message(
-    command: &str,
-    resolved_path: &str,
-    shape: OutsidePathShape,
-) -> String {
+pub fn outside_path_message(command: &str, resolved_path: &str, shape: OutsidePathShape) -> String {
     const TAIL: &str = ", which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting.";
     let head = match shape {
         OutsidePathShape::MovesLaterReads => {

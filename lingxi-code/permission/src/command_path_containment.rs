@@ -859,8 +859,7 @@ fn read_block_unanalyzable_ask(reason: &str) -> PathConstraintAsk {
 fn env_prefix_outside_safe_list(command: &str) -> bool {
     static NAME_RE: OnceLock<Regex> = OnceLock::new();
     static ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
-    let name_re =
-        NAME_RE.get_or_init(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=").unwrap());
+    let name_re = NAME_RE.get_or_init(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=").unwrap());
     let assign_re = ASSIGN_RE.get_or_init(|| {
         Regex::new(r#"^[A-Za-z_][A-Za-z0-9_]*\+?=(?:"[^"$`\\]*"|'[^']*'|[A-Za-z0-9_./:+-]*)[ \t]+"#)
             .unwrap()
@@ -1174,7 +1173,10 @@ fn glob_segment_can_match_dotdot(segment: &str) -> bool {
                 }
             }
             other => {
-                if matches!(other, '.' | '+' | '^' | '$' | '(' | ')' | '|' | '{' | '}' | '\\') {
+                if matches!(
+                    other,
+                    '.' | '+' | '^' | '$' | '(' | ')' | '|' | '{' | '}' | '\\'
+                ) {
                     re.push('\\');
                 }
                 re.push(other);
@@ -1341,7 +1343,9 @@ pub fn check_command_path_containment(
             // before the `o2e` lookup.
             let interpreter = INLINE_CODE_FLAGS
                 .iter()
-                .find(|(name, _)| *name == verb.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.'))
+                .find(|(name, _)| {
+                    *name == verb.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
+                })
                 .map(|(_, flags)| *flags);
             if let Some(flags) = interpreter {
                 // `if (args.includes("-")) return zU(`${C} runs code from stdin …`)`
@@ -1400,10 +1404,7 @@ pub fn check_command_path_containment(
                             continue;
                         }
                     } else if let Some(eq) = arg.find('=') {
-                        if matches!(
-                            &arg[..eq],
-                            "--git-dir" | "--work-tree" | "--file"
-                        ) {
+                        if matches!(&arg[..eq], "--git-dir" | "--work-tree" | "--file") {
                             dirs.push(arg[eq + 1..].to_string());
                         }
                     } else if arg.starts_with("-C") && arg.len() > 2 {
@@ -1448,7 +1449,8 @@ pub fn check_command_path_containment(
                 continue;
             }
             let positionals = filter_out_flags(args);
-            let checked: Vec<String> = if positionals.len() != args.len() || positionals.len() == 1 {
+            let checked: Vec<String> = if positionals.len() != args.len() || positionals.len() == 1
+            {
                 positionals
             } else {
                 positionals[..positionals.len().saturating_sub(1)].to_vec()
@@ -1574,9 +1576,7 @@ pub fn check_command_path_containment(
                         // of the working directories when the shell expands it,
                         // so the reduced base proves nothing.
                         if has_glob_metachar(path)
-                            && path
-                                .split(['/', '\\'])
-                                .any(glob_segment_can_match_dotdot)
+                            && path.split(['/', '\\']).any(glob_segment_can_match_dotdot)
                         {
                             let message = format!(
                                 "{base} names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
@@ -1597,9 +1597,7 @@ pub fn check_command_path_containment(
                             return Some(PathConstraintAsk {
                                 message,
                                 reason: crate::policy::OUTSIDE_READS_BLOCKED_REASON.to_string(),
-                                blocked_path: Some(
-                                    resolved.to_string_lossy().into_owned(),
-                                ),
+                                blocked_path: Some(resolved.to_string_lossy().into_owned()),
                                 outside_reads_blocked: true,
                             });
                         }
@@ -2221,7 +2219,9 @@ mod tests {
     fn env_command_assignment_scans_all_of_argv() {
         let argv = |c: &str| split_argv(c);
         // Only the `env` COMMAND, by basename.
-        assert!(env_command_assignment_outside_safe_list(&argv("env SECRET=1 cat f")));
+        assert!(env_command_assignment_outside_safe_list(&argv(
+            "env SECRET=1 cat f"
+        )));
         assert!(env_command_assignment_outside_safe_list(&argv(
             "/usr/bin/env SECRET=1 cat f"
         )));
@@ -2230,17 +2230,27 @@ mod tests {
             "env -u FOO SECRET=1 cat f"
         )));
         // On-list names are fine.
-        assert!(!env_command_assignment_outside_safe_list(&argv("env LANG=C cat f")));
-        assert!(!env_command_assignment_outside_safe_list(&argv("env -C /etc cat f")));
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "env LANG=C cat f"
+        )));
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "env -C /etc cat f"
+        )));
         // A different argv[0] is not this branch's business, even with an
         // off-list assignment in the tail (that is `Eun`'s prefix job, and only
         // when it LEADS the command).
-        assert!(!env_command_assignment_outside_safe_list(&argv("cat SECRET=1")));
-        assert!(!env_command_assignment_outside_safe_list(&argv("envx SECRET=1 cat f")));
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "cat SECRET=1"
+        )));
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "envx SECRET=1 cat f"
+        )));
         assert!(!env_command_assignment_outside_safe_list(&[]));
         // 🚨 The oracle's name pattern here has NO `\+?`, unlike `Eun`'s, so an
         // append is not an assignment for this branch.
-        assert!(!env_command_assignment_outside_safe_list(&argv("env SECRET+=1 cat f")));
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "env SECRET+=1 cat f"
+        )));
     }
 
     #[test]
@@ -2262,8 +2272,11 @@ mod tests {
     #[test]
     fn read_into_additional_working_dir_passes() {
         let extra = vec![PathBuf::from("/tmp/scratch")];
-        assert!(check_command_path_containment("cat /tmp/scratch/x", &roots(), &extra, None).is_none());
-        let a = check_command_path_containment("cat /etc/passwd", &roots(), &extra, None).expect("ask");
+        assert!(
+            check_command_path_containment("cat /tmp/scratch/x", &roots(), &extra, None).is_none()
+        );
+        let a =
+            check_command_path_containment("cat /etc/passwd", &roots(), &extra, None).expect("ask");
         assert!(a.message.contains("'/proj/work', '/tmp/scratch'"));
     }
 
@@ -2493,7 +2506,8 @@ mod tests {
     fn cat_dotdot_after_segment_asks_with_traversal_message() {
         // `cat sub/../ok.txt` resolves inside cwd but still asks (symlink escape
         // defense) with the byte-locked message.
-        let a = check_command_path_containment("cat sub/../ok.txt", &roots(), &[], None).expect("ask");
+        let a =
+            check_command_path_containment("cat sub/../ok.txt", &roots(), &[], None).expect("ask");
         assert_eq!(
             a.message,
             "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory"
@@ -2532,5 +2546,4 @@ mod tests {
         assert!(!glob_segment_can_match_dotdot("a?c"));
         assert!(!glob_segment_can_match_dotdot("[abc]"));
     }
-
 }

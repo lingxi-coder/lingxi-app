@@ -31,6 +31,18 @@ use bridge_server::boot::{self, BridgeArgs};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(any(unix, windows))]
+    if engine_desktop::shell_supervisor::is_supervisor_invocation() {
+        return engine_desktop::shell_supervisor::run_supervisor(
+            engine_desktop::supervisor_exit_sink,
+        )
+        .await
+        .map_err(Into::into);
+    }
+    #[cfg(any(unix, windows))]
+    if let Ok(executable) = std::env::current_exe() {
+        engine_desktop::shell_supervisor::enable_supervisor(executable);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

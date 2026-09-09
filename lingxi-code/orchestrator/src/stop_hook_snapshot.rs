@@ -60,6 +60,7 @@ fn type_label(task_type: &str) -> String {
         "mcp_task" => "MCP task",
         "in_process_teammate" => "teammate",
         "dream" => "dream",
+        "auto_mode_scan" => "auto-mode scan",
         "remote_agent" => "cloud session",
         "local_fusion" => "fusion",
         other => return other.to_string(),

@@ -956,6 +956,12 @@ pub enum ClientCommand {
         request_id: String,
         request: CronRequestDto,
     },
+    // Trusted human-client message to an existing task. Appended to preserve
+    // every existing UniFFI ordinal; model tools never select this origin.
+    TaskMessage {
+        task_id: String,
+        message: String,
+    },
 }
 
 /// A writable MCP server-definition scope, as named on the wire. Deliberately

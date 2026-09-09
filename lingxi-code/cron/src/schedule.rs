@@ -95,7 +95,10 @@ pub fn parse_cron(s: &str) -> Result<CronExpression, CronParseError> {
     if parts.len() != 5 {
         return Err(CronParseError::FieldCount(parts.len()));
     }
-    let mut fields = parts.iter().zip(FIELD_RANGES).map(|(part, range)| expand_field(part, range));
+    let mut fields = parts
+        .iter()
+        .zip(FIELD_RANGES)
+        .map(|(part, range)| expand_field(part, range));
     let mut next = || fields.next().expect("five fields");
     Ok(CronExpression {
         raw: s.to_string(),
@@ -303,7 +306,13 @@ impl CronExpression {
 #[must_use]
 pub fn human_schedule(cron: &str) -> String {
     const DAY_NAMES: [&str; 7] = [
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
     ];
     fn all_digits(s: &str) -> bool {
         !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
@@ -590,7 +599,10 @@ mod tests {
     #[test]
     fn parses_basic_expression() {
         let c = parse_cron("*/5 9-17 * * 1-5").unwrap();
-        assert_eq!(c.minute.values(), &[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]);
+        assert_eq!(
+            c.minute.values(),
+            &[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+        );
         assert_eq!(c.hour.values(), &[9, 10, 11, 12, 13, 14, 15, 16, 17]);
         assert!(c.dom.is_wild(1, 31));
         assert_eq!(c.dom.values().len(), 31);
@@ -602,7 +614,10 @@ mod tests {
     // day-of-month and month (min 1) `*/N` therefore starts at 1, not at N.
     #[test]
     fn step_starts_at_field_minimum() {
-        assert_eq!(values("0 0 */5 * *", |c| &c.dom), vec![1, 6, 11, 16, 21, 26, 31]);
+        assert_eq!(
+            values("0 0 */5 * *", |c| &c.dom),
+            vec![1, 6, 11, 16, 21, 26, 31]
+        );
         assert_eq!(values("0 0 * */2 *", |c| &c.month), vec![1, 3, 5, 7, 9, 11]);
         assert_eq!(values("0 */7 * * *", |c| &c.hour), vec![0, 7, 14, 21]);
         // 2023-11-16 00:00 UTC (dom 16) matches `*/5` on dom; the 15th does not.
@@ -613,8 +628,14 @@ mod tests {
 
     #[test]
     fn accepts_stepped_ranges_mixed_lists_and_sunday_alias() {
-        assert_eq!(values("0-30/10,45 * * * *", |c| &c.minute), vec![0, 10, 20, 30, 45]);
-        assert_eq!(values("*/15,7 * * * *", |c| &c.minute), vec![0, 7, 15, 30, 45]);
+        assert_eq!(
+            values("0-30/10,45 * * * *", |c| &c.minute),
+            vec![0, 10, 20, 30, 45]
+        );
+        assert_eq!(
+            values("*/15,7 * * * *", |c| &c.minute),
+            vec![0, 7, 15, 30, 45]
+        );
         assert_eq!(values("0 0 * * 1-5,0", |c| &c.dow), vec![0, 1, 2, 3, 4, 5]);
         assert_eq!(values("0 0 * * 7", |c| &c.dow), vec![0]);
         assert_eq!(values("0 0 * * 5-7", |c| &c.dow), vec![0, 5, 6]);

@@ -268,7 +268,13 @@ mod tests {
     fn families_absent_from_the_table_are_never_gated() {
         for model in ["claude-haiku-4-5", "claude-haiku-9-9", "claude-instant-1"] {
             assert!(!model_at_or_above_threshold(model, MODEL_THRESHOLDS));
-            assert!(todo_tools_enabled_inner(Some(model), false, false, false, false));
+            assert!(todo_tools_enabled_inner(
+                Some(model),
+                false,
+                false,
+                false,
+                false
+            ));
         }
     }
 
@@ -322,12 +328,18 @@ mod tests {
     /// falls short of `[4,8]`.
     #[test]
     fn missing_version_components_read_as_zero() {
-        assert!(model_at_or_above_threshold("claude-sonnet-5", MODEL_THRESHOLDS));
+        assert!(model_at_or_above_threshold(
+            "claude-sonnet-5",
+            MODEL_THRESHOLDS
+        ));
         assert!(model_at_or_above_threshold(
             "claude-sonnet-5-0",
             MODEL_THRESHOLDS
         ));
-        assert!(!model_at_or_above_threshold("claude-opus-4", MODEL_THRESHOLDS));
+        assert!(!model_at_or_above_threshold(
+            "claude-opus-4",
+            MODEL_THRESHOLDS
+        ));
         assert!(!model_at_or_above_threshold(
             "claude-opus-4-0-0",
             MODEL_THRESHOLDS
@@ -349,7 +361,10 @@ mod tests {
             "claude-opus-4-10",
             MODEL_THRESHOLDS
         ));
-        assert!(!model_at_or_above_threshold("claude-opus-4-9", &[("opus", &[4, 10])]));
+        assert!(!model_at_or_above_threshold(
+            "claude-opus-4-9",
+            &[("opus", &[4, 10])]
+        ));
         // Leading zeros parse as the number, matching JS `Number("08")`.
         assert!(model_at_or_above_threshold(
             "claude-opus-4-08",
@@ -396,7 +411,10 @@ mod tests {
                 ..Default::default()
             };
             assert!(todo_tools_enabled(&ctx), "{model:?}");
-            assert_eq!(todo_tools_enabled(&ctx), todo_tools_enabled_for_model(model));
+            assert_eq!(
+                todo_tools_enabled(&ctx),
+                todo_tools_enabled_for_model(model)
+            );
         }
     }
 
@@ -408,7 +426,10 @@ mod tests {
         let gated = Some("claude-opus-4-8");
         assert!(!todo_tools_enabled_inner(gated, false, false, false, false));
         assert!(todo_tools_enabled_inner(gated, false, false, false, true));
-        assert!(!telemetry::flag_bool(ROSY_WREN_FLAG, false), "default is off");
+        assert!(
+            !telemetry::flag_bool(ROSY_WREN_FLAG, false),
+            "default is off"
+        );
     }
 
     /// `Ja()` and `QDn()` short-circuit ahead of the model read, so they hold

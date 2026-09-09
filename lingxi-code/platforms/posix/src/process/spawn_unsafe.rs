@@ -49,6 +49,12 @@ pub fn attach_setsid(cmd: &mut Command) {
     }
 }
 
+/// Effective owner used to authenticate the private supervisor directory.
+pub(super) fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no arguments or memory preconditions.
+    unsafe { libc::geteuid() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::attach_setsid;
@@ -122,4 +128,106 @@ mod tests {
 
         child.wait().await.expect("wait child");
     }
+}
+
+/// Fork with the ordinary exec-error pipe intact, but do not exec the approved
+/// program until the source has received its process capability. Cancellation
+/// drops the parent socket; the child sees EOF and leaves without running it.
+pub(super) async fn spawn_with_capability(
+    mut command: Command,
+    binding: Option<&platform_api::process::BackgroundTaskBinding>,
+) -> Result<tokio::process::Child, platform_api::ProcessError> {
+    use platform_api::ProcessError;
+    use std::os::fd::AsRawFd;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let sink = binding.and_then(|binding| binding.on_exit.as_ref());
+    if !sink.is_some_and(|sink| sink.stop_notify().is_some()) {
+        let mut child = command
+            .spawn()
+            .map_err(|e| ProcessError::Io(e.to_string()))?;
+        if let (Some(binding), Some(sink), Some(pid)) = (binding, sink, child.id()) {
+            if let Err(error) = sink.on_spawn(&binding.task_id, pid).await {
+                let _ = super::kill_tree::kill_tree_force(pid);
+                let _ = child.wait().await;
+                return Err(error);
+            }
+        }
+        return Ok(child);
+    }
+    let (parent, child_socket) =
+        std::os::unix::net::UnixStream::pair().map_err(|e| ProcessError::Io(e.to_string()))?;
+    parent
+        .set_nonblocking(true)
+        .map_err(|e| ProcessError::Io(e.to_string()))?;
+    let parent_fd = parent.as_raw_fd();
+    let child_fd = child_socket.as_raw_fd();
+    // SAFETY: only close/getpid/write/read and errno access run after fork.
+    // The socketpair was created with CLOEXEC. Close the inherited parent end
+    // before waiting, otherwise supervisor death could not produce EOF.
+    unsafe {
+        command.pre_exec(move || {
+            let _keep_child_socket_alive = &child_socket;
+            libc::close(parent_fd);
+            let pid = libc::getpid().to_ne_bytes();
+            let mut written = 0;
+            while written < pid.len() {
+                let count = libc::write(
+                    child_fd,
+                    pid[written..].as_ptr().cast(),
+                    pid.len() - written,
+                );
+                if count < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                written += count as usize;
+            }
+            let mut accepted = 0u8;
+            loop {
+                let count = libc::read(child_fd, (&mut accepted as *mut u8).cast(), 1);
+                if count == 1 && accepted == 1 {
+                    return Ok(());
+                }
+                if count < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+            }
+        });
+    }
+    let mut parent =
+        tokio::net::UnixStream::from_std(parent).map_err(|e| ProcessError::Io(e.to_string()))?;
+    let mut spawn = tokio::task::spawn_blocking(move || command.spawn());
+    let mut pid = [0u8; std::mem::size_of::<libc::pid_t>()];
+    tokio::select! {
+        result = &mut spawn => return result.map_err(|e|ProcessError::Io(e.to_string()))?
+            .map_err(|e|ProcessError::Io(e.to_string())),
+        result = parent.read_exact(&mut pid) => { result.map_err(|e|ProcessError::Io(e.to_string()))?; }
+    }
+    let pid = libc::pid_t::from_ne_bytes(pid) as u32;
+    let binding = binding.expect("gated binding");
+    if let Err(error) = sink
+        .expect("gated sink")
+        .on_spawn(&binding.task_id, pid)
+        .await
+    {
+        drop(parent);
+        let _ = spawn.await;
+        return Err(error);
+    }
+    parent
+        .write_all(&[1])
+        .await
+        .map_err(|e| ProcessError::Io(e.to_string()))?;
+    spawn
+        .await
+        .map_err(|e| ProcessError::Io(e.to_string()))?
+        .map_err(|e| ProcessError::Io(e.to_string()))
 }

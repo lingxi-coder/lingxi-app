@@ -1373,7 +1373,7 @@ fn now_ms() -> u64 {
 /// PID-reuse guard. This intentionally mirrors the existing registry format
 /// instead of introducing another persisted identity field here.
 #[cfg(unix)]
-fn process_start_identity(pid: u32) -> Option<String> {
+pub fn process_start_identity(pid: u32) -> Option<String> {
     if pid <= 1 {
         return None;
     }
@@ -1391,7 +1391,7 @@ fn process_start_identity(pid: u32) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn process_start_identity(pid: u32) -> Option<String> {
+pub fn process_start_identity(pid: u32) -> Option<String> {
     if pid <= 1 {
         return None;
     }
@@ -1416,7 +1416,7 @@ fn process_start_identity(pid: u32) -> Option<String> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_start_identity(_pid: u32) -> Option<String> {
+pub fn process_start_identity(_pid: u32) -> Option<String> {
     None
 }
 

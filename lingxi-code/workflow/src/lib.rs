@@ -1186,7 +1186,11 @@ where
 // thin wrapper delegating here — splitting the QuickJS FFI glue further is a
 // correctness-risk restructure out of proportion to a lint, not a genuine
 // readability problem.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 pub fn run_with_progress_and_fusion<R, F, P>(
     script: &str,
     agent_runner: R,

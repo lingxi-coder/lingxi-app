@@ -211,9 +211,7 @@ pub const MCP_TASK_ID_UNITS: usize = 8;
 pub fn sanitize_mcp_task_id(value: &str) -> String {
     let stripped: String = value
         .chars()
-        .filter(|c| {
-            !(c.is_control() || is_mcp_stripped_class(*c))
-        })
+        .filter(|c| !(c.is_control() || is_mcp_stripped_class(*c)))
         .collect();
     let intermediate = truncate_utf16_units(&stripped, MCP_ID_INTERMEDIATE_UNITS);
     truncate_utf16_units(&intermediate, MCP_TASK_ID_UNITS)
@@ -240,23 +238,14 @@ pub const MCP_NAME_UNITS: usize = MCP_NAME_WIDTH * 4;
 /// trims, an empty result becomes `None`, and `Xe` is a grapheme-segmented
 /// truncation to 200 display COLUMNS with a trailing `…`.
 ///
-/// Two deliberate narrowings, both from the port's substrate rather than from
-/// choice:
-///
-/// * `\p{Cc}` is absent from `Ge` upstream too — a control character survives
-///   the replace and is then folded by `To`'s whitespace collapse only if it is
-///   whitespace. Reproduced exactly.
-/// * `pt` is `Bun.stripANSI`, and this port has no ANSI stripper at this layer
-///   (`tui-core`'s is above `platform-api`). The names reaching this function
-///   come from MCP server CONFIGURATION, not from a terminal, so no call site
-///   can carry an escape today. If one ever can, the strip belongs here, before
-///   the `Ge` replace.
+/// ANSI sequences are stripped before invisible-character and whitespace
+/// normalization, matching `Bun.stripANSI` even for names from configuration.
 #[must_use]
 pub fn sanitize_mcp_name(value: &str) -> Option<String> {
     // `.replace(Ge, " ")` — each RUN becomes one space.
     let mut replaced = String::with_capacity(value.len());
     let mut in_run = false;
-    for c in value.chars() {
+    for c in strip_ansi_text(value).chars() {
         if is_mcp_stripped_class(c) {
             if !in_run {
                 replaced.push(' ');
@@ -330,6 +319,53 @@ fn truncate_to_width_ellipsis(value: &str, max_width: usize) -> String {
     out
 }
 
+/// Strip CSI, OSC and two-byte terminal escape sequences without dependencies.
+/// UTF-8 text outside a complete escape sequence is preserved.
+pub fn strip_ansi_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        let marker = if c == '\u{1b}' {
+            chars.next()
+        } else if c == '\u{9b}' {
+            Some('[')
+        } else if c == '\u{9d}' {
+            Some(']')
+        } else {
+            out.push(c);
+            continue;
+        };
+        match marker {
+            Some('[') => {
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' || next == '\u{9c}' {
+                        break;
+                    }
+                    if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(' '..='/') => {
+                while chars.peek().is_some_and(|c| (' '..='/').contains(c)) {
+                    chars.next();
+                }
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,7 +378,10 @@ mod tests {
         assert_eq!(sanitize_mcp_task_id("short"), "short");
         // U+200B (Cf) and U+2028 (Zl) are removed, not replaced — the surviving
         // characters close up, so eight of them still fit.
-        assert_eq!(sanitize_mcp_task_id("a\u{200b}b\u{2028}cdefghij"), "abcdefgh");
+        assert_eq!(
+            sanitize_mcp_task_id("a\u{200b}b\u{2028}cdefghij"),
+            "abcdefgh"
+        );
         // A variation selector is removed too.
         assert_eq!(sanitize_mcp_task_id("a\u{fe0f}bc"), "abc");
     }
@@ -367,7 +406,10 @@ mod tests {
             Some("git hub".to_string()),
             "a RUN of format chars becomes exactly one space"
         );
-        assert_eq!(sanitize_mcp_name("  spaced   out  "), Some("spaced out".to_string()));
+        assert_eq!(
+            sanitize_mcp_name("  spaced   out  "),
+            Some("spaced out".to_string())
+        );
         assert_eq!(sanitize_mcp_name(""), None);
         assert_eq!(sanitize_mcp_name("\u{200b}\u{2028}"), None);
     }

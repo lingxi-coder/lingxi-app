@@ -498,4 +498,3 @@ mod tests {
         assert_eq!(worker_status_label(&WorkerStatus::Killed), "killed");
     }
 }
-

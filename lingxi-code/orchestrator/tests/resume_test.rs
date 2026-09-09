@@ -493,15 +493,32 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
         iterations: 2,
         tokens_at_start: 500,
     };
-    let attachment = |status, goal_state| platform_api::GoalStatusAttachment {
-        kind: "goal_status".to_string(),
-        status,
-        condition: "ship it".to_string(),
-        iterations: 2,
-        duration_ms: 1000,
-        tokens: 200,
-        last_reason: Some("tests pending".to_string()),
-        goal_state,
+    let attachment = |status, goal_state: Option<platform_api::ActiveGoalSnapshot>| match status {
+        platform_api::GoalStatusKind::Set => {
+            platform_api::GoalStatusAttachment::sentinel_set("ship it".to_string(), goal_state)
+        }
+        platform_api::GoalStatusKind::Cleared => {
+            platform_api::GoalStatusAttachment::sentinel_cleared("ship it".to_string())
+        }
+        platform_api::GoalStatusKind::Achieved => platform_api::GoalStatusAttachment::achieved(
+            "ship it".to_string(),
+            Some("tests pending".to_string()),
+            2,
+            1000,
+            200,
+        ),
+        platform_api::GoalStatusKind::Failed => platform_api::GoalStatusAttachment::failed(
+            "ship it".to_string(),
+            Some("tests pending".to_string()),
+            2,
+            1000,
+            200,
+        ),
+        platform_api::GoalStatusKind::NotMet => platform_api::GoalStatusAttachment::not_met(
+            "ship it".to_string(),
+            Some("tests pending".to_string()),
+            goal_state,
+        ),
     };
     let line = |payload: platform_api::GoalStatusAttachment| {
         serde_json::from_value(json!({
@@ -526,10 +543,22 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
     for status in [
         platform_api::GoalStatusKind::Achieved,
         platform_api::GoalStatusKind::Failed,
+        platform_api::GoalStatusKind::Cleared,
     ] {
         let terminal = line(attachment(status, None));
         assert!(state_from_messages(sid, &[terminal]).active_goal.is_none());
     }
+
+    // A not-met turn is NOT terminal: the goal keeps running, refreshed from the
+    // snapshot the record carries.
+    let not_met = line(attachment(
+        platform_api::GoalStatusKind::NotMet,
+        Some(snapshot.clone()),
+    ));
+    let still_running = state_from_messages(sid, &[not_met])
+        .active_goal
+        .expect("a not-met record leaves the goal active");
+    assert_eq!(still_running.iterations, 2);
 }
 
 #[test]

@@ -600,25 +600,14 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
     orchestrator.set_active_goal("ship it").await;
     orchestrator.run_turn("hi").await.expect("turn ok");
 
-    let statuses = std::fs::read_to_string(path)
-        .expect("goal transcript")
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter_map(|line| {
-            if line["type"] != "attachment" || line["attachment"]["type"] != "goal_status" {
-                return None;
-            }
-            Some((
-                line["attachment"]["status"].as_str()?.to_string(),
-                line["attachment"]["iterations"].as_u64()?,
-            ))
-        })
-        .collect::<Vec<_>>();
+    let statuses = goal_status_rows(path);
     assert_eq!(
         statuses,
         [
             ("set".to_string(), 0),
-            ("set".to_string(), 1),
+            // 2.1.266 @4212300: a blocking evaluation is its own `not_met`
+            // record, NOT a second `set` sentinel.
+            ("not_met".to_string(), 1),
             ("achieved".to_string(), 2)
         ],
         "a successful evaluation must not emit a redundant terminal set record"
@@ -661,7 +650,22 @@ async fn goal_status_transcript_records_impossible_as_failed() {
     orchestrator.run_turn("hi").await.expect("turn ok");
     assert!(orchestrator.get_active_goal().await.is_none());
 
-    let statuses = std::fs::read_to_string(path)
+    let statuses = goal_status_rows(path);
+    assert_eq!(
+        statuses,
+        [("set".to_string(), 0), ("failed".to_string(), 1)],
+        "an impossible condition must terminate as failed, never achieved"
+    );
+}
+
+/// Read the `goal_status` records out of a transcript as `(variant, iterations)`.
+///
+/// 2.1.266 tells the five variants apart with `met`/`failed`/`sentinel` rather
+/// than a `status` enum, and only the TERMINAL records carry `iterations` — the
+/// set sentinel and the not-met record carry the count inside LingXi's
+/// `goalState` resume extension instead.
+fn goal_status_rows(path: impl AsRef<std::path::Path>) -> Vec<(String, u64)> {
+    std::fs::read_to_string(path)
         .expect("goal transcript")
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -669,17 +673,24 @@ async fn goal_status_transcript_records_impossible_as_failed() {
             if line["type"] != "attachment" || line["attachment"]["type"] != "goal_status" {
                 return None;
             }
-            Some((
-                line["attachment"]["status"].as_str()?.to_string(),
-                line["attachment"]["iterations"].as_u64()?,
-            ))
+            let a = &line["attachment"];
+            let met = a["met"].as_bool()?;
+            let failed = a["failed"].as_bool().unwrap_or(false);
+            let sentinel = a["sentinel"].as_bool().unwrap_or(false);
+            let variant = match (sentinel, met, failed) {
+                (true, false, _) => "set",
+                (true, true, _) => "cleared",
+                (false, true, _) => "achieved",
+                (false, false, true) => "failed",
+                (false, false, false) => "not_met",
+            };
+            let iterations = a["iterations"]
+                .as_u64()
+                .or_else(|| a["goalState"]["iterations"].as_u64())
+                .unwrap_or_default();
+            Some((variant.to_string(), iterations))
         })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        statuses,
-        [("set".to_string(), 0), ("failed".to_string(), 1)],
-        "an impossible condition must terminate as failed, never achieved"
-    );
+        .collect()
 }
 
 #[tokio::test]

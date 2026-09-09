@@ -29,7 +29,7 @@
 //! all return through the batch wrapper `Zy` (2.1.238 @296675470), which maps
 //! `NT` (@296673554) = `` `<system-reminder>\n${e}\n</system-reminder>` `` over
 //! every message and marks it `isMeta:!0`; that envelope is applied by the
-//! single caller, `ConversationOrchestrator::plan_mode_reminder_message`, so the
+//! single caller, `ConversationOrchestrator::plan_mode_turn_messages`, so the
 //! byte-exact body assertions below stay readable.
 //!
 //! `render_full` keeps the 206 single-letter locals `r`/`n`/`o` (plan count /
@@ -51,6 +51,11 @@ pub struct PlanReminderParams<'a> {
     pub is_subagent: bool,
     /// `e.reminderType === "sparse"` — the terse per-turn variant.
     pub reminder_type_sparse: bool,
+    /// `zx() === "default"` — whether the session is on the default output
+    /// style. 2.1.266 `fTs` gates the Explore/Plan-subagent Phase 1/2 bodies on
+    /// `d8() && zx()==="default"`, so a custom output style falls back to the
+    /// no-subagent phases.
+    pub output_style_is_default: bool,
 }
 
 // ─── shared fragments ────────────────────────────────────────────────────────
@@ -118,16 +123,20 @@ fn plan_agent_count() -> u32 {
     1
 }
 
-/// 206 `QVt()` — whether Explore/Plan subagents are available `o`.
+/// 2.1.266 `fTs`'s `o = d8() && zx()==="default"` — whether the Explore/Plan
+/// subagent phases are used.
 ///
-/// 206 reads the cached `tengu_slate_ibis` GB flag (default TRUE), short-
-/// circuited to `false` by a truthy `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS`.
-/// The GB flag has no Rust home in this inert module; default `true` unless the
-/// disable env var is set to a non-empty value (JS truthiness).
-fn subagents_available() -> bool {
-    !std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+/// `zx()==="default"` is the caller's `output_style_is_default`. `d8()` is
+/// `Fto.of(B().host).isEnabled()`, a host-scoped feature object with no Rust
+/// home; the port keeps 206's stand-in for it — TRUE unless
+/// `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS` is set to a non-empty value (JS
+/// truthiness). Documented divergence: the host feature gate itself is not
+/// modelled, only its env-var escape hatch.
+fn subagents_available(output_style_is_default: bool) -> bool {
+    output_style_is_default
+        && !std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
 }
 
 // ─── renderers ───────────────────────────────────────────────────────────────
@@ -191,7 +200,7 @@ pub fn render_full(p: &PlanReminderParams<'_>) -> String {
 
     let r = plan_agent_count();
     let n = explore_agent_count();
-    let o = subagents_available();
+    let o = subagents_available(p.output_style_is_default);
 
     // 206 `i` — Phase 1.
     let phase1 = if o {
@@ -223,6 +232,46 @@ pub fn render_full(p: &PlanReminderParams<'_>) -> String {
     )
 }
 
+// ─── plan-mode boundary reminders (2.1.266) ─────────────────────────────────
+
+/// `plan_mode_exit` (`src_162329786.js` @5432394) — emitted on the turn after
+/// the session leaves plan mode.
+///
+/// ```js
+/// plan_mode_exit:(e)=>{let n=e.planExists?` The plan file is located at ${e.planFilePath} if you need to reference it.`:"";
+///   return Pc([ke({content:`## Exited Plan Mode\n\nYou have exited plan mode. You can now make edits, run tools, and take actions.${n}`,isMeta:!0})])}
+/// ```
+#[must_use]
+pub fn render_plan_mode_exit(plan_file_path: &str, plan_exists: bool) -> String {
+    let located = if plan_exists {
+        format!(" The plan file is located at {plan_file_path} if you need to reference it.")
+    } else {
+        String::new()
+    };
+    format!(
+        "## Exited Plan Mode\n\nYou have exited plan mode. You can now make edits, run tools, and take actions.{located}"
+    )
+}
+
+/// `plan_mode_reentry` (`src_162329786.js` @5447210) — emitted once when a
+/// session that has already exited plan mode re-enters it with a plan file on
+/// disk. `${su}` resolves to `ExitPlanMode`.
+#[must_use]
+pub fn render_plan_mode_reentry(plan_file_path: &str) -> String {
+    format!(
+        "## Re-entering Plan Mode\n\nYou are returning to plan mode after having previously exited it. A plan file exists at {plan_file_path} from your previous planning session.\n\n**Before proceeding with any new planning, you should:**\n1. Read the existing plan file to understand what was previously planned\n2. Evaluate the user's current request against that plan\n3. Decide how to proceed:\n   - **Different task**: If the user's request is for a different task\u{2014}even if it's similar or related\u{2014}start fresh by overwriting the existing plan\n   - **Same task, continuing**: If this is explicitly a continuation or refinement of the exact same task, modify the existing plan while cleaning up outdated or irrelevant sections\n4. Continue on with the plan process and most importantly you should always edit the plan file one way or the other before calling ExitPlanMode\n\nTreat this as a fresh planning session. Do not assume the existing plan is relevant without evaluating it first."
+    )
+}
+
+/// `plan_file_reference` (`src_162329786.js` @5430355) — carries a surviving
+/// plan file across a compaction boundary (`_ts` @4123349, assembled by `KOe`).
+#[must_use]
+pub fn render_plan_file_reference(plan_file_path: &str, plan_content: &str) -> String {
+    format!(
+        "A plan file exists from plan mode at: {plan_file_path}\n\nPlan contents:\n\n{plan_content}\n\nIf this plan is relevant to the current work and not already complete, continue working on it."
+    )
+}
+
 /// 206 dispatch: `isSubAgent ? NU_ : reminderType==="sparse" ? MU_ : LU_`.
 #[must_use]
 pub fn render_plan_mode_reminder(p: &PlanReminderParams<'_>) -> String {
@@ -251,6 +300,7 @@ mod tests {
             custom_instructions: None,
             is_subagent: false,
             reminder_type_sparse: false,
+            output_style_is_default: true,
         }
     }
 

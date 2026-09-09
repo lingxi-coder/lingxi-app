@@ -205,7 +205,11 @@ async fn deferral_arms_the_idle_timer_and_clear_cancels_it() {
         .is_none());
 }
 
-#[tokio::test]
+/// 2.1.266 `HZ` floors the idle re-arm at `qmt` (60 s), so this test can no
+/// longer observe the loop by waiting in real time — it runs on the paused
+/// clock, which auto-advances to each sleep's deadline while the runtime is
+/// idle.
+#[tokio::test(start_paused = true)]
 async fn idle_loop_exit_allows_a_new_deferral_stretch_to_rearm() {
     let mut orch = orch().with_stop_hook_snapshot(Arc::new(EmptyGoalStopSnapshot));
     set_goal(&orch, "ship it").await;
@@ -223,7 +227,8 @@ async fn idle_loop_exit_allows_a_new_deferral_stretch_to_rearm() {
         .goal_checkin_idle_generation
         .load(Ordering::SeqCst);
     orch.sync_goal_checkin_idle_task().await;
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    // Virtual seconds: the loop's first sleep is a full 60 s re-arm floor.
+    tokio::time::timeout(std::time::Duration::from_secs(600), async {
         while orch
             .lifecycle_runtime
             .goal_checkin_idle_running

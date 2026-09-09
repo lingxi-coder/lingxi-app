@@ -916,7 +916,22 @@ As you answer the user's questions, you can use the following context:\n\
     /// not observable, the structure is). Uses the bare UUID (not the `sess:`
     /// display form) so the filename has no `:` separator, matching
     /// `computed_transcript_path`.
-    pub(crate) fn plan_file_path(
+    /// The session's plan file, preferring the shared identity when the host
+    /// published one (2.1.266 `ay(void 0)`); otherwise the pre-slug derivation.
+    pub(crate) fn session_plan_file_path(&self, session_id: &SessionId) -> String {
+        if let Some(plan_files) = self.config.plan_files.as_ref() {
+            if let Some(path) = plan_files.plan_file(None) {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+        Self::plan_file_path(
+            session_id,
+            &self.cwd,
+            self.config.plans_directory.as_deref(),
+        )
+    }
+
+    pub fn plan_file_path(
         session_id: &SessionId,
         project_root: &std::path::Path,
         plans_directory: Option<&str>,
@@ -947,7 +962,7 @@ As you answer the user's questions, you can use the following context:\n\
     /// (`W5_`'s primary check `o === n || o.startsWith(n + sep)`) and passes
     /// the hardened protected-dir / same-repo-root checks. On rejection, fall
     /// through to the default `<config-home>/plans/`.
-    pub(super) fn plans_dir(
+    pub fn plans_dir(
         project_root: &std::path::Path,
         plans_directory: Option<&str>,
     ) -> std::path::PathBuf {
@@ -978,7 +993,7 @@ As you answer the user's questions, you can use the following context:\n\
     /// The default plans directory — `<config-home>/plans/`, rebranding 206's
     /// `~/.claude/plans/` to `$LINGXI_CONFIG_DIR ?? ~/.lingxi`
     /// (`memory::lingxi_md::user_config_dir`).
-    pub(super) fn default_plans_dir() -> std::path::PathBuf {
+    pub fn default_plans_dir() -> std::path::PathBuf {
         let config_home = dirs::home_dir()
             .map(|h| memory::lingxi_md::user_config_dir(&h))
             .unwrap_or_else(|| {

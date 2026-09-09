@@ -192,6 +192,73 @@ pub fn next_checkin_interval_ms(base_interval_ms: i64, checkin_count: u32) -> i6
     base_interval_ms.saturating_mul(multiplier)
 }
 
+/// `xns = 3` (2.1.266 `src_162329786.js` @4166900) — after this many IDLE
+/// check-ins the timer keeps re-arming but stops delivering, until the user
+/// speaks again.
+pub const IDLE_CHECKIN_CAP: u32 = 3;
+
+/// `qmt = 60000` — the floor on the idle timer's re-arm delay.
+pub const IDLE_REARM_FLOOR_MS: i64 = 60_000;
+
+/// `$S = 2147483647` (`src_158588265.js`) — upstream's `setTimeout` ceiling.
+/// Retained so the delay arithmetic matches; `tokio::time::sleep` has no such
+/// limit of its own.
+pub const IDLE_MAX_DELAY_MS: i64 = 2_147_483_647;
+
+/// `Rns` — appended to the check-in SUMMARY once the idle cap is reached.
+///
+/// ## Divergence (reason)
+///
+/// Upstream delivers `{summary, body}` and the summary drives a UI notification
+/// row. LingXi's idle path enqueues only the body as an `isMeta` user message,
+/// so this constant has no delivery channel yet; it is defined here so the pair
+/// stays together and so a future summary channel does not re-derive it.
+pub const IDLE_PAUSED_SUMMARY_SUFFIX: &str =
+    " \u{b7} idle check-ins paused until your next message";
+
+/// `Pns` — appended to the check-in BODY once the idle cap is reached
+/// (`Mns(e)` = `{summary: e.summary+Rns, body: e.body+Pns}`).
+pub const IDLE_PAUSED_BODY_SUFFIX: &str = " Claude Code won't wake this session for another check-in until the user sends a message, so say clearly where things stand.";
+
+/// `RUe(e)` — `(e.idleCheckinCount ?? 0) >= xns`.
+#[must_use]
+pub fn idle_cap_reached(idle_checkin_count: u32) -> bool {
+    idle_checkin_count >= IDLE_CHECKIN_CAP
+}
+
+/// `Mns(e).body` — the body a capped check-in delivers.
+#[must_use]
+pub fn with_idle_pause_suffix(body: &str) -> String {
+    format!("{body}{IDLE_PAUSED_BODY_SUFFIX}")
+}
+
+/// `HZ`'s delay, in ms:
+///
+/// ```js
+/// let r=Yer(n,e.goal.checkinCount??0),
+///     o=RUe(e.goal)?0:e.now-e.goal.deferredSince,
+///     d=Math.min($S,Math.max(qmt,r-o));
+/// ```
+///
+/// Once the cap is reached the elapsed term drops out, so the timer re-arms a
+/// full backoff interval ahead instead of firing immediately and spinning.
+#[must_use]
+pub fn next_idle_delay_ms(
+    base_interval_ms: i64,
+    checkin_count: u32,
+    idle_checkin_count: u32,
+    now_ms: i64,
+    deferred_since_ms: i64,
+) -> i64 {
+    let interval = next_checkin_interval_ms(base_interval_ms, checkin_count);
+    let elapsed = if idle_cap_reached(idle_checkin_count) {
+        0
+    } else {
+        now_ms.saturating_sub(deferred_since_ms)
+    };
+    IDLE_MAX_DELAY_MS.min(IDLE_REARM_FLOOR_MS.max(interval.saturating_sub(elapsed)))
+}
+
 /// The deferral bookkeeping the oracle keeps on `activeGoal`
 /// (`deferredSince` / `checkinCount` / `lastDeferralPassAt`).
 ///
@@ -214,6 +281,11 @@ pub struct GoalDeferralState {
     /// The task ids that were deferring at the last pass — the port's stand-in
     /// for `Math.min(...startTimes)` (see the module divergence note).
     pub last_deferring_ids: Vec<String>,
+    /// `idleCheckinCount` (2.1.266) — how many check-ins the IDLE TIMER has
+    /// delivered since the user last spoke. Counted separately from
+    /// [`Self::checkin_count`], which also counts turn-end check-ins, and
+    /// cleared by [`Self::clear_idle_checkins`] (`vSt`).
+    pub idle_checkin_count: u32,
 }
 
 impl GoalDeferralState {
@@ -286,6 +358,15 @@ impl GoalDeferralState {
     /// deferring any more, so the three deferral fields are dropped.
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// `vSt` (2.1.266 @4171302) — the user sent a message, so the idle-check-in
+    /// budget resets and the timer may deliver again. Called from the prompt
+    /// intake, NOT from the deferral pass: everything else about the stretch
+    /// (`deferredSince`, `checkinCount`) survives, exactly as upstream's
+    /// `{idleCheckinCount:r,...o}` destructure keeps the rest of the goal.
+    pub fn clear_idle_checkins(&mut self) {
+        self.idle_checkin_count = 0;
     }
 }
 
@@ -484,6 +565,78 @@ mod tests {
     }
 
     #[test]
+    fn the_idle_cap_is_three_deliveries() {
+        assert!(!idle_cap_reached(0));
+        assert!(!idle_cap_reached(2));
+        assert!(idle_cap_reached(3));
+        assert!(idle_cap_reached(9));
+    }
+
+    #[test]
+    fn the_idle_delay_floors_at_one_minute() {
+        // `r - o` is tiny (the stretch has almost caught up) ⇒ the 60s floor.
+        let base = 30 * 60_000;
+        let now = 1_000_000;
+        assert_eq!(
+            next_idle_delay_ms(base, 0, 0, now, now - base + 5),
+            IDLE_REARM_FLOOR_MS
+        );
+    }
+
+    #[test]
+    fn the_idle_delay_subtracts_elapsed_below_the_cap() {
+        let base = 30 * 60_000;
+        let now = 10_000_000;
+        // 10 minutes into a 30-minute stretch ⇒ 20 minutes to go.
+        assert_eq!(
+            next_idle_delay_ms(base, 0, 0, now, now - 10 * 60_000),
+            20 * 60_000
+        );
+        // The backoff multiplier applies to the base, not the remainder.
+        assert_eq!(
+            next_idle_delay_ms(base, 1, 0, now, now - 10 * 60_000),
+            2 * base - 10 * 60_000
+        );
+    }
+
+    #[test]
+    fn at_the_cap_the_elapsed_term_drops_out() {
+        // `RUe(goal) ? 0 : now - deferredSince` — a capped goal re-arms a whole
+        // interval ahead however long the stretch has already run, so the timer
+        // cannot spin at the floor.
+        let base = 30 * 60_000;
+        let now = 10_000_000;
+        assert_eq!(
+            next_idle_delay_ms(base, 0, IDLE_CHECKIN_CAP, now, now - 29 * 60_000),
+            base
+        );
+    }
+
+    #[test]
+    fn the_pause_suffix_is_byte_exact() {
+        assert_eq!(
+            with_idle_pause_suffix("Goal check-in: body."),
+            "Goal check-in: body. Claude Code won't wake this session for another check-in until the user sends a message, so say clearly where things stand."
+        );
+    }
+
+    #[test]
+    fn clearing_idle_checkins_keeps_the_stretch() {
+        let mut state = GoalDeferralState {
+            deferred_since: Some(10),
+            checkin_count: 2,
+            last_deferral_pass_at: Some(20),
+            last_deferring_ids: vec!["a".into()],
+            idle_checkin_count: 3,
+        };
+        state.clear_idle_checkins();
+        assert_eq!(state.idle_checkin_count, 0);
+        assert_eq!(state.deferred_since, Some(10));
+        assert_eq!(state.checkin_count, 2);
+        assert_eq!(state.last_deferral_pass_at, Some(20));
+    }
+
+    #[test]
     fn a_zero_interval_disables_the_feature_entirely() {
         let mut state = GoalDeferralState::default();
         let tasks = vec![task("b1", "shell", "one")];
@@ -498,6 +651,7 @@ mod tests {
             checkin_count: 3,
             last_deferral_pass_at: Some(2),
             last_deferring_ids: vec!["b1".into()],
+            idle_checkin_count: 2,
         };
         state.clear();
         assert_eq!(state, GoalDeferralState::default());

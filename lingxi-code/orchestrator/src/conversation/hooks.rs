@@ -89,6 +89,7 @@ impl ConversationOrchestrator {
         if let Some(goal) = goal.as_ref() {
             self.persist_goal_status_attachment(status, Some(goal))
                 .await;
+            self.fire_goal_terminal_event(status, goal).await;
         }
         let _ = self
             .remove_active_goal_stop_hook_for_session(session_id)
@@ -588,6 +589,14 @@ impl ConversationOrchestrator {
             return false;
         }
 
+        // Captured BEFORE `advance`, which resets `deferred_since` to now when
+        // it fires — `Jer`'s `deferredMs` is the stretch that just ended.
+        let deferred_since_before = self
+            .lifecycle_runtime
+            .goal_checkin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deferred_since;
         let checkin = Self::advance_goal_checkin_state(
             &self.lifecycle_runtime.goal_checkin,
             &goal.condition,
@@ -596,6 +605,24 @@ impl ConversationOrchestrator {
         );
         self.sync_goal_checkin_idle_task().await;
         if let Some(body) = checkin {
+            let (checkin_count, idle_checkin_count) = {
+                let state = self
+                    .lifecycle_runtime
+                    .goal_checkin
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (state.checkin_count, state.idle_checkin_count)
+            };
+            let now_ms = tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+            Self::fire_goal_checkin_injected(
+                self.model_runtime.analytics_bus.as_ref(),
+                "turn_end",
+                deferred_since_before.map_or(0, |since| now_ms.saturating_sub(since)),
+                &deferring,
+                checkin_count,
+                idle_checkin_count,
+            )
+            .await;
             let msg = ConversationMessage::user_meta(MessageId::new(), body);
             {
                 let mut session = self.session.lock().await;
@@ -604,6 +631,132 @@ impl ConversationOrchestrator {
             self.persist_message_to_jsonl(&msg).await;
         }
         true
+    }
+
+    /// The terminal `tengu_goal_*` analytics events (2.1.266):
+    ///
+    /// * achieved — `i("tengu_goal_achieved",{promptLength,iterations,durationMs,tokens,origin})`
+    ///   (@4211700);
+    /// * impossible — `i("tengu_goal_failed",{promptLength,reasonLength,iterations,durationMs,tokens,origin})`
+    ///   (@4211500);
+    /// * cleared — `eB(goal, reason)` = `i("tengu_goal_cleared",{reason,iterations,durationMs,origin})`
+    ///   (`src_160454523.js`), whose `reason` discriminates `user_clear` from
+    ///   `superseded` / `context_limit` / `api_error`.
+    ///
+    /// ## Divergence (reason)
+    ///
+    /// `origin` is always `"user"` here. Upstream reads it from
+    /// `queuedGoalOrigin`, which only ever holds `proposal_direct` /
+    /// `proposal_approved` — both set exclusively by `ProposeGoal`, which LingXi
+    /// does not ship (see the accepted-divergence register).
+    async fn fire_goal_terminal_event(
+        &self,
+        status: platform_api::GoalStatusKind,
+        goal: &lingxi_core::session::ActiveGoalState,
+    ) {
+        let Some(bus) = self.model_runtime.analytics_bus.as_ref() else {
+            return;
+        };
+        let (event, reason) = match status {
+            platform_api::GoalStatusKind::Achieved => ("tengu_goal_achieved", None),
+            platform_api::GoalStatusKind::Failed => ("tengu_goal_failed", None),
+            platform_api::GoalStatusKind::Cleared => ("tengu_goal_cleared", Some("user_clear")),
+            // `Set` never tears a goal down, and `NotMet` leaves it running.
+            platform_api::GoalStatusKind::Set | platform_api::GoalStatusKind::NotMet => return,
+        };
+        let duration_ms = std::time::SystemTime::now()
+            .duration_since(goal.set_at)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let mut metadata = telemetry::LogEventMetadata::new();
+        if let Some(reason) = reason {
+            metadata.insert(
+                "reason".into(),
+                telemetry::AnalyticsValue::String(reason.to_string()),
+            );
+        } else {
+            metadata.insert(
+                "promptLength".into(),
+                telemetry::AnalyticsValue::Int(goal.condition.len() as i64),
+            );
+            let tokens = self
+                .snapshot_cost_real()
+                .await
+                .total_tokens
+                .saturating_sub(goal.tokens_at_start);
+            metadata.insert(
+                "tokens".into(),
+                telemetry::AnalyticsValue::Int(tokens as i64),
+            );
+            if event == "tengu_goal_failed" {
+                metadata.insert(
+                    "reasonLength".into(),
+                    telemetry::AnalyticsValue::Int(
+                        goal.last_reason.as_ref().map_or(0, String::len) as i64,
+                    ),
+                );
+            }
+        }
+        metadata.insert(
+            "iterations".into(),
+            telemetry::AnalyticsValue::Int(goal.iterations as i64),
+        );
+        metadata.insert(
+            "durationMs".into(),
+            telemetry::AnalyticsValue::Int(duration_ms as i64),
+        );
+        metadata.insert(
+            "origin".into(),
+            telemetry::AnalyticsValue::String("user".to_string()),
+        );
+        bus.log_event(event, metadata).await;
+    }
+
+    /// `Jer(trigger, deferredMs, goal, tasks)` (2.1.266 @4168800) —
+    /// `i("tengu_goal_checkin_injected",{trigger,deferredMs,activeShells,activeAgents,checkinCount,idleCheckinCount})`.
+    ///
+    /// `activeShells` is upstream's `W(tasks, E4t)` (the `local_bash` half),
+    /// `activeAgents` the remainder — here read off the already-projected
+    /// [`crate::prompt::goal_checkin::DeferringTask::label`].
+    pub(super) async fn fire_goal_checkin_injected(
+        bus: Option<&Arc<telemetry::AnalyticsBus>>,
+        trigger: &'static str,
+        deferred_ms: i64,
+        tasks: &[crate::prompt::goal_checkin::DeferringTask],
+        checkin_count: u32,
+        idle_checkin_count: u32,
+    ) {
+        let Some(bus) = bus else {
+            return;
+        };
+        let active_shells = tasks.iter().filter(|t| t.label == "shell").count();
+        let mut metadata = telemetry::LogEventMetadata::new();
+        metadata.insert(
+            "trigger".into(),
+            telemetry::AnalyticsValue::String(trigger.to_string()),
+        );
+        metadata.insert(
+            "deferredMs".into(),
+            telemetry::AnalyticsValue::Int(deferred_ms),
+        );
+        metadata.insert(
+            "activeShells".into(),
+            telemetry::AnalyticsValue::Int(active_shells as i64),
+        );
+        metadata.insert(
+            "activeAgents".into(),
+            telemetry::AnalyticsValue::Int((tasks.len() - active_shells) as i64),
+        );
+        metadata.insert(
+            "checkinCount".into(),
+            telemetry::AnalyticsValue::Int(i64::from(checkin_count)),
+        );
+        metadata.insert(
+            "idleCheckinCount".into(),
+            telemetry::AnalyticsValue::Int(i64::from(idle_checkin_count)),
+        );
+        bus.log_event("tengu_goal_checkin_injected", metadata).await;
     }
 
     fn advance_goal_checkin_state(
@@ -631,6 +784,7 @@ impl ConversationOrchestrator {
         running: Arc<std::sync::atomic::AtomicBool>,
         generation_counter: Arc<std::sync::atomic::AtomicU64>,
         generation: u64,
+        analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
     ) {
         struct RunningGuard {
             running: Arc<std::sync::atomic::AtomicBool>,
@@ -662,6 +816,11 @@ impl ConversationOrchestrator {
             if base_interval_ms <= 0 {
                 return;
             }
+            // 2.1.266 `HZ`: `min($S, max(qmt, backoff - elapsed))`. The 60s
+            // floor is what stops a stretch that has already outrun its
+            // interval from spinning the timer, and once the idle cap is
+            // reached the elapsed term drops out so the re-arm is a full
+            // interval ahead.
             let sleep_ms = {
                 let state = goal_checkin
                     .lock()
@@ -669,18 +828,33 @@ impl ConversationOrchestrator {
                 let Some(deferred_since) = state.deferred_since else {
                     return;
                 };
-                let interval = crate::prompt::goal_checkin::next_checkin_interval_ms(
-                    base_interval_ms,
-                    state.checkin_count,
-                );
                 let now_ms =
                     tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
-                deferred_since
-                    .saturating_add(interval)
-                    .saturating_sub(now_ms)
-                    .max(1)
+                crate::prompt::goal_checkin::next_idle_delay_ms(
+                    base_interval_ms,
+                    state.checkin_count,
+                    state.idle_checkin_count,
+                    now_ms,
+                    deferred_since,
+                )
             };
-            tokio::time::sleep(Duration::from_millis(sleep_ms as u64)).await;
+            tokio::time::sleep(Duration::from_millis(sleep_ms.max(1) as u64)).await;
+
+            // `if(RUe(C)){t("[goal] idle check-in cap reached — tick re-armed
+            // only"),HZ({...}); return}` — read AFTER the sleep, because a user
+            // message during it clears the budget (`vSt`) and re-enables
+            // delivery. Upstream also skips a tick when a passive
+            // task-notification is already queued (`Ins`/`rnr`); LingXi's idle
+            // path has no message queue to peek at, so that skip has no home.
+            if crate::prompt::goal_checkin::idle_cap_reached(
+                goal_checkin
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .idle_checkin_count,
+            ) {
+                tracing::debug!("[goal] idle check-in cap reached \u{2014} tick re-armed only");
+                continue;
+            }
 
             // Serialize idle emission with every public turn. Besides keeping
             // the history order deterministic, this prevents the background
@@ -708,6 +882,12 @@ impl ConversationOrchestrator {
                 return;
             }
 
+            // Captured before `advance` resets the stretch — see the
+            // turn-end twin.
+            let deferred_since_before = goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .deferred_since;
             let body = Self::advance_goal_checkin_state(
                 &goal_checkin,
                 &goal.condition,
@@ -715,6 +895,36 @@ impl ConversationOrchestrator {
                 base_interval_ms,
             );
             if let Some(body) = body {
+                // `p(RUe(V)?Mns(re):re)` — `V` is the goal AFTER the increment,
+                // so the delivery that REACHES the cap is the one that carries
+                // the pause suffix, and no further delivery follows it.
+                let idle_checkin_count = {
+                    let mut state = goal_checkin
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.idle_checkin_count = state.idle_checkin_count.saturating_add(1);
+                    state.idle_checkin_count
+                };
+                let body = if crate::prompt::goal_checkin::idle_cap_reached(idle_checkin_count) {
+                    crate::prompt::goal_checkin::with_idle_pause_suffix(&body)
+                } else {
+                    body
+                };
+                let checkin_count = goal_checkin
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .checkin_count;
+                let now_ms =
+                    tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+                Self::fire_goal_checkin_injected(
+                    analytics_bus.as_ref(),
+                    "idle_timer",
+                    deferred_since_before.map_or(0, |since| now_ms.saturating_sub(since)),
+                    &deferring,
+                    checkin_count,
+                    idle_checkin_count,
+                )
+                .await;
                 let msg = ConversationMessage::user_meta(MessageId::new(), body);
                 {
                     session.lock().await.history.push(msg.clone());
@@ -812,8 +1022,15 @@ impl ConversationOrchestrator {
             goal.clone()
         };
         if persist_active {
-            self.persist_active_goal_state_to_jsonl(Some(&snapshot))
-                .await;
+            // 2.1.266 @4212300: a blocking evaluation yields
+            // `{met:false, condition, reason}` — the goal stays active with its
+            // iteration count and reason refreshed, so this is NOT the `Set`
+            // sentinel the port used to write here.
+            self.persist_goal_status_attachment(
+                platform_api::GoalStatusKind::NotMet,
+                Some(&snapshot),
+            )
+            .await;
         }
     }
 

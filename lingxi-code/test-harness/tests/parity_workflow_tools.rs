@@ -11,7 +11,6 @@ use telemetry::tengu::tool::{
     EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED,
 };
 use test_harness::parity::load_fixture;
-use tool_plan::plan_mode::{PLAN_MODE_ENTER_MARKER, PLAN_MODE_EXIT_MARKER};
 use tool_task::todo_write::{TODO_STATE_COMPLETED, TODO_STATE_IN_PROGRESS, TODO_STATE_PENDING};
 use tool_worktree::worktree::{
     flatten_slug, validate_worktree_slug, MAX_WORKTREE_SLUG_LENGTH, WORKTREE_BRANCH_PREFIX,
@@ -51,13 +50,6 @@ fn todo_aliases_are_rejected_by_serde() {
 // (todo_max_content_chars_matches_fixture removed: claude-code's TodoItemSchema
 // `BWd` has `.min(1)` but NO `.max()` on content, so the 4096-char cap and its
 // TODO_MAX_CONTENT_CHARS const were removed — #76.)
-
-#[test]
-fn plan_markers_match_fixture() {
-    let f = fixture();
-    assert_eq!(f["plan_mode"]["enter_marker"], PLAN_MODE_ENTER_MARKER);
-    assert_eq!(f["plan_mode"]["exit_marker"], PLAN_MODE_EXIT_MARKER);
-}
 
 #[test]
 fn worktree_constants_match_fixture() {

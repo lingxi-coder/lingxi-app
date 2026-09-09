@@ -139,6 +139,18 @@ pub struct SessionState {
     /// counters); defaults to `false` on deserialize.
     #[serde(default)]
     pub plan_reminder_shown: bool,
+    /// 2.1.266 `NM` — "this session has exited plan mode at least once".
+    /// `ExitPlanMode` sets it; the plan-mode reminder provider consumes it to
+    /// emit ONE `plan_mode_reentry` attachment on the next entry that finds an
+    /// existing plan file (`if(nPt()&&y!==null){…;NM(!1)}`), then clears it.
+    #[serde(default)]
+    pub plan_mode_exited: bool,
+    /// 2.1.266 `Vz` — "a `plan_mode_exit` reminder is owed". `ExitPlanMode` sets
+    /// it (`NM(!0),Vz(!0)`); the provider clears it whether or not it emits
+    /// (`Z_s` calls `Vz(!1)` on both the still-in-plan-mode early return and the
+    /// emit path).
+    #[serde(default)]
+    pub plan_mode_exit_pending: bool,
     /// Finding #73 — assistant turns since the last `TodoWrite` (V1) /
     /// `TaskCreate`|`TaskUpdate` (V2) tool call. The per-turn todo-reminder
     /// (`L4p`/`N4p` `turnsSinceLastTodoWrite`/`turnsSinceLastTaskManagement`)
@@ -220,6 +232,8 @@ impl SessionState {
             ultracode_non_meta_turns_since_reminder: 0,
             plan_mode: false,
             plan_reminder_shown: false,
+            plan_mode_exited: false,
+            plan_mode_exit_pending: false,
             turns_since_last_todo_write: 0,
             turns_since_last_reminder: 0,
             injected_message_sources: HashMap::new(),

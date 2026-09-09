@@ -913,20 +913,27 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
         if attachment.get("type").and_then(serde_json::Value::as_str) == Some("goal_status") {
             let status: platform_api::GoalStatusAttachment =
                 serde_json::from_value(attachment.clone()).ok()?;
-            return match status.status {
-                platform_api::GoalStatusKind::Set => status.goal_state.map(|goal| {
-                    Some(ActiveGoalState {
-                        condition: goal.condition,
-                        set_at: goal.set_at,
-                        last_reason: goal.last_reason,
-                        iterations: goal.iterations,
-                        tokens_at_start: goal.tokens_at_start,
-                    })
-                }),
-                platform_api::GoalStatusKind::Cleared
-                | platform_api::GoalStatusKind::Achieved
-                | platform_api::GoalStatusKind::Failed => Some(None),
+            // 2.1.266 shape: a SENTINEL announces set (`met:false`) or clear
+            // (`met:true`); a non-sentinel record is an evaluation, terminal
+            // when it is `met` (achieved) or `failed` (impossible), and
+            // otherwise a not-met turn that leaves the goal running.
+            let terminal = if status.sentinel == Some(true) {
+                status.met
+            } else {
+                status.met || status.failed == Some(true)
             };
+            if terminal {
+                return Some(None);
+            }
+            return status.goal_state.map(|goal| {
+                Some(ActiveGoalState {
+                    condition: goal.condition,
+                    set_at: goal.set_at,
+                    last_reason: goal.last_reason,
+                    iterations: goal.iterations,
+                    tokens_at_start: goal.tokens_at_start,
+                })
+            });
         }
     }
     if message.message_type != "system" {

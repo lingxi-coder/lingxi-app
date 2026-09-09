@@ -20,6 +20,7 @@ impl BuiltinHookHandler for BlockingBuiltin {
             stderr: String::new(),
             exit_code: Some(0),
             response: Some(HookResponse {
+                impossible: false,
                 decision: Some(HookDecision::Block),
                 reason: Some("test policy".into()),
                 // O2 `hook_blocking_error`: the `command` half of the blocking

@@ -613,7 +613,45 @@ impl ConversationOrchestrator {
             });
         }
 
+        // 2.1.266 `_ts` (@4123349), assembled by `KOe` as
+        // `[...files, ...skills, ...planFileReference, …]` — a plan file that
+        // survived the boundary is re-attached so the model can pick the plan
+        // back up after a compaction.
+        if let Some(message) = self.plan_file_reference_attachment().await {
+            out.push(message);
+        }
+
         out
+    }
+
+    /// `_ts(agentId, storageV5)` — the `plan_file_reference` attachment.
+    ///
+    /// ```js
+    /// async function _ts(e,n){ if(i8()!==void 0) Bp(ay(e));
+    ///   let r=await Kke(e,n); if(!r)return null; let o=ay(e);
+    ///   return un({type:"plan_file_reference",planFilePath:o,planContent:r}) }
+    /// ```
+    ///
+    /// `if(!r)` is JS-falsy, so an EMPTY plan file produces no attachment — not
+    /// just a missing one. The `Bp(ay(e))` cache-invalidation half has no Rust
+    /// home (the port reads the file directly rather than through a plan-file
+    /// cache).
+    pub(super) async fn plan_file_reference_attachment(
+        &self,
+    ) -> Option<protocol::ConversationMessage> {
+        let path = {
+            let session = self.session.lock().await;
+            self.session_plan_file_path(&session.session_id)
+        };
+        let content = std::fs::read_to_string(&path).ok()?;
+        if content.is_empty() {
+            return None;
+        }
+        let body = crate::prompt::plan_reminder::render_plan_file_reference(&path, &content);
+        Some(protocol::ConversationMessage::user_meta(
+            protocol::MessageId::new(),
+            format!("<system-reminder>\n{body}\n</system-reminder>"),
+        ))
     }
 
     fn post_compact_attached_file_paths(messages: &[protocol::ConversationMessage]) -> Vec<String> {

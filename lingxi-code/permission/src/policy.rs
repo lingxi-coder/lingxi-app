@@ -166,6 +166,13 @@ pub struct PermissionPolicy {
     /// [`Self::with_pwsh_parser`] at the engine boot site on hosts with `pwsh`
     /// (e.g. [`crate::powershell_parse::SystemPwshParser`]).
     pub pwsh_parser: Option<std::sync::Arc<dyn crate::powershell_parse::PwshParser>>,
+    /// The session's plan files — the one write carve-out plan mode grants
+    /// (2.1.266 `Zl`, consulted by `LZe`). `None` (the DEFAULT) leaves
+    /// `authorize` byte-identical to the pre-carve-out behavior; the engine
+    /// roots publish a shared [`crate::plan_files::PlanFileMatcher`] here and
+    /// into the tool context so `ExitPlanMode` reads back the same file the
+    /// model was allowed to write.
+    pub plan_files: Option<std::sync::Arc<crate::plan_files::PlanFileMatcher>>,
     /// Enterprise gate that permits only managed policy rules and disables
     /// user/project/local permission persistence for the session.
     pub allow_managed_permission_rules_only: bool,
@@ -219,11 +226,23 @@ impl PermissionPolicy {
             block_reads_outside_working_directories: false,
             sandbox_runtime: None,
             pwsh_parser: None,
+            plan_files: None,
             allow_managed_permission_rules_only: false,
             classify_all_shell: false,
             workspace_leases: None,
             bash_command_clamps: Vec::new(),
         }
+    }
+
+    /// Publish the session's plan-file identity holder — see
+    /// [`crate::plan_files`]. Without it the carve-out never fires.
+    #[must_use]
+    pub fn with_plan_files(
+        mut self,
+        plan_files: std::sync::Arc<crate::plan_files::PlanFileMatcher>,
+    ) -> Self {
+        self.plan_files = Some(plan_files);
+        self
     }
 
     /// Attach the per-spawn `bashCommandClamp` GROUPS for THIS call
@@ -947,6 +966,7 @@ impl PermissionPolicy {
             roots: self.roots.clone(),
             stripped_dangerous: self.stripped_dangerous.clone(),
             stripped_positions: self.stripped_positions.clone(),
+            plan_files: self.plan_files.clone(),
             additional_working_dirs,
             block_reads_outside_working_directories: self.block_reads_outside_working_directories,
             sandbox_runtime: self.sandbox_runtime.clone(),
@@ -1078,6 +1098,37 @@ impl PermissionPolicy {
         //     protects a read-denied file from being edited, so it must not be
         //     overridable by an allow rule / bypass. Roots-gated.
         if file_tool_kind(tool_name) == FileToolKind::Editor
+        // PLAN-FILE-01 (2.1.266 `LZe` @351498 / the read resolver @352778): the
+        //     session's own plan file is ALLOWED for reading and writing. Order
+        //     is load-bearing — upstream places both allows after the edit
+        //     deny/ask rule walks but BEFORE the write safety check and the
+        //     plan-mode mutation ask, so the plan file stays writable even
+        //     though LingXi's default plans directory (`<config-home>/plans`)
+        //     sits under `~/.claude`. Without this the plan-mode reminder tells
+        //     the model to write a file the gate then prompts on every time.
+        //     `includeWorkshopDoc` is `permissionMode === "plan"` for writes and
+        //     always true for reads, exactly as the two call sites pass it.
+        if let Some(plan_files) = self.plan_files.as_ref() {
+            let kind = file_tool_kind(tool_name);
+            let carve_out = match kind {
+                FileToolKind::Editor => Some((true, mode == PermissionMode::Plan)),
+                FileToolKind::Reader => Some((false, true)),
+                FileToolKind::NonFile => None,
+            };
+            if let (Some((writing, include_workshop_doc)), Some(roots)) =
+                (carve_out, self.roots.as_ref())
+            {
+                if let Some(path) = input_path_for_tool(tool_name, input, roots) {
+                    if plan_files.matches(
+                        std::path::Path::new(path.as_ref()),
+                        Some(roots.cwd.as_path()),
+                        include_workshop_doc,
+                    ) {
+                        return allow_plan_file(writing);
+                    }
+                }
+            }
+        }
             && self.edit_covered_by_read_deny(tool_name, input)
         {
             return ask_edit_read_deny_covered(tool_name);
@@ -3134,6 +3185,23 @@ fn allow_with_mode(mode: PermissionMode) -> PermissionResult {
 
 /// Sandbox auto-allow grant (claude-code `checkSandboxAutoAllow`'s final
 /// `behavior: 'allow'`, `decisionReason: { type: 'other', reason: 'Auto-allowed
+/// The plan-file carve-out allow — `Oe(n, …)` in 2.1.266 `LZe` (write) and the
+/// read resolver, whose reasons are byte-locked in [`crate::plan_files`].
+fn allow_plan_file(writing: bool) -> PermissionResult {
+    PermissionResult::Allow {
+        reason: PermissionDecisionReason::Other {
+            reason: if writing {
+                crate::plan_files::PLAN_FILE_WRITE_ALLOW_REASON.to_string()
+            } else {
+                crate::plan_files::PLAN_FILE_READ_ALLOW_REASON.to_string()
+            },
+        },
+        updated_input: None,
+        update_destination: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
 /// with sandbox (autoAllowBashIfSandboxed enabled)' }`). Tagged
 /// [`PermissionDecisionReason::Other`] carrying the byte-faithful reason (TS
 /// uses `type: 'other'` here, NOT a sandbox-specific reason — preserved so the

@@ -318,6 +318,77 @@ mod tests {
 
     // ── Plan-mode dynamic gate: authorize_with_mode ──────────────────────────
 
+    /// PLAN-FILE-01: in plan mode the session's own plan file is writable
+    /// WITHOUT a prompt, and nothing else in the plans directory is.
+    ///
+    /// This is the whole point of the carve-out: the plan-mode reminder tells
+    /// the model to write exactly this file, so a `Write` to it must not reach
+    /// the plan-mode mutation ask.
+    #[test]
+    fn the_session_plan_file_is_writable_in_plan_mode() {
+        use std::path::PathBuf;
+
+        let plans_dir = PathBuf::from("/home/u/.claude/plans");
+        let matcher =
+            std::sync::Arc::new(platform_api::plan_files::PlanFileMatcher::with_identity(
+                platform_api::plan_files::PlanFileIdentity {
+                    plans_dir: plans_dir.clone(),
+                    slug: "brave-baking-otter".into(),
+                    workshop_enabled: false,
+                },
+            ));
+        let policy = PermissionPolicy::new(PermissionMode::Plan)
+            .with_roots(crate::FsRoots {
+                cwd: PathBuf::from("/home/u/project"),
+                home: Some(PathBuf::from("/home/u")),
+                lingxi_home: PathBuf::from("/home/u/.claude"),
+            })
+            .with_plan_files(matcher);
+
+        let own = serde_json::json!({
+            "file_path": plans_dir.join("brave-baking-otter.md").to_string_lossy(),
+            "content": "# Plan",
+        });
+        match policy.authorize_with_mode("Write", &own, PermissionMode::Plan) {
+            crate::PermissionResult::Allow { reason, .. } => match reason {
+                crate::PermissionDecisionReason::Other { reason } => assert_eq!(
+                    reason,
+                    platform_api::plan_files::PLAN_FILE_WRITE_ALLOW_REASON
+                ),
+                other => panic!("expected the byte-locked carve-out reason, got {other:?}"),
+            },
+            other => panic!("the session plan file must be writable in plan mode: {other:?}"),
+        }
+
+        // A different session's plan file in the SAME directory is not covered.
+        let foreign = serde_json::json!({
+            "file_path": plans_dir.join("someone-elses-plan.md").to_string_lossy(),
+            "content": "# Plan",
+        });
+        assert!(
+            !matches!(
+                policy.authorize_with_mode("Write", &foreign, PermissionMode::Plan),
+                crate::PermissionResult::Allow { .. }
+            ),
+            "the carve-out must not widen to the whole plans directory"
+        );
+
+        // And the carve-out is plan-file-shaped, not mode-shaped: without an
+        // identity the same write is asked about, as it was before.
+        let bare = PermissionPolicy::new(PermissionMode::Plan).with_roots(crate::FsRoots {
+            cwd: PathBuf::from("/home/u/project"),
+            home: Some(PathBuf::from("/home/u")),
+            lingxi_home: PathBuf::from("/home/u/.claude"),
+        });
+        assert!(
+            !matches!(
+                bare.authorize_with_mode("Write", &own, PermissionMode::Plan),
+                crate::PermissionResult::Allow { .. }
+            ),
+            "no published identity ⇒ no carve-out"
+        );
+    }
+
     #[test]
     fn authorize_with_mode_self_mode_matches_authorize() {
         // authorize() is exactly authorize_with_mode(.., self.mode): threading the

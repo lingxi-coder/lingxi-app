@@ -1788,6 +1788,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let running = Arc::clone(&self.lifecycle_runtime.goal_checkin_idle_running);
             let generation_counter =
                 Arc::clone(&self.lifecycle_runtime.goal_checkin_idle_generation);
+            let analytics_bus = self.model_runtime.analytics_bus.clone();
             let handle = tokio::spawn(async move {
                 ConversationOrchestrator::run_goal_checkin_idle_loop(
                     provider,
@@ -1801,6 +1802,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     running,
                     generation_counter,
                     generation,
+                    analytics_bus,
                 )
                 .await;
             });

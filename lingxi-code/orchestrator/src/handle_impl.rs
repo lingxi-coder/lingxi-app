@@ -453,6 +453,25 @@ impl OrchestratorHandle for ConversationOrchestrator {
         drop(s);
         self.persist_active_goal_state_to_jsonl(snapshot.as_ref())
             .await;
+        // `rRe`: `i("tengu_stop_hook_added",{promptLength,via:_("goal"),origin})`
+        // (`src_160454523.js`). `origin` is always `"user"` here — see
+        // `fire_goal_terminal_event`.
+        if let Some(bus) = self.model_runtime.analytics_bus.as_ref() {
+            let mut metadata = telemetry::LogEventMetadata::new();
+            metadata.insert(
+                "promptLength".into(),
+                telemetry::AnalyticsValue::Int(condition.len() as i64),
+            );
+            metadata.insert(
+                "via".into(),
+                telemetry::AnalyticsValue::String("goal".to_string()),
+            );
+            metadata.insert(
+                "origin".into(),
+                telemetry::AnalyticsValue::String("user".to_string()),
+            );
+            bus.log_event("tengu_stop_hook_added", metadata).await;
+        }
         self.sync_active_goal_stop_hook_for_current_state().await;
     }
 

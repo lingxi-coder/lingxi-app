@@ -7487,6 +7487,7 @@ dependencies = [
  "tool-api",
 ]
 
+ "tracing",
 [[package]]
 name = "tool-shell"
 version = "0.12.0"

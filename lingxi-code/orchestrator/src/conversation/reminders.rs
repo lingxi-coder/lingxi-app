@@ -147,19 +147,17 @@ impl ConversationOrchestrator {
     /// per-turn OUTGOING snapshot (never `session.history` / JSONL) so it never
     /// accumulates; `None` keeps the locked turn-loop fixtures byte-identical
     /// (default: plan mode OFF).
-    pub(crate) async fn plan_mode_reminder_message(&self) -> Option<ConversationMessage> {
-        let (path, exists, real_user_turns, entered_plan_mode) = {
+    /// Upstream returns a LIST here (`J_s`): a `plan_mode_reentry` attachment
+    /// may precede the `plan_mode` one on the entry that finds an existing plan
+    /// file, and both sit behind the SAME cadence gate — `lyr`'s early return
+    /// runs before the reentry push, so a suppressed turn emits neither.
+    pub(crate) async fn plan_mode_turn_messages(&self) -> Vec<ConversationMessage> {
+        let (path, exists, real_user_turns, entered_plan_mode, reentry) = {
             let mut s = self.session.lock().await;
             if !s.plan_mode {
-                return None;
+                return Vec::new();
             }
-            let path = Self::plan_file_path(
-                &s.session_id,
-                // 206 `Ct()` = the original project root (session-init cwd), NOT
-                // the post-`cd` shell cwd.
-                &self.cwd,
-                self.config.plans_directory.as_deref(),
-            );
+            let path = self.session_plan_file_path(&s.session_id);
             let exists = std::path::Path::new(&path).exists();
             // `ixl`'s turn counter: non-meta user messages carrying NO
             // `tool_result` block. Tool-result continuations within one turn are
@@ -184,7 +182,15 @@ impl ConversationOrchestrator {
             // `plan_mode_exit` boundary `Y4T` stops counting at.
             let entered_plan_mode = !s.plan_reminder_shown;
             s.plan_reminder_shown = true;
-            (path, exists, real_user_turns, entered_plan_mode)
+            // `if(nPt()&&y!==null){C.push({type:"plan_mode_reentry",…}),NM(!1)}`
+            // — one reentry reminder per exit→enter cycle, and only when a plan
+            // file from the previous session is actually on disk. A missing file
+            // leaves the flag set for the next entry, exactly as upstream does.
+            let reentry = s.plan_mode_exited && exists;
+            if reentry {
+                s.plan_mode_exited = false;
+            }
+            (path, exists, real_user_turns, entered_plan_mode, reentry)
         };
         // Decide emission + full/sparse under the cadence lock so two concurrent
         // turns cannot both render attachment `c`.
@@ -196,7 +202,7 @@ impl ConversationOrchestrator {
             if let Some(last) = c.real_user_turns_at_last_emission {
                 // `if(_ && y < TURNS_BETWEEN_ATTACHMENTS) return []`
                 if real_user_turns.saturating_sub(last) < PLAN_TURNS_BETWEEN_ATTACHMENTS {
-                    return None;
+                    return Vec::new();
                 }
             }
             c.attachments_emitted += 1;
@@ -213,6 +219,12 @@ impl ConversationOrchestrator {
             custom_instructions: self.config.plan_mode_instructions.as_deref(),
             is_subagent: false,
             reminder_type_sparse: sparse,
+            // `zx()==="default"` — an unset `output_style` IS the default style.
+            output_style_is_default: self
+                .config
+                .output_style
+                .as_deref()
+                .map_or(true, |style| style == "default"),
         };
         // All three plan-mode renderers (`M5T` full / `L5T` sparse / `H5T`
         // subagent) return through the batch wrapper `Zy` (2.1.238 @296675470),
@@ -222,7 +234,55 @@ impl ConversationOrchestrator {
         // envelope is applied here, exactly as the other per-turn reminders do.
         let body = crate::prompt::plan_reminder::render_plan_mode_reminder(&params);
         let content = format!("<system-reminder>\n{body}\n</system-reminder>");
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
+        let mut out = Vec::with_capacity(2);
+        if reentry {
+            let reentry_body = crate::prompt::plan_reminder::render_plan_mode_reentry(&path);
+            out.push(ConversationMessage::user_meta(
+                MessageId::new(),
+                format!("<system-reminder>\n{reentry_body}\n</system-reminder>"),
+            ));
+        }
+        out.push(ConversationMessage::user_meta(MessageId::new(), content));
+        out
+    }
+
+    /// The `plan_mode_exit` reminder — 2.1.266 `Z_s`:
+    ///
+    /// ```js
+    /// async function Z_s(e,n){if(ue(n).mode==="plan")return Vz(!1),[];
+    ///   let{foundPlanModeAttachment:r}=lyr(e??[]);
+    ///   if(!n$n()&&!r)return[];
+    ///   Vz(!1);
+    ///   let o=ay(n.agentId),d=zF(n.agentId)!==null;
+    ///   return[{type:"plan_mode_exit",planFilePath:o,planExists:d}]}
+    /// ```
+    ///
+    /// Still in plan mode ⇒ clear the pending flag and emit nothing. Otherwise
+    /// emit when the flag is set. The `!r` half of upstream's guard (a
+    /// `plan_mode` attachment still visible in history even with no pending
+    /// flag) is not reproduced: LingXi's plan-mode reminders live only in the
+    /// per-turn outgoing snapshot, never in `session.history`, so there is no
+    /// history to scan — the flag is the only witness.
+    pub(crate) async fn plan_mode_exit_message(&self) -> Option<ConversationMessage> {
+        let (path, exists) = {
+            let mut s = self.session.lock().await;
+            if s.plan_mode {
+                s.plan_mode_exit_pending = false;
+                return None;
+            }
+            if !s.plan_mode_exit_pending {
+                return None;
+            }
+            s.plan_mode_exit_pending = false;
+            let path = self.session_plan_file_path(&s.session_id);
+            let exists = std::path::Path::new(&path).exists();
+            (path, exists)
+        };
+        let body = crate::prompt::plan_reminder::render_plan_mode_exit(&path, exists);
+        Some(ConversationMessage::user_meta(
+            MessageId::new(),
+            format!("<system-reminder>\n{body}\n</system-reminder>"),
+        ))
     }
 
     pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {

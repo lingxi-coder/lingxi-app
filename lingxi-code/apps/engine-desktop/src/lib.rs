@@ -10993,7 +10993,35 @@ pub async fn build(
     // `settings.json` `plansDirectory` (206 `iT`): custom plan-file directory,
     // resolved against the project root with a within-root containment check by
     // the orchestrator. `None` keeps the default `<config-home>/plans/`.
+    // 2.1.266 `Zl`/`ay`: the session's plan-file identity. Published into the
+    // permission policy (so plan mode's one write carve-out fires — without it
+    // the plan-mode reminder tells the model to write a file the gate then
+    // prompts on) and read back by `ExitPlanMode` through the same policy, so
+    // the file the model was allowed to write is exactly the file whose contents
+    // are echoed on approval. The plans directory derivation is shared with the
+    // orchestrator's reminder (`ConversationOrchestrator::plans_dir`) rather than
+    // re-derived here.
+    // 2.1.266 `getPlanSlug`: the plan file is named by a random three-word slug
+    // (`brave-quiet-otter.md`), re-rolled on collision, NOT by the session id.
+    // Upstream can seed it from the transcript (`planSlugSeed`); LingXi has no
+    // seed source, so it takes the unseeded form.
+    let plans_dir =
+        orchestrator::ConversationOrchestrator::plans_dir(&cwd, cfg.plans_directory.as_deref());
+    let plan_slug = platform_api::plan_slug::generate_slug(None, &|candidate| {
+        platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+    });
+    let plan_files = std::sync::Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
+        permission::plan_files::PlanFileIdentity {
+            plans_dir,
+            slug: plan_slug,
+            // `ZUe()` — LingXi ships no workshop skill.
+            workshop_enabled: false,
+        },
+    ));
     orch_cfg.plans_directory.clone_from(&cfg.plans_directory);
+    // ONE plan-file identity: the reminder's path, the permission carve-out and
+    // `ExitPlanMode`'s read-back all resolve through this object.
+    orch_cfg.plan_files = Some(plan_files.clone());
     // CLI `--exclude-dynamic-system-prompt-sections`: move the per-machine env
     // block out of the (cacheable) system prompt into the first user message.
     orch_cfg.exclude_dynamic_system_prompt_sections = cfg.exclude_dynamic_system_prompt_sections;
@@ -11899,7 +11927,8 @@ pub async fn build(
                 // `pwsh`/`powershell` is not on PATH, exactly like claude-code.
                 .with_pwsh_parser(std::sync::Arc::new(
                     permission::powershell_parse::SystemPwshParser,
-                ));
+                ))
+                .with_plan_files(plan_files.clone());
         policy.bypass_killswitch_active = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
         // refuses `auto` when any tier set `disableAutoMode: "disable"`.
@@ -13265,7 +13294,8 @@ pub async fn build(
                     })
                     .with_pwsh_parser(std::sync::Arc::new(
                         permission::powershell_parse::SystemPwshParser,
-                    )),
+                    ))
+                    .with_plan_files(plan_files.clone()),
             )
         }),
         sandbox_available,

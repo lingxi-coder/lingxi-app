@@ -366,6 +366,18 @@ pub struct OrchestratorConfig {
     /// keeps the byte-identical default plans directory.
     #[serde(default)]
     pub plans_directory: Option<String>,
+    /// The session's plan-file identity, shared with the permission policy that
+    /// grants plan mode's write carve-out and with `ExitPlanMode`'s read-back.
+    ///
+    /// `None` (tests, and hosts that never wired one) falls back to deriving the
+    /// path from the session id, which is what the port did before 2.1.266's
+    /// random slugs. Set it and this is the ONLY derivation: the path the model
+    /// is told to write, the path the gate allows and the path the tool reads
+    /// are the same string by construction.
+    ///
+    /// Runtime-only: never serialized with the rest of the config.
+    #[serde(skip)]
+    pub plan_files: Option<std::sync::Arc<platform_api::plan_files::PlanFileMatcher>>,
 
     /// (2.1.212) The session's resolved reasoning-effort LEVEL string
     /// (`low`/`medium`/`high`/`xhigh`/`max`), sourced from CLI `--effort`
@@ -447,6 +459,7 @@ impl Default for OrchestratorConfig {
             user_email: None,
             plan_mode_instructions: None,
             plans_directory: None,
+            plan_files: None,
             effort: None,
             ultracode_feature_flag_cadence: None,
             ultracode_product_default_cadence: None,
@@ -512,6 +525,7 @@ mod tests {
             user_email: Some("u@example.com".into()),
             plan_mode_instructions: Some("MY BODY".into()),
             plans_directory: Some("docs/plans".into()),
+            plan_files: None,
             effort: Some("high".into()),
             ultracode_feature_flag_cadence: Some(12),
             ultracode_product_default_cadence: Some(10),

@@ -192,8 +192,10 @@ impl StreamingTurnDriver<'_> {
         // LingXi twins must inject this reminder. Appended to THIS turn's
         // OUTGOING snapshot only (never `session.history` / JSONL) and BEFORE
         // the blocking-limit estimate below so its tokens are counted in the
-        // prompt size. See [`Self::plan_mode_reminder_message`].
-        if let Some(reminder) = orch.plan_mode_reminder_message().await {
+        // prompt size. See [`Self::plan_mode_turn_messages`].
+        turn_reminders.extend(orch.plan_mode_turn_messages().await);
+        // `$f("plan_mode_exit", …)` runs right after the plan-mode provider.
+        if let Some(reminder) = orch.plan_mode_exit_message().await {
             turn_reminders.push(reminder);
         }
 
@@ -2277,6 +2279,14 @@ impl ConversationOrchestrator {
         self.discard_stale_prefetches().await;
 
         // 1. Append the user prompt to session history.
+        // 2.1.266 `vSt`: a user message re-opens the idle-check-in budget that
+        // `RUe`'s cap closed ("idle check-ins paused until your next message").
+        // Only the deferral's idle counter is reset; the stretch itself lives on.
+        self.lifecycle_runtime
+            .goal_checkin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_idle_checkins();
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
         {
             let mut s = self.session.lock().await;
@@ -3208,6 +3218,14 @@ impl ConversationOrchestrator {
         self.discard_stale_prefetches().await;
 
         // 1. Append the user prompt to session history.
+        // 2.1.266 `vSt`: a user message re-opens the idle-check-in budget that
+        // `RUe`'s cap closed ("idle check-ins paused until your next message").
+        // Only the deferral's idle counter is reset; the stretch itself lives on.
+        self.lifecycle_runtime
+            .goal_checkin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_idle_checkins();
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
         {
             let mut s = self.session.lock().await;

@@ -629,6 +629,11 @@ pub struct MobileRuntime {
     /// reads as the app's origin conversation. Updated by
     /// `retarget_session_writer` on every session change.
     pub(crate) active_session_uuid: Arc<std::sync::Mutex<String>>,
+    /// 2.1.266 `Zl`/`ay`: the session's plan-file identity, shared with the boot
+    /// permission policy. Re-published by `retarget_session_writer` on every
+    /// session change, so the carve-out and `ExitPlanMode` always name the
+    /// CURRENT session's plan file rather than the one this host booted on.
+    pub(crate) plan_files: Arc<permission::plan_files::PlanFileMatcher>,
     /// App-owned Agent factory. Each app session receives a separate
     /// ConversationOrchestrator and app-scoped MCP registry.
     pub(crate) app_agent_executor: Arc<dyn LocalAppsAgentExecutor>,
@@ -3102,6 +3107,25 @@ async fn build_mobile_inner_with_ask(
     // app's origin `conversation_id` from THIS cell — model input is never
     // trusted for it.
     let active_session_uuid = Arc::new(std::sync::Mutex::new(main_session_uuid.clone()));
+    // The plans directory derivation is shared with the orchestrator's plan-mode
+    // reminder rather than re-derived here, so the path the model is told to
+    // write, the path the permission carve-out allows, and the path
+    // `ExitPlanMode` reads back cannot diverge. Mobile sets no `plansDirectory`.
+    // 2.1.266 `getPlanSlug`: the plan file is named by a random three-word slug
+    // (`brave-quiet-otter.md`), re-rolled on collision, NOT by the session id.
+    // Upstream can seed it from the transcript (`planSlugSeed`); LingXi has no
+    // seed source, so it takes the unseeded form.
+    let plans_dir = orchestrator::ConversationOrchestrator::plans_dir(&cwd, None);
+    let plan_files = Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
+        permission::plan_files::PlanFileIdentity {
+            slug: platform_api::plan_slug::generate_slug(None, &|candidate| {
+                platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+            }),
+            plans_dir: plans_dir.clone(),
+            // `ZUe()` — LingXi ships no workshop skill.
+            workshop_enabled: false,
+        },
+    ));
     {
         let cell = active_session_uuid.clone();
         let _ = local_apps_mcp.attach_session_provider(Arc::new(move || {
@@ -3844,7 +3868,8 @@ async fn build_mobile_inner_with_ask(
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
             .with_block_reads_outside_working_directories(block_reads_outside_working_directories)
-            .with_workspace_leases(workspace_leases.clone());
+            .with_workspace_leases(workspace_leases.clone())
+            .with_plan_files(plan_files.clone());
         // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
         policy.bypass_killswitch_active = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
@@ -5340,6 +5365,7 @@ async fn build_mobile_inner_with_ask(
 /// the `uniffi` feature (F3-01) this becomes `#[derive(uniffi::Error)]`-able; it
 /// is intentionally flat (no embedded engine types) so it marshals across the
 /// boundary unchanged.
+        plan_files,
 #[derive(Debug, Clone, thiserror::Error)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum MobileEngineError {
@@ -6685,6 +6711,19 @@ impl MobileEngineHandle {
             .activate_managed_mcp_conversation(&session_uuid, cwd)
             .await
         {
+            // Re-point the plan-file carve-out at the new session, with a fresh
+            // slug — a retarget is a new plan file, not a rename of the old one.
+            if let Some(identity) = self.inner.plan_files.identity() {
+                let plans_dir = identity.plans_dir.clone();
+                self.inner
+                    .plan_files
+                    .publish(permission::plan_files::PlanFileIdentity {
+                        slug: platform_api::plan_slug::generate_slug(None, &|candidate| {
+                            platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+                        }),
+                        ..identity
+                    });
+            }
             tracing::warn!(
                 session_id = %session_uuid,
                 %error,

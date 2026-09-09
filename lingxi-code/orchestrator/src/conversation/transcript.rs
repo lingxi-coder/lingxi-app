@@ -1173,15 +1173,35 @@ impl ConversationOrchestrator {
             iterations: goal.iterations,
             tokens_at_start: goal.tokens_at_start,
         };
-        let attachment = platform_api::GoalStatusAttachment {
-            kind: "goal_status".to_string(),
-            status,
-            condition: goal.condition.clone(),
-            iterations: goal.iterations,
-            duration_ms,
-            tokens: total_tokens.saturating_sub(goal.tokens_at_start),
-            last_reason: goal.last_reason.clone(),
-            goal_state: matches!(status, platform_api::GoalStatusKind::Set).then_some(snapshot),
+        let condition = goal.condition.clone();
+        let reason = goal.last_reason.clone();
+        let tokens = total_tokens.saturating_sub(goal.tokens_at_start);
+        let attachment = match status {
+            platform_api::GoalStatusKind::Set => {
+                platform_api::GoalStatusAttachment::sentinel_set(condition, Some(snapshot))
+            }
+            platform_api::GoalStatusKind::Cleared => {
+                platform_api::GoalStatusAttachment::sentinel_cleared(condition)
+            }
+            platform_api::GoalStatusKind::Achieved => platform_api::GoalStatusAttachment::achieved(
+                condition,
+                reason,
+                goal.iterations,
+                duration_ms,
+                tokens,
+            ),
+            platform_api::GoalStatusKind::Failed => platform_api::GoalStatusAttachment::failed(
+                condition,
+                reason,
+                goal.iterations,
+                duration_ms,
+                tokens,
+            ),
+            // The goal survives a not-met turn, so the resume snapshot rides
+            // along with it; upstream's record carries only condition+reason.
+            platform_api::GoalStatusKind::NotMet => {
+                platform_api::GoalStatusAttachment::not_met(condition, reason, Some(snapshot))
+            }
         };
         match serde_json::to_value(attachment) {
             Ok(value) => self.persist_hook_attachment_to_jsonl(value).await,

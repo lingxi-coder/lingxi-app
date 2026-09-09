@@ -157,7 +157,10 @@ async fn fork_without_prompt_copies_to_background_session() {
 #[tokio::test]
 async fn goal_with_no_active_goal_reports_no_goal_set() {
     let (d, _h, root) = fresh("goal");
-    assert_eq!(handled(&d, "/goal").await, "No goal set");
+    assert_eq!(
+        handled(&d, "/goal").await,
+        "No goal set. Usage: `/goal <condition>`"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 

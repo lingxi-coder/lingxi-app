@@ -470,8 +470,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // spread before the invoked-skills bodies (`REg`) and the tool/mcp deltas
     // (`gYt`/`YJn`). Appended to THIS call's OUTGOING snapshot only (never
     // `session.history` / JSONL). See
-    // [`ConversationOrchestrator::plan_mode_reminder_message`].
-    if let Some(reminder) = orch.plan_mode_reminder_message().await {
+    // [`ConversationOrchestrator::plan_mode_turn_messages`].
+    turn_reminders.extend(orch.plan_mode_turn_messages().await);
+    // `$f("plan_mode_exit", …)` runs right after the plan-mode provider.
+    if let Some(reminder) = orch.plan_mode_exit_message().await {
         turn_reminders.push(reminder);
     }
 

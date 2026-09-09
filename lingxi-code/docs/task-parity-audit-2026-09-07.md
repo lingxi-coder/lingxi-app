@@ -90,12 +90,12 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 |---|---|---|---|---|
 | `TOF-02` | confirmed | P2 | medium | Six independent derivations of the task-output root/file name (oracle has one) |
 | `TOF-03` | confirmed | P2 | low | Desktop spool directory is keyed by a freshly minted UUID, not the session id **[fixed]** |
-| `TOF-04` | confirmed | P2 | medium | Full-output read has no 8MB tail cap and no "[NKB of earlier output omitted]" header |
+| `TOF-04` | confirmed **[fixed]** | P2 | medium | Full-output read has no 8MB tail cap and no "[NKB of earlier output omitted]" header |
 | `TOF-05` | confirmed | P2 | medium | Writer failure semantics missing: no "[output omitted: it could not be written to disk]" marker, no retry-once, no 16MB drop, no writer eviction |
 | `TOF-06` | confirmed | P2 | medium | Background shell output files never get the `[killed]` / `[exited with code N]` trailer **[fixed]** |
 | `TOF-09` | confirmed | P2 | medium | Tool-side tasks-directory recognition absent (jSn ignore globs, Grep guard, USn sandbox deny, gMe .output id parse) |
 | `TOF-07` | confirmed **[fixed]** | P3 | low | 5GB cap counted in UTF-8 bytes; oracle counts JS string length (UTF-16 code units) |
-| `TOF-08` | confirmed | P3 | low | Swap-refusal message family drifted: recovery clause on every reason, reasons renamed, env var not named |
+| `TOF-08` | confirmed **[fixed]** | P3 | low | Swap-refusal message family drifted: recovery clause on every reason, reasons renamed, env var not named |
 | `TOF-10` | confirmed | P3 | high | local_agent output is a spool copy, not a symlink to the agent transcript (fK) |
 | `TOF-11` | confirmed | P3 | low | outputOffset never advances — no BSn delta path |
 | `TOF-12` | confirmed **[fixed]** | P3 | low | Background-note comment cites `L0i`@183106320; 2.1.263 builder is `$2t` with a fourth (`backgroundedToDeliverMessage`) arm the port lacks |
@@ -113,7 +113,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `TO-05` | confirmed **[fixed]** | P2 | medium | Non-bash TaskOutput `<output>` is not passed through the subagent-output sanitiser (`uH`): no `[harness: subagent output matched instruction-shaped pattern(s): …]` marker, no `Human:`/`Assistant:` turn-marker neutralisation |
 | `TO-06` | confirmed | P2 | medium | TaskOutput for an `mcp_task` returns the spooled result text; the oracle returns a synthetic metadata block (server/tool/status/elapsed…) with `omitOutputPath` and its own truncation header |
 | `TO-07` | confirmed | P2 | medium | local_agent output shaping: no `[The agent produced no report text.]`, no `harnessHead` prefix, no `isRawTranscript` flag on the transcript fallback |
-| `TO-08` | confirmed | P3 | medium | Output-cap sources differ: oracle honours settings `taskOutputMaxChars` (clamped 4000..128000) before the env var; `maxResultSizeChars` is a getter `zut()+18000` (50000 default) and `persistenceThresholdCeiling` 146000 — port is env-only, 100_000, no ceiling |
+| `TO-08` | confirmed **[fixed]** | P3 | medium | Output-cap sources differ: oracle honours settings `taskOutputMaxChars` (clamped 4000..128000) before the env var; `maxResultSizeChars` is a getter `zut()+18000` (50000 default) and `persistenceThresholdCeiling` 146000 — port is env-only, 100_000, no ceiling |
 | `TO-09` | confirmed | P3 | low | Blocking-wait edges and UI hints: task evicted mid-wait should yield `{retrieval_status:"timeout",task:null}`, abort should raise (not return timeout), `waiting_for_task` progress event and `non-blocking` tool-use render are absent |
 | `TO-10` | confirmed **[partially fixed: the `Unsupported task type` branch landed; the keepalive exceptions and the re-signalled note remain]** | P3 | medium | TaskStop remaining branches: `Unsupported task type: X` text, keepalive/loop-still-live exceptions to "not running", and the `had already ended … re-signalled it` note path |
 
@@ -175,7 +175,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `MON-05` | confirmed **[fixed]** | P2 | low | Suppression notice is merged AFTER the batch in one event; oracle sends a separate housekeeping notice BEFORE the event, and resets the high-volume window on a different condition |
 | `MON-06` | confirmed **[fixed]** | P2 | low | Line batching differs from Umn: truncation suffix `…` vs `...(truncated)`, no 3000-char batch cap, no trim/empty-line drop, and a 256-line pending cap counted as suppression |
 | `MON-07` | confirmed **[fixed]** | P2 | medium | Zero-output monitor exit is summarised as `stream ended`; oracle says `Monitor "d" ended without producing output (exit 0)` |
-| `MON-09` | confirmed | P2 | medium | Monitor command bypasses the sandbox decision that the oracle applies (shouldUseSandbox: jS({command})) |
+| `MON-09` | confirmed **[fixed]** | P2 | medium | Monitor command bypasses the sandbox decision that the oracle applies (shouldUseSandbox: jS({command})) |
 | `MON-03` | confirmed | P3 | medium | Command monitor is minted as a separate `monitor_ws`/'s' task type instead of a `local_bash` record with kind:"monitor" ('b' id); id.rs comment cites 2.1.223 to justify it |
 | `MON-08` | confirmed | P3 | medium | MCP auto-background ignores hasPendingElicitation: oracle keeps the call in the foreground while an elicitation dialog is open |
 | `MON-10` | confirmed **[partially fixed: the `Dl()`-gated description split landed; `getMcpAutoBackgroundMs`'s host latch remains]** | P3 | low | Dl()-gated variants missing: Monitor prompt has no 'foreground with Bash' wording when background tasks are disabled, and getMcpAutoBackgroundMs ignores the host-level backgroundTasksDisabled latch |
@@ -295,6 +295,26 @@ Twelve more findings, oldest commit first.
   marker stay hintless; three stale id/type claims are corrected, including a
   documented call site for `validate_task_id` that never existed; and the
   background-note comment moves to `$2t`, naming its two unported arms and why.
+
+Four more, same day:
+
+- `e496102c4` **TO-08** — `settings.taskOutputMaxChars` now wins over
+  `TASK_MAX_OUTPUT_LENGTH` (clamped 4_000..=128_000 by `see()`), and the two
+  derived numbers stop being flat constants: `maxResultSizeChars` is the getter
+  `zut()+18_000` (50_000 default, 146_000 at the ceiling) and
+  `persistenceThresholdCeiling` is 146_000.
+- `35682672b` **TOF-04** — a full read is capped at the last 8 MiB with
+  `[NKB of earlier output omitted]`; the cut snaps forward to a UTF-8 boundary
+  and the header is recomputed from what survived.
+- `91fb46306` **TOF-08** — the swap-refusal recovery clause moves to the one
+  refusal it fits (`tasks dir moved or linked`) and names `LINGXI_TMPDIR`.
+  Writing the test first disproved the mapping: a directory replaced by a
+  symlink never reaches the identity-CHANGED branch, because the pin stops
+  resolving first.
+- `39026e7da` **MON-09** — a monitor command goes through `jS({command})` like
+  any Bash call instead of taking an unconditional sandbox bypass; the wrapped
+  form travels as `spawn_command` so the displayed command stays raw. Plugin
+  monitors stay unsandboxed, matching `shouldUseSandbox: !1`.
 
 Guards worth keeping in mind for follow-up work:
 

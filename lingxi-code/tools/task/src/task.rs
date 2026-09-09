@@ -178,11 +178,20 @@ fn env_truthy(key: &str) -> bool {
     platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
-/// Pure core of [`is_todo_v2_enabled`] — 1:1 with the v2.1.183 binary `TE()`:
-/// `function TE(){if(_l(process.env.LINGXI_ENABLE_TASKS))return!1;return!0}`.
+/// Pure core of [`is_todo_v2_enabled`] — 1:1 with the binary's tasks-v2 gate,
+/// spelled `TE()` in v2.1.183 and `X_()` in 2.1.263
+/// (`src_160357157.js` @10464):
+/// `function X_(){if(a.CLAUDE_CODE_ENABLE_TASKS===!1)return!1;return!0}`,
+/// previously `function TE(){if(_l(process.env.LINGXI_ENABLE_TASKS))return!1;return!0}`.
 /// i.e. V2-Task-tools-enabled = NOT (the env normalizes to `0`/`false`/`no`/`off`).
 /// `_l` = [`platform_api::env::is_env_defined_falsy`] (byte-exact: `e===void 0`⇒false,
 /// boolean⇒`!e`, else lowercased+trimmed ∈ {`0`,`false`,`no`,`off`}).
+///
+/// The 2.1.263 rename is NOT a behaviour change: `CLAUDE_CODE_ENABLE_TASKS` is
+/// declared `I.triBool()`, whose transform is `Ie(e)?!0:po(e)?!1:void 0`, and
+/// `po` is the old `_l` verbatim
+/// (`["0","false","no","off"].includes(String(t).toLowerCase().trim())`,
+/// `src_156606933.js` @922).
 ///
 /// There is NO non-interactive term in the binary — the prior
 /// `enable_tasks_env || !non_interactive` formula was stale (wrong/opposite
@@ -308,13 +317,18 @@ fn join_sanitized(values: &[String]) -> String {
 
 /// Whether the Product-A V2 Task tools are advertised (and `TodoWrite` hidden).
 ///
-/// Port of `isTodoV2Enabled()` (binary `TE()`): enabled UNLESS
+/// Port of `isTodoV2Enabled()` (binary `TE()`, 2.1.263 `X_()`): enabled UNLESS
 /// `LINGXI_ENABLE_TASKS` is a *defined falsy* value (`0`/`false`/`no`/`off`,
 /// case-insensitive, trimmed). Unset, empty, or any other value ⇒ enabled.
 ///
+/// This is only HALF the advertise decision: the four tasks-dir Task tools are
+/// gated on `h3(){return X_()&&OO()}` and `TodoWrite` on `!X_()&&OO()`, so the
+/// `OO()` model gate is applied as a separate conjunct at each call site — see
+/// [`task_tools_enabled`] / [`todo_write_enabled`].
+///
 /// The `ctx` parameter is retained for the `Tool::is_enabled` signature but is
-/// unused — the binary's `TE()` reads only `process.env`, no session/interactive
-/// signal.
+/// unused — the binary's gate reads only the environment, no
+/// session/interactive signal.
 #[must_use]
 pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
     todo_v2_enabled_inner(platform_api::env::is_env_defined_falsy(

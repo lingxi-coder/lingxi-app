@@ -4,8 +4,9 @@
 //! `Task*` (V2) tools "haven't been used recently". The reminder fires only
 //! when BOTH counters cross their thresholds (`TURNS_SINCE_WRITE` /
 //! `TURNS_BETWEEN_REMINDERS`, each `10`), is killswitched by
-//! `LINGXI_TODO_REMINDER_MODE === "off"`, and selects V1 vs V2 via `TE()`
-//! (`is_todo_v2_enabled`).
+//! `LINGXI_TODO_REMINDER_MODE === "off"`, is gated as a whole by the
+//! `OO()` todo-tools model gate, and selects V1 vs V2 via the tasks-v2 gate
+//! (`is_todo_v2_enabled`; 2.1.263 `X_()`, 2.1.183 `TE()`).
 //!
 //! ## Binary ground truth (`bin/claude.exe`, v2.1.183)
 //!
@@ -30,6 +31,34 @@
 //! DEFAULT and `false` (V1 todo_reminder) only when `LINGXI_ENABLE_TASKS`
 //! is explicitly disabled. The producer (`ytl`, offset ~203087213) is
 //! `()=>TE()?B4p(...):M4p(...)` — V2 when `TE()`, else V1.
+//!
+//! ## 2.1.263 delta
+//!
+//! The selector is renamed `X_` and now reads the PARSED env object rather
+//! than `process.env` directly (`src_160357157.js` @10464):
+//!
+//! ```js
+//! function X_(){if(a.CLAUDE_CODE_ENABLE_TASKS===!1)return!1;return!0}
+//! ```
+//!
+//! Behaviourally identical: `CLAUDE_CODE_ENABLE_TASKS` is declared
+//! `I.triBool()`, whose transform is `Ie(e)?true : po(e)?false : undefined`,
+//! and `po` is byte-for-byte the old `_l`
+//! (`["0","false","no","off"].includes(String(t).toLowerCase().trim())`,
+//! `src_156606933.js` @922). So `=== false` still means exactly "the value
+//! normalizes to 0/false/no/off".
+//!
+//! What DID change is that the whole producer sits behind the `OO()`
+//! todo-tools model gate (`src_160988549.js` @5064719):
+//!
+//! ```js
+//! ()=>OO()?X_()?xps(d,t):vps(d,t):Promise.resolve([])
+//! ```
+//!
+//! and each renderer re-checks it — `case"todo_reminder":{if(X_()||!OO())
+//! return[]` and `case"task_reminder":{if(!h3())return[]` where
+//! `h3(){return X_()&&OO()}`. Both guards are fused into [`select_mode`],
+//! because LingXi never persists attachments.
 //!
 //! Renderers (`messages.ts` `normalizeAttachmentForAPI`, offset ~206021028):
 //! the reminder body `r` is emitted RAW as `Ln({content:r,isMeta:!0})` — there

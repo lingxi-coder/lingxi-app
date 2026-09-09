@@ -2983,6 +2983,49 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             AGENT_INPUT_SCHEMA["properties"]["run_in_background"]["description"],
             json!("Agents run in the background by default; you will be notified when one completes. Set to false only when your very next action depends on this agent's result and nothing else could usefully happen while it runs — otherwise leave it in the background so the user can hand you other work.")
         );
+        // 2.1.266 `G4o()` @3573156 — the sentence pair names the configured
+        // default subagent model. 2.1.238's text ("or inherits from the
+        // parent") described a precedence the resolver no longer has.
+        assert_eq!(
+            AGENT_INPUT_SCHEMA["properties"]["model"]["description"],
+            json!("Optional model override for this agent. Takes precedence over the agent definition's model frontmatter and the configured default subagent model. If omitted, uses the agent definition's model, else the default (inherits from the parent unless a default subagent model is configured). Ignored for subagent_type: \"fork\" — forks always inherit the parent model.")
+        );
+    }
+
+    /// `gSn()`'s tail projections over the advertised schema (@3575600):
+    /// `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` drops `model` entirely, and a
+    /// coordinator session appends one of two suffixes to its description.
+    /// Exercised through the pure projector so no process-global session state
+    /// is needed for the coordinator arm.
+    #[test]
+    fn agent_schema_projection_covers_coordinator_and_model_force() {
+        // Non-coordinator, no force: the base description, unchanged.
+        let plain = project_agent_input_schema(&AGENT_INPUT_SCHEMA_MODEL, false);
+        assert_eq!(
+            plain["properties"]["model"]["description"],
+            json!(AGENT_MODEL_PARAM_DESCRIPTION)
+        );
+        // Coordinator (env unset ⇒ not forced): the steering suffix, appended
+        // with no separator because the binary concatenates with `+`.
+        let coord = project_agent_input_schema(&AGENT_INPUT_SCHEMA_MODEL, true);
+        let desc = coord["properties"]["model"]["description"]
+            .as_str()
+            .expect("model description is a string");
+        assert!(
+            desc.starts_with(AGENT_MODEL_PARAM_DESCRIPTION),
+            "the suffix is appended to the base sentence, got: {desc}"
+        );
+        assert!(
+            desc.ends_with(" Set this only when EXPLICITLY asked by the user for a specific model, never because the task seems small, simple, or cheap; otherwise omit it so the worker uses the default (the session model, unless a default subagent model is configured)."),
+            "coordinator suffix missing, got: {desc}"
+        );
+        // Both projections keep every other property.
+        for schema in [&plain, &coord] {
+            let props = schema["properties"].as_object().expect("properties");
+            assert!(props.contains_key("description"));
+            assert!(props.contains_key("prompt"));
+            assert!(!props.contains_key("cwd"), "cwd is never advertised");
+        }
     }
 
     // The `name` property carries the zod `.regex(uZc)` body as a wire JSON
@@ -5914,6 +5957,118 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         // Non-one-shot → trailer still present after the marker.
         assert!(mc.contains("<usage>subagent_tokens: 0"));
+    }
+
+    /// `bft`'s max-turns harness NOTE (src_162329786.js @3532630). The runner
+    /// stamps `reason`/`max_turns` onto the ordinary completion result, so the
+    /// agent's partial text survives AND the note fronts it.
+    #[tokio::test]
+    async fn turn_limited_agent_reports_the_limit_and_keeps_partial_output() {
+        let spawner = arc_mock_spawner();
+        let child_id = protocol::AgentId::new();
+        spawner.script_completed_with(
+            child_id,
+            json!({
+                "content": [{ "type": "text", "text": "found three call sites" }],
+                "text": "found three call sites",
+                "reason": "max_turns_exhausted",
+                "max_turns": 7,
+            }),
+            platform_api::subagent_spawn::SubagentUsage::default(),
+            0,
+            0,
+            0,
+        );
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let result = tool
+            .call(
+                json!({
+                    "description": "d",
+                    "subagent_type": "general-purpose",
+                    "prompt": "do it",
+                    "run_in_background": false
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let mc = result.data["model_content"].as_str().unwrap();
+        assert!(
+            mc.starts_with("NOTE: this agent stopped at its 7-turn limit before finishing. The text below is PARTIAL output; treat it as incomplete. Send the agent a message (SendMessage) to let it continue from where it stopped.\n"),
+            "the harness note must front the report; got: {mc}"
+        );
+        assert!(
+            mc.contains("found three call sites"),
+            "the partial output must survive the turn-limited exit; got: {mc}"
+        );
+        assert!(
+            !mc.contains("(Subagent completed but returned no output.)"),
+            "a run with partial text is not a no-output run; got: {mc}"
+        );
+        // The note is a harness block, so it reaches the structured content too
+        // (`Tt=[...Le,...je,...Xe]`).
+        let blocks = result.data["content"].as_array().unwrap();
+        assert!(blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("NOTE: this agent stopped at its 7-turn limit"));
+    }
+
+    /// The other arm of `Dt`, plus `PKt`: a one-shot built-in cannot be
+    /// continued, so it gets no "send it a message" tail, and a run that
+    /// produced no text says so instead of claiming partial output.
+    #[tokio::test]
+    async fn turn_limited_one_shot_builtin_omits_the_continuation_tail() {
+        let spawner = arc_mock_spawner();
+        let child_id = protocol::AgentId::new();
+        spawner.script_completed_with(
+            child_id,
+            json!({
+                "content": [],
+                "text": "",
+                "reason": "max_turns_exhausted",
+                "max_turns": 3,
+            }),
+            platform_api::subagent_spawn::SubagentUsage::default(),
+            0,
+            0,
+            0,
+        );
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let result = tool
+            .call(
+                json!({
+                    "description": "d",
+                    "subagent_type": "Explore",
+                    "prompt": "look",
+                    "run_in_background": false
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let mc = result.data["model_content"].as_str().unwrap();
+        assert_eq!(
+            mc,
+            "NOTE: this agent stopped at its 3-turn limit before finishing. It was still calling tools and had produced no report.\n",
+            "one-shot built-ins take no continuation tail, and a text-less run is not `PARTIAL output`",
+        );
     }
 
     // ── G3: required-MCP-servers gate (AgentTool.tsx:367-409) ──

@@ -12,7 +12,7 @@
 //! `SubagentContext` so the child runner sees the same `Arc`s as the parent.
 
 use crate::api::SubagentApiClient;
-use crate::builtins::builtin_agent_definitions;
+use crate::builtins::{builtin_agent_definitions, WORKFLOW_SUBAGENT_TYPE};
 use crate::context::SubagentContext;
 use crate::definition::{
     AgentDefinition, AgentIsolation, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
@@ -218,6 +218,14 @@ pub struct PoolSubagentSpawner {
     /// (the common case → the Inherit branch returns the parent model unchanged,
     /// byte-identical to before this seam).
     permission_mode: PermissionMode,
+    /// Set-once inputs to the spawn-time `bypassPermissions` clamps — claude
+    /// runAgent `bs(Rn)`'s `YYe()` / `ey()` / `Rn.restricted` arms. Filled at the
+    /// composition root via [`Self::spawn_bypass_gates_handle`] because
+    /// `bypass_disabled` only exists after the boot permission tiers load, which
+    /// happens well AFTER this spawner is built and boxed. Unfilled ⇒
+    /// [`crate::permission_mode::SpawnBypassGates::default`] ⇒ no clamp fires
+    /// (byte-identical to before this seam).
+    spawn_bypass_gates: Arc<std::sync::OnceLock<crate::permission_mode::SpawnBypassGates>>,
     /// RAW user model setting string (mirrors claude-code
     /// `getUserSpecifiedModelSetting()`, e.g. `"opusplan"` / `"haiku"` / `None`)
     /// — NOT the resolved id. Used ONLY for the opusplan/haiku plan-mode runtime
@@ -529,6 +537,7 @@ impl PoolSubagentSpawner {
             default_model_selection_provider: Arc::new(std::sync::OnceLock::new()),
             provider_first_party_resolver: Arc::new(std::sync::OnceLock::new()),
             permission_mode: PermissionMode::Default,
+            spawn_bypass_gates: Arc::new(std::sync::OnceLock::new()),
             model_setting: None,
             model_restriction: None,
             session_provider_first_party: true,
@@ -646,6 +655,27 @@ impl PoolSubagentSpawner {
     /// composition root fills it after the existing `CoordinatorMode` is
     /// created, before any spawn can run. Unfilled means an ordinary session.
     #[must_use]
+    /// Set-once seam for the spawn-time bypass clamps (see
+    /// [`Self::spawn_bypass_gates`]). Grab this BEFORE boxing the spawner and
+    /// fill it once the boot permission tiers exist.
+    #[must_use]
+    pub fn spawn_bypass_gates_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<crate::permission_mode::SpawnBypassGates>> {
+        self.spawn_bypass_gates.clone()
+    }
+
+    /// Builder: arm the spawn-time bypass clamps immediately (tests / minimal
+    /// hosts that know all three bits up front).
+    #[must_use]
+    pub fn with_spawn_bypass_gates(
+        self,
+        gates: crate::permission_mode::SpawnBypassGates,
+    ) -> Self {
+        let _ = self.spawn_bypass_gates.set(gates);
+        self
+    }
+
     pub fn coordinator_mode_handle(
         &self,
     ) -> Arc<std::sync::OnceLock<Arc<dyn CoordinatorModeHandle>>> {
@@ -1666,6 +1696,8 @@ impl PoolSubagentSpawner {
                 None,
                 self.permission_mode,
                 def.permission_mode,
+                self.spawn_bypass_gates.get().copied().unwrap_or_default(),
+                &mut |m| tracing::warn!("{m}"),
             )
         };
         if effective_permission_mode == Some(PermissionMode::Plan) {
@@ -2156,6 +2188,23 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
     let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
     for def in defs {
         if def.agent_type == platform_api::FUSION_PANEL_TYPE {
+            continue;
+        }
+        // `workflow-subagent` is NOT a catalog agent. The oracle declares it
+        // (`bn`, src_173804794.js @34591) inside the workflow chunk and hands it
+        // straight to the workflow runtime; `cre()` — the built-in roster the
+        // listing is built from — never contains it, so no oracle session has
+        // ever advertised it to the model. The port keeps it in
+        // `builtin_agent_definitions` as the workflow path's resolution
+        // registry, which put an extra
+        // `- workflow-subagent: Internal subagent for workflow script
+        // orchestration. (Tools: All tools except SendUserMessage, Agent,
+        // Workflow)` line into BOTH model-facing catalogs (the inline Agent tool
+        // prompt and the `agent_listing_delta` reminder) and made an internal
+        // type selectable via `subagent_type`. Drop it here — the one place both
+        // catalogs are built — rather than from the registry the workflow runtime
+        // resolves against.
+        if def.agent_type == WORKFLOW_SUBAGENT_TYPE {
             continue;
         }
         // [Finding 25] `fusion` is reserved for the Fusion Agent surface (see
@@ -6531,8 +6580,11 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
         let entries = spawner.agent_listing().await;
-        // All 5 built-ins, sorted by type.
-        assert_eq!(entries.len(), 5);
+        // Every LISTED built-in, sorted by type: general-purpose,
+        // statusline-setup, Explore, Plan. `workflow-subagent` is in the roster
+        // as the workflow runtime's resolution entry but is never advertised —
+        // the oracle's `cre()` has never held it (see `agent_listing_entries`).
+        assert_eq!(entries.len(), 4);
         let by: std::collections::HashMap<&str, &SubagentListingEntry> =
             entries.iter().map(|e| (e.agent_type.as_str(), e)).collect();
         // general-purpose: All { .. } → "All tools".
@@ -6564,8 +6616,8 @@ mod tests {
         // The catalog entry (Explicit[Read] → "Read") wins over the built-in.
         assert_eq!(explore.when_to_use, "CUSTOM EXPLORE");
         assert_eq!(explore.tools_description, "Read");
-        // Still 5 (override, not addition).
-        assert_eq!(entries.len(), 5);
+        // Still 4 (override, not addition).
+        assert_eq!(entries.len(), 4);
     }
 
     /// claude 2.1.238 `NJa` (@290291941) guard-by-guard.
@@ -6658,11 +6710,43 @@ mod tests {
         assert_eq!(crate::tools_description(&def), "None");
     }
 
+    /// How many built-ins the model-facing listing actually carries. The
+    /// ROSTER (`builtin_agent_definitions`) is one longer: it also holds
+    /// `workflow-subagent`, which exists only so the workflow runtime can
+    /// resolve its own private type. The oracle declares that definition in the
+    /// workflow chunk and never in `cre()`, so it must not reach either
+    /// catalog — see `agent_listing_entries`.
+    fn listed_builtin_count() -> usize {
+        builtin_agent_definitions()
+            .iter()
+            .filter(|d| d.agent_type != WORKFLOW_SUBAGENT_TYPE)
+            .count()
+    }
+
+    /// The roster keeps `workflow-subagent` (the workflow path resolves against
+    /// it); the listing must not. Asserted on the NAME, not on a count, so a
+    /// later roster change cannot quietly re-advertise it.
+    #[test]
+    fn agent_listing_entries_never_advertises_the_workflow_subagent() {
+        let defs = builtin_agent_definitions();
+        assert!(
+            defs.iter().any(|d| d.agent_type == WORKFLOW_SUBAGENT_TYPE),
+            "premise: the roster is the workflow runtime's resolution registry",
+        );
+        let entries = crate::agent_listing_entries(&defs);
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.agent_type == WORKFLOW_SUBAGENT_TYPE),
+            "`workflow-subagent` is not a catalog agent and must never be advertised to the model",
+        );
+    }
+
     #[test]
     fn agent_listing_entries_merges_builtins_and_catalog_later_wins() {
         // built-ins FIRST, then a catalog override for a same-named type.
         let mut defs = builtin_agent_definitions();
-        let n_builtins = defs.len();
+        let n_builtins = listed_builtin_count();
         defs.push(AgentDefinition {
             agent_type: "Explore".to_string(),
             when_to_use: "CATALOG OVERRIDE".to_string(),
@@ -6705,7 +6789,7 @@ mod tests {
     #[test]
     fn agent_listing_entries_drops_disk_agent_named_fusion() {
         let mut defs = builtin_agent_definitions();
-        let n_builtins = defs.len();
+        let n_builtins = listed_builtin_count();
         defs.push(AgentDefinition {
             agent_type: "fusion".to_string(),
             when_to_use: "a user's own fusion agent".to_string(),
@@ -6732,7 +6816,7 @@ mod tests {
             "Fu\u{2010}sion",
         ] {
             let mut defs = builtin_agent_definitions();
-            let n_builtins = defs.len();
+            let n_builtins = listed_builtin_count();
             defs.push(AgentDefinition {
                 agent_type: spelling.to_string(),
                 when_to_use: "a user's own fusion agent".to_string(),
@@ -6753,7 +6837,7 @@ mod tests {
     #[test]
     fn agent_listing_entries_keeps_agents_that_only_contain_fusion() {
         let mut defs = builtin_agent_definitions();
-        let n_builtins = defs.len();
+        let n_builtins = listed_builtin_count();
         for spelling in ["fusion-agent", "confusion", "fusions"] {
             defs.push(AgentDefinition {
                 agent_type: spelling.to_string(),

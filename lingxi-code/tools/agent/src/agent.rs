@@ -412,6 +412,54 @@ fn reserved_agent_id_shape(name: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// claude `G4o()`'s `model` parameter description (@3573156), the arm every
+/// non-coordinator session sees.
+///
+/// 2.1.266 rewrote the 2.1.238 sentence pair to name the *configured default
+/// subagent model* — the precedence clause gained "and the configured default
+/// subagent model", and the fallback clause became "else the default (inherits
+/// from the parent unless a default subagent model is configured)". The port
+/// carried the 2.1.238 text ("or inherits from the parent"), which describes a
+/// precedence the resolver no longer has.
+pub(crate) const AGENT_MODEL_PARAM_DESCRIPTION: &str = "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter and the configured default subagent model. If omitted, uses the agent definition's model, else the default (inherits from the parent unless a default subagent model is configured). Ignored for subagent_type: \"fork\" — forks always inherit the parent model.";
+
+/// The coordinator-mode suffix `G4o()` appends to
+/// [`AGENT_MODEL_PARAM_DESCRIPTION`] (`xi()?…:""`, @3573581 / @3573661).
+///
+/// Both arms begin with a leading space — the binary concatenates them onto the
+/// base sentence with `+`, not through a separator.
+const AGENT_MODEL_PARAM_COORDINATOR_FORCED_SUFFIX: &str =
+    " Unavailable on this session: this parameter is ignored — do not set it.";
+const AGENT_MODEL_PARAM_COORDINATOR_SUFFIX: &str = " Set this only when EXPLICITLY asked by the user for a specific model, never because the task seems small, simple, or cheap; otherwise omit it so the worker uses the default (the session model, unless a default subagent model is configured).";
+
+/// `a.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL` — when set on a
+/// COORDINATOR session the `model` argument is ignored outright (and `call`
+/// clears it), so the description says so instead of steering its use.
+#[must_use]
+pub(crate) fn coordinator_forces_worker_inherit_model() -> bool {
+    platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_COORDINATOR_FORCE_WORKER_INHERIT_MODEL")
+            .or_else(|_| std::env::var("CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL"))
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// `a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` — the deployment pin that takes the
+/// `model` argument away from the model entirely. `gSn()` (@3575600) drops the
+/// property from the advertised schema, and the LONG-arm agent-definition
+/// bullet drops its "; the `model` parameter here overrides the definition for
+/// this one call" clause (@3569298).
+#[must_use]
+pub(crate) fn subagent_model_forced() -> bool {
+    platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
+            .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
+            .ok()
+            .as_deref(),
+    )
+}
+
 static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
@@ -431,7 +479,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "model": {
                 "type": "string",
                 "enum": ["sonnet", "opus", "haiku", "fable"],
-                "description": "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent. Ignored for subagent_type: \"fork\" — forks always inherit the parent model."
+                "description": AGENT_MODEL_PARAM_DESCRIPTION
             },
             "run_in_background": {
                 "type": "boolean",
@@ -525,6 +573,44 @@ static AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND: Lazy<Value> = Lazy::new(|| {
     schema
 });
 
+/// Finish `gSn()`'s two remaining projections over the base model-facing schema:
+/// the coordinator-mode `model` description suffix and the
+/// `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` omission of `model` altogether.
+///
+/// ```js
+/// gSn=m(()=>{let e=z4o().omit({cwd:!0}),n=Bl()||L5()?e.omit({run_in_background:!0}):e;
+///            return a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE?n.omit({model:!0}):n})
+/// ```
+///
+/// `run_in_background` is already projected by the caller's choice of base
+/// (`advertise_run_in_background`); this applies the rest. Called once per tool
+/// instance and memoized, matching the binary's `m(...)` memoization of the
+/// whole builder.
+fn project_agent_input_schema(base: &Value, is_coordinator: bool) -> Value {
+    let mut schema = base.clone();
+    let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return schema;
+    };
+    if subagent_model_forced() {
+        props.remove("model");
+        return schema;
+    }
+    if is_coordinator {
+        let suffix = if coordinator_forces_worker_inherit_model() {
+            AGENT_MODEL_PARAM_COORDINATOR_FORCED_SUFFIX
+        } else {
+            AGENT_MODEL_PARAM_COORDINATOR_SUFFIX
+        };
+        if let Some(model) = props.get_mut("model").and_then(Value::as_object_mut) {
+            model.insert(
+                "description".to_string(),
+                Value::String(format!("{AGENT_MODEL_PARAM_DESCRIPTION}{suffix}")),
+            );
+        }
+    }
+    schema
+}
+
 /// Format the M3-05 byte-locked budget-exceeded denial string.
 ///
 /// Caller passes `current_nano_usd`; output is the literal
@@ -579,6 +665,50 @@ fn extract_content_texts(result: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// claude `pRe` (src_160528463.js @870) — the prefix of the harness NOTE that
+/// fronts a turn-limited agent's result.
+const MAX_TURNS_NOTE_PREFIX: &str = "NOTE: this agent stopped at its ";
+
+/// Build the harness NOTE `bft` prepends when the run ended on its turn budget
+/// (src_162329786.js @3532630):
+///
+/// ```js
+/// let en=PKt.has(C)?"":` Send the agent a message (${Yr}) to let it continue from where it stopped.`,
+///     Dt=ye.length>0?"The text below is PARTIAL output; treat it as incomplete."
+///                   :"It was still calling tools and had produced no report.";
+/// Le.push({type:"text",text:`${pRe}${Fe}-turn limit before finishing. ${Dt}${en}\n`})
+/// ```
+///
+/// `Fe` is the exhausted budget (`N2n`, the `max_turns_reached` attachment),
+/// `ye` the agent's own final text blocks BEFORE the output guard runs, and
+/// `PKt` the one-shot built-ins — `Explore` / `Plan` cannot be continued, so
+/// they get no "send it a message" tail. The note is a harness block, not agent
+/// output, so it is NOT passed through the subagent output guard.
+fn max_turns_harness_note(max_turns: u64, agent_type: &str, has_partial_output: bool) -> String {
+    let continuation = if ONE_SHOT_BUILTIN_AGENT_TYPES.contains(&agent_type) {
+        ""
+    } else {
+        " Send the agent a message (SendMessage) to let it continue from where it stopped."
+    };
+    let body = if has_partial_output {
+        "The text below is PARTIAL output; treat it as incomplete."
+    } else {
+        "It was still calling tools and had produced no report."
+    };
+    format!("{MAX_TURNS_NOTE_PREFIX}{max_turns}-turn limit before finishing. {body}{continuation}\n")
+}
+
+/// `N2n(e)` (@3530xxx) reduced to the shape the port's runner publishes: the
+/// max-turns fall-through is the only completion that stamps
+/// `reason: "max_turns_exhausted"` onto its result, and it carries the budget
+/// under `max_turns`.
+fn max_turns_reached_from_result(result: &Value) -> Option<u64> {
+    if result.get("reason").and_then(Value::as_str) != Some("max_turns_exhausted") {
+        return None;
+    }
+    result.get("max_turns").and_then(Value::as_u64)
 }
 
 /// Render the model-facing `tool_result` text for a COMPLETED subagent, byte-for-byte
@@ -647,6 +777,10 @@ pub struct AgentTool {
     /// `nul` @292883815 — see [`AgentTool::new`]). Schema-only: the async
     /// DISPATCH gate is `!WA()` alone and is evaluated inline in `call`.
     advertise_run_in_background: bool,
+    /// `gSn()`'s memoized projection of the advertised schema — the coordinator
+    /// `model` description suffix and the `SUBAGENT_MODEL_FORCE` omission,
+    /// resolved on first use because both read live session state.
+    projected_input_schema: std::sync::OnceLock<Value>,
     /// Injected Fusion orchestrator. `None` on mobile and in `register_all`.
     fusion: Option<Arc<dyn FusionExecutor>>,
 }
@@ -1245,6 +1379,7 @@ impl AgentTool {
         Self {
             ctx,
             advertise_run_in_background,
+            projected_input_schema: std::sync::OnceLock::new(),
             fusion: None,
         }
     }
@@ -2245,6 +2380,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             if is_fork { "For fresh agents, terse" } else { "Terse" }
         );
 
+        // `${a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE?"":"; the `model` parameter here
+        // overrides the definition for this one call"}` (@3569298) — when the
+        // deployment pins the subagent model, the `model` argument is gone from
+        // the advertised schema, so the bullet must not promise it.
+        let model_override_clause = if subagent_model_forced() {
+            ""
+        } else {
+            "; the `model` parameter here overrides the definition for this one call"
+        };
+
         // `d` — the code-reviewer example, shared by both `Example usage:` blocks.
         let code_reviewer_example = format!(
             "<example>\n\
@@ -2359,7 +2504,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
 - {final_report_note}\n\
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.{background_notes}{dont_race_note}\n\
 - To continue a previously spawned agent, use SendMessage with the agent's ID or name as the `to` field — that resumes it with full context. A new {AGENT_TOOL_NAME} call starts a fresh agent with no memory of prior runs{fork_memory_qualifier}, so the prompt must be self-contained.\n\
-- Each agent type's model, reasoning effort, and tool access are set in its definition (`.lingxi/agents/*.md` frontmatter, or the SDK `agents` option); the `model` parameter here overrides the definition for this one call.\n\
+- Each agent type's model, reasoning effort, and tool access are set in its definition (`.lingxi/agents/*.md` frontmatter, or the SDK `agents` option){model_override_clause}.\n\
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since a fresh agent is not aware of the user's intent{proactive_notes}\n\
 - With `isolation: \"worktree\"`, the worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.{when_to_fork}{writing_the_prompt}\n\n\
 {examples}"
@@ -2929,11 +3074,23 @@ impl Tool for AgentTool {
     fn input_schema(&self) -> &Value {
         // claude advertises `yJp().omit({cwd:!0})` — the model-facing schema
         // never exposes `cwd` (set internally by isolation / explicit override).
-        if self.advertise_run_in_background {
-            &AGENT_INPUT_SCHEMA_MODEL
-        } else {
-            &AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND
-        }
+        // `gSn()`'s remaining two projections (coordinator `model` suffix,
+        // `SUBAGENT_MODEL_FORCE` omission) depend on live session state, so the
+        // projected schema is memoized per instance the way the binary memoizes
+        // the whole builder.
+        self.projected_input_schema.get_or_init(|| {
+            let base = if self.advertise_run_in_background {
+                &*AGENT_INPUT_SCHEMA_MODEL
+            } else {
+                &*AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND
+            };
+            let is_coordinator = self
+                .ctx
+                .coordinator_mode
+                .as_ref()
+                .is_some_and(|m| m.is_enabled());
+            project_agent_input_schema(base, is_coordinator)
+        })
     }
     fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
         let Some(name) = input.get("name").and_then(Value::as_str) else {
@@ -3120,6 +3277,23 @@ impl Tool for AgentTool {
                 )));
             }
         };
+
+        // `if(xi()&&a.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL)F=void 0`
+        // (@3577560) — on a coordinator session pinned to worker inheritance the
+        // `model` argument is dropped before anything reads it, which is also
+        // what the schema description advertises. Dropping it here (rather than
+        // at each of the four `parsed.model` reads) keeps the selection, the
+        // spawn request and the telemetry on one value.
+        if parsed.model.is_some()
+            && coordinator_forces_worker_inherit_model()
+            && self
+                .ctx
+                .coordinator_mode
+                .as_ref()
+                .is_some_and(|m| m.is_enabled())
+        {
+            parsed.model = None;
+        }
 
         // `name` zod chain `z.string().regex(uZc).refine(t=>t!==K9)` (binary
         // `exy`). The wire `pattern` (on the advertised `name` property) covers
@@ -3855,7 +4029,25 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // all, so neither may suppress async dispatch here. (Before 2.1.238 the
         // port ANDed in `is_pro_plan()`, which forced every Pro-plan subagent to
         // run synchronously; the binary never does that.)
-        let run_in_background = (parsed.run_in_background.unwrap_or(true) || selected.background)
+        // 2.1.266 moved this decision into `vBo` (@2957xxx) and, in doing so,
+        // factored the AUTO-background arm behind `!Pw(n)`:
+        //
+        // ```js
+        // let d=e.isCoordinator&&!o||e.forceAsync||!o&&r!==!1;
+        // let y=r===!0||n.background===!0||!Pw(n)&&d;
+        // ```
+        //
+        // `Pw(e)` (@1514599) = `e.source==="built-in"&&e.agentType===Wy` — the
+        // built-in web-fetch agent. It answers a question the caller is usually
+        // waiting on (its own `whenToUse` tells the model to run it in the
+        // foreground), so omitting `run_in_background` must NOT background it;
+        // only an explicit `run_in_background: true`, or `background: true` in a
+        // definition, still can. The two explicit arms stay outside the factor,
+        // exactly as the binary has them.
+        let is_builtin_web_fetch = selected.is_built_in && effective_type == WEB_FETCH_AGENT_TYPE;
+        let run_in_background = (parsed.run_in_background == Some(true)
+            || selected.background
+            || (!is_builtin_web_fetch && parsed.run_in_background != Some(false)))
             && !background_tasks_disabled
             && !caller_is_in_process_teammate;
         let is_async = run_in_background;
@@ -4259,7 +4451,22 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     Self::emit_subagent_output_flagged(&bus, &agent_id.to_string(), &sanitized)
                         .await;
                 }
-                let content_texts = sanitized.content;
+                let mut content_texts = sanitized.content;
+                // `bft`'s harness notes (`Le`) are unshifted in front of the
+                // report before anything else reads the content, so they reach
+                // BOTH the structured `content[]` and the model-facing string.
+                // Without this a turn-limited subagent rendered as
+                // `(Subagent completed but returned no output.)` — the model was
+                // told the run produced nothing, with no hint that it had merely
+                // run out of turns and could be continued.
+                if let Some(limit) = max_turns_reached_from_result(&content) {
+                    let note = max_turns_harness_note(
+                        limit,
+                        &effective_type,
+                        !raw_content_texts.is_empty(),
+                    );
+                    content_texts.insert(0, note);
+                }
                 let content_blocks: Vec<Value> = content_texts
                     .iter()
                     .map(|t| json!({ "type": "text", "text": t }))

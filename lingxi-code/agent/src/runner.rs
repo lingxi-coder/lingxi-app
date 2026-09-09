@@ -2371,13 +2371,28 @@ async fn run_subagent_loop(
                 let _ = writer.record_terminal(status, None).await;
             }
             publish_prompt_hook_transcript(&ctx, history, &last_usage);
+            // The oracle's `bft` (src_162329786.js @3532630) finalizes a
+            // max-turns exit through the SAME path as any other completion: the
+            // last assistant message's text blocks are the result content, and a
+            // `max_turns_reached` attachment only adds a harness NOTE in front of
+            // them. Dropping the blocks here made every turn-limited subagent
+            // return `(Subagent completed but returned no output.)` — the caller
+            // lost whatever partial work the agent had reported. Build the normal
+            // result and carry the reason alongside it, so the reason readers
+            // (`tasks::handlers::local_agent::max_turns_reached_from`,
+            // `fusion::panel::max_turns_exhausted_detail`) still see it.
+            let mut result = build_completed_result(history, &[], None);
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert(
+                    "reason".to_string(),
+                    serde_json::Value::String("max_turns_exhausted".to_string()),
+                );
+                obj.insert("max_turns".to_string(), serde_json::json!(max_turns));
+            }
             let _ = out_tx
                 .send(SubagentEvent::Completed {
                     agent_id,
-                    result: serde_json::json!({
-                        "reason": "max_turns_exhausted",
-                        "max_turns": max_turns,
-                    }),
+                    result,
                     usage: last_usage.clone(),
                     total_tool_use_count,
                     total_duration_ms: elapsed_ms(run_start),

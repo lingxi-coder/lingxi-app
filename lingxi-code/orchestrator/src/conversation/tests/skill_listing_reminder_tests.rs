@@ -633,6 +633,50 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
     );
 }
 
+/// TN-04 middle link: two completions drained in one turn must reach the
+/// drivers as TWO messages. The renderer producing two enveloped blocks is
+/// useless if the producer hands the drivers only the first.
+#[tokio::test]
+async fn two_completions_in_one_turn_are_two_messages() {
+    let reg = ToolRegistry::new();
+    let bash = platform_api::task_registry::TaskNotification {
+        task_id: "b11111111".into(),
+        task_type: "local_bash".into(),
+        status: "completed".into(),
+        description: "run tests".into(),
+        output_path: Some("/tmp/tasks/b11111111.output".into()),
+        exit_code: Some(0),
+        ..Default::default()
+    };
+    let agent = platform_api::task_registry::TaskNotification {
+        task_id: "a22222222".into(),
+        task_type: "local_agent".into(),
+        status: "completed".into(),
+        description: "research".into(),
+        output_path: Some("/tmp/tasks/a22222222.output".into()),
+        ..Default::default()
+    };
+    let orch = orch_with(reg, None).with_task_notifications(Arc::new(OnceTaskNotifications(
+        std::sync::Mutex::new(vec![bash, agent]),
+    )));
+
+    let messages = orch.task_notification_reminder_messages().await;
+    assert_eq!(messages.len(), 2, "two completions ⇒ two messages");
+    let texts: Vec<String> = messages.iter().map(|m| m.text_content()).collect();
+    assert!(texts[0].contains("b11111111"), "got: {:?}", texts[0]);
+    assert!(texts[1].contains("a22222222"), "got: {:?}", texts[1]);
+    // Each message carries its own envelope and its own provenance header.
+    for text in &texts {
+        assert_eq!(text.matches("<system-reminder>").count(), 1, "got: {text}");
+        assert_eq!(
+            text.matches(crate::prompt::task_notification::NON_USER_INPUT_HEADER)
+                .count(),
+            1,
+            "got: {text}"
+        );
+    }
+}
+
 /// A completion notification is a durable conversation event: the drivers push
 /// it into history and the JSONL rather than returning it as a transient
 /// reminder. Keeping it out of the reminder vector is what stops a retry -- which

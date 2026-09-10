@@ -1360,7 +1360,6 @@ mod tests {
         use crate::commands::attach::AttachDisposition;
         let home = tempfile::tempdir().unwrap();
         let mut calls = 0usize;
-        // A labelled block, not a loop: every path leaves through `break 'wait`.
         let got = 'wait: {
             fn resolve_with<Attach>(
                 home: &Path,

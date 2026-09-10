@@ -302,6 +302,35 @@ agent 类型 / model / cwd / background，改写后再对权限规则复核。�
 
 **下一步**：等 function-hook 子系统本身立项，那是独立的一次移植。
 
+#### 2026-09-10 复核：把「阻塞」换成可执行的清单
+
+三条独立证据确认阻塞成立（不是从旧记录继承的）：
+
+1. `HookExecutor` 只有 **3 个** variant —— `Command` / `Http` / `Agent`
+   （`hooks/src/definition.rs:157`）。**没有** function/JS 变体。
+2. `rquickjs` 只在 **`workflow` 一个 crate** 的 Cargo.toml 里；`hooks` 拿不到 JS 引擎。
+3. `plugin/src/manifest.rs:310` 的 `hooks: Vec<HookDefinition>` 是**命令钩子**，
+   复用的就是上面那个只有 3 个变体的类型。
+
+⚠️ 「端口有 rquickjs 所以离得不远」是**错的判断**，我自己先这么想过：
+`workflow` 里的 JS 跑的是**用户自己写、且明确授权运行**的 workflow 脚本；
+function hook 跑的是**插件提供、每次 spawn 自动执行**的代码。信任语境不同，
+上游正因此把它隔离在打包好的 worker 里（`HOOKS_WORKER_URL`）。
+⛔ 别为了省事把插件 JS 塞进 workflow 的引擎里跑。
+
+**真要做，最小清单（按依赖顺序）：**
+
+| # | 要做的 | 为什么不能跳 |
+|---|---|---|
+| 1 | **安全模型先定**：插件 JS 以什么权限跑、能不能碰 fs/net/env、超时与取消 | 这是唯一不能事后补的一条；其余都是接线 |
+| 2 | 一个 `hooks` 能依赖的 JS 执行 seam（新 crate，或把引擎从 `workflow` 抽出来） | §8.1 分层：`hooks` 是 engine 层，不能依赖 tool 层的 `tools/workflow` |
+| 3 | `HookExecutor::Function{...}` + plugin manifest 里声明 function hook 的 schema | 没有声明面就没人能注册 |
+| 4 | `agent.spawn` 事件 + payload/response 契约（deny / 改写 type·model·cwd·background） | 上游 `_Bo` @2955987 |
+| 5 | 改写后**重新**过一遍权限规则 | 上游明确有这一步；漏掉 = 插件可绕过权限 |
+| 6 | 六条错误文案 @3585420–3587034 | 有了产出点才有意义 |
+
+**判据**：第 1 条没有书面结论之前，2-6 都不要动。
+
 ### 3.4 AG-16 — `cacheTtl`（P3，**明确不做，2026-09-10 复核仍成立**）
 
 `sKt(e)` 读 `frontmatter.experimental.cacheTtl`（key 归一化成 `cachettl`，值域 `k_e`）

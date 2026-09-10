@@ -5152,26 +5152,24 @@ fn desktop_fusion_attempts(
     budget: Arc<cost::BudgetEnforcer>,
     tracker: Arc<cost::CostTracker>,
     pricing: Arc<cost::PricingCatalog>,
-    outputs: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
-) -> Option<Arc<fusion_attempts::DesktopFusionAttempts>> {
-    outputs.map(|outputs| {
-        let attempts = fusion_attempts::DesktopFusionAttempts::new(
-            service.clone(),
-            budget,
-            tracker,
-            pricing,
-            outputs,
-        );
-        service.set_model_attempt_hooks(attempts.clone());
-        attempts
-    })
+    outputs: Arc<dyn platform_api::WorkflowOutputScopes>,
+) -> Arc<fusion_attempts::DesktopFusionAttempts> {
+    let attempts = fusion_attempts::DesktopFusionAttempts::new(
+        service.clone(),
+        budget,
+        tracker,
+        pricing,
+        outputs,
+    );
+    service.set_model_attempt_hooks(attempts.clone());
+    attempts
 }
 
 fn desktop_fusion_executor(
     spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
     side_query: Arc<dyn sidequery::SideQueryClient>,
     cfg: &DesktopConfig,
-    attempts: Option<Arc<fusion_attempts::DesktopFusionAttempts>>,
+    attempts: Arc<fusion_attempts::DesktopFusionAttempts>,
     // Round-4 review finding [8]: a `ModelSource` (typically
     // `FusionCatalogModelSource`, `LlmStack::fusion_catalog_source`) instead
     // of a frozen `Vec<CatalogModel>` — the orchestrator already re-queries
@@ -5196,13 +5194,11 @@ fn desktop_fusion_executor(
     }
     let config_source: Arc<dyn fusion::FusionConfigSource> =
         Arc::new(DesktopFusionConfigSource { cfg: cfg.clone() });
-    let mut inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
+    let inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
         .with_bus(bus)
         .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)))
-        .with_panel_admission();
-    if let Some(attempts) = attempts {
-        inner = inner.with_attempt_registrar(attempts);
-    }
+        .with_panel_admission()
+        .with_attempt_registrar(attempts);
     Arc::new(DesktopFusionExecutor {
         inner: Arc::new(inner),
         cfg: cfg.clone(),
@@ -5212,6 +5208,69 @@ fn desktop_fusion_executor(
 #[cfg(test)]
 mod desktop_fusion_executor_boot_test {
     use super::*;
+
+    /// Config preflight never reaches a provider, but every executor now
+    /// carries an attempt registrar, so build a real one over an unreachable
+    /// service rather than reintroducing an unregistered executor shape.
+    struct UnreachableTransport;
+    impl llm_client::Transport for UnreachableTransport {
+        fn execute<'a>(
+            &'a self,
+            _: &'a llm_client::ProviderRequest,
+        ) -> llm_client::transport::BoxFuture<
+            'a,
+            Result<llm_client::ProviderResponse, llm_client::LlmError>,
+        > {
+            Box::pin(async { panic!("preflight_error() must not send") })
+        }
+        fn open_stream<'a>(
+            &'a self,
+            _: &'a llm_client::ProviderRequest,
+        ) -> llm_client::transport::BoxFuture<
+            'a,
+            Result<llm_client::transport::StreamingResponse, llm_client::LlmError>,
+        > {
+            Box::pin(async { panic!("preflight_error() must not stream") })
+        }
+    }
+
+    fn unreachable_attempts() -> Arc<fusion_attempts::DesktopFusionAttempts> {
+        let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let tracker = Arc::new(cost::CostTracker::new(
+            protocol::SessionId::new(),
+            pricing.clone(),
+            tx,
+        ));
+        let budget = Arc::new(cost::BudgetEnforcer::new(
+            cost::BudgetConfig {
+                max_session_nano_usd: None,
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: Vec::new(),
+                on_exceed: cost::BudgetExceedPolicy::Halt,
+            },
+            tracker.clone(),
+        ));
+        let outputs = budget.workflow_output_scopes();
+        desktop_fusion_attempts(
+            Arc::new(llm_client::ApiService::new(
+                Arc::new(
+                    llm_client::DefaultLlmClient::from_config(Default::default()).unwrap(),
+                ),
+                Arc::new(UnreachableTransport),
+                Default::default(),
+                Default::default(),
+                "test",
+                None,
+                None,
+            )),
+            budget,
+            tracker,
+            pricing,
+            outputs,
+        )
+    }
 
     /// Never actually called: `preflight_error()` re-validates settings
     /// directly and must not spawn a panel or issue a side query.
@@ -5276,7 +5335,7 @@ mod desktop_fusion_executor_boot_test {
             Arc::new(UnreachableSpawner),
             Arc::new(UnreachableSideQuery),
             &cfg,
-            None,
+            unreachable_attempts(),
             Arc::new(Vec::<fusion::CatalogModel>::new()),
             Arc::new(telemetry::AnalyticsBus::new()),
             Arc::new(cost::PricingCatalog::builtin_reference()),
@@ -5327,7 +5386,7 @@ mod desktop_fusion_executor_boot_test {
             Arc::new(UnreachableSpawner),
             Arc::new(UnreachableSideQuery),
             &cfg,
-            None,
+            unreachable_attempts(),
             Arc::new(Vec::<fusion::CatalogModel>::new()),
             Arc::new(telemetry::AnalyticsBus::new()),
             Arc::new(cost::PricingCatalog::builtin_reference()),
@@ -7167,8 +7226,8 @@ pub struct DesktopSessionLifecycle {
     subagent_spawner: Arc<agent::handle::PoolSubagentSpawner>,
     fusion_api_service: Arc<llm_client::ApiService>,
     cost_tracker: Arc<cost::CostTracker>,
-    session_state_manager: Option<Arc<session_state::SessionStateManager>>,
-    fusion_recorder_factory: Option<Arc<fusion_recorder::DesktopFusionRecorderFactory>>,
+    session_state_manager: Arc<session_state::SessionStateManager>,
+    fusion_recorder_factory: Arc<fusion_recorder::DesktopFusionRecorderFactory>,
     fusion_recovery_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Disposable ledger root created for a `--no-session-persistence` host.
     /// Removed once every queue is closed, so the promise of leaving nothing
@@ -7310,12 +7369,10 @@ impl DesktopSessionLifecycle {
         if let Err(error) = self.cost_tracker.drain_owned_settlements().await {
             report.errors.push(format!("cost settlement failed: {error}"));
         }
-        if let Some(manager) = self.session_state_manager.as_ref() {
-            if let Err(error) = manager.flush_all().await {
-                report
-                    .errors
-                    .push(format!("session queue flush failed: {error}"));
-            }
+        if let Err(error) = self.session_state_manager.flush_all().await {
+            report
+                .errors
+                .push(format!("session queue flush failed: {error}"));
         }
         if let Some(recovery) = self.fusion_recovery_task.lock().await.take() {
             if let Err(error) = recovery.await {
@@ -7324,36 +7381,33 @@ impl DesktopSessionLifecycle {
                     .push(format!("Fusion startup recovery task failed: {error}"));
             }
         }
-        if let Some(factory) = self.fusion_recorder_factory.as_ref() {
-            report.publications = factory
-                .drain_pending_all(stage(std::time::Duration::from_secs(2)))
-                .await;
-            for receipt in &report.publications {
-                if !matches!(
-                    receipt.status,
-                    platform_api::FusionPublicationStatus::Published
-                        | platform_api::FusionPublicationStatus::Queued
-                ) {
-                    report.errors.push(
-                        receipt
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "Fusion publication remains queued".into()),
-                    );
-                }
+        report.publications = self
+            .fusion_recorder_factory
+            .drain_pending_all(stage(std::time::Duration::from_secs(2)))
+            .await;
+        for receipt in &report.publications {
+            if !matches!(
+                receipt.status,
+                platform_api::FusionPublicationStatus::Published
+                    | platform_api::FusionPublicationStatus::Queued
+            ) {
+                report.errors.push(
+                    receipt
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Fusion publication remains queued".into()),
+                );
             }
         }
-        if let Some(manager) = self.session_state_manager.as_ref() {
-            if let Err(error) = manager.flush_all().await {
-                report
-                    .errors
-                    .push(format!("late session queue flush failed: {error}"));
-            }
-            if let Err(error) = manager.close_and_drain().await {
-                report
-                    .errors
-                    .push(format!("session state shutdown failed: {error}"));
-            }
+        if let Err(error) = self.session_state_manager.flush_all().await {
+            report
+                .errors
+                .push(format!("late session queue flush failed: {error}"));
+        }
+        if let Err(error) = self.session_state_manager.close_and_drain().await {
+            report
+                .errors
+                .push(format!("session state shutdown failed: {error}"));
         }
         if let Some(home) = self.ephemeral_home.as_ref() {
             // Every queue and claim above is closed by now. A failure here is
@@ -7384,15 +7438,15 @@ pub struct DesktopRuntime {
     /// permission gate.
     pub orchestrator: Arc<ConversationOrchestrator>,
     /// Hydrated per-session durable coordinator retained for Fusion terminal
-    /// receipts and ordinary cost mutations. None when persistence is
-    /// explicitly disabled.
-    pub session_state: Option<Arc<session_state::SessionStateCoordinator>>,
+    /// receipts and ordinary cost mutations. Every host has one: an
+    /// ephemeral-transcript host gets a disposable ledger under a temporary
+    /// home rather than no ledger at all.
+    pub session_state: Arc<session_state::SessionStateCoordinator>,
     /// Common Fusion recorder pinned to the boot session's coordinator.
-    pub fusion_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
+    pub fusion_recorder: Arc<dyn platform_api::FusionRunRecorder>,
     /// Per-session Fusion recorder factory retained for host shutdown/remount
     /// draining. It owns recorders for every mounted session, not just boot A.
-    pub fusion_recorder_factory:
-        Option<Arc<fusion_recorder::DesktopFusionRecorderFactory>>,
+    pub fusion_recorder_factory: Arc<fusion_recorder::DesktopFusionRecorderFactory>,
     /// Shared ordered shutdown owner used by CLI remounts and bridge process
     /// teardown. It is always present, including explicit ephemeral mode.
     pub session_lifecycle: Arc<DesktopSessionLifecycle>,
@@ -11055,6 +11109,122 @@ fn capture_legacy_opening_balance(
     }
 }
 
+/// The write half of this key pair lives in the CLI (`session_cost`), so the
+/// round trip crosses a crate boundary with nothing but these two field names
+/// and the `SessionId` spelling holding it together.
+#[cfg(test)]
+mod legacy_opening_balance_test {
+    use super::*;
+
+    fn write(config: &Path, cwd: &Path, entries: serde_json::Map<String, serde_json::Value>) {
+        let key = migrations::global_config::project_path_for_config(cwd);
+        migrations::global_config::save_project_config(config, &key, |mut project| {
+            for (name, value) in entries {
+                project.insert(name, value);
+            }
+            project
+        })
+        .unwrap();
+    }
+
+    fn entries(session: &str, cost: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = serde_json::Map::new();
+        map.insert("lastSessionId".into(), serde_json::json!(session));
+        map.insert("lastCost".into(), cost);
+        map
+    }
+
+    #[test]
+    fn imports_the_cli_written_pair_for_a_matching_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join(".lingxi.json");
+        let cwd = Path::new("/proj/alpha");
+        let session = protocol::SessionId::new();
+        // Exactly what `save_session_cost` writes: `session_id.to_string()`.
+        write(&config, cwd, entries(&session.to_string(), serde_json::json!(0.0175)));
+
+        assert_eq!(
+            capture_legacy_opening_balance(Some(&config), cwd),
+            Some((session, 17_500_000))
+        );
+    }
+
+    #[test]
+    fn refuses_another_session_another_project_and_a_missing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join(".lingxi.json");
+        let cwd = Path::new("/proj/alpha");
+        let session = protocol::SessionId::new();
+        write(&config, cwd, entries(&session.to_string(), serde_json::json!(0.0175)));
+
+        // A different project key must not inherit alpha's balance.
+        assert_eq!(
+            capture_legacy_opening_balance(Some(&config), Path::new("/proj/beta")),
+            None
+        );
+        // No config path at all (a TempDir-homed host) imports nothing.
+        assert_eq!(capture_legacy_opening_balance(None, cwd), None);
+        // A file with no project entry imports nothing.
+        let empty = directory.path().join("empty.json");
+        assert_eq!(capture_legacy_opening_balance(Some(&empty), cwd), None);
+    }
+
+    #[test]
+    fn rejects_values_that_are_not_a_positive_finite_amount() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/proj/alpha");
+        let session = protocol::SessionId::new().to_string();
+        for cost in [
+            serde_json::json!(0.0),
+            serde_json::json!(-1.0),
+            serde_json::json!("0.5"),
+            serde_json::json!(null),
+        ] {
+            let config = directory.path().join(format!("{cost}.json"));
+            write(&config, cwd, entries(&session, cost.clone()));
+            assert_eq!(
+                capture_legacy_opening_balance(Some(&config), cwd),
+                None,
+                "{cost} is not an importable opening balance"
+            );
+        }
+    }
+
+    /// An unparseable id is not a reason to import into whatever session is
+    /// booting: the balance belongs to a named session or to no one.
+    #[test]
+    fn refuses_an_unparseable_session_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join(".lingxi.json");
+        let cwd = Path::new("/proj/alpha");
+        write(&config, cwd, entries("not-a-uuid", serde_json::json!(0.0175)));
+
+        assert_eq!(capture_legacy_opening_balance(Some(&config), cwd), None);
+    }
+
+    /// Pins the RESULT, not the explicit clamp above it: a float-to-integer
+    /// `as` cast already saturates, so removing that branch leaves this green.
+    /// What must never change is that an absurd figure comes back as a ceiling
+    /// rather than a small wrapped number that would read as a real balance.
+    #[test]
+    fn saturates_instead_of_wrapping_on_an_absurd_amount() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join(".lingxi.json");
+        let cwd = Path::new("/proj/alpha");
+        let session = protocol::SessionId::new();
+        write(
+            &config,
+            cwd,
+            entries(&session.to_string(), serde_json::json!(1.0e30)),
+        );
+
+        assert_eq!(
+            capture_legacy_opening_balance(Some(&config), cwd),
+            Some((session, u64::MAX))
+        );
+    }
+}
+
 pub async fn build(
     mut cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
@@ -11511,7 +11681,7 @@ pub async fn build(
     let ledger_home = ephemeral_home
         .clone()
         .unwrap_or_else(|| cfg.lingxi_home.clone());
-    let session_state_manager = Some(()).map(|()| {
+    let session_state_manager = {
         let legacy_shadow = legacy_opening_balance.map(|(legacy_session_id, amount)| {
             Arc::new(move |session_id| (session_id == legacy_session_id).then_some(amount))
                 as Arc<
@@ -11522,7 +11692,7 @@ pub async fn build(
             ledger_home.clone(),
             legacy_shadow,
         )
-    });
+    };
     let (session_state, durable_hydration) = {
         let lease = if let Some(lease) = construction_writer_lease {
             lease
@@ -11554,11 +11724,9 @@ pub async fn build(
             // so seed the tracker only from the post-import authoritative
             // projection.
             let hydration = coordinator.hydrate(main_session_id).await?;
-            if let Some(manager) = session_state_manager.as_ref() {
-                manager
-                    .register(main_session_id, coordinator.clone())
-                    .await?;
-            }
+            session_state_manager
+                .register(main_session_id, coordinator.clone())
+                .await?;
             Ok(hydration)
         }
         .await;
@@ -11573,16 +11741,15 @@ pub async fn build(
                 return Err(BuildError::DurableSession(message));
             }
         };
-        (Some(coordinator), Some(hydration))
+        (coordinator, hydration)
     };
 
     // Decorate the same writer that the orchestrator receives. Fusion delivery
     // resolves its active path under this writer's lock and the coordinator's
     // durable transaction, so ordinary append, outbox delivery, and `/cd`
     // retargeting share one authority.
-    let main_jsonl_writer = if let Some(coordinator) =
-        session_state.as_ref().filter(|_| cfg.session_persistence)
-    {
+    let main_jsonl_writer = if cfg.session_persistence {
+        let coordinator = &session_state;
         let durable_writer = Arc::new(session::jsonl::DurableTranscriptWriter::from_pinned(
             coordinator.journal().root().to_path_buf(),
             coordinator.journal().root_identity(),
@@ -11599,85 +11766,52 @@ pub async fn build(
     } else {
         Arc::new(main_jsonl_writer)
     };
-    if let Some(manager) = session_state_manager.as_ref() {
-        manager.set_transcript_writer(main_jsonl_writer.clone());
-    }
-    let fusion_transcript_target = session_state.as_ref().map(|_| {
-        fusion_recorder::FusionTranscriptTarget::new(main_jsonl_writer.clone())
-            .for_session(main_session_id)
-    });
-    let fusion_recorder_factory_impl = session_state_manager.as_ref().map(|manager| {
-        Arc::new(fusion_recorder::DesktopFusionRecorderFactory::new(
-                manager.clone(),
-                fusion_transcript_target
-                    .as_ref()
-                    .expect("durable session has a transcript target")
-                    .clone(),
-            ))
-    });
+    session_state_manager.set_transcript_writer(main_jsonl_writer.clone());
+    let fusion_transcript_target = fusion_recorder::FusionTranscriptTarget::new(
+        main_jsonl_writer.clone(),
+    )
+    .for_session(main_session_id);
+    let fusion_recorder_factory_impl = Arc::new(
+        fusion_recorder::DesktopFusionRecorderFactory::new(
+            session_state_manager.clone(),
+            fusion_transcript_target.clone(),
+        ),
+    );
     // Resolve the boot recorder through the same factory retained for hot
     // sessions and shutdown recovery. This both shares its per-delivery lock
     // and ensures a boot outbox is included in `retry_pending_all()`.
-    let (fusion_recorder, fusion_recovery_recorder): (
-        Option<Arc<dyn platform_api::FusionRunRecorder>>,
-        Option<Arc<fusion_recorder::DesktopFusionRecorder>>,
-    ) = if let Some(factory) = fusion_recorder_factory_impl.as_ref() {
-        let recorder = factory
-            .recorder_for_session(main_session_id)
-            .expect("boot durable session is registered before recorder wiring");
-        (
-            Some(recorder.clone() as Arc<dyn platform_api::FusionRunRecorder>),
-            Some(recorder),
-        )
-    } else {
-        (
-            Some(Arc::new(fusion_recorder::UnavailableFusionRecorder)),
-            None,
-        )
-    };
-    let fusion_recorder_factory: Arc<dyn platform_api::FusionRunRecorderFactory> =
-        fusion_recorder_factory_impl.clone().map_or_else(
-            || {
-                Arc::new(fusion_recorder::UnavailableFusionRecorderFactory)
-                    as Arc<dyn platform_api::FusionRunRecorderFactory>
-            },
-            |factory| factory as Arc<dyn platform_api::FusionRunRecorderFactory>,
-        );
+    let fusion_recovery_recorder = fusion_recorder_factory_impl
+        .recorder_for_session(main_session_id)
+        .expect("boot durable session is registered before recorder wiring");
+    let fusion_recorder =
+        fusion_recovery_recorder.clone() as Arc<dyn platform_api::FusionRunRecorder>;
+    let fusion_recorder_factory = fusion_recorder_factory_impl.clone()
+        as Arc<dyn platform_api::FusionRunRecorderFactory>;
 
     // One CostTracker per process. The ephemeral path retains compatibility
     // with hosts that explicitly disabled session persistence; production
     // persistence uses the hydrated app-owned coordinator and its exact lease.
-    let cost_tracker =
-        if let (Some(coordinator), Some(hydration)) = (session_state.clone(), durable_hydration) {
-            let coordinator_core = session_state_manager
-                .as_ref()
-                .and_then(|manager| manager.coordinator_core(main_session_id))
-                .ok_or_else(|| {
-                    BuildError::DurableSession("boot coordinator cache is missing".into())
-                })?;
-            Arc::new(
-                cost::CostTracker::new(
-                    main_session_id,
-                    pricing.clone(),
-                    tokio::sync::mpsc::channel(1).0,
-                )
-                .try_with_durable_persistence(
-                    hydration,
-                    coordinator_core.clone() as Arc<dyn cost::CostPersistence>,
-                    coordinator_core.writer_lease_core(),
-                    coordinator.durability_gate(),
-                )
-                .map_err(|error| BuildError::DurableSession(error.to_string()))?,
-            )
-        } else {
-            let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
-            tokio::spawn(async move { while cost_persist_rx.recv().await.is_some() {} });
-            Arc::new(cost::CostTracker::new(
+    let cost_tracker = {
+        let coordinator_core = session_state_manager
+            .coordinator_core(main_session_id)
+            .ok_or_else(|| {
+                BuildError::DurableSession("boot coordinator cache is missing".into())
+            })?;
+        Arc::new(
+            cost::CostTracker::new(
                 main_session_id,
                 pricing.clone(),
-                cost_persist_tx,
-            ))
-        };
+                tokio::sync::mpsc::channel(1).0,
+            )
+            .try_with_durable_persistence(
+                durable_hydration,
+                coordinator_core.clone() as Arc<dyn cost::CostPersistence>,
+                coordinator_core.writer_lease_core(),
+                session_state.durability_gate(),
+            )
+            .map_err(|error| BuildError::DurableSession(error.to_string()))?,
+        )
+    };
     // Phase 2a T7: the CostTracker uses the SAME assembled pricing catalog the
     // estimator was built from (built-in reference tiers + non-Anthropic preset
     // rows + settings overrides), not a fresh `builtin_reference()`, so session
@@ -11872,19 +12006,13 @@ pub async fn build(
     // Main responses and workflows must publish to the same session/turn
     // book that will authorize physical Fusion attempts. Disabled-persistence
     // hosts retain the legacy counters, since these scopes require durability.
-    let workflow_output_scopes = session_state_manager
-        .as_ref()
-        .map(|_| shared_budget_enforcer.workflow_output_scopes());
-    if let Some(scopes) = &workflow_output_scopes {
-        if let Err(error) = scopes
+    let workflow_output_scopes = shared_budget_enforcer.workflow_output_scopes();
+    {
+        if let Err(error) = workflow_output_scopes
             .ensure_current(main_session_id, protocol::MessageId::new(), orch_cfg.token_budget)
             .await
         {
-            let cleanup = if let Some(coordinator) = &session_state {
-                coordinator.close_and_drain().await.err()
-            } else {
-                None
-            };
+            let cleanup = session_state.close_and_drain().await.err();
             let message = cleanup.map_or_else(
                 || error.to_string(),
                 |cleanup| format!("{error}; coordinator cleanup failed: {cleanup}"),
@@ -11892,11 +12020,11 @@ pub async fn build(
             return Err(BuildError::DurableSession(message));
         }
     }
-    if let (Some(manager), Some(recorders)) =
-        (&session_state_manager, &fusion_recorder_factory_impl)
-    {
-        manager.configure_retention(&cost_tracker, &shared_budget_enforcer, recorders);
-    }
+    session_state_manager.configure_retention(
+        &cost_tracker,
+        &shared_budget_enforcer,
+        &fusion_recorder_factory_impl,
+    );
     let fusion_attempts = desktop_fusion_attempts(
         api_service.clone(),
         shared_budget_enforcer.clone(),
@@ -13338,7 +13466,7 @@ pub async fn build(
     .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
     .with_worktree_manager(worktree_manager.clone())
     .with_fusion(fusion_executor.clone())
-    .with_terminal_recorder_opt(fusion_recorder.clone())
+    .with_terminal_recorder_opt(Some(fusion_recorder.clone()))
     .with_terminal_recorder_factory(fusion_recorder_factory.clone())
     .with_status_sink(
         local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
@@ -13347,11 +13475,8 @@ pub async fn build(
         as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
     // Nested workflow names resolve against the same plugin registry.
     .with_plugin_workflows(plugin_workflow_registry.clone());
-    let local_workflow_handler = if let Some(scopes) = &workflow_output_scopes {
-        local_workflow_handler.with_output_scopes(scopes.clone())
-    } else {
-        local_workflow_handler
-    };
+    let local_workflow_handler =
+        local_workflow_handler.with_output_scopes(workflow_output_scopes.clone());
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
         Arc::new(local_workflow_handler),
@@ -13372,7 +13497,7 @@ pub async fn build(
         fusion_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         fusion_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
-        fusion_recorder.clone(),
+        Some(fusion_recorder.clone()),
         Some(fusion_recorder_factory.clone()),
     );
 
@@ -14182,7 +14307,7 @@ pub async fn build(
         Some(current_cwd_cell.clone()),
         worktree_state_persister,
         Some(fusion_executor.clone()),
-        fusion_recorder.clone(),
+        Some(fusion_recorder.clone()),
         Some(fusion_recorder_factory.clone()),
     );
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
@@ -14726,7 +14851,7 @@ pub async fn build(
         // subagent spawner's subagents dir — one consistent session id end-to-end.
         .with_session_id(main_session_id)
         .with_cost_tracker(cost_tracker.clone())
-        .with_cost_session_switcher_opt(session_state_manager.clone())
+        .with_cost_session_switcher_opt(Some(session_state_manager.clone()))
         .with_session_activation_observer(Arc::new(ProcessSessionActivationObserver))
         // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
         // above) into the orchestrator, replacing the hardcoded trusted=true /
@@ -14888,11 +15013,7 @@ pub async fn build(
         }
         _ => orch_builder,
     };
-    let orch_builder = if let Some(scopes) = workflow_output_scopes {
-        orch_builder.with_workflow_output_scopes(scopes)
-    } else {
-        orch_builder
-    };
+    let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
     let orch = Arc::new(orch_builder);
     orch.attach_owned_session_switches();
     async_hook_response_buffer.attach_rewake_target(&orch);
@@ -14920,14 +15041,10 @@ pub async fn build(
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
-    if let Some(transcript) = fusion_transcript_target.as_ref() {
-        transcript.attach_orchestrator(&orch);
-    }
-    let fusion_recovery_task = fusion_recovery_recorder.map(|recovery_recorder| {
-        tokio::spawn(async move {
-            let _ = recovery_recorder.retry_pending().await;
-        })
-    });
+    fusion_transcript_target.attach_orchestrator(&orch);
+    let fusion_recovery_task = Some(tokio::spawn(async move {
+        let _ = fusion_recovery_recorder.retry_pending().await;
+    }));
     // Production terminal publication is owned by the durable Fusion recorder.
     // Keep the compatibility sink deliberately unbound here: binding it to an
     // orchestrator that owns this task registry would create
@@ -15154,7 +15271,7 @@ pub async fn build(
                 .collect(),
         )
         .with_durable_publication_available(cfg.session_persistence)
-        .with_publication_retrier(fusion_recorder_factory_impl.clone()),
+        .with_publication_retrier(Some(fusion_recorder_factory_impl.clone())),
     ));
 
     // WIZARD-06: re-register `/auto-mode-setup` WITH its runners attached.
@@ -19729,11 +19846,7 @@ still flip to available"
         );
         let mcp_registry = Arc::downgrade(&rt.mcp_registry);
         let command_registry = Arc::downgrade(&rt.shared_command_registry);
-        let lease = rt
-            .session_state
-            .as_ref()
-            .expect("persistent test runtime")
-            .writer_lease();
+        let lease = rt.session_state.writer_lease();
         let weak_lease = Arc::downgrade(&lease);
         drop(lease);
 
@@ -19793,8 +19906,6 @@ still flip to available"
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         let coordinator = rt
             .session_state
-            .as_ref()
-            .expect("persistent test runtime")
             .clone();
         let writer_lease = coordinator.writer_lease();
         let weak_lease = Arc::downgrade(&writer_lease);

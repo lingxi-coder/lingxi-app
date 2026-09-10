@@ -4002,27 +4002,11 @@ async fn mount_resumed_tui_inner(
         eprintln!("lingxi-cli: resume deferred tools failed: {error}");
         return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
     }
-    // COST seed (resume parity, claude-code `restoreCostStateForSession`): the
-    // freshly-built cost tracker starts at zero, so without this the footer
-    // would show `$0.0000` after resume until the first new turn. Restore the
-    // prior accumulated cost from the project config IF it was saved for THIS
-    // session id (the `run_ratatui` exit path writes it via `saveCurrentSessionCosts`).
-    if tui_build.runtime.session_state.is_none() {
-        if let Some(cfg_path) = migrations::global_config::global_config_path() {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            if let Some(usd) = crate::session_cost::restore_session_cost_usd(
-                &cfg_path,
-                &cwd,
-                &session_id.to_string(),
-            ) {
-                tui_build
-                    .runtime
-                    .orchestrator
-                    .restore_session_cost(crate::session_cost::usd_to_nano(usd))
-                    .await;
-            }
-        }
-    }
+    // COST seed on resume: the durable ledger owns this. Every host now has a
+    // coordinator, and `SessionStateManager`'s captured opening-balance import
+    // seeds the same `lastCost` figure into the WAL exactly once per session,
+    // before the tracker is published. Reading it a second time here would add
+    // the prior total on top of a projection that already contains it.
     // LIVE-STATE carry (parity with claude-code's in-place `/rewind`, a React
     // setState that never rebuilds and so keeps model + fast-mode + plan-mode):
     // apply the state the OUTGOING runtime had, carried IN MEMORY through the

@@ -654,11 +654,6 @@ pub(crate) async fn run_ratatui_with_initial_state(
     initial_prompt: Option<String>,
     handoff: Option<platform_api::BackgroundingSnapshot>,
 ) -> RunOutcome {
-    // Durable session state owns the authoritative cost ledger and terminal
-    // publication path.  Keep this bit before the runtime is projected into
-    // the TUI so the legacy config shadow write below cannot run alongside a
-    // hydrated coordinator (or in explicit no-persistence mode).
-    let session_persistence_enabled = tui_build.runtime.session_state.is_some();
     let session_lifecycle = tui_build.runtime.session_lifecycle.clone();
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
     tui_build
@@ -1843,10 +1838,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // Resume parity (claude-code `saveCurrentSessionCosts`, fired on process
     // exit): persist this session's accumulated cost to the project config,
     // keyed by (project, session id), so a later `--resume` of THIS session
-    // restores it into the footer. Best-effort — a config-write failure must
+    // restores it into the footer. Best-effort -- a config-write failure must
     // never change the exit code. Runs for every exit arm (clean quit or TUI
-    // failure), matching the reference's unconditional exit hook.
-    if !session_persistence_enabled {
+    // failure), matching the reference's unconditional exit hook. The durable
+    // ledger is this session's authority; the config key stays a faithful
+    // upstream mirror, read back only as a once-per-session opening balance.
+    {
         let total_usd = summary_orch.snapshot_cost().await.total_usd;
         let session_uuid = summary_orch.current_session_id().await.as_uuid();
         if let Some(cfg_path) = migrations::global_config::global_config_path() {

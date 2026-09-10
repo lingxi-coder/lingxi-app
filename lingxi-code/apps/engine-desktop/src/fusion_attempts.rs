@@ -144,18 +144,6 @@ impl fusion::FusionAttemptRegistrar for DesktopFusionAttempts {
 }
 
 impl DesktopFusionAttempts {
-    /// Evaluation-only ordinary single-agent registration. Reuses the exact
-    /// durable route/receipt owner but grants no analyst/synthesis authority.
-    pub(crate) fn register_single(
-        &self,
-        captured: fusion::FusionAttemptRegistration,
-    ) -> Result<fusion::RegisteredFusionAttempts, platform_api::FusionError> {
-        if captured.resolved.panels.len() != 1 {
-            return Err(fusion_error("single evaluation requires exactly one route"));
-        }
-        self.register_routes(captured, false)
-    }
-
     fn register_routes(
         &self,
         captured: fusion::FusionAttemptRegistration,

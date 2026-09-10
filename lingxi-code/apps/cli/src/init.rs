@@ -38,15 +38,15 @@ pub struct Runtime {
     /// The fully-constructed orchestrator.
     pub orchestrator: Arc<ConversationOrchestrator>,
     /// Durable session coordinator retained across CLI runtime projection and
-    /// remounts; None is the explicit no-session-persistence mode.
-    pub session_state: Option<Arc<engine_desktop::session_state::SessionStateCoordinator>>,
+    /// remounts. Every host has one; the no-transcript mode gets a disposable
+    /// ledger under a temporary home rather than no ledger.
+    pub session_state: Arc<engine_desktop::session_state::SessionStateCoordinator>,
     /// Common Fusion terminal recorder retained by the projected runtime.
-    pub fusion_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
+    pub fusion_recorder: Arc<dyn platform_api::FusionRunRecorder>,
     /// Per-session recorder factory used to drain mounted outboxes during CLI
     /// shutdown or an in-process session remount.
-    pub fusion_recorder_factory: Option<
+    pub fusion_recorder_factory:
         Arc<engine_desktop::fusion_recorder::DesktopFusionRecorderFactory>,
-    >,
     /// Ordered producer/cost/session/outbox drain retained across the desktop
     /// runtime projection.
     pub session_lifecycle: Arc<engine_desktop::DesktopSessionLifecycle>,

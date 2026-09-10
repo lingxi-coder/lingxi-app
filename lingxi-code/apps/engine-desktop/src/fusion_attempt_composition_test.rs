@@ -129,7 +129,7 @@ fn service() -> Arc<llm_client::ApiService> {
 
 fn executor(
     cfg: &DesktopConfig,
-    host: Option<Arc<fusion_attempts::DesktopFusionAttempts>>,
+    host: Arc<fusion_attempts::DesktopFusionAttempts>,
     pricing: Arc<cost::PricingCatalog>,
 ) -> Arc<dyn FusionExecutor> {
     let catalog = MODELS
@@ -262,9 +262,8 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
         budget.clone(),
         tracker.clone(),
         pricing.clone(),
-        Some(outputs),
-    )
-    .unwrap();
+        outputs,
+    );
     assert_eq!(
         Arc::strong_count(&host),
         2,
@@ -278,10 +277,10 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
         .unwrap(),
     );
     assert_eq!(
-        executor(&rollback, Some(host.clone()), pricing.clone()).workflow_batch_concurrency(),
+        executor(&rollback, host.clone(), pricing.clone()).workflow_batch_concurrency(),
         1
     );
-    let executor = executor(&cfg, Some(host.clone()), pricing);
+    let executor = executor(&cfg, host.clone(), pricing);
     assert_eq!(executor.workflow_batch_concurrency(), 2);
     assert_eq!(
         Arc::strong_count(&host),
@@ -329,9 +328,17 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
     worker.await.unwrap();
 }
 
+/// An ephemeral-transcript host is not an unmetered host. It gets a real
+/// ledger under a temporary home, so every attempt is registered and billed
+/// exactly as for a persistent host; what it does not get is a transcript on
+/// disk. Before the disposable ledger existed this host had no registrar at
+/// all, which both clamped it to one workflow batch and billed it as an
+/// unverifiable aggregate.
 #[tokio::test]
-async fn desktop_fusion_composition_ephemeral_remains_legacy_and_requires_pool_admission() {
-    let (_tmp, mut cfg) = tests::test_config(true);
+async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_admission() {
+    let (tmp, mut cfg) = tests::test_config(true);
+    // No transcript, but the ledger below still lands under a real directory:
+    // production roots it at a temporary `LINGXI_HOME` removed at shutdown.
     cfg.session_persistence = false;
     cfg.flag_settings = Some(
         serde_json::from_value(serde_json::json!({
@@ -340,20 +347,51 @@ async fn desktop_fusion_composition_ephemeral_remains_legacy_and_requires_pool_a
         .unwrap(),
     );
     let session = protocol::SessionId::new();
+    let lease = platform_api::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
+        .claim_session_id(&session.to_string(), std::process::id())
+        .unwrap()
+        .into_shared();
+    let coordinator =
+        session_state::SessionStateCoordinator::open(tmp.path(), session, lease).unwrap();
+    let _worker = coordinator.start().await.unwrap();
     let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
     let (tx, _) = tokio::sync::mpsc::channel(1);
-    let tracker = Arc::new(cost::CostTracker::new(session, pricing.clone(), tx));
+    let tracker = Arc::new(
+        cost::CostTracker::new(session, pricing.clone(), tx)
+            .try_with_durable_persistence(
+                coordinator.hydrate(session).await.unwrap(),
+                coordinator.clone(),
+                coordinator.writer_lease(),
+                coordinator.durability_gate(),
+            )
+            .unwrap(),
+    );
     let budget = budget(tracker.clone());
-    let host = desktop_fusion_attempts(service(), budget.clone(), tracker, pricing.clone(), None);
-    assert!(host.is_none());
+    let outputs = budget.workflow_output_scopes();
+    outputs
+        .ensure_current(session, protocol::MessageId::new(), Some(100_000))
+        .await
+        .unwrap();
+    // The host keeps only a weak handle to the service, so this binding is
+    // what keeps the attempt registrar reachable for the whole test.
+    let service = service();
+    let host = desktop_fusion_attempts(
+        service.clone(),
+        budget.clone(),
+        tracker,
+        pricing.clone(),
+        outputs,
+    );
     let executor = executor(&cfg, host, pricing);
-    assert_eq!(executor.workflow_batch_concurrency(), 1);
+    // The clamp to one batch belonged to the unregistered path, not to the
+    // ephemeral host, so this now reads the configured value.
+    assert_eq!(executor.workflow_batch_concurrency(), 2);
     let prepared = executor
         .prepare(submission(session, budget.clone()))
         .unwrap();
     assert_eq!(
         prepared.control().billing_mode(),
-        ModelAttemptBillingMode::LegacyAggregate
+        ModelAttemptBillingMode::MeteredAttempts
     );
     // Offline does not implement the admitted-pool seam. Activation must fail
     // closed before reaching its panicking legacy spawn/side-query methods.
@@ -388,7 +426,7 @@ async fn desktop_fusion_composition_refuses_ephemeral_tracker_even_with_output_s
         budget.clone(),
         tracker,
         pricing.clone(),
-        Some(outputs),
+        outputs,
     );
     let error = executor(&cfg, host, pricing)
         .prepare(submission(session, budget.clone()))

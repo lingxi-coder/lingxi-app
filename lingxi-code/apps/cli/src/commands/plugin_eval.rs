@@ -277,6 +277,35 @@ pub struct EvalCase {
     pub graders: Vec<GraderDefinition>,
     /// Source case path.
     pub source: PathBuf,
+    /// Author-declared arms, run in order against one shared grader set.
+    ///
+    /// Empty is the ordinary single-arm case, or the two-arm `with-without`
+    /// ablation. Two or more entries replace both: the FIRST arm is the
+    /// baseline every other arm is compared against, and the LAST is the one
+    /// the case's headline score reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arms: Vec<EvalArm>,
+}
+
+/// One author-declared arm of a case.
+///
+/// An arm changes only what the agent is asked and what settings it runs
+/// under. Everything else -- graders, model, turn and timeout limits, tool
+/// surface, scaffold -- stays shared, which is what makes the runs paired and
+/// their difference attributable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalArm {
+    /// Stable arm label. Used in the report, in run directory names, and in
+    /// the delta table, so it must be unique within a case.
+    pub label: String,
+    /// Prompt for this arm. Absent means the case prompt verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Settings JSON merged into the child agent's `--settings` object.
+    /// Later keys win over the harness's own plugin-enablement keys, so an
+    /// arm can turn a subsystem on for itself alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
 }
 
 /// A free deterministic grader or an LLM rubric grader.
@@ -602,32 +631,107 @@ pub struct EvalMockAborted {
     pub reason: String,
 }
 
-/// Per-arm run collection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Runs grouped by arm label, in the order the arms ran.
+///
+/// Serializes as a JSON object keyed by label, so an ablation suite still
+/// reports the familiar `with` / `without` keys and an arms suite reports its
+/// own. Order is meaningful: the first entry is the baseline.
+#[derive(Debug, Clone, Default)]
 pub struct EvalArms {
-    /// Runs with the target plugin loaded.
-    #[serde(rename = "with")]
-    pub with_plugin: Vec<EvalRunResult>,
-    /// Runs without the target plugin.
-    #[serde(rename = "without", skip_serializing_if = "Option::is_none")]
-    pub without_plugin: Option<Vec<EvalRunResult>>,
+    /// Label and its runs, baseline first.
+    pub by_label: Vec<(String, Vec<EvalRunResult>)>,
+}
+
+impl EvalArms {
+    /// Every run across every arm.
+    pub fn runs(&self) -> impl Iterator<Item = &EvalRunResult> {
+        self.by_label.iter().flat_map(|(_, runs)| runs.iter())
+    }
+
+    /// Runs for one label, if that arm ran.
+    #[must_use]
+    pub fn labelled(&self, label: &str) -> Option<&[EvalRunResult]> {
+        self.by_label
+            .iter()
+            .find(|(name, _)| name == label)
+            .map(|(_, runs)| runs.as_slice())
+    }
+}
+
+impl Serialize for EvalArms {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.by_label.len()))?;
+        for (label, runs) in &self.by_label {
+            map.serialize_entry(label, runs)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for EvalArms {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ArmsVisitor;
+        impl<'de> serde::de::Visitor<'de> for ArmsVisitor {
+            type Value = EvalArms;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a map of arm label to runs")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut access: M,
+            ) -> Result<EvalArms, M::Error> {
+                // Encounter order, not sorted order: the first arm is the
+                // baseline and the report has to keep saying which one that is.
+                let mut by_label = Vec::new();
+                while let Some((label, runs)) = access.next_entry::<String, Vec<EvalRunResult>>()? {
+                    by_label.push((label, runs));
+                }
+                Ok(EvalArms { by_label })
+            }
+        }
+        deserializer.deserialize_map(ArmsVisitor)
+    }
 }
 
 /// Aggregate score block for one case.
+///
+/// With two or more arms the headline figures describe the LAST arm and the
+/// `_without` figures describe the FIRST, which is what makes the ablation
+/// wording still read correctly: its arms are ordered `without` then `with`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvalCaseAggregates {
-    /// With-plugin score.
+    /// Final arm's score.
     pub score: f64,
-    /// With-plugin pass rate.
+    /// Final arm's pass rate.
     pub pass_rate: f64,
-    /// Without-plugin score.
+    /// Baseline arm's score.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_without: Option<f64>,
-    /// Without-plugin pass rate.
+    /// Baseline arm's pass rate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pass_rate_without: Option<f64>,
-    /// With-minus-without score delta.
+    /// Final minus baseline score.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<f64>,
+    /// Every arm's own score, baseline first. Present only when the case
+    /// declared its own arms; two-arm ablation is fully described above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_arm: Vec<EvalArmAggregate>,
+}
+
+/// One arm's score beside its distance from the baseline arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalArmAggregate {
+    /// Arm label.
+    pub label: String,
+    /// Mean grader score across this arm's runs.
+    pub score: f64,
+    /// Fraction of this arm's runs that passed.
+    pub pass_rate: f64,
+    /// Score minus the baseline arm's score. `None` on the baseline itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<f64>,
 }
@@ -1037,71 +1141,79 @@ async fn run_evaluation(
     let mut results = Vec::new();
     'case_loop: for case in cases {
         let run_count = cli.runs.or(case.runs).unwrap_or(DEFAULT_RUNS);
-        let mut runs = Vec::new();
+        // Both shapes reduce to the same thing: an ordered list of arms with
+        // the baseline first. The ablation is the implicit two-arm plan; a
+        // case that declares `arms:` supplies its own.
+        let plan = arm_plan(&case, &ablation);
+        let mut runs: Vec<EvalRunResult> = Vec::new();
         for run_number in 1..=run_count {
             if budget_reached(cli.max_cost_usd, total_cost) {
                 partial = true;
                 break;
             }
-            let mut baseline_output = None;
-            if ablation == "with-without" {
-                let baseline = run_one_arm(
+            let mut baseline_output: Option<String> = None;
+            for (index, arm) in plan.iter().enumerate() {
+                if index > 0 && budget_reached(cli.max_cost_usd, total_cost) {
+                    partial = true;
+                    break;
+                }
+                let result = run_one_arm(
                     cli,
                     &target.root,
                     &target.disabled_plugin_ids,
                     &case,
-                    "without",
+                    arm,
                     run_number,
                     &temp.path,
-                    false,
                     total_cost,
-                    None,
+                    baseline_output.as_deref(),
+                    index == 0,
                 )
                 .await;
-                total_cost += baseline.cost_usd;
-                partial |= baseline.skipped_paid_graders;
-                baseline_output = Some(baseline.output.clone());
-                runs.push(baseline);
-                if budget_reached(cli.max_cost_usd, total_cost) {
-                    partial = true;
-                    continue;
+                total_cost += result.cost_usd;
+                partial |= result.skipped_paid_graders;
+                if index == 0 && plan.len() > 1 {
+                    baseline_output = Some(result.output.clone());
                 }
+                runs.push(result);
             }
-            let plugin_run = run_one_arm(
-                cli,
-                &target.root,
-                &target.disabled_plugin_ids,
-                &case,
-                "with",
-                run_number,
-                &temp.path,
-                true,
-                total_cost,
-                baseline_output.as_deref(),
-            )
-            .await;
-            total_cost += plugin_run.cost_usd;
-            partial |= plugin_run.skipped_paid_graders;
-            runs.push(plugin_run);
         }
         if runs.is_empty() && budget_reached(cli.max_cost_usd, total_cost) {
             partial = true;
             break 'case_loop;
         }
-        let mut with_plugin = Vec::new();
-        let mut without_plugin = Vec::new();
+        let mut by_label: Vec<(String, Vec<EvalRunResult>)> = plan
+            .iter()
+            .map(|arm| (arm.label.clone(), Vec::new()))
+            .collect();
         for run in runs {
-            if run.arm == "with" {
-                with_plugin.push(run);
-            } else {
-                without_plugin.push(run);
+            if let Some((_, bucket)) = by_label.iter_mut().find(|(label, _)| *label == run.arm) {
+                bucket.push(run);
             }
         }
-        let score = run_average(&with_plugin);
-        let pass_rate = run_pass_rate(&with_plugin);
-        let score_without = (ablation == "with-without").then(|| run_average(&without_plugin));
-        let pass_rate_without =
-            (ablation == "with-without").then(|| run_pass_rate(&without_plugin));
+        let baseline = by_label.first().map(|(_, runs)| run_average(runs));
+        let baseline_pass = by_label.first().map(|(_, runs)| run_pass_rate(runs));
+        let (score, pass_rate) = by_label
+            .last()
+            .map_or((0.0, 0.0), |(_, runs)| (run_average(runs), run_pass_rate(runs)));
+        let paired = plan.len() > 1;
+        let per_arm = if case.arms.is_empty() {
+            Vec::new()
+        } else {
+            by_label
+                .iter()
+                .enumerate()
+                .map(|(index, (label, runs))| EvalArmAggregate {
+                    label: label.clone(),
+                    score: run_average(runs),
+                    pass_rate: run_pass_rate(runs),
+                    delta: (index > 0)
+                        .then(|| baseline.map(|base| run_average(runs) - base))
+                        .flatten(),
+                })
+                .collect()
+        };
+        let score_without = paired.then_some(baseline).flatten();
         let case_dir = case.source.parent().unwrap_or(&target.root);
         let case_dir = case_dir
             .strip_prefix(&target.root)
@@ -1125,16 +1237,14 @@ async fn run_evaluation(
             max_turns: case.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             tags: case.tags,
             graders: case.graders,
-            arms: EvalArms {
-                with_plugin,
-                without_plugin: (ablation == "with-without").then_some(without_plugin),
-            },
+            arms: EvalArms { by_label },
             aggregates: EvalCaseAggregates {
                 score,
                 pass_rate,
                 score_without,
-                pass_rate_without,
-                delta: score_without.map(|baseline| score - baseline),
+                pass_rate_without: paired.then_some(baseline_pass).flatten(),
+                delta: score_without.map(|base| score - base),
+                per_arm,
             },
         });
     }
@@ -1164,20 +1274,13 @@ async fn run_evaluation(
     let mean_delta = (!deltas.is_empty()).then(|| deltas.iter().sum::<f64>() / deltas.len() as f64);
     let run_failed = results.iter().any(|case| {
         case.arms
-            .with_plugin
-            .iter()
-            .chain(case.arms.without_plugin.iter().flatten())
+            .runs()
             .any(|run| run.error.is_some() || run.aborted.is_some())
     });
     let threshold_failed = cases_passed != cases_total || run_failed;
     let auth_failed = results
         .iter()
-        .flat_map(|case| {
-            case.arms
-                .with_plugin
-                .iter()
-                .chain(case.arms.without_plugin.iter().flatten())
-        })
+        .flat_map(|case| case.arms.runs())
         .filter_map(|run| run.error.as_deref())
         .any(|error| error.contains("Not logged in"));
     let cost_ceiling = budget_reached(cli.max_cost_usd, total_cost);
@@ -1220,18 +1323,66 @@ async fn run_evaluation(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One arm resolved against its case: what to ask, under which settings, and
+/// whether the target plugin is loaded for it.
+struct PlannedArm {
+    label: String,
+    prompt: String,
+    plugin_enabled: bool,
+    settings: Option<serde_json::Value>,
+}
+
+/// Reduce a case to the ordered arms it will actually run, baseline first.
+fn arm_plan(case: &EvalCase, ablation: &str) -> Vec<PlannedArm> {
+    if !case.arms.is_empty() {
+        // Author-declared arms replace the ablation pair: every arm gets the
+        // resolved target, and what differs between them is exactly what the
+        // case wrote down.
+        return case
+            .arms
+            .iter()
+            .map(|arm| PlannedArm {
+                label: arm.label.clone(),
+                prompt: arm.prompt.clone().unwrap_or_else(|| case.prompt.clone()),
+                plugin_enabled: true,
+                settings: arm.settings.clone(),
+            })
+            .collect();
+    }
+    let with = PlannedArm {
+        label: "with".to_string(),
+        prompt: case.prompt.clone(),
+        plugin_enabled: true,
+        settings: None,
+    };
+    if ablation != "with-without" {
+        return vec![with];
+    }
+    vec![
+        PlannedArm {
+            label: "without".to_string(),
+            prompt: case.prompt.clone(),
+            plugin_enabled: false,
+            settings: None,
+        },
+        with,
+    ]
+}
+
 async fn run_one_arm(
     cli: &Cli,
     plugin_root: &Path,
     disabled_plugin_ids: &[String],
     case: &EvalCase,
-    arm: &str,
+    planned: &PlannedArm,
     run_number: u32,
     temp_root: &Path,
-    plugin_enabled: bool,
     prior_cost: f64,
     baseline_output: Option<&str>,
+    is_baseline: bool,
 ) -> EvalRunResult {
+    let arm = planned.label.as_str();
+    let plugin_enabled = planned.plugin_enabled;
     let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let discovered_mocks = if plugin_enabled && cli.mocks == "record" {
         match discover_eval_mocks(cli, plugin_root, case) {
@@ -1243,7 +1394,7 @@ async fn run_one_arm(
     };
     let run_dir = temp_root
         .join(safe_segment(&case.name))
-        .join(format!("{arm}-{run_number}"));
+        .join(format!("{}-{run_number}", safe_segment(arm)));
     if let Err(error) = fs::create_dir_all(&run_dir) {
         return failed_run(
             arm,
@@ -1306,7 +1457,7 @@ async fn run_one_arm(
         })
         .or_else(|| plugin_enabled.then_some(plugin_root));
     let mut output = run_agent(
-        &case.prompt,
+        &planned.prompt,
         model,
         &allowed_tools,
         plugin_for_agent,
@@ -1317,6 +1468,7 @@ async fn run_one_arm(
         cli.verbose,
         case.append_system_prompt.as_deref(),
         prepared_mocks.as_ref(),
+        planned.settings.as_ref(),
     )
     .await;
     let mut mocks = discovered_mocks.map(|mocks| mocks.report);
@@ -1352,14 +1504,15 @@ async fn run_one_arm(
             break;
         }
         if matches!(grader, GraderDefinition::Baseline { .. }) && baseline_output.is_none() {
-            if arm == "without" {
+            // The baseline arm has nothing to compare against by definition.
+            if is_baseline {
                 continue;
             }
             grader_results.push(GraderResult::from_definition(
                 grader,
                 Some(0.0),
                 false,
-                "baseline grader requires --ablation with-without".to_string(),
+                "baseline grader requires --ablation with-without or a case with arms".to_string(),
                 false,
             ));
             continue;
@@ -1991,6 +2144,34 @@ fn failed_run(arm: &str, run: u32, error: String) -> EvalRunResult {
     }
 }
 
+/// Build the single `--settings` argument the eval child receives, or `None`
+/// when there is nothing to say.
+///
+/// One argument or none: a second `--settings` occurrence silently replaces
+/// the first, so the harness's plugin-enablement keys and the arm's own
+/// settings have to be merged here rather than passed separately. The arm
+/// wins on a key collision, since an arm exists precisely to change what the
+/// child runs under.
+fn eval_child_settings(
+    disabled_plugin_ids: &[String],
+    arm_settings: Option<&serde_json::Value>,
+) -> Option<String> {
+    let mut settings = serde_json::Map::new();
+    if !disabled_plugin_ids.is_empty() {
+        let disabled = disabled_plugin_ids
+            .iter()
+            .map(|id| (id.clone(), serde_json::Value::Bool(false)))
+            .collect::<serde_json::Map<_, _>>();
+        settings.insert("enabledPlugins".to_string(), disabled.into());
+    }
+    if let Some(serde_json::Value::Object(arm)) = arm_settings {
+        for (key, value) in arm {
+            settings.insert(key.clone(), value.clone());
+        }
+    }
+    (!settings.is_empty()).then(|| serde_json::Value::Object(settings).to_string())
+}
+
 async fn run_agent(
     prompt: &str,
     model: Option<&str>,
@@ -2003,6 +2184,7 @@ async fn run_agent(
     verbose: bool,
     append_system_prompt: Option<&str>,
     mock_runtime: Option<&PreparedMockRuntime>,
+    arm_settings: Option<&serde_json::Value>,
 ) -> AgentOutput {
     // `--settings {"enabledPlugins": ...}` is retained below as
     // defense-in-depth, but the desktop composition root intentionally reads
@@ -2069,14 +2251,8 @@ async fn run_agent(
             .arg("--disallowedTools")
             .arg("MCP");
     }
-    if !disabled_plugin_ids.is_empty() {
-        let disabled = disabled_plugin_ids
-            .iter()
-            .map(|id| (id.clone(), serde_json::Value::Bool(false)))
-            .collect::<serde_json::Map<_, _>>();
-        command
-            .arg("--settings")
-            .arg(serde_json::json!({ "enabledPlugins": disabled }).to_string());
+    if let Some(settings) = eval_child_settings(disabled_plugin_ids, arm_settings) {
+        command.arg("--settings").arg(settings);
     }
     if let Some(system_prompt) = append_system_prompt {
         command.arg("--append-system-prompt").arg(system_prompt);
@@ -2413,6 +2589,9 @@ async fn grade_output(
                 DEFAULT_TIMEOUT_SECONDS,
                 false,
                 None,
+                None,
+                // The judge grades under stock settings. An arm's settings
+                // belong to the run being graded, never to the grader.
                 None,
             )
             .await;
@@ -3049,6 +3228,7 @@ fn parse_case_yaml(path: &Path) -> Result<EvalCase, String> {
     } else {
         discover_markdown_graders(dir)?
     };
+    let arms = parse_yaml_arms(map, &name)?;
     Ok(EvalCase {
         name,
         prompt,
@@ -3082,7 +3262,78 @@ fn parse_case_yaml(path: &Path) -> Result<EvalCase, String> {
             .or_else(|| yaml_string(map, "scaffoldScript")),
         graders,
         source: path.to_path_buf(),
+        arms,
     })
+}
+
+/// Reserved arm labels. The ablation path already publishes runs under these,
+/// so a case may not also mint them and collide in the same report.
+const RESERVED_ARM_LABELS: [&str; 2] = ["with", "without"];
+
+fn parse_yaml_arms(map: &Mapping, case_name: &str) -> Result<Vec<EvalArm>, String> {
+    let Some(value) = yaml_value(map, "arms") else {
+        return Ok(Vec::new());
+    };
+    let entries = value
+        .as_sequence()
+        .ok_or_else(|| format!("eval case {case_name:?}: arms must be a list"))?;
+    if entries.len() < 2 {
+        return Err(format!(
+            "eval case {case_name:?}: arms needs at least two entries, or none at all -- \
+             a single arm is the ordinary case and has nothing to compare against"
+        ));
+    }
+    let mut arms = Vec::with_capacity(entries.len());
+    let mut seen = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .as_mapping()
+            .ok_or_else(|| format!("eval case {case_name:?}: each arm must be a YAML object"))?;
+        let label = yaml_string(entry, "label")
+            .ok_or_else(|| format!("eval case {case_name:?}: each arm needs a label"))?;
+        let label = label.trim().to_string();
+        if label.is_empty() {
+            return Err(format!("eval case {case_name:?}: an arm label cannot be blank"));
+        }
+        if RESERVED_ARM_LABELS.contains(&label.as_str()) {
+            return Err(format!(
+                "eval case {case_name:?}: {label:?} is reserved for the ablation arms"
+            ));
+        }
+        if seen.contains(&label) {
+            return Err(format!(
+                "eval case {case_name:?}: two arms are both labelled {label:?}"
+            ));
+        }
+        seen.push(label.clone());
+        let prompt = yaml_string(entry, "prompt");
+        if prompt.as_deref().is_some_and(|text| text.trim().is_empty()) {
+            return Err(format!(
+                "eval case {case_name:?}: arm {label:?} declares an empty prompt; \
+                 omit the key to inherit the case prompt"
+            ));
+        }
+        let settings = match yaml_value(entry, "settings") {
+            None => None,
+            Some(raw) => {
+                let json = serde_json::to_value(raw).map_err(|error| {
+                    format!("eval case {case_name:?}: arm {label:?} settings are not JSON: {error}")
+                })?;
+                if !json.is_object() {
+                    return Err(format!(
+                        "eval case {case_name:?}: arm {label:?} settings must be an object"
+                    ));
+                }
+                Some(json)
+            }
+        };
+        arms.push(EvalArm {
+            label,
+            prompt,
+            settings,
+        });
+    }
+    Ok(arms)
 }
 
 fn parse_prompt_case(dir: &Path) -> Result<EvalCase, String> {
@@ -3114,6 +3365,8 @@ fn parse_prompt_case(dir: &Path) -> Result<EvalCase, String> {
         scaffold_script: yaml_string(&frontmatter, "scaffold_script"),
         graders: discover_markdown_graders(dir)?,
         source: prompt_path,
+        // A prose case is a prompt file; declaring arms needs `case.yaml`.
+        arms: Vec::new(),
     })
 }
 
@@ -3908,12 +4161,7 @@ fn render_html_report(result: &AggregateResult) -> String {
             html_escape(&case.name),
             html_escape(&case.prompt_markdown)
         ));
-        for run in case
-            .arms
-            .with_plugin
-            .iter()
-            .chain(case.arms.without_plugin.iter().flatten())
-        {
+        for run in case.arms.runs() {
             details.push_str(&format!(
                 "<details><summary>{} run {} · score {:.3}</summary><h4>Output</h4><pre>{}</pre>",
                 html_escape(&run.arm),
@@ -5011,8 +5259,7 @@ mod tests {
                 tags: Vec::new(),
                 graders: Vec::new(),
                 arms: EvalArms {
-                    with_plugin: vec![malicious_run],
-                    without_plugin: None,
+                    by_label: vec![("with".to_string(), vec![malicious_run])],
                 },
                 aggregates: EvalCaseAggregates {
                     score: 1.0,
@@ -5020,6 +5267,7 @@ mod tests {
                     score_without: None,
                     pass_rate_without: None,
                     delta: None,
+                    per_arm: Vec::new(),
                 },
             }],
             aggregates: EvalAggregates {
@@ -5065,5 +5313,211 @@ mod tests {
         symlink(&outside, evals.join("prompt.md")).unwrap();
         let error = discover_cases(temp.path(), DEFAULT_EVAL_DIR).unwrap_err();
         assert!(error.contains("symlink"));
+    }
+
+    fn case_with_arms(body: &str) -> Result<EvalCase, String> {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("case.yaml");
+        fs::write(&path, body).unwrap();
+        parse_case_yaml(&path)
+    }
+
+    #[test]
+    fn arms_are_parsed_in_order_and_inherit_the_case_prompt() {
+        let case = case_with_arms(
+            r#"
+name: fusion-vs-single
+prompt: "refactor the parser"
+arms:
+  - label: single
+  - label: fusion
+    prompt: "/fusion refactor the parser"
+    settings:
+      fusion:
+        enabled: true
+"#,
+        )
+        .unwrap();
+
+        let labels: Vec<&str> = case.arms.iter().map(|arm| arm.label.as_str()).collect();
+        assert_eq!(labels, ["single", "fusion"]);
+        // An omitted prompt inherits, which is what keeps the pair comparable.
+        assert_eq!(case.arms[0].prompt, None);
+        assert_eq!(
+            case.arms[1].prompt.as_deref(),
+            Some("/fusion refactor the parser")
+        );
+        assert_eq!(case.arms[0].settings, None);
+        assert_eq!(
+            case.arms[1].settings,
+            Some(serde_json::json!({"fusion": {"enabled": true}}))
+        );
+    }
+
+    #[test]
+    fn arm_declarations_that_cannot_produce_a_comparison_are_refused() {
+        let single = case_with_arms("name: c\nprompt: p\narms:\n  - label: only\n").unwrap_err();
+        assert!(single.contains("at least two entries"), "got: {single}");
+
+        let dup = case_with_arms("name: c\nprompt: p\narms:\n  - label: a\n  - label: a\n")
+            .unwrap_err();
+        assert!(dup.contains("both labelled"), "got: {dup}");
+
+        let reserved =
+            case_with_arms("name: c\nprompt: p\narms:\n  - label: with\n  - label: b\n")
+                .unwrap_err();
+        assert!(reserved.contains("reserved"), "got: {reserved}");
+
+        let blank =
+            case_with_arms("name: c\nprompt: p\narms:\n  - label: \"  \"\n  - label: b\n")
+                .unwrap_err();
+        assert!(blank.contains("cannot be blank"), "got: {blank}");
+
+        let unlabelled =
+            case_with_arms("name: c\nprompt: p\narms:\n  - prompt: x\n  - label: b\n")
+                .unwrap_err();
+        assert!(unlabelled.contains("needs a label"), "got: {unlabelled}");
+
+        let scalar_settings = case_with_arms(
+            "name: c\nprompt: p\narms:\n  - label: a\n    settings: 7\n  - label: b\n",
+        )
+        .unwrap_err();
+        assert!(
+            scalar_settings.contains("must be an object"),
+            "got: {scalar_settings}"
+        );
+
+        let empty_prompt = case_with_arms(
+            "name: c\nprompt: p\narms:\n  - label: a\n    prompt: \"  \"\n  - label: b\n",
+        )
+        .unwrap_err();
+        assert!(
+            empty_prompt.contains("omit the key"),
+            "got: {empty_prompt}"
+        );
+    }
+
+    fn bare_case(prompt: &str) -> EvalCase {
+        EvalCase {
+            name: "c".into(),
+            prompt: prompt.into(),
+            expected_outcome: None,
+            tags: Vec::new(),
+            runs: None,
+            model: None,
+            timeout_seconds: None,
+            max_turns: None,
+            allowed_tools: Vec::new(),
+            append_system_prompt: None,
+            scaffold_script: None,
+            graders: Vec::new(),
+            source: PathBuf::from("case.yaml"),
+            arms: Vec::new(),
+        }
+    }
+
+    /// Both shapes have to reduce to one ordered list, because everything
+    /// downstream -- the baseline grader, the delta, the report keys -- reads
+    /// only that list.
+    #[test]
+    fn the_arm_plan_puts_the_baseline_first_for_both_shapes() {
+        let plain = bare_case("ask");
+        assert_eq!(
+            arm_plan(&plain, "none")
+                .iter()
+                .map(|arm| (arm.label.clone(), arm.plugin_enabled))
+                .collect::<Vec<_>>(),
+            [("with".to_string(), true)]
+        );
+        assert_eq!(
+            arm_plan(&plain, "with-without")
+                .iter()
+                .map(|arm| (arm.label.clone(), arm.plugin_enabled))
+                .collect::<Vec<_>>(),
+            [("without".to_string(), false), ("with".to_string(), true)]
+        );
+
+        let mut declared = bare_case("ask");
+        declared.arms = vec![
+            EvalArm {
+                label: "single".into(),
+                prompt: None,
+                settings: None,
+            },
+            EvalArm {
+                label: "fusion".into(),
+                prompt: Some("/fusion ask".into()),
+                settings: Some(serde_json::json!({"fusion": {"enabled": true}})),
+            },
+        ];
+        // Declared arms REPLACE the ablation pair rather than nesting inside
+        // it, so a with-without invocation cannot silently double the runs.
+        for ablation in ["none", "with-without"] {
+            let plan = arm_plan(&declared, ablation);
+            assert_eq!(plan.len(), 2, "ablation {ablation} must not add arms");
+            assert_eq!(plan[0].label, "single");
+            assert_eq!(plan[0].prompt, "ask", "an omitted prompt inherits");
+            assert_eq!(plan[1].prompt, "/fusion ask");
+            assert!(plan.iter().all(|arm| arm.plugin_enabled));
+        }
+    }
+
+    /// An arm that turns a subsystem on has to reach the child, and it has to
+    /// do so WITHOUT dropping the plugin-enablement keys the harness relies on
+    /// to keep a globally installed copy of the target out of the baseline.
+    #[test]
+    fn arm_settings_and_plugin_disablement_travel_in_one_argument() {
+        let disabled = vec!["target".to_string()];
+        let arm = serde_json::json!({"fusion": {"enabled": true}});
+
+        assert_eq!(eval_child_settings(&[], None), None);
+
+        let harness_only: serde_json::Value =
+            serde_json::from_str(&eval_child_settings(&disabled, None).unwrap()).unwrap();
+        assert_eq!(harness_only["enabledPlugins"]["target"], false);
+        assert!(harness_only.get("fusion").is_none());
+
+        let arm_only: serde_json::Value =
+            serde_json::from_str(&eval_child_settings(&[], Some(&arm)).unwrap()).unwrap();
+        assert_eq!(arm_only["fusion"]["enabled"], true);
+        assert!(arm_only.get("enabledPlugins").is_none());
+
+        let merged: serde_json::Value =
+            serde_json::from_str(&eval_child_settings(&disabled, Some(&arm)).unwrap()).unwrap();
+        assert_eq!(merged["enabledPlugins"]["target"], false);
+        assert_eq!(merged["fusion"]["enabled"], true);
+
+        // On a collision the arm wins: that is the whole point of declaring it.
+        let overriding = serde_json::json!({"enabledPlugins": {"target": true}});
+        let clashed: serde_json::Value =
+            serde_json::from_str(&eval_child_settings(&disabled, Some(&overriding)).unwrap())
+                .unwrap();
+        assert_eq!(clashed["enabledPlugins"]["target"], true);
+    }
+
+    /// The report keys are the arm labels, and their ORDER is load-bearing:
+    /// the first entry is the baseline every delta is measured against.
+    #[test]
+    fn arms_serialize_as_a_label_keyed_map_that_round_trips_in_order() {
+        let arms = EvalArms {
+            by_label: vec![
+                ("single".to_string(), Vec::new()),
+                ("fusion".to_string(), Vec::new()),
+            ],
+        };
+        let json = serde_json::to_string(&arms).unwrap();
+        assert_eq!(json, r#"{"single":[],"fusion":[]}"#);
+        let restored: EvalArms = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored
+                .by_label
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["single", "fusion"],
+            "a sorted map would report the wrong baseline"
+        );
+        assert!(restored.labelled("fusion").is_some());
+        assert!(restored.labelled("absent").is_none());
     }
 }

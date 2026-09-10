@@ -101,6 +101,13 @@ impl StateMachinePool {
         }
     }
 
+    /// The runtime this pool spawns on. A sibling pool built for a different
+    /// class of caller drives the same runtime.
+    #[must_use]
+    pub fn runtime(&self) -> Arc<dyn RuntimeSpawner> {
+        self.runtime.clone()
+    }
+
     #[cfg(test)]
     pub async fn set_post_spawn_wait(&self, notify: Arc<Notify>) {
         *self.post_spawn_wait.write().await = Some(notify);

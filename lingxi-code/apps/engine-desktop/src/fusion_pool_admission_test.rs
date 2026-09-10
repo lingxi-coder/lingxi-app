@@ -483,10 +483,11 @@ async fn fusion_pool_admission_real_spawner_consumes_whole_group_without_reacqui
 async fn fusion_pool_admission_queue_cancel_and_timeout_do_not_reserve_or_call_api() {
     for cancel_queue in [true, false] {
         let fixture = Fixture::new();
+        // Occupy every Fusion panel slot so the run below has to queue.
         let held = fixture
             .spawner
             .reserve_fusion_panel_group(
-                2,
+                platform_api::FUSION_PANEL_POOL_CAP,
                 tokio::time::Instant::now() + Duration::from_secs(60),
                 tokio_util::sync::CancellationToken::new(),
             )

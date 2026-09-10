@@ -55,6 +55,13 @@ pub const FUSION_MIN_PANEL: u8 = 2;
 /// OpenRouter-aligned panel cap.
 pub const FUSION_MAX_PANEL: u8 = 8;
 
+/// Slots in the Fusion panel sub-pool. Sized to the largest admissible group
+/// so a single run is never refused for want of capacity, and kept separate
+/// from the ordinary subagent pool so a queued group cannot delay or refuse a
+/// user's own Agent call. Desktop already ran a second pool for teammates for
+/// the same reason.
+pub const FUSION_PANEL_POOL_CAP: usize = FUSION_MAX_PANEL as usize;
+
 /// Hidden panel subagent type. Resolved like `fork` (catalog cannot shadow it)
 /// and never appears in the Agent listing.
 pub const FUSION_PANEL_TYPE: &str = "fusion-panel";

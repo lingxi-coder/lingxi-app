@@ -1,36 +1,33 @@
 //! Pool-local admission. A reservation is capacity, not an allocated agent.
+//!
+//! Ordinary spawns and Fusion panel groups no longer share a core: each pool
+//! serves one kind of caller, so admission needs no queue, no headroom
+//! reservation and no generation bookkeeping. Ordinary admission is fail-fast
+//! and a group waits on tokio's own FIFO-fair semaphore.
 
 use platform_api::panel_pool::PanelAdmissionCancellation as CancellationToken;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
+
+/// Longest a whole-group reservation waits, independent of the run's own
+/// deadline. The effective wait is the earlier of the two.
+const GROUP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdmissionError {
     InvalidCount,
     Full,
-    QueueFull,
     Cancelled,
     Deadline,
     Closed,
 }
 
-#[derive(Default)]
-struct State {
-    queue: VecDeque<(u64, u32)>,
-    next_id: u64,
-    generation: u64,
-    closed: bool,
-}
-
 pub(crate) struct CapacityCore {
     semaphore: Arc<Semaphore>,
     max: usize,
-    state: Mutex<State>,
-    changed: watch::Sender<u64>,
 }
 
 pub(crate) struct TrackedPoolPermit {
@@ -76,11 +73,6 @@ impl TrackedPoolPermit {
     }
 }
 
-struct Waiter {
-    core: Arc<CapacityCore>,
-    id: u64,
-}
-
 impl CapacityCore {
     pub(crate) fn new(max: usize) -> Result<Arc<Self>, AdmissionError> {
         if max > Semaphore::MAX_PERMITS {
@@ -89,30 +81,7 @@ impl CapacityCore {
         Ok(Arc::new(Self {
             semaphore: Arc::new(Semaphore::new(max)),
             max,
-            state: Mutex::new(State::default()),
-            changed: watch::channel(0).0,
         }))
-    }
-
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|poisoned| {
-            let mut state = poisoned.into_inner();
-            state.closed = true;
-            self.semaphore.close();
-            self.changed.send_replace(state.generation);
-            state
-        })
-    }
-
-    fn notify(&self, state: &mut State) {
-        match state.generation.checked_add(1) {
-            Some(next) => state.generation = next,
-            None => {
-                state.closed = true;
-                self.semaphore.close();
-            }
-        }
-        self.changed.send_replace(state.generation);
     }
 
     pub(crate) fn max(&self) -> usize {
@@ -127,21 +96,17 @@ impl CapacityCore {
         Arc::ptr_eq(self, &permit.core)
     }
 
+    /// Fail-fast single-slot admission. Nothing but physical occupancy can
+    /// refuse it: this pool has no waiters to protect.
     pub(crate) fn acquire_ordinary(self: &Arc<Self>) -> Result<TrackedPoolPermit, AdmissionError> {
-        let state = self.state();
-        if state.closed {
-            return Err(AdmissionError::Closed);
-        }
-        let protected = state.queue.front().map_or(0, |(_, count)| *count as usize);
-        if self.available_permits() <= protected {
-            return Err(AdmissionError::Full);
-        }
         let owned = self
             .semaphore
             .clone()
             .try_acquire_owned()
-            .map_err(|_| AdmissionError::Full)?;
-        drop(state);
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => AdmissionError::Closed,
+                tokio::sync::TryAcquireError::NoPermits => AdmissionError::Full,
+            })?;
         Ok(TrackedPoolPermit {
             owned: Some(owned),
             core: self.clone(),
@@ -149,6 +114,10 @@ impl CapacityCore {
         })
     }
 
+    /// Whole-group admission: every slot or none. tokio's semaphore queues
+    /// waiters in FIFO order and hands released permits to the front of that
+    /// queue, so a group cannot be starved by a later one and there is no
+    /// partial start to unwind.
     pub(crate) async fn reserve_group(
         self: &Arc<Self>,
         count: usize,
@@ -158,112 +127,29 @@ impl CapacityCore {
         if count == 0 || count > self.max || count > u32::MAX as usize {
             return Err(AdmissionError::InvalidCount);
         }
-        let deadline = overall_deadline.min(Instant::now() + Duration::from_secs(30));
-        let mut changed = self.changed.subscribe();
-        let waiter = {
-            let mut state = self.state();
-            if state.closed {
-                return Err(AdmissionError::Closed);
-            }
-            if cancel.is_cancelled() {
-                return Err(AdmissionError::Cancelled);
-            }
-            if Instant::now() >= deadline {
-                return Err(AdmissionError::Deadline);
-            }
-            if state.queue.len() == 16 {
-                return Err(AdmissionError::QueueFull);
-            }
-            let id = state.next_id;
-            state.next_id = match id.checked_add(1) {
-                Some(next) => next,
-                None => {
-                    state.closed = true;
-                    self.semaphore.close();
-                    self.changed.send_replace(state.generation);
-                    return Err(AdmissionError::Closed);
-                }
-            };
-            state.queue.push_back((id, count as u32));
-            Waiter {
-                core: self.clone(),
-                id,
-            }
+        let deadline = overall_deadline.min(Instant::now() + GROUP_ADMISSION_TIMEOUT);
+        let acquire = self.semaphore.clone().acquire_many_owned(count as u32);
+        let mut owned = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(AdmissionError::Cancelled),
+            () = tokio::time::sleep_until(deadline) => return Err(AdmissionError::Deadline),
+            result = acquire => result.map_err(|_| AdmissionError::Closed)?,
         };
-        loop {
-            if cancel.is_cancelled() {
-                return Err(AdmissionError::Cancelled);
-            }
-            if Instant::now() >= deadline {
-                return Err(AdmissionError::Deadline);
-            }
-            let acquired = {
-                let mut state = self.state();
-                if state.closed {
-                    return Err(AdmissionError::Closed);
-                }
-                if state.queue.front().is_some_and(|(id, _)| *id == waiter.id) {
-                    // The mutex may have delayed this waiter after its outer checks.
-                    if cancel.is_cancelled() {
-                        return Err(AdmissionError::Cancelled);
-                    }
-                    if Instant::now() >= deadline {
-                        return Err(AdmissionError::Deadline);
-                    }
-                    match self.semaphore.clone().try_acquire_many_owned(count as u32) {
-                        Ok(owned) => {
-                            state.queue.pop_front();
-                            self.notify(&mut state);
-                            Some(owned)
-                        }
-                        Err(_) => None,
-                    }
-                } else {
-                    None
-                }
-            };
-            if let Some(mut owned) = acquired {
-                if self.state().closed {
-                    drop(owned);
-                    return Err(AdmissionError::Closed);
-                }
-                // Split outside the book lock: tracked destructors reenter it.
-                let permits = (0..count)
-                    .map(|_| TrackedPoolPermit {
-                        owned: Some(owned.split(1).expect("whole group owns every slot")),
-                        core: self.clone(),
-                        group: None,
-                    })
-                    .collect();
-                return Ok(permits);
-            }
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(AdmissionError::Cancelled),
-                _ = tokio::time::sleep_until(deadline) => return Err(AdmissionError::Deadline),
-                result = changed.changed() => {
-                    if result.is_err() { return Err(AdmissionError::Closed); }
-                }
-            }
-        }
-    }
-}
-
-impl Drop for Waiter {
-    fn drop(&mut self) {
-        let mut state = self.core.state();
-        if let Some(index) = state.queue.iter().position(|(id, _)| *id == self.id) {
-            state.queue.remove(index);
-            self.core.notify(&mut state);
-        }
+        // Split outside any lock: a tracked permit's destructor is ordinary code.
+        let permits = (0..count)
+            .map(|_| TrackedPoolPermit {
+                owned: Some(owned.split(1).expect("whole group owns every slot")),
+                core: self.clone(),
+                group: None,
+            })
+            .collect();
+        Ok(permits)
     }
 }
 
 impl Drop for TrackedPoolPermit {
     fn drop(&mut self) {
-        // Capacity is observable before the generation is published.
         drop(self.owned.take());
-        self.core.notify(&mut self.core.state());
         if let Some(group) = &self.group {
             if group.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
                 group.changed.notify_waiters();

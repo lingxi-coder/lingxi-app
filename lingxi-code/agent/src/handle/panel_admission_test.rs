@@ -182,9 +182,9 @@ async fn panel_admission_context_rejection_and_running_cancellation_return_capac
         entered: entered.clone(),
         park: true,
     }));
-    let permit = reserve(&spawner, 1).await.into_permits().pop().unwrap();
     let unavailable = PoolSubagentSpawner::new(pool.clone())
         .with_default_model_selection_provider(Arc::new(|| None));
+    let permit = reserve(&unavailable, 1).await.into_permits().pop().unwrap();
     assert!(unavailable
         .spawn_workflow_with_observer_admitted(
             request(),
@@ -209,8 +209,17 @@ async fn panel_admission_context_rejection_and_running_cancellation_return_capac
         result = &mut running => panic!("parked API returned: {result:?}"),
         () = entered.notified() => {}
     }
-    assert_eq!(pool.slot_count().await, 1);
+    assert_eq!(
+        spawner.panel_pool().slot_count().await,
+        1,
+        "a panel occupies the Fusion sub-pool"
+    );
+    assert_eq!(
+        pool.slot_count().await,
+        0,
+        "and never the ordinary subagent pool"
+    );
     drop(running);
-    drop(reserve(&spawner, 1).await);
-    assert_eq!(pool.slot_count().await, 0);
+    drop(reserve(&spawner, platform_api::FUSION_PANEL_POOL_CAP).await);
+    assert_eq!(spawner.panel_pool().slot_count().await, 0);
 }

@@ -354,3 +354,57 @@ async fn pool_starvation_shared_pool_would_starve_agent_tool() {
         "the rejected spawn never invoked the model"
     );
 }
+
+/// P0-2 regression: a queued Fusion panel group must never refuse an ordinary
+/// `AgentTool` spawn that the pool has room for.
+///
+/// Before the Fusion sub-pool, both admission paths shared one `CapacityCore`,
+/// and ordinary admission reserved headroom for whatever group sat at the queue
+/// head. A user's Agent call was then rejected with the concurrency-cap error
+/// while free slots existed — for up to the group's whole admission timeout.
+#[tokio::test]
+async fn fusion_group_never_refuses_an_agent_tool_spawn() {
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    // Three free slots, and a Fusion group that wants four: unsatisfiable, so
+    // it waits. Nothing about that may reach ordinary admission.
+    let pool = Arc::new(StateMachinePool::new(runtime.clone(), TEAMMATE_POOL_CAP + 3));
+    fill_with_parked_teammates(&pool).await;
+
+    let api = ScriptedApiClient::new();
+    let spawner = Arc::new(PoolSubagentSpawner::new(pool.clone()).with_api_client(api.clone()));
+
+    let waiting = {
+        let spawner = spawner.clone();
+        tokio::spawn(async move {
+            spawner
+                .reserve_fusion_panel_group(
+                    4,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                    platform_api::panel_pool::PanelAdmissionCancellation::new(),
+                )
+                .await
+        })
+    };
+    // Let the group reach the point where it is queued and blocked.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let result = spawner.spawn(agent_tool_request(), inheritance()).await;
+    assert!(
+        result.is_ok(),
+        "an ordinary spawn was refused while {} slots were free: {result:?}",
+        pool_free_slots(&pool).await
+    );
+    assert_eq!(
+        *api.calls.lock().unwrap(),
+        1,
+        "the admitted spawn really reached the model"
+    );
+    waiting.abort();
+}
+
+/// Free ordinary slots, derived from the pool's own occupancy so the message
+/// above names a real number rather than restating the fixture.
+async fn pool_free_slots(pool: &StateMachinePool) -> usize {
+    (TEAMMATE_POOL_CAP + 3).saturating_sub(pool.slot_count().await)
+}

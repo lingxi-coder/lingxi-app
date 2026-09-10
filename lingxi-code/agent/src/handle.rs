@@ -206,6 +206,12 @@ fn observer_initial_message_index(messages: Option<&[ConversationMessage]>) -> u
 /// cloning them.
 pub struct PoolSubagentSpawner {
     pool: Arc<StateMachinePool>,
+    /// Fusion panel slots, isolated from `pool`. A whole-group reservation
+    /// waits here, so it can never delay or refuse an ordinary Agent spawn,
+    /// and `concurrent_subagent_count` deliberately does not count it — the
+    /// Agent tool's own concurrency precheck must keep seeing only the pool it
+    /// competes for.
+    panel_pool: Arc<StateMachinePool>,
     /// Optional model API seam handed to every child runner via the
     /// child's [`SubagentContext`]. `None` keeps the legacy stub behavior
     /// (the runner emits a synthetic completion without calling the model).
@@ -599,6 +605,14 @@ pub fn append_subagent_system_prompt_suffix() -> Option<String> {
 }
 
 impl PoolSubagentSpawner {
+    /// Fusion panel slots. Separate from the ordinary subagent pool on
+    /// purpose: panel occupancy must not enter the Agent tool's concurrency
+    /// precheck, and a queued panel group must not refuse an ordinary spawn.
+    #[must_use]
+    pub fn panel_pool(&self) -> &Arc<StateMachinePool> {
+        &self.panel_pool
+    }
+
     /// Construct an adapter wrapping `pool` with no API client (legacy stub
     /// runner). Use [`Self::with_api_client`] to enable the real multi-turn
     /// loop.
@@ -608,8 +622,13 @@ impl PoolSubagentSpawner {
             .into_iter()
             .map(|d| (d.agent_type.clone(), d))
             .collect();
+        let panel_pool = Arc::new(StateMachinePool::new(
+            pool.runtime(),
+            platform_api::FUSION_PANEL_POOL_CAP,
+        ));
         Self {
             pool,
+            panel_pool,
             api_client: None,
             tool_registry: Arc::new(RuntimeLink::new()),
             new_diagnostics_source_factory: None,
@@ -2679,9 +2698,14 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 }
             }) as Arc<dyn Fn(AgentId) + Send + Sync>
         });
+        let slot_pool = if admitted.is_some() {
+            self.panel_pool.clone()
+        } else {
+            self.pool.clone()
+        };
         let allocation = match admitted {
-            Some(permit) => self.pool.allocate_admitted_with_receipt(ctx, allocation_receipt, permit).await,
-            None => self.pool.allocate_with_receipt(ctx, allocation_receipt).await,
+            Some(permit) => slot_pool.allocate_admitted_with_receipt(ctx, allocation_receipt, permit).await,
+            None => slot_pool.allocate_with_receipt(ctx, allocation_receipt).await,
         };
         let (_aid, mut rx) = match allocation {
             Ok(pair) => pair,
@@ -2706,7 +2730,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // observer. A cancelled or stalled observer must not orphan the already
         // running child or leak its pool slot.
         let mut dealloc_guard = SpawnDeallocGuard {
-            pool: self.pool.clone(),
+            pool: slot_pool.clone(),
             agent_id,
             observer_events: observer_events.clone(),
             armed: true,
@@ -2926,7 +2950,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // result. Kept AHEAD of the teardown so a wedged MCP `disconnect`
         // cannot hold the pool slot (and the capacity permit inside it)
         // hostage — the same reason the guard's drop path deallocates first.
-        let _ = self.pool.deallocate(&agent_id).await;
+        let _ = slot_pool.deallocate(&agent_id).await;
         // §24b (claude `Agr`'s `cleanup` — `runAgent`'s `finally`): tear down
         // exactly the connections THIS spawn newly created, regardless of the
         // terminal outcome (`Completed`/`Failed`/`Killed` all reach here).
@@ -3050,7 +3074,9 @@ impl SubagentSpawner for PoolSubagentSpawner {
         deadline: tokio::time::Instant,
         cancel: platform_api::panel_pool::PanelAdmissionCancellation,
     ) -> Result<platform_api::PanelPoolLease, SubagentSpawnError> {
-        self.pool.reserve_panel_group(count, deadline, cancel).await
+        self.panel_pool
+            .reserve_panel_group(count, deadline, cancel)
+            .await
     }
 
     async fn spawn_workflow_with_observer_admitted(
@@ -3062,7 +3088,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         watchdog: platform_api::WorkflowQueryWatchdog,
         permit: platform_api::PanelPoolPermit,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        let permit = self.pool.take_panel_permit(permit)
+        let permit = self.panel_pool.take_panel_permit(permit)
             .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
         // Keep this scope's immediate callee callback-free: the spawn entry
         // must take the token before it can suspend or run third-party code.

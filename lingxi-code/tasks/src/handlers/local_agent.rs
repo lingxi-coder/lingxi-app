@@ -433,7 +433,6 @@ impl Task for LocalAgentHandler {
             .as_ref()
             .and_then(|r| r.forked_skill_name.clone());
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
-            model_attempt: None,
             subagent_type,
             prompt,
             observer: None,
@@ -473,6 +472,7 @@ impl Task for LocalAgentHandler {
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         });
         // What `park` needs, cloned BEFORE `request` moves into the spawn:
         // the launch configuration is what a rebuilt runner is configured from.
@@ -1330,7 +1330,6 @@ mod tests {
     /// resolved before dispatch (the P1-01 ownership transfer).
     fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
-            model_attempt: None,
             subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
             observer: None,
@@ -1370,6 +1369,7 @@ mod tests {
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         }
     }
 
@@ -2823,7 +2823,6 @@ mod tests {
         let inherited_budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(MockBudget);
         let creator_agent_id = protocol::AgentId::new();
         let expected = SubagentSpawnRequest {
-            model_attempt: None,
             subagent_type: "code-reviewer".into(),
             prompt: "inspect the background request".into(),
             observer: None,
@@ -2863,6 +2862,7 @@ mod tests {
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         };
         let input = TaskSpawnInput::LocalAgent {
             agent_id: protocol::AgentId::new(),

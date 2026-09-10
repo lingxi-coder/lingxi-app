@@ -85,10 +85,6 @@ pub enum StructuredOutputMode {
 /// so the trait surface stays insulated from `lingxi-tools`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SubagentSpawnRequest {
-    /// Host-only registered model-call capability for this child. Neither
-    /// model-authored input nor serialized task replay may mint this authority.
-    #[serde(skip)]
-    pub model_attempt: Option<crate::ModelAttemptContext>,
     /// The subagent type to resolve (built-in or user/project catalog). NOT
     /// validated here — the spawner resolves it with claude-code precedence
     /// (catalog overrides built-ins; unknown → `general-purpose`).
@@ -334,6 +330,14 @@ pub struct SubagentSpawnRequest {
     /// Caller correlation id (Fusion run id + panel index).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    /// Host-only registered model-call capability for this child. Neither
+    /// model-authored input nor serialized task replay may mint this authority.
+    ///
+    /// Deliberately LAST: `main` grows this struct from the front, and both
+    /// sides inserting one line after the same `{` is what turns a dozen
+    /// mechanical additions into three-way conflicts.
+    #[serde(skip)]
+    pub model_attempt: Option<crate::ModelAttemptContext>,
 }
 
 /// Workflow-scoped model-query stall policy.

@@ -2843,7 +2843,6 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             budget,
         };
         let request = SubagentSpawnRequest {
-            model_attempt: None,
             subagent_type: effective_type.to_string(),
             prompt: parsed.prompt.clone(),
             observer: selected.observer.clone().or_else(|| {
@@ -2919,6 +2918,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -3974,7 +3974,6 @@ Use /mcp to configure and authenticate the required MCP servers.",
         };
 
         let request = SubagentSpawnRequest {
-            model_attempt: None,
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
             // general-purpose; explicit-validated otherwise), not the raw input.
             subagent_type: effective_type.clone(),
@@ -4080,6 +4079,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         };
 
         // Nested-progress bridge: `spawn_with_progress` feeds one String line per

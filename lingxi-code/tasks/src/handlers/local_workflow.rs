@@ -1919,7 +1919,6 @@ fn make_request(
     }
 
     SubagentSpawnRequest {
-        model_attempt: None,
         subagent_type,
         prompt: prompt.to_string(),
         observer: None,
@@ -1973,6 +1972,7 @@ fn make_request(
         max_input_bytes_per_turn: None,
         query_source_label: None,
         correlation_id: None,
+        model_attempt: None,
     }
 }
 

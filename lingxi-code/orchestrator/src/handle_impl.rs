@@ -749,7 +749,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let codename = format!("fork-{}", &uuid::Uuid::new_v4().simple().to_string()[..4]);
 
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
-            model_attempt: None,
             subagent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
             origin_session_id: Some(origin_session_id),
             // NOTE (deliberate deviation from the plan's `String::new()`): the
@@ -799,6 +798,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         };
 
         let invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker> = Arc::new(

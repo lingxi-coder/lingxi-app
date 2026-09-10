@@ -223,7 +223,6 @@ async fn fill_with_parked_teammates(pool: &StateMachinePool) {
 
 fn agent_tool_request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
-        model_attempt: None,
         subagent_type: "general-purpose".into(),
         prompt: "do one thing".into(),
         observer: None,
@@ -264,6 +263,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         max_input_bytes_per_turn: None,
         query_source_label: None,
         correlation_id: None,
+        model_attempt: None,
     }
 }
 

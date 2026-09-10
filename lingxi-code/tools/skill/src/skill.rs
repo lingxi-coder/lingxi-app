@@ -343,7 +343,6 @@ impl SkillTool {
             ctx.origin_session_id
         };
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
-            model_attempt: None,
             subagent_type: desc
                 .agent
                 .clone()
@@ -392,6 +391,7 @@ impl SkillTool {
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         };
         let mut invoker_impl = tool_api::tool_invoker_impl::RegistryToolInvoker::new(
             ctx.subagent_registry.clone().ok_or_else(|| {

@@ -170,7 +170,6 @@ mod tests {
 
     fn request(subagent_type: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
-            model_attempt: None,
             subagent_type: subagent_type.into(),
             prompt: "do the thing".into(),
             observer: None,
@@ -210,6 +209,7 @@ mod tests {
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         }
     }
 

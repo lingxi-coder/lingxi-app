@@ -297,7 +297,6 @@ impl Task for DreamHandler {
         //    `context_paths` has no source on the variant, so an empty vec is
         //    passed.
         let request = SubagentSpawnRequest {
-            model_attempt: None,
             subagent_type: DREAM_SUBAGENT_TYPE.to_string(),
             prompt: build_consolidation_prompt(&prompt),
             observer: None,
@@ -343,6 +342,7 @@ impl Task for DreamHandler {
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer

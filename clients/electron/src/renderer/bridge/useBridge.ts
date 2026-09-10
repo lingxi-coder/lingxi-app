@@ -822,6 +822,7 @@ export function useBridge(): UseBridge {
   const [pendingSession, setPendingSession] = useState<SessionRef | null>(null);
   const [runtimeStates, setRuntimeStates] = useState<Map<string, RuntimeState>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const clearError = useCallback(() => setError(null), []);
   const [audioSnapshot, setAudioSnapshot] = useState<NativeAudioSnapshot>(defaultNativeAudioSnapshot());
   // Settings are file-layer state, not per-conversation state, so this is
   // one value for the whole app rather than something keyed into `runtimeStates`.
@@ -2370,7 +2371,7 @@ export function useBridge(): UseBridge {
     pendingComputerAccess: computerAccessQueue[0] ?? null,
     pendingAskUserQuestion: askUserQuestionQueue[0] ?? null,
     error,
-    clearError: () => setError(null),
+    clearError,
     sendTrackedPrompt,
     subscribeTrackedSpeech,
     sendPrompt,

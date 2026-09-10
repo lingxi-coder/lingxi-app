@@ -2786,6 +2786,12 @@ export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): v
 
 export function ErrorBanner({ bridge }: { bridge: UseBridge }) {
   const t = useT();
+  useEffect(() => {
+    if (!bridge.error) return undefined;
+    const timeoutId = window.setTimeout(() => bridge.clearError(), 5_000);
+    return () => window.clearTimeout(timeoutId);
+  }, [bridge.error, bridge.clearError]);
+
   if (!bridge.error) return null;
   const error = classifyDesktopError(bridge.error);
   return (

@@ -134,8 +134,8 @@ oracle 2.1.267 的谓词是 `a0`（`src_163219561.js` @699180，.266 里叫 `jH`
 | `launch workflows or act on existing runs.` | ✅ `tools/workflow/src/lib.rs` |
 | `send messages.` | ✅ `tools/ui/src/send_message.rs` |
 | `start monitors.` | ✅ `tools/task/src/monitor.rs` |
-| `resume other agents.` | ⬜ 未接 |
-| `Shell exec refused: agent ${id} has a kill pending loop settlement` | ⬜ 见下 |
+| `resume other agents.`（调用方一侧） | ✅ 端口的 resume 走 SendMessage，已由上一行覆盖 |
+| `Shell exec refused: agent ${id} has a kill pending loop settlement` | ✅ `tools/shell/src/bash.rs`（`f888a1761`） |
 
 #### 🚨 原来的阻塞判断是错的，我中途的替代判断也是错的
 
@@ -171,12 +171,36 @@ registry）新增 refcount 的 stop-pending 集合，RAII guard：
 settle；端口的「轮询 + `deallocate`」本身就给窗口封了顶，定时器在这儿无事可做，
 可观测行为一致。
 
-#### ⬜ 剩下的一个：shell exec
+#### shell exec 的形状决定（`f888a1761`）
 
-上游 `if(Fe!==void 0&&a0(Fe)) return t('Shell exec refused: …'), rSe();` —— 记日志后
-返回它那个 canned 的 aborted **结果**；端口的 cancel 路径返回的是 **Err**
-（`foreground_returns_aborted_when_cancel_token_fired`）。两种形状要先定一个，
-不是照抄那三行就行，所以单独留着。
+上游 `if(Fe!==void 0&&a0(Fe)) return t('Shell exec refused: …'), rSe();`
+—— `rSe()` 返回的是 **它自己 abort 路径返回的同一个值**（`xDt`：`status:"killed"`、
+`code:145`、`stderr:"Command aborted before execution"`、`interrupted:!0`），
+那句话只进**日志**，不给模型看。
+
+所以不变量不是那几个 wire 值，而是「**停止中的 exec，按 abort 的方式拒**」。
+端口的 abort 值是 `ToolError::Aborted`（`turn_loop` 把它映射成 `"interrupted"`
+的 `toolDenialKind`）。照抄 `code:145` 那个 body 会**凭空造一个别处都不存在的结果形状**，
+而且把「拒绝执行」报成「跑过了并且失败了」—— 两边代码都不是这么用它的。
+那句话按上游的位置留在 debug 日志里。
+
+⚠️ 种雷验证里 **S2（把 `Aborted` 换成 `InvalidInput`）会红** —— 形状本身被钉住了，
+不是只钉了「有没有拒」。
+
+#### ⬜ 仍然没做：resume 的**目标**一侧
+
+上游那个站点有**两个**检查，第二个不是同一族：
+
+```js
+if(a0(e)||!xh(e)&&Ps(d.get(e)?.status??"running"))
+  throw new Pne(`Agent ${e} is still stopping — its previous run was stopped but has not exited. …`)
+```
+
+`e` 是**被 resume 的那个** agent。调用方那一半端口已经覆盖（resume 走 SendMessage，
+门已经在），但目标这一半在工具层**没有落点**：端口没有上游那套 resume 状态机
+（`resuming` 标志、`already running or being resumed`），resume 发生在更深的
+handler / streaming spawner 里。要做得先找到那个分支，别硬塞进 SendMessage ——
+它同时也给**运行中**的 agent 投递消息，一刀切会拒掉正常投递。
 
 ### 3.2 AG-14 — harness-note 分层（**2026-09-10 复查：不是一个整层的移植任务**）
 

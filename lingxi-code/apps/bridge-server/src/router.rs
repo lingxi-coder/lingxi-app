@@ -2694,6 +2694,19 @@ impl EngineCommandRouter {
                     }
                 }
                 None => {
+                    // A persistent runner can be visible in the live roster
+                    // before its first JSONL append reaches disk. Treat that
+                    // narrow startup window as a quiet retry; surfacing a
+                    // rejected command here makes the renderer's poll loop
+                    // append the same "not found" row every tick. Historical
+                    // ids still take the explicit error path below.
+                    if self.has_live_session_agent_task(&agent_id).await {
+                        tracing::debug!(
+                            %agent_id,
+                            "session agent transcript is not on disk yet; retrying"
+                        );
+                        return;
+                    }
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
                         message: "session agent transcript was not found".to_string(),
@@ -2732,6 +2745,28 @@ impl EngineCommandRouter {
             revision,
         })
         .await;
+    }
+
+    /// Whether a missing transcript belongs to a currently live background
+    /// agent. The task registry is the authoritative bridge-side view during
+    /// the short allocation→first-write window; a parked agent remains
+    /// resumable even though its task status is terminal.
+    async fn has_live_session_agent_task(&self, agent_id: &str) -> bool {
+        self.tasks
+            .list(TaskListFilter::default())
+            .await
+            .ok()
+            .is_some_and(|rows| {
+                rows.into_iter().any(|row| {
+                    row.task_type == "local_agent"
+                        && row.owner_agent_id.as_deref() == Some(agent_id)
+                        && (row.is_parked
+                            || matches!(
+                                row.status.as_str(),
+                                "pending" | "running" | "paused"
+                            ))
+                })
+            })
     }
 
     /// Snapshot the live slash-command catalog from the shared registry, adding

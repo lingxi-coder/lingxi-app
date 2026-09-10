@@ -2054,6 +2054,25 @@ pub trait StreamingSubagentSpawner: Send + Sync {
         Ok((agent_id, receiver))
     }
 
+    /// Spawn a persistent subagent under a caller-assigned identity.
+    ///
+    /// Background task registration allocates the public agent id before the
+    /// handler starts the runner. Implementations that can reserve identities
+    /// should override this method so the returned id, transcript filename,
+    /// task row, and mailbox all refer to that same agent. The default keeps
+    /// older injected spawners source-compatible; their own allocator remains
+    /// authoritative.
+    async fn spawn_persistent_with_observer_for_id(
+        &self,
+        _agent_id: AgentId,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        observer: Arc<dyn SubagentSpawnObserver>,
+    ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
+        self.spawn_persistent_with_observer(request, inherit, observer)
+            .await
+    }
+
     /// Restore a transcript-backed runner under its persisted identity.
     /// Implementations without stable allocation must refuse rather than
     /// silently route child notifications to a different agent.
@@ -2109,6 +2128,17 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         observer: Arc<dyn SubagentSpawnObserver>,
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
         self.spawn_persistent_internal(request, inherit, Some(observer), None)
+            .await
+    }
+
+    async fn spawn_persistent_with_observer_for_id(
+        &self,
+        agent_id: AgentId,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        observer: Arc<dyn SubagentSpawnObserver>,
+    ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
+        self.spawn_persistent_internal(request, inherit, Some(observer), Some(agent_id))
             .await
     }
 
@@ -3668,6 +3698,34 @@ mod tests {
         spawner.stop(&old_id).await.unwrap();
         spawner.stop(&old_id).await.unwrap();
         assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_persistent_spawn_preserves_requested_identity() {
+        struct Observer;
+        #[async_trait]
+        impl SubagentSpawnObserver for Observer {
+            async fn on_event(&self, _: SubagentObservation) {}
+        }
+
+        let pool = Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            2,
+        ));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let requested_id = AgentId::new();
+        let (actual_id, _events) = spawner
+            .spawn_persistent_with_observer_for_id(
+                requested_id,
+                minimal_spawn_request("fresh stable identity"),
+                dummy_inherit(),
+                Arc::new(Observer),
+            )
+            .await
+            .expect("persistent spawn should accept the preallocated identity");
+
+        assert_eq!(actual_id, requested_id);
+        spawner.stop(&requested_id).await.expect("stop should succeed");
     }
 
     /// §24b PRODUCTION reachability: a wired `mcp_tool_builder` must (a) have

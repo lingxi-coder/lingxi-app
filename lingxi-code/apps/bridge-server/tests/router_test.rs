@@ -457,11 +457,19 @@ fn router_with_store(
     handle: Arc<MockOrchestratorHandle>,
     root: &std::path::Path,
 ) -> EngineCommandRouter {
+    router_with_store_and_tasks(handle, root, Arc::new(MockTaskRegistry { rows: vec![] }))
+}
+
+fn router_with_store_and_tasks(
+    handle: Arc<MockOrchestratorHandle>,
+    root: &std::path::Path,
+    tasks: Arc<dyn TaskRegistryHandle>,
+) -> EngineCommandRouter {
     let cwd = root.to_string_lossy().into_owned();
     EngineCommandRouter::new(
         handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
-        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        tasks,
         None,
         None,
     )
@@ -2085,6 +2093,39 @@ async fn session_agent_transcript_route_reports_absent_and_corrupt_files() {
         [ClientEvent::Error { kind: ErrorKindDto::Internal, message }]
             if message.contains("corrupt")
     ));
+}
+
+#[tokio::test]
+async fn live_session_agent_without_a_first_transcript_write_retries_quietly() {
+    let root = tempfile::tempdir().unwrap();
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let agent_id = protocol::AgentId::new();
+    let tasks = Arc::new(MockTaskRegistry {
+        rows: vec![TaskRecord {
+            task_id: "a-liveagent".into(),
+            task_type: "local_agent".into(),
+            status: "running".into(),
+            owner_agent_id: Some(agent_id.to_string()),
+            description: "still starting".into(),
+            ..Default::default()
+        }],
+    });
+    let router = router_with_store_and_tasks(handle, root.path(), tasks);
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::LoadSessionAgentTranscript {
+                agent_id: agent_id.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert!(
+        sink.events().await.is_empty(),
+        "a live agent whose first JSONL append has not landed must be retried without a user-visible error"
+    );
 }
 
 #[cfg(unix)]

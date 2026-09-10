@@ -731,7 +731,11 @@ impl LocalAgentHandler {
                     let started = if request.resumed_history.is_some() {
                         streaming.restore_persistent_with_observer(requested_agent_id, request, inherit, observer).await
                     } else {
-                        streaming.spawn_persistent_with_observer(request, inherit, observer).await
+                        // The registry allocates the public agent id before
+                        // entering this handler. Preserve it in the inner
+                        // runner so its transcript path, observer events,
+                        // task row, and mailbox all address the same agent.
+                        streaming.spawn_persistent_with_observer_for_id(requested_agent_id, request, inherit, observer).await
                     };
                     let (agent_id, mut rx) = match started {
                             Ok(v) => v,

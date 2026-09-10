@@ -13,6 +13,7 @@ pub mod code_review_skill;
 pub mod cron_skill;
 pub mod dataviz_skill;
 pub mod deep_research_skill;
+pub mod explain_usage_skill;
 pub mod fewer_permission_prompts_skill;
 pub mod keybindings_help_skill;
 pub mod loop_skill;
@@ -44,6 +45,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_dataviz_skill(reg);
     register_update_config_skill(reg);
     register_keybindings_help_skill(reg);
+    register_explain_usage_skill(reg);
 }
 
 /// Register the user-facing `/cron` scheduler command.
@@ -409,6 +411,8 @@ mod tests {
             "cron".to_string(),
             "dataviz".to_string(),
             "deep-research".to_string(),
+            // Ported 2026-09-10.
+            "explain-usage".to_string(),
             "fewer-permission-prompts".to_string(),
             // Ported 2026-09-10: model-invocable only (`userInvocable:!1`), so
             // it never shows in the slash menu; the user route is /keybindings.
@@ -803,6 +807,24 @@ fn register_keybindings_help_skill(reg: &mut CommandRegistry) {
         },
         loaded_from: Some("bundled".into()),
         user_invocable: Some(false),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
+/// Register the `/explain-usage` bundled skill (reference registrar `Mo`).
+fn register_explain_usage_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "explain-usage".into(),
+        description: explain_usage_skill::EXPLAIN_USAGE_DESCRIPTION.into(),
+        menu_description: Some("See where this session\u{2019}s tokens went, in plain words".into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(explain_usage_skill::ExplainUsagePromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
     });

@@ -154,13 +154,13 @@ Upstream 2.1.267 registers **21** (`uo({name:…})`, variable names resolved):
 `run-skill-generator`, `setup-claude`, `update-config`, `whiteboard`,
 `workflow-authoring`, `workshop`.
 
-The port registers **15** through `register_bundled_skills` (11 + `update-config`,
-`keybindings-help`, `explain-usage` and `workflow-authoring`, added 2026-09-10), plus `claude-api` as the `skill-api`
+The port registers **16** through `register_bundled_skills` (11 + `update-config`,
+`keybindings-help`, `explain-usage`, `workflow-authoring` and `checkup`, added 2026-09-10), plus `claude-api` as the `skill-api`
 compiled-in builtin.
 
-| in both (9) | LingXi-only (4) | upstream-only (12) |
+| in both (10) | LingXi-only (4) | upstream-only (11) |
 |---|---|---|
-| batch, claude-api, code-review, dataviz, explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config, workflow-authoring | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, memory-types, setup-claude, whiteboard, workshop |
+| batch, claude-api, code-review, dataviz, doctor (as `checkup`), explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config, workflow-authoring | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, memory-types, setup-claude, whiteboard, workshop |
 
 ### The remaining nine, adjudicated one by one (2026-09-10)
 
@@ -230,7 +230,7 @@ Also pinned: the line telling the model to treat transcript contents as data
 rather than instructions. It is the skill's only defence against a transcript
 that contains instruction-shaped text.
 
-### ⛔ `doctor` — NOT a port; this surface already exists by another mechanism
+### ✅ `doctor` — RESOLVED 2026-09-10: landed as `/checkup` (see §2.5)
 
 Upstream's `doctor` is a bundled SKILL (`uo({name:"doctor",aliases:["checkup"],
 survivesBundledKillSwitch:!0,requires:{workspace:!0},terminalOriented:!0,…})`) —
@@ -241,12 +241,17 @@ handler (`commands/core/src/doctor.rs`) rendering a LOCKED report, plus the
 `lingxi-cli doctor` subcommand. Registering a bundled skill under the same name
 would collide with that builtin registration.
 
-So this is an adjudication, not a backlog item: the user-facing capability is
-present, delivered differently. ⛔ Do not "port" it by registering a second
-`doctor` — decide first whether this port wants the deterministic report, the
-model-driven one, or both under distinct names. Same shape as the
-`commands/`-as-skills row above: a feature judged absent because one mechanism
-was missing, when another already covers it.
+The open question this section posed — "the deterministic report, the
+model-driven one, or both under distinct names" — was **decided by the user on
+2026-09-10: both, under distinct names.** Upstream's skill now ships as
+`/checkup`, which is upstream's OWN alias for it, so the port neither collides
+with the builtin `doctor` nor invents a name. Full write-up, including the two
+Anthropic-distribution checks that were cut, in §2.5.
+
+⛔ The original warning still stands and is why this landed as `checkup`: do not
+register a second `doctor`. Same shape as the `commands/`-as-skills row above —
+a feature judged absent because one mechanism was missing, when another already
+covers part of it.
 
 ⚠️ **A near miss worth recording.** `stuck` was reported out of this audit as a
 fourth portable name. It is not a bundled skill — it has ~50 occurrences in the
@@ -426,3 +431,46 @@ and gating on a predicate the registration site cannot see risks the one state
 the invariant forbids — the skill absent while the description claims it is
 loadable. Registered unconditionally instead; a reference readable while
 workflows are off is inert.
+
+## 2.5 `doctor` — LANDED 2026-09-10 as `/checkup`
+
+Commit `e8da94ffa`. Upstream registers `doctor` with `aliases:["checkup"]`,
+`terminalOriented:!0`, `disableModelInvocation:!0`. This port already ships a
+`/doctor` that is a **different thing**: a deterministic command whose
+`DoctorReport` DTO the GUI clients render as a screen (`doctor_report_parity`
+in `client-adapter`). Both wanted the name; neither subsumes the other. User
+decision 2026-09-10: keep `/doctor`, land upstream's under its own alias.
+
+**Two of ten checks cut**, both Anthropic-DISTRIBUTION diagnostics already
+excluded by the accepted divergences:
+
+| cut | why |
+|---|---|
+| Check 7 (version currency), whole | `npm view @anthropic-ai/claude-code`, `downloads.claude.ai/claude-code-releases`, `claude-code` Homebrew casks, `claude update` — LingXi ships through none of them |
+| Check 0's first two bullets | enumerate `~/.local/bin/claude`, npm-global `@anthropic-ai/claude-code`, `installMethod` |
+
+Check 0's other three bullets (unparseable settings, broken/colliding agent
+definitions, malformed skill frontmatter) map exactly and are kept, as are
+checks 1-6 and 8-9.
+
+🚨 **Cutting a numbered check moves every cross-reference to it** — the report
+format's check list, the "checks 0 and 7" command note, the consolidated-cleanup
+gate, and the data-sources header, which advertised check 7 as the one permitted
+network call. Prose has no compiler, so
+`the_check_numbering_is_self_consistent` pins the heading set, the absence of
+any "check 7" reference, and the actionable-check list together.
+
+⛔ `mcp__claude_ai_<connector>__` is deliberately NOT rebranded — it is the wire
+prefix for claude.ai connectors. Rebranding it would stop the model matching
+real transcript entries **while every branding assertion still passed**, so it
+has its own test, red-proofed separately.
+
+**Substrate verified rather than rebranded on faith:** skill usage is
+`~/.lingxi/skill_usage.json` (a file, not a key in `~/.claude.json`); transcripts
+`~/.lingxi/projects/<cwd>[-<djb2>]/*.jsonl`; `MAX_MEMORY_CHARACTER_COUNT` in
+`memory/src/lib.rs`; `lingxi-cli plugin validate` / `mcp remove`.
+⚠️ `pluginUsage` has NO counterpart here — plugin guidance rests on transcript
+evidence, which is upstream's own fallback for zero-count plugins.
+⚠️ Upstream's `progressMessage:"running checkup"` is unwired: `SlashCommand`
+carries no such field.
+

@@ -40,8 +40,6 @@ expression: names
 - TaskOutput
 - TaskStop
 - TaskUpdate
-- TeamCreate
-- TeamDelete
 - TodoWrite
 - ToolSearch
 - WaitForMcpServers

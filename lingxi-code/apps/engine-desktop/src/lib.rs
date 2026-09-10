@@ -6580,6 +6580,12 @@ pub async fn desktop_command_registry(
     connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
     gates: CustomizationGates,
     strict_plugin_only_skills: bool,
+    // `--add-dir` roots. Each contributes `<root>/<DOT_DIR>/skills` to skill
+    // discovery, mirroring upstream's
+    // `for(let e of Up()){ let S = P.join(e,".claude","skills"); … }`
+    // (2.1.267 `src_172414592.js` @5180). Raw roots, NOT skill dirs: the join
+    // happens below so all three registration sites share one answer.
+    add_dir_roots: &[std::path::PathBuf],
     // SKILLEXEC: the SAME shared command-registry slot the slash dispatcher and
     // `Skill` tool loader observe (filled by `build()` right after this returns).
     // `/reload-skills` (batch 8) mutates it live so a reload refreshes the set
@@ -6626,6 +6632,13 @@ pub async fn desktop_command_registry(
     // same-named custom command shadows a builtin (TS findCommand order).
     let home = dirs::home_dir().unwrap_or_else(|| lingxi_home.to_path_buf());
     let managed_dir = crate::settings_watch::managed_settings_dir();
+    // The `--add-dir` skill tier. `load_skill_markdown_files_with_roots` takes
+    // ALREADY-RESOLVED skill directories (a test pins that contract), so the
+    // `<root>/<DOT_DIR>/skills` join belongs to the caller — here.
+    let additional_skill_dirs: Vec<std::path::PathBuf> = add_dir_roots
+        .iter()
+        .map(|root| root.join(branding::DOT_DIR).join("skills"))
+        .collect();
     // Batch 8: the newly-ported implemented commands (`/fork`, `/goal`,
     // `/recap`, `/reload-skills`, `/skill-doctor`, `/stop`). Wired here (after
     // the skill-discovery roots are known, before the `disables_skills` early
@@ -6638,7 +6651,7 @@ pub async fn desktop_command_registry(
         lingxi_home.to_path_buf(),
         Some(managed_dir.clone()),
         home.clone(),
-        Vec::new(),
+        additional_skill_dirs.clone(),
         gates.safe_mode,
         load_merged_disable_agent_view(cwd),
     );
@@ -6671,7 +6684,7 @@ pub async fn desktop_command_registry(
                 lingxi_home,
                 Some(&managed_dir),
                 &home,
-                &[],
+                &additional_skill_dirs,
             )
             .await,
         )
@@ -6680,7 +6693,7 @@ pub async fn desktop_command_registry(
         cwd.to_path_buf(),
         lingxi_home.to_path_buf(),
         Some(managed_dir),
-        Vec::new(),
+        additional_skill_dirs,
     )));
     tracing::debug!(
         custom_commands = registered,
@@ -8228,7 +8241,10 @@ struct AgentMcpConnectLoopGuard {
 }
 
 impl AgentMcpConnectLoopGuard {
-    fn new(agent_type: String, lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>) -> Self {
+    fn new(
+        agent_type: String,
+        lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
+    ) -> Self {
         Self {
             lease,
             cleanups: Vec::new(),
@@ -8409,7 +8425,6 @@ async fn build_agent_mcp_tool_set(
             );
             tools.push(Arc::new(tool) as Arc<dyn tool_api::Tool>);
         }
-
     }
     agent::agent_mcp_tools::AgentMcpToolSet {
         tools,
@@ -9401,9 +9416,10 @@ pub async fn build_shared_credential_stack_with_policy(
     isolated_credential_storage: bool,
     credential_storage_policy: CredentialStoragePolicy,
 ) -> Result<SharedCredentialStack, BuildError> {
-    let http = Arc::new(PosixHttp::new().with_monitor_proxy(Arc::new(
-        sandbox_runtime_runner::MonitorProxyConnector,
-    )));
+    let http = Arc::new(
+        PosixHttp::new()
+            .with_monitor_proxy(Arc::new(sandbox_runtime_runner::MonitorProxyConnector)),
+    );
     let clock = Arc::new(PosixClock::new());
     let credentials_path = lingxi_home.join(".credentials.json");
     let storage = if isolated_credential_storage {
@@ -11243,7 +11259,8 @@ pub async fn build(
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
-    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> = subagent_spawner_arc.clone();
+    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> =
+        subagent_spawner_arc.clone();
 
     //       The budget enforcer shares both the process `CostTracker` and the
     //       CLI `--max-budget` ceiling with the main orchestrator. Claude Code
@@ -13019,7 +13036,11 @@ pub async fn build(
         let deny_seed = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
         let ctx = sandbox::policy_convert::SandboxConvertContext {
             lingxi_temp_dir: Some(lingxi_temp_dir()),
-            task_output_dir: Some(session_task_output_dir(&cwd, &main_session_uuid).to_string_lossy().into_owned()),
+            task_output_dir: Some(
+                session_task_output_dir(&cwd, &main_session_uuid)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             settings_file_paths: vec![
                 deny_seed(cfg.lingxi_home.join("settings.json")),
                 deny_seed(cwd.join(branding::DOT_DIR).join("settings.json")),
@@ -14568,6 +14589,7 @@ pub async fn build(
         connect_chatgpt,
         cfg.customization_gates,
         strict_plugin_only_skills,
+        &cfg.add_dir,
         shared_command_registry.clone(),
     )
     .await;
@@ -15774,6 +15796,7 @@ mod tests {
             Arc::new(G),
             super::CustomizationGates::default(),
             false,
+            &[],
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
         )
         .await;
@@ -15881,6 +15904,7 @@ mod tests {
                 Arc::new(G),
                 gates,
                 false,
+                &[],
                 Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
             )
             .await;
@@ -15892,6 +15916,113 @@ mod tests {
             assert!(
                 reg.get_handler("connect").is_some(),
                 "{gates:?}: builtins must stay registered"
+            );
+        }
+    }
+
+    /// An `--add-dir` root contributes `<root>/<DOT_DIR>/skills` to discovery.
+    ///
+    /// Upstream 2.1.267 (`src_172414592.js` @5180) closes its skill-directory
+    /// assembly with
+    /// `for(let e of Up()){ let S = P.join(e,".claude","skills"); … s.push(S) }`.
+    /// This port had the parameter all the way down to the loader and passed
+    /// `Vec::new()` at all three registration sites, so the tier existed and was
+    /// never populated — and the loader would have used the root DIRECTLY as a
+    /// skills dir rather than joining, so wiring it naively would still have
+    /// found nothing.
+    ///
+    /// Two arms on purpose: the first proves the skill is not reachable by some
+    /// ambient path, so the second is really testing the root.
+    #[tokio::test]
+    async fn an_add_dir_root_contributes_its_skills() {
+        use async_trait::async_trait;
+        use command_core::{
+            ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
+            CopilotConnectStep,
+        };
+        use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+
+        struct MockAuth;
+        #[async_trait]
+        impl AuthHandle for MockAuth {
+            async fn login(&self) -> Result<LoginInfo, AuthError> {
+                Err(AuthError::Cancelled)
+            }
+            async fn logout(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+            async fn current_user(&self) -> Option<LoginInfo> {
+                None
+            }
+        }
+        struct W;
+        #[async_trait]
+        impl ConnectCredentialWriter for W {
+            async fn prompt_and_store_key(&self, _id: &str) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct C;
+        #[async_trait]
+        impl CopilotConnectDriver for C {
+            async fn begin(
+                &self,
+                _domain: Option<&str>,
+            ) -> Result<CopilotConnectStep, ConnectError> {
+                Ok(CopilotConnectStep {
+                    user_code: "X".into(),
+                    verification_uri: "u".into(),
+                })
+            }
+            async fn poll_to_completion(
+                &self,
+                _s: &CopilotConnectStep,
+            ) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct G;
+        #[async_trait]
+        impl ChatGptConnectDriver for G {
+            async fn connect(&self) -> Result<String, ConnectError> {
+                Ok("Connected chatgpt.".into())
+            }
+        }
+
+        let cwd_tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = cwd_tmp.path().to_path_buf();
+        let root_tmp = tempfile::tempdir().expect("tempdir");
+        let root = root_tmp.path().to_path_buf();
+        let skill_dir = root.join(branding::DOT_DIR).join("skills").join("addskill");
+        std::fs::create_dir_all(&skill_dir).expect("mk skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: From an add-dir\n---\nbody\n",
+        )
+        .expect("write SKILL.md");
+
+        for (roots, want) in [(Vec::new(), false), (vec![root.clone()], true)] {
+            let handle: Arc<dyn OrchestratorHandle> =
+                Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+            let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth);
+            let reg = super::desktop_command_registry(
+                handle,
+                auth,
+                &cwd,
+                &cwd,
+                Arc::new(W),
+                Arc::new(C),
+                Arc::new(G),
+                super::CustomizationGates::default(),
+                false,
+                &roots,
+                Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
+            )
+            .await;
+            assert_eq!(
+                reg.resolve("addskill").is_some(),
+                want,
+                "add-dir roots {roots:?}: the skill must be reachable only through the root"
             );
         }
     }
@@ -18200,7 +18331,8 @@ still flip to available"
             vec![std::path::PathBuf::from("/tmp")],
         );
         ctx.mcp_registry = Some(registry.clone());
-        let set = super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def, None).await;
+        let set =
+            super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def, None).await;
         assert_eq!(set.tools.len(), 3);
 
         let deny = set
@@ -25671,7 +25803,9 @@ mod desktop_agent_mcp_cleanup_guard_tests {
     /// server is already live and its cleanup handle already sits in the
     /// function's local `cleanups` vec. Dropping the future there is exactly
     /// the Fusion `join_set.abort_all()` race the finding describes.
-    struct HangingConnectTransport { entered: Arc<tokio::sync::Notify> }
+    struct HangingConnectTransport {
+        entered: Arc<tokio::sync::Notify>,
+    }
 
     #[async_trait::async_trait]
     impl McpTransport for HangingConnectTransport {
@@ -25777,11 +25911,20 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         agent::AgentMcpServerSpec::Record(server)
     }
 
-    async fn connect_loop_fixture() -> (protocol::AgentId, String, Arc<mcp::McpRegistry>, tool_api::BuiltinToolContext, agent::AgentDefinition, Arc<tokio::sync::Notify>) {
+    async fn connect_loop_fixture() -> (
+        protocol::AgentId,
+        String,
+        Arc<mcp::McpRegistry>,
+        tool_api::BuiltinToolContext,
+        agent::AgentDefinition,
+        Arc<tokio::sync::Notify>,
+    ) {
         let agent_id = protocol::AgentId::new();
         let opened_key = mcp::registry::agent_scope_table_key(agent_id, "opened");
         let entered = Arc::new(tokio::sync::Notify::new());
-        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport { entered: entered.clone() })));
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport {
+            entered: entered.clone(),
+        })));
         // `opened` is already live, so `connect_agent_scoped` short-circuits
         // on it and the loop pushes its cleanup handle; `hangs` is not, so
         // its connect parks in the transport forever.
@@ -25840,7 +25983,15 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         let (agent_id, opened_key, registry, ctx, def, _) = connect_loop_fixture().await;
         let outcome = tokio::time::timeout(
             Duration::from_millis(300),
-            super::build_agent_mcp_tool_set(registry.clone(), ctx, false, false, agent_id, def, None),
+            super::build_agent_mcp_tool_set(
+                registry.clone(),
+                ctx,
+                false,
+                false,
+                agent_id,
+                def,
+                None,
+            ),
         )
         .await;
         assert!(
@@ -25921,8 +26072,9 @@ a plain local that no caller has ever seen, so nothing else can ever tear it dow
                 assert_eq!(actual, id);
                 build_calls.fetch_add(1, Ordering::SeqCst);
                 let lease = Arc::new(LeaseProbe {
-                    _lease: Some(lease
-                        .expect("restored construction must carry its identity reservation")),
+                    _lease: Some(
+                        lease.expect("restored construction must carry its identity reservation"),
+                    ),
                     released: release_probe.clone(),
                 }) as agent::agent_mcp_tools::AgentMcpConstructionLease;
                 Box::pin(super::build_agent_mcp_tool_set(
@@ -26048,5 +26200,4 @@ pub fn supervisor_exit_sink(
         manager,
         path.to_path_buf(),
     ))
-
 }

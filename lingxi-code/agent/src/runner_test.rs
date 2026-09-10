@@ -76,6 +76,9 @@ struct StreamingMockApiClient {
     /// Tools seen on the most recent `messages_create_stream` call — lets a
     /// test prove `ctx.tool_schemas` threads through the seam.
     last_tools: Mutex<Vec<serde_json::Value>>,
+    /// The model each call was issued against, in order — lets a test prove a
+    /// refusal hop actually re-issued against the fallback.
+    models: Mutex<Vec<String>>,
 }
 
 impl StreamingMockApiClient {
@@ -84,7 +87,12 @@ impl StreamingMockApiClient {
             turns: Mutex::new(turns.into_iter().collect()),
             calls: AtomicUsize::new(0),
             last_tools: Mutex::new(Vec::new()),
+            models: Mutex::new(Vec::new()),
         })
+    }
+
+    fn models(&self) -> Vec<String> {
+        self.models.lock().unwrap().clone()
     }
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
@@ -108,7 +116,7 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
 
     async fn messages_create_stream(
         &self,
-        _model: &str,
+        model: &str,
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -119,6 +127,7 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
     > {
         use futures::StreamExt;
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.models.lock().unwrap().push(model.to_string());
         *self.last_tools.lock().unwrap() = tools;
         let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
@@ -491,6 +500,7 @@ fn loop_ctx(
 /// Build a `SubagentContext` with the minimum fields the runner reads.
 fn fresh_subagent_ctx() -> SubagentContext {
     SubagentContext {
+        task_registry: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_name: None,
@@ -568,6 +578,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         query_source_label: None,
         correlation_id: None,
         model_attempt: None,
+        refusal_fallback_chain: Vec::new(),
     }
 }
 
@@ -2113,6 +2124,79 @@ fn structured_output_validation_and_cap_helpers() {
     assert!(validate_structured_output(Some("{ not json"), &serde_json::json!({})).is_ok());
     // Default cap is 5 (claude `OBp`).
     assert_eq!(structured_output_retry_cap(), 5);
+}
+
+#[test]
+fn local_app_operator_schema_requires_complete_host_qa_projection() {
+    let document: serde_json::Value = serde_json::from_str(include_str!(
+        "../../plugins/lingxi-local-app/schemas/workflow-agent-results.schema.json"
+    ))
+    .expect("parse checked-in Local App workflow role schemas");
+    let mut schema = document["$defs"]["operator_result"].clone();
+    schema["$defs"] = document["$defs"].clone();
+    let schema = serde_json::to_string(&schema).expect("serialize operator role schema");
+
+    let complete = serde_json::json!({
+        "ok": true,
+        "qa_handle": "qa_00000000000000000000000000000000",
+        "evidence_ids": ["evidence-1"],
+        "status": "evidence_collected",
+        "issues": [],
+        "summary": "Host evidence collected",
+        "verification_scope": {
+            "declared_target_ids": ["primary", "ipad"],
+            "in_scope_target_ids": ["primary"],
+            "unverified_target_ids": ["ipad"],
+            "unverified_scenario_ids": ["ipad-layout"]
+        },
+        "upstream_failures": [{
+            "id": "source:save",
+            "message": "save did not persist",
+            "introduced_at_ms": 10
+        }],
+        "upstream_findings": [{
+            "id": "source:save",
+            "message": "save did not persist",
+            "blocking": true,
+            "resolved_by_evidence_ids": []
+        }]
+    });
+    assert!(
+        validate_structured_output(Some(&schema), &complete).is_ok(),
+        "the complete Host QaBegin projection must satisfy the production validator"
+    );
+
+    let mut missing_scope = complete.clone();
+    missing_scope
+        .as_object_mut()
+        .expect("operator result object")
+        .remove("verification_scope");
+    assert!(
+        validate_structured_output(Some(&schema), &missing_scope).is_err(),
+        "operator output without canonical Host scope must fail closed"
+    );
+
+    for ledger_field in ["upstream_failures", "upstream_findings"] {
+        let mut missing_ledger = complete.clone();
+        missing_ledger
+            .as_object_mut()
+            .expect("operator result object")
+            .remove(ledger_field);
+        assert!(
+            validate_structured_output(Some(&schema), &missing_ledger).is_err(),
+            "operator output without {ledger_field} must fail closed"
+        );
+    }
+
+    let mut incomplete_finding = complete;
+    incomplete_finding["upstream_findings"][0]
+        .as_object_mut()
+        .expect("upstream finding object")
+        .remove("resolved_by_evidence_ids");
+    assert!(
+        validate_structured_output(Some(&schema), &incomplete_finding).is_err(),
+        "Host upstream finding projection must include resolution evidence ids"
+    );
 }
 
 #[tokio::test]
@@ -3853,6 +3937,14 @@ impl hooks::executor::BuiltinHookHandler for RecordingStopContextHook {
         ctx: &hooks::registry::HookContext,
     ) -> hooks::response::HookResult {
         if matches!(event, hooks::events::HookEvent::SubagentStop { .. }) {
+            let live = ctx
+                .prompt_transcript
+                .as_ref()
+                .expect("worker Stop must carry live history");
+            assert!(live.messages.iter().any(|message| matches!(message,
+                ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block, protocol::ContentBlock::Text { text } if text == "go")))));
+            assert!(live.messages.iter().any(|message| matches!(message,
+                ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, protocol::ContentBlock::Text { text } if text == "done")))));
             self.seen
                 .lock()
                 .unwrap()
@@ -5436,4 +5528,515 @@ fn cap_input_bytes_measurement_work_is_linear_for_many_pairs() {
         max,
         "linear metadata must preserve the exact full-history byte count"
     );
+}
+
+struct OwnerNotificationRegistry {
+    rest_acknowledged: AtomicBool,
+    wake_checked: tokio::sync::Notify,
+    drains: AtomicUsize,
+    parked_fold: tokio::sync::Notify,
+    owner: protocol::AgentId,
+    pending: Mutex<Vec<platform_api::task_registry::TaskNotification>>,
+    revision: tokio::sync::watch::Sender<u64>,
+}
+impl OwnerNotificationRegistry {
+    fn publish(&self) {
+        self.pending
+            .lock()
+            .unwrap()
+            .push(platform_api::task_registry::TaskNotification {
+                task_id: "achild".into(),
+                task_type: "local_agent".into(),
+                status: "completed".into(),
+                recipient_agent_id: Some(self.owner),
+                description: "child finished".into(),
+                ..Default::default()
+            });
+        self.revision.send_modify(|n| *n += 1);
+    }
+}
+#[async_trait]
+impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegistry {
+    async fn create(
+        &self,
+        _: platform_api::task_registry::TaskCreateInput,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn get(
+        &self,
+        _: &str,
+    ) -> Result<
+        Option<platform_api::task_registry::TaskRecord>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn list(
+        &self,
+        _: platform_api::task_registry::TaskListFilter,
+    ) -> Result<
+        Vec<platform_api::task_registry::TaskRecord>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        Ok(vec![])
+    }
+    async fn update(
+        &self,
+        _: &str,
+        _: platform_api::task_registry::TaskUpdatePatch,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn set_status(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn kill(
+        &self,
+        _: &str,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn output(
+        &self,
+        _: &str,
+        _: Option<u64>,
+    ) -> Result<
+        platform_api::task_registry::TaskOutputChunk,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn can_wake_agent_for_task_notification(&self, _: protocol::AgentId) -> bool {
+        let acknowledged = self.rest_acknowledged.load(Ordering::SeqCst);
+        self.wake_checked.notify_one();
+        acknowledged
+    }
+    fn subscribe_task_notifications(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.revision.subscribe())
+    }
+    async fn take_pending_task_notifications_for(
+        &self,
+        recipient: Option<protocol::AgentId>,
+    ) -> Result<
+        Vec<platform_api::task_registry::TaskNotification>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        assert_eq!(recipient, Some(self.owner));
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap());
+        if self.drains.fetch_add(1, Ordering::SeqCst) >= 2 {
+            self.parked_fold.notify_one();
+        }
+        Ok(pending)
+    }
+}
+
+#[tokio::test]
+async fn owner_notification_wakes_parked_runner_without_user_message() {
+    let api = MockSubagentApiClient::new(vec![
+        Ok(text_response("first", Some("end_turn"))),
+        Ok(text_response("second", Some("end_turn"))),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.persistent = true;
+    let registry = Arc::new(OwnerNotificationRegistry {
+        rest_acknowledged: AtomicBool::new(true),
+        wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0),
+        parked_fold: tokio::sync::Notify::new(),
+        owner: ctx.agent_id,
+        pending: Mutex::new(vec![]),
+        revision: tokio::sync::watch::channel(0).0,
+    });
+    ctx.task_registry = Some(registry.clone());
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+        registry.parked_fold.notified().await;
+        registry.publish();
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(api.call_count(), 2);
+    let json = serde_json::to_string(&api.last_messages()).unwrap();
+    assert_eq!(json.matches("<task-id>achild</task-id>").count(), 1);
+    drop(event_tx);
+    runner.await.unwrap();
+}
+
+struct NotificationDuringRequestApi {
+    registry: Arc<OwnerNotificationRegistry>,
+    completed: AtomicBool,
+    calls: AtomicUsize,
+    last_messages: Mutex<Vec<ConversationMessage>>,
+}
+#[async_trait]
+impl crate::api::SubagentApiClient for NotificationDuringRequestApi {
+    async fn messages_create(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        *self.last_messages.lock().unwrap() = messages;
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.registry.publish();
+            // Notification arrives with a genuinely pending provider future.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            self.completed.store(true, Ordering::SeqCst);
+        }
+        Ok(text_response("done", Some("end_turn")))
+    }
+}
+#[tokio::test]
+async fn owner_notification_folds_after_inflight_request_without_cancelling_it() {
+    let mut ctx = fresh_subagent_ctx();
+    let registry = Arc::new(OwnerNotificationRegistry {
+        rest_acknowledged: AtomicBool::new(true),
+        wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0),
+        parked_fold: tokio::sync::Notify::new(),
+        owner: ctx.agent_id,
+        pending: Mutex::new(vec![]),
+        revision: tokio::sync::watch::channel(0).0,
+    });
+    let api = Arc::new(NotificationDuringRequestApi {
+        registry: registry.clone(),
+        completed: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+        last_messages: Mutex::new(vec![]),
+    });
+    ctx.api_client = Some(api.clone());
+    ctx.task_registry = Some(registry);
+    ctx.agent_definition.max_turns = 4;
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+    })
+    .await
+    .unwrap();
+    assert!(
+        api.completed.load(Ordering::SeqCst),
+        "original provider future survived notification"
+    );
+    assert_eq!(api.calls.load(Ordering::SeqCst), 2);
+    assert!(serde_json::to_string(&*api.last_messages.lock().unwrap())
+        .unwrap()
+        .contains("<task-id>achild</task-id>"));
+    drop(event_tx);
+    runner.await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_notification_waits_for_handler_rest_acknowledgement() {
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("first", Some("end_turn"))), Ok(text_response("second", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.persistent = true;
+    let registry = Arc::new(OwnerNotificationRegistry {
+        rest_acknowledged: AtomicBool::new(false), wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0), parked_fold: tokio::sync::Notify::new(), owner: ctx.agent_id,
+        pending: Mutex::new(vec![]), revision: tokio::sync::watch::channel(0).0,
+    });
+    ctx.task_registry = Some(registry.clone());
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+        registry.wake_checked.notified().await;
+        registry.publish();
+        registry.wake_checked.notified().await;
+        assert_eq!(api.call_count(), 1, "pending notification cannot outrun handler rest acknowledgement");
+        registry.rest_acknowledged.store(true, Ordering::SeqCst);
+        registry.revision.send_modify(|revision| *revision += 1);
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+    }).await.unwrap();
+    assert_eq!(api.call_count(), 2);
+    drop(event_tx);
+    runner.await.unwrap();
+}
+
+// ── Subagent refusal cascade ───────────────────────────────────────────────
+//
+// claude-code runs subagents through the SAME query generator as the main
+// thread, so a refusing subagent hops to the fallback model and retries. This
+// port's subagent loop is separate and treated `refusal` as an ordinary
+// terminal stop reason, so the run simply ended.
+
+#[tokio::test]
+async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.refusal_fallback_chain = vec!["fallback-model".to_string()];
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    let events = drain(out_rx).await;
+    let text = events
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => {
+                Some(result["text"].as_str().unwrap_or_default().to_string())
+            }
+            _ => None,
+        })
+        .expect("the run completed");
+    assert!(
+        text.contains("done"),
+        "the retry's answer is the run's result: {text:?}"
+    );
+    // The answer also carries the `ICe` note naming the model that produced it
+    // — see `a_hopped_subagents_answer_carries_the_refusal_note`.
+    assert!(text.contains('\u{26A0}'), "…prefixed by the note: {text:?}");
+    assert_eq!(
+        api.call_count(),
+        2,
+        "a refusal with a hop left must re-issue, not end the run"
+    );
+    assert_eq!(
+        api.models().get(1).map(String::as_str),
+        Some("fallback-model"),
+        "the retry must go to the fallback, not back to the refusing model: {:?}",
+        api.models()
+    );
+}
+
+/// The control: with no chain configured a refusal is still terminal, which is
+/// every subagent's behaviour before this. Without it the test above would
+/// pass just as well if the loop retried unconditionally.
+#[tokio::test]
+async fn a_refusal_with_no_chain_configured_still_ends_the_run() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let ctx = loop_ctx(api.clone(), None, 3);
+    assert!(
+        ctx.refusal_fallback_chain.is_empty(),
+        "precondition: nothing configured"
+    );
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    assert_eq!(
+        api.call_count(),
+        1,
+        "no chain ⇒ the refusal is terminal, as before"
+    );
+}
+
+/// The cascade is bounded by its chain: each hop is consumed, so a subagent
+/// that keeps refusing stops rather than looping over the same models.
+#[tokio::test]
+async fn a_subagent_cascade_stops_when_the_chain_is_exhausted() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 8);
+    ctx.refusal_fallback_chain = vec!["hop-one".to_string(), "hop-two".to_string()];
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    assert_eq!(
+        api.call_count(),
+        3,
+        "the original call plus one per chain entry, then terminal: {:?}",
+        api.models()
+    );
+    assert_eq!(
+        api.models()[1..].to_vec(),
+        vec!["hop-one".to_string(), "hop-two".to_string()],
+        "each hop is consumed once, in order"
+    );
+}
+
+/// A subagent's swap is `scope: "local"` — it lasts for this run and does not
+/// touch the session model, unlike the main thread's, which is `"session"`.
+/// claude-code's `ICe` looks for exactly the local one.
+#[test]
+fn a_subagent_refusal_frame_is_scoped_local() {
+    let frame = super::refusal_fallback_frame(
+        MessageId::new(),
+        &platform_api::refusal_notice::RefusalNotice {
+            origin_model: "refusing-model".to_string(),
+            serving_model: "fallback-model".to_string(),
+            ..platform_api::refusal_notice::RefusalNotice::default()
+        },
+    );
+    match frame {
+        ConversationMessage::System {
+            subtype,
+            refusal_fallback: Some(meta),
+            ..
+        } => {
+            assert_eq!(subtype.as_deref(), Some("model_refusal_fallback"));
+            assert_eq!(meta.scope.as_deref(), Some("local"));
+            assert_eq!(meta.original_model, "refusing-model");
+            assert_eq!(meta.fallback_model, "fallback-model");
+        }
+        other => panic!("expected a typed system frame, got {other:?}"),
+    }
+}
+
+// ── `ICe` / `PZo`: the harness note and the retraction filter ───────────────
+
+/// `iht`'s `⚠ ${notice.content}` note. The parent asked a subagent a question
+/// and got an answer from a DIFFERENT model than it dispatched; upstream says
+/// so in the result. Without the note the swap is invisible to the caller.
+#[tokio::test]
+async fn a_hopped_subagents_answer_carries_the_refusal_note() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("the answer", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.refusal_fallback_chain = vec!["fallback-model".to_string()];
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    let events = drain(out_rx).await;
+    let result = events
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("the run completed");
+    let text = result["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains('\u{26A0}') && text.contains("fallback-model"),
+        "the answer must name the model that actually produced it: {text:?}"
+    );
+    assert!(
+        text.contains("the answer"),
+        "and it must still carry the report: {text:?}"
+    );
+    let first = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        first.starts_with('\u{26A0}'),
+        "the note is a leading block, ahead of the report: {first:?}"
+    );
+}
+
+/// The control: a run that never hopped has no note. Without it the test above
+/// would pass just as well if the note were unconditional.
+#[tokio::test]
+async fn a_subagent_that_never_refused_carries_no_note() {
+    let api = StreamingMockApiClient::new(vec![streamed_text_turn("the answer", "end_turn")]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.refusal_fallback_chain = vec!["fallback-model".to_string()];
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    let events = drain(out_rx).await;
+    let result = events
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("the run completed");
+    assert_eq!(result["text"].as_str(), Some("the answer"));
+}
+
+/// `PZo` — a notice that supersedes an earlier hop names the messages that hop
+/// produced, and those must not survive into the answer. System messages always
+/// do: the notices are how the retraction is expressed at all.
+#[test]
+fn retracted_messages_are_dropped_but_notices_survive() {
+    let assistant = |text: &str| ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![protocol::ContentBlock::Text {
+            text: text.to_string(),
+        }],
+        stop_reason: None,
+    };
+    let doomed = assistant("superseded output");
+    let doomed_uuid = doomed.id().as_uuid().to_string();
+    let kept = assistant("live output");
+    let notice = super::refusal_fallback_frame(
+        MessageId::new(),
+        &platform_api::refusal_notice::RefusalNotice {
+            origin_model: "refusing".to_string(),
+            serving_model: "fallback".to_string(),
+            retracted_message_uuids: vec![doomed_uuid],
+            ..platform_api::refusal_notice::RefusalNotice::default()
+        },
+    );
+
+    let live = super::drop_retracted(&[doomed, notice, kept]);
+
+    assert_eq!(live.len(), 2, "the superseded message is gone: {live:?}");
+    assert!(
+        live.iter()
+            .any(|m| matches!(m, ConversationMessage::System { .. })),
+        "the notice itself survives"
+    );
+    assert!(
+        live.iter().any(|m| matches!(
+            m,
+            ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|b| matches!(b, protocol::ContentBlock::Text { text } if text == "live output"))
+        )),
+        "the unretracted message survives"
+    );
+}
+
+/// A notice for a model that is NOT the one serving the answer is not this
+/// run's explanation — matching upstream's `fallbackModel === answer's model`.
+#[test]
+fn a_notice_for_another_model_is_not_picked() {
+    let notice = super::refusal_fallback_frame(
+        MessageId::new(),
+        &platform_api::refusal_notice::RefusalNotice {
+            serving_model: "hop-one".to_string(),
+            ..platform_api::refusal_notice::RefusalNotice::default()
+        },
+    );
+    let history = vec![notice];
+    assert!(super::local_refusal_notice(&history, "hop-two").is_none());
+    assert!(super::local_refusal_notice(&history, "hop-one").is_some());
 }

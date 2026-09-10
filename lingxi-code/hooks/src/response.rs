@@ -114,6 +114,10 @@ impl PairedRewrite {
 /// `system_message`, or `attachments`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookResponse {
+    /// Internal prompt-evaluator result (`ppr.impossible`), never supplied by
+    /// command/HTTP hook JSON. A matching session goal terminates as failed.
+    #[serde(skip)]
+    pub impossible: bool,
     /// Engine action the hook recommends (block / allow / approve / continue).
     pub decision: Option<HookDecision>,
     /// Human-readable reason for the decision (rendered to the user on Block).

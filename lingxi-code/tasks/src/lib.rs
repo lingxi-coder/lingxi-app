@@ -16,6 +16,7 @@ pub mod id;
 pub mod output_manager;
 pub mod registry;
 pub mod registry_status_sink;
+mod resolve;
 pub mod scope;
 pub mod state;
 pub mod task_trait;
@@ -50,3 +51,5 @@ pub use registry::{
 pub use scope::{LocalAppWorkflowPurpose, LocalAppWorkflowTaskScope, MalformedAppId};
 pub use state::*;
 pub use task_trait::*;
+
+mod lifecycle_store;

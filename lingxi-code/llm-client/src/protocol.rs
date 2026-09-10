@@ -58,6 +58,12 @@ pub struct LlmRequest {
     pub profile: Option<String>,
     /// Conversation messages, oldest first.
     pub messages: Vec<Message>,
+    /// Historical identities used by signature recovery; never provider wire.
+    #[serde(skip)]
+    pub thinking_source_message_ids: Vec<::protocol::MessageId>,
+    /// Query ownership for retries and lazy streams; never provider wire.
+    #[serde(skip)]
+    pub thinking_recovery_scope: Option<crate::thinking_scope::ThinkingRecoveryScope>,
     /// System prompt blocks, in order (empty = no system prompt).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub system: Vec<SystemBlock>,

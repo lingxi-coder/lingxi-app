@@ -7,6 +7,14 @@ private struct ActiveCronOccurrenceKey: Hashable {
     let scheduledAtMs: UInt64
 }
 
+/// Attempts one wake may spend on a single occurrence before parking it, so an
+/// outage that outlives the background window does not consume the whole budget.
+private let inProcessAttemptBudget = 3
+
+/// Total attempts a scheduled occurrence gets across wakes before its transient
+/// failure becomes terminal. Matches Android `MAX_EXECUTION_ATTEMPTS`.
+private let maxScheduledExecutionAttempts = 5
+
 @MainActor
 @Observable
 final class CronRepository {
@@ -82,6 +90,14 @@ final class CronRepository {
 
     func handleSceneBecameActive() async {
         await reconcile(reason: "foreground")
+    }
+
+    /// Re-arm the OS wake from the current task file without executing anything.
+    /// A task created in chat (the model's `CronCreate`) is only on disk; if the
+    /// user then backgrounds the app, this is the last chance to hand its next
+    /// fire time to `BGTaskScheduler` before the process is suspended.
+    func handleSceneDidEnterBackground() async {
+        await loadState(lastReconciledAtMs: state.scheduling.lastReconciledAtMs)
     }
 
     func handleBackgroundWake() async {
@@ -192,9 +208,11 @@ final class CronRepository {
             }
             let outcome: CronExecutionOutcome
             do {
+                // Manual runs stay in-process: the user is watching, so a
+                // transient failure is reported now rather than parked.
                 outcome = try await executeWithRetry(runID: claimed.runID) {
                     try await self.executor.runTaskNow(scope: scope, task: task)
-                }
+                }.outcome
             } catch is CancellationError {
                 outcome = CronExecutionOutcome(
                     status: .cancelled,
@@ -296,7 +314,11 @@ final class CronRepository {
                 state.loading = false
                 return
             }
+            // Only schedules the engine will actually fire may arm the OS wake;
+            // `dueOccurrences` filters unsupported tasks out, so waking for them
+            // would burn a background slot and run nothing.
             let nextFire = tasks
+                .filter(\.task.mobileSupported)
                 .compactMap(\.task.nextFireMs)
                 .min()
             try await scheduler.schedule(taskIdentifier: backgroundTaskIdentifier, earliestAtMs: nextFire)
@@ -448,6 +470,17 @@ final class CronRepository {
             if existing.status.isTerminal {
                 try Task.checkCancellation()
                 _ = try await store.acknowledgeOccurrence(taskID: task.id, scheduledAtMs: scheduledAtMs)
+            } else if existing.status == .queued, existing.attempt > 0 {
+                // Parked by an earlier wake after a transient failure: this wake
+                // is the retry, not a crash to recover from.
+                try await runClaimedOccurrence(
+                    scope,
+                    task: task,
+                    scheduledAtMs: scheduledAtMs,
+                    store: store,
+                    runID: existing.runID,
+                    startAttempt: existing.attempt + 1
+                )
             } else {
                 try Task.checkCancellation()
                 _ = try await historyStore.markTerminal(
@@ -473,8 +506,39 @@ final class CronRepository {
         ) else {
             return
         }
+        try await runClaimedOccurrence(
+            scope,
+            task: task,
+            scheduledAtMs: scheduledAtMs,
+            store: store,
+            runID: claimed.runID,
+            startAttempt: 1
+        )
+    }
+
+    /// Run (or resume) one claimed occurrence.
+    ///
+    /// A transient failure with attempts left is PARKED rather than finished:
+    /// the run row keeps its attempt count and the occurrence is deliberately
+    /// left unacknowledged, so the engine still reports it due and the next wake
+    /// retries it. This mirrors Android, where the worker returns
+    /// `Result.retry()` and only acknowledges once the attempts are exhausted —
+    /// without it a single network blip at wake time silently consumed the
+    /// occurrence and the task never ran.
+    private func runClaimedOccurrence(
+        _ scope: CronScope,
+        task: CronTaskRecord,
+        scheduledAtMs: UInt64,
+        store: any CronStoreClient,
+        runID: String,
+        startAttempt: Int
+    ) async throws {
         try Task.checkCancellation()
-        let outcome = try await executeWithRetry(runID: claimed.runID) {
+        let attempted = try await executeWithRetry(
+            runID: runID,
+            startAttempt: startAttempt,
+            attemptCap: maxScheduledExecutionAttempts
+        ) {
             try await self.executor.runTaskIfDue(
                 scope: scope,
                 task: task,
@@ -487,12 +551,21 @@ final class CronRepository {
             )
         }
         try Task.checkCancellation()
+        if isTransient(attempted.outcome), attempted.attempt < maxScheduledExecutionAttempts {
+            _ = try await historyStore.markRetry(
+                runID: runID,
+                attempt: attempted.attempt,
+                message: attempted.outcome.errorMessage
+                    ?? String(localized: "cron_execution_failed_default")
+            )
+            return
+        }
         let record = try await historyStore.markTerminal(
-            runID: claimed.runID,
-            status: outcome.status,
-            resultText: outcome.resultText,
-            errorMessage: outcome.errorMessage,
-            errorKind: outcome.errorKind
+            runID: runID,
+            status: attempted.outcome.status,
+            resultText: attempted.outcome.resultText,
+            errorMessage: attempted.outcome.errorMessage,
+            errorKind: attempted.outcome.errorKind
         )
         try Task.checkCancellation()
         _ = try await store.acknowledgeOccurrence(taskID: task.id, scheduledAtMs: scheduledAtMs)
@@ -514,20 +587,33 @@ final class CronRepository {
         return scope
     }
 
-    /// Retry only failures the product can distinguish as transient. Every
-    /// attempt updates the persisted run row, while the occurrence is
-    /// acknowledged only after this loop reaches a terminal outcome.
+    /// Only failures the product can distinguish as transient are retried.
+    private func isTransient(_ outcome: CronExecutionOutcome) -> Bool {
+        outcome.errorKind == .network || outcome.errorKind == .timedOut
+    }
+
+    /// Retry a transient failure in place, and report which attempt produced the
+    /// returned outcome so the caller can park the run for a later wake.
+    ///
+    /// `attemptCap` is the run's TOTAL attempt budget across wakes (Android's
+    /// `MAX_EXECUTION_ATTEMPTS`); at most [`inProcessAttemptBudget`] of them are
+    /// spent in one wake, so a backgrounded app never burns the whole budget on
+    /// one outage.
     private func executeWithRetry(
         runID: String,
+        startAttempt: Int = 1,
+        attemptCap: Int = inProcessAttemptBudget,
         operation: @escaping () async throws -> CronExecutionOutcome
-    ) async throws -> CronExecutionOutcome {
+    ) async throws -> (outcome: CronExecutionOutcome, attempt: Int) {
         var last = CronExecutionOutcome(
             status: .failed,
             resultText: nil,
             errorMessage: String(localized: "cron_execution_failed_default"),
             errorKind: .unknown
         )
-        for attempt in 1...3 {
+        var attempt = max(1, startAttempt)
+        var spentHere = 0
+        while true {
             try Task.checkCancellation()
             _ = try await historyStore.markRunning(runID: runID, attempt: attempt)
             try Task.checkCancellation()
@@ -546,11 +632,16 @@ final class CronRepository {
                     errorKind: classified.kind
                 )
             }
-            let transient = last.errorKind == .network || last.errorKind == .timedOut
-            guard transient, attempt < 3 else { return last }
-            try await Task.sleep(for: .milliseconds(250 * attempt))
+            spentHere += 1
+            guard isTransient(last),
+                  attempt < attemptCap,
+                  spentHere < inProcessAttemptBudget
+            else {
+                return (last, attempt)
+            }
+            try await Task.sleep(for: .milliseconds(250 * spentHere))
+            attempt += 1
         }
-        return last
     }
 
     private func requireTask(scopeID: String, taskID: String) async throws -> CronTaskRecord {

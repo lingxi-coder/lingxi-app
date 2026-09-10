@@ -22,7 +22,7 @@ pub enum TaskType {
     LocalWorkflow,
     /// MCP server monitor.
     MonitorMcp,
-    /// Shell/WebSocket-style stdout event monitor (`monitor_ws`).
+    /// WebSocket monitor wire type and internal command-monitor handler key.
     Monitor,
     /// A single long-running MCP `tools/call` that exceeded
     /// `getMcpAutoBackgroundMs` and was moved to the background (claude-code
@@ -31,6 +31,8 @@ pub enum TaskType {
     McpTask,
     /// Background long-running "dream" loop.
     Dream,
+    /// Environment reconnaissance for /auto-mode-setup.
+    AutoModeScan,
     /// Fusion multi-model deliberation (`/fusion`).
     LocalFusion,
 }
@@ -46,11 +48,11 @@ impl TaskType {
             Self::InProcessTeammate => 't',
             Self::LocalWorkflow => 'w',
             Self::MonitorMcp => 'm',
-            // Oracle 2.1.223 prefix table (@242497270): `monitor_ws:"s"` —
-            // an earlier port shared MonitorMcp's 'm', colliding the two.
+            // 2.1.263: WebSocket monitors use s; command monitors mint b.
             Self::Monitor => 's',
             Self::McpTask => 'k',
             Self::Dream => 'd',
+            Self::AutoModeScan => 'e',
             Self::LocalFusion => 'f',
         }
     }

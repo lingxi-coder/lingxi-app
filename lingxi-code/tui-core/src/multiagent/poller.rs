@@ -14,6 +14,10 @@ use std::sync::Arc;
 #[must_use]
 pub fn task_row_from_record(r: TaskRecord) -> TaskRow {
     TaskRow {
+        unread: !r.notified,
+        model: r.model,
+        effort: r.effort,
+        awaiting_plan_approval: r.awaiting_plan_approval,
         task_id: r.task_id,
         task_type: r.task_type,
         status: r.status,
@@ -34,6 +38,10 @@ pub fn task_row_from_record(r: TaskRecord) -> TaskRow {
 #[must_use]
 pub fn task_row_from_record_ref(r: &TaskRecord) -> TaskRow {
     TaskRow {
+        unread: !r.notified,
+        model: r.model.clone(),
+        effort: r.effort.clone(),
+        awaiting_plan_approval: r.awaiting_plan_approval,
         task_id: r.task_id.clone(),
         task_type: r.task_type.clone(),
         status: r.status.clone(),

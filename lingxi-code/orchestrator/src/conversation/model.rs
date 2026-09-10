@@ -1356,72 +1356,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // one refuses. An empty chain falls back to the historical single
         // `refusal_fallback_model`, which is exactly a one-element chain — so
         // the default path is byte-identical to before the cascade existed.
-        let chain: Vec<String> = if self.config.refusal_fallback_chain.is_empty() {
-            self.config
-                .refusal_fallback_model
-                .clone()
-                .into_iter()
-                .collect()
-        } else {
-            self.config.refusal_fallback_chain.clone()
+        let chain = self.config.refusal_chain();
+        let current_model = { self.session.lock().await.model.clone() };
+        let notice_uuid = uuid::Uuid::new_v4().to_string();
+        // Routing, the once-per-session latch, the tried set and the notice
+        // accumulate/collapse pair all live in `platform_api::refusal_driver`,
+        // because the subagent runner needs to behave identically and cannot
+        // depend on this crate.
+        let hop = {
+            let mut cascade = self.model_runtime.refusal_cascade.lock().await;
+            cascade.next_hop(&chain, &current_model, notice_uuid.clone())
         };
-        if chain.is_empty() {
-            return false;
-        }
-        // Models already tried THIS EPISODE, so a cascade cannot loop back onto
-        // one that has already refused.
-        let tried = self.model_runtime.refusal_tried_models.lock().await.clone();
-        let route = crate::refusal_cascade::route_refusal(
-            &crate::refusal_cascade::RouteInputs {
-                chain: Some(&chain),
-                armed_fallback_model: None,
-                armed_target_is_refusing_model: false,
-                catch_all_enabled: false,
-            },
-            |stage| {
-                // A stage is reachable when it has not already been routed to
-                // this episode. Claude's exclusion is exactly `triedModels`,
-                // which resets with the session — deliberately NOT "differs
-                // from the current model": after a hop the current model IS the
-                // previous fallback, and excluding it would make a cleared
-                // session unable to route to that model again.
-                (!tried.iter().any(|m| m == stage)).then(|| stage.to_string())
-            },
-        );
         // Report every stage the walk passed over. A chain that silently
         // degraded to its last entry is otherwise indistinguishable from one
         // that worked first try.
-        for report in crate::refusal_cascade::decline_reports(&route) {
+        for report in hop.as_ref().map_or(&[][..], |h| &h.declines) {
             tracing::info!(
                 event = "tengu_refusal_fallback_route_declined",
                 reason = report.as_str(),
             );
         }
-        let crate::refusal_cascade::RefusalRoute::Category { stage, .. } = route else {
+        let Some(hop) = hop else {
             return false;
         };
-        // What the cascade still has left. A hop with stages remaining may be
-        // superseded, so its notice is provisional.
-        let stage_remaining = stage.remaining_chain;
-        let fallback = stage.model;
-        // Once-per-session latch (refusalFallbackModelLatch analog) — applies
-        // only to a SINGLE-hop chain, which is the historical shape. A real
-        // cascade is bounded by the chain instead: each hop is consumed by
-        // `tried`, so the walk terminates on its own without needing the latch
-        // to cap it.
-        if chain.len() <= 1
-            && self
-                .model_runtime
-                .refusal_fallback_latched
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            return false;
-        }
-        self.model_runtime
-            .refusal_tried_models
-            .lock()
-            .await
-            .push(fallback.clone());
+        let fallback = hop.fallback_model;
         // Persistently swap the session model to the fallback.
         let (original_model, original_profile) = {
             let mut s = self.session.lock().await;
@@ -1437,47 +1395,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
         // User-visible warning. 2.1.206 `VPn(e,t,r)` =
         //   `${f_t(r) ? mmi(e) : hmi(e,r)} Switched to ${Mf(t)}. ${bxr(e)}`
-        // for the common `category == "other"` path: `f_t("other")` is false, so
-        // `hmi(e,"other")` fires with the generic `$7m` prefix ("This model's
-        // safeguards flagged this message. This sometimes happens with safe,
-        // normal conversations."); `bxr(e)` is the feedback line. `Mf(t)` = the
-        // fallback's MARKETING NAME (byte-verified: 206 uses the friendly name,
-        // not the raw id) — resolve it, falling back to the id for an unknown
-        // model. (The cyber/bio `mmi(e)` "intentionally broad" variant needs the
-        // refusal category routed through here — deferred with the typed
-        // model_refusal_fallback system frame.)
-        // Route the notice through the episode accumulator and the collapse
-        // queue rather than emitting it directly. A hop that a LATER hop
-        // supersedes must not reach the user: "switched to X" stops being true
-        // the moment the cascade moves on from X. So an intermediate hop is
-        // held PROVISIONALLY and folded into the notice that finally settles,
-        // which reports how many hops it collapsed.
-        let more_hops_possible = !stage_remaining.is_empty();
-        let notice_uuid = uuid::Uuid::new_v4().to_string();
-        let emitted = {
-            let mut episode = self.model_runtime.refusal_episode.lock().await;
-            episode.merge(crate::refusal_notice::RefusalNotice {
-                uuid: notice_uuid.clone(),
-                origin_model: original_model.clone(),
-                serving_model: fallback.clone(),
-                ..crate::refusal_notice::RefusalNotice::default()
-            });
-            let taken = if more_hops_possible {
-                episode.take_provisional(&notice_uuid)
-            } else {
-                episode.settle()
-            };
-            drop(episode);
-            match taken {
-                Some(notice) => self
-                    .model_runtime
-                    .refusal_notice_queue
-                    .lock()
-                    .await
-                    .accept(notice, more_hops_possible),
-                None => Vec::new(),
-            }
-        };
+        // for the common `category == "other"` path.
+        let emitted = hop.notices;
         for e in emitted {
             if e.suppressed_count > 0 {
                 tracing::info!(
@@ -1486,9 +1405,40 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     emitted_via = e.emitted_via.as_str(),
                 );
             }
-            self.output
-                .emit_text(&Self::refusal_warning_text(&e.banner.serving_model))
-                .await;
+            let content = Self::refusal_warning_text(&e.banner.serving_model);
+            self.output.emit_text(&content).await;
+            // claude-code carries this notice as a TYPED system message in the
+            // conversation (`Dcr`, `src_163219561.js`), not only as banner text.
+            // Emitting it on the stream alone made it ephemeral: it never
+            // reached the transcript, so it was gone on resume and nothing
+            // could see WHICH earlier notices a later hop superseded —
+            // `retractedMessageUuids` had no carrier.
+            //
+            // `convert_messages` drops every `System` before the wire
+            // (`llm-client/src/convert.rs`), so this is transcript + TUI only
+            // and never becomes model context.
+            let notice_msg = protocol::ConversationMessage::System {
+                id: protocol::MessageId::new(),
+                content,
+                subtype: Some("model_refusal_fallback".to_string()),
+                compact_metadata: None,
+                refusal_fallback: Some(protocol::RefusalFallbackMetadata {
+                    trigger: "refusal".to_string(),
+                    direction: "retry".to_string(),
+                    // This port's cascade persistently swaps the SESSION model
+                    // (see the latch above), which is upstream's `swapSession`
+                    // arm — `scope: Mt ? "session" : "local"`.
+                    scope: Some("session".to_string()),
+                    original_model: e.banner.origin_model.clone(),
+                    fallback_model: e.banner.serving_model.clone(),
+                    request_id: e.banner.request_id.clone(),
+                    api_refusal_category: e.banner.api_refusal_category.clone(),
+                    retracted_message_uuids: e.banner.retracted_message_uuids.clone(),
+                    refused_user_message_uuid: e.banner.refused_user_message_uuid.clone(),
+                }),
+            };
+            self.session.lock().await.history.push(notice_msg.clone());
+            self.persist_message_to_jsonl(&notice_msg).await;
         }
         // Success-path analytics — inline event name (NOT a locked telemetry
         // const), so the 347-entry `ALL_EVENT_NAMES` fixture lock is unperturbed.
@@ -1865,6 +1815,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let running = Arc::clone(&self.lifecycle_runtime.goal_checkin_idle_running);
             let generation_counter =
                 Arc::clone(&self.lifecycle_runtime.goal_checkin_idle_generation);
+            let analytics_bus = self.model_runtime.analytics_bus.clone();
             let handle = tokio::spawn(async move {
                 ConversationOrchestrator::run_goal_checkin_idle_loop(
                     provider,
@@ -1878,6 +1829,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     running,
                     generation_counter,
                     generation,
+                    analytics_bus,
                 )
                 .await;
             });
@@ -1958,6 +1910,112 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Update the thinking policy for the next API request.
     pub fn set_thinking_config(&self, thinking: llm_client::model::thinking::ThinkingConfig) {
         self.api.set_thinking_config(thinking);
+    }
+
+    pub(crate) fn scope_api_session<'a, F: std::future::Future + 'a>(
+        &'a self,
+        non_interactive: bool,
+        future: F,
+    ) -> impl std::future::Future<Output = F::Output> + 'a {
+        // Keep the large turn future on the heap before building this context
+        // wrapper; otherwise each generic async layer copies its full state.
+        let future = Box::pin(future);
+        async move {
+            let scope = self
+                .transcript
+                .thinking_recovery
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(writer) = self.transcript.jsonl_writer.clone() {
+                let session = self.session.clone();
+                let expected_session = session.lock().await.session_id;
+                let last_uuid = self.transcript.last_jsonl_uuid.clone();
+                let cwd = self.current_cwd();
+                let git_branch = self.resolve_git_branch().await;
+                scope.set_recorder(Arc::new(move |ranges| {
+                    let writer = writer.clone();
+                    let session = session.clone();
+                    let last_uuid = last_uuid.clone();
+                    let cwd = cwd.clone();
+                    let git_branch = git_branch.clone();
+                    Box::pin(async move {
+                        Self::persist_thinking_recovery_snapshot(
+                            writer,
+                            last_uuid,
+                            session,
+                            expected_session,
+                            cwd,
+                            git_branch,
+                            ranges,
+                        )
+                        .await;
+                    })
+                }));
+            }
+            llm_client::thinking_scope::scope_thinking_recovery(
+                scope,
+                platform_api::session_flags::scope_non_interactive_session(non_interactive, future),
+            )
+            .await
+        }
+    }
+
+    /// Restore rejected historical identities onto both API clients.
+    pub(crate) async fn sync_thinking_signature_strip_flag_to_api(&self) {
+        let messages = self.session.lock().await.thinking_stripped_messages.clone();
+        self.scope_api_session(!self.prompt_is_interactive(), async {
+            self.api.set_thinking_stripped_messages(messages.clone());
+            self.streaming_api.set_thinking_stripped_messages(messages);
+        })
+        .await;
+    }
+
+    /// Persist a marker for each newly rejected history snapshot, before the
+    /// response is appended. Later responses remain outside the marker's scope.
+    pub(crate) async fn persist_thinking_signature_strip_latch(&self) {
+        let (mut messages, streaming_messages) = self
+            .scope_api_session(!self.prompt_is_interactive(), async {
+                (
+                    self.api.thinking_stripped_messages(),
+                    self.streaming_api.thinking_stripped_messages(),
+                )
+            })
+            .await;
+        for (id, from) in streaming_messages {
+            messages
+                .entry(id)
+                .and_modify(|current| *current = (*current).min(from))
+                .or_insert(from);
+        }
+        {
+            let mut session = self.session.lock().await;
+            // Desktop shares one service with workers and side queries. A
+            // worker-only rejection must not write a marker on the main chain.
+            messages.retain(|id, _| session.history.iter().any(|message| message.id() == *id));
+            let changed = messages.iter().any(|(id, from)| {
+                session
+                    .thinking_stripped_messages
+                    .get(id)
+                    .is_none_or(|current| from < current)
+            });
+            if !changed {
+                return;
+            }
+            session.thinking_signature_stripped = true;
+            for (id, from) in messages {
+                session
+                    .thinking_stripped_messages
+                    .entry(id)
+                    .and_modify(|current| *current = (*current).min(from))
+                    .or_insert(from);
+            }
+        }
+        self.persist_hook_attachment_to_jsonl(serde_json::json!({
+            "type": "thinking_stripped",
+            "scope": "all",
+        }))
+        .await;
     }
 
     /// Update how the attached output sink presents subsequent thinking blocks.

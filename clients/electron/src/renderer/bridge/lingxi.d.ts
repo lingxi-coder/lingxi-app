@@ -1,3 +1,4 @@
+import type { CronJobDto } from '@lingxi/bridge-client';
 import type {
   AskUserQuestionRequestDto,
   AudioOpDto,
@@ -109,12 +110,14 @@ export interface NativeAudioApi {
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
+  getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   updateSettings(patch: {
     theme?: 'dark' | 'light' | 'system';
+    collapseThoughtsByDefault?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
@@ -141,6 +144,8 @@ export interface LingxiApi {
   listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   newSession(projectPath: string, model?: string): Promise<BootstrapState>;
   openSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
+  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
+  archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   clearSession(sessionId: string): Promise<void>;
   sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;

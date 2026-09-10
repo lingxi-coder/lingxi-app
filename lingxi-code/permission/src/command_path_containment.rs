@@ -55,7 +55,9 @@
 
 use crate::filesystem::{path_in_allowed_working_path, FsRoots};
 use crate::path_constraints::PathConstraintAsk;
+use regex::Regex;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// The per-command file-operation type — 1:1 with TS `FileOperationType`
 /// (`utils/permissions/pathValidation.ts:27`). Drives both the glob-in-write
@@ -764,6 +766,160 @@ fn extract_jq(args: &[String]) -> Vec<String> {
 /// TS `PATH_EXTRACTORS.git` (`pathValidation.ts:491-508`): only
 /// `git diff --no-index A B` extracts paths (the first two positional args after
 /// `diff`). Every other git subcommand is git's own security boundary → no paths.
+/// PARITY 2.1.263 `o2e` — interpreters that take INLINE CODE, and the flags
+/// that carry it. The lookup key has any trailing version suffix stripped
+/// (`python3.11` → `python`).
+const INLINE_CODE_FLAGS: &[(&str, &[&str])] = &[
+    ("python", &["-c"]),
+    ("node", &["-e", "--eval", "-p", "--print"]),
+    ("nodejs", &["-e", "--eval", "-p", "--print"]),
+    ("bun", &["-e", "--eval", "-p", "--print"]),
+    ("tsx", &["-e", "--eval", "-p", "--print"]),
+    ("perl", &["-e", "-E"]),
+    ("ruby", &["-e"]),
+    ("php", &["-r"]),
+    ("bash", &["-c"]),
+    ("sh", &["-c"]),
+    ("zsh", &["-c"]),
+    ("dash", &["-c"]),
+    ("ksh", &["-c"]),
+    ("lua", &["-e"]),
+    ("luajit", &["-e"]),
+    ("deno", &["eval"]),
+    ("Rscript", &["-e"]),
+    ("julia", &["-e", "-E"]),
+    ("osascript", &["-e"]),
+];
+
+/// PARITY 2.1.263 `mmo(argv)` — does this subcommand read its program from
+/// stdin? The basename (version suffix stripped) must be an [`INLINE_CODE_FLAGS`]
+/// interpreter AND either a bare `-` appears, or every argument is a flag.
+fn reads_code_from_stdin(tokens: &[String]) -> bool {
+    let Some((base, args)) = tokens.split_first() else {
+        return false;
+    };
+    let verb = base.rsplit('/').next().unwrap_or(base);
+    let key = verb.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if !INLINE_CODE_FLAGS.iter().any(|(name, _)| *name == key) {
+        return false;
+    }
+    if args.iter().any(|a| a == "-") {
+        return true;
+    }
+    args.iter().all(|a| a.starts_with('-'))
+}
+
+/// The `zU(reason)` shape as a [`PathConstraintAsk`] (the shell walkers produce
+/// these rather than a `PermissionResult`).
+fn read_block_unanalyzable_ask(reason: &str) -> PathConstraintAsk {
+    let message = format!(
+        "{reason}; under the read block (permissions.blockReadsOutsideWorkingDirectories) a command the shell parser cannot analyze asks the person"
+    );
+    PathConstraintAsk {
+        reason: message.clone(),
+        message,
+        blocked_path: None,
+        outside_reads_blocked: true,
+    }
+}
+
+/// PARITY 2.1.263 `Eun(input, node)` — does the command carry a leading
+/// `NAME=value` env PREFIX whose NAME is outside the safe list?
+///
+/// ```js
+/// function Eun(e,t){
+///   if(t) return t.envVars.some((p)=>!eO(p.name));
+///   let r=/^([A-Za-z_][A-Za-z0-9_]*)\+?=/,
+///       o=/^[A-Za-z_][A-Za-z0-9_]*\+?=(?:"[^"$`\\]*"|'[^']*'|[A-Za-z0-9_./:+-]*)[ \t]+/,
+///       d=e.command;
+///   for(;;){
+///     let p=d.match(r);   if(!p) return !1;
+///     if(!eO(p[1])) return !0;
+///     let _=d.match(o);   if(!_) return !0;
+///     d=d.slice(_[0].length)
+///   }
+/// }
+/// ```
+///
+/// 🚨 The loop has three exits and only ONE of them is `false`: "there is no
+/// leading assignment at all". A SAFE name whose VALUE does not match the
+/// (narrower) strip pattern `o` is still UNSAFE — the walk cannot advance past
+/// it, so it cannot prove the rest of the prefix is assignment-free. So
+/// `LANG=$(id) cat f` escalates even though `LANG` is on the list.
+///
+/// 🚨 Pattern `o` is NOT `strip_safe_wrappers`' env regex: this one accepts
+/// `NAME+=`, allows `+` inside a bare value, and admits an EMPTY value (`*`, not
+/// `+`), so `LANG= cat f` advances here but not there. Kept separate deliberately.
+///
+/// DIVERGENCE: the `t` branch (`node.envVars`) is not wired — this seam has no
+/// AST node, so the port always takes the oracle's string fallback. That is the
+/// same shape the oracle uses whenever the AST is unavailable, and it is only
+/// ever more conservative for a compound command (it inspects the leading
+/// prefix of the whole string rather than each node).
+fn env_prefix_outside_safe_list(command: &str) -> bool {
+    static NAME_RE: OnceLock<Regex> = OnceLock::new();
+    static ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
+    let name_re = NAME_RE.get_or_init(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=").unwrap());
+    let assign_re = ASSIGN_RE.get_or_init(|| {
+        Regex::new(r#"^[A-Za-z_][A-Za-z0-9_]*\+?=(?:"[^"$`\\]*"|'[^']*'|[A-Za-z0-9_./:+-]*)[ \t]+"#)
+            .unwrap()
+    });
+    let mut rest = command;
+    loop {
+        let Some(name) = name_re.captures(rest).map(|c| c[1].to_string()) else {
+            return false;
+        };
+        if !crate::shell_command::is_safe_env_var(&name) {
+            return true;
+        }
+        let Some(m) = assign_re.find(rest) else {
+            return true;
+        };
+        rest = &rest[m.end()..];
+    }
+}
+
+/// PARITY 2.1.263 `ymo`'s first statement — the `env` COMMAND carrying an
+/// assignment outside the safe list.
+///
+/// ```js
+/// if(!d && p.slice(p.lastIndexOf("/")+1)==="env" && e.argv.slice(1).some((D)=>{
+///     let N=/^([A-Za-z_][A-Za-z0-9_]*)=/.exec(D);
+///     return N!==null && !eO(N[1])
+///   }))
+///   return zU("an environment variable assignment outside the safe list cannot be checked against the read block");
+/// ```
+///
+/// 🚨 This runs on the RAW argv, BEFORE `_v`/`strip_safe_wrappers` — which strips
+/// `env` itself. Checking the stripped form would make this unreachable.
+///
+/// 🚨 It scans ALL of `argv[1..]`, not the leading assignment run, so
+/// `env -u FOO BAR=1 cat f` is caught on `BAR`. The NAME pattern here has no
+/// `\+?`, unlike [`env_prefix_outside_safe_list`].
+fn env_command_assignment_outside_safe_list(tokens: &[String]) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)=").unwrap());
+    let Some(argv0) = tokens.first() else {
+        return false;
+    };
+    if basename(argv0) != "env" {
+        return false;
+    }
+    tokens[1..].iter().any(|t| {
+        re.captures(t)
+            .is_some_and(|c| !crate::shell_command::is_safe_env_var(&c[1]))
+    })
+}
+
+/// `p.slice(p.lastIndexOf("/")+1)` — the oracle's basename, which also treats a
+/// bare `foo` as its own basename.
+fn basename(arg: &str) -> &str {
+    match arg.rfind('/') {
+        Some(i) => &arg[i + 1..],
+        None => arg,
+    }
+}
+
 fn extract_git(args: &[String]) -> Vec<String> {
     if args.first().map(String::as_str) == Some("diff") && args.iter().any(|a| a == "--no-index") {
         // PATH-05: ALL positional args after `diff` (TS `Bx(e.slice(1))`), not a
@@ -948,6 +1104,92 @@ fn validate_path(path: &str, operation_type: OperationType, roots: &FsRoots) -> 
 }
 
 /// TS `getGlobBaseDirectory` (`utils/permissions/pathValidation.ts:57-74`):
+/// PARITY 2.1.263 `_tt(segment)` — could this glob SEGMENT match the literal
+/// `..`? If any segment of a globbed path can, `ymo` refuses to reduce the path
+/// to a base directory and returns `Op` instead, because the glob could walk
+/// upward out of the working directories at expansion time.
+///
+/// ```js
+/// function _tt(e){
+///   if (Fx(e) === -1) return false;              // not a glob at all
+///   if (/\[[:=.]/.test(e)) return true;          // POSIX class/equiv/collating
+///   if (e.startsWith("*") || e.startsWith("?")) return false;   // carve-out
+///   …build a regex from the glob…
+///   try { return new RegExp(t).test("..") } catch { return true }
+/// }
+/// ```
+///
+/// The `*`/`?`-prefix carve-out is the binary's, not an approximation: a leading
+/// `*` WOULD match `..`, but the oracle deliberately does not treat it as an
+/// upward escape.
+fn glob_segment_can_match_dotdot(segment: &str) -> bool {
+    if !has_glob_metachar(segment) {
+        return false;
+    }
+    // `/\[[:=.]/` — a bracket immediately followed by `:`, `=` or `.`.
+    if segment
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0] == b'[' && matches!(w[1], b':' | b'=' | b'.'))
+    {
+        return true;
+    }
+    if segment.starts_with('*') || segment.starts_with('?') {
+        return false;
+    }
+    // Build the equivalent regex and test it against "..".
+    let mut re = String::from("^");
+    let chars: Vec<char> = segment.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '*' => re.push_str(".*"),
+            '?' => re.push('.'),
+            '[' => {
+                let negated = matches!(chars.get(i + 1), Some('!') | Some('^'));
+                let close = chars[i + if negated { 3 } else { 2 }..]
+                    .iter()
+                    .position(|c| *c == ']')
+                    .map(|p| p + i + if negated { 3 } else { 2 });
+                match close {
+                    None => re.push_str("\\["),
+                    Some(end) => {
+                        let inner: String = chars[i + 1..end].iter().collect();
+                        let inner = match inner.strip_prefix(['!', '^']) {
+                            Some(rest) => format!("^{rest}"),
+                            None => inner,
+                        };
+                        re.push('[');
+                        for ch in inner.chars() {
+                            if ch == '\\' || ch == ']' {
+                                re.push('\\');
+                            }
+                            re.push(ch);
+                        }
+                        re.push(']');
+                        i = end;
+                    }
+                }
+            }
+            other => {
+                if matches!(
+                    other,
+                    '.' | '+' | '^' | '$' | '(' | ')' | '|' | '{' | '}' | '\\'
+                ) {
+                    re.push('\\');
+                }
+                re.push(other);
+            }
+        }
+        i += 1;
+    }
+    re.push('$');
+    // A pattern the regex engine rejects is treated as matching (the binary's
+    // `catch { return true }` — fail closed).
+    regex::Regex::new(&re).map_or(true, |r| r.is_match(".."))
+}
+
 /// everything before the first glob metachar, truncated to its last `/`. Used
 /// for READ globs so the directory the glob expands in is the containment
 /// subject. (`containsPathTraversal` full-resolve branch is folded into the
@@ -1038,6 +1280,7 @@ pub fn check_command_path_containment(
     command: &str,
     roots: &FsRoots,
     additional: &[PathBuf],
+    read_block_dirs: Option<&[PathBuf]>,
 ) -> Option<PathConstraintAsk> {
     let subs = crate::shell_command::split_command(command);
     let compound_has_cd = compound_has_cd(&subs);
@@ -1046,6 +1289,202 @@ pub fn check_command_path_containment(
         .as_deref()
         .map(|p| p.to_string_lossy().into_owned());
     let work_dirs = working_dir_paths(roots, additional);
+
+    // PARITY 2.1.263 `mpo(argv, cwd, ctx)` — `ln` / `link`. They are NOT in the
+    // oracle's `qU` action-verb table (nor in `command_spec` here), which is why
+    // the binary gives them their own function:
+    //
+    // ```js
+    // let E = vh(argv.slice(1));                                  // positionals
+    // let I = (E.length !== args.length || E.length === 1) ? E : E.slice(0,-1);
+    // ```
+    //
+    // i.e. when any flag was present, or there is exactly one positional, EVERY
+    // positional is read-checked; otherwise the LAST one (the link name, which
+    // is created rather than read) is dropped.
+    //
+    // 🚨 READ-BLOCK ONLY, for the same reason as `ppo`: with the block off,
+    // `PE(target,…,"read")` allows a plain outside path here, so running this
+    // generally would ask where the binary allows.
+    if let Some(block_dirs) = read_block_dirs {
+        // PARITY 2.1.263 `Pmo`: an interpreter fed by a heredoc or a pipe runs
+        // code the parser never sees, so the read block escalates the whole
+        // command before any per-path work.
+        //
+        // ```js
+        // if (blockReads && commands.some((c,i) => mmo(c.argv) &&
+        //       (/<<</.test(cmd) || /<<(?!<)/.test(cmd) || (i>0 && cmd.includes("|")))))
+        //   return zU("code on stdin cannot be checked against the read block");
+        // ```
+        let has_heredoc = command.contains("<<");
+        let has_pipe = command.contains('|');
+        for (idx, sub) in subs.iter().enumerate() {
+            let stripped = crate::shell_command::strip_safe_wrappers(sub);
+            let tokens = split_argv(&stripped);
+            if !reads_code_from_stdin(&tokens) {
+                continue;
+            }
+            if has_heredoc || (idx > 0 && has_pipe) {
+                return Some(read_block_unanalyzable_ask(
+                    "code on stdin cannot be checked against the read block",
+                ));
+            }
+        }
+
+        for sub in &subs {
+            let stripped = crate::shell_command::strip_safe_wrappers(sub);
+            let tokens = split_argv(&stripped);
+            let Some((base, args)) = tokens.split_first() else {
+                continue;
+            };
+            let verb = base.rsplit('/').next().unwrap_or(base);
+            // PARITY 2.1.263 `ymo`'s interpreter guards, in the binary's order.
+            // `python3.11` → `python`: the trailing version suffix is stripped
+            // before the `o2e` lookup.
+            let interpreter = INLINE_CODE_FLAGS
+                .iter()
+                .find(|(name, _)| {
+                    *name == verb.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
+                })
+                .map(|(_, flags)| *flags);
+            if let Some(flags) = interpreter {
+                // `if (args.includes("-")) return zU(`${C} runs code from stdin …`)`
+                if args.iter().any(|a| a == "-") {
+                    return Some(read_block_unanalyzable_ask(&format!(
+                        "{verb} runs code from stdin, which cannot be checked against the read block"
+                    )));
+                }
+                // `if (args.some(inline-code flag)) return zU(`${C} runs inline code …`)`
+                if args.iter().any(|a| {
+                    flags.iter().any(|f| {
+                        a == f
+                            || (f.starts_with("--") && a.starts_with(&format!("{f}=")))
+                            || (!f.starts_with("--")
+                                && a.starts_with('-')
+                                && !a.starts_with("--")
+                                && a.len() > 2
+                                && a.contains(&f[1..]))
+                    })
+                }) {
+                    return Some(read_block_unanalyzable_ask(&format!(
+                        "{verb} runs inline code, which cannot be checked against the read block"
+                    )));
+                }
+            }
+            // `if (C === "xargs") return Op(C)` — it builds its argv at run time.
+            if verb == "xargs" {
+                let message = format!(
+                    "xargs names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
+                );
+                return Some(PathConstraintAsk {
+                    reason: message.clone(),
+                    message,
+                    blocked_path: None,
+                    outside_reads_blocked: true,
+                });
+            }
+            // PARITY 2.1.263 `ymo`'s git branch — the path-bearing global flags
+            // (`-C`, `--git-dir`, `--work-tree`, `--file`, `-f`, their `=`
+            // forms, and attached `-C<dir>`), fed to `gmo`. These live ONLY in
+            // `ymo`, not in the `qU` table extractor (which is why the port's
+            // `extract_git` covers only `diff --no-index`), so like `ppo`/`mpo`
+            // they are read-block only.
+            if verb == "git" {
+                let mut dirs: Vec<String> = Vec::new();
+                let mut idx = 0;
+                while idx < args.len() {
+                    let arg = &args[idx];
+                    if matches!(
+                        arg.as_str(),
+                        "-C" | "--git-dir" | "--work-tree" | "--file" | "-f"
+                    ) {
+                        if let Some(next) = args.get(idx + 1) {
+                            dirs.push(next.clone());
+                            idx += 2;
+                            continue;
+                        }
+                    } else if let Some(eq) = arg.find('=') {
+                        if matches!(&arg[..eq], "--git-dir" | "--work-tree" | "--file") {
+                            dirs.push(arg[eq + 1..].to_string());
+                        }
+                    } else if arg.starts_with("-C") && arg.len() > 2 {
+                        dirs.push(arg[2..].to_string());
+                    }
+                    idx += 1;
+                }
+                for raw in &dirs {
+                    if raw.is_empty() {
+                        continue;
+                    }
+                    // `gmo`: `if (hi(d)) return Op(e)`.
+                    if has_glob_metachar(raw) || raw.contains('$') || raw.contains('`') {
+                        let message = format!(
+                            "git names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
+                        );
+                        return Some(PathConstraintAsk {
+                            reason: message.clone(),
+                            message,
+                            blocked_path: Some(raw.clone()),
+                            outside_reads_blocked: true,
+                        });
+                    }
+                    let expanded = expand_tilde(strip_surrounding_quotes(raw), home.as_deref());
+                    let resolved = crate::filesystem::expand_path(&expanded, roots);
+                    if !path_in_allowed_working_path(&resolved, block_dirs, roots) {
+                        return Some(PathConstraintAsk {
+                            message: crate::read_block::outside_path_message(
+                                "git",
+                                &resolved.to_string_lossy(),
+                                crate::read_block::OutsidePathShape::NamesResolved,
+                            ),
+                            reason: crate::policy::OUTSIDE_READS_BLOCKED_REASON.to_string(),
+                            blocked_path: Some(resolved.to_string_lossy().into_owned()),
+                            outside_reads_blocked: true,
+                        });
+                    }
+                }
+                continue;
+            }
+            if verb != "ln" && verb != "link" {
+                continue;
+            }
+            let positionals = filter_out_flags(args);
+            let checked: Vec<String> = if positionals.len() != args.len() || positionals.len() == 1
+            {
+                positionals
+            } else {
+                positionals[..positionals.len().saturating_sub(1)].to_vec()
+            };
+            for raw in &checked {
+                // `if (I.some(hi)) return Op(p)`.
+                if has_glob_metachar(raw) || raw.contains('$') || raw.contains('`') {
+                    let message = format!(
+                        "{verb} names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
+                    );
+                    return Some(PathConstraintAsk {
+                        reason: message.clone(),
+                        message,
+                        blocked_path: Some(raw.clone()),
+                        outside_reads_blocked: true,
+                    });
+                }
+                let expanded = expand_tilde(strip_surrounding_quotes(raw), home.as_deref());
+                let resolved = crate::filesystem::expand_path(&expanded, roots);
+                if !path_in_allowed_working_path(&resolved, block_dirs, roots) {
+                    return Some(PathConstraintAsk {
+                        message: crate::read_block::outside_path_message(
+                            verb,
+                            &resolved.to_string_lossy(),
+                            crate::read_block::outside_path_shape_for(verb),
+                        ),
+                        reason: crate::policy::OUTSIDE_READS_BLOCKED_REASON.to_string(),
+                        blocked_path: Some(resolved.to_string_lossy().into_owned()),
+                        outside_reads_blocked: true,
+                    });
+                }
+            }
+        }
+    }
 
     for sub in &subs {
         // SECURITY: strip wrapper commands (timeout/nice/nohup/time/stdbuf) so
@@ -1086,6 +1525,7 @@ pub fn check_command_path_containment(
                 message: msg,
                 reason: format!("{base} command with flags requires manual approval"),
                 blocked_path: None,
+                outside_reads_blocked: false,
             });
         }
 
@@ -1097,6 +1537,7 @@ pub fn check_command_path_containment(
                 message: "Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
                 reason: "Compound command contains cd with write operation - manual approval required to prevent path resolution bypass".to_string(),
                 blocked_path: None,
+                outside_reads_blocked: false,
             });
         }
 
@@ -1118,9 +1559,49 @@ pub fn check_command_path_containment(
                         message: reason.clone(),
                         reason,
                         blocked_path: Some(path.clone()),
+                        outside_reads_blocked: false,
                     });
                 }
                 PathGuard::Check(resolved) => {
+                    // PARITY 2.1.263 `mpo` (ln/link), the cp/mv arm and the
+                    // generic walker `gmo`: under the read block the path is
+                    // checked against `mEt` and the refusal carries the block's
+                    // own copy plus `PE`'s `outsideReadsBlocked` safetyCheck.
+                    // `mEt ⊆ rb`, so this subsumes the generic containment
+                    // message below once the block is armed.
+                    if let Some(block_dirs) = read_block_dirs {
+                        // PARITY `ymo`: before trusting the glob's base
+                        // directory, refuse outright when any segment's glob
+                        // could match `..` — such a pattern can walk upward out
+                        // of the working directories when the shell expands it,
+                        // so the reduced base proves nothing.
+                        if has_glob_metachar(path)
+                            && path.split(['/', '\\']).any(glob_segment_can_match_dotdot)
+                        {
+                            let message = format!(
+                                "{base} names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
+                            );
+                            return Some(PathConstraintAsk {
+                                reason: message.clone(),
+                                message,
+                                blocked_path: Some(path.clone()),
+                                outside_reads_blocked: true,
+                            });
+                        }
+                        if !path_in_allowed_working_path(&resolved, block_dirs, roots) {
+                            let message = crate::read_block::outside_path_message(
+                                base,
+                                &resolved.to_string_lossy(),
+                                crate::read_block::outside_path_shape_for(base),
+                            );
+                            return Some(PathConstraintAsk {
+                                message,
+                                reason: crate::policy::OUTSIDE_READS_BLOCKED_REASON.to_string(),
+                                blocked_path: Some(resolved.to_string_lossy().into_owned()),
+                                outside_reads_blocked: true,
+                            });
+                        }
+                    }
                     if !path_in_allowed_working_path(&resolved, &work_dirs, roots) {
                         let dirs = all_working_directories(roots, additional);
                         let dir_list = format_directory_list(&dirs);
@@ -1139,12 +1620,69 @@ pub fn check_command_path_containment(
                             reason: message.clone(),
                             message,
                             blocked_path: Some(resolved_disp.into_owned()),
+                            outside_reads_blocked: false,
                         });
                     }
                 }
             }
         }
     }
+    // PARITY 2.1.263 — the two env-var read-block escalations, in the binary's
+    // order. Both sit AFTER the per-path walk above, matching `Oun`, which runs
+    // `ele` (the path containment these lines mirror) and only then reaches:
+    //
+    // ```js
+    // if (t.blockReadsOutsideWorkingDirectories === !0) {
+    //   if (Eun(e,o) && !(jS(e)&&Nz()))
+    //     return zU("an environment variable prefix outside the safe list cannot be checked against the read block");
+    //   let de = ymo(o, d, t, r===!0, jS(e)&&Nz());
+    //   if (de) return de;
+    // }
+    // ```
+    //
+    // 🚨 Order is observable, but only for a COMPOUND command
+    // (`SECRET=1 ls && cat /etc/passwd`): `env_prefix_outside_safe_list` reads
+    // the leading prefix of the whole string while the walk above runs
+    // per-subcommand, so both can fire and the PATH message must win. On a
+    // SIMPLE command an off-list prefix is precisely what stops the walk from
+    // reaching a path — `strip_safe_wrappers` strips only SAFE names, so
+    // `SECRET=1` lands as argv[0] and matches no verb — and there is no path
+    // refusal to lose. Putting these at the top of the read-block section,
+    // where the `mmo` stdin check correctly lives (that one is in `Pmo`,
+    // upstream of `Oun`), would silently swap the copy the person sees.
+    //
+    // DIVERGENCE, same root: with an AST the oracle sees `SECRET=1` as an
+    // envVar and still resolves `cat /etc/passwd`, so for the SIMPLE form it
+    // surfaces the path copy where the port surfaces the env copy. Both refuse,
+    // both carry the outsideReadsBlocked safety check; only the wording differs.
+    //
+    // 🚨 READ-BLOCK ONLY: with the block off, none of this runs and an unsafe
+    // env prefix is simply stripped for matching (`strip_safe_wrappers`).
+    //
+    // DIVERGENCE: the `!(jS(e)&&Nz())` suppressor — "this command will run
+    // sandboxed anyway, so the read block need not analyze it" — is NOT applied,
+    // exactly as it is already not applied to the `mmo` stdin check above. This
+    // seam has no sandbox-decision input to consult; wiring it is a change to
+    // this function's signature and to every caller, and it would have to land
+    // for both checks at once. The port is therefore more conservative than the
+    // binary here: it asks where a sandboxed run would have passed through.
+    if read_block_dirs.is_some() {
+        if env_prefix_outside_safe_list(command) {
+            return Some(read_block_unanalyzable_ask(
+                "an environment variable prefix outside the safe list cannot be checked \
+                 against the read block",
+            ));
+        }
+        for sub in &subs {
+            if env_command_assignment_outside_safe_list(&split_argv(sub)) {
+                return Some(read_block_unanalyzable_ask(
+                    "an environment variable assignment outside the safe list cannot be checked \
+                     against the read block",
+                ));
+            }
+        }
+    }
+
     None
 }
 
@@ -1259,7 +1797,7 @@ mod tests {
     }
 
     fn check(cmd: &str) -> Option<PathConstraintAsk> {
-        check_command_path_containment(cmd, &roots(), &[])
+        check_command_path_containment(cmd, &roots(), &[], None)
     }
 
     // ── D1: read commands out-of-cwd → ask ─────────────────────────────────
@@ -1645,6 +2183,84 @@ mod tests {
         assert!(a.message.starts_with("cat in '/etc/passwd' was blocked."));
     }
 
+    // ── PARITY 2.1.263 `Eun` / `ymo`-head: env vars vs the read block ──────
+
+    #[test]
+    fn env_prefix_safe_list_walk_has_three_exits() {
+        // (1) No leading assignment at all → the only `false` exit.
+        assert!(!env_prefix_outside_safe_list("cat /etc/passwd"));
+        assert!(!env_prefix_outside_safe_list(""));
+        assert!(!env_prefix_outside_safe_list("env FOO=1 cat f"));
+
+        // (2) A leading NAME off the list → true, immediately.
+        assert!(env_prefix_outside_safe_list("SECRET=1 cat f"));
+        assert!(env_prefix_outside_safe_list("SECRET+=1 cat f"));
+
+        // Safe names are walked past, one pair at a time, until an off-list one.
+        assert!(!env_prefix_outside_safe_list("LANG=C CI=1 cat f"));
+        assert!(env_prefix_outside_safe_list("LANG=C CI=1 SECRET=1 cat f"));
+
+        // (3) 🚨 The exit that is easy to get wrong: a SAFE name whose VALUE the
+        // strip pattern cannot match is ALSO `true`. The walk cannot advance, so
+        // it cannot prove what follows is assignment-free.
+        assert!(env_prefix_outside_safe_list("LANG=$(id) cat f"));
+        assert!(env_prefix_outside_safe_list("LANG=a;b cat f"));
+        // Quoted forms and an EMPTY value ARE matched by the pattern, so these
+        // advance and come back clean — this is where `Eun` is WIDER than
+        // `strip_safe_wrappers`, whose value class is `+` and unquoted only.
+        assert!(!env_prefix_outside_safe_list(r#"LANG="en_US" cat f"#));
+        assert!(!env_prefix_outside_safe_list("LANG='en_US' cat f"));
+        assert!(!env_prefix_outside_safe_list("LANG= cat f"));
+        // `+` is inside `Eun`'s bare-value class but not `strip_safe_wrappers`'.
+        assert!(!env_prefix_outside_safe_list("LANG=a+b cat f"));
+    }
+
+    #[test]
+    fn env_command_assignment_scans_all_of_argv() {
+        let argv = |c: &str| split_argv(c);
+        // Only the `env` COMMAND, by basename.
+        assert!(env_command_assignment_outside_safe_list(&argv(
+            "env SECRET=1 cat f"
+        )));
+        assert!(env_command_assignment_outside_safe_list(&argv(
+            "/usr/bin/env SECRET=1 cat f"
+        )));
+        // Not the leading run — an assignment after a flag still counts.
+        assert!(env_command_assignment_outside_safe_list(&argv(
+            "env -u FOO SECRET=1 cat f"
+        )));
+        // On-list names are fine.
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "env LANG=C cat f"
+        )));
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "env -C /etc cat f"
+        )));
+        // A different argv[0] is not this branch's business, even with an
+        // off-list assignment in the tail (that is `Eun`'s prefix job, and only
+        // when it LEADS the command).
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "cat SECRET=1"
+        )));
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "envx SECRET=1 cat f"
+        )));
+        assert!(!env_command_assignment_outside_safe_list(&[]));
+        // 🚨 The oracle's name pattern here has NO `\+?`, unlike `Eun`'s, so an
+        // append is not an assignment for this branch.
+        assert!(!env_command_assignment_outside_safe_list(&argv(
+            "env SECRET+=1 cat f"
+        )));
+    }
+
+    #[test]
+    fn basename_matches_the_oracle_slice() {
+        assert_eq!(basename("/usr/bin/env"), "env");
+        assert_eq!(basename("env"), "env");
+        assert_eq!(basename("./env"), "env");
+        assert_eq!(basename("/"), "");
+    }
+
     #[test]
     fn nice_wrapper_stripped() {
         let a = check("nice cat /etc/passwd").expect("ask");
@@ -1656,8 +2272,11 @@ mod tests {
     #[test]
     fn read_into_additional_working_dir_passes() {
         let extra = vec![PathBuf::from("/tmp/scratch")];
-        assert!(check_command_path_containment("cat /tmp/scratch/x", &roots(), &extra).is_none());
-        let a = check_command_path_containment("cat /etc/passwd", &roots(), &extra).expect("ask");
+        assert!(
+            check_command_path_containment("cat /tmp/scratch/x", &roots(), &extra, None).is_none()
+        );
+        let a =
+            check_command_path_containment("cat /etc/passwd", &roots(), &extra, None).expect("ask");
         assert!(a.message.contains("'/proj/work', '/tmp/scratch'"));
     }
 
@@ -1887,18 +2506,44 @@ mod tests {
     fn cat_dotdot_after_segment_asks_with_traversal_message() {
         // `cat sub/../ok.txt` resolves inside cwd but still asks (symlink escape
         // defense) with the byte-locked message.
-        let a = check_command_path_containment("cat sub/../ok.txt", &roots(), &[]).expect("ask");
+        let a =
+            check_command_path_containment("cat sub/../ok.txt", &roots(), &[], None).expect("ask");
         assert_eq!(
             a.message,
             "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory"
         );
         // A leading `..` escaping cwd gets the generic containment message, NOT
         // the traversal one (SUr does not fire).
-        let b = check_command_path_containment("cat ../secret", &roots(), &[]).expect("ask");
+        let b = check_command_path_containment("cat ../secret", &roots(), &[], None).expect("ask");
         assert!(!b.message.contains("traversal after a directory segment"));
     }
 
     fn svec(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// PARITY 2.1.263 `_tt(segment)` — which glob segments could match `..`.
+    #[test]
+    fn glob_segment_dotdot_matcher_matches_the_oracle() {
+        // Not a glob at all → false (the binary's `Fx(e) === -1` early return),
+        // even though the literal `..` obviously "matches" itself.
+        assert!(!glob_segment_can_match_dotdot(".."));
+        assert!(!glob_segment_can_match_dotdot("src"));
+        // A leading `*` / `?` is the binary's explicit carve-out.
+        assert!(!glob_segment_can_match_dotdot("*"));
+        assert!(!glob_segment_can_match_dotdot("*.rs"));
+        assert!(!glob_segment_can_match_dotdot("?x"));
+        // POSIX class / equivalence / collating → true without building a regex.
+        assert!(glob_segment_can_match_dotdot("[[:alpha:]]"));
+        assert!(glob_segment_can_match_dotdot("[[=a=]]"));
+        assert!(glob_segment_can_match_dotdot("[[.a.]]"));
+        // Built regex actually matches "..".
+        assert!(glob_segment_can_match_dotdot(".*"));
+        assert!(glob_segment_can_match_dotdot(".?"));
+        assert!(glob_segment_can_match_dotdot(".[.]"));
+        // …and ones that do not.
+        assert!(!glob_segment_can_match_dotdot("x*"));
+        assert!(!glob_segment_can_match_dotdot("a?c"));
+        assert!(!glob_segment_can_match_dotdot("[abc]"));
     }
 }

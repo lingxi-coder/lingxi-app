@@ -55,7 +55,7 @@ export function emptyDesktopState(): DesktopState {
     currentModel: null,
     conversationControls: null,
     fastMode: false,
-    permissionMode: 'default',
+    permissionMode: 'auto',
     slashCommands: [],
     tasks: {},
     taskOutput: {},
@@ -95,7 +95,7 @@ function startSession(
       ? state.sessions
       : [{
         uuid: sessionId,
-        title: 'New session',
+        title: 'New chat',
         modified_rfc3339: new Date().toISOString(),
         message_count: 0,
         mode,

@@ -347,6 +347,8 @@
     <string name="cron_one_time_datetime_button">單次日期時間</string>
     <string name="cron_open_alarm_settings_button">開啟「鬧鐘和提醒」</string>
     <string name="cron_pending">待定</string>
+    <string name="cron_unsupported_generic">此裝置無法執行該排程</string>
+    <string name="cron_unsupported_schedule_fmt">不會執行：%1$s</string>
     <string name="cron_preset_every_hour">每小時</string>
     <string name="cron_preset_every_monday_9am">每週一 09:00</string>
     <string name="cron_prompt_field_label">提示詞 / 任務</string>
@@ -949,6 +951,9 @@
     <string name="local_apps_verification_summary_needs_revalidation">已核准的 MCP 目錄與目前生效的建置不再相符，必須重新驗證。</string>
     <string name="local_apps_verification_summary_needs_setup">尚未啟用已核准的本機應用 MCP 目錄。</string>
     <string name="local_apps_verification_summary_passed">MCP schema、Flow、呼叫與隔離驗證已通過。</string>
+    <string name="local_apps_verification_summary_ui_verification_corrupt">已儲存的介面驗證證據已損毀。</string>
+    <string name="local_apps_verification_summary_ui_verification_passed">主機介面與資料驗證證據已通過。</string>
+    <string name="local_apps_verification_summary_ui_verification_required">目前應用尚未完成介面驗證。</string>
     <string name="local_apps_verification_summary_verification_unavailable">此主機無法提供介面驗證的證據。</string>
     <string name="local_apps_verification_ui">介面驗證</string>
     <string name="local_apps_view_all">檢視全部應用</string>

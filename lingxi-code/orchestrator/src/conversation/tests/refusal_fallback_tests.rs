@@ -129,9 +129,7 @@ async fn a_single_hop_chain_still_latches_once_per_session() {
     let (orch, _out) = orch_with_refusal_chain(&["only"]);
     assert!(orch.maybe_swap_to_refusal_fallback().await);
     assert!(
-        orch.model_runtime
-            .refusal_fallback_latched
-            .load(std::sync::atomic::Ordering::SeqCst),
+        orch.model_runtime.refusal_cascade.lock().await.is_latched(),
         "a single-hop chain still sets the latch"
     );
     assert!(
@@ -158,10 +156,11 @@ async fn clearing_the_session_lets_the_cascade_start_over() {
     assert!(orch.maybe_swap_to_refusal_fallback().await);
     assert!(!orch.maybe_swap_to_refusal_fallback().await);
 
-    orch.model_runtime.refusal_tried_models.lock().await.clear();
     orch.model_runtime
-        .refusal_fallback_latched
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+        .refusal_cascade
+        .lock()
+        .await
+        .reset_routing();
     assert!(
         orch.maybe_swap_to_refusal_fallback().await,
         "a reset session walks the chain again"
@@ -184,10 +183,7 @@ async fn no_fallback_configured_is_a_strict_noop() {
     );
     assert!(out.text_events().await.is_empty(), "no warning emitted");
     assert!(
-        !orch
-            .model_runtime
-            .refusal_fallback_latched
-            .load(std::sync::atomic::Ordering::SeqCst),
+        !orch.model_runtime.refusal_cascade.lock().await.is_latched(),
         "latch must stay unset when nothing was configured"
     );
 }
@@ -251,10 +247,7 @@ async fn clear_session_resets_refusal_fallback_latch() {
         .expect("clear_session succeeds");
 
     assert!(
-        !orch
-            .model_runtime
-            .refusal_fallback_latched
-            .load(std::sync::atomic::Ordering::SeqCst),
+        !orch.model_runtime.refusal_cascade.lock().await.is_latched(),
         "clear_session must reset the per-session refusal fallback latch"
     );
     assert!(
@@ -283,14 +276,110 @@ async fn resume_session_resets_refusal_fallback_latch() {
     .expect("resume_session succeeds");
 
     assert!(
-        !orch
-            .model_runtime
-            .refusal_fallback_latched
-            .load(std::sync::atomic::Ordering::SeqCst),
+        !orch.model_runtime.refusal_cascade.lock().await.is_latched(),
         "resume_session must reset the per-session refusal fallback latch"
     );
     assert!(
         orch.maybe_swap_to_refusal_fallback().await,
         "a resumed session must be able to swap on its first refusal"
     );
+}
+
+// ── The typed `model_refusal_fallback` system message ──────────────────────
+//
+// claude-code carries the notice as a typed system message in the conversation
+// (`Dcr`, `src_163219561.js`), not only as banner text. This port emitted it on
+// the output stream alone, so it never reached the transcript: gone on resume,
+// and `retractedMessageUuids` had no carrier — nothing could see which earlier
+// notices a later hop superseded.
+
+/// Every `model_refusal_fallback` system message in `history`, in order.
+async fn refusal_frames(orch: &ConversationOrchestrator) -> Vec<protocol::RefusalFallbackMetadata> {
+    orch.session
+        .lock()
+        .await
+        .history
+        .iter()
+        .filter_map(|m| match m {
+            protocol::ConversationMessage::System {
+                subtype: Some(subtype),
+                refusal_fallback: Some(meta),
+                ..
+            } if subtype == "model_refusal_fallback" => Some(meta.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_swap_records_a_typed_frame_in_the_transcript() {
+    let (orch, _out) = orch_with_refusal_fallback(Some("fallback-model"));
+    assert!(orch.maybe_swap_to_refusal_fallback().await);
+
+    let frames = refusal_frames(&orch).await;
+    assert_eq!(frames.len(), 1, "the swap must leave a frame behind");
+    let f = &frames[0];
+    assert_eq!(f.trigger, "refusal");
+    assert_eq!(f.direction, "retry");
+    assert_eq!(
+        f.scope.as_deref(),
+        Some("session"),
+        "this port's cascade swaps the SESSION model — upstream's `swapSession` arm"
+    );
+    assert_eq!(f.fallback_model, "fallback-model");
+}
+
+/// A collapsed cascade leaves ONE frame, naming where the session actually
+/// ended up — and its retraction list is EMPTY, which is correct rather than a
+/// gap: the superseded hop was held provisionally and never reached the user,
+/// so `scrub` drops it from the list. `retracted_message_uuids` carries only
+/// notices that were actually shown and then superseded.
+#[tokio::test]
+async fn a_collapsed_cascade_leaves_one_frame_for_where_it_ended_up() {
+    let (orch, _out) = orch_with_refusal_chain(&["hop-one", "hop-two"]);
+    assert!(orch.maybe_swap_to_refusal_fallback().await);
+    assert!(orch.maybe_swap_to_refusal_fallback().await);
+
+    let frames = refusal_frames(&orch).await;
+    assert_eq!(
+        frames.len(),
+        1,
+        "one notice reached the user, so one frame: {frames:?}"
+    );
+    assert_eq!(frames[0].fallback_model, "hop-two");
+    assert_eq!(
+        frames[0].original_model, "claude-opus-4-8",
+        "the frame reports where the episode STARTED, not the hop before it"
+    );
+    assert!(
+        frames[0].retracted_message_uuids.is_empty(),
+        "hop-one was never shown, so there is nothing to retract"
+    );
+}
+
+/// A `System` message that reached the wire would be REJECTED
+/// (`convert_message` → `InvalidRequest`), so the frame must be dropped before
+/// the request is built. `convert_messages` skips every `System`; this pins
+/// that the notice rides along in history without becoming model context.
+#[tokio::test]
+async fn the_frame_never_reaches_the_wire() {
+    let (orch, _out) = orch_with_refusal_fallback(Some("fallback-model"));
+    assert!(orch.maybe_swap_to_refusal_fallback().await);
+    let history = orch.session.lock().await.history.clone();
+    assert!(
+        history
+            .iter()
+            .any(|m| matches!(m, protocol::ConversationMessage::System { .. })),
+        "precondition: the frame is in history"
+    );
+
+    let wire = llm_client::convert::normalize_messages_for_api(history);
+    assert!(
+        !wire
+            .iter()
+            .any(|m| matches!(m, protocol::ConversationMessage::System { .. })),
+        "a System message on the wire is an InvalidRequest: {wire:?}"
+    );
+    // And the stronger statement: the real encoder accepts what survives.
+    llm_client::convert::to_llm_messages(wire).expect("the normalized history encodes");
 }

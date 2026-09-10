@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '13.0.0';
+export const CLIENT_PROTOCOL_VERSION = '13.1.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -180,7 +180,32 @@ export type AudioResultDto =
  * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive; consumers
  * should treat the union as open-ended.
  */
+export interface CronRequestDto {
+  action: 'list' | 'create' | 'update' | 'delete';
+  id?: string;
+  cron?: string;
+  prompt?: string;
+  recurring?: boolean;
+  durable?: boolean;
+  no_expiry?: boolean;
+  expires_at?: number;
+}
+
+export interface CronJobDto {
+  expires_at?: number;
+  session_id?: string;
+  id: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  durable: boolean;
+  permanent: boolean;
+  created_at: number;
+  last_fired_at?: number;
+}
+
 export type ClientCommand =
+  | { type: 'cron_manage'; request_id: string; request: CronRequestDto }
   // ── Turn driving ──────────────────────────────────────────────────────────
   | {
       type: 'send_prompt';
@@ -254,6 +279,7 @@ export type ClientCommand =
   | { type: 'task_list'; status_filter?: TaskStatusDto }
   | { type: 'task_output'; task_id: string; offset: number }
   | { type: 'task_stop'; task_id: string }
+  | { type: 'task_message'; task_id: string; message: string }
   | { type: 'resume_workflow'; task_id: string }
   // ── Local apps ──────────────────────────────────────────────────────────────
   | { type: 'list_apps' }
@@ -986,6 +1012,8 @@ export type TaskStatusDto =
 
 /** One task row (listings.rs `TaskRowDto`). */
 export interface TaskRowDto {
+  /** The teammate is waiting for its leader's plan decision. */
+  awaiting_plan_approval?: boolean;
   task_id: string;
   task_type: string;
   status: TaskStatusDto;
@@ -996,6 +1024,14 @@ export interface TaskRowDto {
   error?: string;
   /** `local_fusion` only (F005): the run's current progress-stage label. */
   stage?: string;
+  /** Additive shell specialization, e.g. a command event monitor. */
+  kind?: string;
+  /** Agent completion has not yet been delivered or consumed. */
+  unread?: boolean;
+  /** Concrete model used by an agent task. */
+  model?: string;
+  /** String effort label; numeric budgets are omitted. */
+  effort?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1913,9 +1949,23 @@ export type AudioOpDto =
  * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive.
  */
 export type ClientEvent =
+  | { type: 'cron_result'; request_id: string; jobs: CronJobDto[]; error?: string }
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
+  | { type: 'message_identity'; message_id: string }
+  | { type: 'message_retracted'; message_id: string }
   | { type: 'system_notice'; message: string; is_error: boolean }
+  | {
+      type: 'loop_wakeup';
+      /** The resume line, already rendered host-side. */
+      message: string;
+      /** The companion meta line, present only when `streak > 0`. */
+      companion?: string;
+      /** Consecutive quiet ticks before this wakeup; 0 for an ordinary one. */
+      streak: number;
+      /** When the streak began, epoch ms; 0 when there is none. */
+      since_ms: number;
+    }
   | { type: 'ask_user_question'; request: AskUserQuestionRequestDto }
   | { type: 'ask_user_question_resolved'; request_id: number }
   | {
@@ -2108,6 +2158,9 @@ export type ClientEvent =
   | { type: 'auth_state'; state: AuthStateDto }
   | { type: 'doctor_report'; report: DoctorReportDto }
   | { type: 'task_row'; task: TaskRowDto }
+  /** SDK task lifecycle receipt (`ClientEvent::TaskLifecycle`). The payload is the
+   *  already-serialized `system` / `task_*` SDK record, forwarded verbatim. */
+  | { type: 'task_lifecycle'; event_json: string }
   | {
       type: 'task_output_chunk';
       task_id: string;

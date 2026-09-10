@@ -25,4 +25,11 @@ or its profiles). File-backed runtimes follow the markdown link
 surface profiles that match the app. Use only LingXi Browser and Local App tools
 already provided by the product.
 Report defects but do not repair source in the QA pass; the orchestrator owns
-repair, rebuild, and retest rounds.
+repair, rebuild, and retest rounds. When Host returns a
+`verification_scope`, it is authoritative: exercise only the current-device
+`in_scope_target_ids`, preserve `declared_target_ids`, and report
+`unverified_target_ids`/`unverified_scenario_ids` explicitly. Never describe
+untested targets as passed or summarize a partial run as full-matrix success.
+Carry Host upstream finding IDs/messages unchanged. A post-repair pass may
+resolve one only with exact fresh Host evidence IDs; it must not erase or
+rewrite an immutable prior candidate.

@@ -7,6 +7,32 @@
 //! Task 1). Copies with deliberately different semantics stay local and
 //! documented.
 
+/// PARITY 2.1.263 `YYe()` — `process.env.CLAUDE_CODE_EVAL_CONFINED === true`.
+///
+/// A confined eval-harness run takes its permission grants ONLY from the
+/// command line: hook allows are dropped (`hooks` `H_n`) and the rule loader
+/// drops every `allow`-behavior rule (`permission` `OG`).
+///
+/// 🚨 The binary compares against the LITERAL `true`, so `1` / `yes` / `on` /
+/// `TRUE` do NOT arm it. That is deliberately unlike [`is_env_truthy`], which
+/// almost everything else in this codebase uses — do not "fix" it into the
+/// truthy allowlist, that would silently widen the gate.
+#[must_use]
+pub fn is_eval_confined_session() -> bool {
+    is_eval_confined_value(std::env::var("CLAUDE_CODE_EVAL_CONFINED").ok().as_deref())
+}
+
+/// The comparison [`is_eval_confined_session`] makes, without the environment.
+///
+/// Exists so the spelling rule can be pinned by a test that does not mutate a
+/// process-global. `cargo test` runs a binary's tests on parallel threads in
+/// one process, so a `set_var` here is visible to every test in flight — which
+/// is exactly how the `hooks` suite grew an intermittent failure.
+#[must_use]
+pub fn is_eval_confined_value(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 /// `isEnvTruthy(envVar)` — see module docs.
 #[must_use]
 pub fn is_env_truthy(value: Option<&str>) -> bool {
@@ -14,27 +40,46 @@ pub fn is_env_truthy(value: Option<&str>) -> bool {
     matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on")
 }
 
-/// The env core of `isAgentSwarmsEnabled()` / oracle `Jc()` (2.1.223
-/// @247378175: `(CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS || svy()) &&
-/// getFeatureValue("tengu_amber_flint", true)`): Anthropic-internal runs
-/// (`USER_TYPE=ant`) are on by default, external runs need the experimental
-/// env opt-in (port-renamed `LINGXI_EXPERIMENTAL_AGENT_TEAMS`).
+/// `isAgentSwarmsEnabled()` — oracle 2.1.263 `zr()`
+/// (`src_160714897.js` @752):
 ///
-/// The oracle's remaining terms are not modeled: `tengu_amber_flint` is a
-/// default-TRUE GrowthBook killswitch (no GrowthBook in the port ⇒ always
-/// true) and `svy()` is internal-run detection folded into the `USER_TYPE`
-/// arm here. The single SHARED implementation for the two runtime gates
-/// (`tool-task`'s TaskUpdate side-effects, `tool-ui`'s SendMessage); the
-/// coordinator team tools gate on a host `agent_swarms_enabled` feature flag
-/// at `is_enabled` time instead — a different, documented surface.
+/// ```js
+/// function t(){return process.argv.includes("--agent-teams")}
+/// function zr(){
+///   if(!a.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS&&!t())return!1;
+///   if(!H("tengu_amber_flint",!0))return!1;
+///   return!0}
+/// ```
+///
+/// Two opt-ins, either of which turns the surface on: the experimental env var
+/// (port-renamed `LINGXI_EXPERIMENTAL_AGENT_TEAMS`) or the `--agent-teams`
+/// argv flag.
+///
+/// The second term used to be `USER_TYPE=ant` here, ported from 2.1.223's
+/// `svy()` internal-run detection. 2.1.263 replaced that with the explicit
+/// flag, so an Anthropic-internal environment variable no longer decides it
+/// — which also matters for a multi-provider port, where `USER_TYPE` says
+/// nothing about whether the operator wants agent teams.
+///
+/// `tengu_amber_flint` is a default-TRUE GrowthBook killswitch (no GrowthBook
+/// in the port ⇒ always true), so it is not modeled. The single SHARED
+/// implementation for the two runtime gates (`tool-task`'s TaskUpdate
+/// side-effects, `tool-ui`'s SendMessage); the coordinator team tools gate on a
+/// host `agent_swarms_enabled` feature flag at `is_enabled` time instead — a
+/// different, documented surface.
 #[must_use]
 pub fn agent_swarms_enabled() -> bool {
-    std::env::var("USER_TYPE").is_ok_and(|v| v == "ant")
-        || is_env_truthy(
-            std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS")
-                .ok()
-                .as_deref(),
-        )
+    is_env_truthy(
+        std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS")
+            .ok()
+            .as_deref(),
+    ) || agent_teams_argv_flag()
+}
+
+/// Oracle `t(){return process.argv.includes("--agent-teams")}` — an EXACT
+/// element match on the raw argv, not a prefix or `--flag=value` form.
+fn agent_teams_argv_flag() -> bool {
+    std::env::args().any(|arg| arg == "--agent-teams")
 }
 
 /// `isEnvDefinedFalsy(envVar)` (`utils/envUtils.ts:39-47`): a defined,
@@ -49,6 +94,62 @@ pub fn is_env_defined_falsy(value: Option<&str>) -> bool {
         Some(v) if v.is_empty() => false,
         Some(v) => matches!(v.to_lowercase().trim(), "0" | "false" | "no" | "off"),
     }
+}
+
+/// Oracle `_t()` (`src_158095655.js` @674824): `E6() === "bg"`, where
+/// `E6()` reads `CLAUDE_CODE_SESSION_KIND` and admits `bg`, `daemon` and
+/// `daemon-worker` — only the `bg` value answers this predicate. The port
+/// spells the variable `LINGXI_SESSION_KIND`; the daemon injects it into the
+/// worker it spawns (`apps/cli/src/commands/daemon.rs`, `bg_worker_env`).
+///
+/// This is the whole of the oracle's `Ja()` that the port can express.
+/// `Ja(){return _t()||Jh()!==null}` also disjoins a **bg takeover** state
+/// (`Kt().bgTakeover`), and nothing in this workspace can set one: there is no
+/// takeover record, and `resume_to_background` spawns a *new* worker (which
+/// gets `LINGXI_SESSION_KIND=bg`) rather than marking the calling session. The
+/// missing disjunct is therefore vacuously false today, so this is an
+/// equivalence rather than an approximation. It stops being one the moment a
+/// takeover grows session state — the likely homes are
+/// `apps/cli/src/bg_attach.rs` and `background_dispatch.rs`'s
+/// `resume_to_background`, named here so that change has a way back.
+///
+/// Deliberately NOT `session::jsonl::schema::session_kind()` (whose whitelist
+/// also admits `daemon`/`daemon-worker`, strictly wider than `_t()`) and NOT
+/// [`crate::session_flags::is_non_interactive_session`] (a `-p`/print run sets
+/// that without being a background session).
+#[must_use]
+pub fn is_bg_session() -> bool {
+    std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg")
+}
+
+/// Port of claude-code `areBackgroundTasksDisabled` (2.1.263 `Dl()`;
+/// 2.1.238 `WA()`: `getSettings().backgroundTasksDisabled ||
+/// env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`).
+///
+/// Only the env half is modelled, and the reason is NOT the one an earlier
+/// version of this comment gave. `i5().backgroundTasksDisabled` is not a
+/// settings key with a `false` default — it is a runtime LATCH, flipped by
+/// `disableBackgroundTasks()` on the MCP-serve/SDK http entry path
+/// (`let p=S==="http"; if(p){let r=i5(); r.disableBackgroundTasks(),
+/// r.disableUnsandboxedCommands()}`, `src_187861758.js`).
+///
+/// That entry path has no analogue here: the port has no `mcp serve` / http
+/// server mode, so nothing could set the latch. Adding one would be a field with
+/// no producer. If such a mode is ever added it must flip this gate too — and
+/// `disableUnsandboxedCommands` alongside it, which the oracle sets in the same
+/// breath.
+///
+/// This lives here rather than in `tool-shell` because the gate has consumers on
+/// both sides of that crate: the Bash prompt and input schema inside it, and the
+/// SDK `background_tasks` control request in `apps/cli`, which does not depend
+/// on it. Two private copies would drift.
+#[must_use]
+pub fn background_tasks_disabled() -> bool {
+    is_env_truthy(
+        std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Group-digit separator characters accepted by claude-code's `BZa`/`$Za`

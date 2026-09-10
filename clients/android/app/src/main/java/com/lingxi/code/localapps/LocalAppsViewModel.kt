@@ -2600,15 +2600,18 @@ private fun AppDependencyChangeConfirmationRequestDto.toUiDependencyChangeConfir
         rollbackPolicy = rollbackPolicy,
     )
 
-private fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction? {
+internal fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction? {
+    val qaEnvelope = parseLocalAppQaEnvelope(value, requestId)
+    if (isLocalAppQaRequestId(requestId) && qaEnvelope == null) return null
+    val actionValue = if (qaEnvelope == null) value else qaEnvelope.actionValue
     val uiTarget = target?.toUiTarget()
-    return when (action) {
+    val parsed = when (action) {
         AppUiActionKindDto.INSPECT -> LocalAppUiAutomationAction.Inspect
         AppUiActionKindDto.CLICK -> uiTarget?.let(LocalAppUiAutomationAction::Click)
-        AppUiActionKindDto.FILL -> uiTarget?.let { LocalAppUiAutomationAction.Fill(it, value.orEmpty()) }
-        AppUiActionKindDto.SELECT -> uiTarget?.let { LocalAppUiAutomationAction.Select(it, value.orEmpty()) }
-        AppUiActionKindDto.TOGGLE -> uiTarget?.let { LocalAppUiAutomationAction.Toggle(it, value.toBoolean()) }
-        AppUiActionKindDto.SCROLL -> value.orEmpty().split(',', limit = 2).let { parts ->
+        AppUiActionKindDto.FILL -> uiTarget?.let { LocalAppUiAutomationAction.Fill(it, actionValue.orEmpty()) }
+        AppUiActionKindDto.SELECT -> uiTarget?.let { LocalAppUiAutomationAction.Select(it, actionValue.orEmpty()) }
+        AppUiActionKindDto.TOGGLE -> uiTarget?.let { LocalAppUiAutomationAction.Toggle(it, actionValue.toBoolean()) }
+        AppUiActionKindDto.SCROLL -> actionValue.orEmpty().split(',', limit = 2).let { parts ->
             LocalAppUiAutomationAction.Scroll(
                 x = parts.getOrNull(0)?.trim()?.toIntOrNull() ?: 0,
                 y = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: 0,
@@ -2618,7 +2621,7 @@ private fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction? 
         // schema constrains `value` no further. Origin is enforced in the
         // WebView, the only layer that knows the live one.
         AppUiActionKindDto.NAVIGATE ->
-            value?.takeIf { it.startsWith('/') || it.contains("://") }
+            actionValue?.takeIf { it.startsWith('/') || it.contains("://") }
                 ?.let(LocalAppUiAutomationAction::Navigate)
         AppUiActionKindDto.BACK -> LocalAppUiAutomationAction.Back
         AppUiActionKindDto.RELOAD -> LocalAppUiAutomationAction.Reload
@@ -2626,12 +2629,12 @@ private fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction? 
         // (`{"rect":{"x","y","width","height"}}`) straight through; the
         // WebView layer parses it, clamps it to the real viewport, and
         // reports what it actually captured back as `capture_rect`.
-        AppUiActionKindDto.CAPTURE_VIEW -> LocalAppUiAutomationAction.CaptureView(value)
+        AppUiActionKindDto.CAPTURE_VIEW -> LocalAppUiAutomationAction.CaptureView(actionValue)
         // `"x,y"` / `"x,y,phase"`, the same comma-packed `value` convention
         // SCROLL already uses. The wire variant is fieldless on purpose: a
         // data-carrying uniffi variant renders this enum as a Kotlin sealed
         // class and renames every existing constant.
-        AppUiActionKindDto.POINTER -> value.orEmpty().split(',').map { it.trim() }.let { parts ->
+        AppUiActionKindDto.POINTER -> actionValue.orEmpty().split(',').map { it.trim() }.let { parts ->
             // `toDoubleOrNull`, not `toIntOrNull`: the documented unit is CSS
             // pixels and an agent reading a centre off `getBoundingClientRect()`
             // sends "207.5,320". `toIntOrNull` rejected that outright and the
@@ -2649,13 +2652,18 @@ private fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction? 
         }
         // Split from the RIGHT and only when the tail is a known phase, so the
         // key `,` itself still works.
-        AppUiActionKindDto.KEY -> value.orEmpty().trim().let { raw ->
+        AppUiActionKindDto.KEY -> actionValue.orEmpty().trim().let { raw ->
             val comma = raw.lastIndexOf(',')
             val tail = if (comma >= 0) raw.substring(comma + 1).trim().lowercase() else ""
             val hasPhase = tail in setOf("press", "down", "up")
             val key = if (hasPhase) raw.substring(0, comma).trim() else raw
             if (key.isEmpty()) null else LocalAppUiAutomationAction.Key(key, if (hasPhase) tail else "press")
         }
+    }
+    return if (qaEnvelope != null && parsed != null) {
+        LocalAppUiAutomationAction.Qa(qaEnvelope.expectedRuntimeUrl, parsed)
+    } else {
+        parsed
     }
 }
 

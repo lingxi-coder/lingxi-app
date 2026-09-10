@@ -607,6 +607,19 @@ fn session_model_exceeds_explore_cap(
 ///   inherits the session model CAPPED at opus.
 /// - Otherwise (haiku/sonnet/opus session, or any non-firstParty provider):
 ///   `"inherit"` — Explore runs on the session model.
+///
+/// 2.1.266 spells the same function `yX` and adds a kill-switch ahead of the
+/// cap test (@1496xxx):
+///
+/// ```js
+/// if(a.CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP)return"inherit";
+/// ```
+///
+/// so a deployment can let Explore run on the full session model. The port
+/// reads it through `is_env_truthy` rather than JS truthiness, the same
+/// approximation every other bare `a.X` gate here uses — it differs only for a
+/// value like `"0"`, which is truthy in JS and which nobody sets on a
+/// kill-switch.
 #[must_use]
 pub fn resolve_builtin_explore_model(
     def: &AgentDefinition,
@@ -615,6 +628,14 @@ pub fn resolve_builtin_explore_model(
 ) -> AgentModel {
     if def.agent_type != "Explore" || !matches!(def.source, AgentSource::BuiltIn) {
         return def.model.clone();
+    }
+    if platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_DISABLE_EXPLORE_INHERIT_CAP")
+            .or_else(|_| std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"))
+            .ok()
+            .as_deref(),
+    ) {
+        return AgentModel::Inherit;
     }
     if session_model_exceeds_explore_cap(session_model, session_provider_first_party) {
         AgentModel::Alias(EXPLORE_MODEL_CAP.to_string())
@@ -1495,6 +1516,31 @@ mod tests {
                 "{session} → opus cap"
             );
         }
+    }
+
+    /// 2.1.266 `yX`'s kill-switch, ahead of the cap test: a deployment can let
+    /// Explore run on the full session model.
+    #[test]
+    fn explore_inherit_cap_kill_switch_restores_plain_inherit() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let def = builtin_explore_def();
+        // Premise: this session WOULD be capped without the switch, so a pass
+        // below cannot come from the session model being under the cap anyway.
+        assert!(
+            matches!(
+                resolve_builtin_explore_model(&def, "claude-fable-5-1", true),
+                AgentModel::Alias(ref a) if a == "opus"
+            ),
+            "premise: a fable-class session is capped",
+        );
+        std::env::set_var("LINGXI_DISABLE_EXPLORE_INHERIT_CAP", "1");
+        let got = resolve_builtin_explore_model(&def, "claude-fable-5-1", true);
+        std::env::remove_var("LINGXI_DISABLE_EXPLORE_INHERIT_CAP");
+        assert!(
+            matches!(got, AgentModel::Inherit),
+            "the kill-switch returns plain `inherit`, got {got:?}",
+        );
     }
 
     #[test]

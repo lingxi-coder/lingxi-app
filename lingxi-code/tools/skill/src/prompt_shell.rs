@@ -562,6 +562,8 @@ fn build_effective_policy(
         policy = policy.with_pwsh_parser(pwsh_parser);
     }
     policy = policy.with_working_dirs(base.additional_working_dirs.clone());
+    policy = policy
+        .with_block_reads_outside_working_directories(base.block_reads_outside_working_directories);
     policy = policy.with_bypass_available(base.bypass_permissions_available);
     policy = policy.with_restricted(base.restricted);
     policy.bypass_killswitch_active = base.bypass_killswitch_active;

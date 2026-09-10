@@ -229,6 +229,11 @@ pub enum DriveStep {
     RetryAfter(Duration),
     /// Re-encode with this `max_tokens` then retry (529-independent).
     AdjustMaxTokens(u32),
+    /// Strip thinking / redacted_thinking blocks and retry the same request
+    /// (2.1.259 thinking-signature 400). Does **not** consume a budget attempt.
+    /// Once per request; a second hit is [`Terminal`]. Applies to any provider
+    /// whose 400 copy matches the classifier.
+    StripThinkingSignature,
     /// Switch to the fallback model then retry.
     Fallback {
         /// The model identifier to use for the fallback attempt.
@@ -279,6 +284,10 @@ pub struct RetryState {
     /// `false` (the default) keeps Claude Code's parity 429-retry for Anthropic
     /// and every PAID model.
     pub rate_limit_terminal: bool,
+    /// `true` once this request already applied
+    /// [`DriveStep::StripThinkingSignature`]. A second thinking-signature 400
+    /// is terminal (the strip is once-per-request, like overflow adjustment).
+    pub thinking_signature_stripped: bool,
 }
 
 /// Consecutive-529 / Opus-fallback policy threaded into [`next_step`].
@@ -514,6 +523,10 @@ pub fn resolve_retry_control_with_settings(
 /// 4. [`LlmError::InvalidRequest`] — overflow check:
 ///    - Message parses as overflow AND `adjusted_max_tokens` yields `Some(n)`
 ///      → [`DriveStep::AdjustMaxTokens(n)`] (does **not** consume an attempt).
+///    - Message matches Anthropic thinking-signature 400 copy AND this request
+///      has not already stripped → [`DriveStep::StripThinkingSignature`]
+///      (does **not** consume an attempt). DeepSeek / OpenAI / Gemini 400 copy
+///      does not match and stays [`DriveStep::Terminal`].
 ///    - Otherwise → [`DriveStep::Terminal`].
 /// 5. All other errors → [`DriveStep::Terminal`].
 /// 6. Budget exhaustion: once `state.attempt >= ctl.max_retries`, every
@@ -654,6 +667,17 @@ pub fn next_step_with_backoff(
                     // AdjustMaxTokens does NOT consume a budget attempt.
                     return DriveStep::AdjustMaxTokens(new_max);
                 }
+            }
+
+            // 2.1.259 thinking-signature 400: strip once, then retry. Classifier
+            // is the 400 copy, not the protocol family — OpenAI / Gemini /
+            // OpenAI-compat thinking models heal the same way. DeepSeek
+            // reasoning_content 400s do not match and stay terminal.
+            if !state.thinking_signature_stripped
+                && crate::model::thinking_signature::is_thinking_signature_rejection(message)
+            {
+                state.thinking_signature_stripped = true;
+                return DriveStep::StripThinkingSignature;
             }
 
             DriveStep::Terminal

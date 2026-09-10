@@ -425,14 +425,6 @@ fn inspect_missing_required_input(
     })
 }
 
-fn missing_required_message(missing_keys: &[String]) -> String {
-    if missing_keys.len() == 1 {
-        format!("MCPTool: missing required property {:?}", missing_keys[0])
-    } else {
-        format!("MCPTool: missing required properties {:?}", missing_keys)
-    }
-}
-
 /// Build the model-facing `mcp_progress` / `progress` event payload for one
 /// forwarded MCP `notifications/progress` (MCP.4). Mirrors
 /// `services/mcp/client.ts:3104-3112`:
@@ -1010,6 +1002,9 @@ impl ReadMcpResourceTool {
 
 // -- Schemas -----------------------------------------------------------------
 
+// H4.inputSchema = c({}).passthrough(); inputJSONSchema is wire-only.
+static MCP_RUNTIME_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| json!({"type":"object"}));
+
 static MCP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
@@ -1366,6 +1361,13 @@ impl Tool for MCPTool {
         // dispatcher → the `{full_name, arguments}` envelope schema.
         self.bound_schema.as_ref().unwrap_or(&MCP_TOOL_SCHEMA)
     }
+    fn input_validation_schema(&self) -> &Value {
+        if self.full_name.is_some() {
+            &MCP_RUNTIME_INPUT_SCHEMA
+        } else {
+            &MCP_TOOL_SCHEMA
+        }
+    }
     fn output_schema(&self) -> Option<&Value> {
         self.bound_output_schema.as_ref()
     }
@@ -1632,22 +1634,17 @@ impl Tool for MCPTool {
             self.bound_schema.as_ref().or(generic_input_schema.as_ref()),
         ) {
             let tool_use_id = ctx.tool_use_id.as_ref().map(|id| id.to_string());
-            let Some(message_id) = ctx.assistant_message_id.as_ref() else {
-                return Err(ToolError::InvalidInput(missing_required_message(
-                    &preflight.missing_keys,
-                )));
-            };
-            emit_mcp_input_missing_required(
-                self.bus(),
-                tool_use_id.as_deref(),
-                message_id,
-                tool_input_size_bytes,
-                &preflight,
-            )
-            .await;
-            return Err(ToolError::InvalidInput(missing_required_message(
-                &preflight.missing_keys,
-            )));
+            // P6n is telemetry only; the MCP server owns its advertised schema.
+            if let Some(message_id) = ctx.assistant_message_id.as_ref() {
+                emit_mcp_input_missing_required(
+                    self.bus(),
+                    tool_use_id.as_deref(),
+                    message_id,
+                    tool_input_size_bytes,
+                    &preflight,
+                )
+                .await;
+            }
         }
 
         // STARTED.
@@ -1803,7 +1800,9 @@ impl Tool for MCPTool {
         let cancel = tokio_util::sync::CancellationToken::new();
         let parent_cancel = ctx.cancel.clone();
         let bound_output_schema = self.bound_output_schema.clone();
+        let task_raw_content = Arc::new(std::sync::Mutex::new(None));
         let mut call_task = {
+            let task_raw_content = task_raw_content.clone();
             let registry = registry.clone();
             let bus = bus.clone();
             let output_dir = output_dir.clone();
@@ -1848,6 +1847,11 @@ impl Tool for MCPTool {
                     biased;
                     () = cancelled => Err(ToolError::Aborted),
                     res = &mut call_fut => {
+                        if let Ok(dto) = &res {
+                            if !dto.is_error {
+                                *task_raw_content.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dto.structured_content.as_ref().map_or_else(|| dto.content.clone(), |value| Value::String(value.to_string())));
+                            }
+                        }
                         process_mcp_call_result(
                             bus,
                             output_dir,
@@ -1867,21 +1871,45 @@ impl Tool for MCPTool {
             })
         };
 
-        // `Promise.race([f, xr(s)])`: settled-first returns the result directly;
-        // timeout-first breaks out to the background path. `biased` polls the
-        // call before the timer so a call that finishes exactly at the deadline
-        // still returns inline (matching the binary's `==="settled"` check).
-        tokio::select! {
-            biased;
-            joined = &mut call_task => {
-                return match joined {
-                    Ok(result) => result,
-                    Err(join_err) => Err(ToolError::Internal(format!(
-                        "MCPTool: background task join error: {join_err}"
-                    ))),
-                };
+        // `while(!0){ Promise.race([f, xr(s)]); if(B?.())continue; break }`:
+        // settled-first returns the result directly; timeout-first consults the
+        // elicitation predicate and, while a dialog is OPEN, re-arms a whole
+        // fresh window instead of detaching. `biased` polls the call before the
+        // timer so a call that finishes exactly at the deadline still returns
+        // inline (matching the binary's `==="settled"` check).
+        //
+        // MON-08: the port had a bare single-shot select here, so a `tools/call`
+        // waiting on the user was backgrounded at the first deadline — turning a
+        // question into an orphan. The window is 120 s by default and the port's
+        // Elicitation hook has a 10-minute default timeout, so this was a real
+        // window, not a theoretical one.
+        //
+        // NOTE the granularity: each `continue` mints a NEW full-length timer,
+        // exactly as the oracle does. Polling more tightly would be a divergence
+        // — a dialog closing at T=121 s backgrounds at T=240 s upstream, not at
+        // T=121 s.
+        loop {
+            tokio::select! {
+                biased;
+                joined = &mut call_task => {
+                    return match joined {
+                        Ok(result) => result,
+                        Err(join_err) => Err(ToolError::Internal(format!(
+                            "MCPTool: background task join error: {join_err}"
+                        ))),
+                    };
+                }
+                () = tokio::time::sleep(std::time::Duration::from_millis(auto_bg_ms as u64)) => {}
             }
-            () = tokio::time::sleep(std::time::Duration::from_millis(auto_bg_ms as u64)) => {}
+            // `B?.()` — an absent predicate is falsy, so a server with no live
+            // client backgrounds exactly as before.
+            let dialog_open = registry
+                .get_client(server.as_str())
+                .await
+                .is_some_and(|client| client.has_pending_elicitation());
+            if !dialog_open {
+                break;
+            }
         }
 
         // Timeout — move the still-running call to the background as an
@@ -1961,8 +1989,16 @@ impl Tool for MCPTool {
                         // this settle won the terminal transition (the binary's
                         // `!k` guard — a killed / already-settled task never
                         // re-emits). `settle_mcp_task` reports that via `Ok(true)`.
+                        let raw = task_raw_content.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                        let receipt = if !failed {
+                            raw.map(|raw| {
+                                let (now, random) = persist_id_seed();
+                                crate::task_result::prepare(&raw, &output_dir, &format!("{now}-{random}"))
+                            })
+                        } else { None };
+                        let (text, hint) = receipt.map_or((text, None), |receipt| (receipt.text, receipt.saved_hint));
                         if let Ok(true) =
-                            task_registry.settle_mcp_task(&task_id, &text, failed).await
+                            task_registry.settle_mcp_task_with_hint(&task_id, &text, failed, hint.as_deref()).await
                         {
                             emit_auto_background_outcome(&bus, outcome).await;
                         }
@@ -4519,8 +4555,8 @@ mod input_missing_required_preflight_tests {
     }
 
     #[tokio::test]
-    async fn missing_required_preflight_emits_event_and_skips_transport() {
-        let (conn, _peer_tx, mut peer_rx) = paired();
+    async fn missing_required_preflight_emits_event_and_preserves_transport() {
+        let (conn, peer_tx, mut peer_rx) = paired();
         let client =
             Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
@@ -4558,21 +4594,26 @@ mod input_missing_required_preflight_tests {
         let assistant_message_id = protocol::MessageId::new();
         use_ctx.assistant_message_id = Some(assistant_message_id);
 
-        let err = tool
-            .call(
-                json!({ "note": "leftover </token>" }),
-                use_ctx,
-                tool_api::test_support::fresh_tx(),
-            )
-            .await
-            .expect_err("missing required must fail before transport");
-        assert!(format!("{err}").contains("missing required property"));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), peer_rx.recv())
-                .await
-                .is_err(),
-            "preflight must stop before any MCP request frame is sent"
-        );
+        let responder = tokio::spawn(async move {
+            let frame = peer_rx.recv().await.expect("request reaches MCP server");
+            let request: Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(
+                request["params"]["arguments"],
+                json!({"note":"leftover </token>"})
+            );
+            let response = json!({"jsonrpc":"2.0","id":request["id"],"result":{"content":[{"type":"text","text":"accepted"}],"isError":false}});
+            let mut bytes = serde_json::to_vec(&response).unwrap();
+            bytes.push(b'\n');
+            peer_tx.send(Bytes::from(bytes)).await.unwrap();
+        });
+        tool.call(
+            json!({"note":"leftover </token>"}),
+            use_ctx,
+            tool_api::test_support::fresh_tx(),
+        )
+        .await
+        .expect("server accepts foreign-schema input");
+        responder.await.unwrap();
 
         let events = sink.events().await;
         let event = events
@@ -4618,9 +4659,32 @@ mod input_missing_required_preflight_tests {
         assert!(!event.metadata.contains_key("_PROTO_server_name"));
         assert!(!event.metadata.contains_key("_PROTO_tool_name"));
         assert!(
-            !events.iter().any(|event| event.name == MCP_STARTED),
-            "preflight rejection must happen before MCP_STARTED"
+            events.iter().any(|event| event.name == MCP_STARTED),
+            "missing-required telemetry must not prevent MCP_STARTED"
         );
+    }
+
+    #[test]
+    fn foreign_ref_allof_and_conditional_schemas_are_advertisement_only() {
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::env::temp_dir()],
+        );
+        let schema = json!({"type":"object","$defs":{"token":{"type":"string"}},"allOf":[{"properties":{"token":{"$ref":"#/$defs/token"}},"required":["token"]}],"if":{"required":["flag"]},"then":{"required":["other"]}});
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__local__tool".into(),
+            "local tool".into(),
+            schema.clone(),
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(tool.input_schema(), &schema);
+        assert_eq!(tool.input_validation_schema(), &json!({"type":"object"}));
     }
 
     #[tokio::test]
@@ -4872,6 +4936,7 @@ mod auto_background_race_tests {
     struct RecordingRegistry {
         registered: StdMutex<Vec<McpTaskRegistration>>,
         settled: StdMutex<Vec<(String, String, bool)>>,
+        saved_hints: StdMutex<Vec<String>>,
         /// The cancel token handed to the most recent `register_mcp_task` — a
         /// test fires it to simulate a `TaskStop` (F3-2 regression).
         captured_cancel: StdMutex<Option<tokio_util::sync::CancellationToken>>,
@@ -4917,6 +4982,11 @@ mod auto_background_race_tests {
             *self.captured_cancel.lock().unwrap() = Some(cancel);
             Ok("ktest0001".to_string())
         }
+        async fn settle_mcp_task_with_hint(&self, id: &str, text: &str, failed: bool, hint: Option<&str>) -> Result<bool, TaskRegistryError> {
+            if let Some(hint) = hint { self.saved_hints.lock().unwrap().push(hint.to_string()); }
+            self.settle_mcp_task(id,text,failed).await
+        }
+
         async fn settle_mcp_task(
             &self,
             id: &str,
@@ -5425,6 +5495,32 @@ mod auto_background_race_tests {
                 .any(|e| e.name == TENGU_FEATURE_SAD || e.name == TENGU_FEATURE_BAD),
             "completed path emits ONLY feature_ok: {events:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backgrounded_call_produces_saved_hint_from_raw_persisted_result() {
+        let (conn, peer_tx, mut peer_rx) = paired_with_timeout(std::time::Duration::from_secs(600));
+        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry,Some(recorder.clone()));
+        let output_dir = ctx.tool_results_dir();
+        let tool = MCPTool::new(ctx);
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-saved"));
+        tool.call(call_input(),use_ctx,tool_api::test_support::fresh_tx()).await.unwrap();
+        let raw = "&".repeat(30_000); // Under generic token threshold; over escaped notification budget.
+        answer_call(&mut peer_rx,&peer_tx,json!({"result":{"content":[{"type":"text","text":raw}],"isError":false}})).await;
+        for _ in 0..200 { if !recorder.settled.lock().unwrap().is_empty() { break; } tokio::task::yield_now().await; }
+        let hints = recorder.saved_hints.lock().unwrap();
+        assert_eq!(hints.len(),1);
+        assert!(hints[0].contains("complete 30000-character output was saved"));
+        let path = hints[0].split("output was saved to ").nth(1).unwrap().split(';').next().unwrap();
+        assert!(std::path::Path::new(path).starts_with(&output_dir));
+        assert_eq!(std::fs::read_to_string(path).unwrap(),raw);
+        assert!(recorder.settled.lock().unwrap()[0].1.ends_with("… [truncated]"));
+        std::fs::remove_file(path).unwrap();
     }
 
     // F3-3: a backgrounded call whose result carries `isError:true` settles the

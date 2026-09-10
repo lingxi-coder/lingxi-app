@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod handle;
+pub mod implicit_team;
 pub mod internal_tools;
 pub mod mailbox;
 pub mod mode;
@@ -21,10 +22,9 @@ pub mod team_registry;
 pub mod teammate_pump;
 pub mod tool_send_message;
 pub mod tool_synthetic_output;
-pub mod tool_team_create;
-pub mod tool_team_delete;
 
 pub use handle::worker_status_label;
+pub use implicit_team::ImplicitTeammateSpawner;
 pub use mailbox::{MailboxError, MailboxRouter, MessageSender, TeammateMailbox, TeammateMessage};
 pub use mode::CoordinatorMode;
 pub use prompt::{coordinator_system_prompt, coordinator_user_context, is_env_truthy};
@@ -33,5 +33,3 @@ pub use team_registry::{TeamRegistry, WorkerAgent, WorkerStatus};
 pub use teammate_pump::run_teammate_pump;
 pub use tool_send_message::{SendMessageTool, SEND_MESSAGE_TOOL_NAME};
 pub use tool_synthetic_output::{SyntheticOutputTool, SYNTHETIC_OUTPUT_TOOL_NAME};
-pub use tool_team_create::{TeamCreateTool, TEAM_CREATE_TOOL_NAME};
-pub use tool_team_delete::{TeamDeleteTool, TEAM_DELETE_TOOL_NAME};

@@ -31,7 +31,7 @@
 //! script thread sends last is delivered to the caller.
 
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -945,6 +945,18 @@ impl ToolInvoker for WorkspaceLeaseToolInvoker {
             .await
     }
 
+    async fn invoke_detailed(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+    ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        self.inner
+            .invoke_detailed(name, input, ctx, Some(self.token))
+            .await
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1334,7 +1346,11 @@ async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
 /// worker drives the script to completion (via [`run_workflow_script`]), spools
 /// the script's return value, reports the terminal status, and removes its own
 /// cancel record on exit. `kill` cancels the in-flight worker.
+type ProcessOwners = Arc<StdMutex<HashSet<protocol::AgentId>>>;
+
+/// Runs workflow workers and retains the process identities of their subagents.
 pub struct LocalWorkflowHandler {
+    process_owners: StdMutex<HashMap<String, ProcessOwners>>,
     /// Allocates a subagent slot and pumps it to a terminal [`SubagentResult`].
     spawner: Arc<dyn SubagentSpawner>,
     /// Parent's tool invoker — passed through *unchanged* in
@@ -1421,6 +1437,7 @@ impl LocalWorkflowHandler {
         output_manager: Arc<TaskOutputManager>,
     ) -> Self {
         Self {
+            process_owners: StdMutex::new(HashMap::new()),
             spawner,
             tool_invoker,
             budget,
@@ -1624,6 +1641,7 @@ impl LocalWorkflowHandler {
 }
 
 struct WorkflowIsolationSpawner {
+    process_owners: ProcessOwners,
     inner: Arc<dyn SubagentSpawner>,
     worktree: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
     slug_prefix: String,
@@ -1640,6 +1658,13 @@ impl WorkflowIsolationSpawner {
         observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
         watchdog: Option<platform_api::subagent_spawn::WorkflowQueryWatchdog>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
+        // Process cleanup depends on synchronous allocation receipts, not on
+        // whether a live-progress UI or journal happens to be enabled.
+        let observer = Some(Arc::new(WorkflowProcessObserver {
+            owners: self.process_owners.clone(),
+            inner: observer,
+        })
+            as Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>);
         let worktree = if request.isolation.as_deref() == Some("worktree") {
             if let Some(manager) = self.worktree.as_ref() {
                 let seq = self
@@ -1690,6 +1715,49 @@ impl WorkflowIsolationSpawner {
             let _ = platform_api::worktree::agent_worktree_result(manager.as_ref(), handle).await;
         }
         result
+    }
+}
+
+struct WorkflowProcessObserver {
+    owners: ProcessOwners,
+    inner: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+}
+
+#[async_trait]
+impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObserver {
+    async fn on_model_selected(&self, event: &platform_api::subagent_spawn::SubagentObservation, effort: Option<&str>) {
+        if let Some(inner) = &self.inner { inner.on_model_selected(event, effort).await; }
+    }
+
+    async fn before_start(&self, event: &platform_api::subagent_spawn::SubagentObservation) -> Result<(), SubagentSpawnError> {
+        if let Some(inner) = &self.inner { inner.before_start(event).await?; }
+        Ok(())
+    }
+    fn on_allocated(&self, event: &platform_api::subagent_spawn::SubagentObservation) {
+        if let platform_api::subagent_spawn::SubagentObservation::Allocated { agent_id, .. } = event
+        {
+            self.owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(*agent_id);
+        }
+        if let Some(inner) = &self.inner {
+            inner.on_allocated(event);
+        }
+    }
+
+    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+        if let platform_api::subagent_spawn::SubagentObservation::Allocated { agent_id, .. } =
+            &event
+        {
+            self.owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(*agent_id);
+        }
+        if let Some(inner) = &self.inner {
+            inner.on_event(event).await;
+        }
     }
 }
 
@@ -1918,6 +1986,7 @@ fn make_request(
     }
 
     SubagentSpawnRequest {
+        teammate_color: None,
         subagent_type,
         prompt: prompt.to_string(),
         observer: None,
@@ -4633,6 +4702,28 @@ async fn resolve_nested_script(
 
 #[async_trait]
 impl Task for LocalWorkflowHandler {
+    async fn process_owner_ids(&self, task_id: &str) -> Vec<protocol::AgentId> {
+        let owners = self
+            .process_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(task_id)
+            .cloned();
+        owners
+            .map(|owners| {
+                owners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    async fn has_live_worker(&self, task_id: &str) -> bool {
+        self.workers.lock().await.contains_key(task_id)
+    }
+
     fn name(&self) -> &str {
         HANDLER_NAME
     }
@@ -4810,6 +4901,11 @@ impl Task for LocalWorkflowHandler {
             .unwrap_or(0);
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
+        let process_owners = Arc::new(StdMutex::new(HashSet::new()));
+        self.process_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task_id.clone(), process_owners.clone());
         // Cooperative-cancel flag: shared between the script thread's engine
         // interrupt handler (via `run_workflow_script`) and the `WorkerCancel`
         // record `kill` flips. `false` until killed.
@@ -5033,6 +5129,7 @@ impl Task for LocalWorkflowHandler {
                 let workflow_spawner: Arc<dyn SubagentSpawner> =
                     if let Some(worktree) = worktree_manager.clone() {
                         Arc::new(WorkflowIsolationSpawner {
+                            process_owners: process_owners.clone(),
                             inner: spawner.clone(),
                             worktree: Some(worktree),
                             slug_prefix: worker_task_id.clone(),
@@ -5041,6 +5138,7 @@ impl Task for LocalWorkflowHandler {
                         })
                     } else {
                         Arc::new(WorkflowIsolationSpawner {
+                            process_owners: process_owners.clone(),
                             inner: spawner.clone(),
                             worktree: None,
                             slug_prefix: worker_task_id.clone(),

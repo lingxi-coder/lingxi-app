@@ -107,6 +107,49 @@ test('the four configuration managers render without horizontal dialog overflow'
   assert.equal(result.layout.plugins.manifestPluginEditor, true, 'plugins must render manifest-driven configuration fields');
 });
 
+test('custom providers import, save credentials, preserve edits and isolate layers', async () => {
+  const result = await runScenario('custom-providers');
+  assert.equal(result.locked.projectDisabled, true, 'cannot switch destination during save');
+  assert.equal(result.saved.lastEngineSettingsPatch.destination, 'user');
+  assert.deepEqual(result.saved.credentialWrites, ['customlab']);
+  assert.equal(JSON.stringify(result.saved.lastEngineSettingsPatch).includes('test-only-secret'), false);
+  assert.equal(result.fixedId, true);
+  const edited = result.edited.lastEngineSettingsPatch.patch.providers;
+  assert.deepEqual(Object.keys(edited), ['customlab']);
+  assert.deepEqual(edited.customlab.models[0].aliases, ['fast']);
+  assert.deepEqual(edited.customlab.models[0].capabilities, { reasoning: true });
+  assert.deepEqual(edited.customlab.models[0].metadata, { display_name: 'Model A' });
+  assert.equal(edited.customlab.supportsWebsockets, false);
+  assert.equal(edited.customlab.models.length, 1);
+  assert.equal(edited.customlab.models[0].id, 'model-renamed');
+  assert.deepEqual(edited.customlab.pricing, { 'model-renamed': { inputPerMtok: 1, outputPerMtok: 2 } });
+  assert.ok(result.invalidText);
+  assert.equal(result.invalidText.includes('test-only-secret'), false);
+  assert.equal(result.conflictSkipped, true);
+  const imported = result.partial.lastEngineSettingsPatch.patch.providers;
+  assert.deepEqual(Object.keys(imported).sort(), ['customlab', 'imported']);
+  assert.equal(imported.customlab.baseUrl, 'https://changed.example/v1');
+  assert.equal(imported.imported.type, 'anthropic');
+  assert.equal(JSON.stringify(imported).includes('test-only-import-secret'), false);
+  assert.deepEqual(result.retried.credentialWrites, ['customlab', 'imported']);
+  assert.equal(result.clearedOnSwitch, true);
+  assert.equal(result.overflow, false);
+  assert.match(result.retryError, /正整数/);
+  assert.equal(result.malformedRowSurvives, true);
+  assert.deepEqual(result.dualAuth, { mode: 'key', keyPresent: true });
+  assert.equal(result.legacy.apiKeyEnv, 'LEGACY_KEY');
+  assert.deepEqual(result.legacy.models, [{ id: 'legacy-model' }]);
+  assert.deepEqual(result.toggledPricing, { 'final-model': { inputPerMtok: 1, outputPerMtok: 2 }, other: { inputPerMtok: 3, outputPerMtok: 4 } });
+  assert.equal(result.pricingTargetProtected, true);
+});
+
+test('provider drafts and pending credential writes do not survive switching sessions', async () => {
+  const result = await runScenario('provider-session-isolation');
+  assert.equal(result.draftCleared, true);
+  assert.deepEqual(result.state.credentialWrites, []);
+  assert.equal(result.state.userDisabled, false, 'an interrupted save releases its layer lock');
+});
+
 test('project and local tabs are disabled with no project open, with the reason shown as visible text', async () => {
   const { withoutProject, withProject } = await runScenario('project-tabs');
   assert.equal(withoutProject.userDisabled, false, 'the user layer needs no project and must stay editable');

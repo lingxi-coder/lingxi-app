@@ -1,3 +1,4 @@
+import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -29,7 +30,7 @@ import {
   validatePrompt,
   validateRequestId,
 } from './validation.js';
-import { resolveProviderIdForModel } from './credential-broker.js';
+import { resolveModelCredentialProviderIds } from './credential-broker.js';
 
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 export const CH_APPROVE = 'lingxi:approve';
@@ -608,7 +609,10 @@ const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'message_complete',
   'usage_update',
   'error',
+  'message_identity',
+  'message_retracted',
   'system_notice',
+  'loop_wakeup',
   'session_ended',
 ]);
 
@@ -671,11 +675,16 @@ export class SessionRuntime {
   private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
   private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
   private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
+  private archiving = false;
+  private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private activeTurn = false;
   private activeTurnId: number | undefined;
   private cancellingTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
-  private readonly pendingPermissionIds = new Set<number>();
+  /** Permission requests remain replayable until the engine reports a terminal resolution. */
+  private readonly pendingPermissionIds = new Map<number, PermissionRequest>();
+  /** Prevent a delayed duplicate permission frame from resurrecting a terminal request. */
+  private readonly resolvedPermissionIds = new Set<number>();
   private readonly pendingComputerAccessIds = new Set<number>();
   private readonly pendingAskUserQuestionIds = new Set<number>();
   private readonly pendingAskUserQuestionRequests = new Map<number, PendingAskUserQuestionRequest>();
@@ -683,6 +692,101 @@ export class SessionRuntime {
   private sessionHasHistory = false;
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
+  private credentialRoutingSettings: unknown = undefined;
+  private pendingModelSwitch: { model: string; sent: boolean; promise: Promise<void>; complete(): void; fail(error: Error): void } | undefined;
+
+  private switchModel(model: string): Promise<void> {
+    if (this.pendingModelSwitch) return Promise.reject(new Error('A model switch is already in progress.'));
+    const generation = this.generation;
+    const client = this.requireClient();
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    const finish = (error?: Error): void => {
+      if (this.pendingModelSwitch !== pending) return;
+      clearTimeout(timer);
+      this.pendingModelSwitch = undefined;
+      if (error) reject(error); else resolve();
+      this.notifyActivityChanged();
+    };
+    const pending = { model, sent: false, promise, complete: () => finish(), fail: (error: Error) => finish(error) };
+    const timer = setTimeout(() => finish(new Error('Model switch confirmation timed out.')), 10_000);
+    this.pendingModelSwitch = pending;
+    this.notifyActivityChanged();
+    void (async () => {
+      try {
+        await this.ensureModelProviderCredential(model);
+        if (this.pendingModelSwitch !== pending) return;
+        if (generation !== this.generation || client !== this.client || this.archiving || this.activeTurn) {
+          throw new Error('Model switch was interrupted.');
+        }
+        pending.sent = true;
+        client.sendCommand({ type: 'set_model', model });
+      } catch (error) {
+        pending.fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+    return promise;
+  }
+
+  private readonly pendingPromptHydrations = new Set<symbol>();
+  private selectedModelReference: string | undefined;
+  private pendingCredentialSettings: { promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
+
+  private ensureCredentialSettings(): Promise<void> {
+    if (this.credentialRoutingSettings !== undefined) return Promise.resolve();
+    if (this.pendingCredentialSettings) return this.pendingCredentialSettings.promise;
+    const client = this.requireClient();
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    const timer = setTimeout(() => reject(new Error('Provider settings loading timed out.')), 5_000);
+    this.pendingCredentialSettings = { promise, resolve, reject };
+    void promise.then(() => clearTimeout(timer), () => clearTimeout(timer)).finally(() => {
+      if (this.pendingCredentialSettings?.promise === promise) this.pendingCredentialSettings = undefined;
+    });
+    try { client.sendCommand({ type: 'refresh_listings', which: [{ type: 'settings' }] }); }
+    catch (error) { reject(error instanceof Error ? error : new Error(String(error))); }
+    return promise;
+  }
+
+  private configuredCustomProviderIds: string[] = [];
+  private readonly customProviderWaiters = new Map<string, Set<() => void>>();
+
+  async ensureCustomProviderConfigured(providerId: string): Promise<void> {
+    if (this.configuredCustomProviderIds.includes(providerId)) return;
+    const client = this.requireClient();
+    await new Promise<void>((resolve, reject) => {
+      const waiters = this.customProviderWaiters.get(providerId) ?? new Set<() => void>();
+      const finish = (): void => {
+        clearTimeout(timer);
+        waiters.delete(finish);
+        if (waiters.size === 0) this.customProviderWaiters.delete(providerId);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        waiters.delete(finish);
+        if (waiters.size === 0) this.customProviderWaiters.delete(providerId);
+        reject(new Error('unsupported provider: settings did not confirm this profile'));
+      }, 5_000);
+      waiters.add(finish);
+      this.customProviderWaiters.set(providerId, waiters);
+      try {
+        client.sendCommand({ type: 'refresh_listings', which: [{ type: 'settings' }] });
+      } catch (error) {
+        clearTimeout(timer);
+        waiters.delete(finish);
+        if (waiters.size === 0) this.customProviderWaiters.delete(providerId);
+        reject(error);
+      }
+    });
+  }
+
+
+  get customProviderIds(): readonly string[] {
+    return [...this.configuredCustomProviderIds];
+  }
+
   private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
   private readonly targets = new Map<WebContents, Set<string>>();
   /**
@@ -708,12 +812,47 @@ export class SessionRuntime {
     this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
   }
 
+  beginArchive(): () => void {
+    if (this.archiving || this.turnActive || this.pendingInteractions > 0 || this.pendingCron.size > 0) throw new Error('Wait for active work and pending interactions before archiving this chat.');
+    this.archiving = true;
+    return () => { this.archiving = false; };
+  }
+
+  get cronOperationPending(): boolean {
+    return this.archiving || this.pendingCron.size > 0;
+  }
+
+  manageCron(request: CronRequestDto): Promise<CronJobDto[]> {
+    return this.sendCronCommand({ type: 'cron_manage', request_id: randomUUID(), request });
+  }
+
+  private sendCronCommand(command: Extract<ClientCommand, { type: 'cron_manage' }>): Promise<CronJobDto[]> {
+    const { request_id, request } = command;
+    if (this.pendingCron.has(request_id)) return Promise.reject(new Error('Scheduled task request is already pending.'));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCron.delete(request_id);
+        this.notifyActivityChanged();
+        reject(new Error('Scheduled task operation timed out.'));
+      }, 30_000);
+      this.pendingCron.set(request_id, { resolve, reject, timer, creating: request.action === 'create' });
+      this.notifyActivityChanged();
+      try { this.requireClient().sendCommand(command); }
+      catch (error) {
+        clearTimeout(timer);
+        this.pendingCron.delete(request_id);
+        this.notifyActivityChanged();
+        reject(error);
+      }
+    });
+  }
+
   get connectionState(): ConnectionState {
     return this.state;
   }
 
   get turnActive(): boolean {
-    return this.activeTurn;
+    return this.activeTurn || this.pendingPromptHydrations.size > 0 || this.pendingModelSwitch !== undefined;
   }
 
   get activeCredentialProviderIds(): readonly string[] {
@@ -751,7 +890,7 @@ export class SessionRuntime {
       projectPath: this.projectPath || this.activeWorkspace || '',
       sessionId: this.sessionId,
       connection: this.connectionState,
-      turnActive: this.activeTurn,
+      turnActive: this.turnActive,
       pendingInteractions: this.pendingInteractions,
       pendingAskUserQuestions: this.pendingAskUserQuestionIds.size,
       ...(this.runtimeVersions ? { runtimeVersions: this.runtimeVersions } : {}),
@@ -845,6 +984,14 @@ export class SessionRuntime {
     const origins = this.targets.get(webContents) ?? new Set<string>();
     origins.add(origin);
     this.targets.set(webContents, origins);
+    this.replayPendingInteractions(webContents);
+  }
+
+  /** Re-deliver interactions that may have arrived before a renderer reload. */
+  replayPendingInteractions(webContents: WebContents): void {
+    for (const request of this.pendingPermissionIds.values()) {
+      this.sendToWindow(webContents, CH_PERMISSION, request);
+    }
     for (const pending of this.pendingAskUserQuestionRequests.values()) {
       this.sendClientEvent(webContents, { type: 'ask_user_question', request: pending.request }, false);
     }
@@ -931,6 +1078,7 @@ export class SessionRuntime {
    */
   private clearTurnInteractions(): void {
     this.pendingPermissionIds.clear();
+    this.resolvedPermissionIds.clear();
     this.pendingComputerAccessIds.clear();
     for (const requestId of [...this.pendingAskUserQuestionIds]) {
       this.clearPendingAskUserQuestion(requestId);
@@ -990,6 +1138,11 @@ export class SessionRuntime {
   }
 
   private async startInternal(): Promise<void> {
+    this.configuredCustomProviderIds = [];
+    this.credentialRoutingSettings = undefined;
+    this.selectedModelReference = undefined;
+    this.pendingCredentialSettings?.reject(new Error('Provider settings loading was interrupted.'));
+    this.pendingCredentialSettings = undefined;
     let generation = ++this.generation;
     const bridgeRoot = this.opts.bridgeRoot;
     if (bridgeRoot && this.projectPath) {
@@ -1030,6 +1183,7 @@ export class SessionRuntime {
 
     const launch = await this.opts.launchConfig();
     if (this.disposed) throw new Error('SessionRuntime is disposed');
+    this.selectedModelReference = launch.model;
     this.activeWorkspace = launch.workspace;
     if (launch.sessionId && launch.sessionId !== this.sessionId) {
       throw new Error('bridge launch session id does not match the runtime');
@@ -1345,6 +1499,46 @@ export class SessionRuntime {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
       }
+      if (event.type === 'cron_result') {
+        const pending = this.pendingCron.get(event.request_id);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingCron.delete(event.request_id);
+          if (event.error) pending.reject(new Error(event.error));
+          else {
+            // Successful creation also persists an empty transcript anchor in the engine.
+            // The owning chat must no longer be reused as an unsent draft.
+            if (pending.creating && !this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) {
+              this.sessionIdentityCommitted = true;
+            }
+            pending.resolve(event.jobs);
+          }
+          this.notifyActivityChanged();
+        }
+      }
+      if (event.type === 'settings_snapshot') {
+        this.configuredCustomProviderIds = [];
+        try {
+          const effective: unknown = JSON.parse(event.effective_json);
+          this.credentialRoutingSettings = effective;
+          this.pendingCredentialSettings?.resolve();
+          const providers = effective && typeof effective === 'object' && !Array.isArray(effective)
+            ? (effective as Record<string, unknown>).providers : undefined;
+          if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+            this.configuredCustomProviderIds = Object.entries(providers).filter(([id, profile]) =>
+              /^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)
+              && profile !== null && typeof profile === 'object' && !Array.isArray(profile),
+            ).map(([id]) => id);
+          }
+        } catch {
+          this.credentialRoutingSettings = undefined;
+          this.pendingCredentialSettings?.reject(new Error('Invalid provider settings snapshot.'));
+          // An invalid snapshot must not keep stale credential authorization.
+        }
+        for (const providerId of this.configuredCustomProviderIds) {
+          for (const resolve of this.customProviderWaiters.get(providerId) ?? []) resolve();
+        }
+      }
       if (event.type === 'provider_credential_status') {
         this.handleProviderCredentialStatus(event);
       }
@@ -1364,6 +1558,10 @@ export class SessionRuntime {
           this.completePendingSessionResumeIfReady();
         }
       }
+      if (event.type === 'error') {
+        this.pendingCredentialSettings?.reject(new Error('Provider settings loading failed.'));
+        this.pendingModelSwitch?.fail(new Error('Model switch failed.'));
+      }
       if (event.type === 'error' && this.pendingSessionResume) {
         this.rejectPendingSessionResume(new Error(sanitizeDiagnostic(event.message)));
       }
@@ -1379,6 +1577,8 @@ export class SessionRuntime {
         this.clearTurnInteractions();
       }
       if (event.type === 'model_changed') {
+        this.selectedModelReference = event.model;
+        if (this.pendingModelSwitch?.sent && this.pendingModelSwitch.model === event.model) this.pendingModelSwitch.complete();
         try { this.opts.onModelChanged?.(event.model); }
         catch (error) { this.diagnostics.add('warn', 'host', error); }
         const pending = this.pendingSessionResume;
@@ -1410,23 +1610,29 @@ export class SessionRuntime {
       if (event.type === 'ask_user_question_resolved') {
         this.clearPendingAskUserQuestion(event.request_id);
       }
+      if (event.type === 'permission_request_resolved') {
+        this.resolvedPermissionIds.add(event.request_id);
+        this.pendingPermissionIds.delete(event.request_id);
+      }
       if (
         event.type === 'turn_started'
         || event.type === 'turn_ended'
         || event.type === 'session_ended'
         || event.type === 'ask_user_question'
         || event.type === 'ask_user_question_resolved'
+        || event.type === 'permission_request_resolved'
       ) this.notifyActivityChanged();
       this.broadcastClientEvent(event);
     });
     client.on('permission', (request: PermissionRequest) => {
       if (generation !== this.generation || !this.activeTurn || this.cancellingTurn) return;
       if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
+        if (this.resolvedPermissionIds.has(request.request_id)) return;
         if (!this.pendingPermissionIds.has(request.request_id) && this.pendingPermissionIds.size >= MAX_PENDING_PERMISSIONS) {
           this.diagnostics.add('warn', 'bridge', 'permission request limit reached');
           return;
         }
-        this.pendingPermissionIds.add(request.request_id);
+        this.pendingPermissionIds.set(request.request_id, request);
         this.notifyActivityChanged();
         this.broadcast(CH_PERMISSION, request);
       }
@@ -1520,9 +1726,33 @@ export class SessionRuntime {
     if (!origin || !origins.has(origin)) throw new Error('unauthorized IPC origin');
   }
 
-  sendPrompt(text: unknown, images: unknown = []): void {
+  sendPrompt(text: unknown, images: unknown = []): void | Promise<void> {
+    if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
+    if (this.opts.resolveProviderCredential) {
+      const generation = this.generation;
+      const client = this.requireClient();
+      const token = Symbol('prompt hydration');
+      this.pendingPromptHydrations.add(token);
+      this.notifyActivityChanged();
+      return (async () => {
+        try {
+          if (this.pendingModelSwitch) await this.pendingModelSwitch.promise;
+          if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+          if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
+          if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
+          this.sendPreparedPrompt(prompt, validatedImages);
+        } finally {
+          this.pendingPromptHydrations.delete(token);
+          this.notifyActivityChanged();
+        }
+      })();
+    }
+    this.sendPreparedPrompt(prompt, validatedImages);
+  }
+
+  private sendPreparedPrompt(prompt: string, validatedImages: ReturnType<typeof validateImageRefs>): void {
     const needsIdentityCommit = !this.sessionIdentityCommitted;
     this.requireClient().sendPrompt(prompt, { images: validatedImages });
     this.sessionHasHistory = true;
@@ -1544,6 +1774,11 @@ export class SessionRuntime {
   cancelTurn(turnId: unknown): void {
     const id = validateOptionalTurnId(turnId);
     this.requireClient().cancel(id);
+    this.pendingModelSwitch?.fail(new Error('Model switch was cancelled.'));
+    if (this.pendingPromptHydrations.size > 0) {
+      this.pendingPromptHydrations.clear();
+      this.notifyActivityChanged();
+    }
     if (this.activeTurn && (id === undefined || id === this.activeTurnId)) {
       this.cancellingTurn = true;
       this.clearTurnInteractions();
@@ -1610,7 +1845,7 @@ export class SessionRuntime {
       // The engine owns provider credential resolution. The Electron host must
       // not reject a prompt merely because no secret crossed its stdin boundary;
       // CLI/TUI may already have populated the shared secure store.
-      this.sendPrompt(text, images);
+      return this.sendPrompt(text, images);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -1692,8 +1927,14 @@ export class SessionRuntime {
    * actual (unchanged) mode, so nothing to revert.
    */
   async dispatchCommand(command: unknown): Promise<void> {
+    if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
-    assertCommandAllowedDuringTurn(validated, this.activeTurn);
+    if (validated.type === 'cron_manage') {
+      await this.sendCronCommand(validated);
+      return;
+    }
+    if (validated.type === 'set_model' && this.pendingModelSwitch) throw new Error('A model switch is already in progress.');
+    assertCommandAllowedDuringTurn(validated, this.turnActive);
     if (validated.type === 'set_permission_mode' && validated.mode === 'bypassPermissions') {
       const accepted = (await this.opts.confirmBypassPermissions?.()) ?? false;
       if (!accepted) {
@@ -1706,8 +1947,8 @@ export class SessionRuntime {
       // would race a real reply the engine has already accepted.
       this.outstandingResponderRequests.delete(validated.request_id);
     }
-    if (validated.type === 'set_model') {
-      await this.ensureModelProviderCredential(validated.model);
+    if (validated.type === 'set_model' && this.opts.resolveProviderCredential) {
+      return this.switchModel(validated.model);
     }
     this.requireClient().sendCommand(validated);
   }
@@ -1735,8 +1976,13 @@ export class SessionRuntime {
   }
 
   private async ensureModelProviderCredential(model: string): Promise<void> {
-    const providerId = resolveProviderIdForModel(model);
-    if (providerId) await this.ensureProviderCredentialCached(providerId);
+    if (!this.opts.resolveProviderCredential) return;
+    const generation = this.generation;
+    const client = this.requireClient();
+    if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+    if (generation !== this.generation || client !== this.client) throw new Error('Provider credential loading was interrupted.');
+    await Promise.all(resolveModelCredentialProviderIds(model, this.credentialRoutingSettings)
+      .map((providerId) => this.ensureProviderCredentialCached(providerId)));
   }
 
   hasCachedProviderCredential(providerId: string): boolean {
@@ -1870,6 +2116,9 @@ export class SessionRuntime {
 
   private setState(next: ConnectionState): void {
     this.state = next;
+    if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
+      this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+    }
     if (
       this.pendingSessionResume
       && (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle')
@@ -1890,8 +2139,15 @@ export class SessionRuntime {
   }
 
   private async stopBridge(): Promise<void> {
+    for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
+    this.pendingCron.clear();
     ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
+    this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+    this.pendingCredentialSettings?.reject(new Error('Provider settings loading was interrupted.'));
+    this.pendingCredentialSettings = undefined;
+    this.credentialRoutingSettings = undefined;
+    this.pendingPromptHydrations.clear();
     this.clearTurnInteractions();
     // Losing the connection IS the engine's own drain: `close_connection`
     // drops every parked audio sender, so each in-flight call has already
@@ -2025,7 +2281,8 @@ export class BridgeManager extends SessionRuntime {}
  */
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
-  private readonly openingSessions = new Map<string, { projectPath: string; promise: Promise<SessionRuntime> }>();
+  private readonly openingSessions = new Map<string, { projectPath: string; promise: Promise<SessionRuntime>; activate: boolean }>();
+  private readonly backgroundSessionLeases = new Map<string, number>();
   private readonly draftSessions = new Map<string, SessionRef>();
   private readonly openingDraftSessions = new Map<string, Promise<SessionRef>>();
   private readonly closingProjects = new Set<string>();
@@ -2079,10 +2336,12 @@ export class SessionRuntimeManager {
     return runtime.sessionId === this.activeSessionId
       || runtime.turnActive
       || runtime.pendingInteractions > 0
+      || runtime.cronOperationPending
       || status === 'spawning'
       || status === 'restarting'
       || status === 'connecting'
-      || this.openingSessions.has(runtime.sessionId);
+      || this.openingSessions.has(runtime.sessionId)
+      || this.backgroundSessionLeases.has(runtime.sessionId);
   }
 
   private trimCache(): void {
@@ -2137,6 +2396,11 @@ export class SessionRuntimeManager {
     for (const runtime of this.runtimes.values()) runtime.registerWindow(webContents, rendererUrl);
   }
 
+  /** Re-deliver pending interaction prompts after a renderer document reload. */
+  replayPendingInteractions(webContents: WebContents): void {
+    for (const runtime of this.runtimes.values()) runtime.replayPendingInteractions(webContents);
+  }
+
   /** Create, validate, and optionally start one session-owned runtime. */
   async ensure(ref: SessionRef, start = true, resumeModel?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
@@ -2173,7 +2437,7 @@ export class SessionRuntimeManager {
     }
   }
 
-  openSession(ref: SessionRef, empty = false, resumeModel?: string): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -2183,19 +2447,23 @@ export class SessionRuntimeManager {
     const pending = this.openingSessions.get(ref.sessionId);
     if (pending) {
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      pending.activate ||= activate;
       return pending.promise;
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     if (existing?.connectionState.status === 'connected') {
-      this.activate(existing);
+      if (activate) this.activate(existing);
       return Promise.resolve(existing);
     }
 
-    const promise = this.openSessionInternal(ref, existing, empty);
+    const promise = this.openSessionInternal(ref, existing, empty).then((runtime) => {
+      if (this.openingSessions.get(ref.sessionId)?.activate) this.activate(runtime);
+      return runtime;
+    });
     const trackedPromise = promise.finally(() => {
       if (this.openingSessions.get(ref.sessionId)?.promise === trackedPromise) this.openingSessions.delete(ref.sessionId);
     });
-    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, promise: trackedPromise });
+    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, promise: trackedPromise, activate });
     return trackedPromise;
   }
 
@@ -2209,7 +2477,6 @@ export class SessionRuntimeManager {
         runtime = await this.ensure(ref, true);
       }
       if (!empty) await runtime.resumeOwnedSession();
-      this.activate(runtime);
       return runtime;
     } catch (error) {
       if (!existing && runtime) {
@@ -2219,6 +2486,25 @@ export class SessionRuntimeManager {
         await runtime.dispose().catch(() => undefined);
       }
       throw error;
+    }
+  }
+
+  /** Keep an inactive runtime alive for the whole host operation, then enforce the cache bound. */
+  async withBackgroundSession<T>(
+    ref: SessionRef,
+    empty: boolean,
+    resumeModel: string | undefined,
+    operation: (runtime: SessionRuntime) => Promise<T>,
+  ): Promise<T> {
+    assertSessionRef(ref);
+    this.backgroundSessionLeases.set(ref.sessionId, (this.backgroundSessionLeases.get(ref.sessionId) ?? 0) + 1);
+    try {
+      return await operation(await this.openSession(ref, empty, resumeModel, false));
+    } finally {
+      const count = (this.backgroundSessionLeases.get(ref.sessionId) ?? 1) - 1;
+      if (count) this.backgroundSessionLeases.set(ref.sessionId, count);
+      else this.backgroundSessionLeases.delete(ref.sessionId);
+      this.trimCache();
     }
   }
 
@@ -2360,7 +2646,7 @@ export class SessionRuntimeManager {
     });
     ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown) => {
       this.assertSender(event);
-      this.requireById(sessionId).sendPrompt(text, images);
+      return this.requireById(sessionId).sendPrompt(text, images);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -2428,7 +2714,7 @@ export class SessionRuntimeManager {
           return true;
         }
         try {
-          onFirstPromptSent(ref);
+          if (this.activeSessionId === ref.sessionId) onFirstPromptSent(ref);
           this.clearDraftSession(ref);
           return true;
         } catch (error) {

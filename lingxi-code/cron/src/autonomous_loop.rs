@@ -26,8 +26,11 @@
 //! — ported as [`telemetry::flag_bool`] (an empty cached snapshot by default →
 //! returns `default`, i.e. the shipped binary's GrowthBook-absent behavior) —
 //! with the binary's EXACT per-gate env-vs-flag split:
-//!   - resolution gate `isLoopDefaultPromptEnabled` = `nt("tengu_kairos_loop_prompt",false)` (FLAG-ONLY)
-//!   - dynamic gate `isLoopDynamic` = `nt("tengu_kairos_loop_dynamic",false)` (FLAG-ONLY)
+//!   - resolution gate `isLoopDefaultPromptEnabled` — REMOVED in 2.1.263 (the
+//!     flag `tengu_kairos_loop_prompt` no longer exists in the binary); the
+//!     sentinel resolvers are unconditional
+//!   - dynamic gate `isLoopDynamic` — REMOVED in 2.1.263 (`tengu_kairos_loop_dynamic`
+//!     no longer exists); the dynamic `/loop` mode is unconditional
 //!   - preamble variant `isLoopPersistentPreambleEnabled` = env `LINGXI_LOOP_PERSISTENT` || `nt("tengu_kairos_loop_persistent",false)`
 //!   - keepalive gate `isLoopKeepaliveEnabled` = env `LINGXI_LOOP_KEEPALIVE` || `nt("tengu_kairos_loop_keepalive",false)`
 //!   - `PushNotification` addendum `Yke()` = `nt("tengu_kairos_push_notifications",false)` && `agentPushNotifEnabled` setting
@@ -42,6 +45,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 // ── Sentinels (binary string-table) ──────────────────────────────────────────
 
@@ -91,25 +95,35 @@ pub fn is_loop_persistent_preamble_enabled() -> bool {
         || telemetry::flag_bool("tengu_kairos_loop_persistent", false)
 }
 
-/// `fJr` / `isLoopDefaultPromptEnabled` (cc_all.txt:504952):
-/// `nt("tengu_kairos_loop_prompt",false)` — FLAG ONLY (no env in the binary).
-/// Gates whether the autonomous/loop.md sentinels resolve at all (else `J4d`
-/// passes them through verbatim). With no live GrowthBook the flag is at its
-/// shipped default `false`, so the resolvers pass sentinels through unchanged —
-/// byte-identical to the shipped binary. Tests flip it via
-/// `telemetry::test_set_flag("tengu_kairos_loop_prompt", true)`.
+/// `fJr` / `isLoopDefaultPromptEnabled` — REMOVED in 2.1.263.
+///
+/// Through 2.1.2xx this was `nt("tengu_kairos_loop_prompt",false)` and gated
+/// whether the autonomous/loop.md sentinels resolved at all. In 2.1.263 the flag
+/// does not appear in the binary and `resolveAutonomousLoopFire` /
+/// `resolveLoopFileFire` have no gate return, so this is a constant `true`. It
+/// is kept as a function (rather than deleted) so the call sites still read like
+/// the binary's dispatch; there is nothing for a test to flip.
 #[must_use]
 pub fn is_loop_default_prompt_enabled() -> bool {
-    telemetry::flag_bool("tengu_kairos_loop_prompt", false)
+    // PARITY 2.1.263: `tengu_kairos_loop_prompt` no longer exists in the binary
+    // (0 hits); `resolveAutonomousLoopFire` / `resolveLoopFileFire` resolve the
+    // sentinels unconditionally. Kept as a function so callers read naturally.
+    true
 }
 
-/// `q_e` / `isLoopDynamic` (cc_all.txt:504966):
-/// `nt("tengu_kairos_loop_dynamic",false)` — FLAG ONLY (no env in the binary).
-/// Selects the DYNAMIC-pacing builders (`hZm` usage / `gZm` prompt-builder, and
-/// `a(loopFile,true)` for the no-prompt autonomous default) over the cron variants.
+/// `q_e` / `isLoopDynamic` — REMOVED in 2.1.263.
+///
+/// Through 2.1.2xx this was `nt("tengu_kairos_loop_dynamic",false)` and selected
+/// the DYNAMIC-pacing builders (`hZm` usage / `gZm` prompt-builder, and
+/// `a(loopFile,true)` for the no-prompt autonomous default) over the cron
+/// variants. In 2.1.263 the flag does not appear in the binary and those
+/// builders are the only ones reachable, so this is a constant `true`.
 #[must_use]
 pub fn is_loop_dynamic_enabled() -> bool {
-    telemetry::flag_bool("tengu_kairos_loop_dynamic", false)
+    // PARITY 2.1.263: `tengu_kairos_loop_dynamic` no longer exists in the binary
+    // (0 hits). `/loop <prompt>` always builds the dynamic (ScheduleWakeup)
+    // prompt and `ScheduleWakeup.call` has no gate branch.
+    true
 }
 
 /// `iKi` / `isLoopKeepaliveEnabled` (cc_all.txt:504966):
@@ -123,8 +137,14 @@ pub fn is_loop_dynamic_enabled() -> bool {
 // being available for that follow-on work.
 #[must_use]
 pub fn is_loop_keepalive_enabled() -> bool {
-    env_truthy("LINGXI_LOOP_KEEPALIVE")
-        || telemetry::flag_bool("tengu_kairos_loop_keepalive", false)
+    // PARITY 2.1.263 `YXn`: `let e=a.CLAUDE_CODE_LOOP_KEEPALIVE; if(e!==void 0)
+    // return e; return H("tengu_kairos_loop_keepalive",!0)` — a DEFINED env var
+    // is returned raw (any non-empty string is truthy in JS), and the flag
+    // default is TRUE.
+    match std::env::var("LINGXI_LOOP_KEEPALIVE") {
+        Ok(value) => !value.is_empty(),
+        Err(_) => telemetry::flag_bool("tengu_kairos_loop_keepalive", true),
+    }
 }
 
 /// `Yke` (cc_all.txt:504927): `Rle() && mc("agentPushNotifEnabled",false).value`,
@@ -139,13 +159,10 @@ pub fn is_loop_keepalive_enabled() -> bool {
 // flag/setting are ever enabled.
 #[must_use]
 pub fn is_push_notif_enabled() -> bool {
-    telemetry::flag_bool("tengu_kairos_push_notifications", false) && agent_push_notif_setting()
-}
-
-/// `mc("agentPushNotifEnabled", false).value` (cc_all.txt:504927).
-#[must_use]
-fn agent_push_notif_setting() -> bool {
-    platform_api::session_flags::agent_push_notif_enabled()
+    // ONE implementation, hosted in `telemetry` so the orchestrator's
+    // monitor-event renderer can gate on the same predicate without taking a
+    // dependency on `cron`.
+    telemetry::push_notifications_enabled()
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -159,41 +176,16 @@ fn env_truthy(key: &str) -> bool {
 
 // ── Preambles (binary `aJr` / `VVi`) ─────────────────────────────────────────
 
-/// `aJr` (cc_all.txt:504904-504914) — the default (non-persistent) autonomous-
-/// loop preamble; `j4d` = `AUTONOMOUS_LOOP_PREAMBLE` is `aJr`. Verbatim incl.
-/// trailing newline (the binary template literal ends with one).
-// PARITY: binary aJr (cc_all.txt:504904).
-const PREAMBLE_DEFAULT: &str = "# Autonomous loop check
-You're being invoked on a timer while the user is away or occupied. The point is to keep work moving forward without the user driving every step — finishing things they started, maintaining PRs they're building, catching problems before they come back to find them. You're a steward, not an initiator. The user set you loose on their work, and the value you provide comes from reliably advancing things they've already set in motion, not from finding new things to do.
-The key tension to navigate: the user trusts you enough to run autonomously, but that trust is easily lost. Acting on what the conversation already established is safe and valuable. Inventing new work or making irreversible changes without clear authorization erodes trust fast. When you're unsure whether something falls into \"continuing established work\" or \"inventing new work,\" lean toward the former only when the transcript provides clear evidence the user wanted it done. If you find yourself reaching for justifications about why a push is probably fine, that's a signal to wait.
-## What to act on
-The current conversation is your highest-signal source — re-read the transcript above, since everything there is something the user was actively engaged with. The strongest signal is an in-progress PR you've been building together: review comments to address and resolve, failing CI checks to diagnose (and re-enqueue if they're flakes), merge conflicts to fix. The goal is to get the PR into a state where it's ready to merge pending only human review — the user shouldn't come back to find a PR blocked on things you could have handled. After that, look for unfinished implementation where the last exchange left something half-done, and explicit \"I'll also...\" or \"next I'll...\" commitments the conversation made and didn't honor. Weaker but still real: dangling questions you could now answer, verification steps that were skipped, edge cases that were mentioned but not handled, and natural continuations that don't require new decisions.
-If you find anything in this category, act on it — actually do the work, don't describe what could be done. Run the tests, don't say \"you could run the tests.\" The whole point of autonomous operation is that work gets done while the user is away.
-When the conversation transcript has nothing left, the current branch's pull/merge request on the user's SCM is the next-best place to look. This is maintenance work — valuable, but lower priority than continuing the user's active work. Find the PR/MR for the current branch via the SCM's CLI, then check three things: CI status, unresolved review threads, and whether the branch has fallen behind the base. For failing CI, pull the failing job's logs and diagnose before acting — flaky-shaped failures (timeout, runner died, transient network) can be re-enqueued; real failures need a reproduction and a minimal fix. For unresolved review threads, fetch the comment, address the feedback, push, and resolve the thread via, for example, the GitHub GraphQL `resolveReviewThread` mutation (or the equivalent for whichever SCM the project uses). Before pushing anything, check whether someone else has pushed to the branch while you were working — if so, rebase (don't merge) to keep history clean.
-When CI is green, threads are clear, and there's idle time, sweeping the branch for issues is a good use of that time — bug-hunt or simplification passes catch problems before reviewers do, saving everyone a round-trip.
-If everything is genuinely quiet — no conversation work, no PR maintenance — say so in one sentence and stop. No summary of what you checked, no list of what you might do later. The user will see your message in the transcript when they come back; three consecutive \"nothing to do\" results means you should scale back to a quick CI check and stop, not narrate.
-## Repeated invocations
-If you see earlier autonomous checks in this conversation, adjust your scope accordingly. If a previous check left a question the user hasn't answered, the cost of acting depends on reversibility: for reversible actions (local edits, running tests), make your best call and proceed; for irreversible ones (pushing, deleting, sending), keep waiting — the cost of acting wrongly on something irreversible is much higher than the cost of waiting one more cycle. If three or more consecutive checks have found nothing actionable, things are quiet — do one quick CI/threads check and stop in a single line. Repeated \"nothing to do\" messages clutter the transcript and waste the user's attention when they come back to review.
-Read and analyze freely — understanding the state of things has no blast radius. Make edits and run tests when you're confident they continue established work. Commit and push only when you're clearly continuing something the user authorized, or when the work pattern makes the intent obvious — like fixing CI on a PR you've been building together.
-";
+/// `loopAutonomousPreamble-07qcyhv4.md` (2.1.263) — the default (non-
+/// persistent) autonomous-loop preamble, shipped as a bundled markdown file in
+/// the binary (ASCII hyphens, blank lines between paragraphs, trailing newline).
+/// Byte-exact copy of that file.
+const PREAMBLE_DEFAULT: &str = include_str!("bundled/loopAutonomousPreamble.md");
 
-/// `VVi` (cc_all.txt:504916-504926) — the persistent-preamble variant
-/// (`getAutonomousLoopPreamble` returns this when `isLoopPersistentPreambleEnabled`).
-/// Verbatim incl. trailing newline.
-// PARITY: binary VVi (cc_all.txt:504916).
-const PREAMBLE_PERSISTENT: &str = "# Autonomous loop check
-You're being invoked on a timer while the user is away or occupied. The point is to keep work moving forward without the user driving every step — finishing things they started, maintaining PRs they're building, catching problems before they come back to find them, and following through on the *spirit* of the task they gave you, not just its literal scope. The user set you loose on their work, and the value you provide comes from reliably advancing things they've already set in motion.
-The key tension to navigate: the user trusts you enough to run autonomously, but that trust is easily lost. Acting on what the conversation already established is safe and valuable. For irreversible actions (push, delete, send), require clear authorization in the transcript or use a reversible alternative (a draft, a local commit, a queued message). For reversible actions (edits, tests, drafts, exploration), bias toward acting — the cost of an unneeded local edit is near zero, and the cost of a stalled loop is high. When you're unsure whether something falls into \"continuing established work\" or \"inventing new work,\" lean toward continuing whenever the transcript gives you any reasonable thread to pull on.
-## What to act on
-The current conversation is your highest-signal source — re-read the transcript above, since everything there is something the user was actively engaged with. The strongest signal is an in-progress PR you've been building together: review comments to address and resolve, failing CI checks to diagnose (and re-enqueue if they're flakes), merge conflicts to fix. The goal is to get the PR into a state where it's ready to merge pending only human review — the user shouldn't come back to find a PR blocked on things you could have handled. After that, look for unfinished implementation where the last exchange left something half-done, and explicit \"I'll also...\" or \"next I'll...\" commitments the conversation made and didn't honor. Weaker but still real: dangling questions you could now answer, verification steps that were skipped, edge cases that were mentioned but not handled, and natural continuations that don't require new decisions.
-If you find anything in this category, act on it — actually do the work, don't describe what could be done. Run the tests, don't say \"you could run the tests.\" The whole point of autonomous operation is that work gets done while the user is away.
-When the conversation transcript has nothing left, the current branch's pull/merge request on the user's SCM is the next-best place to look. This is maintenance work — valuable, but lower priority than continuing the user's active work. Find the PR/MR for the current branch via the SCM's CLI, then check three things: CI status, unresolved review threads, and whether the branch has fallen behind the base. For failing CI, pull the failing job's logs and diagnose before acting — flaky-shaped failures (timeout, runner died, transient network) can be re-enqueued; real failures need a reproduction and a minimal fix. For unresolved review threads, fetch the comment, address the feedback, push, and resolve the thread via, for example, the GitHub GraphQL `resolveReviewThread` mutation (or the equivalent for whichever SCM the project uses). Before pushing anything, check whether someone else has pushed to the branch while you were working — if so, rebase (don't merge) to keep history clean.
-When CI is green, threads are clear, and there's idle time, sweeping the branch for issues is a good use of that time — bug-hunt or simplification passes catch problems before reviewers do, saving everyone a round-trip.
-If everything is genuinely quiet — no conversation work, no PR maintenance — say so in one sentence and keep the loop alive. Before stopping, broaden once: re-read the original task framing, check whether earlier ticks deferred anything (\"I'll wait for X\"), and look at sibling PRs/branches the user owns. Persistence is the point of autonomous mode. Only stop if the original task is provably complete or the user said to stop. (Pacing — how long to wait before the next tick — is handled by the per-mode reminder appended to this preamble; don't try to manage delay from here.)
-## Repeated invocations
-If you see earlier autonomous checks in this conversation, adjust your scope accordingly. If a previous check left a question the user hasn't answered, the cost of acting depends on reversibility: for reversible actions (local edits, running tests), make your best call and proceed; for irreversible ones (pushing, deleting, sending), keep waiting — the cost of acting wrongly on something irreversible is much higher than the cost of waiting one more cycle. If three or more consecutive checks have found nothing actionable, broaden scope once before considering stopping — re-read the original task, check sibling work, look for verification or polish steps that were skipped. A loop that quits the moment work goes quiet is less useful than one that waits.
-Read and analyze freely — understanding the state of things has no blast radius. Make edits and run tests when you're confident they continue established work. Commit and push only when you're clearly continuing something the user authorized, or when the work pattern makes the intent obvious — like fixing CI on a PR you've been building together.
-";
+/// `loopAutonomousPreamblePersistent-3zqtkrvg.md` (2.1.263) — the persistent-
+/// preamble variant (`getAutonomousLoopPreamble` returns this when
+/// `isLoopPersistentPreambleEnabled`). Byte-exact copy of the bundled file.
+const PREAMBLE_PERSISTENT: &str = include_str!("bundled/loopAutonomousPreamblePersistent.md");
 
 /// `AUTONOMOUS_LOOP_PREAMBLE` (`j4d`, cc_all.txt:504950) = the default preamble.
 pub const AUTONOMOUS_LOOP_PREAMBLE: &str = PREAMBLE_DEFAULT;
@@ -237,7 +229,7 @@ fn push_notif_addendum(cron: bool) -> String {
         "newly blocked on a decision you won't make alone, third straight tick with nothing to do, you're ending the loop"
     };
     format!(
-        "\nUse {PUSH_NOTIFICATION} when the loop can't move further without the user, or when something landed that they'd want to act on now: {n}, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+        "\n\nUse {PUSH_NOTIFICATION} when the loop can't move further without the user, or when something landed that they'd want to act on now: {n}, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
     )
 }
 
@@ -246,7 +238,7 @@ fn push_notif_addendum(cron: bool) -> String {
 // PARITY: binary mJr (cc_all.txt:504966).
 fn monitor_addendum() -> String {
     format!(
-        "\nIf a {MONITOR} is armed (check {TASK_LIST}), keep `delaySeconds` at 1200–1800s — the {MONITOR} is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before rescheduling. To stop the loop, also {TASK_STOP} the monitor (use {TASK_LIST} to find its task ID if no longer in context)."
+        "\n\nIf a {MONITOR} is armed (check {TASK_LIST}), keep `delaySeconds` at 1200–1800s — the {MONITOR} is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call {SCHEDULE_WAKEUP} with `stop: true` and {TASK_STOP} the monitor (use {TASK_LIST} to find its task ID if no longer in context)."
     )
 }
 
@@ -255,7 +247,7 @@ fn monitor_addendum() -> String {
 /// `tKi` (cc_all.txt:504951) — autonomous loop tick (cron mode).
 fn tick_autonomous_cron() -> String {
     format!(
-        "# Autonomous loop tick\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call {SCHEDULE_WAKEUP} from this tick.{addendum}",
+        "# Autonomous loop tick\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call {SCHEDULE_WAKEUP} from this tick.{addendum}",
         addendum = push_notif_addendum(false),
     )
 }
@@ -263,7 +255,7 @@ fn tick_autonomous_cron() -> String {
 /// `W4d` (cc_all.txt:504952) — autonomous loop tick (dynamic pacing).
 fn tick_autonomous_dynamic() -> String {
     format!(
-        "# Autonomous loop tick (dynamic pacing)\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\nYou scheduled this tick via the {SCHEDULE_WAKEUP} tool (not a recurring cron). To keep the loop alive, call {SCHEDULE_WAKEUP} again at the end of this turn with `prompt` set to the literal sentinel `{AUTONOMOUS_LOOP_DYNAMIC_SENTINEL}` — otherwise the loop ends after this tick.{monitor}{push}",
+        "# Autonomous loop tick (dynamic pacing)\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the {SCHEDULE_WAKEUP} tool (not a recurring cron). To keep the loop alive, call {SCHEDULE_WAKEUP} again at the end of this turn with `prompt` set to the literal sentinel `{AUTONOMOUS_LOOP_DYNAMIC_SENTINEL}` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.{monitor}{push}",
         monitor = monitor_addendum(),
         push = push_notif_addendum(false),
     )
@@ -272,7 +264,7 @@ fn tick_autonomous_dynamic() -> String {
 /// `G4d` (cc_all.txt:504952) — loop.md tasks tick (cron mode).
 fn tick_loopfile_cron() -> String {
     format!(
-        "# /loop tick — loop.md tasks\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call {SCHEDULE_WAKEUP} from this tick.{addendum}",
+        "# /loop tick — loop.md tasks\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call {SCHEDULE_WAKEUP} from this tick.{addendum}",
         addendum = push_notif_addendum(true),
     )
 }
@@ -280,7 +272,7 @@ fn tick_loopfile_cron() -> String {
 /// `V4d` (cc_all.txt:504952) — loop.md tasks tick (dynamic pacing).
 fn tick_loopfile_dynamic() -> String {
     format!(
-        "# /loop tick — loop.md tasks (dynamic pacing)\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\nYou scheduled this tick via the {SCHEDULE_WAKEUP} tool (not a recurring cron). To keep the loop alive, call {SCHEDULE_WAKEUP} again at the end of this turn with `prompt` set to the literal sentinel `{LOOP_FILE_DYNAMIC_SENTINEL}` — otherwise the loop ends after this tick.{monitor}{push}",
+        "# /loop tick — loop.md tasks (dynamic pacing)\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the {SCHEDULE_WAKEUP} tool (not a recurring cron). To keep the loop alive, call {SCHEDULE_WAKEUP} again at the end of this turn with `prompt` set to the literal sentinel `{LOOP_FILE_DYNAMIC_SENTINEL}` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.{monitor}{push}",
         monitor = monitor_addendum(),
         push = push_notif_addendum(true),
     )
@@ -289,7 +281,7 @@ fn tick_loopfile_dynamic() -> String {
 /// `K4d` (cc_all.txt:504952) — loop.md ABSENT tick (dynamic pacing).
 fn tick_loopfile_absent_dynamic() -> String {
     format!(
-        "# /loop tick — loop.md absent (dynamic pacing)\nloop.md is not currently present. Run the autonomous check using the loop instructions established earlier in this conversation.\nYou scheduled this tick via the {SCHEDULE_WAKEUP} tool (not a recurring cron). To keep the loop alive — and to pick up loop.md if it is recreated — call {SCHEDULE_WAKEUP} again at the end of this turn with `prompt` set to the literal sentinel `{LOOP_FILE_DYNAMIC_SENTINEL}` — otherwise the loop ends after this tick.{monitor}{push}",
+        "# /loop tick — loop.md absent (dynamic pacing)\n\nloop.md is not currently present. Run the autonomous check using the loop instructions established earlier in this conversation.\n\nYou scheduled this tick via the {SCHEDULE_WAKEUP} tool (not a recurring cron). To keep the loop alive — and to pick up loop.md if it is recreated — call {SCHEDULE_WAKEUP} again at the end of this turn with `prompt` set to the literal sentinel `{LOOP_FILE_DYNAMIC_SENTINEL}` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.{monitor}{push}",
         monitor = monitor_addendum(),
         push = push_notif_addendum(false),
     )
@@ -322,7 +314,7 @@ fn truncate_loop_file(content: &str) -> String {
         .unwrap_or(budget);
     let head = &content[..cut];
     format!(
-        "{head}\n> WARNING: loop.md was truncated to {LOOP_FILE_MAX_BYTES} bytes. Keep the task list concise."
+        "{head}\n\n> WARNING: loop.md was truncated to {LOOP_FILE_MAX_BYTES} bytes. Keep the task list concise."
     )
 }
 
@@ -412,9 +404,8 @@ static DELIVERY: Mutex<DeliveryState> = Mutex::new(DeliveryState {
 // PARITY: in the binary `X4d` is invoked from the post-compact cleanup `Zne`
 // (`if(o)resetAutonomousLoopDelivered()`, main-thread compact). The port wires it
 // at the same site — `compaction::run_post_compact_cleanup` inside its
-// main-thread-compact gate. Inert by default (the resolver gate
-// `tengu_kairos_loop_prompt` is off → `DELIVERY` is never mutated), so it
-// byte-matches the shipped binary until the flag flips.
+// main-thread-compact gate. Live as of 2.1.263: the resolver gate is gone, so
+// the sentinels always resolve and `DELIVERY` really is mutated.
 pub fn reset_autonomous_loop_delivered() {
     let mut st = DELIVERY.lock().unwrap();
     st.preamble_delivered = false;
@@ -429,6 +420,98 @@ pub fn reset_autonomous_loop_delivered() {
 // binary these live on the session state object `Nt`; the port mirrors them with
 // a process-global [`Mutex`] (single live /loop per process, like `DELIVERY`).
 
+/// Per-prompt dynamic-loop bookkeeping (2.1.263 `PLn(prompt)` / `dYt(prompt, …)`):
+/// when this loop started, when its last wakeup was due, and whether it has
+/// already been aged out. A loop whose last wakeup is more than an hour in the
+/// past is treated as a NEW loop (the binary's `S` restart check).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DynamicLoopRecord {
+    /// Epoch ms when the loop's first wakeup was scheduled.
+    pub started_at_ms: i64,
+    /// Epoch ms the most recent wakeup was scheduled FOR.
+    pub last_scheduled_for_ms: i64,
+    /// True once the loop reached `recurringMaxAgeMs` and was ended.
+    pub aged_out: bool,
+}
+
+/// Why a `/loop` tick was NOT quiet — the veto arms of the oracle's `v()`,
+/// with its exact reason literals.
+///
+/// The oracle finds these by walking the transcript span between the last
+/// `scheduled_task_fire{cronKind:"loop"}` anchor and the end of the transcript.
+/// LingXi has no live transcript array to walk: a wakeup is enqueued as ONE
+/// command, so the span IS the turn it runs. The components that observe a
+/// disturbance therefore mark it on [`LoopRuntime`] as it happens, and the
+/// turn-completion edge reads the mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopFoldVeto {
+    /// A blocking system message (a compaction boundary or another scheduled
+    /// fire) landed in the span.
+    BlockingSystemInSpan,
+    /// A tool call was interrupted or cancelled.
+    ToolAbort,
+    /// A tool call was denied.
+    ToolDenial,
+    /// Real input arrived from a human during the tick.
+    ForeignUserInput,
+    /// A queued command was waiting to run.
+    QueuedCommand,
+    /// The model did not end the tick with `ScheduleWakeup({noop: true})`.
+    ModelReportedWork,
+}
+
+impl LoopFoldVeto {
+    /// The oracle's literal, as passed to `g("loop_noop_fold", reason)`.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::BlockingSystemInSpan => "blocking_system_in_span",
+            Self::ToolAbort => "tool_abort",
+            Self::ToolDenial => "tool_denial",
+            Self::ForeignUserInput => "foreign_user_input",
+            Self::QueuedCommand => "queued_command",
+            Self::ModelReportedWork => "model_reported_work",
+        }
+    }
+}
+
+/// What the turn that just ended contributed to the fold span.
+///
+/// PARITY the two fields the oracle counts by walking the transcript span:
+/// `span_len` (messages) and `tool_uses` (`tool_use` blocks). LingXi's span is
+/// one turn, so the orchestrator tallies them as they happen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoopSpanCounts {
+    /// `tool_use` blocks the assistant emitted (the oracle's `c.size`).
+    pub tool_uses: u32,
+    /// Messages the span holds (the oracle's `b.length`).
+    pub span_len: u32,
+}
+
+/// What the turn-completion edge decided about the tick that just ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopFoldOutcome {
+    /// The tick was quiet. `streak` counts it (so it is never 0) and `since` is
+    /// when the run of quiet ticks began — the oracle's `noOpStreak` /
+    /// `streakStartedAt`.
+    Folded {
+        /// Consecutive quiet ticks including this one.
+        streak: u32,
+        /// Start of the quiet run.
+        since: SystemTime,
+        /// Wall time from the fire that started this tick to now, in seconds
+        /// (the oracle's `span_duration_s`).
+        duration_secs: u64,
+        /// The span's `tool_use` count and message count.
+        span: LoopSpanCounts,
+    },
+    /// The tick did something; the streak resets.
+    Vetoed {
+        /// The oracle's veto literal.
+        reason: LoopFoldVeto,
+    },
+}
+
 #[derive(Default)]
 struct LoopRuntimeState {
     /// `Nt.loopTickInFlightPrompt` — prompt of the loop tick being processed.
@@ -440,6 +523,25 @@ struct LoopRuntimeState {
     /// registry to query, and the wakeup enqueues in the FUTURE, so this
     /// synchronous per-turn flag is the only reliable "model rescheduled" signal.
     rescheduled_this_turn: bool,
+    /// 2.1.263 dynamic-loop records keyed by the wakeup prompt (`PLn`/`dYt`).
+    dynamic_loops: std::collections::HashMap<String, DynamicLoopRecord>,
+    /// 2.1.263 `OLn()` / `gHt(bool)` — the loop already emitted its terminal
+    /// `tengu_loop_ended`; a later `stop: true` is cleanup only.
+    loop_ended: bool,
+    /// When the in-flight tick started (the oracle's anchor timestamp), used for
+    /// `span_duration_s`.
+    tick_started_at: Option<SystemTime>,
+    /// `noop` of the LAST `ScheduleWakeup` call in the current tick — the
+    /// oracle's `p` in `v()`. `None` when the model armed no wakeup at all,
+    /// which vetoes exactly as `p !== true` does.
+    tick_noop_reported: Option<bool>,
+    /// The FIRST disturbance seen during the current tick. The oracle returns on
+    /// the first veto it meets walking the span forward, so first-wins.
+    tick_veto: Option<LoopFoldVeto>,
+    /// `noOpStreak` — consecutive quiet ticks folded so far.
+    noop_streak: u32,
+    /// `streakStartedAt` — when the current quiet run began.
+    streak_started_at: Option<SystemTime>,
 }
 
 /// Session-scoped dynamic-loop state.
@@ -455,9 +557,83 @@ pub struct LoopRuntime {
 impl LoopRuntime {
     /// Mark the start of a loop tick and clear the prior reschedule marker.
     pub fn begin_tick(&self, prompt: String) {
+        self.begin_tick_at(prompt, SystemTime::now());
+    }
+
+    /// [`Self::begin_tick`] with an explicit start instant (tests, and hosts
+    /// with their own clock). Also clears the per-tick fold marks, so a veto or
+    /// a `noop` from the previous tick can never settle this one.
+    pub fn begin_tick_at(&self, prompt: String, at: SystemTime) {
         let mut st = self.state.lock().unwrap();
         st.tick_in_flight_prompt = Some(prompt);
         st.rescheduled_this_turn = false;
+        st.tick_started_at = Some(at);
+        st.tick_noop_reported = None;
+        st.tick_veto = None;
+    }
+
+    /// Record the `noop` argument of a `ScheduleWakeup` call made during this
+    /// tick. The LAST call of the tick wins, matching the oracle's `p`, which is
+    /// overwritten by each `ScheduleWakeup` tool_use it walks past.
+    pub fn mark_noop_reported(&self, noop: bool) {
+        self.state.lock().unwrap().tick_noop_reported = Some(noop);
+    }
+
+    /// Mark this tick as not-quiet. The FIRST veto recorded wins.
+    pub fn veto_tick(&self, veto: LoopFoldVeto) {
+        let mut st = self.state.lock().unwrap();
+        if st.tick_veto.is_none() {
+            st.tick_veto = Some(veto);
+        }
+    }
+
+    /// PARITY `v()` + the streak arithmetic in `D()`: settle the tick that just
+    /// ended into the no-op streak.
+    ///
+    /// Returns `None` when no tick was in flight (the turn was not a loop
+    /// wakeup). A veto resets the streak; a fold extends it and returns the
+    /// count INCLUDING this tick, which is what the next wakeup renders.
+    ///
+    /// Reads the in-flight marker WITHOUT taking it — the keepalive and
+    /// user-abort edges that run after this one consume it.
+    pub fn settle_tick(&self, now: SystemTime, span: LoopSpanCounts) -> Option<LoopFoldOutcome> {
+        let mut st = self.state.lock().unwrap();
+        st.tick_in_flight_prompt.as_ref()?;
+        let veto = st.tick_veto.or_else(|| {
+            (st.tick_noop_reported != Some(true)).then_some(LoopFoldVeto::ModelReportedWork)
+        });
+        st.tick_veto = None;
+        st.tick_noop_reported = None;
+        let started_at = st.tick_started_at.take();
+        if let Some(reason) = veto {
+            st.noop_streak = 0;
+            st.streak_started_at = None;
+            return Some(LoopFoldOutcome::Vetoed { reason });
+        }
+        let since = st.streak_started_at.or(started_at).unwrap_or(now);
+        st.noop_streak = st.noop_streak.saturating_add(1);
+        st.streak_started_at = Some(since);
+        let duration_secs = started_at
+            .and_then(|start| now.duration_since(start).ok())
+            .map_or(0, |d| d.as_secs());
+        Some(LoopFoldOutcome::Folded {
+            streak: st.noop_streak,
+            since,
+            duration_secs,
+            span,
+        })
+    }
+
+    /// The current no-op streak and when it started — what a firing wakeup
+    /// renders as `\u{b7} N no-op tick(s) since \u{2026}`. `None` when the last tick
+    /// was not quiet.
+    #[must_use]
+    pub fn noop_streak(&self) -> Option<(u32, SystemTime)> {
+        let st = self.state.lock().unwrap();
+        match (st.noop_streak, st.streak_started_at) {
+            (0, _) | (_, None) => None,
+            (streak, Some(since)) => Some((streak, since)),
+        }
     }
 
     /// Peek at the current in-flight loop prompt.
@@ -493,17 +669,105 @@ impl LoopRuntime {
         self.state.lock().unwrap().consecutive_keepalives = count;
     }
 
+    /// 2.1.263 `PLn(prompt)` — the dynamic-loop record for `prompt`, if any.
+    #[must_use]
+    pub fn dynamic_loop_record(&self, prompt: &str) -> Option<DynamicLoopRecord> {
+        self.state
+            .lock()
+            .unwrap()
+            .dynamic_loops
+            .get(prompt)
+            .copied()
+    }
+
+    /// 2.1.263 `dYt(prompt, record)` — store the dynamic-loop record for `prompt`.
+    pub fn set_dynamic_loop_record(&self, prompt: &str, record: DynamicLoopRecord) {
+        self.state
+            .lock()
+            .unwrap()
+            .dynamic_loops
+            .insert(prompt.to_string(), record);
+    }
+
+    /// 2.1.263 `Ort(prompt)` / `sessionCron.forgetChainStart` — drop the
+    /// dynamic-loop record for `prompt`. `ZXn` (`stop: true`) and `t3t` (user
+    /// abort) forget every cancelled wakeup's prompt plus the in-flight tick's,
+    /// so a later `/loop` on the same prompt starts a fresh 7-day window instead
+    /// of inheriting the stopped loop's `startedAt`.
+    pub fn forget_dynamic_loop(&self, prompt: &str) {
+        self.state.lock().unwrap().dynamic_loops.remove(prompt);
+    }
+
+    /// 2.1.263 `OLn()` — whether the loop already ended (terminal event emitted).
+    #[must_use]
+    pub fn loop_ended(&self) -> bool {
+        self.state.lock().unwrap().loop_ended
+    }
+
+    /// 2.1.263 `gHt(ended)` — record / clear the loop-ended marker. `/loop`
+    /// invocation clears it (`K_n`); every terminal path sets it.
+    pub fn set_loop_ended(&self, ended: bool) {
+        self.state.lock().unwrap().loop_ended = ended;
+    }
+
     /// Clear all state for a fresh loop/session.
     pub fn reset(&self) {
         *self.state.lock().unwrap() = LoopRuntimeState::default();
     }
 }
 
-static LOOP_RUNTIME: Mutex<LoopRuntimeState> = Mutex::new(LoopRuntimeState {
-    tick_in_flight_prompt: None,
-    consecutive_keepalives: 0,
-    rescheduled_this_turn: false,
-});
+static LOOP_RUNTIME: std::sync::LazyLock<Mutex<LoopRuntimeState>> =
+    std::sync::LazyLock::new(|| Mutex::new(LoopRuntimeState::default()));
+
+/// Process-global `PLn(prompt)` (hosts without a session-scoped [`LoopRuntime`]).
+#[must_use]
+pub fn dynamic_loop_record(prompt: &str) -> Option<DynamicLoopRecord> {
+    LOOP_RUNTIME
+        .lock()
+        .unwrap()
+        .dynamic_loops
+        .get(prompt)
+        .copied()
+}
+
+/// Process-global `dYt(prompt, record)`.
+pub fn set_dynamic_loop_record(prompt: &str, record: DynamicLoopRecord) {
+    LOOP_RUNTIME
+        .lock()
+        .unwrap()
+        .dynamic_loops
+        .insert(prompt.to_string(), record);
+}
+
+/// Process-global `Ort(prompt)` — see [`LoopRuntime::forget_dynamic_loop`].
+pub fn forget_dynamic_loop(prompt: &str) {
+    LOOP_RUNTIME.lock().unwrap().dynamic_loops.remove(prompt);
+}
+
+/// Process-global `OLn()`.
+#[must_use]
+pub fn loop_ended() -> bool {
+    LOOP_RUNTIME.lock().unwrap().loop_ended
+}
+
+/// Process-global `gHt(ended)`.
+pub fn set_loop_ended(ended: bool) {
+    LOOP_RUNTIME.lock().unwrap().loop_ended = ended;
+}
+
+/// 2.1.263 `K_n()` = `gHt(!1), Eje()` — `/loop` was invoked with no arguments,
+/// so a previously-ended loop is live again.
+///
+/// The binary also calls `resetWakeFires()` here; the port has no `wakeFires`
+/// counter (it exists only to render `fires: N` on the pending-wakeup status
+/// line and `loopWakeFires` in checkpoint state, neither of which the port
+/// surfaces), so there is nothing to reset. The binary guards this call with
+/// `!isSkillPreload && !modelScheduledOrigin`; the port's `BundledPromptFn::build`
+/// seam carries neither flag, and `build` is only reached from an actual user
+/// dispatch, so the guard has no port-side equivalent to honour.
+pub fn note_loop_invoked() {
+    set_loop_ended(false);
+}
 
 /// Mark the START of a loop-tick turn (binary `onFireTask` `I7e(d.prompt)`):
 /// record the in-flight tick prompt and clear the per-turn reschedule flag. Called
@@ -552,10 +816,7 @@ pub fn set_loop_consecutive_keepalives(n: u32) {
 
 /// Clear all loop runtime state. Used by tests and a fresh-loop start.
 pub fn reset_loop_runtime_state() {
-    let mut st = LOOP_RUNTIME.lock().unwrap();
-    st.tick_in_flight_prompt = None;
-    st.consecutive_keepalives = 0;
-    st.rescheduled_this_turn = false;
+    *LOOP_RUNTIME.lock().unwrap() = LoopRuntimeState::default();
 }
 
 /// Process-wide serialization lock for tests that mutate the shared `DELIVERY`
@@ -582,9 +843,6 @@ pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
     if !is_autonomous_loop_sentinel(sentinel) {
         return None;
     }
-    if !is_loop_default_prompt_enabled() {
-        return None;
-    }
     // PARITY: `nKi` calls `pJr()` on EVERY autonomous fire, right after the two
     // gate returns and before computing the tick (cc_all.txt:504952).
     log_autonomous_loop_activation();
@@ -599,7 +857,12 @@ pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
         return Some(tick);
     }
     st.preamble_delivered = true;
-    Some(format!("{}\n{}", get_autonomous_loop_preamble(), tick))
+    // PARITY 2.1.263: `${v()}\n\n---\n\n${o}`.
+    Some(format!(
+        "{}\n\n---\n\n{}",
+        get_autonomous_loop_preamble(),
+        tick
+    ))
 }
 
 /// `sKi` / `resolveLoopFileFire` (cc_all.txt:504966): resolves a loop.md sentinel
@@ -611,9 +874,6 @@ pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
 #[must_use]
 pub fn resolve_loop_file_fire(sentinel: &str, cwd: &Path) -> Option<String> {
     if !is_loop_file_sentinel(sentinel) {
-        return None;
-    }
-    if !is_loop_default_prompt_enabled() {
         return None;
     }
     let dynamic = sentinel == LOOP_FILE_DYNAMIC_SENTINEL;
@@ -630,8 +890,9 @@ pub fn resolve_loop_file_fire(sentinel: &str, cwd: &Path) -> Option<String> {
             return Some(tick);
         }
         st.last_content = Some(file.content.clone());
+        // PARITY 2.1.263: `# /loop tick — tasks from ${path}\n\n…\n\n---\n\n${content}\n\n---\n\n${tick}`.
         return Some(format!(
-            "# /loop tick — tasks from {path}\nThe user configured a loop-tasks file. Work through the tasks defined below; these are the instructions for this tick and every subsequent tick (the reminder on later fires refers back to this message).\n{content}\n{tick}",
+            "# /loop tick — tasks from {path}\n\nThe user configured a loop-tasks file. Work through the tasks defined below; these are the instructions for this tick and every subsequent tick (the reminder on later fires refers back to this message).\n\n---\n\n{content}\n\n---\n\n{tick}",
             path = file.path.display(),
             content = file.content,
         ));
@@ -651,7 +912,11 @@ pub fn resolve_loop_file_fire(sentinel: &str, cwd: &Path) -> Option<String> {
     }
     st.last_content = Some(PREAMBLE_SENTINEL.to_string());
     st.preamble_delivered = true;
-    Some(format!("{}\n{}", get_autonomous_loop_preamble(), tick))
+    Some(format!(
+        "{}\n\n---\n\n{}",
+        get_autonomous_loop_preamble(),
+        tick
+    ))
 }
 
 /// `J4d` / `resolveLoopDefaultFire` (cc_all.txt:504966):
@@ -661,6 +926,154 @@ pub fn resolve_loop_default_fire(sentinel: &str, cwd: &Path) -> String {
     resolve_autonomous_loop_fire(sentinel)
         .or_else(|| resolve_loop_file_fire(sentinel, cwd))
         .unwrap_or_else(|| sentinel.to_string())
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::{LoopFoldOutcome, LoopFoldVeto, LoopRuntime, LoopSpanCounts};
+    use std::time::{Duration, SystemTime};
+
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    /// A quiet tick still costs one assistant message plus the `ScheduleWakeup`
+    /// call and its result.
+    fn quiet_span() -> LoopSpanCounts {
+        LoopSpanCounts {
+            tool_uses: 1,
+            span_len: 2,
+        }
+    }
+
+    /// A tick the model closed with `noop: true` folds, and consecutive quiet
+    /// ticks keep the streak's ORIGINAL start (the oracle's
+    /// `since: s.streakStartedAt ?? s.timestamp`).
+    #[test]
+    fn consecutive_quiet_ticks_extend_one_streak() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("p".into(), at(1_000));
+        rt.mark_noop_reported(true);
+        assert_eq!(
+            rt.settle_tick(at(1_030), quiet_span()),
+            Some(LoopFoldOutcome::Folded {
+                streak: 1,
+                since: at(1_000),
+                duration_secs: 30,
+                span: quiet_span(),
+            })
+        );
+        rt.begin_tick_at("p".into(), at(2_000));
+        rt.mark_noop_reported(true);
+        assert_eq!(
+            rt.settle_tick(at(2_010), quiet_span()),
+            Some(LoopFoldOutcome::Folded {
+                streak: 2,
+                since: at(1_000),
+                duration_secs: 10,
+                span: quiet_span(),
+            })
+        );
+        assert_eq!(rt.noop_streak(), Some((2, at(1_000))));
+    }
+
+    /// PARITY `if(p!==!0) return {kind:"veto",reason:"model_reported_work"}` —
+    /// a tick that did work, and one that armed no wakeup at all, both veto.
+    #[test]
+    fn work_or_silence_vetoes_and_resets_the_streak() {
+        for reported in [Some(false), None] {
+            let rt = LoopRuntime::default();
+            rt.begin_tick_at("p".into(), at(1_000));
+            rt.mark_noop_reported(true);
+            rt.settle_tick(at(1_010), quiet_span());
+            rt.begin_tick_at("p".into(), at(2_000));
+            if let Some(noop) = reported {
+                rt.mark_noop_reported(noop);
+            }
+            assert_eq!(
+                rt.settle_tick(at(2_010), quiet_span()),
+                Some(LoopFoldOutcome::Vetoed {
+                    reason: LoopFoldVeto::ModelReportedWork,
+                })
+            );
+            assert_eq!(rt.noop_streak(), None, "a veto resets the streak");
+        }
+    }
+
+    /// A veto marked by the driver wins over the model's own `noop: true`, and
+    /// the FIRST veto of the tick is the one reported.
+    #[test]
+    fn a_marked_veto_beats_a_noop_claim_and_first_wins() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("p".into(), at(1_000));
+        rt.mark_noop_reported(true);
+        rt.veto_tick(LoopFoldVeto::ToolAbort);
+        rt.veto_tick(LoopFoldVeto::QueuedCommand);
+        assert_eq!(
+            rt.settle_tick(at(1_010), quiet_span()),
+            Some(LoopFoldOutcome::Vetoed {
+                reason: LoopFoldVeto::ToolAbort,
+            })
+        );
+    }
+
+    /// A turn that was not a loop tick settles nothing — the edge runs after
+    /// EVERY turn, so this is what keeps a normal turn out of the streak.
+    #[test]
+    fn a_turn_that_was_not_a_tick_settles_nothing() {
+        let rt = LoopRuntime::default();
+        rt.mark_noop_reported(true);
+        assert_eq!(rt.settle_tick(at(1_000), quiet_span()), None);
+        assert_eq!(rt.noop_streak(), None);
+    }
+
+    /// `begin_tick` clears the previous tick's marks, so a stale veto or a
+    /// stale `noop` can never decide the next one.
+    #[test]
+    fn beginning_a_tick_clears_the_previous_ticks_marks() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("p".into(), at(1_000));
+        rt.veto_tick(LoopFoldVeto::ToolDenial);
+        rt.begin_tick_at("p".into(), at(2_000));
+        rt.mark_noop_reported(true);
+        assert!(matches!(
+            rt.settle_tick(at(2_005), quiet_span()),
+            Some(LoopFoldOutcome::Folded { streak: 1, .. })
+        ));
+    }
+
+    /// PARITY the counter's `span_len` / `tool_uses`: whatever the turn tallied
+    /// is what the fold reports, not a placeholder.
+    #[test]
+    fn the_span_counts_reach_the_fold_outcome() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("p".into(), at(1_000));
+        rt.mark_noop_reported(true);
+        let span = LoopSpanCounts {
+            tool_uses: 3,
+            span_len: 7,
+        };
+        assert_eq!(
+            rt.settle_tick(at(1_012), span),
+            Some(LoopFoldOutcome::Folded {
+                streak: 1,
+                since: at(1_000),
+                duration_secs: 12,
+                span,
+            })
+        );
+    }
+
+    /// The in-flight marker is READ, not taken: the keepalive and user-abort
+    /// edges run after the fold and still need it.
+    #[test]
+    fn settling_leaves_the_in_flight_prompt_for_the_later_edges() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("tick".into(), at(1_000));
+        rt.mark_noop_reported(true);
+        rt.settle_tick(at(1_001), quiet_span());
+        assert_eq!(rt.take_in_flight_prompt().as_deref(), Some("tick"));
+    }
 }
 
 #[cfg(test)]
@@ -675,12 +1088,8 @@ mod tests {
         std::env::remove_var("LINGXI_LOOP_PERSISTENT");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         platform_api::session_flags::set_agent_push_notif_enabled(false);
-        // The resolver gate (`fJr`/`is_loop_default_prompt_enabled`) DEFAULTS off
-        // (binary `tengu_kairos_loop_prompt=false`, FLAG-ONLY — no env). Turn it on
-        // for the resolution tests via the test-only flag override (binary `ROt`/
-        // `Uvi`). The dedicated `gate_off_passthrough` test clears it to assert the
-        // default.
-        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
+        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         g
     }
 
@@ -709,15 +1118,26 @@ mod tests {
         assert!(!is_loop_default_sentinel("5m /foo"));
     }
 
+    // PARITY 2.1.263: the preambles are the bundled markdown files
+    // `loopAutonomousPreamble-07qcyhv4.md` (4972 bytes) and
+    // `loopAutonomousPreamblePersistent-3zqtkrvg.md` (5380 bytes) — ASCII
+    // hyphens, a blank line after the heading and between paragraphs.
     #[test]
-    fn preamble_default_is_ajr_verbatim() {
+    fn preamble_default_is_the_bundled_file_verbatim() {
         let _g = guard();
         assert_eq!(AUTONOMOUS_LOOP_PREAMBLE, PREAMBLE_DEFAULT);
-        assert!(PREAMBLE_DEFAULT.starts_with("# Autonomous loop check\n"));
+        assert_eq!(PREAMBLE_DEFAULT.len(), 4972);
+        assert_eq!(PREAMBLE_PERSISTENT.len(), 5380);
+        assert!(PREAMBLE_DEFAULT.starts_with("# Autonomous loop check\n\nYou're being invoked"));
+        assert!(PREAMBLE_DEFAULT.contains("without the user driving every step - finishing things"));
+        assert!(
+            !PREAMBLE_DEFAULT.contains('\u{2014}'),
+            "the bundled file has no em-dashes"
+        );
+        assert!(!PREAMBLE_PERSISTENT.contains('\u{2014}'));
         assert!(PREAMBLE_DEFAULT.contains("You're a steward, not an initiator."));
+        assert!(PREAMBLE_DEFAULT.contains("\n\n## What to act on\n\n"));
         assert!(PREAMBLE_DEFAULT.ends_with("building together.\n"));
-        // The default preamble lacks the persistent-only "spirit" / "keep the
-        // loop alive" phrasing.
         assert!(!PREAMBLE_DEFAULT.contains("the *spirit* of the task"));
     }
 
@@ -734,65 +1154,45 @@ mod tests {
     }
 
     #[test]
-    fn gate_env_vs_flag_split_matches_binary() {
+    fn gates_match_2_1_263() {
         let _g = guard();
-        // guard() set the prompt flag on; clear all loop flags + envs for a clean
-        // baseline (shipped-binary default: every gate off).
-        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
         std::env::remove_var("LINGXI_LOOP_PERSISTENT");
         std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
-        assert!(!is_loop_default_prompt_enabled());
-        assert!(!is_loop_dynamic_enabled());
-        assert!(!is_loop_persistent_preamble_enabled());
-        assert!(!is_loop_keepalive_enabled());
-        assert!(!is_push_notif_enabled());
-
-        // PROMPT/DYNAMIC: FLAG-ONLY (binary fJr/q_e have NO env layer).
-        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        // PARITY 2.1.263: `tengu_kairos_loop_prompt` / `tengu_kairos_loop_dynamic`
+        // no longer exist — the sentinel resolvers and the dynamic /loop mode are
+        // unconditional.
         assert!(is_loop_default_prompt_enabled());
         assert!(is_loop_dynamic_enabled());
-        // The removed env vars must NOT influence the flag-only gates.
-        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
-        std::env::set_var("LINGXI_LOOP_PROMPT", "1");
-        assert!(
-            !is_loop_default_prompt_enabled(),
-            "LINGXI_LOOP_PROMPT must NOT enable the flag-only gate (binary fJr is flag-only)"
-        );
-        std::env::remove_var("LINGXI_LOOP_PROMPT");
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
+        assert!(!is_loop_persistent_preamble_enabled());
+        // Keepalive `YXn`: flag default TRUE …
+        assert!(is_loop_keepalive_enabled());
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", false);
+        assert!(!is_loop_keepalive_enabled(), "flag off disables");
+        // … and a DEFINED env var wins raw: any non-empty string is truthy, an
+        // empty string is falsy (binary `if(e!==void 0)return e`).
+        std::env::set_var("LINGXI_LOOP_KEEPALIVE", "1");
+        assert!(is_loop_keepalive_enabled(), "env arm");
+        std::env::set_var("LINGXI_LOOP_KEEPALIVE", "");
+        assert!(!is_loop_keepalive_enabled(), "empty env is falsy");
+        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
 
-        // PERSISTENT/KEEPALIVE: env || flag (binary YIn/iKi have both).
+        // PERSISTENT: env || flag.
         telemetry::test_set_flag("tengu_kairos_loop_persistent", true);
         assert!(is_loop_persistent_preamble_enabled(), "flag arm");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
-        assert!(!is_loop_persistent_preamble_enabled());
         std::env::set_var("LINGXI_LOOP_PERSISTENT", "1");
         assert!(is_loop_persistent_preamble_enabled(), "env arm");
         std::env::remove_var("LINGXI_LOOP_PERSISTENT");
 
-        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
-        assert!(is_loop_keepalive_enabled(), "flag arm");
-        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
-        std::env::set_var("LINGXI_LOOP_KEEPALIVE", "1");
-        assert!(is_loop_keepalive_enabled(), "env arm");
-        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
-
-        // Yke: push flag alone is not enough.
+        // Push: flag alone is not enough.
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
-        assert!(
-            !is_push_notif_enabled(),
-            "Yke needs BOTH the flag and the agentPushNotifEnabled setting"
-        );
+        assert!(!is_push_notif_enabled());
         platform_api::session_flags::set_agent_push_notif_enabled(true);
-        assert!(
-            is_push_notif_enabled(),
-            "Yke enables only after both gates are true"
-        );
+        assert!(is_push_notif_enabled());
         platform_api::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
     }
@@ -835,31 +1235,31 @@ mod tests {
     }
 
     #[test]
-    fn gate_off_passthrough() {
-        // PARITY: with `fJr()`/`is_loop_default_prompt_enabled()` at its binary
-        // default (`tengu_kairos_loop_prompt=false`), the resolver returns the
-        // sentinel UNCHANGED — `J4d(e)=nKi(e)??sKi(e)??e` → `e`. This is the exact
-        // shipped-binary behavior (the feature is gated off until the server flag
-        // flips). `guard()` sets the override; clear it to exercise the default.
+    fn sentinels_always_resolve_and_preamble_joins_with_rule() {
+        // PARITY 2.1.263: no resolver gate — every sentinel resolves, and the
+        // first delivery is `${preamble}\n\n---\n\n${tick}`.
         let _g = guard();
-        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
-        assert!(!is_loop_default_prompt_enabled());
         let cwd = std::env::temp_dir();
-        // All four sentinels pass through verbatim when the gate is off.
-        assert_eq!(
-            resolve_loop_default_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, &cwd),
-            AUTONOMOUS_LOOP_DYNAMIC_SENTINEL
+        let first = resolve_loop_default_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, &cwd);
+        assert_ne!(first, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
+        let expected_head = format!(
+            "{}\n\n---\n\n# Autonomous loop tick (dynamic pacing)\n\nRun the autonomous check",
+            PREAMBLE_DEFAULT
         );
-        assert_eq!(
-            resolve_loop_default_fire(AUTONOMOUS_LOOP_SENTINEL, &cwd),
-            AUTONOMOUS_LOOP_SENTINEL
-        );
-        assert_eq!(
+        assert!(first.starts_with(&expected_head), "{first}");
+        assert!(first.contains("and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick."));
+        assert!(first.contains("\n\nIf a Monitor is armed (check TaskList)"));
+        assert!(first.contains(
+            "To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor"
+        ));
+        assert_ne!(
             resolve_loop_default_fire(LOOP_FILE_DYNAMIC_SENTINEL, &cwd),
             LOOP_FILE_DYNAMIC_SENTINEL
         );
-        assert!(resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).is_none());
-        assert!(resolve_loop_file_fire(LOOP_FILE_SENTINEL, &cwd).is_none());
+        // Cron-mode tick: blank line after the heading, no ScheduleWakeup call.
+        let cron = tick_autonomous_cron();
+        assert!(cron.starts_with("# Autonomous loop tick\n\nRun the autonomous check"));
+        assert!(cron.ends_with("do not call ScheduleWakeup from this tick."));
     }
 
     #[test]
@@ -872,7 +1272,7 @@ mod tests {
         let first = resolve_loop_file_fire(LOOP_FILE_DYNAMIC_SENTINEL, tmp.path()).unwrap();
         assert!(!first.contains("# Autonomous loop check"));
         assert!(first.starts_with("# /loop tick — tasks from "));
-        assert!(first.contains("- task A"));
+        assert!(first.contains("(the reminder on later fires refers back to this message).\n\n---\n\n- task A\n- task B\n\n---\n\n# /loop tick — loop.md tasks (dynamic pacing)\n\n"));
         assert!(first.contains("# /loop tick — loop.md tasks (dynamic pacing)"));
         // Second fire, unchanged content: short reminder tick only.
         let second = resolve_loop_file_fire(LOOP_FILE_DYNAMIC_SENTINEL, tmp.path()).unwrap();
@@ -909,7 +1309,7 @@ mod tests {
         let out = truncate_loop_file(&big);
         assert!(out.len() <= LOOP_FILE_MAX_BYTES + 200);
         assert!(out.ends_with(
-            "> WARNING: loop.md was truncated to 25000 bytes. Keep the task list concise."
+            "\n\n> WARNING: loop.md was truncated to 25000 bytes. Keep the task list concise."
         ));
         // Short content is untouched.
         assert_eq!(truncate_loop_file("- task\n"), "- task\n");
@@ -936,7 +1336,7 @@ mod tests {
         // Every retained head char is the full `€` (no replacement/mojibake).
         let head = out
             .strip_suffix(
-                "\n> WARNING: loop.md was truncated to 25000 bytes. Keep the task list concise.",
+                "\n\n> WARNING: loop.md was truncated to 25000 bytes. Keep the task list concise.",
             )
             .expect("footer present");
         assert!(head.chars().all(|c| c == '\u{20ac}'));
@@ -956,8 +1356,8 @@ mod tests {
     fn dynamic_tick_includes_monitor_addendum() {
         let _g = guard();
         let out = tick_autonomous_dynamic();
-        assert!(out.contains("If a Monitor is armed (check TaskList)"));
-        assert!(out.contains("TaskStop the monitor"));
+        assert!(out.contains("\n\nIf a Monitor is armed (check TaskList)"));
+        assert!(out.contains("handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context)."));
     }
 
     #[test]

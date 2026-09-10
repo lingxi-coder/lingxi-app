@@ -286,7 +286,10 @@ fn parse_one_provider(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    if kind.requires_api_key_env() && env_var.is_none() {
+    if kind.requires_api_key_env()
+        && options.credential_mode == ProviderCredentialMode::Env
+        && env_var.is_none()
+    {
         return Err(format!(
             "provider {name:?}: \"apiKeyEnv\" is required and must not be empty"
         ));
@@ -961,6 +964,27 @@ mod tests {
         let mut providers = BTreeMap::new();
         providers.insert(name.to_string(), value);
         providers
+    }
+
+    #[test]
+    fn deferred_credentials_allow_absent_env_but_env_mode_requires_it() {
+        let providers = one(
+            "custom",
+            json!({
+                "type": "openai", "baseUrl": "https://example.com/v1",
+                "models": [{"id": "test-model"}]
+            }),
+        );
+        let parsed = parse_provider_profiles_strict(
+            &providers,
+            ProviderParseOptions::lenient_deferred_static(),
+        )
+        .expect("secure host credentials do not require an environment variable");
+        assert_eq!(parsed[0].env_var, None);
+        assert_eq!(parsed[0].profile.credential, CredentialConfig::None);
+        assert!(
+            parse_provider_profiles_strict(&providers, ProviderParseOptions::strict_env()).is_err()
+        );
     }
 
     /// The current catalog carries Mythos 5.1 immediately after Fable 5.1.

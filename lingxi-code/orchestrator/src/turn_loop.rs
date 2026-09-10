@@ -170,6 +170,35 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_NUDGE: &str = concat!(
     "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
 );
 
+/// Non-interactive main (`-p`) truncated-after-output recovery nudge
+/// (cc 2.1.263 `tZo` / `query_truncated_response_recovery`).
+pub(crate) const TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN: &str = concat!(
+    "Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. ",
+    "If none of it survived, answer the request from the start.",
+);
+
+/// Subagent truncated-after-output recovery nudge.
+pub(crate) const TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT: &str = concat!(
+    "Your response above was cut off mid-stream and only your next message is delivered. ",
+    "Write the complete response again from the start — no apology, no mention of the cut-off.",
+);
+
+/// `tZo`: recover a truncated-after-output api-error for subagents and for
+/// non-interactive (`-p`) main. Interactive main ends (the notice is enough).
+#[must_use]
+pub(crate) fn truncated_response_recovery_eligible(query_source: &str, interactive: bool) -> bool {
+    let src = crate::config::sanitize_query_source(query_source);
+    truncated_response_recovery_is_subagent(src)
+        || (!interactive && (src.starts_with("repl_main_thread") || src == "sdk"))
+}
+
+/// cc 2.1.263 `ji`: `agent:*` and `hook_agent` are subagent queries.
+/// Keep the port's established `subagent` alias; sanitization only collapses
+/// custom-agent suffixes and does not otherwise classify query sources.
+pub(crate) fn truncated_response_recovery_is_subagent(query_source: &str) -> bool {
+    query_source.starts_with("agent:") || matches!(query_source, "hook_agent" | "subagent")
+}
+
 /// Byte-exact `isMeta` retry message pushed when a `PermissionDenied` hook
 /// returns `{retry: true}` on the gated auto-mode classifier-deny path. 1:1 with
 /// claude-code `toolExecution.ts:1096`. DORMANT in the external build — the
@@ -188,20 +217,10 @@ pub(crate) const PERMISSION_DENIED_RETRY_MESSAGE: &str =
 /// which is the authoritative source for this string in this crate.
 pub(crate) use crate::model::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE;
 
-/// Byte-exact meta nudge injected when the model returns `stop_reason ==
-/// "tool_use"` but produces ZERO `tool_use` blocks (a malformed / leaked-invoke
-/// response). 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset
-/// ~202945837): the first-failure injection text.
-///
-/// claude-code gates the text on a `tengu_malformed_tool_use_clean_retry`
-/// feature flag (`PZa()`) that DEFAULTS TO FALSE, so the default first-failure
-/// string is this non-clean-retry variant. (The clean-retry variant would be
-/// "The previous response failed to produce a valid tool call. Please retry the
-/// tool call now." — gated behind the flag, not emitted in the default build.)
-/// Injected as a META user message ([`ConversationMessage::user_meta`]), matching
-/// CC's `createUserMessage({…, isMeta:!0})` — it persists with `isMeta:true`.
+/// Clean retry nudge from cc 2.1.263 `ZZe` (src_158021603.js).
+/// `Oer` unconditionally drops the malformed attempt before appending it.
 pub(crate) const MALFORMED_TOOL_USE_RETRY_NUDGE: &str =
-    "Your tool call was malformed and could not be parsed. Please retry.";
+    "The previous response failed to produce a valid tool call. Please retry the tool call now.";
 
 /// Byte-exact NON-meta message emitted on the SECOND malformed-tool-use failure
 /// (the retry also produced no `tool_use` block): the turn terminates as
@@ -451,8 +470,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // spread before the invoked-skills bodies (`REg`) and the tool/mcp deltas
     // (`gYt`/`YJn`). Appended to THIS call's OUTGOING snapshot only (never
     // `session.history` / JSONL). See
-    // [`ConversationOrchestrator::plan_mode_reminder_message`].
-    if let Some(reminder) = orch.plan_mode_reminder_message().await {
+    // [`ConversationOrchestrator::plan_mode_turn_messages`].
+    turn_reminders.extend(orch.plan_mode_turn_messages().await);
+    // `$f("plan_mode_exit", …)` runs right after the plan-mode provider.
+    if let Some(reminder) = orch.plan_mode_exit_message().await {
         turn_reminders.push(reminder);
     }
 
@@ -555,10 +576,30 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // surfaces exactly one `<task-notification>`. Placed after the async-hook
     // reminder and before the relevant-memory reminder, identical to the
     // streaming twin — claude-code has ONE main loop, so both LingXi twins must
-    // inject this reminder. `None` when no registry is wired / nothing finished.
-    // See [`ConversationOrchestrator::task_notification_reminder_message`].
-    if let Some(reminder) = orch.task_notification_reminder_message().await {
-        turn_reminders.push(reminder);
+    // inject these reminders — ONE message per completion, matching the
+    // oracle's per-notification enqueue. Empty when no registry is wired /
+    // nothing finished.
+    // See [`ConversationOrchestrator::task_notification_reminder_messages`].
+    for reminder in orch.task_notification_reminder_messages_in_turn(true).await {
+        // A completion notification is a real conversation event, not a
+        // transient reminder: claude-code enqueues it onto the command queue and
+        // it becomes a durable user message. The port used to render it into the
+        // outgoing snapshot only, so it vanished from the transcript the moment
+        // the turn ended -- and because the drain marks each task notified once,
+        // it could never be shown again.
+        //
+        // It goes into history (and the JSONL) rather than `turn_reminders`
+        // precisely because `call_api_with_ptl_recovery` rebuilds the request
+        // from raw history on every retry and re-appends the reminders: being in
+        // both would send it twice on any retry or model fallback. Pushing it
+        // onto this call's snapshot too keeps it in THIS turn's request, which
+        // the snapshot taken above predates.
+        {
+            let mut session = orch.session.lock().await;
+            session.history.push(reminder.clone());
+        }
+        orch.persist_message_to_jsonl(&reminder).await;
+        history_snapshot.push(reminder);
     }
 
     // REM-14: dream completions enqueue memory updates while task
@@ -662,7 +703,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     let api_success_message_count = u32::try_from(history_snapshot.len()).unwrap_or(u32::MAX);
     let api_success_message_tokens =
         compaction::grouping::estimate_tokens_for_range(&history_snapshot);
-    let response = match call_api_with_ptl_recovery(
+    let api_result = call_api_with_ptl_recovery(
         orch,
         system,
         &model,
@@ -676,8 +717,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         &turn_reminders,
         cost_scope.as_ref(),
     )
-    .await
-    {
+    .await;
+    orch.persist_thinking_signature_strip_latch().await;
+    let response = match api_result {
         Ok(outcome) => match outcome {
             PtlCallOutcome::Response(resp) => resp,
             PtlCallOutcome::PromptTooLong => {
@@ -1012,6 +1054,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
 
     // 5. If there are tool_use blocks, dispatch them and feed results back.
+    // `/loop` fold span: this response's calls, and the messages it adds.
     let tool_uses: Vec<(ToolUseId, String, serde_json::Value, Option<String>)> = assistant_blocks
         .iter()
         .filter_map(|b| match b {
@@ -1024,6 +1067,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             _ => None,
         })
         .collect();
+    orch.turn_span.note_assistant_response(tool_uses.len());
 
     // HOOK.2: a PreToolUse hook returning `continue:false` (preventContinuation)
     // stops the agent loop AFTER this turn step's tools have run (TS
@@ -1161,6 +1205,23 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         }
     }
 
+    // LONE `ScheduleWakeup` ENDS THE TURN (binary
+    // `if(yo.length===1 && yo[0].name===Xi && Zoe(…)) { if(kg().some(…loop…)) … }`).
+    // A round whose ONLY tool call was `ScheduleWakeup`, and which actually
+    // armed a wakeup, has nothing left to do: the tool's own result already
+    // tells the model the harness will re-invoke it when the wakeup fires, so
+    // feeding that result back just buys one more model round to say so.
+    //
+    // The flag is CONSUMED either way (inside the predicate) so a call that
+    // armed a wakeup alongside other tools cannot leak into the next round.
+    let lone_wakeup_ended_turn = !hook_prevent_continuation
+        && !tool_requested_end_turn
+        && take_lone_wakeup_turn_end(orch, tool_uses.iter().map(|(_, name, _, _)| name.as_str()))
+            .await;
+    if lone_wakeup_ended_turn {
+        emit_loop_dynamic_wakeup_ends_turn_telemetry(orch).await;
+    }
+
     // Finding #73 (batched twin): advance the per-turn todo/task reminder
     // counters for THIS assistant turn, then reset `turns_since_last_todo_write`
     // to 0 if this turn's assistant response invoked the variant's "recent use"
@@ -1202,6 +1263,14 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             .await;
     }
 
+    // Oer only exhausts two consecutive malformed attempts: every other
+    // transition replaces `malformed_tool_use_retry` in the oracle state.
+    if response.stop_reason.as_deref() != Some("tool_use") || !tool_uses.is_empty() {
+        if let Some(state) = recovery.as_deref_mut() {
+            state.malformed_tool_use_retried = false;
+        }
+    }
+
     // 6. Decide loop disposition.
     let outcome = if end_conversation_requested {
         // The model confirmed (2nd EndConversation call) — end the query.
@@ -1228,6 +1297,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             stop_reason: "end_turn".to_string(),
             allow_budget_continuation: false,
             tool_requested_end: true,
+        }
+    } else if lone_wakeup_ended_turn {
+        // `tool_requested_end: false` — the tool did not ask (no `toolEndsTurn`
+        // marker); the turn loop decided, as the binary's own arm does.
+        TurnStepOutcome::Ended {
+            final_message_id: assistant_id,
+            stop_reason: "end_turn".to_string(),
+            allow_budget_continuation: false,
+            tool_requested_end: false,
         }
     } else {
         match response.stop_reason.as_deref() {
@@ -1271,9 +1349,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     && !prior_structured_output =>
             {
                 let state = recovery.as_deref_mut().expect("recovery is Some");
-                handle_thinking_only(orch, state).await?
+                handle_thinking_only(orch, assistant_id, state).await?
             }
-            Some("end_turn") => TurnStepOutcome::Ended {
+            Some("end_turn" | "stop_sequence") | None => TurnStepOutcome::Ended {
                 final_message_id: assistant_id,
                 stop_reason: "end_turn".to_string(),
                 allow_budget_continuation: true,
@@ -1389,6 +1467,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // resolving whichever session happens to be active later.
     cost_scope: Option<&cost::CostSessionScope>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
+    orch.sync_thinking_signature_strip_flag_to_api().await;
     // A first request after resume may overflow before any successful call
     // has populated the summary fork's cache-safe slot.
     orch.save_cache_safe_params(system, model, &tools).await;
@@ -2204,7 +2283,17 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
     // `context_limit` / `api_error`; `platform_api::GoalStatusKind` has only
     // `Set|Cleared|Achieved`, and widening it would change a serialized
     // transcript enum, so the teardown records `Cleared`.
-    let Some(goal) = orch.clear_active_goal_state_and_hook().await else {
+    // `kB(e, d==="context_limit" ? "context_limit" : "api_error")` — upstream
+    // discriminates on the BUCKET, and `GoalClearBucket::ContextLimit` is
+    // reachable only from `GoalClearReason::ContextLimit` (every `ApiError` arm
+    // yields `Auth` / `Billing` / `ModelUnavailable` / no-clear), so testing the
+    // bucket here is the same test.
+    let cleared_reason = if bucket == GoalClearBucket::ContextLimit {
+        platform_api::GoalClearedReason::ContextLimit
+    } else {
+        platform_api::GoalClearedReason::ApiError
+    };
+    let Some(goal) = orch.clear_active_goal_state_and_hook(cleared_reason).await else {
         return;
     };
     // `de("goal_met", s)` — the failure-flavoured twin of the success event.
@@ -2486,11 +2575,13 @@ pub(crate) async fn surface_terminal_api_error(
             error: Some("max_output_tokens"),
             api_error_status: None,
             inner_stop_reason: None,
+            truncated_after_output: false,
         },
         "refusal" => ApiErrorEnvelope {
             error: Some("invalid_request"),
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
+            truncated_after_output: false,
         },
         // `terminal_api_error_text` returned `Some` only for the three reasons
         // above; any other value can't reach here.
@@ -2612,6 +2703,78 @@ pub(crate) async fn surface_model_error(
         bus.log_event("tengu_query_error", metadata).await;
     }
     surface_api_error_notice(orch, error_text, env).await
+}
+
+/// PARITY the binary's `Xi`. Spelled out rather than imported: `orchestrator`
+/// does not depend on `tool-cron`, and the tool name is a model-facing wire
+/// string, not an internal symbol.
+const SCHEDULE_WAKEUP_TOOL_NAME: &str = "ScheduleWakeup";
+
+/// PARITY `Zoe(family, model)` =
+/// `dm(model, "fable_5_mitigations", family) || family === "claude-mythos-5"`
+/// — the model gate on the lone-`ScheduleWakeup` turn end. It is a
+/// model-generation mitigation, so most models never take the branch and keep
+/// feeding the tool result back, exactly as before.
+fn lone_wakeup_ends_turn_model(model_id: &str) -> bool {
+    use platform_api::model_capabilities::{has_capability, normalize_model_id, ModelCapability};
+    has_capability(model_id, ModelCapability::Fable5Mitigations)
+        || normalize_model_id(model_id) == "claude-mythos-5"
+}
+
+/// Consume the wakeup-armed flag and report whether this round was exactly one
+/// `ScheduleWakeup` that armed a wakeup, on a model the binary's gate covers.
+///
+/// PARITY `if(yo.length===1 && yo[0].name===Xi && Zoe(...)) { if(kg().some(…loop…)) … }`.
+///
+/// Shared by BOTH turn loops — the batched one in this module and the streaming
+/// twin in `conversation::drivers`. One definition matters more than usual here:
+/// the first cut of this arm lived only in the batched loop, and the streaming
+/// loop is the one the desktop bridge takes, so `/loop` never reached it.
+///
+/// The flag is consumed on every call (`swap`), including the early returns, so
+/// a `ScheduleWakeup` that armed a wakeup alongside other tools cannot leak into
+/// the next round.
+pub(crate) async fn take_lone_wakeup_turn_end<'a>(
+    orch: &ConversationOrchestrator,
+    tool_names: impl Iterator<Item = &'a str>,
+) -> bool {
+    let armed = orch
+        .loop_wakeup_armed_slot
+        .as_ref()
+        .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
+    if !armed {
+        return false;
+    }
+    let mut names = tool_names;
+    if !matches!(
+        (names.next(), names.next()),
+        (Some(only), None) if only == SCHEDULE_WAKEUP_TOOL_NAME
+    ) {
+        return false;
+    }
+    let session = orch.session();
+    let model = session.lock().await.model.clone();
+    lone_wakeup_ends_turn_model(&model)
+}
+
+/// PARITY the turn-loop branch that ends a turn on a lone `ScheduleWakeup`:
+/// `i("tengu_loop_dynamic_wakeup_ends_turn", {queryChainId, queryDepth})`.
+pub(crate) async fn emit_loop_dynamic_wakeup_ends_turn_telemetry(orch: &ConversationOrchestrator) {
+    telemetry::emit_loop_dynamic_wakeup_ends_turn(&orch.query_chain_id, 0);
+    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
+        return;
+    };
+    let mut metadata = telemetry::LogEventMetadata::new();
+    metadata.insert(
+        "queryChainId".into(),
+        telemetry::AnalyticsValue::String(orch.query_chain_id.clone()),
+    );
+    metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
+    bus.log_event(
+        telemetry::tengu::kairos::LOOP_DYNAMIC_WAKEUP_ENDS_TURN,
+        metadata,
+    )
+    .await;
 }
 
 pub(crate) async fn emit_tool_result_ended_turn_telemetry(
@@ -2852,7 +3015,7 @@ fn is_tool_result_carrier(msg: &ConversationMessage) -> bool {
 /// completed (`stop_reason = "end_turn"`).
 async fn handle_malformed_tool_use(
     orch: &ConversationOrchestrator,
-    _assistant_id: MessageId,
+    assistant_id: MessageId,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     if state.malformed_tool_use_retried {
@@ -2891,6 +3054,7 @@ async fn handle_malformed_tool_use(
         MessageId::new(),
         MALFORMED_TOOL_USE_RETRY_NUDGE.to_string(),
     );
+    orch.discard_retry_attempt(assistant_id).await;
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -2907,10 +3071,12 @@ async fn handle_malformed_tool_use(
 /// has already checked `!thinking_only_nudged && !has_visible_text(..)`.
 async fn handle_thinking_only(
     orch: &ConversationOrchestrator,
+    assistant_id: MessageId,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     let nudge_msg =
         ConversationMessage::user_meta(MessageId::new(), THINKING_ONLY_NUDGE.to_string());
+    orch.discard_retry_attempt(assistant_id).await;
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -3317,14 +3483,14 @@ fn tool_result_has_media(content_blocks: Option<&[serde_json::Value]>) -> bool {
 /// the `text` block lengths in an array (non-text blocks contribute 0).
 fn tool_result_size(content: &str, content_blocks: Option<&[serde_json::Value]>) -> usize {
     match content_blocks {
-        None => content.len(),
+        None => content.encode_utf16().count(),
         Some(blocks) => blocks
             .iter()
             .map(|b| {
                 if b.get("type").and_then(serde_json::Value::as_str) == Some("text") {
                     b.get("text")
                         .and_then(serde_json::Value::as_str)
-                        .map_or(0, str::len)
+                        .map_or(0, |text| text.encode_utf16().count())
                 } else {
                     0
                 }
@@ -3364,26 +3530,44 @@ fn tool_result_size(content: &str, content_blocks: Option<&[serde_json::Value]>)
 /// receives the full payload. The caller MUST clear `content_blocks` whenever
 /// this reports `true`.
 struct PersistenceOutcome {
+    utf16_code_units: Option<Vec<u16>>,
     content: String,
     replaced: bool,
 }
 
-/// Read the process-output spill identity emitted by the Bash tool. The three
-/// fields are an all-or-nothing contract: accepting a partial object would
-/// make the persistence layer fall back to a path that cannot be tied to the
-/// task registry's stable identity.
+/// Read the process-output spill identity emitted by the Bash tool.
+///
+/// 2.1.263 result data carries `persistedOutputPath` / `persistedOutputSize`.
+/// Older in-flight results still used `outputTaskId` / `outputFilePath` /
+/// `outputFileSize`; both shapes are accepted so a mid-upgrade transcript
+/// keeps the same file. A partial object is rejected so the persistence
+/// layer cannot fall back to a path that cannot be tied to the spill.
 fn process_output_file_from_data(
     data: &serde_json::Value,
 ) -> Option<platform_api::ProcessOutputFile> {
     let object = data.as_object()?;
-    let task_id = object.get("outputTaskId")?.as_str()?;
-    let path = object.get("outputFilePath")?.as_str()?;
-    let size = object.get("outputFileSize")?.as_u64()?;
+    let path = object
+        .get("persistedOutputPath")
+        .or_else(|| object.get("outputFilePath"))?
+        .as_str()?;
+    let size = object
+        .get("persistedOutputSize")
+        .or_else(|| object.get("outputFileSize"))?
+        .as_u64()?;
+    let task_id = object
+        .get("outputTaskId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })?;
     if task_id.is_empty() || path.is_empty() {
         return None;
     }
     Some(platform_api::ProcessOutputFile {
-        task_id: task_id.to_string(),
+        task_id,
         path: path.to_string(),
         size,
     })
@@ -3410,14 +3594,15 @@ async fn apply_tool_result_persistence_with_process_output(
         // seam, but its structured media blocks must remain inline.
         if !tool_result_is_blank(&content, content_blocks) && !tool_result_has_media(content_blocks)
         {
-            let (preview, content_has_more) = trp::preview(&content, trp::PREVIEW_CHARS);
+            let (preview, content_has_more) = trp::preview_utf16(&content, trp::PREVIEW_CHARS);
             let original_size = usize::try_from(output_file.size).unwrap_or(usize::MAX);
-            let replacement = trp::wrap(
+            let exact_replacement = trp::wrap_utf16(
                 original_size,
                 &output_file.path,
-                preview,
+                &preview,
                 content_has_more || output_file.size > trp::PREVIEW_CHARS as u64,
             );
+            let replacement = String::from_utf16_lossy(&exact_replacement);
             tracing::info!(
                 task_id = %output_file.task_id,
                 path = %output_file.path,
@@ -3435,14 +3620,14 @@ async fn apply_tool_result_persistence_with_process_output(
                     telemetry::AnalyticsValue::String(tool_name.to_string()),
                 );
                 metadata.insert("originalSizeBytes".into(), int(original_size));
-                metadata.insert("persistedSizeBytes".into(), int(replacement.len()));
+                metadata.insert("persistedSizeBytes".into(), int(exact_replacement.len()));
                 metadata.insert(
                     "estimatedOriginalTokens".into(),
                     int(original_size.div_ceil(trp::CHARS_PER_TOKEN)),
                 );
                 metadata.insert(
                     "estimatedPersistedTokens".into(),
-                    int(replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
+                    int(exact_replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
                 );
                 metadata.insert(
                     "thresholdUsed".into(),
@@ -3451,6 +3636,9 @@ async fn apply_tool_result_persistence_with_process_output(
                 bus.log_event("tengu_tool_result_persisted", metadata).await;
             }
             return PersistenceOutcome {
+                utf16_code_units: String::from_utf16(&exact_replacement)
+                    .is_err()
+                    .then_some(exact_replacement),
                 content: replacement,
                 replaced: true,
             };
@@ -3488,18 +3676,21 @@ async fn apply_tool_result_persistence(
             bus.log_event("tengu_tool_empty_result", metadata).await;
         }
         return PersistenceOutcome {
+            utf16_code_units: None,
             content: format!("({tool_name} completed with no output)"),
             replaced: true,
         };
     }
     if tool_result_has_media(content_blocks) {
         return PersistenceOutcome {
+            utf16_code_units: None,
             content,
             replaced: false,
         };
     }
     let Some(threshold) = threshold else {
         return PersistenceOutcome {
+            utf16_code_units: None,
             content,
             replaced: false,
         };
@@ -3507,12 +3698,14 @@ async fn apply_tool_result_persistence(
     let size = tool_result_size(&content, content_blocks);
     if size <= threshold {
         return PersistenceOutcome {
+            utf16_code_units: None,
             content,
             replaced: false,
         };
     }
     let Some(home) = orch.config_home.as_ref() else {
         return PersistenceOutcome {
+            utf16_code_units: None,
             content,
             replaced: false,
         };
@@ -3527,6 +3720,7 @@ async fn apply_tool_result_persistence(
             // the oracle; an unserializable array is the same "leave it alone".
             Err(_) => {
                 return PersistenceOutcome {
+                    utf16_code_units: None,
                     content,
                     replaced: false,
                 }
@@ -3543,7 +3737,7 @@ async fn apply_tool_result_persistence(
     // The on-disk stem is the port's INTERNAL `ToolUseId`, matching the
     // oracle's `${e.tool_use_id}.txt` — claude-code's internal block-param id
     // likewise differs from the `toolu_…` id it records in the transcript.
-    let persisted = match trp::persist(&dir, tool_use_id.as_str(), &body, is_json).await {
+    let persisted = match trp::persist(home, &dir, tool_use_id.as_str(), &body, is_json).await {
         Ok(p) => p,
         Err(msg) => {
             tracing::error!(
@@ -3551,6 +3745,7 @@ async fn apply_tool_result_persistence(
                 "Failed to persist tool result: {msg}"
             );
             return PersistenceOutcome {
+                utf16_code_units: None,
                 content,
                 replaced: false,
             };
@@ -3561,12 +3756,13 @@ async fn apply_tool_result_persistence(
         "Persisted tool result to {path_display} ({})",
         trp::format_bytes(persisted.original_size)
     );
-    let replacement = trp::wrap(
+    let exact_replacement = trp::wrap_utf16(
         persisted.original_size,
         &path_display,
-        &persisted.preview,
+        &persisted.preview_utf16,
         persisted.has_more,
     );
+    let replacement = String::from_utf16_lossy(&exact_replacement);
     if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
         #[allow(clippy::cast_possible_wrap)]
         fn int(v: usize) -> telemetry::AnalyticsValue {
@@ -3578,19 +3774,22 @@ async fn apply_tool_result_persistence(
             telemetry::AnalyticsValue::String(tool_name.to_string()),
         );
         metadata.insert("originalSizeBytes".into(), int(persisted.original_size));
-        metadata.insert("persistedSizeBytes".into(), int(replacement.len()));
+        metadata.insert("persistedSizeBytes".into(), int(exact_replacement.len()));
         metadata.insert(
             "estimatedOriginalTokens".into(),
             int(persisted.original_size.div_ceil(trp::CHARS_PER_TOKEN)),
         );
         metadata.insert(
             "estimatedPersistedTokens".into(),
-            int(replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
+            int(exact_replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
         );
         metadata.insert("thresholdUsed".into(), int(threshold));
         bus.log_event("tengu_tool_result_persisted", metadata).await;
     }
     PersistenceOutcome {
+        utf16_code_units: String::from_utf16(&exact_replacement)
+            .is_err()
+            .then_some(exact_replacement),
         content: replacement,
         replaced: true,
     }
@@ -3681,32 +3880,31 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // any hook, so there is no pre-hook context to fold — emit the raw
         // wrapped literal verbatim (claude-code's unknown-tool has no hook
         // context).
-        let Some(tool_handle) = orch.tools.find_by_name(name) else {
+        let Some(tool_handle) = orch.find_dispatchable_tool(name) else {
             // Shared builder so this parity-critical string lives in one place
             // (also used by the streaming executor's add_tool).
+            let suffix = crate::streaming_executor::unknown_tool_suffix_for(name, orch);
             let result_block = crate::streaming_executor::synthetic_unknown_tool(
                 tool_use_id.clone(),
                 name,
                 provider_id.clone(),
+                &suffix,
             );
             // Pass the SAME wrapped string the result_block carries as the
             // model text, so the SDK frame's `content` matches the model wire.
             let model_text = match &result_block {
                 ContentBlock::ToolResult { content, .. } => content.clone(),
                 _ => format!(
-                    "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
+                    "<tool_use_error>Error: No such tool available: {name}{suffix}</tool_use_error>"
                 ),
             };
-            // O1: claude's unknown-tool arm (2.1.220 BIN off 235398500 /
-            // 232971680) stamps the persisted line with the BARE string
-            // `` `Error: No such tool available: ${name}${suffix}` `` — the
-            // unwrapped twin of the `<tool_use_error>` model text. `suffix` is
-            // claude's `Gks` "did you mean" hint, which the port does not
-            // produce, so it is empty here (same as claude when no alias
-            // matches).
+            // O1: claude's unknown-tool arm stamps the persisted line with the
+            // BARE string `` `Error: No such tool available: ${name}${suffix}` ``
+            // — the unwrapped twin of the `<tool_use_error>` model text. `suffix`
+            // is 2.1.263 `Ldt` (Glob/Grep-via-shell, MCP disconnect, …).
             orch.record_tool_use_result(
                 tool_use_id,
-                serde_json::Value::String(format!("Error: No such tool available: {name}")),
+                serde_json::Value::String(format!("Error: No such tool available: {name}{suffix}")),
             )
             .await;
             orch.emit_tool_result_frame(
@@ -3750,13 +3948,12 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // `inputSchema.safeParse`): runs on the RAW `input` (pre-hook), AFTER the
         // unknown-tool arm and BEFORE the `validate_input` gate — the exact order
         // of `checkPermissionsAndCallTool` (safeParse ~615 precedes validateInput
-        // ~683). BEHAVIORAL parity only: the `<tool_use_error>InputValidationError:
-        // …>` wrapper matches, but the detail bytes intentionally differ from
-        // claude-code's Zod `formatZodValidationError` output (unportable). A
+        // ~683). Native refinement issues accompany the exported JSON Schema
+        // so the detail uses Claude's Zod `zue` grouping and JSON fallback. A
         // malformed tool schema is treated as PASS (logged) — see
         // [`crate::schema_validation::validate_tool_input_schema`].
         if let Err(detail) =
-            crate::schema_validation::validate_tool_input_schema(tool_handle.input_schema(), input)
+            crate::schema_validation::validate_tool_schema(tool_handle.as_ref(), input)
         {
             tool_handle
                 .on_input_schema_rejected(
@@ -3988,6 +4185,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // events at prompt grain.
         let prompt_id = orch.prompt_runtime.current_prompt_id.lock().await.clone();
         let hook_ctx = HookContext {
+            prompt_transcript: Some(orch.prompt_hook_transcript().await),
             session_id,
             cwd: orch.current_cwd(),
             transcript_path,
@@ -5941,7 +6139,12 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // envelope is computed, the file written, the telemetry fired, and the
         // model still receives the full oversized payload.
         let (final_content, content_blocks) = if persistence.replaced {
-            (persistence.content, None)
+            (
+                persistence.content,
+                persistence
+                    .utf16_code_units
+                    .map(protocol::js_utf16::tool_result_sidecar),
+            )
         } else {
             (persistence.content, content_blocks)
         };
@@ -6067,6 +6270,7 @@ async fn run_post_tool_batch_hooks_inner(
         .map(|w| w.path().to_path_buf())
         .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
     let batch_ctx = HookContext {
+        prompt_transcript: Some(orch.prompt_hook_transcript().await),
         session_id,
         cwd: orch.current_cwd(),
         transcript_path,
@@ -8244,7 +8448,14 @@ mod tool_result_persistence_wiring_tests {
                     .unwrap(),
             )
             .unwrap();
-            let body = "x".repeat(len);
+            let mut body = "x".repeat(len);
+            if input
+                .get("split_surrogate")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                body.replace_range(1999..2001, "😀");
+            }
             Ok(ToolCallResult {
                 data: json!(body),
                 model_content: Some(body),
@@ -8293,6 +8504,70 @@ mod tool_result_persistence_wiring_tests {
             panic!("expected ToolResult");
         };
         content.clone()
+    }
+
+    #[tokio::test]
+    async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
+        use llm_client::WireCodec;
+        use protocol::{ConversationMessage, MessageId};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.jsonl");
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.path().into())),
+        ));
+        let orch =
+            orch_with(Arc::new(SizedTool), Some(tmp.path().into())).with_jsonl_writer(writer);
+        let mut call = use_of("Sized", 4000).remove(0);
+        call.2["split_surrogate"] = json!(true);
+        let assistant = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            stop_reason: Some("tool_use".into()),
+            content: vec![ContentBlock::ToolUse {
+                id: call.0.clone(),
+                name: "Sized".into(),
+                input: call.2.clone(),
+                provider_id: None,
+            }],
+        };
+        orch.persist_message_to_jsonl(&assistant).await;
+        let (results, ..) = dispatch_tool_uses_tracked(&orch, &vec![call], None)
+            .await
+            .unwrap();
+        let mut user = ConversationMessage::user(MessageId::new(), String::new());
+        if let ConversationMessage::User { content, .. } = &mut user {
+            *content = results;
+        }
+        orch.persist_message_to_jsonl(&user).await;
+        let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+        let history =
+            crate::resume::state_from_messages(uuid::Uuid::nil(), &loaded.messages_in_order)
+                .history;
+        let request = llm_client::LlmRequest {
+            model: "claude-opus-4-7".into(),
+            messages: llm_client::convert::to_llm_messages(history).unwrap(),
+            ..Default::default()
+        };
+        let codec =
+            llm_client::AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+        for encoded in [
+            codec.encode_request(&request).unwrap(),
+            codec.encode_count_tokens_request(&request).unwrap(),
+        ] {
+            let wire = String::from_utf8(encoded.wire_body_bytes().unwrap()).unwrap();
+            assert!(
+                wire.contains("\\ud83d\\n..."),
+                "exact JS surrogate must reach wire: {wire}"
+            );
+            assert!(
+                !wire.contains("lingxi_tool_result_string_utf16"),
+                "sidecar must not leak"
+            );
+            assert!(
+                !wire.contains('\u{fffd}'),
+                "display replacement must not reach Claude"
+            );
+        }
     }
 
     /// T5 — `o<=i` returns the result UNCHANGED; only a STRICTLY larger body
@@ -8361,11 +8636,11 @@ mod tool_result_persistence_wiring_tests {
         std::fs::create_dir_all(output_path.parent().expect("task dir")).expect("task dir");
         std::fs::write(&output_path, "x".repeat(5_000)).expect("task output");
         let data = json!({
-            "outputTaskId": "local_bash_spilled",
-            "outputFilePath": output_path,
-            "outputFileSize": 5_000,
+            "persistedOutputPath": output_path,
+            "persistedOutputSize": 5_000,
         });
         let output_file = super::process_output_file_from_data(&data).expect("all metadata");
+        assert_eq!(output_file.task_id, "local_bash_spilled");
         let id = ToolUseId::new();
         let outcome = super::apply_tool_result_persistence_with_process_output(
             &orch,
@@ -8386,6 +8661,28 @@ mod tool_result_persistence_wiring_tests {
             !tmp.path().join("projects").exists(),
             "the generic tool-use persistence path must not receive a duplicate"
         );
+    }
+
+    #[test]
+    fn process_output_file_from_data_accepts_legacy_and_2_1_263_names() {
+        let legacy = json!({
+            "outputTaskId": "legacy-id",
+            "outputFilePath": "/tmp/legacy.out",
+            "outputFileSize": 12,
+        });
+        let file = super::process_output_file_from_data(&legacy).expect("legacy");
+        assert_eq!(file.task_id, "legacy-id");
+        assert_eq!(file.path, "/tmp/legacy.out");
+        assert_eq!(file.size, 12);
+
+        let current = json!({
+            "persistedOutputPath": "/tmp/current.out",
+            "persistedOutputSize": 34,
+        });
+        let file = super::process_output_file_from_data(&current).expect("current");
+        assert_eq!(file.task_id, "current");
+        assert_eq!(file.path, "/tmp/current.out");
+        assert_eq!(file.size, 34);
     }
 
     /// T6 — `U0u`: a block array containing an image (or document) is NEVER
@@ -9154,6 +9451,7 @@ mod tool_hook_wiring_tests {
         let invoker =
             RegistryToolInvoker::new(Arc::new(registry)).with_gate(Arc::new(NoOpPermissionGate));
         let ctx = SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,

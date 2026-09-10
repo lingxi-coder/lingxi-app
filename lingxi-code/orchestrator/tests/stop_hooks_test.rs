@@ -347,6 +347,56 @@ async fn stop_block_continues_until_cap_then_overrides() {
 }
 
 #[tokio::test]
+async fn stop_hook_block_cap_accepts_claude_code_env_alias() {
+    let _env = GOAL_CAP_ENV_LOCK.lock().unwrap();
+    let prior_lx = std::env::var("LINGXI_STOP_HOOK_BLOCK_CAP").ok();
+    let prior_cc = std::env::var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP").ok();
+    std::env::remove_var("LINGXI_STOP_HOOK_BLOCK_CAP");
+    std::env::set_var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", "1");
+
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
+    let hooks = exec_with(
+        Arc::new(StopBlockHandler),
+        builtin_hook("stop-block", HookEventType::Stop),
+    )
+    .await;
+    let output = Arc::new(MockOutputStream::new());
+    let o = Arc::new(ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+
+    let outcome = o.run_turn("hi").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+    assert_eq!(
+        api.captured_msgs().await.len(),
+        2,
+        "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=1 must cap after the first continuation"
+    );
+    let texts = output.text_events().await;
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("overriding and ending turn")),
+        "cap warning must fire when only the CLAUDE_CODE_ alias is set: {texts:?}"
+    );
+
+    std::env::remove_var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP");
+    if let Some(v) = prior_lx {
+        std::env::set_var("LINGXI_STOP_HOOK_BLOCK_CAP", v);
+    }
+    if let Some(v) = prior_cc {
+        std::env::set_var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", v);
+    }
+}
+
+#[tokio::test]
 async fn stop_block_coinciding_with_max_turns_ends_without_feedback() {
     // Binary blocking-branch order: max-turns is checked BEFORE the block cap
     // (`let dt=ie+1,nn=te+1; if(c&&dt>c) return G("tengu_stop_hook_block_count",
@@ -550,7 +600,72 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
     orchestrator.set_active_goal("ship it").await;
     orchestrator.run_turn("hi").await.expect("turn ok");
 
-    let statuses = std::fs::read_to_string(path)
+    let statuses = goal_status_rows(path);
+    assert_eq!(
+        statuses,
+        [
+            ("set".to_string(), 0),
+            // 2.1.266 @4212300: a blocking evaluation is its own `not_met`
+            // record, NOT a second `set` sentinel.
+            ("not_met".to_string(), 1),
+            ("achieved".to_string(), 2)
+        ],
+        "a successful evaluation must not emit a redundant terminal set record"
+    );
+}
+
+#[tokio::test]
+async fn goal_status_transcript_records_impossible_as_failed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    ));
+    let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1")]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([Ok(
+            r#"{"ok": false, "impossible": true, "reason": "required service is unavailable"}"#
+                .to_string(),
+        )])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner).await;
+    let orchestrator = Arc::new(
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            hooks,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer),
+    );
+
+    orchestrator.set_active_goal("ship it").await;
+    orchestrator.run_turn("hi").await.expect("turn ok");
+    assert!(orchestrator.get_active_goal().await.is_none());
+
+    let statuses = goal_status_rows(path);
+    assert_eq!(
+        statuses,
+        [("set".to_string(), 0), ("failed".to_string(), 1)],
+        "an impossible condition must terminate as failed, never achieved"
+    );
+}
+
+/// Read the `goal_status` records out of a transcript as `(variant, iterations)`.
+///
+/// 2.1.266 tells the five variants apart with `met`/`failed`/`sentinel` rather
+/// than a `status` enum, and only the TERMINAL records carry `iterations` — the
+/// set sentinel and the not-met record carry the count inside LingXi's
+/// `goalState` resume extension instead.
+fn goal_status_rows(path: impl AsRef<std::path::Path>) -> Vec<(String, u64)> {
+    std::fs::read_to_string(path)
         .expect("goal transcript")
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -558,21 +673,24 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
             if line["type"] != "attachment" || line["attachment"]["type"] != "goal_status" {
                 return None;
             }
-            Some((
-                line["attachment"]["status"].as_str()?.to_string(),
-                line["attachment"]["iterations"].as_u64()?,
-            ))
+            let a = &line["attachment"];
+            let met = a["met"].as_bool()?;
+            let failed = a["failed"].as_bool().unwrap_or(false);
+            let sentinel = a["sentinel"].as_bool().unwrap_or(false);
+            let variant = match (sentinel, met, failed) {
+                (true, false, _) => "set",
+                (true, true, _) => "cleared",
+                (false, true, _) => "achieved",
+                (false, false, true) => "failed",
+                (false, false, false) => "not_met",
+            };
+            let iterations = a["iterations"]
+                .as_u64()
+                .or_else(|| a["goalState"]["iterations"].as_u64())
+                .unwrap_or_default();
+            Some((variant.to_string(), iterations))
         })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        statuses,
-        [
-            ("set".to_string(), 0),
-            ("set".to_string(), 1),
-            ("achieved".to_string(), 2)
-        ],
-        "a successful evaluation must not emit a redundant terminal set record"
-    );
+        .collect()
 }
 
 #[tokio::test]

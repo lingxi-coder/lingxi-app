@@ -9,6 +9,7 @@ import type {
 export type DesktopDisposition = 'exposed' | 'host_private' | 'degraded' | 'not_applicable';
 
 export const CLIENT_COMMAND_DISPOSITIONS = {
+  cron_manage: 'exposed',
   send_prompt: 'host_private',
   cancel: 'host_private',
   attach_turn: 'not_applicable',
@@ -46,6 +47,7 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   task_list: 'exposed',
   task_output: 'exposed',
   task_stop: 'exposed',
+  task_message: 'exposed',
   resume_workflow: 'not_applicable',
   list_apps: 'not_applicable',
   get_app_details: 'not_applicable',
@@ -96,8 +98,12 @@ export const REFRESH_LISTING_DISPOSITIONS = {
 } as const satisfies Record<ListingKindDto['type'], DesktopDisposition>;
 
 export const CLIENT_EVENT_DISPOSITIONS = {
+  cron_result: 'exposed',
   error: 'exposed',
+  message_identity: 'exposed',
+  message_retracted: 'exposed',
   system_notice: 'exposed',
+  loop_wakeup: 'exposed',
   ask_user_question: 'exposed',
   ask_user_question_resolved: 'exposed',
   permission_request_resolved: 'exposed',
@@ -221,6 +227,7 @@ export const APP_EVENT_DISPOSITIONS = {
  * stay out.
  */
 export const ALLOWED_CLIENT_COMMAND_TYPES = [
+  'cron_manage',
   'set_model',
   'list_models',
   'list_sessions',
@@ -230,6 +237,7 @@ export const ALLOWED_CLIENT_COMMAND_TYPES = [
   'task_list',
   'task_output',
   'task_stop',
+  'task_message',
   'list_session_agents',
   'load_session_agent_transcript',
   'set_permission_mode',

@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod builtin;
+pub mod conditional;
 pub mod frontmatter;
 pub mod listing;
 pub mod mcp_builders;
@@ -22,6 +23,7 @@ pub mod prefetch;
 pub mod registry;
 
 pub use builtin::{register_desktop, register_mobile};
+pub use conditional::{is_conditional, ConditionalSkills};
 pub use frontmatter::{parse_skill_markdown, SkillLoadError};
 pub use listing::{
     load_file_skill_sections, load_file_skill_sections_with_roots, FileSkillRow, FileSkillSection,

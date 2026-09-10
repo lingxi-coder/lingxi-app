@@ -40,6 +40,7 @@ pub struct MockSpawnInvocation {
 /// Recording mock for `SubagentSpawner`.
 pub struct MockSubagentSpawner {
     invocations: Mutex<Vec<MockSpawnInvocation>>,
+    teammate_enabled: Mutex<bool>,
     response: Mutex<MockSpawnResponse>,
     /// `required_mcp_servers` surfaced from `resolve_required_mcp_servers` (the
     /// `#G3` pre-spawn MCP gate). Default empty (no requirement).
@@ -95,6 +96,7 @@ impl MockSubagentSpawner {
     pub fn new() -> Self {
         Self {
             invocations: Mutex::new(Vec::new()),
+            teammate_enabled: Mutex::new(false),
             response: Mutex::new(MockSpawnResponse::Completed),
             required_mcp_servers: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
@@ -104,6 +106,11 @@ impl MockSubagentSpawner {
             listing_override: Mutex::new(None),
             tools_denied: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Enable the implicit team in this mock session.
+    pub fn enable_teammates(&self) {
+        *self.teammate_enabled.lock().unwrap() = true;
     }
 
     /// Replace the catalog returned by `agent_listing`.
@@ -230,6 +237,35 @@ impl Default for MockSubagentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for MockSubagentSpawner {
+    fn teammate_enabled(&self) -> bool {
+        *self.teammate_enabled.lock().unwrap()
+    }
+
+    async fn spawn_teammate(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<platform_api::team_spawn::TeammateLaunch, SubagentSpawnError> {
+        self.invocations.lock().unwrap().push(MockSpawnInvocation {
+            request: request.clone(),
+            inherit,
+        });
+        Ok(platform_api::team_spawn::TeammateLaunch {
+            teammate_id: "scout@session".into(),
+            agent_id: "scout@session".into(),
+            agent_type: request.subagent_type,
+            model: "sonnet".into(),
+            name: request.name.unwrap(),
+            color: "blue".into(),
+            tmux_session_name: String::new(),
+            tmux_window_name: String::new(),
+            tmux_pane_id: "in-process".into(),
+            team_name: "session".into(),
+            is_splitpane: false,
+            plan_mode_required: false,
+        })
+    }
+
     async fn spawn(
         &self,
         request: SubagentSpawnRequest,
@@ -253,8 +289,8 @@ impl SubagentSpawner for MockSubagentSpawner {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-                        usage_complete: true,
-},
+                usage_complete: true,
+            },
             MockSpawnResponse::CompletedWith {
                 agent_id,
                 content,
@@ -276,8 +312,8 @@ impl SubagentSpawner for MockSubagentSpawner {
                 response_char_count,
                 last_request_id,
                 cumulative_usage: usage,
-                        usage_complete: true,
-},
+                usage_complete: true,
+            },
             MockSpawnResponse::Failed(reason) => SubagentResult::Failed {
                 agent_id: protocol::AgentId::new(),
                 reason,
@@ -342,16 +378,19 @@ impl SubagentSpawner for MockSubagentSpawner {
             SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "use for anything".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools".into(),
             },
             SubagentListingEntry {
                 agent_type: "Explore".into(),
                 when_to_use: "search".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
             SubagentListingEntry {
                 agent_type: "Plan".into(),
                 when_to_use: "plan a task".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
         ]
@@ -404,6 +443,12 @@ impl SubagentSpawner for MockSubagentSpawner {
 
 /// In-memory recording mock for `TaskRegistryHandle`.
 pub struct MockTaskRegistryHandle {
+    resume_recipes: Mutex<HashMap<String, (SubagentSpawnRequest, SubagentInheritance)>>,
+    reject_resume_recipe: std::sync::atomic::AtomicBool,
+    killers: Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskKiller>>>,
+    receivers: Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskMessageReceiver>>>,
+    backgrounders: Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskBackgrounder>>>,
+    outcomes: Mutex<HashMap<String, platform_api::task_registry::AgentTerminalOutcome>>,
     records: Mutex<HashMap<String, TaskRecord>>,
     counter: AtomicU64,
     /// Per-session subagent-spawn counter backing `get_total_agent_spawns` /
@@ -412,10 +457,37 @@ pub struct MockTaskRegistryHandle {
 }
 
 impl MockTaskRegistryHandle {
+    /// Exact foreground launch bundle saved before releasing the startup gate.
+    pub fn resume_recipe(&self, id: &str) -> Option<(SubagentSpawnRequest, SubagentInheritance)> {
+        self.resume_recipes.lock().unwrap().get(id).cloned()
+    }
+    /// Exercise a registry failure before the model is allowed to run.
+    pub fn reject_resume_recipe_registration(&self) {
+        self.reject_resume_recipe.store(true, Ordering::SeqCst);
+    }
+
+    /// Invoke the real foreground cancellation owner in tests.
+    pub async fn kill_foreground_worker(&self, id: &str) {
+        let killer = self.killers.lock().unwrap().get(id).cloned().unwrap();
+        killer.kill().await;
+    }
+
+    /// Deliver to the actual externally bound foreground runner in tests.
+    pub async fn send_foreground_message(&self, id: &str, message: String) -> Result<(), TaskRegistryError> {
+        let receiver = self.receivers.lock().unwrap().get(id).cloned().unwrap();
+        receiver.send(message).await
+    }
+
     /// Empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self {
+            resume_recipes: Mutex::new(HashMap::new()),
+            reject_resume_recipe: Default::default(),
+            killers: Mutex::new(HashMap::new()),
+            receivers: Mutex::new(HashMap::new()),
+            backgrounders: Mutex::new(HashMap::new()),
+            outcomes: Mutex::new(HashMap::new()),
             records: Mutex::new(HashMap::new()),
             counter: AtomicU64::new(0),
             spawns: AtomicU64::new(0),
@@ -457,6 +529,41 @@ impl Default for MockTaskRegistryHandle {
 
 #[async_trait]
 impl TaskRegistryHandle for MockTaskRegistryHandle {
+    async fn register_agent_resume_recipe(&self, id: &str, request: SubagentSpawnRequest, inheritance: SubagentInheritance) -> Result<(), TaskRegistryError> {
+        if !self.records.lock().unwrap().contains_key(id) { return Err(TaskRegistryError::NotFound(id.into())); }
+        if self.reject_resume_recipe.load(Ordering::SeqCst) { return Err(TaskRegistryError::Internal("resume recipe rejected".into())); }
+        self.resume_recipes.lock().unwrap().insert(id.into(), (request, inheritance));
+        Ok(())
+    }
+    async fn bind_agent_message_receiver(&self, id: &str, receiver: Arc<dyn platform_api::task_registry::TaskMessageReceiver>) -> Result<(), TaskRegistryError> { self.receivers.lock().unwrap().insert(id.to_string(), receiver); Ok(()) }
+
+    async fn register_foreground_agent(&self, registration: platform_api::task_registry::ForegroundAgentRegistration) -> Result<platform_api::task_registry::ForegroundAgentHandle, TaskRegistryError> {
+        let id = self.fresh_id("local_agent");
+        self.records.lock().unwrap().insert(id.clone(), TaskRecord {
+            task_id: id.clone(), task_type: "local_agent".into(), status: "running".into(),
+            owner_agent_id: Some(registration.agent_id.to_string()), is_backgrounded: Some(false), ..Default::default()
+        });
+        Ok(platform_api::task_registry::ForegroundAgentHandle {task_id: id.clone(), output_path: format!("/tmp/{id}.output")})
+    }
+    async fn unregister_foreground_agent(&self, id: &str) {
+        let mut records = self.records.lock().unwrap();
+        if records.get(id).is_some_and(|r| r.is_backgrounded != Some(true)) { records.remove(id); }
+    }
+    async fn bind_background_killer(&self, id: &str, killer: Arc<dyn platform_api::task_registry::TaskKiller>) -> Result<(), TaskRegistryError> { self.killers.lock().unwrap().insert(id.to_string(), killer); Ok(()) }
+    async fn bind_background_requester(&self, id: &str, requester: Arc<dyn platform_api::task_registry::TaskBackgrounder>) -> Result<(), TaskRegistryError> {
+        self.backgrounders.lock().unwrap().insert(id.into(), requester); Ok(())
+    }
+    async fn background_task(&self, id: &str) -> bool {
+        let requester = self.backgrounders.lock().unwrap().get(id).cloned();
+        if let Some(requester) = requester {
+            self.records.lock().unwrap().get_mut(id).unwrap().is_backgrounded = Some(true);
+            requester.background().await; true
+        } else { false }
+    }
+    async fn set_agent_outcome(&self, id: &str, outcome: platform_api::task_registry::AgentTerminalOutcome) {
+        self.outcomes.lock().unwrap().insert(id.into(), outcome);
+    }
+
     fn get_total_agent_spawns(&self) -> u64 {
         self.spawns.load(Ordering::SeqCst)
     }

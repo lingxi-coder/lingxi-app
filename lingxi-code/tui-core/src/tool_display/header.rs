@@ -235,7 +235,7 @@ pub fn tool_icon(tool: &str, input: &Value) -> ToolIcon {
             "Task" | "Agent" | "Workflow" => ToolIcon::Workflow,
             "TodoWrite" | "ListChecks" => ToolIcon::ListChecks,
             "Skill" | "Sparkles" => ToolIcon::Sparkles,
-            "TaskOutput" | "BashOutput" | "BashOutputTool" | "Output" => ToolIcon::Output,
+            "TaskOutput" | "AgentOutput" | "AgentOutputTool" | "BashOutput" | "BashOutputTool" | "Output" => ToolIcon::Output,
             "TaskStop" | "KillShell" | "KillBash" | "Stop" => ToolIcon::Stop,
             "Plug" => ToolIcon::Plug,
             // First-party local-app host operations. They used to be spelled
@@ -365,10 +365,13 @@ pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
         // `TaskOutput` and `TaskStop` are registered under claude-code's
         // legacy names too (`tools/task/src/task.rs` `aliases()`), and the
         // wire carries whichever name the model used.
-        "TaskOutput" | "BashOutput" | "BashOutputTool" => {
+        "TaskOutput" | "AgentOutput" | "AgentOutputTool" | "BashOutput" | "BashOutputTool" => {
             header.verb = ToolVerb::Output;
             header.primary =
                 first_str(input, &["bash_id", "shell_id", "task_id"]).map(str::to_string);
+            if input.get("block").is_some_and(|value| value == &Value::Bool(false) || value.as_str() == Some("false")) {
+                header.qualifier = Some(" (non-blocking)".into());
+            }
         }
         "TaskStop" | "KillShell" | "KillBash" => {
             header.verb = ToolVerb::Kill;
@@ -420,6 +423,29 @@ pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
     header
 }
 
+/// Derive a resolved call's header, preserving ordinary named subagents.
+/// Claude Code 2.1.263 A$n uses the input name as an @-label only when the
+/// corresponding result confirms a persistent teammate was spawned.
+#[must_use]
+pub fn tool_header_with_result(tool: &str, input: &Value, result: &Value) -> ToolHeader {
+    let mut header = tool_header(tool, input);
+    if tool == "Read" {
+        if let Some(id) = result.get("file").and_then(|f| f.get("taskId")).and_then(Value::as_str) {
+            header.label = "Read agent output".into();
+            header.primary = Some(id.into());
+        }
+    }
+    if tool == "Agent" && result.get("status").and_then(Value::as_str) == Some("teammate_spawned") {
+        if let Some(name) = str_field(input, "name") {
+            header.label = format!("@{name}");
+            header.primary = str_field(input, "subagent_type")
+                .filter(|kind| !matches!(*kind, "general-purpose" | "worker"))
+                .map(str::to_owned);
+        }
+    }
+    header
+}
+
 /// Human label shown in the spinner for an in-flight tool call, mapping the
 /// tool name to a claude-code-style gerund (`Bash` → `Running Bash`).
 #[must_use]
@@ -443,6 +469,16 @@ mod tests {
 
     fn title(tool: &str, input: &Value) -> String {
         tool_header(tool, input).title()
+    }
+
+    #[test]
+    fn registered_output_read_header_uses_task_id_from_result() {
+        let input = serde_json::json!({"file_path":"/tmp/session/tasks/b12345678.output"});
+        let plain = tool_header_with_result("Read", &input, &serde_json::json!({"file":{}}));
+        assert_eq!(plain.label, "Read");
+        let task = tool_header_with_result("Read", &input, &serde_json::json!({"file":{"taskId":"b12345678"}}));
+        assert_eq!(task.label, "Read agent output");
+        assert_eq!(task.primary.as_deref(), Some("b12345678"));
     }
 
     #[test]
@@ -560,6 +596,17 @@ mod tests {
             let header = tool_header(tool, &json!({"shell_id": "sh_1"}));
             assert_eq!(header.verb, ToolVerb::Kill, "{tool}");
             assert_eq!(header.title(), "Kill(sh_1)", "{tool}");
+        }
+    }
+
+    #[test]
+    fn task_output_nonblocking_annotation_honors_coerced_input() {
+        for tool in ["TaskOutput", "AgentOutput", "AgentOutputTool", "BashOutput", "BashOutputTool"] {
+            for block in [json!(false), json!("false")] {
+                assert_eq!(tool_header(tool, &json!({"task_id": "b12345678", "block": block})).title(),
+                    "Output(b12345678) (non-blocking)");
+            }
+            assert_eq!(tool_header(tool, &json!({"task_id": "b12345678", "block": true})).title(), "Output(b12345678)");
         }
     }
 
@@ -728,5 +775,33 @@ mod tests {
         for (tool, expected) in cases {
             assert_eq!(tool_icon(tool, &json!({})), expected, "{tool}");
         }
+    }
+}
+
+#[cfg(test)]
+mod teammate_header_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_confirmed_teammates_use_the_input_name_as_an_at_label() {
+        let input =
+            json!({"name":"reviewer","subagent_type":"Explore","description":"Review the module"});
+        let spawned = tool_header_with_result(
+            "Agent",
+            &input,
+            &json!({"status":"teammate_spawned","name":"reviewer-2"}),
+        );
+        assert_eq!(spawned.label, "@reviewer");
+        assert_eq!(spawned.primary.as_deref(), Some("Explore"));
+        let ordinary = tool_header_with_result("Agent", &input, &json!({"status":"completed"}));
+        assert_eq!(ordinary, tool_header("Agent", &input));
+        let generic = tool_header_with_result(
+            "Agent",
+            &json!({"name":"reviewer","subagent_type":"general-purpose"}),
+            &json!({"status":"teammate_spawned"}),
+        );
+        assert_eq!(generic.label, "@reviewer");
+        assert_eq!(generic.primary, None);
     }
 }

@@ -171,6 +171,9 @@ impl EffortLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct HookBackgroundTask {
+    /// Internal goal-deferral metadata; never part of the hook payload wire.
+    #[serde(skip)]
+    pub is_idle: bool,
     pub id: String,
     #[serde(rename = "type")]
     pub r#type: String,
@@ -417,21 +420,21 @@ pub struct TaskCreatedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct TeammateIdlePayload {
-    pub hook_event_name: HookEventNameTeammateIdle,
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
-    /// See [`PreToolUsePayload::prompt_id`].
+    /// Oracle 2.1.263 Sa: present only when the scratchpad feature has a path.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scratchpad_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub agent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub effort: Option<EffortLevel>,
+    // E_n spreads Sa before adding the event marker. It does not pass a tool
+    // context to Sa, so agent_id and effort are absent for this event.
+    pub hook_event_name: HookEventNameTeammateIdle,
     pub teammate_name: String,
     pub team_name: String,
 }
@@ -1650,6 +1653,57 @@ fn validate_permission_request_decision(
         }
     }
     Ok(())
+}
+/// PARITY 2.1.263 `imr(output, zodError)` — the three HINTS appended to a hook
+/// JSON validation failure. They tell a hook author which field they reached for
+/// instead of the one the event actually accepts, and they are keyed on the RAW
+/// output shape (not on the validator's internal issue list), so they port
+/// cleanly even though this crate validates with serde rather than zod.
+///
+/// ```js
+/// if (isObj(hso) && !("hookEventName" in hso))
+///   p = 'hookSpecificOutput is missing required field "hookEventName"';
+/// else if (isObj(hso) && hso.hookEventName === "PermissionRequest" && !isObj(hso.decision) && …)
+///   p += ' (PermissionRequest decision must be …)';
+/// else if (isObj(e) && d?.path.length === 1 && d.path[0] === "decision" && …)
+///   p += ' (top-level decision is the legacy approve|block field; …)';
+/// ```
+///
+/// Returned separately from [`HookResponseParseError`] so callers can append it
+/// to whichever diagnostic they surface; `None` when no hint applies.
+#[must_use]
+pub fn validation_hint(raw: &serde_json::Value) -> Option<String> {
+    let obj = raw.as_object()?;
+    if let Some(hso) = obj.get("hookSpecificOutput").and_then(|v| v.as_object()) {
+        if !hso.contains_key("hookEventName") {
+            // NB: the binary REPLACES the message here rather than appending.
+            return Some(
+                "hookSpecificOutput is missing required field \"hookEventName\"".to_string(),
+            );
+        }
+        if hso.get("hookEventName").and_then(|v| v.as_str()) == Some("PermissionRequest")
+            && !hso
+                .get("decision")
+                .is_some_and(serde_json::Value::is_object)
+        {
+            return Some(
+                " (PermissionRequest decision must be {\"behavior\": \"allow\"} or {\"behavior\": \"deny\", \"message\": \"...\"})"
+                    .to_string(),
+            );
+        }
+        return None;
+    }
+    // A hook that put `allow`/`deny`/`ask` in the LEGACY top-level `decision`.
+    match obj.get("decision").and_then(|v| v.as_str()) {
+        Some("ask") => Some(
+            " (top-level decision is the legacy approve|block field; for \"ask\" use hookSpecificOutput.permissionDecision in a PreToolUse hook)"
+                .to_string(),
+        ),
+        Some(other @ ("allow" | "deny")) => Some(format!(
+            " (top-level decision is the legacy approve|block field; for \"{other}\" use hookSpecificOutput.permissionDecision in a PreToolUse hook, or hookSpecificOutput.decision: {{\"behavior\": \"{other}\"}} in a PermissionRequest hook)"
+        )),
+        _ => None,
+    }
 }
 
 /// Parse a hook's JSON reply into a [`HookResponse`].

@@ -470,6 +470,8 @@ impl ConversationOrchestrator {
             last_reason: goal.last_reason,
             iterations: goal.iterations,
             tokens_at_start: goal.tokens_at_start,
+            // Adopting a goal along with a resumed session is `mon`'s case.
+            origin: lingxi_core::session::GoalOrigin::Restored,
         });
         let resumed_effort = runtime.effort.clone();
         let resumed_reasoning = runtime.reasoning_selection.clone();
@@ -521,10 +523,13 @@ impl ConversationOrchestrator {
             .deferral()
             .replace_loaded(runtime.loaded_tool_names);
         *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+        // The latch resets with the session, and so does the cascade's
+        // tried-models list (see `clear_session`).
         self.model_runtime
-            .refusal_fallback_latched
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.model_runtime.refusal_tried_models.lock().await.clear();
+            .refusal_cascade
+            .lock()
+            .await
+            .reset_routing();
         self.hooks.clear_session_hooks(old_session_id).await;
         let (to_model, to_profile) = {
             let session = self.session.lock().await;
@@ -657,6 +662,25 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn set_active_goal(&self, condition: &str) {
         let tokens_at_start = self.snapshot_cost_real().await.total_tokens;
+        // `let l = t.getAppState().activeGoal; if (l !== void 0) kB(l,"superseded")`
+        // (`src_161508826.js`) — a goal replaced by a newer one is torn down as
+        // surely as one that was cleared, and upstream accounts for it before
+        // the overwrite so `iterations` / `durationMs` still describe the OLD
+        // goal. Only the event fires here: the Stop hook is not removed, because
+        // `sync_active_goal_stop_hook_for_current_state` below re-points it at
+        // the replacement.
+        let superseded = {
+            let s = self.session.lock().await;
+            s.active_goal.clone()
+        };
+        if let Some(superseded) = superseded.as_ref() {
+            self.fire_goal_terminal_event(
+                platform_api::GoalStatusKind::Cleared,
+                superseded,
+                Some(platform_api::GoalClearedReason::Superseded),
+            )
+            .await;
+        }
         let mut s = self.session.lock().await;
         s.active_goal = Some(lingxi_core::session::ActiveGoalState {
             condition: condition.to_string(),
@@ -664,16 +688,39 @@ impl OrchestratorHandle for ConversationOrchestrator {
             last_reason: None,
             iterations: 0,
             tokens_at_start,
+            // `fxe`'s `origin: o`, where `y()` returned its `"user"` fallback.
+            origin: lingxi_core::session::GoalOrigin::User,
         });
         let snapshot = s.active_goal.clone();
         drop(s);
         self.persist_active_goal_state_to_jsonl(snapshot.as_ref())
             .await;
+        // `rRe`: `i("tengu_stop_hook_added",{promptLength,via:_("goal"),origin})`
+        // (`src_160454523.js`). `origin` is always `"user"` here — see
+        // `fire_goal_terminal_event`.
+        if let Some(bus) = self.model_runtime.analytics_bus.as_ref() {
+            let mut metadata = telemetry::LogEventMetadata::new();
+            metadata.insert(
+                "promptLength".into(),
+                telemetry::AnalyticsValue::Int(condition.len() as i64),
+            );
+            metadata.insert(
+                "via".into(),
+                telemetry::AnalyticsValue::String("goal".to_string()),
+            );
+            metadata.insert(
+                "origin".into(),
+                telemetry::AnalyticsValue::String("user".to_string()),
+            );
+            bus.log_event("tengu_stop_hook_added", metadata).await;
+        }
         self.sync_active_goal_stop_hook_for_current_state().await;
     }
 
     async fn clear_active_goal(&self) -> Option<ActiveGoalSnapshot> {
-        self.clear_active_goal_state_and_hook().await
+        // The `/goal clear` arm — upstream's `kB(n,"user_clear")`.
+        self.clear_active_goal_state_and_hook(platform_api::GoalClearedReason::UserClear)
+            .await
     }
 
     async fn set_active_goal_last_reason(&self, reason: Option<String>) {
@@ -749,6 +796,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let codename = format!("fork-{}", &uuid::Uuid::new_v4().simple().to_string()[..4]);
 
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
+            teammate_color: None,
             subagent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
             origin_session_id: Some(origin_session_id),
             // NOTE (deliberate deviation from the plan's `String::new()`): the
@@ -854,6 +902,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .fork_to_background(&history, system_prompt, prompt, &model)
             .await
             .map_err(|e| HandleError::ActionFailed(e.to_string()))
+    }
+
+    async fn can_background_conversation_on_exit(&self) -> bool {
+        if self.bg_session_forker.is_none()
+            || !platform_api::agent_view::is_enabled()
+            || std::env::var("LINGXI_DISABLE_ADOPT").is_ok_and(|value| !value.is_empty())
+        {
+            return false;
+        }
+        self.session.lock().await.history.iter().any(|message| {
+            matches!(message, protocol::ConversationMessage::User { .. })
+                && !message.is_meta()
+                && !message.text_content().trim().is_empty()
+        })
     }
 
     async fn background_conversation(
@@ -1728,6 +1790,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
             }
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
+    }
+
+    async fn run_queued_turn_streaming(
+        &self,
+        prompt: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        in_human_turn: bool,
+    ) -> Result<platform_api::TurnOutcome, HandleError> {
+        self.run_turn_streaming_with_origin(prompt, Vec::new(), cancel, None, in_human_turn)
+            .await
+            .map(|outcome| match outcome {
+                crate::conversation::TurnOutcome::EndTurn => platform_api::TurnOutcome::EndTurn,
+                crate::conversation::TurnOutcome::Cancelled => platform_api::TurnOutcome::Cancelled,
+                crate::conversation::TurnOutcome::MaxTurns => platform_api::TurnOutcome::MaxTurns,
+            })
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))
     }
 
     async fn run_turn_streaming_with_images(

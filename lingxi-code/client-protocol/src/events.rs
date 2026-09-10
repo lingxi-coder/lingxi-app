@@ -34,14 +34,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Outbound events the engine streams to a client.
-///
-/// Each live-turn variant notes its engine source (from the area maps).
-/// `ThinkingDelta` and `UsageUpdate` are now LIVE-FED by the §0.7 "light up
-/// thinking/usage" follow-up: `event_router` emits them via
-/// `OutputStream::emit_thinking` / `emit_usage`. The remaining reserved
-/// variants (e.g. `CoordinatorStatus`) are defined so the contract freezes now
-/// but still have no live engine source in the foundation (decisions §0.7 /
-/// §0.9) and round-trip only.
+//
+// Each live-turn variant notes its engine source (from the area maps).
+// `ThinkingDelta` and `UsageUpdate` are now LIVE-FED by the §0.7 "light up
+// thinking/usage" follow-up: `event_router` emits them via
+// `OutputStream::emit_thinking` / `emit_usage`. The remaining reserved
+// variants (e.g. `CoordinatorStatus`) are defined so the contract freezes now
+// but still have no live engine source in the foundation (decisions §0.7 /
+// §0.9) and round-trip only.
 // Boxing the app payload would change the generated Swift/Kotlin protocol API.
 #[allow(clippy::large_enum_variant)]
 // UniFFI 0.28 stores an enum's variant/field documentation in the same
@@ -585,6 +585,47 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Authoritative scheduled task snapshot after a management operation.
+    CronResult {
+        request_id: String,
+        jobs: Vec<CronJobDto>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Retract the current or just-completed rejected assistant attempt.
+    MessageRetracted {
+        message_id: String,
+    },
+    /// Correlate the streamed assistant response with its stable identity.
+    MessageIdentity {
+        message_id: String,
+    },
+
+    /// A `/loop` wakeup fired. `message` is the resume line, already rendered
+    /// host-side so its wording lives in one place.
+    ///
+    /// `streak` is how many consecutive QUIET ticks preceded it: `0` for an
+    /// ordinary wakeup, `N > 0` when the client should collapse the previous
+    /// `N` loop-wakeup groups behind this row and show `companion` with it.
+    /// Every wakeup carries this event — including `streak: 0` — so a client
+    /// can mark the group boundary without matching on the copy.
+    ///
+    /// Appended LAST: per §0.10 an additive event that moves no existing
+    /// native ordinal keeps `CLIENT_PROTOCOL_VERSION` and updates the contract
+    /// index only.
+    LoopWakeup {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        companion: Option<String>,
+        streak: u32,
+        since_ms: u64,
+    },
+
+    // Additive SDK task lifecycle receipt. Keep new variants after the
+    // frozen prefix so existing UniFFI variant ordinals remain unchanged.
+    TaskLifecycle {
+        event_json: String,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -766,4 +807,23 @@ pub enum AudioOpDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         voice: Option<String>,
     },
+}
+
+/// A durable task from the workspace's existing cron scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CronJobDto {
+    pub id: String,
+    pub cron: String,
+    pub prompt: String,
+    pub recurring: bool,
+    pub durable: bool,
+    pub permanent: bool,
+    pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fired_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }

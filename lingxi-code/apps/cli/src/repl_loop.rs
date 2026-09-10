@@ -27,6 +27,17 @@ pub enum StepOutcome {
     ExitCommand,
 }
 
+/// Host adapter for completion delivery while the prompt is idle.
+#[async_trait::async_trait]
+pub trait TaskNotificationWake: Send + Sync {
+    /// Only called after a real stdin line selects `/tasks message`.
+    async fn send_human_task_message(&self, _task_id: &str, _message: &str) -> Result<(), String> {
+        Err("task messaging is unavailable".into())
+    }
+    async fn wait(&self);
+    async fn run(&self, cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError>;
+}
+
 /// Execute one REPL iteration: print prompt, read a line, dispatch.
 ///
 /// Generic over the concrete `AsyncRead` / `AsyncWrite` types so tests can
@@ -42,8 +53,8 @@ pub enum StepOutcome {
 /// `Notification {idle_prompt}` hook is fired ONCE and the read keeps going.
 /// `None` (or a notifier that gates its timer off) preserves the exact prior
 /// input behaviour. The timer is purely additive — it never drives the loop,
-/// never drops the in-flight read (`read_line` is NOT cancel-safe; see the
-/// input `select!`), and a failing fire can never affect input.
+/// preserves partially read input across wakeups, and a failing hook never
+/// affects input.
 // `step` is the REPL iteration seam with all its dependencies injected for
 // testability (stdin/stderr, dispatcher, handle, sink, sigint, idle notifier,
 // run-turn). The idle notifier is the 8th injected arg; the list is cohesive
@@ -65,108 +76,112 @@ pub async fn step<W>(
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
+    step_with_notifications(
+        stdin,
+        stderr,
+        dispatcher,
+        handle,
+        sink,
+        sigint,
+        idle,
+        None,
+        run_turn_fn,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn step_with_notifications<W>(
+    stdin: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
+    stderr: &mut W,
+    dispatcher: &dyn SlashCommandDispatcher,
+    handle: Arc<dyn OrchestratorHandle>,
+    sink: Arc<dyn OutputSink>,
+    sigint: &SigintSource,
+    idle: Option<&dyn IdleNotifier>,
+    notifications: Option<&dyn TaskNotificationWake>,
+    run_turn_fn: impl Fn(
+        String,
+        CancellationToken,
+    ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>,
+) -> StepOutcome
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     // 1. Print the "> " prompt to stderr (L1 + L2 byte-lock from T0).
     let _ = stderr.write_all(b"> ").await;
     let _ = stderr.flush().await;
 
-    // 2. Read a line, racing against SIGINT and (additively) the idle timer.
-    //
-    // SHARED STDIN: `stdin` is the SINGLE `BufReader<Stdin>` shared with the
-    // injected `InteractivePromptingGate`. We lock it ONLY for the duration of
-    // the prompt read (between turns) and DROP the guard before invoking
-    // `run_turn_fn`, so the gate can lock the SAME reader to prompt `y/n`
-    // during the turn. The two phases are strictly sequential within one loop
-    // iteration, so the `tokio::sync::Mutex` is never contended and never
-    // deadlocks.
-    //
-    // CANCEL-SAFETY: `AsyncBufReadExt::read_line` is NOT cancel-safe — dropping
-    // its future mid-read can lose buffered bytes. We therefore pin it ONCE and
-    // re-await the SAME future across `select!` iterations: only the SIGINT arm
-    // and a completed read leave this loop (the SIGINT drop is the pre-existing,
-    // accepted behaviour). The idle arm fires the notification ONCE and then
-    // loops back to re-await the in-flight read, so the timer NEVER drops it.
-    // The idle timer is armed fresh for THIS post-turn idle period (parity:
-    // `clearTimeout` + re-`setTimeout` per render, `screens/REPL.tsx:3920-3941`)
-    // and `idle_fired` makes it at-most-once per idle period.
-    let mut line = String::new();
-
-    // Acquire the shared-stdin lock for the prompt read ONLY. The guard is
-    // dropped at the end of this block (`read_scope`) — BEFORE `run_turn_fn` —
-    // so the gate can lock the SAME reader during the turn.
-    let read_scope: Option<StepOutcome> = {
-        let mut guard = stdin.lock().await;
-
-        let read_fut = guard.read_line(&mut line);
-        tokio::pin!(read_fut);
-
-        // Arm the idle timer only when a notifier is present AND not gated off
-        // (`arm_timer() == None` ⇒ no `Notification` hook registered). A
-        // `pending()` future is selected over only when no real timer exists, so
-        // the no-hook path is byte-identical to the prior two-arm `select!`.
-        let idle_timer = idle.and_then(IdleNotifier::arm_timer);
-        let mut idle_timer = match idle_timer {
-            Some(fut) => fut,
-            None => Box::pin(std::future::pending::<()>()),
-        };
-        let mut idle_fired = false;
-
-        loop {
+    // read_until is cancellation-safe: partial bytes stay in `line_bytes`
+    // when a completion wakes the host. Release the shared reader before the
+    // machine turn so permission tools can acquire the same stdin mutex.
+    let mut line_bytes = Vec::new();
+    let mut idle_timer = idle
+        .and_then(IdleNotifier::arm_timer)
+        .unwrap_or_else(|| Box::pin(std::future::pending::<()>()));
+    enum InputEvent {
+        Read(std::io::Result<usize>),
+        Signal,
+        Idle,
+        Completion,
+    }
+    loop {
+        let event = {
+            let mut reader = stdin.lock().await;
             tokio::select! {
-                result = &mut read_fut => {
-                    match result {
-                        Ok(0) => {
-                            // EOF (Ctrl+D) — L3 byte-lock: print "\n" to stdout.
-                            let _ = tokio::io::stdout().write_all(b"\n").await;
-                            break Some(StepOutcome::Eof);
-                        }
-                        Ok(_bytes) => break None,
-                        Err(_) => {
-                            // IO error — try again on next iteration.
-                            break Some(StepOutcome::Continue);
-                        }
+                result = reader.read_until(b'\n', &mut line_bytes) => InputEvent::Read(result),
+                () = sigint.wait() => InputEvent::Signal,
+                () = &mut idle_timer => InputEvent::Idle,
+                () = async {
+                    match notifications {
+                        Some(wake) => wake.wait().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => InputEvent::Completion,
+            }
+        };
+        match event {
+            InputEvent::Read(Ok(0)) => {
+                let _ = tokio::io::stdout().write_all(b"\n").await;
+                return StepOutcome::Eof;
+            }
+            InputEvent::Read(Ok(_)) => break,
+            InputEvent::Read(Err(_)) => return StepOutcome::Continue,
+            InputEvent::Signal => {
+                if sigint.take_idle_armed() {
+                    return StepOutcome::DoubleSigintExit;
+                }
+                sigint.arm_idle();
+                let _ = stderr.write_all(b"\n").await;
+                let armed = sigint.idle_armed.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    armed.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+                return StepOutcome::Continue;
+            }
+            InputEvent::Idle => {
+                if let Some(notifier) = idle {
+                    notifier.fire().await;
+                }
+                idle_timer = Box::pin(std::future::pending::<()>());
+            }
+            InputEvent::Completion => {
+                let cancel = CancellationToken::new();
+                let signal = sigint.arm_for_turn(cancel.clone());
+                sink.turn_start().await;
+                if let Some(wake) = notifications {
+                    if let Err(error) = wake.run(cancel).await {
+                        sink.error("runtime", &error.to_string()).await;
                     }
                 }
-                () = sigint.wait() => {
-                    // SIGINT at the idle prompt.
-                    if sigint.take_idle_armed() {
-                        // Second Ctrl+C within the 2-second window → exit 130.
-                        break Some(StepOutcome::DoubleSigintExit);
-                    }
-                    // First idle Ctrl+C: arm the flag, print "\n", start the
-                    // 2-second disarm timer.
-                    sigint.arm_idle();
-                    let _ = stderr.write_all(b"\n").await;
-                    let idle_armed = sigint.idle_armed.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        idle_armed.store(false, std::sync::atomic::Ordering::SeqCst);
-                    });
-                    break Some(StepOutcome::Continue);
-                }
-                () = &mut idle_timer, if !idle_fired => {
-                    // Idle threshold elapsed before input arrived. Fire the
-                    // `Notification {idle_prompt}` hook ONCE, best-effort — it can
-                    // never affect the input read, which is still in flight — then
-                    // loop back to keep awaiting the SAME pinned `read_line`.
-                    idle_fired = true;
-                    if let Some(notifier) = idle {
-                        notifier.fire().await;
-                    }
-                    // Re-arm with a never-resolving timer so the disabled idle arm
-                    // is cheap on subsequent loop turns (at-most-once per period).
-                    idle_timer = Box::pin(std::future::pending::<()>());
-                }
+                signal.abort();
             }
         }
-        // `guard` (and the pinned `read_fut` borrowing it) drop HERE — the
-        // shared reader is unlocked before any turn runs.
-    };
-
-    // A terminal read outcome (Eof / DoubleSigintExit / first-idle-Ctrl+C /
-    // IO error) returns now; otherwise `line` holds the prompt input.
-    if let Some(outcome) = read_scope {
-        return outcome;
     }
+    let Ok(line) = String::from_utf8(line_bytes) else {
+        return StepOutcome::Continue;
+    };
 
     // Strip trailing newline(s).
     let input = line.trim_end_matches('\n').trim_end_matches('\r');
@@ -176,6 +191,31 @@ where
 
     // A real line arrived — clear any pending idle-armed state.
     sigint.disarm_idle();
+
+    let (command, args) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    if command == "/tasks" {
+        if let (Some(parsed), Some(host)) =
+            (platform_api::human_task_message::parse(args), notifications)
+        {
+            let result = match parsed {
+                Ok((task_id, message)) => host
+                    .send_human_task_message(task_id, message)
+                    .await
+                    .map(|()| format!("Message accepted for task {task_id}")),
+                Err(error) => Err(error.into()),
+            };
+            match result {
+                Ok(display) => sink.command_output(input, &display).await,
+                Err(error) => sink.error("task_message", &error).await,
+            }
+            return StepOutcome::Continue;
+        }
+    }
+
+    // Let the host choose stay/stop/handoff before the one-way exit flag is set.
+    if notifications.is_some() && matches!(input.trim(), "/exit" | "/quit") {
+        return StepOutcome::ExitCommand;
+    }
 
     // 3. Dispatch: slash command vs plain text.
     if input.starts_with('/') {
@@ -194,6 +234,7 @@ where
                 let _sigint_guard = sigint.arm_for_turn(token.clone());
                 sink.turn_start().await;
                 let outcome = run_turn_fn(prompt, token).await;
+                _sigint_guard.abort();
                 match outcome {
                     Ok(TurnOutcome::EndTurn) => {}
                     Ok(TurnOutcome::MaxTurns) => {
@@ -229,6 +270,7 @@ where
     let _sigint_guard = sigint.arm_for_turn(token.clone());
     sink.turn_start().await;
     let outcome = run_turn_fn(input.to_string(), token).await;
+    _sigint_guard.abort();
     match outcome {
         Ok(TurnOutcome::EndTurn) => {}
         Ok(TurnOutcome::MaxTurns) => {
@@ -631,6 +673,126 @@ mod tests {
         assert!(
             prompts.lock().await.is_empty(),
             "a Handled (display-only) command must NOT invoke run_turn_fn"
+        );
+    }
+    struct TestTaskWake {
+        ready: tokio::sync::Notify,
+        ran: tokio::sync::Notify,
+        stdin: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
+        calls: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl TaskNotificationWake for TestTaskWake {
+        async fn wait(&self) {
+            self.ready.notified().await;
+        }
+        async fn run(&self, _cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError> {
+            assert!(
+                self.stdin.try_lock().is_ok(),
+                "machine tools must be able to read permission input"
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.ran.notify_one();
+            Ok(TurnOutcome::EndTurn)
+        }
+    }
+
+    #[tokio::test]
+    async fn task_completion_wakes_stdio_without_losing_partial_human_input() {
+        let (mut writer, reader) = duplex(64);
+        let stdin = shared_stdin(reader);
+        let wake = Arc::new(TestTaskWake {
+            ready: tokio::sync::Notify::new(),
+            ran: tokio::sync::Notify::new(),
+            stdin: stdin.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let producer = wake.clone();
+        let writing = tokio::spawn(async move {
+            writer.write_all(b"hel").await.unwrap();
+            // Let read_until consume the partial line before delivering completion.
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            producer.ready.notify_one();
+            producer.ran.notified().await;
+            writer.write_all(b"lo\n").await.unwrap();
+            writer
+        });
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let observed = prompts.clone();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            step_with_notifications(
+                stdin,
+                &mut Vec::new(),
+                &NoopDispatcher,
+                Arc::new(MockOrchestratorHandle::new()),
+                Arc::new(PlainSink::new()),
+                &SigintSource::spawn(),
+                None,
+                Some(wake.as_ref()),
+                move |prompt, _| {
+                    let prompts = observed.clone();
+                    Box::pin(async move {
+                        prompts.lock().await.push(prompt);
+                        Ok(TurnOutcome::EndTurn)
+                    })
+                },
+            ),
+        )
+        .await
+        .expect("idle task wake must not wait for a human newline");
+        assert_eq!(result, StepOutcome::Continue);
+        assert_eq!(*prompts.lock().await, vec!["hello"]);
+        assert_eq!(wake.calls.load(Ordering::SeqCst), 1);
+        let _ = writing.await.unwrap();
+    }
+    struct HumanTaskHost(std::sync::Mutex<Vec<(String, String)>>);
+    #[async_trait::async_trait]
+    impl TaskNotificationWake for HumanTaskHost {
+        async fn wait(&self) {
+            std::future::pending::<()>().await;
+        }
+        async fn run(&self, _: CancellationToken) -> Result<TurnOutcome, OrchestratorError> {
+            unreachable!()
+        }
+        async fn send_human_task_message(
+            &self,
+            task_id: &str,
+            message: &str,
+        ) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((task_id.into(), message.into()));
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn typed_tasks_message_uses_human_host_and_never_model_dispatch() {
+        let (mut writer, reader) = duplex(128);
+        writer
+            .write_all(b"/tasks message a123  continue  \n")
+            .await
+            .unwrap();
+        let host = HumanTaskHost(Default::default());
+        let result = step_with_notifications(
+            shared_stdin(reader),
+            &mut Vec::new(),
+            &NoopDispatcher,
+            Arc::new(MockOrchestratorHandle::new()),
+            Arc::new(PlainSink::new()),
+            &SigintSource::spawn(),
+            None,
+            Some(&host),
+            |_, _| panic!("human task message must not become a main model prompt"),
+        )
+        .await;
+        assert_eq!(result, StepOutcome::Continue);
+        assert_eq!(
+            *host.0.lock().unwrap(),
+            vec![("a123".into(), " continue  ".into())]
         );
     }
 }

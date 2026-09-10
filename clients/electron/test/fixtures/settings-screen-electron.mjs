@@ -333,6 +333,168 @@ async function runVisualAdminScenario(window, webContents) {
   return { pages, layout, screenshots };
 }
 
+async function runCustomProvidersScenario(window, webContents) {
+  const run = (code) => webContents.executeJavaScript(code);
+  const click = async (label) => {
+    await run(`(() => { const b = [...document.querySelectorAll('button')].find(e => e.textContent.trim() === ${JSON.stringify(label)}); if (!b) throw new Error('missing button: ' + ${JSON.stringify(label)}); b.click(); })()`);
+    await delay(35);
+  };
+  const fill = async (label, value) => {
+    await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${label}"]`)}, ${JSON.stringify(value)})`);
+    await delay(35);
+  };
+  const capture = async (name) => {
+    const folder = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+    if (!folder) return;
+    mkdirSync(folder, { recursive: true });
+    const theme = process.env.LINGXI_SETTINGS_SCREEN_THEME === 'dark' ? 'dark' : 'light';
+    writeFileSync(join(folder, `${theme}-custom-${name}.png`), (await window.capturePage()).toPNG());
+  };
+  await run('window.__settingsScreenTest.setHasProject(true)');
+  await run('window.__settingsScreenTest.setLayeredSnapshot({ user: {}, project: {}, local: {} })');
+  await run('window.__settingsScreenTest.selectPage("custom-providers")');
+  await delay(70);
+  await capture('empty');
+  await click('＋ 新增 Provider');
+  await fill('Profile 名称', 'customlab');
+  await fill('baseUrl', 'https://example.com/v1');
+  await fill('API Key', 'test-only-secret-1234');
+  await fill('模型 ID 1', 'model-a');
+  await capture('editor');
+  await run('window.__settingsScreenTest.holdSettingsWrite()');
+  await click('保存 Provider');
+  const locked = await run('window.__settingsScreenTest.state()');
+  await run('window.__settingsScreenTest.clickLayerTab("project")');
+  await run('window.__settingsScreenTest.releaseSettingsWrite()');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().credentialWrites.length === 1');
+  const saved = await run('window.__settingsScreenTest.state()');
+
+  // Edit an existing entry with fields the simple editor does not expose.
+  await run(`window.__settingsScreenTest.setLayeredSnapshot({ user: { providers: { customlab: {
+    type: 'openai', baseUrl: 'https://example.com/v1', supportsWebsockets: false,
+    models: [{ id: 'model-a', aliases: ['fast'], capabilities: { reasoning: true }, metadata: { display_name: 'Model A' } }, { id: 'remove-me' }],
+    pricing: { 'model-a': { inputPerMtok: 1, outputPerMtok: 2 }, 'remove-me': { inputPerMtok: 3, outputPerMtok: 4 } }
+  } } }, project: { providers: { other: {type:'openai',baseUrl:'https://other.example',apiKeyEnv:'OTHER_KEY',models:[{id:'other'}]} } }, local:{} })`);
+  await delay(50);
+  await click('编辑');
+  const fixedId = await run('document.querySelector(\'[aria-label="Profile 名称"]\').readOnly');
+  await fill('baseUrl', 'https://changed.example/v1');
+  await fill('模型 ID 1', 'model-renamed');
+  await run('document.querySelector(\'[aria-label="移除模型 2"]\').click()');
+  await delay(35);
+  await click('保存 Provider');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers.customlab.baseUrl === "https://changed.example/v1"');
+  const edited = await run('window.__settingsScreenTest.state()');
+  await delay(50);
+  await capture('list');
+
+  await click('导入 JSON');
+  await fill('JSON 配置', '{"apiKey":"test-only-secret-1234",broken');
+  await click('解析并预览');
+  const invalidText = await run('document.querySelector(\'[role="alert"]\')?.textContent');
+  await capture('invalid-json');
+  const importedJson = JSON.stringify({ provider: {
+    customlab: { npm: '@ai-sdk/openai-compatible', options: { baseURL: 'https://conflict.example', apiKey: '{env:EXISTING_KEY}' }, models: { replacement: {} } },
+    imported: { npm: '@ai-sdk/anthropic', options: { baseURL: 'https://api.example.com', apiKey: 'test-only-import-secret' }, models: { claude: {} } },
+  } });
+  await run(`(() => { const files = new DataTransfer(); files.items.add(new File([${JSON.stringify(importedJson)}], 'providers.json', {type:'application/json'})); const input = document.querySelector('input[type=file]'); input.files = files.files; input.dispatchEvent(new Event('change', {bubbles:true})); })()`);
+  await waitFor(webContents, 'document.querySelector(\'[aria-label="JSON 配置"]\')?.value.includes("test-only-import-secret")');
+  await click('解析并预览');
+  const conflictSkipped = await run('document.querySelector(\'input[type="checkbox"]\').checked === false');
+  await capture('import-preview');
+  await run('window.__settingsScreenTest.failNextCredential()');
+  await click('确认导入 1 个 Provider');
+  await waitFor(webContents, 'document.body.textContent.includes("配置已保存，凭据保存失败")');
+  const partial = await run('window.__settingsScreenTest.state()');
+  await capture('credential-retry');
+  await click('重试保存凭据');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().credentialWrites.includes("imported")');
+  const retried = await run('window.__settingsScreenTest.state()');
+
+  await click('导入 JSON');
+  await fill('JSON 配置', '{"provider":{}}');
+  await run('window.__settingsScreenTest.clickLayerTab("project")');
+  await delay(50);
+  const clearedOnSwitch = await run('!document.querySelector(\'[aria-label="JSON 配置"]\')');
+  await click('编辑');
+  window.setSize(760, 720);
+  await delay(70);
+  const overflow = await run('(() => { const d = document.querySelector(\'[role="dialog"]\'); return d.scrollWidth > d.clientWidth + 1; })()');
+  await capture('narrow');
+  await run('document.querySelector("details > summary").click()');
+  await fill('maxAttempts', '1.5');
+  await click('保存');
+  const retryError = await run('document.querySelector(\'[role="alert"]\')?.textContent');
+  await run('window.__settingsScreenTest.clickLayerTab("user")');
+  await delay(35);
+  await run('window.__settingsScreenTest.setLayeredSnapshot({ user:{ providers:{ broken:null } }, project:{}, local:{} })');
+  await delay(35);
+  const malformedRowSurvives = await run('document.body.textContent.includes("broken") && Boolean(document.querySelector(\'[role="dialog"]\'))');
+  await click('导入 JSON');
+  await fill('JSON 配置', JSON.stringify({ providers: { dual: { type: 'openai', baseUrl: 'https://example.com', apiKeyEnv: 'FALLBACK_KEY', apiKey: 'test-only-explicit-key', models: [{ id: 'm' }] } } }));
+  await click('解析并预览');
+  const dualAuth = await run('({ mode:document.querySelector(\'[aria-label="认证方式"]\').value, keyPresent:Boolean(document.querySelector(\'[aria-label="API Key"]\')) })');
+  await click('← 返回 Provider 列表');
+  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{providers:{Legacy:{type:"openai",baseUrl:"https://legacy.example",apiKeyEnv:"LEGACY_KEY",models:["legacy-model"]}}},project:{},local:{}})');
+  await delay(35);
+  await click('编辑');
+  await fill('模型 ID 1', ' legacy-model ');
+  await fill('baseUrl', ' https://legacy.example/v1 ');
+  await click('保存 Provider');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers?.Legacy?.baseUrl === "https://legacy.example/v1"');
+  const legacy = await run('window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers.Legacy');
+  await click('导入 JSON');
+  await fill('JSON 配置', JSON.stringify({ providers: { priced: {
+    type: 'openai', baseUrl: 'https://example.com', apiKeyEnv: 'PRICED_KEY',
+    models: [{ id: 'old' }, { id: 'other' }],
+    pricing: { old: { inputPerMtok: 1, outputPerMtok: 2 }, other: { inputPerMtok: 3, outputPerMtok: 4 } },
+  } } }));
+  await click('解析并预览');
+  await fill('模型 ID 1', 'other');
+  const pricingTargetProtected = await run('document.querySelector(\'[aria-label="移除模型 2"]\').disabled && !document.querySelector(\'[aria-label="移除模型 1"]\').disabled');
+  await run('document.querySelector(\'input[type="checkbox"]\').click()');
+  await delay(35);
+  await run('document.querySelector(\'input[type="checkbox"]\').click()');
+  await delay(35);
+  await fill('模型 ID 1', 'final-model');
+  await click('确认导入 1 个 Provider');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers?.priced');
+  const toggledPricing = await run('window.__settingsScreenTest.state().lastEngineSettingsPatch.patch.providers.priced.pricing');
+  return { pricingTargetProtected, toggledPricing, legacy, malformedRowSurvives, dualAuth, retryError, locked, saved, fixedId, edited, invalidText, conflictSkipped, partial, retried, clearedOnSwitch, overflow };
+}
+
+async function runProviderSessionIsolation(webContents) {
+  const run = (code) => webContents.executeJavaScript(code);
+  const click = async (label) => {
+    await run(`(() => { const b = [...document.querySelectorAll('button')].find(e => e.textContent.trim() === ${JSON.stringify(label)}); if (!b) throw new Error('missing button'); b.click(); })()`);
+    await delay(35);
+  };
+  const fill = async (label, value) => {
+    await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${label}"]`)}, ${JSON.stringify(value)})`);
+    await delay(35);
+  };
+  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{},project:{},local:{}})');
+  await run('window.__settingsScreenTest.selectPage("custom-providers")');
+  await click('＋ 新增 Provider');
+  await fill('Profile 名称', 'old-project-draft');
+  await run('window.__settingsScreenTest.setActiveSession("session-b")');
+  await delay(50);
+  const draftCleared = await run('!document.querySelector(\'[aria-label="Profile 名称"]\')');
+  if (!draftCleared) return { draftCleared };
+  await click('＋ 新增 Provider');
+  await fill('Profile 名称', 'pending-key');
+  await fill('baseUrl', 'https://example.com');
+  await fill('API Key', 'test-only-key');
+  await fill('模型 ID 1', 'model');
+  await run('window.__settingsScreenTest.holdSettingsWrite()');
+  await click('保存 Provider');
+  await run('window.__settingsScreenTest.setActiveSession("session-c")');
+  await delay(50);
+  await run('window.__settingsScreenTest.releaseSettingsWrite()');
+  await delay(80);
+  return { draftCleared, state: await run('window.__settingsScreenTest.state()') };
+}
+
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
@@ -342,7 +504,9 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
-    const result = scenario === 'visual-admin' ? await runVisualAdminScenario(window, webContents)
+    const result = scenario === 'provider-session-isolation' ? await runProviderSessionIsolation(webContents)
+      : scenario === 'custom-providers' ? await runCustomProvidersScenario(window, webContents)
+      : scenario === 'visual-admin' ? await runVisualAdminScenario(window, webContents)
       : scenario === 'project-tabs' ? await runProjectTabsScenario(webContents)
       : scenario === 'no-engine-banner' ? await runNoEngineBannerScenario(webContents)
       : scenario === 'malformed-snapshot' ? await runMalformedSnapshotScenario(webContents)

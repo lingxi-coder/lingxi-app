@@ -54,7 +54,7 @@ fn is_1m_context_disabled() -> bool {
 
 /// `true` if `model` carries an explicit `[1m]` suffix (case-insensitive),
 /// unless 1M context is disabled. Mirrors `has1mContext`.
-fn has_1m_context(model: &str) -> bool {
+pub fn has_1m_context(model: &str) -> bool {
     if is_1m_context_disabled() {
         return false;
     }
@@ -92,7 +92,7 @@ fn model_supports_1m(model: &str) -> bool {
 /// recognized only as `claude-fable-5-1`; the removed 5.0 id is not an alias.
 /// Honors the same `CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch (`Aye()` guard
 /// inside `Hx`).
-fn model_native_1m(model: &str) -> bool {
+pub fn model_native_1m(model: &str) -> bool {
     if is_1m_context_disabled() {
         return false;
     }

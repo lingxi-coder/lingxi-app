@@ -41,6 +41,22 @@ mod tests {
     }
 
     #[test]
+    fn host_managed_key_does_not_require_environment_metadata() {
+        let raw = one(
+            "custom",
+            json!({
+                "type": "openai", "baseUrl": "https://example.com/v1",
+                "models": [{"id": "model"}]
+            }),
+        );
+        let (parsed, warnings) = parse_user_providers(&raw);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].env_var, None);
+        assert_eq!(parsed[0].profile.credential, CredentialConfig::None);
+    }
+
+    #[test]
     fn wrapper_preserves_deferred_credential_and_env_metadata() {
         let raw = one(
             "groq",

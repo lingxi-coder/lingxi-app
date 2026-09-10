@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import '../../src/renderer/global.css';
 
 import { BetaComposer } from '../../src/renderer/components/BetaDesktop';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
@@ -14,6 +15,7 @@ const projectPath = '/tmp/composer-draft-project';
 let resolvePendingSend: (() => void) | undefined;
 let sendPending = false;
 let lastSentPrompt = '';
+let cancelCount = 0;
 const audioRequests: NativeAudioCommand[] = [];
 
 function audioResponse(command: NativeAudioCommand): NativeAudioResponse {
@@ -53,7 +55,7 @@ function audioResponse(command: NativeAudioCommand): NativeAudioResponse {
   }
 }
 
-(window as unknown as { lingxi: { audio: unknown } }).lingxi = {
+if (!window.lingxi) (window as unknown as { lingxi: { audio: unknown } }).lingxi = {
   audio: {
     request: async (command: NativeAudioCommand) => {
       audioRequests.push(command);
@@ -130,7 +132,7 @@ function bridgeFixture(sessionId: string, running: boolean) {
         resolve();
       };
     }),
-    cancel: async () => undefined,
+    cancel: async () => { cancelCount += 1; },
   };
 }
 
@@ -142,6 +144,7 @@ function Fixture() {
     window.__composerDraftTest = {
       switchSession: setSessionId,
       setRunning,
+      cancelCount: () => cancelCount,
       sendPending: () => sendPending,
       lastSentPrompt: () => lastSentPrompt,
       resolveSend: () => resolvePendingSend?.(),
@@ -170,6 +173,7 @@ declare global {
     __composerDraftTest?: {
       switchSession(sessionId: string): void;
       setRunning(running: boolean): void;
+      cancelCount(): number;
       sendPending(): boolean;
       lastSentPrompt(): string;
       resolveSend(): void;

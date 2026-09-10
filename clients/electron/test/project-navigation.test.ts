@@ -148,6 +148,7 @@ test('desktop topbar keeps command and engine controls out of the chrome', () =>
     ...bridgeFixture(),
     usage: null,
     conversation: { sessionKey: 'session-a', summaries: [] },
+    runtimeCenter: { inspectorOpen: false },
   };
   const markup = renderToStaticMarkup(React.createElement(
     Theme.Provider,
@@ -156,16 +157,15 @@ test('desktop topbar keeps command and engine controls out of the chrome', () =>
       bridge: bridge as any,
       runtimeCenterOpen: false,
       onToggleRuntimeCenter: () => undefined,
-      theme: 'dark',
-      onTheme: () => undefined,
     }),
   ));
 
-  assert.match(markup, /aria-label="Toggle theme"/);
-  assert.match(markup, /aria-label="Open context summaries"/);
-  assert.match(markup, /aria-label="Toggle runtime center"/);
+  assert.match(markup, /aria-label="More chat actions"/);
+  assert.match(markup, /aria-label="Toggle pinned summary"/);
+  assert.match(markup, /aria-label="Toggle right panel"/);
+  assert.doesNotMatch(markup, /aria-label="Toggle theme"|aria-label="Open context summaries"/);
   assert.doesNotMatch(markup, /Open command palette|Open session status|Engine ready|>Commands</);
-  assert.doesNotMatch(openingTag(markup, 'aria-label="Open context summaries"'), /background:/);
+  assert.doesNotMatch(openingTag(markup, 'aria-label="Toggle pinned summary"'), /background:/);
 
   const css = readFileSync(join(import.meta.dirname, '../src/renderer/global.css'), 'utf8');
   assert.match(css, /\.desktop-topbar-action\s*\{[^}]*background:\s*transparent/s);
@@ -211,6 +211,9 @@ test('sidebar renders global pins before projects and limits each project sessio
   ));
 
   assert.ok(markup.indexOf('Pinned work') < markup.indexOf('id="projects-heading"'));
+  const footer = markup.slice(markup.indexOf('class="desktop-sidebar-footer"'), markup.indexOf('class="sidebar-resize-handle'));
+  assert.match(footer, /> Settings<|>Settings<|> <!-- -->Settings</);
+  assert.doesNotMatch(footer, /Engine|diagnostics|role="status"/);
   assert.match(markup, /MLPlatform/);
   assert.match(markup, /LingXi-Next/);
   assert.match(markup, /Session 5/);
@@ -299,12 +302,14 @@ test('a running turn keeps drafting and local composer controls interactive', ()
 
   assert.match(promptTag, /contentEditable="true"/i);
   assert.match(promptTag, /aria-disabled="false"/);
-  for (const marker of ['aria-label="Attach image"', 'aria-label="Search workspace files"', 'aria-label="Start ordinary recording"']) {
+  for (const marker of ['aria-label="Attach files"', 'aria-label="Search workspace files"', 'aria-label="Start ordinary recording"']) {
     assert.doesNotMatch(openingTag(markup, marker), /\bdisabled\b/, `${marker} must remain interactive`);
   }
   assert.doesNotMatch(markup, /aria-label="Goal active"/);
   assert.doesNotMatch(openingTag(markup, 'aria-label="Stop current turn"'), /\bdisabled\b/);
-  assert.match(markup, /aria-label="Send pending message"/);
+  assert.match(markup, /class="composer-send-presence" data-visible="false" aria-hidden="true"/);
+  assert.match(openingTag(markup, 'aria-label="Send pending message"'), /\bdisabled\b/);
+  assert.match(openingTag(markup, 'aria-label="Send pending message"'), /tabindex="-1"/i);
 
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
   const submitStart = source.indexOf('const submit = async');

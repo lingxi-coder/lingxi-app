@@ -58,6 +58,36 @@ pub enum TodoState {
     Completed,
 }
 
+/// How a goal came to be active — the `origin` field of every `tengu_goal_*`
+/// analytics event.
+///
+/// Upstream 2.1.267 resolves it in `y(e,t)` (`src_161508826.js`), which reads a
+/// `queuedGoalOrigin` staged by `ProposeGoal` and otherwise returns the literal
+/// `"user"`, so the value is never absent. `ProposeGoal`'s two spellings
+/// (`proposal_direct` / `proposal_approved`) are unreachable here — LingXi does
+/// not ship that tool (see the accepted-divergence register) — which leaves the
+/// two values below.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalOrigin {
+    /// `y()`'s fallback: the user set this goal in this session.
+    #[default]
+    User,
+    /// `mon` (`src_182607998.js`) — the goal came back with a resumed session.
+    Restored,
+}
+
+impl GoalOrigin {
+    /// The analytics spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Restored => "restored",
+        }
+    }
+}
+
 /// Active session-scoped `/goal` state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveGoalState {
@@ -74,6 +104,16 @@ pub struct ActiveGoalState {
     /// Cumulative session tokens when the goal was set.
     #[serde(default)]
     pub tokens_at_start: u64,
+    /// How the goal became active. Upstream keeps `origin` on the in-memory
+    /// app-state object only — the persisted `goal_status` schema is
+    /// `{condition, iterations, set_at, tokens_at_start, last_reason}` — so this
+    /// is `skip`ped rather than added to a pinned wire shape. It survives a
+    /// compact boundary through
+    /// [`CompactActiveGoalState`](../../protocol/messages/struct.CompactActiveGoalState.html),
+    /// which mirrors upstream's raw dump of the same object, and the resume fold
+    /// re-derives it as [`GoalOrigin::Restored`] regardless of what was stored.
+    #[serde(skip)]
+    pub origin: GoalOrigin,
 }
 
 /// Timestamp sidecar for timing-sensitive history policies.
@@ -95,6 +135,10 @@ pub struct SessionState {
     pub session_id: SessionId,
     /// Ordered conversation history.
     pub history: Vec<ConversationMessage>,
+    /// Original assistant grouping flags `(isVirtual, resumedFromIncompleteThinking)`
+    /// retained when JSONL rows are projected into protocol messages.
+    #[serde(default)]
+    pub hook_message_grouping: HashMap<MessageId, (bool, bool)>,
     /// Cumulative token usage across all turns.
     pub usage: CumulativeUsage,
     /// Model identifier (e.g. `"claude-opus-4-7"`).
@@ -135,6 +179,18 @@ pub struct SessionState {
     /// counters); defaults to `false` on deserialize.
     #[serde(default)]
     pub plan_reminder_shown: bool,
+    /// 2.1.266 `NM` — "this session has exited plan mode at least once".
+    /// `ExitPlanMode` sets it; the plan-mode reminder provider consumes it to
+    /// emit ONE `plan_mode_reentry` attachment on the next entry that finds an
+    /// existing plan file (`if(nPt()&&y!==null){…;NM(!1)}`), then clears it.
+    #[serde(default)]
+    pub plan_mode_exited: bool,
+    /// 2.1.266 `Vz` — "a `plan_mode_exit` reminder is owed". `ExitPlanMode` sets
+    /// it (`NM(!0),Vz(!0)`); the provider clears it whether or not it emits
+    /// (`Z_s` calls `Vz(!1)` on both the still-in-plan-mode early return and the
+    /// emit path).
+    #[serde(default)]
+    pub plan_mode_exit_pending: bool,
     /// Finding #73 — assistant turns since the last `TodoWrite` (V1) /
     /// `TaskCreate`|`TaskUpdate` (V2) tool call. The per-turn todo-reminder
     /// (`L4p`/`N4p` `turnsSinceLastTodoWrite`/`turnsSinceLastTaskManagement`)
@@ -187,6 +243,15 @@ pub struct SessionState {
     /// history snapshot. Unlike `isMeta`, this is a hard context boundary.
     #[serde(default)]
     pub model_context_excluded_messages: HashSet<MessageId>,
+    /// Whether a thinking-signature recovery marker has been observed.
+    /// The actual outbound scope lives in `thinking_stripped_messages`; this
+    /// compatibility flag must never disable freshly generated thinking.
+    #[serde(default)]
+    pub thinking_signature_stripped: bool,
+    /// First rejected thinking block per historical assistant message. Fresh
+    /// assistant IDs remain eligible to round-trip thinking after recovery.
+    #[serde(default)]
+    pub thinking_stripped_messages: HashMap<MessageId, usize>,
 }
 
 impl SessionState {
@@ -196,6 +261,7 @@ impl SessionState {
         Self {
             session_id,
             history: Vec::new(),
+            hook_message_grouping: HashMap::new(),
             usage: CumulativeUsage::default(),
             model,
             model_profile: None,
@@ -206,12 +272,16 @@ impl SessionState {
             ultracode_non_meta_turns_since_reminder: 0,
             plan_mode: false,
             plan_reminder_shown: false,
+            plan_mode_exited: false,
+            plan_mode_exit_pending: false,
             turns_since_last_todo_write: 0,
             turns_since_last_reminder: 0,
             injected_message_sources: HashMap::new(),
             transcript_only_messages: HashSet::new(),
             compact_summary_messages: HashSet::new(),
             model_context_excluded_messages: HashSet::new(),
+            thinking_signature_stripped: false,
+            thinking_stripped_messages: HashMap::new(),
         }
     }
 

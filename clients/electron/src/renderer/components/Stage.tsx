@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { RunItem } from '../model/runItem';
 import {
@@ -33,12 +33,13 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   const slashIcon = slashCommand ? commandPaletteIcon(slashCommand.name) : null;
   return (
     <div className={user ? 'user-message-bubble' : undefined} style={{
-      maxWidth: user ? images.length ? 430 : 700 : 880,
-      padding: user ? '11px 16px' : 0,
-      borderRadius: user ? 22 : 0,
+      maxWidth: user ? images.length ? 'min(430px, 100%)' : 'min(700px, 90%)' : '100%',
+      minWidth: 0,
+      padding: user ? '10px 16px' : 0,
+      borderRadius: user ? 18 : 0,
       border: 0,
       background: user ? t.surfaceHover : 'transparent',
-      fontSize: 14, lineHeight: 1.65, letterSpacing: '-.01em',
+      fontSize: 14, lineHeight: 1.65, letterSpacing: 0,
       color, fontWeight: item.strong ? 600 : 400,
     }}>
       {images.length > 0 && (
@@ -114,8 +115,8 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
 // The open/closed state lives in the Stage's store, keyed by the block's stable
 // id — NOT in this component. It used to auto-collapse the instant the block
 // sealed, which fought a user who had deliberately opened it to read along; the
-// DEFAULT now comes from `streamed` (a field that never flips) and any explicit
-// user choice wins over it forever.
+// default comes from the device preference, and an explicit user choice wins
+// over that default for the lifetime of this session view.
 const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
   item: Extract<RunItem, { type: 'thinking' }>;
   open: boolean;
@@ -123,12 +124,12 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
 }) {
   const t = useT();
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 880 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: '100%' }}>
       <Disclosure
         id={item.id}
         open={open}
         onToggle={() => onSetOpen(item.id, !open)}
-        buttonStyle={{ padding: '2px 6px 2px 2px', borderRadius: 6, fontSize: 12, fontWeight: 500, letterSpacing: 0 }}
+        buttonStyle={{ minHeight: 28, padding: '4px 6px 4px 0', borderRadius: 6, fontSize: 12, fontWeight: 500, letterSpacing: 0 }}
         summary={
           <span
             className={item.done ? undefined : 'running-sweep'}
@@ -143,9 +144,9 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
       >
         <div
           style={{
-            borderLeft: `2px solid ${t.border}`, paddingLeft: 12, marginLeft: 6,
-            fontSize: 13.5, lineHeight: 1.6, letterSpacing: '-.006em', color: t.text3,
-            whiteSpace: 'pre-wrap',
+            borderLeft: `1px solid ${t.border}`, paddingLeft: 16, marginLeft: 3,
+            fontSize: 13.5, lineHeight: 1.65, letterSpacing: 0, color: t.text2,
+            whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
           }}
         >
           {item.text}
@@ -158,15 +159,14 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
   );
 });
 
-/** Whether a thinking block starts open, before any user choice. */
-function thinkingDefaultOpen(item: Extract<RunItem, { type: 'thinking' }>): boolean {
-  return item.streamed === true;
-}
+import { visibleRows } from './loopFold';
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
   /** The real conversation accumulated from the bridge. */
   liveItems?: RunItem[];
+  /** Default for untouched Thought blocks, including live streams and history. */
+  collapseThoughtsByDefault?: boolean;
   /** True while a turn is streaming — shows the thinking affordance at the tail. */
   running?: boolean;
   /** Truthful empty/onboarding copy supplied by the host state. */
@@ -177,12 +177,17 @@ interface StageProps {
    * scoped by this and dropped when it changes.
    */
   sessionKey?: string;
+  /**
+   * Rows collapsed behind a `/loop` no-op fold
+   * (`ConversationState.foldedItemIds`). Hidden until their fold row is opened,
+   * which uses the same per-item collapse map as every other disclosure.
+   */
+  foldedItemIds?: readonly string[];
 }
 
-export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '' }: StageProps) {
+export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', collapseThoughtsByDefault = true, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const tailRef = useRef<HTMLDivElement>(null);
-  const items: RunItem[] = liveItems;
 
   /**
    * Explicit open/closed choices, keyed by the item's STABLE id WITHIN a
@@ -209,18 +214,28 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
     setCollapse((previous) => collapseSet(previous, sessionRef.current, id, next));
   }, []);
 
+  // Rows a `/loop` no-op fold is hiding drop out here, and come back when their
+  // fold row is opened. A fold row defaults to CLOSED — folding a streak the
+  // reader then has to close by hand would defeat the point.
+  const items: readonly RunItem[] = useMemo(
+    () =>
+      visibleRows(liveItems, foldedItemIds, (foldRowId) =>
+        collapseOpen(visible, sessionKey, foldRowId) ?? false),
+    [liveItems, foldedItemIds, visible, sessionKey],
+  );
+
   // Keep the newest content in view as deltas stream in.
   useEffect(() => {
     tailRef.current?.scrollIntoView({ block: 'end' });
   }, [items.length, running]);
 
   return (
-    <div className="desktop-stage" style={{ flex: 1, overflowY: 'auto', background: t.transcriptBg, position: 'relative' }}>
+    <div className="desktop-stage" style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingInline: 'var(--conversation-gutter, 24px)', background: t.transcriptBg, position: 'relative' }}>
       <div
         className="desktop-stage-feed"
         style={{
-          width: '100%', maxWidth: 1040, margin: '0 auto',
-          padding: '24px clamp(18px, 2.2vw, 24px) 12px',
+          width: '100%', maxWidth: 'var(--conversation-width, 860px)', margin: '0 auto',
+          padding: '28px 0 16px',
           display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >
@@ -280,7 +295,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <ThinkingBlock
                     item={item}
-                    open={collapseOpen(visible, sessionKey, item.id) ?? thinkingDefaultOpen(item)}
+                    open={collapseOpen(visible, sessionKey, item.id) ?? !collapseThoughtsByDefault}
                     onSetOpen={setOpen}
                   />
                 </div>
@@ -318,23 +333,6 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           }
           return null;
         })}
-
-        {/* Streaming affordance — shown at the tail while a live turn runs. */}
-        {running && (
-          <div className="transcript-run-item" data-run-type="status" style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
-            <div style={{ display: 'flex', alignItems: 'center', color: t.text3, fontSize: 13.5 }}>
-              <span
-                className="running-sweep"
-                style={{
-                  '--sweep-base': t.text3,
-                  '--sweep-highlight': t.text,
-                } as CSSProperties}
-              >
-                Thinking…
-              </span>
-            </div>
-          </div>
-        )}
 
         {/* Scroll anchor — keeps the newest content in view as deltas arrive. */}
         <div ref={tailRef} />

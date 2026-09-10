@@ -44,24 +44,47 @@ use crate::definition::HookDefinition;
 use crate::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 
 /// Fixed system prompt the prompt hook evaluates against (`execPromptHook.ts`,
-/// v2.1.193). Oracle product name "Claude Code" is rebranded to "LingXi"; the
-/// segments are joined with single newlines.
-pub(crate) const PROMPT_HOOK_SYSTEM_PROMPT: &str = "You are evaluating a hook condition in LingXi. Judge whether the user-provided condition is met.
+/// v2.1.263). Oracle product name "Claude Code" is rebranded to "LingXi";
+/// blank lines and punctuation retain the evaluator prompt bytes.
+pub(crate) const PROMPT_HOOK_SYSTEM_PROMPT: &str = r#"You are evaluating a hook condition in LingXi. Judge whether the user-provided condition is met.
+
 Your response must be a JSON object with one of these shapes:
-- {\"ok\": true, \"reason\": \"<reason the condition is met>\"}
-- {\"ok\": false, \"reason\": \"<reason the condition is not met>\"}
-Always include a \"reason\" field.";
+- {"ok": true, "reason": "<reason the condition is met>"}
+- {"ok": false, "reason": "<reason the condition is not met>"}
+
+Always include a "reason" field."#;
+
+/// Stop evaluators must judge transcript evidence, including impossible conditions.
+pub(crate) const STOP_PROMPT_HOOK_SYSTEM_PROMPT: &str = r#"You are evaluating a stop-condition hook in LingXi. Read the conversation transcript carefully, then judge whether the user-provided condition is satisfied.
+
+Your response must be a JSON object with one of these shapes:
+- {"ok": true, "reason": "<quote evidence from the transcript that satisfies the condition>"}
+- {"ok": false, "reason": "<quote what is missing or what blocks the condition>"}
+- {"ok": false, "impossible": true, "reason": "<explain why the condition can never be satisfied>"}
+
+Always include a "reason" field, quoting specific text from the transcript whenever possible. If the transcript does not contain clear evidence that the condition is satisfied, return {"ok": false, "reason": "insufficient evidence in transcript"}.
+
+Only use {"ok": false, "impossible": true} when the condition is genuinely unachievable in this session — for example: the condition is self-contradictory, it depends on a resource or capability that is unavailable, or the assistant has explicitly tried, exhausted reasonable approaches, and stated it cannot be done. Apply your own judgment when deciding this — the assistant claiming the goal is impossible is evidence, not proof; independently confirm the condition is genuinely unachievable rather than deferring to the assistant's self-assessment. Do not use it just because the goal has not been reached yet or because progress is slow. When in doubt, return {"ok": false} without "impossible"."#;
 
 /// Default prompt-hook timeout (30 s — `execPromptHook.ts:55`
 /// `hook.timeout ? hook.timeout * 1000 : 30000`).
 pub const HOOK_PROMPT_TIMEOUT_MS: u64 = 30_000;
 
-/// A single-turn LLM query for a prompt hook.
-///
-/// Carries everything the runner needs WITHOUT exposing any api-client /
-/// protocol message types to the hooks crate (decoupling per the seam above).
+/// Live evaluator input, carried separately from the public hook JSON envelope.
+#[derive(Debug, Clone, Default)]
+pub struct PromptHookTranscript {
+    pub messages: Vec<protocol::ConversationMessage>,
+    pub last_usage_tokens: usize,
+    /// Original `(isVirtual, resumedFromIncompleteThinking)` assistant flags.
+    pub message_grouping: std::collections::HashMap<protocol::MessageId, (bool, bool)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PromptHookRequest {
+    /// Current host history, including messages not yet persisted.
+    pub transcript: Option<PromptHookTranscript>,
+    /// Host-provided transcript path from the event envelope, never hook output.
+    pub transcript_path: Option<std::path::PathBuf>,
     /// The user-turn prompt: the hook's `prompt` with `$ARGUMENTS` substituted
     /// by the serialized event payload (`execPromptHook.ts:35,42`).
     pub prompt: String,
@@ -119,6 +142,8 @@ struct PromptHookResponse {
     ok: bool,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    impossible: bool,
 }
 
 /// Telemetry hint for the caller (parallels `HttpExecutionSignal` /
@@ -139,6 +164,7 @@ pub(crate) struct PromptExecutionOutcome {
 }
 
 pub(crate) struct PromptExecutor {
+    pub(crate) transcript: Option<PromptHookTranscript>,
     pub(crate) runner: Option<Arc<dyn HookPromptRunner>>,
     pub(crate) timeout: Duration,
 }
@@ -146,7 +172,11 @@ pub(crate) struct PromptExecutor {
 impl PromptExecutor {
     #[allow(dead_code)]
     pub(crate) fn new(runner: Option<Arc<dyn HookPromptRunner>>, timeout: Duration) -> Self {
-        Self { runner, timeout }
+        Self {
+            runner,
+            timeout,
+            transcript: None,
+        }
     }
 
     /// Execute one Prompt hook.
@@ -183,11 +213,41 @@ impl PromptExecutor {
         };
 
         // Replace `$ARGUMENTS` with the JSON input (`execPromptHook.ts:35`).
-        let processed_prompt = add_arguments_to_prompt(prompt_template, payload_json);
+        let payload = serde_json::from_str::<serde_json::Value>(payload_json).ok();
+        let is_stop = matches!(
+            payload
+                .as_ref()
+                .and_then(|p| p.get("hook_event_name"))
+                .and_then(serde_json::Value::as_str),
+            Some("Stop" | "SubagentStop")
+        );
+        let condition = if is_stop {
+            format!(
+                "Based on the conversation transcript above, has the following stopping condition been satisfied? Answer based on transcript evidence only.\n\nCondition: {prompt_template}"
+            )
+        } else {
+            prompt_template.to_owned()
+        };
+        let processed_prompt = add_arguments_to_prompt(&condition, payload_json);
 
         let req = PromptHookRequest {
+            transcript: self.transcript.clone(),
+            transcript_path: payload
+                .as_ref()
+                .and_then(|p| {
+                    p.get("agent_transcript_path")
+                        .or_else(|| p.get("transcript_path"))
+                })
+                .and_then(serde_json::Value::as_str)
+                .filter(|p| !p.is_empty())
+                .map(std::path::PathBuf::from),
             prompt: processed_prompt,
-            system_prompt: PROMPT_HOOK_SYSTEM_PROMPT.to_string(),
+            system_prompt: if is_stop {
+                STOP_PROMPT_HOOK_SYSTEM_PROMPT
+            } else {
+                PROMPT_HOOK_SYSTEM_PROMPT
+            }
+            .to_string(),
             model: model.map(str::to_owned),
             timeout: self.timeout,
         };
@@ -276,7 +336,7 @@ impl PromptExecutor {
             }
         };
 
-        if parsed.ok {
+        if parsed.ok || (is_stop && parsed.impossible) {
             // Condition met ⇒ `outcome: 'success'` (`execPromptHook.ts:170-182`).
             PromptExecutionOutcome {
                 result: HookResult {
@@ -284,7 +344,11 @@ impl PromptExecutor {
                     stdout: full_response,
                     stderr: String::new(),
                     exit_code: None,
-                    response: None,
+                    response: (is_stop && !parsed.ok && parsed.impossible).then(|| HookResponse {
+                        impossible: true,
+                        reason: parsed.reason,
+                        ..Default::default()
+                    }),
                 },
                 signal: PromptExecutionSignal::Ok,
             }
@@ -310,7 +374,7 @@ impl PromptExecutor {
                         reason: Some(format!("[{prompt_template}]: {reason}")),
                         // `continueOnBlock` (schemas/hooks.ts): default false →
                         // a block prevents continuation; true lets the turn proceed.
-                        prevent_continuation: !continue_on_block,
+                        prevent_continuation: !is_stop && !continue_on_block,
                         ..Default::default()
                     }),
                 },
@@ -406,6 +470,92 @@ mod tests {
             async_timeout: None,
             rewake_message: None,
         }
+    }
+
+    #[tokio::test]
+    async fn evaluator_forwards_live_history_outside_the_hook_payload() {
+        let runner = MockRunner::ok(r#"{"ok":true,"reason":"yes"}"#);
+        let mut exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
+        exec.transcript = Some(PromptHookTranscript {
+            messages: vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "live evidence".into(),
+            )],
+            last_usage_tokens: 123,
+            ..Default::default()
+        });
+        exec.execute(
+            &make_prompt_hook(),
+            "evaluate",
+            None,
+            false,
+            r#"{"hook_event_name":"Stop"}"#,
+        )
+        .await;
+        let calls = runner.recorded.lock().unwrap();
+        let transcript = calls[0].transcript.as_ref().unwrap();
+        assert_eq!(transcript.last_usage_tokens, 123);
+        assert_eq!(transcript.messages.len(), 1);
+        assert!(!calls[0].prompt.contains("live evidence"));
+    }
+
+    #[tokio::test]
+    async fn stop_evaluator_uses_transcript_condition_without_preventing_continuation() {
+        for event in ["Stop", "SubagentStop"] {
+            let runner = MockRunner::ok(r#"{"ok":false,"reason":"tests still fail"}"#);
+            let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
+            let payload =
+                serde_json::json!({"hook_event_name":event,"transcript_path":"/tmp/session.jsonl"})
+                    .to_string();
+            let outcome = exec
+                .execute(&make_prompt_hook(), "all tests pass", None, false, &payload)
+                .await;
+            let response = outcome.result.response.unwrap();
+            assert_eq!(response.decision, Some(HookDecision::Block));
+            assert!(!response.prevent_continuation);
+            let calls = runner.recorded.lock().unwrap();
+            assert_eq!(calls[0].system_prompt, STOP_PROMPT_HOOK_SYSTEM_PROMPT);
+            assert!(calls[0]
+                .prompt
+                .starts_with("Based on the conversation transcript above,"));
+            assert_eq!(
+                calls[0].transcript_path.as_deref(),
+                Some(std::path::Path::new("/tmp/session.jsonl"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn impossible_only_releases_stop_conditions() {
+        for (event, blocked) in [
+            ("Stop", false),
+            ("SubagentStop", false),
+            ("PreToolUse", true),
+        ] {
+            let runner = MockRunner::ok(
+                r#"{"ok":false,"impossible":true,"reason":"unavailable capability"}"#,
+            );
+            let exec = PromptExecutor::new(Some(runner), Duration::from_secs(5));
+            let payload = serde_json::json!({"hook_event_name":event}).to_string();
+            let result = exec
+                .execute(&make_prompt_hook(), "condition", None, false, &payload)
+                .await
+                .result;
+            assert_eq!(
+                result.response.as_ref().and_then(|r| r.decision),
+                blocked.then_some(HookDecision::Block)
+            );
+            assert_eq!(
+                result.response.as_ref().is_some_and(|r| r.impossible),
+                !blocked
+            );
+        }
+    }
+
+    #[test]
+    fn general_evaluator_blank_lines_match_oracle() {
+        assert!(PROMPT_HOOK_SYSTEM_PROMPT.contains("is met.\n\nYour response"));
+        assert!(PROMPT_HOOK_SYSTEM_PROMPT.contains("not met>\"}\n\nAlways include"));
     }
 
     #[tokio::test]

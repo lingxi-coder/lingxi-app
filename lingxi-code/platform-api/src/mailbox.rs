@@ -60,6 +60,11 @@ pub enum MailboxError {
 /// Route-a-message seam used by `SendMessageTool`.
 #[async_trait]
 pub trait MailboxRouterHandle: Send + Sync {
+    /// Assigned team palette color for a currently registered identity.
+    async fn teammate_color(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     /// Route `message` from `from_agent` to `to_agent`.
     async fn route(
         &self,

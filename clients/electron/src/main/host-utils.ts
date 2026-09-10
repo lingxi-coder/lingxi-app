@@ -67,8 +67,10 @@ export interface TrustRecord {
 }
 
 export interface PersistedSettings {
+  archivedSessions?: import('../shared/settings.js').ArchivedSessionRecord[];
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';
+  collapseThoughtsByDefault?: boolean;
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;
@@ -139,6 +141,9 @@ export function parseSettings(value: unknown): PersistedSettings {
     value['theme'] === 'dark' || value['theme'] === 'light' || value['theme'] === 'system'
       ? value['theme']
       : undefined;
+  if (typeof value['collapseThoughtsByDefault'] === 'boolean') {
+    settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
+  }
   settings.model = boundedString(value['model'], 256);
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   if (value['bypassPermissionsModeAccepted'] === true) {
@@ -170,6 +175,18 @@ export function parseSettings(value: unknown): PersistedSettings {
     }
   }
 
+  if (Array.isArray(value['archivedSessions'])) {
+    settings.archivedSessions = [];
+    for (const item of value['archivedSessions']) {
+      if (!isPlainObject(item)) continue;
+      const projectPath = boundedString(item['projectPath'], 32_768);
+      const sessionId = boundedString(item['sessionId'], 64);
+      if (!projectPath || !sessionId || !settings.projects.includes(projectPath) || !SESSION_ID_PATTERN.test(sessionId)) continue;
+      if (settings.archivedSessions.some((item) => item.projectPath === projectPath && item.sessionId === sessionId)) continue;
+      settings.archivedSessions.push({ projectPath, sessionId, title: boundedString(item['title'], 512), archivedAt: boundedString(item['archivedAt'], 64) });
+    }
+    if (settings.activeSession && settings.archivedSessions.some((item) => item.projectPath === settings.activeSession?.projectPath && item.sessionId === settings.activeSession?.sessionId)) delete settings.activeSession;
+  }
   if (Array.isArray(value['pinnedSessions'])) {
     const seen = new Set<string>();
     for (const item of value['pinnedSessions']) {
@@ -197,13 +214,14 @@ export function parseSettings(value: unknown): PersistedSettings {
       if (fingerprint && trustedAt) settings.trustedWorkspaces[workspace] = { fingerprint, trustedAt };
     }
   }
+  settings.pinnedSessions = settings.pinnedSessions.filter((pin) => !settings.archivedSessions?.some((item) => item.projectPath === pin.projectPath && item.sessionId === pin.sessionId));
   return settings;
 }
 
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
-    bypassPermissionsModeAccepted, voice, modelPickerVisibility,
+    bypassPermissionsModeAccepted, voice, modelPickerVisibility, collapseThoughtsByDefault,
   } = settings;
   return {
     version,
@@ -213,7 +231,9 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     activeProject,
     activeSession: activeSession ? { ...activeSession } : undefined,
     projects: [...projects],
+    ...(settings.archivedSessions ? { archivedSessions: settings.archivedSessions.map((item) => ({ ...item })) } : {}),
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
+    ...(typeof collapseThoughtsByDefault === 'boolean' ? { collapseThoughtsByDefault } : {}),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
     ...(voice ? { voice: { ...voice } } : {}),
     ...(modelPickerVisibility ? { modelPickerVisibility: cloneModelPickerVisibility(modelPickerVisibility) } : {}),

@@ -200,7 +200,11 @@ pub trait BuiltinHookHandler: Send + Sync {
 ///
 /// The `http` transport is shared with the rest of the engine so requests
 /// flow through the same retry / telemetry plumbing.
+type AgentPromptTranscripts =
+    HashMap<(protocol::SessionId, protocol::AgentId), crate::PromptHookTranscript>;
+
 pub struct HookExecutorImpl {
+    agent_prompt_transcripts: std::sync::Mutex<AgentPromptTranscripts>,
     registry: Arc<RwLock<HookRegistry>>,
     http: Arc<dyn HttpTransport>,
     /// Background spawner. The Command arm's child runs on the `ProcessRunner`;
@@ -229,6 +233,20 @@ pub struct HookExecutorImpl {
     sandbox: Option<Arc<dyn Sandbox>>,
     /// Optional name-addressed MCP invoker for `mcp_tool` hooks.
     mcp_invoker: Option<Arc<dyn HookMcpInvoker>>,
+    /// `YYe()` — whether this is a confined eval-harness run, resolved ONCE at
+    /// construction rather than re-read inside the merge fold.
+    ///
+    /// Reading `CLAUDE_CODE_EVAL_CONFINED` at the gate made the flag process
+    /// global: `cargo test` runs a binary's tests on parallel threads in one
+    /// process, so a test that armed the variable silently suppressed hook
+    /// allows for every other test in flight. Same fix, same reason as
+    /// `PermissionPolicy::from_rules` — read the environment at the edge and
+    /// pass the answer down.
+    eval_confined: bool,
+    /// Per-executor override for the SessionEnd batch deadline, in place of
+    /// reading [`SESSION_END_HOOKS_TIMEOUT_ENV`] at dispatch. `None` reads the
+    /// environment as before.
+    session_end_timeout_override: Option<String>,
     /// Optional background registry for non-blocking (`blocking == false`)
     /// hooks (B5). Attached via [`Self::with_async_registry`]. When `None`, a
     /// non-blocking hook falls back to running synchronously (so its result is
@@ -282,6 +300,7 @@ impl HookExecutorImpl {
         runtime: Arc<dyn RuntimeSpawner>,
     ) -> Self {
         Self {
+            agent_prompt_transcripts: std::sync::Mutex::new(HashMap::new()),
             registry,
             http,
             runtime,
@@ -292,6 +311,8 @@ impl HookExecutorImpl {
             process: None,
             sandbox: None,
             mcp_invoker: None,
+            eval_confined: eval_confined_session(),
+            session_end_timeout_override: None,
             async_registry: None,
             policy_disable_all_hooks: false,
             hook_observer: None,
@@ -324,6 +345,29 @@ impl HookExecutorImpl {
     #[must_use]
     pub fn with_policy_disable_all_hooks(mut self, disable_all_hooks: bool) -> Self {
         self.policy_disable_all_hooks = disable_all_hooks;
+        self
+    }
+
+    /// Override the confined-eval-session flag (`YYe()`).
+    ///
+    /// The default comes from `CLAUDE_CODE_EVAL_CONFINED` at construction. This
+    /// exists so a test can exercise the confined fold WITHOUT mutating a
+    /// process-global that its neighbours are reading concurrently.
+    #[must_use]
+    pub fn with_eval_confined(mut self, eval_confined: bool) -> Self {
+        self.eval_confined = eval_confined;
+        self
+    }
+
+    /// Override the SessionEnd batch deadline instead of setting
+    /// [`SESSION_END_HOOKS_TIMEOUT_ENV`].
+    ///
+    /// Same reason as [`Self::with_eval_confined`]: the env var is a process
+    /// global, so a test that mutates it is visible to every other test
+    /// dispatching SessionEnd on a neighbouring thread.
+    #[must_use]
+    pub fn with_session_end_timeout_ms(mut self, timeout_ms: &str) -> Self {
+        self.session_end_timeout_override = Some(timeout_ms.to_string());
         self
     }
 
@@ -564,8 +608,37 @@ impl HookExecutorImpl {
             .remove_session_named_hook(session_id, name)
     }
 
+    /// Publish before the child's terminal event, so parent stop hooks never
+    /// race the transcript writer or accidentally evaluate the parent history.
+    pub fn publish_agent_prompt_transcript(
+        &self,
+        session_id: protocol::SessionId,
+        agent_id: protocol::AgentId,
+        transcript: crate::PromptHookTranscript,
+    ) {
+        self.agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((session_id, agent_id), transcript);
+    }
+
+    pub fn take_agent_prompt_transcript(
+        &self,
+        session_id: protocol::SessionId,
+        agent_id: protocol::AgentId,
+    ) -> Option<crate::PromptHookTranscript> {
+        self.agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(session_id, agent_id))
+    }
+
     /// Remove every named runtime hook scoped to `session_id`.
     pub async fn clear_session_hooks(&self, session_id: protocol::SessionId) -> usize {
+        self.agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(session, _), _| *session != session_id);
         self.registry.write().await.clear_session_hooks(session_id)
     }
 
@@ -613,7 +686,10 @@ impl HookExecutorImpl {
 
         // Compute the batch deadline from the env override / the max declared
         // per-hook timeout across the matched set (claude-code `Wqt`).
-        let env_value = std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok();
+        let env_value = match &self.session_end_timeout_override {
+            Some(override_ms) => Some(override_ms.clone()),
+            None => std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok(),
+        };
         let batch_timeout_ms =
             session_end_batch_timeout_ms(env_value.as_deref(), max_per_hook_timeout_ms(&matched));
         let deadline = tokio::time::Instant::now() + Duration::from_millis(batch_timeout_ms);
@@ -687,7 +763,7 @@ impl HookExecutorImpl {
                     let run_ms = run_started.elapsed().as_millis() as u64;
                     self.publish_run_attachment(&mut agg, hook, &attachment_id, &timed_out, run_ms)
                         .await;
-                    Self::merge(&mut agg, hook, timed_out, &hook_event);
+                    Self::merge(&mut agg, hook, timed_out, &hook_event, self.eval_confined);
                     break;
                 };
                 // Emit hook_response AFTER dispatch (for --include-hook-events).
@@ -735,7 +811,7 @@ impl HookExecutorImpl {
                 // ONE transcript attachment per hook run — same as `execute`.
                 self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
                     .await;
-                Self::merge(&mut agg, hook, result, &hook_event);
+                Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
                 // #45(b): no early break on first `Block`. SessionEnd's decision is
                 // a shutdown-path verdict that is never consumed for blocking, and
                 // claude's `cH` runner runs every matched hook regardless; running
@@ -861,7 +937,7 @@ impl HookExecutorImpl {
                 // for every run — 26 048 records in real 2.1.220 transcripts).
                 self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
                     .await;
-                Self::merge(&mut agg, hook, result, &hook_event);
+                Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
                 // #45(b): NO early break on the first `Block`. claude-code's `cH`
                 // runner dispatches every matched hook (BIN off 205755512) and
                 // folds `blocked = some(t.blocked)` afterwards, so later hooks'
@@ -946,7 +1022,7 @@ impl HookExecutorImpl {
                 // ONE transcript attachment per hook run — same as `execute`.
                 self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
                     .await;
-                Self::merge(&mut agg, hook, result, &hook_event);
+                Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
                 // #45(b): no early break on first `Block` — see `execute`. All
                 // matched hooks dispatch; `merge` keeps `Block` sticky.
             } else {
@@ -977,9 +1053,15 @@ impl HookExecutorImpl {
     pub async fn execute_excluding_agent(
         &self,
         event: HookEvent,
-        ctx: HookContext,
+        mut ctx: HookContext,
         exclude_agent_id: protocol::AgentId,
     ) -> AggregateHookResult {
+        if matches!(&event, HookEvent::SubagentStop { agent_id, .. } if *agent_id == exclude_agent_id)
+        {
+            // Consume even if hooks are disabled or none match.
+            ctx.prompt_transcript =
+                self.take_agent_prompt_transcript(ctx.session_id, exclude_agent_id);
+        }
         // #41 runner-head gate (`h$`).
         if let Some(skipped) = self.policy_disable_gate(&event) {
             return skipped;
@@ -1022,7 +1104,7 @@ impl HookExecutorImpl {
                 // ONE transcript attachment per hook run — same as `execute`.
                 self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
                     .await;
-                Self::merge(&mut agg, hook, result, &hook_event);
+                Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
                 // #45(b): no early break on first `Block` — see `execute`. All
                 // matched hooks dispatch; `merge` keeps `Block` sticky.
             } else {
@@ -1794,6 +1876,7 @@ impl Dispatcher {
                     _ => Duration::from_millis(HOOK_PROMPT_TIMEOUT_MS),
                 };
                 let exec = PromptExecutor {
+                    transcript: ctx.prompt_transcript.clone(),
                     runner: self.prompt_runner.clone(),
                     timeout: effective_timeout,
                 };
@@ -1953,6 +2036,7 @@ impl HookExecutorImpl {
         hook: &HookDefinition,
         r: HookResult,
         hook_event: &str,
+        eval_confined: bool,
     ) {
         let mut r = r;
         // PreModelSwitch is a gate: execution failures before a hook can
@@ -1979,6 +2063,42 @@ impl HookExecutorImpl {
                 reason: Some(reason),
                 ..HookResponse::default()
             });
+        }
+        // PARITY 2.1.263 `H_n(response, label)` — a CONFINED eval session takes
+        // permission grants only from its command line, so a hook's ALLOW is
+        // dropped before it can reach the aggregate:
+        //
+        // ```js
+        // function H_n(e,t){
+        //   if(!YYe()) return e;                       // CLAUDE_CODE_EVAL_CONFINED
+        //   if(e.permissionBehavior==="allow"){ n(`${t} permissionDecision=allow ignored: …`); e.permissionBehavior=void 0 }
+        //   if(e.permissionRequestResult?.behavior==="allow"){ n(`${t} PermissionRequest allow ignored: …`); e.permissionRequestResult=void 0 }
+        //   return e }
+        // ```
+        //
+        // Only the ALLOW channels are suppressed — a hook may still block or
+        // ask, which is the whole point of a confined harness run.
+        if eval_confined {
+            if let Some(resp) = &mut r.response {
+                let label = hook_event;
+                if resp.decision == Some(HookDecision::Approve) {
+                    tracing::info!(
+                        target: "hooks",
+                        "{label} permissionDecision=allow ignored: a confined session takes grants only from its command line"
+                    );
+                    resp.decision = None;
+                }
+                if matches!(
+                    resp.permission_request_result,
+                    Some(crate::response::PermissionRequestResult::Allow { .. })
+                ) {
+                    tracing::info!(
+                        target: "hooks",
+                        "{label} PermissionRequest allow ignored: a confined session takes grants only from its command line"
+                    );
+                    resp.permission_request_result = None;
+                }
+            }
         }
         if let Some(resp) = &r.response {
             // #45(b): claude-code's `cH` runner dispatches EVERY matched hook
@@ -3195,15 +3315,16 @@ fn build_lifecycle_envelope_body(
             team_name,
         } => {
             let payload = TeammateIdlePayload {
-                hook_event_name: HookEventNameTeammateIdle,
-                session_id: b.session_id,
+                session_id: ctx.session_id.as_uuid().to_string(),
                 transcript_path: b.transcript_path,
                 cwd: b.cwd,
+                // No scratchpad allocator is wired to this hook scope. Omit the
+                // optional field rather than fabricate a directory.
+                scratchpad_dir: None,
                 prompt_id: b.prompt_id,
                 permission_mode: b.permission_mode,
-                agent_id: b.agent_id,
                 agent_type: b.agent_type,
-                effort: b.effort,
+                hook_event_name: HookEventNameTeammateIdle,
                 teammate_name: teammate_name.clone(),
                 team_name: team_name.clone(),
             };
@@ -4489,4 +4610,18 @@ mod attachment_wiring_tests {
             "lowercase hex uuid: {tuid}"
         );
     }
+}
+
+/// PARITY 2.1.263 `YYe()` — `process.env.CLAUDE_CODE_EVAL_CONFINED === true`.
+///
+/// A confined eval-harness run takes its permission grants ONLY from the
+/// command line: hook allows are dropped ([`run_hooks`]'s `H_n` fold) and the
+/// rule loader drops every `allow`-behavior rule (`OG(e)` — NOT yet ported; see
+/// `docs/permission-byte-alignment-2.1.263-2026-09-07.md`).
+///
+/// The binary compares against the literal `true`, so `1`/`yes` do NOT arm it;
+/// the port keeps that exact spelling rather than the usual truthy allowlist.
+#[must_use]
+pub fn eval_confined_session() -> bool {
+    platform_api::env::is_eval_confined_session()
 }

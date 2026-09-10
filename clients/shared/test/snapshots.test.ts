@@ -231,6 +231,7 @@ function validateTaskRow(v: unknown): void {
   if ('started_at_ms' in task) assert.ok(isNumber(task['started_at_ms']));
   if ('error' in task) assert.ok(isString(task['error']));
   if ('stage' in task) assert.ok(isString(task['stage']));
+  if ('awaiting_plan_approval' in task) assert.equal(typeof task['awaiting_plan_approval'], 'boolean');
 }
 
 // Compile-time contract check for finding B7#11: `TaskRowDto` (listings.rs)
@@ -248,14 +249,19 @@ function validateTaskRow(v: unknown): void {
 // here too.
 test('ALL_TASK_ROW_DTO_KEYS (src/protocolCoverage.ts) matches TaskRowDto exactly', () => {
   assert.deepEqual(Object.keys(ALL_TASK_ROW_DTO_KEYS).sort(), [
+    'awaiting_plan_approval',
     'can_resume',
     'description',
+    'effort',
     'error',
+    'kind',
+    'model',
     'stage',
     'started_at_ms',
     'status',
     'task_id',
     'task_type',
+    'unread',
   ].sort());
 });
 
@@ -1494,6 +1500,14 @@ function validateCommand(name: string, v: unknown): void {
       );
       if ('credential_override' in o) assert.ok(isString(o['credential_override']));
       break;
+    case 'cron_manage': {
+      assert.ok(isString(o['request_id']));
+      const request = o['request'] as Record<string, unknown>;
+      assert.ok(['list', 'create', 'update', 'delete'].includes(request['action'] as string));
+      for (const key of ['id', 'cron', 'prompt']) if (key in request) assert.ok(isString(request[key]));
+      for (const key of ['recurring', 'durable']) if (key in request) assert.equal(typeof request[key], 'boolean');
+      break;
+    }
     case 'set_model':
       assert.ok(isString(o['model']));
       break;
@@ -1551,6 +1565,9 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'task_stop':
       assert.ok(isString(o['task_id']));
+      break;
+    case 'task_message':
+      assert.ok(isString(o['task_id']) && isString(o['message']));
       break;
     case 'resume_workflow':
       assert.ok(isString(o['task_id']));
@@ -2087,6 +2104,21 @@ function validateEvent(name: string, v: unknown): void {
       validateTaskRow(o['task']);
       break;
     }
+    case 'message_identity':
+    case 'message_retracted':
+      assert.ok(isString(o['message_id']));
+      break;
+    case 'loop_wakeup':
+      // `companion` rides only on a collapsed streak, so it stays optional
+      // while the counters are always present.
+      assert.ok(isString(o['message']) && isNumber(o['streak']) && isNumber(o['since_ms']));
+      if ('companion' in o) assert.ok(isString(o['companion']));
+      break;
+    case 'task_lifecycle':
+      // The engine forwards the SDK record already serialized, so the wire
+      // guarantee here is the envelope: exactly one JSON string payload.
+      assert.ok(isString(o['event_json']));
+      break;
     case 'task_output_chunk':
       assert.ok(
         isString(o['task_id']) &&
@@ -2179,6 +2211,17 @@ function validateEvent(name: string, v: unknown): void {
     case 'audio_request':
       assert.ok(isNumber(o['request_id']));
       validateAudioOp(o['op']);
+      break;
+    case 'cron_result':
+      assert.ok(isString(o['request_id']));
+      assert.ok(Array.isArray(o['jobs']));
+      for (const job of o['jobs'] as Record<string, unknown>[]) {
+        for (const key of ['id', 'cron', 'prompt']) assert.ok(isString(job[key]));
+        for (const key of ['recurring', 'durable', 'permanent']) assert.equal(typeof job[key], 'boolean');
+        assert.ok(isNumber(job['created_at']));
+        if ('last_fired_at' in job) assert.ok(isNumber(job['last_fired_at']));
+      }
+      if ('error' in o) assert.ok(isString(o['error']));
       break;
     case 'configuration_operation':
       assert.ok(['skill', 'mcp', 'plugin', 'hook'].includes(o['domain'] as string));

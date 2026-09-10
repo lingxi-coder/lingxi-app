@@ -188,7 +188,7 @@ pub struct AgentToolInput {
     /// `name?` — optional teammate name (AgentTool.tsx:94).
     #[serde(default)]
     pub name: Option<String>,
-    /// `team_name?` — optional team name (AgentTool.tsx:95).
+    /// `team_name?` — deprecated and ignored; the session owns one implicit team.
     #[serde(default)]
     pub team_name: Option<String>,
     /// `mode?` — DEPRECATED and ignored (claude 2.1.212). Still accepted on the
@@ -383,7 +383,83 @@ fn validate_agent_name(name: &str) -> Result<(), String> {
     if name == RESERVED_AGENT_NAME {
         return Err(reserved_agent_name_message());
     }
+    let normalized = name.to_ascii_lowercase();
+    if normalized == "main" || normalized == "team-lead" || reserved_agent_id_shape(&normalized) {
+        return Err("name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly".into());
+    }
     Ok(())
+}
+
+/// Oracle Mb: `^a(?:[\\w-]{1,63}-)?[0-9a-f]{16}$`, after recipient normalization.
+fn reserved_agent_id_shape(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('a') else {
+        return false;
+    };
+    let hex = match rest.rsplit_once('-') {
+        Some((prefix, suffix))
+            if !prefix.is_empty()
+                && prefix.len() <= 63
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) =>
+        {
+            suffix
+        }
+        Some(_) => return false,
+        None => rest,
+    };
+    hex.len() == 16
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// claude `G4o()`'s `model` parameter description (@3573156), the arm every
+/// non-coordinator session sees.
+///
+/// 2.1.266 rewrote the 2.1.238 sentence pair to name the *configured default
+/// subagent model* — the precedence clause gained "and the configured default
+/// subagent model", and the fallback clause became "else the default (inherits
+/// from the parent unless a default subagent model is configured)". The port
+/// carried the 2.1.238 text ("or inherits from the parent"), which describes a
+/// precedence the resolver no longer has.
+pub(crate) const AGENT_MODEL_PARAM_DESCRIPTION: &str = "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter and the configured default subagent model. If omitted, uses the agent definition's model, else the default (inherits from the parent unless a default subagent model is configured). Ignored for subagent_type: \"fork\" — forks always inherit the parent model.";
+
+/// The coordinator-mode suffix `G4o()` appends to
+/// [`AGENT_MODEL_PARAM_DESCRIPTION`] (`xi()?…:""`, @3573581 / @3573661).
+///
+/// Both arms begin with a leading space — the binary concatenates them onto the
+/// base sentence with `+`, not through a separator.
+const AGENT_MODEL_PARAM_COORDINATOR_FORCED_SUFFIX: &str =
+    " Unavailable on this session: this parameter is ignored — do not set it.";
+const AGENT_MODEL_PARAM_COORDINATOR_SUFFIX: &str = " Set this only when EXPLICITLY asked by the user for a specific model, never because the task seems small, simple, or cheap; otherwise omit it so the worker uses the default (the session model, unless a default subagent model is configured).";
+
+/// `a.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL` — when set on a
+/// COORDINATOR session the `model` argument is ignored outright (and `call`
+/// clears it), so the description says so instead of steering its use.
+#[must_use]
+pub(crate) fn coordinator_forces_worker_inherit_model() -> bool {
+    platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_COORDINATOR_FORCE_WORKER_INHERIT_MODEL")
+            .or_else(|_| std::env::var("CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL"))
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// `a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` — the deployment pin that takes the
+/// `model` argument away from the model entirely. `gSn()` (@3575600) drops the
+/// property from the advertised schema, and the LONG-arm agent-definition
+/// bullet drops its "; the `model` parameter here overrides the definition for
+/// this one call" clause (@3569298).
+#[must_use]
+pub(crate) fn subagent_model_forced() -> bool {
+    platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
+            .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
+            .ok()
+            .as_deref(),
+    )
 }
 
 static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -405,7 +481,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "model": {
                 "type": "string",
                 "enum": ["sonnet", "opus", "haiku", "fable"],
-                "description": "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent. Ignored for subagent_type: \"fork\" — forks always inherit the parent model."
+                "description": AGENT_MODEL_PARAM_DESCRIPTION
             },
             "run_in_background": {
                 "type": "boolean",
@@ -474,6 +550,102 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// claude `V4o` — the Agent tool's `outputSchema`, a union of the result shapes
+/// `call` can return.
+///
+/// ```js
+/// q4o = D2n().extend({status:k("completed"),prompt:s(),worktreePath:s().optional(),worktreeBranch:s().optional()})
+/// V4o = Ne([q4o, {status:k("async_launched"), …}, {status:k("remote_launched"), …}])
+/// ```
+///
+/// This is NOT advertised to the model. Its one consumer is the PostToolUse
+/// hook path: when a hook returns `updatedToolOutput`, the replacement is
+/// validated against this schema and DISCARDED on mismatch, keeping the
+/// original result (`turn_loop.rs`, `e.outputSchema?.safeParse(...)`). Without
+/// it, any shape a hook returned was substituted unchecked.
+///
+/// The `remote_launched` arm is omitted — the port has no remote/CCR path and
+/// `call` cannot produce that status, so declaring it would only widen what a
+/// hook may substitute. The two arms here are exactly the two statuses `call`
+/// emits.
+///
+/// `harnessNoteCount` / `harnessTailCount` / `harnessSectionHash` are declared
+/// because `D2n` declares them (all optional); the port does not populate them
+/// yet — see the harness-note residual in the audit report.
+static AGENT_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    let usage = json!({
+        "type": "object",
+        "properties": {
+            "input_tokens": { "type": "number" },
+            "output_tokens": { "type": "number" },
+            "cache_creation_input_tokens": { "type": ["number", "null"] },
+            "cache_read_input_tokens": { "type": ["number", "null"] },
+            "server_tool_use": { "type": ["object", "null"] },
+            "service_tier": { "type": ["string", "null"] },
+            "cache_creation": { "type": ["object", "null"] }
+        },
+        "required": ["input_tokens", "output_tokens"]
+    });
+    json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "status": { "const": "completed" },
+                    "agentId": { "type": "string" },
+                    "agentType": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "content": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "text" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["type", "text"]
+                        }
+                    },
+                    "resolvedModel": { "type": "string" },
+                    "modelsUsed": { "type": "array", "items": { "type": "string" } },
+                    "totalToolUseCount": { "type": "number" },
+                    "totalDurationMs": { "type": "number" },
+                    "totalTokens": { "type": "number" },
+                    "usage": usage,
+                    "worktreePath": { "type": "string" },
+                    "worktreeBranch": { "type": "string" },
+                    "harnessNoteCount": { "type": "number" },
+                    "harnessTailCount": { "type": "number" },
+                    "harnessSectionHash": { "type": "string" }
+                },
+                "required": [
+                    "status", "agentId", "prompt", "content",
+                    "totalToolUseCount", "totalDurationMs", "totalTokens", "usage"
+                ]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "status": { "const": "async_launched" },
+                    "isAsync": { "type": "boolean" },
+                    "agentId": { "type": "string", "description": "The ID of the async agent" },
+                    "description": { "type": "string", "description": "The description of the task" },
+                    "resolvedModel": { "type": "string", "description": "Model in use at the backgrounding transition (a pre-background swap is reflected here)" },
+                    "modelsUsed": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Ordered distinct models used before backgrounding (length > 1 means a mid-run swap)"
+                    },
+                    "prompt": { "type": "string", "description": "The prompt for the agent" },
+                    "outputFile": { "type": "string", "description": "Path to the output file for checking agent progress" },
+                    "canReadOutputFile": { "type": "boolean", "description": "Whether the calling agent has Read/Bash tools to check progress" }
+                },
+                "required": ["status", "agentId", "description", "prompt", "outputFile"]
+            }
+        ]
+    })
+});
+
 /// The MODEL-FACING input schema = [`AGENT_INPUT_SCHEMA`] with `cwd` removed.
 ///
 /// claude resolves the AgentTool's advertised schema as `yJp().omit({cwd:!0})`
@@ -498,6 +670,44 @@ static AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND: Lazy<Value> = Lazy::new(|| {
     }
     schema
 });
+
+/// Finish `gSn()`'s two remaining projections over the base model-facing schema:
+/// the coordinator-mode `model` description suffix and the
+/// `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` omission of `model` altogether.
+///
+/// ```js
+/// gSn=m(()=>{let e=z4o().omit({cwd:!0}),n=Bl()||L5()?e.omit({run_in_background:!0}):e;
+///            return a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE?n.omit({model:!0}):n})
+/// ```
+///
+/// `run_in_background` is already projected by the caller's choice of base
+/// (`advertise_run_in_background`); this applies the rest. Called once per tool
+/// instance and memoized, matching the binary's `m(...)` memoization of the
+/// whole builder.
+fn project_agent_input_schema(base: &Value, is_coordinator: bool) -> Value {
+    let mut schema = base.clone();
+    let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return schema;
+    };
+    if subagent_model_forced() {
+        props.remove("model");
+        return schema;
+    }
+    if is_coordinator {
+        let suffix = if coordinator_forces_worker_inherit_model() {
+            AGENT_MODEL_PARAM_COORDINATOR_FORCED_SUFFIX
+        } else {
+            AGENT_MODEL_PARAM_COORDINATOR_SUFFIX
+        };
+        if let Some(model) = props.get_mut("model").and_then(Value::as_object_mut) {
+            model.insert(
+                "description".to_string(),
+                Value::String(format!("{AGENT_MODEL_PARAM_DESCRIPTION}{suffix}")),
+            );
+        }
+    }
+    schema
+}
 
 /// Format the M3-05 byte-locked budget-exceeded denial string.
 ///
@@ -553,6 +763,88 @@ fn extract_content_texts(result: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Inputs to [`should_run_in_background`] — `vBo`'s argument object minus the
+/// isolation fields, which the port resolves separately.
+struct BackgroundDecision {
+    /// `wantsBackground` — the call's `run_in_background`, tri-state.
+    wants_background: Option<bool>,
+    /// `n.background===!0` — the selected definition's frontmatter flag.
+    definition_background: bool,
+    /// `Pw(n)` — the BUILT-IN `web-fetch` agent, which never auto-backgrounds.
+    is_builtin_web_fetch: bool,
+    /// `e.isCoordinator`.
+    is_coordinator: bool,
+    /// `callerIsInProcessTeammate`.
+    caller_is_in_process_teammate: bool,
+    /// `backgroundTasksDisabled` — the only negative gate on the whole group.
+    background_tasks_disabled: bool,
+}
+
+/// `vBo`'s `shouldRunAsync` for a LOCAL spawn (2.1.266 @2957xxx):
+///
+/// ```js
+/// let d=e.isCoordinator&&!o||e.forceAsync||!o&&r!==!1;
+/// let y=r===!0||n.background===!0||!Pw(n)&&d;
+/// return {…, shouldRunAsync: E||y&&!e.backgroundTasksDisabled}
+/// ```
+///
+/// (`E` is the remote-launch arm, which the port does not have.)
+///
+/// The two EXPLICIT arms — an explicit `run_in_background: true` and a
+/// definition's `background: true` — sit outside the `!Pw(n)` factor, so they
+/// still background the built-in web-fetch agent; only the implicit default
+/// does not.
+///
+/// ⛔ `e.forceAsync` (`L5()&&!Le`, the raw fork FEATURE flag) is NOT modeled.
+/// The binary backgrounds every spawn once fork is enabled, but the port's fork
+/// path is synchronous end to end — the parent's rendered system prompt and the
+/// fork context messages are threaded onto the request the SYNC dispatch builds
+/// (`fork_threads_parent_system_prompt_onto_request`,
+/// `fork_gate_on_explicit_fork_takes_fork_path`), and `dispatch_async` has no
+/// equivalent. Adding the disjunct before the async fork path exists would send
+/// forks down a route that drops their inherited context. It only changes the
+/// answer for an explicit `run_in_background: false`, which the schema does not
+/// advertise while fork is on.
+fn should_run_in_background(d: BackgroundDecision) -> bool {
+    let auto_background = !d.caller_is_in_process_teammate
+        && (d.is_coordinator || d.wants_background != Some(false));
+    (d.wants_background == Some(true)
+        || d.definition_background
+        || (!d.is_builtin_web_fetch && auto_background))
+        && !d.background_tasks_disabled
+        && !d.caller_is_in_process_teammate
+}
+
+fn async_launch_result(launch: platform_api::subagent_spawn::AsyncLaunch, task_id: Option<String>, prompt: &str, description: &str, resolved_model: &str, can_read_output_file: bool) -> ToolCallResult {
+    let agent_id_str = launch.agent_id.as_uuid().to_string();
+    let prefix = format!("Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime.");
+    let tail = if can_read_output_file {
+        format!("Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification.", launch.output_file)
+    } else {
+        "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running.".to_string()
+    };
+    let mut data = json!({"isAsync": true, "status": "async_launched", "agentId": agent_id_str, "prompt": prompt, "description": description, "resolvedModel": resolved_model,
+        "outputFile": launch.output_file, "canReadOutputFile": can_read_output_file, "model_content": format!("{prefix}\n{tail}")});
+    if let Some(task_id) = task_id { data["task_id"] = json!(task_id); }
+    ToolCallResult {data, model_content: None, new_messages: vec![], context_modifier: None, is_error: false, mcp_meta: None}
+}
+
+#[path = "foreground_task.rs"]
+mod foreground_task;
+
+use platform_api::subagent_output::max_turns_harness_note;
+
+/// `N2n(e)` (@3530xxx) reduced to the shape the port's runner publishes: the
+/// max-turns fall-through is the only completion that stamps
+/// `reason: "max_turns_exhausted"` onto its result, and it carries the budget
+/// under `max_turns`.
+fn max_turns_reached_from_result(result: &Value) -> Option<u64> {
+    if result.get("reason").and_then(Value::as_str) != Some("max_turns_exhausted") {
+        return None;
+    }
+    result.get("max_turns").and_then(Value::as_u64)
 }
 
 /// Render the model-facing `tool_result` text for a COMPLETED subagent, byte-for-byte
@@ -621,6 +913,10 @@ pub struct AgentTool {
     /// `nul` @292883815 — see [`AgentTool::new`]). Schema-only: the async
     /// DISPATCH gate is `!WA()` alone and is evaluated inline in `call`.
     advertise_run_in_background: bool,
+    /// `gSn()`'s memoized projection of the advertised schema — the coordinator
+    /// `model` description suffix and the `SUBAGENT_MODEL_FORCE` omission,
+    /// resolved on first use because both read live session state.
+    projected_input_schema: std::sync::OnceLock<Value>,
     /// Injected Fusion orchestrator. `None` on mobile and in `register_all`.
     fusion: Option<Arc<dyn FusionExecutor>>,
     /// Host-owned common terminal recorder for Agent-origin Fusion runs.
@@ -1222,6 +1518,15 @@ fn main_loop_model_parent(ctx: &ToolUseContext) -> Option<String> {
     }
 }
 
+/// The child's agent id, whatever way its run ended.
+fn subagent_result_agent_id(result: &platform_api::SubagentResult) -> protocol::AgentId {
+    match result {
+        platform_api::SubagentResult::Completed { agent_id, .. }
+        | platform_api::SubagentResult::Failed { agent_id, .. }
+        | platform_api::SubagentResult::Killed { agent_id, .. } => *agent_id,
+    }
+}
+
 impl AgentTool {
     fn release_spawn_reservation(&self) {
         if let Some(registry) = &self.ctx.task_registry {
@@ -1271,6 +1576,7 @@ impl AgentTool {
         Self {
             ctx,
             advertise_run_in_background,
+            projected_input_schema: std::sync::OnceLock::new(),
             fusion: None,
             terminal_recorder: None,
             terminal_recorder_factory: None,
@@ -1363,6 +1669,7 @@ impl AgentTool {
         agents.push(SubagentListingEntry {
             agent_type: FUSION_AGENT_TYPE.to_string(),
             when_to_use: FUSION_WHEN_TO_USE.to_string(),
+            when_to_use_lean: None,
             tools_description: "Fusion deliberation (read-only panel)".to_string(),
         });
     }
@@ -1961,8 +2268,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// `agent_listing_delta` attachment path (orchestrator) render identical
     /// lines. The `toolsDescription` is pre-rendered by the spawner (TS
     /// `getToolsDescription`).
-    fn format_agent_line(agent: &platform_api::subagent_spawn::SubagentListingEntry) -> String {
-        platform_api::subagent_spawn::format_agent_line(agent)
+    /// `lean` is `U2n`'s second argument — the LEAN-prompt flag for the model
+    /// this prompt is being rendered for. A definition that declares a
+    /// `whenToUseLean` renders it only on that arm.
+    fn format_agent_line(
+        agent: &platform_api::subagent_spawn::SubagentListingEntry,
+        lean: bool,
+    ) -> String {
+        platform_api::subagent_spawn::format_agent_line(agent, lean)
     }
 
     /// Build the dynamic Agent tool prompt, porting claude-code v2.1.193's
@@ -2060,6 +2373,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         model: Option<&str>,
         general_purpose_available: bool,
     ) -> String {
+        // `re = PC({model, leanPrompt})` — the LEAN-prompt flag, computed ONCE
+        // and used for both the catalog lines (`U2n`'s second argument) and the
+        // SHORT/LONG arm split below, exactly as `H2n` does.
+        let lean = tool_api::dh_simple_system_prompt(model);
         // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
         // the catalog to the orchestrator's `<system-reminder>` attachment, so the
         // description carries only the static pointer line. A LEGACY inline body is
@@ -2103,7 +2420,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             } else {
                 let agent_lines = agents
                     .iter()
-                    .map(Self::format_agent_line)
+                    .map(|agent| Self::format_agent_line(agent, lean))
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!("Available agent types and the tools they have access to:\n{agent_lines}")
@@ -2206,7 +2523,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // render the SHORT arm, so a sonnet / haiku / `claude-3-*` /
         // `opus-4-0..4-7` session never saw `## When not to use`,
         // `## Usage notes`, `## Writing the prompt`, or the `<example>` blocks.
-        if tool_api::dh_simple_system_prompt(model) {
+        if lean {
             // ---- SHORT (lean) arm — binary `if(m){…}` ----
             //
             // `## When to use` + four terse bullets. NO `## When not to use`, NO
@@ -2375,6 +2692,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             if is_fork { "For fresh agents, terse" } else { "Terse" }
         );
 
+        // `${a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE?"":"; the `model` parameter here
+        // overrides the definition for this one call"}` (@3569298) — when the
+        // deployment pins the subagent model, the `model` argument is gone from
+        // the advertised schema, so the bullet must not promise it.
+        let model_override_clause = if subagent_model_forced() {
+            ""
+        } else {
+            "; the `model` parameter here overrides the definition for this one call"
+        };
+
         // `d` — the code-reviewer example, shared by both `Example usage:` blocks.
         let code_reviewer_example = format!(
             "<example>\n\
@@ -2489,7 +2816,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
 - {final_report_note}\n\
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.{background_notes}{dont_race_note}\n\
 - To continue a previously spawned agent, use SendMessage with the agent's ID or name as the `to` field — that resumes it with full context. A new {AGENT_TOOL_NAME} call starts a fresh agent with no memory of prior runs{fork_memory_qualifier}, so the prompt must be self-contained.\n\
-- Each agent type's model, reasoning effort, and tool access are set in its definition (`.lingxi/agents/*.md` frontmatter, or the SDK `agents` option); the `model` parameter here overrides the definition for this one call.\n\
+- Each agent type's model, reasoning effort, and tool access are set in its definition (`.lingxi/agents/*.md` frontmatter, or the SDK `agents` option){model_override_clause}.\n\
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since a fresh agent is not aware of the user's intent{proactive_notes}\n\
 - With `isolation: \"worktree\"`, the worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.{when_to_fork}{writing_the_prompt}\n\n\
 {examples}"
@@ -2734,16 +3061,28 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         bus.log_event(SUBAGENT_OUTPUT_FLAGGED, md).await;
     }
 
-    /// (G11) Emit claude `tengu_agent_tool_terminated` (agentToolUtils.ts:646-656):
-    /// an ASYNC subagent killed by the user (`reason:'user_kill_async'`). Fired by
-    /// the async lifecycle on kill; not reached on the sync path.
-    #[allow(dead_code)]
+    /// Emit claude `tengu_agent_tool_terminated` — a subagent run that ENDED by
+    /// being stopped rather than finishing.
+    ///
+    /// Upstream has three sites: the async kill (`reason` from `killedBy`:
+    /// `parent_kill_async` / `system_kill_async` / `user_kill_async`) and two
+    /// sync cancels, both `user_cancel_sync`.
+    ///
+    /// `final_model` / `model_swapped` are NOT emitted. Upstream reads them off
+    /// the run's models-used list, and `SubagentResult::Killed` carries only an
+    /// agent id here — so the honest options were to omit them or to invent
+    /// `model_swapped: false` for a run that may well have hopped. A subagent CAN
+    /// swap models now (the refusal cascade), which is exactly why a hardcoded
+    /// `false` would be a lie rather than a harmless default.
     async fn emit_agent_tool_terminated(
         bus: &Arc<AnalyticsBus>,
         agent_type: &str,
         model: &str,
         duration_ms: u64,
         is_built_in_agent: bool,
+        is_async: bool,
+        agent_depth: u32,
+        reason: &str,
     ) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -2762,16 +3101,18 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             "duration_ms".into(),
             AnalyticsValue::Int(duration_ms as i64),
         );
-        md.insert("is_async".into(), AnalyticsValue::Bool(true));
+        md.insert("is_async".into(), AnalyticsValue::Bool(is_async));
         md.insert(
             "is_built_in_agent".into(),
             AnalyticsValue::Bool(is_built_in_agent),
         );
         md.insert(
+            "agent_depth".into(),
+            AnalyticsValue::Int(i64::from(agent_depth)),
+        );
+        md.insert(
             "reason".into(),
-            AnalyticsValue::String(
-                Verified::assert_safe("user_kill_async".to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(reason.to_string()).into_inner()),
         );
         bus.log_event(TOOL_TERMINATED, md).await;
     }
@@ -2839,6 +3180,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             budget,
         };
         let request = SubagentSpawnRequest {
+            teammate_color: None,
             subagent_type: effective_type.to_string(),
             prompt: parsed.prompt.clone(),
             observer: selected.observer.clone().or_else(|| {
@@ -2857,11 +3199,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             },
             run_in_background: true,
             name: if is_fork { None } else { parsed.name.clone() },
-            team_name: if is_fork {
-                None
-            } else {
-                parsed.team_name.clone()
-            },
+            team_name: None,
             // (parity 2.1.212) The `mode` call param is DEPRECATED and ignored:
             // claude no longer destructures/passes it. The child inherits the
             // parent's live permission mode (with agent-definition frontmatter as
@@ -2919,7 +3257,6 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
 
         match spawner.spawn_async(request, inherit).await {
             Ok(launch) => {
-                let agent_id_str = launch.agent_id.to_string();
                 // (G14) Register name → agentId for SendMessage routing — ASYNC
                 // ONLY, post-launch so a failed spawn leaves no stale entry
                 // (claude AgentTool.tsx:700-712). Prefer the ctx-level registry
@@ -2937,47 +3274,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 let can_read_output_file = ctx.subagent_registry.as_ref().is_some_and(|reg| {
                     reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
                 });
-                // claude `async_launched` tool_result text, byte-for-byte
-                // (2.1.223 @251729190: prefix `n` + `canReadOutputFile`-branched
-                // tail `o`, joined by `\n`). The 223 prefix appends the
-                // don't-fabricate sentence ("You know nothing about its
-                // results…"), and the non-readable tail appends the
-                // still-running sentence — both new since the 2.1.207 lock.
-                let output_file = &launch.output_file;
-                let prefix = format!(
-                    "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime."
-                );
-                let instructions = if can_read_output_file {
-                    // claude `canReadOutputFile` branch: warn the model NOT to
-                    // read the `.output` file — it is the full subagent JSONL
-                    // transcript and would overflow context. (`${ys}` = `Read`.)
-                    format!(
-                        "Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {output_file}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification."
-                    )
-                } else {
-                    "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running.".to_string()
-                };
-                let model_content = format!("{prefix}\n{instructions}");
-                Ok(ToolCallResult {
-                    data: json!({
-                        "isAsync": true,
-                        "status": "async_launched",
-                        "agentId": agent_id_str,
-                        "description": parsed.description,
-                        // claude `async_launched` payload includes the resolved
-                        // model id (`resolvedModel: U`).
-                        "resolvedModel": selected.resolved_model.clone(),
-                        "prompt": parsed.prompt,
-                        "outputFile": launch.output_file,
-                        "canReadOutputFile": can_read_output_file,
-                        "model_content": model_content,
-                    }),
-                    model_content: None,
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: false,
-                    mcp_meta: None,
-                })
+                Ok(async_launch_result(launch, None, &parsed.prompt, &parsed.description, &selected.resolved_model, can_read_output_file))
             }
             Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {
                 self.release_spawn_reservation();
@@ -3063,11 +3360,48 @@ impl Tool for AgentTool {
     fn input_schema(&self) -> &Value {
         // claude advertises `yJp().omit({cwd:!0})` — the model-facing schema
         // never exposes `cwd` (set internally by isolation / explicit override).
-        if self.advertise_run_in_background {
-            &AGENT_INPUT_SCHEMA_MODEL
-        } else {
-            &AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND
+        // `gSn()`'s remaining two projections (coordinator `model` suffix,
+        // `SUBAGENT_MODEL_FORCE` omission) depend on live session state, so the
+        // projected schema is memoized per instance the way the binary memoizes
+        // the whole builder.
+        self.projected_input_schema.get_or_init(|| {
+            let base = if self.advertise_run_in_background {
+                &*AGENT_INPUT_SCHEMA_MODEL
+            } else {
+                &*AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND
+            };
+            let is_coordinator = self
+                .ctx
+                .coordinator_mode
+                .as_ref()
+                .is_some_and(|m| m.is_enabled());
+            project_agent_input_schema(base, is_coordinator)
+        })
+    }
+    fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
+        let Some(name) = input.get("name").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let mut issues = Vec::new();
+        if !matches_agent_name_pattern(name) {
+            issues.push(serde_json::json!({"origin":"string","code":"invalid_format","format":"regex","pattern":format!("/{AGENT_NAME_PATTERN}/"),"path":["name"],"message":AGENT_NAME_REGEX_MESSAGE}));
         }
+        if name == RESERVED_AGENT_NAME {
+            issues.push(serde_json::json!({"code":"custom","path":["name"],"message":reserved_agent_name_message()}));
+        }
+        // TGo has a second .refine(!l0); Zod reports both for "main".
+        let normalized = self.ctx.subagent_spawner.as_ref().map_or_else(
+            || platform_api::live_sessions::normalize_name(name),
+            |spawner| spawner.normalize_teammate_recipient(name),
+        );
+        if normalized == "main" || normalized == "team-lead" || reserved_agent_id_shape(&normalized)
+        {
+            issues.push(serde_json::json!({"code":"custom","path":["name"],"message":"name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly"}));
+        }
+        issues
+    }
+    fn output_schema(&self) -> Option<&Value> {
+        Some(&AGENT_OUTPUT_SCHEMA)
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -3233,6 +3567,23 @@ impl Tool for AgentTool {
             }
         };
 
+        // `if(xi()&&a.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL)F=void 0`
+        // (@3577560) — on a coordinator session pinned to worker inheritance the
+        // `model` argument is dropped before anything reads it, which is also
+        // what the schema description advertises. Dropping it here (rather than
+        // at each of the four `parsed.model` reads) keeps the selection, the
+        // spawn request and the telemetry on one value.
+        if parsed.model.is_some()
+            && coordinator_forces_worker_inherit_model()
+            && self
+                .ctx
+                .coordinator_mode
+                .as_ref()
+                .is_some_and(|m| m.is_enabled())
+        {
+            parsed.model = None;
+        }
+
         // `name` zod chain `z.string().regex(uZc).refine(t=>t!==K9)` (binary
         // `exy`). The wire `pattern` (on the advertised `name` property) covers
         // the regex at the turn-loop input gate, but `.refine()` (reserved
@@ -3269,6 +3620,43 @@ impl Tool for AgentTool {
                 ctx.depth,
                 depth_limit,
             )));
+        }
+
+        // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing.
+        // A kill is cooperative before it is forced — the runner keeps
+        // dispatching the rest of the current turn's `tool_use` blocks until it
+        // next races the stop at a model round-trip — so without this a dying
+        // agent can still launch a child that outlives it.
+        if let Some(agent_id) = ctx.agent_id {
+            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "subagent_spawner_stop_pending",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(
+                    platform_api::agent_processes::stop_pending_refusal("launch new agents."),
+                ));
+            }
+        }
+
+        // 2.1.263: nesting denial precedes the explicit background denial and
+        // both run before fork/type resolution. A named ordinary child has no
+        // team_name, so it must not be mistaken for a teammate.
+        let caller_is_teammate = ctx.agent_name.is_some() && ctx.team_name.is_some();
+        let caller_is_in_process_teammate = caller_is_teammate
+            && std::env::var("LINGXI_CODE_TEAMMATE_BACKEND").as_deref() != Ok("split-pane");
+        if caller_is_teammate && parsed.name.is_some() {
+            return Err(ToolError::InvalidInput(
+                "Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.".into(),
+            ));
+        }
+        if caller_is_in_process_teammate && parsed.run_in_background == Some(true) {
+            return Err(ToolError::InvalidInput(
+                "In-process teammates cannot spawn background agents. Use run_in_background=false for synchronous subagents.".into(),
+            ));
         }
 
         // Binary `AgentTool.call`: `n=n.replace(/\s+/g," ").trim()` — normalize the
@@ -3353,6 +3741,153 @@ impl Tool for AgentTool {
             return Err(ToolError::InvalidInput(
                 "Fork is not available inside a forked worker. Complete your task directly using your tools.".into(),
             ));
+        }
+
+        // 2.1.263 src_160988549.js:3517864. Named teammates branch before
+        // ordinary type resolution, concurrency accounting, and MCP checks.
+        // team_name and mode are schema-only inputs; neither selects a team.
+        let teammate_candidate = spawner.teammate_enabled()
+            && parsed.name.is_some()
+            && !is_fork
+            && parsed.isolation.is_none()
+            && parsed.cwd.is_none();
+        let listing = if teammate_candidate {
+            spawner.agent_listing().await
+        } else {
+            Vec::new()
+        };
+        let special_type = parsed.subagent_type.as_deref().is_some_and(|kind| {
+            let normalized = normalize_agent_type(WEB_FETCH_AGENT_TYPE);
+            listing
+                .iter()
+                .any(|agent| agent.agent_type == WEB_FETCH_AGENT_TYPE)
+                && (kind == WEB_FETCH_AGENT_TYPE
+                    || (normalize_agent_type(kind) == normalized
+                        && !listing.iter().any(|agent| {
+                            agent.agent_type != WEB_FETCH_AGENT_TYPE
+                                && normalize_agent_type(&agent.agent_type) == normalized
+                        })))
+        });
+        if teammate_candidate && !special_type {
+            let requested = parsed.subagent_type.as_deref();
+            if let (Some(kind), Some(gate)) = (requested, &self.ctx.permission_gate) {
+                if let Some(source) = gate.agent_type_deny(kind).await {
+                    return Err(ToolError::InvalidInput(format!(
+                        "Agent type '{kind}' has been denied by permission rule 'Agent({kind})' from {source}."
+                    )));
+                }
+            }
+            let resolved = requested.and_then(|kind| {
+                listing
+                    .iter()
+                    .find(|agent| agent.agent_type == kind)
+                    .or_else(|| {
+                        let mut matches = listing.iter().filter(|agent| {
+                            normalize_agent_type(&agent.agent_type) == normalize_agent_type(kind)
+                        });
+                        let first = matches.next();
+                        if matches.next().is_none() {
+                            first
+                        } else {
+                            None
+                        }
+                    })
+            });
+            let kind = resolved
+                .map(|agent| agent.agent_type.as_str())
+                .or(requested)
+                .unwrap_or(GENERAL_PURPOSE_AGENT_TYPE);
+            if let Some(gate) = &self.ctx.permission_gate {
+                if let Some(source) = gate.agent_type_deny(kind).await {
+                    return Err(ToolError::InvalidInput(format!(
+                        "Agent type '{kind}' has been denied by permission rule 'Agent({kind})' from {source}."
+                    )));
+                }
+            }
+            let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
+                ToolError::Internal(
+                    "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
+                )
+            })?;
+            let origin_session_id = Self::origin_session_id(&ctx).await;
+            let budget = Self::budget_for_origin(budget, origin_session_id);
+            if let Err(BudgetError::Exceeded { current_nano_usd }) =
+                budget.check_and_charge(0).await
+            {
+                return Err(match budget.max_session_nano_usd() {
+                    Some(limit) => {
+                        ToolError::InvalidInput(budget_limit_reached_error(current_nano_usd, limit))
+                    }
+                    None => ToolError::Internal(format_budget_denied(current_nano_usd)),
+                });
+            }
+            let registry = ctx.subagent_registry.clone().ok_or_else(|| {
+                ToolError::Internal("AgentTool: parent ToolRegistry not threaded via ToolUseContext.subagent_registry".into())
+            })?;
+            let mut invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(registry)
+                .with_background_owned(true);
+            if let Some(gate) = self.ctx.permission_gate.clone() {
+                invoker = invoker.with_gate(gate);
+            }
+            let selected = spawner
+                .resolve_selection(kind, parsed.model.as_deref())
+                .await;
+            let inherited_mode = self
+                .ctx
+                .permission_gate
+                .as_ref()
+                .and_then(|gate| gate.permission_mode())
+                .unwrap_or_else(|| self.ctx.permission_mode.wire_str().to_owned());
+            let resolved_model = if selected.resolved_model.is_empty() {
+                parsed.model.clone()
+            } else {
+                Some(selected.resolved_model)
+            };
+            let request = SubagentSpawnRequest {
+                subagent_type: kind.into(),
+                prompt: parsed.prompt.clone(),
+                description: Some(parsed.description),
+                name: parsed.name,
+                model: resolved_model,
+                // The obsolete input mode never overrides the live parent mode.
+                mode: Some(inherited_mode),
+                // Snapshot the caller's current working directory only after
+                // teammate eligibility has ruled out an explicit cwd override.
+                cwd: Some(
+                    ctx.cwd
+                        .clone()
+                        .unwrap_or_else(|| self.ctx.cwd())
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                creator_agent_id: ctx.agent_id,
+                origin_session_id,
+                parent_model_override: main_loop_model_parent(&ctx),
+                depth: ctx.depth + 1,
+                ..Default::default()
+            };
+            let launch = spawner
+                .spawn_teammate(
+                    request,
+                    SubagentInheritance {
+                        tool_invoker: Arc::new(invoker),
+                        budget,
+                    },
+                )
+                .await
+                .map_err(|error| ToolError::Internal(error.to_string()))?;
+            let mut data = serde_json::to_value(&launch)
+                .map_err(|error| ToolError::Internal(error.to_string()))?;
+            data["status"] = json!("teammate_spawned");
+            data["prompt"] = json!(parsed.prompt);
+            return Ok(ToolCallResult {
+                data,
+                model_content: Some(format!(
+                    "Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)\nagent_id: {}\nname: {}\nThe agent is now running and will receive instructions via mailbox.",
+                    launch.teammate_id, launch.name
+                )), new_messages: vec![], context_modifier: None,
+                is_error: false, mcp_meta: None,
+            });
         }
 
         // Resolve the EFFECTIVE subagent type (2.1.232 `L ? Yne : t ?? general`):
@@ -3590,6 +4125,15 @@ impl Tool for AgentTool {
             }
         };
 
+        let selected = spawner
+            .resolve_selection(&effective_type, parsed.model.as_deref())
+            .await;
+        if caller_is_in_process_teammate && selected.background {
+            return Err(ToolError::InvalidInput(format!(
+                "In-process teammates cannot spawn background agents. Agent '{}' has background: true in its definition.", selected.agent_type
+            )));
+        }
+
         // Claude Code 2.1.217 rejects rather than queues a launch once the
         // runtime already has the configured number of active subagents. Keep
         // this before the session-total counter so a rejected concurrent spawn
@@ -3769,9 +4313,6 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // resolved model / is_built_in) so we can emit claude's
         // `tengu_agent_tool_selected` (AgentTool.tsx:419-428). One cheap
         // catalog lookup via the spawner seam.
-        let selected = spawner
-            .resolve_selection(&effective_type, parsed.model.as_deref())
-            .await;
         // Claude Code 2.1.206 defaults a local subagent to background execution:
         // `run_in_background !== false`, with an agent definition's
         // `background: true` also forcing the async path. The binary then gates
@@ -3797,8 +4338,34 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // all, so neither may suppress async dispatch here. (Before 2.1.238 the
         // port ANDed in `is_pro_plan()`, which forced every Pro-plan subagent to
         // run synchronously; the binary never does that.)
-        let run_in_background = (parsed.run_in_background.unwrap_or(true) || selected.background)
-            && !background_tasks_disabled;
+        // 2.1.266 moved this decision into `vBo` (@2957xxx) and, in doing so,
+        // factored the AUTO-background arm behind `!Pw(n)`:
+        //
+        // ```js
+        // let d=e.isCoordinator&&!o||e.forceAsync||!o&&r!==!1;
+        // let y=r===!0||n.background===!0||!Pw(n)&&d;
+        // ```
+        //
+        // `Pw(e)` (@1514599) = `e.source==="built-in"&&e.agentType===Wy` — the
+        // built-in web-fetch agent. It answers a question the caller is usually
+        // waiting on (its own `whenToUse` tells the model to run it in the
+        // foreground), so omitting `run_in_background` must NOT background it;
+        // only an explicit `run_in_background: true`, or `background: true` in a
+        // definition, still can. The two explicit arms stay outside the factor,
+        // exactly as the binary has them.
+        let run_in_background = should_run_in_background(BackgroundDecision {
+            wants_background: parsed.run_in_background,
+            definition_background: selected.background,
+            is_builtin_web_fetch: selected.is_built_in
+                && effective_type == WEB_FETCH_AGENT_TYPE,
+            is_coordinator: self
+                .ctx
+                .coordinator_mode
+                .as_ref()
+                .is_some_and(|m| m.is_enabled()),
+            caller_is_in_process_teammate,
+            background_tasks_disabled,
+        });
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -3970,6 +4537,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         };
 
         let request = SubagentSpawnRequest {
+            teammate_color: None,
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
             // general-purpose; explicit-validated otherwise), not the raw input.
             subagent_type: effective_type.clone(),
@@ -4002,11 +4570,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             run_in_background,
             // Fork path carries no teammate/isolation/cwd overrides.
             name: if is_fork { None } else { parsed.name.clone() },
-            team_name: if is_fork {
-                None
-            } else {
-                parsed.team_name.clone()
-            },
+            team_name: None,
             // (parity 2.1.212) DEPRECATED `mode` call param — ignored (see the
             // async spawn path). The child inherits the parent's live permission
             // mode; only agent-definition frontmatter overrides it.
@@ -4106,12 +4670,44 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
         });
 
-        let outcome = spawner
-            .spawn_with_progress(request, inherit, Some(prog_tx))
-            .await;
+        let (outcome, foreground_worktree_result) = if let Some(registry) = self.ctx.task_registry.clone() {
+            match foreground_task::run(spawner.clone(), request, inherit, prog_tx, progress.clone(), ctx.tool_use_id.clone(), registry, self.ctx.clone()).await {
+                foreground_task::ForegroundResult::Finished(result, worktree) => (result, Some(worktree)),
+                foreground_task::ForegroundResult::Backgrounded(launch, task_id) => {
+                    if let Some(name) = parsed.name.as_deref() {
+                        if let Some(names) = self.ctx.agent_name_registry.as_ref() { names.register(name, launch.agent_id).await; }
+                        else { spawner.register_name(name, launch.agent_id).await; }
+                    }
+                    let can_read = ctx.subagent_registry.as_ref().is_some_and(|reg| reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some());
+                    return Ok(async_launch_result(launch, Some(task_id), &parsed.prompt, &parsed.description, &selected.resolved_model, can_read));
+                }
+            }
+        } else {
+            (spawner.spawn_with_progress(request, inherit, Some(prog_tx)).await, None)
+        };
         // `prog_tx` is now dropped → the forwarder drains and exits.
         let _ = forwarder.await;
         let duration_ms = started.elapsed().as_millis() as u64;
+
+        // The Bash tool tells a synchronous subagent that a command it
+        // backgrounds "is terminated when you give your final response". This
+        // is where that becomes true: claude-code sweeps the finishing agent's
+        // own shells in its agent-run cleanup (`nHn`), for any outcome. Only
+        // shells this agent started are killed, so the main session's and other
+        // agents' background work is untouched.
+        if let Some(agent_id) = outcome.as_ref().ok().map(subagent_result_agent_id) {
+            if let Some(registry) = self.ctx.task_registry.as_ref() {
+                let killed = registry.kill_background_shells_for_agent(agent_id).await;
+                if killed > 0 {
+                    tracing::debug!(
+                        target: "tool_agent",
+                        %agent_id,
+                        killed,
+                        "stopped the finishing subagent's background shells"
+                    );
+                }
+            }
+        }
 
         // Worktree lifecycle (claude `fe()` / `getWorktreeResult`): once the
         // agent finished, KEEP the worktree (return its path + branch) if it
@@ -4119,12 +4715,15 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // in `platform_api::worktree::agent_worktree_result` (shared with the ASYNC
         // lifecycle owner in the local_agent task handler); it runs for ANY
         // outcome so a worktree never leaks on a failed/killed agent.
-        let worktree_result: Option<(String, String)> = match &agent_worktree {
+        let worktree_result: Option<(String, String)> = match foreground_worktree_result {
+            Some(result) => result,
+            None => match &agent_worktree {
             Some(handle) => {
                 platform_api::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle)
                     .await
             }
             None => None,
+            },
         };
 
         match outcome {
@@ -4169,7 +4768,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // result's `content` array.
                 let raw_content_texts = extract_content_texts(&content);
 
-                let agent_id_str = agent_id.to_string();
+                let agent_id_str = agent_id.as_uuid().to_string();
 
                 // (2.1.212) Indirect-prompt-injection hardening (claude
                 // `ZDu`/`tHu`): run the output guard over the subagent's returned
@@ -4181,9 +4780,25 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 let sanitized =
                     platform_api::subagent_output_guard::sanitize_blocks(&raw_content_texts);
                 if sanitized.any_reportable() {
-                    Self::emit_subagent_output_flagged(&bus, &agent_id_str, &sanitized).await;
+                    Self::emit_subagent_output_flagged(&bus, &agent_id.to_string(), &sanitized)
+                        .await;
                 }
-                let content_texts = sanitized.content;
+                let mut content_texts = sanitized.content;
+                // `bft`'s harness notes (`Le`) are unshifted in front of the
+                // report before anything else reads the content, so they reach
+                // BOTH the structured `content[]` and the model-facing string.
+                // Without this a turn-limited subagent rendered as
+                // `(Subagent completed but returned no output.)` — the model was
+                // told the run produced nothing, with no hint that it had merely
+                // run out of turns and could be continued.
+                if let Some(limit) = max_turns_reached_from_result(&content) {
+                    let note = max_turns_harness_note(
+                        limit,
+                        &effective_type,
+                        !raw_content_texts.is_empty(),
+                    );
+                    content_texts.insert(0, note);
+                }
                 let content_blocks: Vec<Value> = content_texts
                     .iter()
                     .map(|t| json!({ "type": "text", "text": t }))
@@ -4273,6 +4888,20 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
             Ok(SubagentResult::Killed { .. }) => {
                 Self::emit_failed(&bus, &invocation_id, "killed", duration_ms).await;
+                // The sync twin of upstream's kill sites. Before this the event
+                // had an emitter and no caller — the run ended and the metric
+                // that exists to count stopped runs never fired.
+                Self::emit_agent_tool_terminated(
+                    &bus,
+                    &effective_type,
+                    &selected.resolved_model,
+                    duration_ms,
+                    selected.is_built_in,
+                    false,
+                    ctx.depth,
+                    "user_cancel_sync",
+                )
+                .await;
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
             }
             Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {
@@ -4351,6 +4980,7 @@ mod f_description_l_gate_tests {
         vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }]
     }
@@ -4501,6 +5131,7 @@ mod f_description_l_gate_tests {
         fixture.push(platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "fusion".into(),
             when_to_use: "Parallel multi-model deliberation for complex code, task, plan, or review work. About 4\u{2013}5\u{d7} the cost of a single agent.".into(),
+            when_to_use_lean: None,
             tools_description: "Fusion deliberation (read-only panel)".into(),
         });
         // `prompt_env` already takes `AGENT_LIST_ENV_LOCK` — do the

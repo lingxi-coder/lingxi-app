@@ -16,8 +16,8 @@
 //! - **assistant (normal)**: `parentUuid, isSidechain, message, [requestId,]
 //!   type, uuid, timestamp`
 //! - **assistant (api-error)**: `parentUuid, isSidechain, type, uuid,
-//!   timestamp, message, [requestId,] [error,] isApiErrorMessage,
-//!   [apiErrorStatus]`
+//!   timestamp, message, [requestId,] [error,] [errorDetails,]
+//!   [truncatedAfterOutput,] isApiErrorMessage, [apiErrorStatus]`
 //! - **system (compact boundary, `extra.subtype == "compact_boundary"`)**:
 //!   `parentUuid, [logicalParentUuid,] isSidechain, type, subtype, content,
 //!   [isMeta,] level, compactMetadata, uuid, timestamp` — claude's FLATTENED
@@ -185,6 +185,7 @@ const RECOGNIZED_EXTRA: &[&str] = &[
     "requestId",
     "error",
     "errorDetails",
+    "truncatedAfterOutput",
     "isApiErrorMessage",
     "apiErrorStatus",
     "effort",
@@ -353,7 +354,10 @@ impl Serialize for JsonlMessage {
             map.serialize_entry("timestamp", &self.timestamp)?;
         } else if is_assistant && is_api_error {
             // (e1) assistant api-error head: type, uuid, timestamp, message,
-            //      requestId?, error?, isApiErrorMessage, apiErrorStatus?.
+            //      requestId?, error?, errorDetails?, truncatedAfterOutput?,
+            //      isApiErrorMessage, apiErrorStatus?.
+            // `truncatedAfterOutput` sits after `errorDetails` and before
+            // `isApiErrorMessage` (cc 2.1.263 `Ggr`).
             map.serialize_entry("type", &self.message_type)?;
             map.serialize_entry("uuid", &self.uuid)?;
             map.serialize_entry("timestamp", &self.timestamp)?;
@@ -366,6 +370,9 @@ impl Serialize for JsonlMessage {
             }
             if let Some(v) = self.extra.get("errorDetails") {
                 map.serialize_entry("errorDetails", v)?;
+            }
+            if let Some(v) = self.extra.get("truncatedAfterOutput") {
+                map.serialize_entry("truncatedAfterOutput", v)?;
             }
             // isApiErrorMessage is guaranteed present (gated `is_api_error`).
             if let Some(v) = self.extra.get("isApiErrorMessage") {

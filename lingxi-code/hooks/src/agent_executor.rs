@@ -101,6 +101,7 @@ impl AgentExecutor {
         };
 
         let req = SubagentSpawnRequest {
+            teammate_color: None,
             // Hook-spawned verifier is a top-level spawn (no parent agent) ⇒ depth 0.
             depth: 0,
             // Top-level spawn ⇒ the spawner's own default model anchors resolution.
@@ -327,8 +328,8 @@ mod tests {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-                        usage_complete: true,
-}))),
+                usage_complete: true,
+            }))),
         });
         let exec = AgentExecutor::new(Some(spawner.clone()), Duration::from_secs(5));
         let hook = make_agent_hook();

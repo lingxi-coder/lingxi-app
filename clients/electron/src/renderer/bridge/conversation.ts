@@ -85,6 +85,10 @@ export interface ContextSummarySnapshot {
  * without re-scanning `items`.
  */
 export interface ConversationState {
+  /** Items emitted by the last completed attempt, available for retry retraction. */
+  readonly pendingAssistantItems?: readonly string[];
+  readonly assistantAttemptItems?: Readonly<Record<string, readonly string[]>>;
+  readonly retractedAttemptId?: string;
   /** The ordered view-model the Stage renders. */
   readonly items: RunItem[];
   /** True while a turn is in flight (between `turn_started` and `turn_ended`). */
@@ -97,6 +101,16 @@ export interface ConversationState {
   readonly openThinkingIndex: number;
   /** tool-use `id` → index of its tool card in `items`. */
   readonly toolIndex: Readonly<Record<string, number>>;
+  /**
+   * Item ids collapsed behind a `/loop` no-op fold row.
+   *
+   * The engine reports how many quiet wakeup groups to fold; the reducer turns
+   * that into the concrete rows, and the Stage hides them until the fold row is
+   * opened. This is LingXi's stand-in for the oracle's `foldedUuids`, which
+   * cannot be used directly because a wakeup here is one whole turn rather than
+   * a transcript slice.
+   */
+  readonly foldedItemIds: readonly string[];
   /** Latest live token-usage snapshot (`usage_update`), or `null`. */
   readonly usage: UsageSnapshot | null;
   /** Oldest-first compact summaries available for the current session. */
@@ -142,6 +156,7 @@ export function emptyConversation(): ConversationState {
     openAssistantIndex: -1,
     openThinkingIndex: -1,
     toolIndex: {},
+    foldedItemIds: [],
     usage: null,
     summaries: [],
     plan: [],
@@ -187,7 +202,7 @@ function settleRunningTools(items: RunItem[], status: 'done' | 'error'): boolean
 
 /** A user message immediately echoed when the composer submits (optimistic). */
 export function appendUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = []): ConversationState {
-  const trimmed = text.trim();
+  const trimmed = stripInvisibleText(text).trim();
   if (!trimmed) return state;
   const items = state.items.slice();
   // A new user turn closes any previously-open streaming lines.
@@ -380,7 +395,9 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         const prev = items[idx] as Extract<RunItem, { type: 'narration' }>;
         items[idx] = { ...prev, text: prev.text + event.text };
       }
-      return { ...state, items, openAssistantIndex: idx, openThinkingIndex: -1, nextId };
+      return { ...state, items, openAssistantIndex: idx, openThinkingIndex: -1, nextId,
+        pendingAssistantItems: [...new Set([...(state.pendingAssistantItems ?? []), items[idx]!.id])],
+      };
     }
 
     case 'thinking_delta': {
@@ -395,7 +412,9 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         const prev = items[idx] as Extract<RunItem, { type: 'thinking' }>;
         items[idx] = { ...prev, text: prev.text + event.thinking };
       }
-      return { ...state, items, openThinkingIndex: idx, nextId };
+      return { ...state, items, openThinkingIndex: idx, nextId,
+        pendingAssistantItems: [...new Set([...(state.pendingAssistantItems ?? []), items[idx]!.id])],
+      };
     }
 
     case 'tool_use_started': {
@@ -492,12 +511,32 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       return { ...state, plan: event.tasks };
     }
 
+    case 'message_identity': {
+      const ids = state.pendingAssistantItems ?? [];
+      return { ...state, assistantAttemptItems: { ...state.assistantAttemptItems, [event.message_id]: ids } };
+    }
+
+    case 'message_retracted': {
+      if (state.retractedAttemptId === event.message_id) return state;
+      const ids = new Set(state.assistantAttemptItems?.[event.message_id] ?? []);
+      const items = state.items.filter((item) => !ids.has(item.id));
+      const toolIndex: Record<string, number> = {};
+      for (const [toolId, index] of Object.entries(state.toolIndex)) {
+        const next = items.findIndex((item) => item.id === state.items[index]?.id);
+        if (next >= 0) toolIndex[toolId] = next;
+      }
+      const remap = (index: number) => index < 0 ? -1 : items.findIndex((item) => item.id === state.items[index]?.id);
+      return { ...state, items, toolIndex, openAssistantIndex: remap(state.openAssistantIndex), openThinkingIndex: remap(state.openThinkingIndex),
+        retractedAttemptId: event.message_id };
+    }
+
     case 'message_complete': {
       // The streamed assistant text is final; stop appending to it and seal
       // any open reasoning block.
       const items = state.items.slice();
       closeThinking(items, state.openThinkingIndex);
-      return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1 };
+      return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1, pendingAssistantItems: [],
+      };
     }
 
     case 'usage_update':
@@ -607,6 +646,62 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       if (event.is_error) return pushError(state, event.message);
       return pushNotice(state, event.message);
 
+    // A `/loop` wakeup announces itself before the turn it starts. `streak > 0`
+    // means the ticks before it were quiet, so the rows back to (and including)
+    // the `streak`-th previous wakeup row collapse behind this one — the
+    // oracle's `foldedUuids`, resolved here because only the client knows which
+    // rows those turns produced.
+    case 'loop_wakeup': {
+      const items = state.items.slice();
+      closeThinking(items, state.openThinkingIndex);
+      let foldedItemIds = state.foldedItemIds;
+      if (event.streak > 0) {
+        const folded: string[] = [];
+        let boundaries = 0;
+        for (let i = items.length - 1; i >= 0 && boundaries < event.streak; i -= 1) {
+          const row = items[i];
+          folded.push(row.id);
+          if (row.type === 'narration' && row.loopWakeupStreak !== undefined) boundaries += 1;
+        }
+        // Fold only a run that really is `streak` whole groups. A shorter
+        // history (a reconnect, a `/clear`) would otherwise swallow rows that
+        // belong to something else entirely.
+        //
+        // The streak is CUMULATIVE — tick 3 reports 3, not 1 — so this run
+        // subsumes what the previous wakeup folded. Deduplicate rather than
+        // append, or every row would be listed once per subsequent fold.
+        if (boundaries === event.streak) {
+          foldedItemIds = [...new Set([...state.foldedItemIds, ...folded])];
+        }
+      }
+      items.push({
+        type: 'narration',
+        id: itemId(state.nextId),
+        text: event.message,
+        role: 'assistant',
+        loopWakeupStreak: event.streak,
+      });
+      let nextId = state.nextId + 1;
+      if (event.companion !== undefined) {
+        items.push({
+          type: 'narration',
+          id: itemId(nextId),
+          text: event.companion,
+          role: 'assistant',
+          tone: 'muted',
+        });
+        nextId += 1;
+      }
+      return {
+        ...state,
+        items,
+        foldedItemIds,
+        openAssistantIndex: -1,
+        openThinkingIndex: -1,
+        nextId,
+      };
+    }
+
     case 'slash_command_result': {
       // A validation failure can precede the engine's first lifecycle event.
       if (state.activeCompactionId !== null && state.pendingSlashName === '/compact') {
@@ -700,18 +795,20 @@ export function conversationFromMessages(
     for (const block of message.blocks) {
       switch (block.type) {
         case 'text':
-          if (block.text.trim()) {
+          {
+            const displayText = stripInvisibleText(block.text);
+            if (!displayText.trim()) break;
             items.push({
               type: 'narration',
               id: itemId(nextId++),
-              text: block.text,
+              text: displayText,
               strong: message.role === 'user',
               role: message.role === 'user' ? 'user' : 'assistant',
               ...(!attachedImages && images.length ? { images } : {}),
             });
             attachedImages = true;
+            break;
           }
-          break;
         case 'thinking':
           if (block.thinking.trim()) {
             // Rehydrated, not streamed — starts collapsed.
@@ -822,6 +919,11 @@ function messageImageFromRef(image: ImageRefDto): MessageImageDto {
 
 function isRenderableMessageImage(image: MessageImageDto): boolean {
   return isSupportedImageMediaType(image.media_type) && image.url.trim().length > 0;
+}
+
+/** Remove invisible format characters before deciding whether a row is empty. */
+function stripInvisibleText(text: string): string {
+  return text.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
 }
 
 /** Fold a whole event sequence (handy for tests + re-hydration). */

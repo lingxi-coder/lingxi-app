@@ -8,6 +8,20 @@ use platform_api::{
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Socket input holds the transport injected by the tool's host.
+#[derive(Clone)]
+pub struct WebSocketMonitorInput {
+    /// Source and common task metadata.
+    pub registration: platform_api::task_registry::WebSocketMonitorRegistration,
+    /// Native network transport.
+    pub http: Arc<dyn platform_api::HttpTransport>,
+}
+impl std::fmt::Debug for WebSocketMonitorInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebSocketMonitorInput").field("registration", &self.registration).finish_non_exhaustive()
+    }
+}
+
 /// Generic interface implemented by per-type task handlers.
 #[async_trait]
 pub trait Task: Send + Sync {
@@ -28,10 +42,29 @@ pub trait Task: Send + Sync {
     async fn drain_shutdown(&self) -> Result<(), TaskError> {
         Ok(())
     }
+    /// Whether the task's execution loop still has a cancellable worker.
+    async fn has_live_worker(&self, _task_id: &str) -> bool { false }
+    /// Real child agent identities whose processes belong to this task.
+    async fn process_owner_ids(&self, _task_id: &str) -> Vec<protocol::AgentId> { Vec::new() }
+
+    fn forget_resume_recipe(&self, _task_id: &str) {}
+    async fn register_resume_recipe(&self, _task_id: &str, _request: SubagentSpawnRequest, _inheritance: SubagentInheritance) -> Result<(), TaskError> { Err(TaskError::Unsupported) }
+    async fn prepare_human_resume(&self, _task_id: &str, _agent_id: protocol::AgentId, _epoch: u64, _ctx: TaskContext) -> Result<HumanResumePrepared, TaskError> { Err(TaskError::Unsupported) }
+
     /// Whether this task type supports inbound messages.
     fn supports_messages(&self) -> bool {
         false
     }
+    /// Apply a trusted lead's plan review response at the teammate's idle boundary.
+    async fn apply_plan_approval(
+        &self,
+        _task_id: &str,
+        _response: platform_api::teammate_plan::PlanApprovalResponse,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        Err(TaskError::Unsupported)
+    }
+
     /// Deliver a message to a running task. Default implementation rejects.
     async fn send_message(
         &self,
@@ -46,12 +79,16 @@ pub trait Task: Send + Sync {
 /// Spawn-time input — one variant per task type.
 #[derive(Debug, Clone)]
 pub enum TaskSpawnInput {
+    /// Passive WebSocket monitor.
+    MonitorWs(WebSocketMonitorInput),
     /// Spawn a local bash command.
     LocalBash {
         /// Bash command string.
         command: String,
         /// Optional time-out.
         timeout: Option<std::time::Duration>,
+        /// Originating tool call, when the shell was launched from a tool.
+        tool_use_id: Option<String>,
     },
     /// Spawn an in-process agent.
     LocalAgent {
@@ -98,6 +135,10 @@ pub enum TaskSpawnInput {
     },
     /// Spawn an in-process teammate.
     InProcessTeammate {
+        /// Resolved Agent request and parent execution context.
+        spawn_request: Option<platform_api::subagent_spawn::SubagentSpawnRequest>,
+        /// Tool and budget handles inherited from the invoking session.
+        inheritance: Option<platform_api::subagent_spawn::SubagentInheritance>,
         /// Agent target.
         agent_id: protocol::AgentId,
         /// Display name (claude-code `TeammateContext.agentName`).
@@ -108,8 +149,7 @@ pub enum TaskSpawnInput {
         /// `SubagentContext.team_name` so its dispatched tools see the team
         /// identity (`getTeammateContext()?.teamName`).
         team_name: String,
-        /// The teammate's initial TASK (claude-code the TeamCreate `description`
-        /// / the team lead's purpose) — seeded as the teammate's first user
+        /// The teammate's initial task from the Agent prompt, seeded as its first user
         /// message (`SubagentContext::prompt_messages`) so it has a task to work
         /// on rather than only chatting. Empty ⇒ no initial message (the
         /// teammate parks awaiting the first injected message).
@@ -202,6 +242,11 @@ pub enum TaskSpawnInput {
     Monitor {
         /// Shell command to execute.
         command: String,
+        /// The sandbox-wrapped form to actually spawn, when the tool's
+        /// `shouldUseSandbox` decision said to confine it. `None` ⇒ spawn
+        /// `command` unwrapped. `command` stays the raw text so `/tasks` and
+        /// the notifications keep showing what the model asked for.
+        spawn_command: Option<String>,
         /// Optional deadline; `None` is session-persistent.
         timeout: Option<std::time::Duration>,
         /// Working directory inherited from the tool invocation.
@@ -232,6 +277,8 @@ pub enum TaskSpawnInput {
         /// Persistent identity of the creator agent, when available.
         creator_agent_id: Option<protocol::AgentId>,
     },
+    /// Environment scan; its owning command drives execution.
+    AutoModeScan,
     /// Spawn a dream loop.
     Dream {
         /// Initial prompt.
@@ -255,6 +302,11 @@ pub struct TaskContext {
     pub fs: Arc<dyn FileSystem>,
     /// Runtime spawner trait object.
     pub runtime: Arc<dyn RuntimeSpawner>,
+}
+
+pub struct HumanResumePrepared {
+    pub handle: TaskHandle,
+    pub ready: tokio::sync::oneshot::Receiver<Result<(), TaskError>>,
 }
 
 /// Handle returned by [`Task::spawn`].

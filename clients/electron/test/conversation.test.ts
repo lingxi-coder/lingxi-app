@@ -326,6 +326,63 @@ test('system_notice remains non-terminal while surfacing its severity', () => {
   assert.equal((s.items.at(-1) as Narration).text, 'Recovered persisted state.');
 });
 
+test('a /loop wakeup marks its row, and a streak folds the quiet groups behind it', () => {
+  let s = emptyConversation();
+  // First wakeup: nothing before it was quiet, so nothing folds.
+  s = reduceEvent(s, {
+    type: 'loop_wakeup',
+    message: 'Claude resuming /loop wakeup (Sep 7 2:14pm)',
+    streak: 0,
+    since_ms: 0,
+  });
+  assert.equal((s.items.at(-1) as Narration).loopWakeupStreak, 0);
+  assert.deepEqual(s.foldedItemIds, [], 'streak 0 folds nothing');
+  const firstWakeupId = s.items.at(-1)!.id;
+
+  // That tick produced one assistant line…
+  s = reduceEvent(s, { type: 'text_delta', text: 'nothing to do' });
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  const quietLineId = s.items.at(-1)!.id;
+
+  // …and the next wakeup reports it as quiet, folding the group behind itself.
+  s = reduceEvent(s, {
+    type: 'loop_wakeup',
+    message: 'Claude resuming /loop wakeup (Sep 7 3:04pm) \u00b7 1 no-op tick since Sep 7 2:14pm',
+    companion: '[1 prior /loop wakeup found nothing actionable; loop is healthy.]',
+    streak: 1,
+    since_ms: 1_788_790_449_000,
+  });
+  assert.deepEqual(
+    s.foldedItemIds,
+    [firstWakeupId, quietLineId],
+    'the folded run is the previous wakeup row and what its tick produced',
+  );
+  assert.equal(
+    (s.items.at(-1) as Narration).text,
+    '[1 prior /loop wakeup found nothing actionable; loop is healthy.]',
+    'the companion is the last row',
+  );
+  assert.equal((s.items.at(-1) as Narration).tone, 'muted');
+  assert.equal((s.items.at(-2) as Narration).loopWakeupStreak, 1, 'the fold row carries the streak');
+});
+
+/**
+ * A history too short for the streak (a reconnect mid-loop) must fold nothing:
+ * folding "as much as there is" would hide rows belonging to something else.
+ */
+test('a /loop streak longer than the history folds nothing', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'text_delta', text: 'unrelated' });
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  s = reduceEvent(s, {
+    type: 'loop_wakeup',
+    message: 'Claude resuming /loop wakeup (Sep 7 3:04pm) \u00b7 4 no-op ticks since Sep 7 1:00pm',
+    companion: '[4 prior /loop wakeups found nothing actionable; loop is healthy.]',
+    streak: 4,
+    since_ms: 1_788_780_000_000,
+  });
+  assert.deepEqual(s.foldedItemIds, []);
+});
+
 test('failing tool_use_result marks the card errored and surfaces an error line', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'tool_use_started', id: 't', tool: 'Bash', input_json: '{"command":"x"}' });
@@ -864,4 +921,26 @@ test('unknown phases preserve the known stage high-water mark and clock', () => 
   assert.equal(reduceEvent(state, { type: 'compaction_status', phase: 'summarizing' }, 300), state);
   state = reduceEvent(state, { type: 'compaction_status', phase: 'restoring' }, 400);
   assert.equal((state.items[0] as Compaction).phaseStartedAt, 100);
+});
+
+
+test('retry retraction removes only the identified completed assistant attempt', () => {
+  let state = reduceEvents(emptyConversation(), [
+    { type: 'text_delta', text: 'keep prior answer' },
+    { type: 'message_identity', message_id: 'prior' },
+    { type: 'message_complete' },
+    { type: 'thinking_delta', thinking: 'failed thought' },
+    { type: 'text_delta', text: 'malformed response' },
+    { type: 'message_identity', message_id: 'failed' },
+    { type: 'message_complete' },
+    { type: 'text_delta', text: 'clean retry' },
+    { type: 'message_retracted', message_id: 'failed' },
+  ]);
+  const serialized = JSON.stringify(state.items);
+  assert.ok(serialized.includes('keep prior answer'));
+  assert.ok(serialized.includes('clean retry'));
+  assert.ok(!serialized.includes('malformed response'));
+  assert.ok(!serialized.includes('failed thought'));
+  assert.ok(state.openAssistantIndex >= 0);
+  assert.equal(reduceEvent(state, { type: 'message_retracted', message_id: 'failed' }), state);
 });

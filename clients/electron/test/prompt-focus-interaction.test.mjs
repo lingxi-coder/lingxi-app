@@ -82,12 +82,12 @@ test('real Electron preserves Sidebar focus and supports native resize dragging'
       sidebarExists: true,
     });
     assert.deepEqual(result.afterTab, {
-      activeText: 'New session',
+      activeText: 'New chat',
       activeIsSidebar: true,
     });
     assert.deepEqual(result.afterDismiss, {
       promptOpen: false,
-      activeText: 'New session',
+      activeText: 'New chat',
       activeIsSidebar: true,
     });
     assert.deepEqual(result.resize, { before: 260, after: 360 });
@@ -156,6 +156,11 @@ test('real Electron restores an independent unsent composer draft for each sessi
         catch (error) { rejectResult(new Error(`Invalid Electron composer draft output: ${output}`, { cause: error })); }
       });
     });
+
+    if (process.env.LINGXI_TEST_PRELOAD) {
+      assert.deepEqual(result, { nativeFileAttachments: true });
+      return;
+    }
 
     assert.deepEqual(result, {
       audioInteraction: {

@@ -52,6 +52,17 @@ pub struct TaskStateBase {
     pub total_paused_ms: u64,
     /// Path to the spool file accumulating stdout/stderr.
     pub output_file: PathBuf,
+    /// Wall-clock deadline after which a NOTIFIED terminal row may be evicted
+    /// from the registry — claude-code `evictAfter`, stamped as
+    /// `Date.now() + 30_000` on the terminal transition
+    /// (`ret`, `src_160988549.js` @2041938).
+    ///
+    /// `None` on a live row, and also on a resting `local_agent` that still owns
+    /// live background children: the oracle declines to set a deadline there
+    /// (`if(t.park&&keepaliveReasons.size>0)return`) so the parent outlives the
+    /// children that still report to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evict_after: Option<SystemTime>,
     /// Last byte offset surfaced to the caller (for incremental reads).
     pub output_offset: u64,
     /// Whether the user has been notified of completion.
@@ -113,11 +124,25 @@ pub enum TaskState {
     McpTask(McpTaskState),
     /// Dream loop.
     Dream(DreamTaskState),
+    /// Environment scan owned by /auto-mode-setup.
+    AutoModeScan(AutoModeScanTaskState),
     /// Fusion multi-model deliberation.
     LocalFusion(LocalFusionTaskState),
 }
 
 impl TaskState {
+    /// Whether a completed local-agent turn retains a resumable runner.
+    #[must_use]
+    pub fn is_parked(&self) -> bool {
+        matches!(self, Self::LocalAgent(agent) if agent.is_parked)
+    }
+
+    /// Terminal task status does not imply the persistent runner has exited.
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        self.base().status.is_terminal() && !self.is_parked()
+    }
+
     /// Borrow the common base fields regardless of variant.
     #[must_use]
     pub fn base(&self) -> &TaskStateBase {
@@ -131,6 +156,7 @@ impl TaskState {
             Self::Monitor(s) => &s.base,
             Self::McpTask(s) => &s.base,
             Self::Dream(s) => &s.base,
+            Self::AutoModeScan(s) => &s.base,
             Self::LocalFusion(s) => &s.base,
         }
     }
@@ -148,6 +174,7 @@ impl TaskState {
             Self::Monitor(s) => &mut s.base,
             Self::McpTask(s) => &mut s.base,
             Self::Dream(s) => &mut s.base,
+            Self::AutoModeScan(s) => &mut s.base,
             Self::LocalFusion(s) => &mut s.base,
         }
     }
@@ -156,6 +183,12 @@ impl TaskState {
 /// State specific to a local bash task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalBashTaskState {
+    /// This host adopted a supervised shell launched by an earlier host.
+    #[serde(default)]
+    pub is_adopted: bool,
+    /// Origin of the shell invocation (oracle Bft/U6t): turn, agent or inner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
@@ -165,11 +198,34 @@ pub struct LocalBashTaskState {
     pub pid: Option<u32>,
     /// Exit code once terminated.
     pub exit_code: Option<i32>,
+    /// Directory the command was launched in (claude-code stores `cwd: Q()` on
+    /// the `local_bash` record, 2.1.263 `Xne`). `#[serde(default)]` so records
+    /// written before the field existed still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Whether this shell is running in the background (claude-code
+    /// `isBackgrounded`: `Xne` registers `true`, the 2 s foreground arming
+    /// `U6t` registers `false`). Only a backgrounded shell is a task the model
+    /// can address, so this is the field the `Stop` hook's `background_tasks`
+    /// filter and `/tasks` read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_backgrounded: Option<bool>,
 }
 
 /// State specific to an in-process agent task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalAgentTaskState {
+    /// The turn has completed while the persistent runner remains resumable.
+    /// Separate from task status so parked agents are not counted as active work.
+    #[serde(default)]
+    pub is_parked: bool,
+    /// An independent activity observer; never a user-facing completion.
+    #[serde(default)]
+    pub is_observer: bool,
+    /// Activity source for a sidecar; separate from task ownership so ending the
+    /// observed agent does not cascade-stop its independent observer.
+    #[serde(default)]
+    pub observed_agent_id: Option<AgentId>,
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
@@ -224,6 +280,12 @@ pub struct LocalAgentTaskState {
 /// run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentOutcomeState {
+    /// Concrete model and string effort selected for the current runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+
     /// Final text response → the notification's `<result>` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
@@ -239,6 +301,9 @@ pub struct AgentOutcomeState {
     /// Kept isolation worktree branch → `<worktreeBranch>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Turn budget the run exhausted → the turn-limit `completed` summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_reached: Option<u64>,
 }
 
 impl AgentOutcomeState {
@@ -252,6 +317,7 @@ impl AgentOutcomeState {
             error: _,
             worktree_path,
             worktree_branch,
+            max_turns_reached,
         } = incoming;
         if result.is_some() {
             self.result = result;
@@ -264,6 +330,9 @@ impl AgentOutcomeState {
         }
         if worktree_branch.is_some() {
             self.worktree_branch = worktree_branch;
+        }
+        if max_turns_reached.is_some() {
+            self.max_turns_reached = max_turns_reached;
         }
     }
 }
@@ -283,6 +352,12 @@ pub struct RemoteAgentTaskState {
 /// State specific to an in-process teammate task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InProcessTeammateTaskState {
+    /// The persistent runner has finished its turn-set and is awaiting work.
+    #[serde(default)]
+    pub is_idle: bool,
+    /// Waiting for the lead to review a submitted plan; independent of idle.
+    #[serde(default)]
+    pub awaiting_plan_approval: bool,
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
@@ -414,6 +489,13 @@ pub struct MonitorTaskState {
     pub command: String,
     /// Exit code once the command terminates.
     pub exit_code: Option<i32>,
+    /// Bytes the script wrote to STDOUT over the monitor's life (claude-code
+    /// `taskOutput.pipedStdoutBytes`). `Some(0)` is what selects the
+    /// "ended without producing output" completion summary, so the distinction
+    /// from `None` — "never measured", e.g. an MCP monitor that has no stdout
+    /// at all — is load-bearing and must not collapse to a defaulting `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_bytes: Option<u64>,
 }
 
 /// State specific to a backgrounded MCP tool call (claude-code `mcp_task`,
@@ -422,6 +504,10 @@ pub struct MonitorTaskState {
 /// detached `tools/call`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTaskState {
+    /// Full-result persistence receipt for the terminal notification.
+    #[serde(default)]
+    pub saved_hint: Option<String>,
+
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
@@ -434,6 +520,13 @@ pub struct McpTaskState {
     pub mcp_status: String,
     /// Latest human-readable status line (`statusMessage`), if any.
     pub status_message: Option<String>,
+    /// The settled call's result text (`resultText`), kept so the terminal
+    /// notification can inline it in `<result>` the way claude-code's `F` does.
+    /// The spool copy is still written — that is what `TaskOutput` reads — but
+    /// a notification cannot go and read a file, so the text has to be here too.
+    /// `None` until the call settles, and on a call that failed or was
+    /// cancelled (those render from `status_message` instead).
+    pub result_text: Option<String>,
 }
 
 /// State specific to a dream task.
@@ -641,6 +734,7 @@ mod taskstate_scope_readback_tripwire {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: PathBuf::from("/dev/null"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -670,4 +764,12 @@ mod taskstate_scope_readback_tripwire {
         );
     }
 
+}
+
+/// A cancellable environment scan; it never produces a conversation completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoModeScanTaskState {
+    /// Shared task identity and lifecycle.
+    #[serde(flatten)]
+    pub base: TaskStateBase,
 }

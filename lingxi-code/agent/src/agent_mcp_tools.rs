@@ -64,6 +64,10 @@ pub struct AgentMcpToolSet {
     pub cleanups: Vec<AgentMcpCleanupHandle>,
 }
 
+/// Identity reservation held until construction and any cancellation cleanup finish.
+/// Builders must move this lease into asynchronous cleanup when cancelled before returning.
+pub type AgentMcpConstructionLease = Arc<dyn Send + Sync>;
+
 /// Injected per-spawn agent-scoped MCP tool builder (claude `Agr`). Takes the
 /// FINAL resolved [`AgentId`] + [`AgentDefinition`] for one spawn (owned, so
 /// the returned future is `'static`) and returns the built tool set.
@@ -74,7 +78,7 @@ pub struct AgentMcpToolSet {
 /// `hook_executor`/`skill_loader` — see that field's doc in `handle.rs`).
 #[allow(clippy::type_complexity)]
 pub type AgentMcpToolBuilder = Arc<
-    dyn Fn(AgentId, AgentDefinition) -> Pin<Box<dyn Future<Output = AgentMcpToolSet> + Send>>
+    dyn Fn(AgentId, AgentDefinition, Option<AgentMcpConstructionLease>) -> Pin<Box<dyn Future<Output = AgentMcpToolSet> + Send>>
         + Send
         + Sync,
 >;

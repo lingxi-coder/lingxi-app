@@ -332,6 +332,7 @@ pub fn mock_message_response(
 /// the orchestrator's emitted output after wrapping the stream in an `Arc`.
 #[derive(Clone)]
 pub struct MockOutputStream {
+    lifecycle_events: Arc<Mutex<Vec<serde_json::Value>>>,
     events: Arc<Mutex<Vec<OutputEvent>>>,
     /// Denial provenance observed via `emit_tool_result_denied`, as
     /// `(tool_use_id, denial_kind)` in emission order.
@@ -353,11 +354,16 @@ pub struct MockOutputStream {
 }
 
 impl MockOutputStream {
+    pub async fn lifecycle_event_snapshot(&self) -> Vec<serde_json::Value> {
+        self.lifecycle_events.lock().await.clone()
+    }
+
     /// Construct an empty mock.
     #[must_use]
     pub fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
+            lifecycle_events: Arc::new(Mutex::new(Vec::new())),
             denials: Arc::new(Mutex::new(Vec::new())),
             attachments: Arc::new(Mutex::new(Vec::new())),
             compaction_phases: Arc::new(Mutex::new(Vec::new())),
@@ -432,6 +438,23 @@ impl Default for MockOutputStream {
 
 #[async_trait]
 impl OutputStream for MockOutputStream {
+    async fn emit_task_lifecycle(&self, event: &serde_json::Value) {
+        self.lifecycle_events.lock().await.push(event.clone());
+    }
+
+    async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
+        self.events.lock().await.push(OutputEvent::MessageIdentity {
+            message_id: *message_id,
+        });
+    }
+    async fn emit_message_retracted(&self, message_id: &protocol::MessageId) {
+        self.events
+            .lock()
+            .await
+            .push(OutputEvent::MessageRetracted {
+                message_id: *message_id,
+            });
+    }
     async fn emit_text(&self, text: &str) {
         self.events.lock().await.push(OutputEvent::Text {
             text: text.to_string(),
@@ -829,6 +852,8 @@ pub struct MockOrchestratorHandle {
     permission_mode: StdMutex<Option<String>>,
     /// Live effort value used by `/effort` command tests.
     effort: StdMutex<Option<String>>,
+    /// Optional live controls snapshot for routing synchronization tests.
+    conversation_controls: StdMutex<Option<platform_api::ConversationControls>>,
     /// Session-scoped fast-mode flag used by bridge routing tests.
     fast_mode: AtomicBool,
     /// Session-owned dynamic-workflow gate exposed through the handle.
@@ -904,6 +929,7 @@ impl MockOrchestratorHandle {
             switch_model_error: StdMutex::new(None),
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
+            conversation_controls: StdMutex::new(None),
             fast_mode: AtomicBool::new(false),
             dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::new(
                 false, false,
@@ -976,6 +1002,12 @@ impl MockOrchestratorHandle {
     /// Make the next `open_memory_editor` call return `ActionFailed(reason)`.
     pub fn set_memory_editor_error(&self, reason: String) {
         *self.memory_error.lock().unwrap() = Some(reason);
+    }
+
+    /// Enable authoritative controls snapshots; successful control setters update them.
+    pub fn set_conversation_controls(&self, controls: platform_api::ConversationControls) {
+        *self.permission_mode.lock().unwrap() = Some(controls.permission.effective.clone());
+        *self.conversation_controls.lock().unwrap() = Some(controls);
     }
 
     /// Number of `switch_model` calls so far.
@@ -1209,11 +1241,29 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         if let Some(reason) = self.switch_model_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
+        if let Some(controls) = self.conversation_controls.lock().unwrap().as_mut() {
+            controls.model_reference = platform_api::qualified_model_ref(model, profile);
+        }
         Ok(())
     }
 
     async fn permission_mode(&self) -> Option<String> {
         self.permission_mode.lock().unwrap().clone()
+    }
+
+    async fn conversation_controls(&self) -> Option<platform_api::ConversationControls> {
+        self.conversation_controls.lock().unwrap().clone()
+    }
+
+    async fn set_reasoning_selection(
+        &self,
+        selection: platform_api::ReasoningSelection,
+    ) -> Result<(), HandleError> {
+        if let Some(controls) = self.conversation_controls.lock().unwrap().as_mut() {
+            controls.requested_reasoning_selection = selection.clone();
+            controls.effective_reasoning_selection = selection;
+        }
+        Ok(())
     }
 
     async fn current_effort(&self) -> Option<String> {
@@ -1292,6 +1342,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             return Err(HandleError::ActionFailed(reason));
         }
         *self.permission_mode.lock().unwrap() = Some(mode.to_string());
+        if let Some(controls) = self.conversation_controls.lock().unwrap().as_mut() {
+            controls.permission.requested = mode.to_string();
+            controls.permission.effective = mode.to_string();
+        }
         Ok(())
     }
 
@@ -1369,7 +1423,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     }
 
     async fn emit_background_system_notice(&self, body: &str) {
-        self.background_notices.lock().unwrap().push(body.to_string());
+        self.background_notices
+            .lock()
+            .unwrap()
+            .push(body.to_string());
     }
 
     async fn list_model_listings(&self) -> Vec<platform_api::ModelListing> {

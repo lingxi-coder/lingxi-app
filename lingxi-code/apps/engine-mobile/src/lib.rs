@@ -1193,3 +1193,6 @@ mod tests {
         assert_eq!(task_files, 1, "one task persisted in the injected home");
     }
 }
+
+#[cfg(feature = "uniffi")]
+mod agent_resume;

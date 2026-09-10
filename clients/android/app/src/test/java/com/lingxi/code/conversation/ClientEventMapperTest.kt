@@ -206,6 +206,12 @@ class ClientEventMapperTest {
     // --- completion / telemetry ------------------------------------------
 
     @Test
+    fun assistantIdentityAndRetraction_preserveEngineId() {
+        assertEquals(ReplyEvent.MessageIdentity("msg:failed"), clientEventToReply(ClientEvent.MessageIdentity("msg:failed")))
+        assertEquals(ReplyEvent.MessageRetracted("msg:failed"), clientEventToReply(ClientEvent.MessageRetracted("msg:failed")))
+    }
+
+    @Test
     fun messageComplete_withMessage_mapsToNonTerminalBoundary() {
         val r = clientEventToReply(
             ClientEvent.MessageComplete(

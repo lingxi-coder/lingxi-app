@@ -11,11 +11,18 @@
   a finding yet.
 - Prefer one concrete finding with good evidence over many speculative issues.
 
+Host QA evidence is scoped. Use only evidence recorded for the returned
+`qa_handle`, its in-scope target/scenario, and the exact `qa_evidence_ids`
+returned by Host tools. Preserve the Host upstream finding ledger in every
+post-repair candidate; a finding can be marked resolved only with the exact
+new evidence IDs that demonstrate resolution. Never manufacture a union from
+agent prose, and never rewrite a previous immutable candidate.
+
 For motion-heavy flows, capture two frames or observations across time so the
 report can distinguish a static render from a broken transition.
 
 ## Sources
 
-Reviewed: 2026-08-27
+Reviewed: 2026-09-06
 
 - LingXi Local Apps handoff: `docs/local-apps/HANDOFF.md`

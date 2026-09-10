@@ -12,11 +12,13 @@
 //! `q` closes it.
 //!
 //! Faithful SUBSET of claude-code's `BackgroundTasksDialog` (list + stop). The
-//! per-task-type DETAIL/output sub-dialogs are deferred. The opening snapshot
-//! remains useful when no live feed is available; the normal multi-agent event
-//! path refreshes a mounted picker when wired.
+//! per-task-type DETAIL/output sub-dialogs remain separate. The mounted list
+//! refreshes against the live registry, including completed and parked agents.
 
 use std::any::Any;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::buffer::Buffer;
@@ -34,8 +36,12 @@ use crate::renderable::Renderable;
 
 /// The `/tasks` interactive background-task picker.
 pub struct TasksView {
-    /// Current registry rows (newest-first as the registry orders them).
+    /// Current visible registry projection, grouped in oracle dialog order.
     rows: Vec<TaskRow>,
+    registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+    parked_agents: HashSet<String>,
+    monitors: HashSet<String>,
+    last_refresh: Option<Instant>,
     /// Index of the highlighted row.
     selected: usize,
     /// Active render palette (accent header + dim footer hint).
@@ -48,6 +54,10 @@ impl TasksView {
     pub fn new(rows: Vec<TaskRow>, theme: Theme) -> Self {
         Self {
             rows,
+            registry: None,
+            parked_agents: HashSet::new(),
+            monitors: HashSet::new(),
+            last_refresh: None,
             selected: 0,
             theme,
         }
@@ -67,8 +77,87 @@ impl TasksView {
     }
 
     /// Whether `status` denotes a still-running task that can be stopped.
-    fn is_killable(status: &str) -> bool {
-        matches!(status, "running" | "pending" | "queued")
+    fn is_killable(&self, row: &TaskRow) -> bool {
+        row.status == "running"
+            || (row.task_type == "local_agent" && self.parked_agents.contains(&row.task_id))
+    }
+
+    /// Keep the mounted dialog synchronized with completion and rest transitions.
+    #[must_use]
+    pub fn with_registry(
+        mut self,
+        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    ) -> Self {
+        self.registry = Some(registry);
+        self.refresh(Instant::now());
+        self
+    }
+
+    fn refresh(&mut self, now: Instant) {
+        let Some(registry) = &self.registry else {
+            return;
+        };
+        if self
+            .last_refresh
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(200))
+        {
+            return;
+        }
+        self.last_refresh = Some(now);
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let Ok(mut records) =
+            runtime.block_on(registry.list(platform_api::task_registry::TaskListFilter::default()))
+        else {
+            return;
+        };
+        // 2.1.263 Cj/Vp: completed resumable agents are the explicit
+        // exception; terminal shells and foreground-only rows are hidden.
+        records.retain(|record| {
+            record.completed_agent_visible
+                || (matches!(record.status.as_str(), "running" | "pending")
+                    && record.is_backgrounded != Some(false))
+        });
+        self.monitors = records
+            .iter()
+            .filter(|record| record.kind.as_deref() == Some("monitor"))
+            .map(|record| record.task_id.clone())
+            .collect();
+        let selected_id = self.rows.get(self.selected).map(|row| row.task_id.clone());
+        self.parked_agents = records
+            .iter()
+            .filter(|record| record.is_parked)
+            .map(|record| record.task_id.clone())
+            .collect();
+        self.rows = records
+            .into_iter()
+            .map(tui_core::multiagent::task_row_from_record)
+            .collect();
+        let monitors = &self.monitors;
+        self.rows.sort_by_key(|row| Self::group(row, monitors).0);
+        self.selected = selected_id
+            .and_then(|id| self.rows.iter().position(|row| row.task_id == id))
+            .unwrap_or(self.selected.min(self.rows.len().saturating_sub(1)));
+    }
+
+    fn group(row: &TaskRow, monitors: &HashSet<String>) -> (u8, &'static str) {
+        match row.task_type.as_str() {
+            "in_process_teammate" => (0, "Agents"),
+            "local_bash" if !monitors.contains(&row.task_id) => (1, "Shells"),
+            "local_bash" | "monitor_mcp" | "monitor_ws" => (2, "Monitors"),
+            "mcp_task" => (3, "MCP tasks"),
+            "remote_agent" => (4, "Cloud agents"),
+            "local_agent" if row.status == "completed" => (6, "Completed"),
+            "local_agent" => (5, "Local agents"),
+            "local_workflow" => (7, "Dynamic workflows"),
+            "dream" => (8, ""),
+            "auto_mode_scan" => (9, ""),
+            _ => (10, "Other tasks"),
+        }
     }
 
     /// The status glyph for one row.
@@ -82,68 +171,6 @@ impl TasksView {
         }
     }
 
-    /// Render one row, optionally reserving the actual viewport width for the
-    /// lower-priority description. `None` preserves the full inspection/test
-    /// line while `Some` keeps Fusion state/error visible in the real pane.
-    fn row_line(&self, row: &TaskRow, index: usize, width: Option<u16>) -> Line<'static> {
-        let marker = if index == self.selected {
-            "\u{276f} "
-        } else {
-            "  "
-        };
-        let short: String = row.task_id.chars().take(9).collect();
-        let label = row.command.as_deref().unwrap_or(&row.description);
-        let prefix = format!(
-            "{marker}{} {short}  {:<9}",
-            Self::glyph(&row.status),
-            row.status,
-        );
-
-        let detail = if row.task_type == "local_fusion" && row.status == "running" {
-            row.stage
-                .as_deref()
-                .map(sanitize_task_text)
-                .filter(|stage| !stage.is_empty())
-                .map(|stage| format!("[{stage}]"))
-        } else if row.task_type == "local_fusion" && row.status == "failed" {
-            row.error
-                .as_deref()
-                .map(sanitize_task_text)
-                .filter(|error| !error.is_empty())
-                .map(|error| format!("— {error}"))
-        } else {
-            None
-        };
-
-        let text = match detail {
-            Some(detail) => {
-                let priority = format!("{prefix}  {detail}");
-                let label_separator_width = 2;
-                let available = width
-                    .map(usize::from)
-                    .unwrap_or(usize::MAX)
-                    .saturating_sub(priority.width())
-                    .saturating_sub(label_separator_width);
-                if available == 0 {
-                    priority
-                } else {
-                    format!(
-                        "{priority}  {}",
-                        truncate_to_width_ellipsis(&label, available)
-                    )
-                }
-            }
-            None => format!("{prefix}  {label}"),
-        };
-
-        let style = if index == self.selected {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        Line::from(Span::styled(text, style))
-    }
-
     /// Rendered body lines: header, spacer, one line per row, spacer, hint.
     fn lines(&self) -> Vec<Line<'static>> {
         self.lines_at_width(None)
@@ -155,7 +182,7 @@ impl TasksView {
         let dim_style = Style::default().fg(dim);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.rows.len() + 4);
         lines.push(Line::from(Span::styled(
-            format!("Background Tasks ({})", self.rows.len()),
+            "Background",
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
@@ -173,12 +200,127 @@ impl TasksView {
             lines.push(Line::from(Span::styled("Esc close", dim_style)));
             return lines;
         }
+        let mut previous_group = None;
         for (i, r) in self.rows.iter().enumerate() {
-            lines.push(self.row_line(r, i, width));
+            let group = Self::group(r, &self.monitors);
+            if previous_group != Some(group.0) {
+                if previous_group.is_some() {
+                    lines.push(Line::from(""));
+                }
+                if !group.1.is_empty()
+                    && !(group.0 == 1
+                        && self
+                            .rows
+                            .iter()
+                            .all(|row| Self::group(row, &self.monitors).0 == 1))
+                {
+                    let count = self
+                        .rows
+                        .iter()
+                        .filter(|row| Self::group(row, &self.monitors).0 == group.0)
+                        .count();
+                    lines.push(Line::from(Span::styled(
+                        format!("{} ({count})", group.1),
+                        dim_style,
+                    )));
+                }
+                previous_group = Some(group.0);
+            }
+            let marker = if i == self.selected {
+                "\u{276f} "
+            } else {
+                "  "
+            };
+            let label = if self.monitors.contains(&r.task_id) {
+                r.description.clone()
+            } else {
+                r.command.clone().unwrap_or_else(|| r.description.clone())
+            };
+            let status = if r.awaiting_plan_approval {
+                "awaiting approval"
+            } else if r.task_type == "local_agent" && r.status == "completed" {
+                "done"
+            } else {
+                &r.status
+            };
+            let unread = if r.status == "completed" && r.unread {
+                ", unread"
+            } else {
+                ""
+            };
+            let model = r
+                .model
+                .as_deref()
+                .filter(|model| !model.is_empty())
+                .map(|model| {
+                    let effort = r
+                        .effort
+                        .as_deref()
+                        .filter(|effort| !effort.is_empty())
+                        .map(|effort| format!(" ({effort})"))
+                        .unwrap_or_default();
+                    format!(" · {model}{effort}")
+                })
+                .unwrap_or_default();
+            let (label, model) = if r.task_type == "local_agent" {
+                let model = tui_core::render::truncate_to_width_ellipsis(&model, 31);
+                let model_width = unicode_width::UnicodeWidthStr::width(model.as_str());
+                if model_width > 0 && 40usize.saturating_sub(model_width) >= 20 {
+                    (
+                        tui_core::render::truncate_to_width_ellipsis(&label, 40 - model_width),
+                        model,
+                    )
+                } else {
+                    (
+                        tui_core::render::truncate_to_width_ellipsis(&label, 40),
+                        String::new(),
+                    )
+                }
+            } else {
+                (label, String::new())
+            };
+            // A running Fusion row says which stage it is in, and a failed one
+            // says why, both sanitized: the stage and error are model- and
+            // provider-derived text reaching a terminal.
+            let fusion = if r.task_type == "local_fusion" && r.status == "running" {
+                r.stage
+                    .as_deref()
+                    .map(sanitize_task_text)
+                    .filter(|stage| !stage.is_empty())
+                    .map(|stage| format!(" [{stage}]"))
+                    .unwrap_or_default()
+            } else if r.task_type == "local_fusion" && r.status == "failed" {
+                r.error
+                    .as_deref()
+                    .map(sanitize_task_text)
+                    .filter(|error| !error.is_empty())
+                    .map(|error| format!(" \u{2014} {error}"))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let text = format!(
+                "{marker}{label} {} {status}{unread}{fusion}{model}",
+                Self::glyph(&r.status)
+            );
+            let style = if i == self.selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(text, style)));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "\u{2191}\u{2193} navigate \u{00b7} x stop task \u{00b7} Esc close",
+            if self
+                .rows
+                .get(self.selected)
+                .is_some_and(|row| self.is_killable(row))
+            {
+                "\u{2191}\u{2193} navigate \u{00b7} x stop task \u{00b7} Esc close"
+            } else {
+                "\u{2191}\u{2193} navigate \u{00b7} Esc close"
+            },
             dim_style,
         )));
         lines
@@ -186,7 +328,10 @@ impl TasksView {
 
     /// Line index of the selected row (header + spacer occupy 2 lines).
     fn selected_line_index(&self) -> usize {
-        self.selected.saturating_add(2)
+        self.lines()
+            .iter()
+            .position(|line| line.to_string().starts_with("❯ "))
+            .unwrap_or(2)
     }
 
     /// Scroll offset keeping the selected row visible in a `viewport`-tall inner
@@ -233,6 +378,15 @@ impl Renderable for TasksView {
 }
 
 impl BottomPaneView for TasksView {
+    fn handle_tick(&mut self, now: Instant) -> ViewOutcome {
+        self.refresh(now);
+        ViewOutcome::Pending
+    }
+
+    fn needs_redraw(&self) -> bool {
+        self.registry.is_some()
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => ViewOutcome::Cancelled,
@@ -246,9 +400,11 @@ impl BottomPaneView for TasksView {
                 }
                 ViewOutcome::Pending
             }
-            KeyCode::Char('x') | KeyCode::Char('d') | KeyCode::Delete => {
+            KeyCode::Char('x') | KeyCode::Char('d') | KeyCode::Delete
+                if key.modifiers.is_empty() =>
+            {
                 match self.rows.get(self.selected) {
-                    Some(r) if Self::is_killable(&r.status) => {
+                    Some(r) if self.is_killable(r) => {
                         let task_id = r.task_id.clone();
                         // Optimistic: reflect the stop in the list immediately;
                         // the real kill runs off-loop and its result lands in
@@ -291,6 +447,10 @@ mod tests {
 
     fn row(id: &str, status: &str, desc: &str) -> TaskRow {
         TaskRow {
+            unread: false,
+            model: None,
+            effort: None,
+            awaiting_plan_approval: false,
             task_id: id.to_string(),
             task_type: "local_bash".to_string(),
             status: status.to_string(),
@@ -327,6 +487,52 @@ mod tests {
     /// oracle's in-dialog empty body has to render here (Background dialog:
     /// `children: D.length === 0 ? "No tasks currently running" : …`).
     #[test]
+    fn plan_approval_label_clears_after_approval_or_rejection() {
+        let mut task = row("t12345678", "running", "Review API");
+        task.task_type = "in_process_teammate".into();
+        task.awaiting_plan_approval = true;
+        let pending: Vec<String> = view(vec![task.clone()])
+            .lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(pending
+            .iter()
+            .any(|line| line.contains("awaiting approval") && line.contains("Review API")));
+        for _decision in ["approved", "rejected"] {
+            task.awaiting_plan_approval = false;
+            let resolved: Vec<String> = view(vec![task.clone()])
+                .lines()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert!(!resolved
+                .iter()
+                .any(|line| line.contains("awaiting approval")));
+            assert!(resolved
+                .iter()
+                .any(|line| line.contains("running") && line.contains("Review API")));
+        }
+    }
+
+    #[test]
+    fn completed_agent_row_shows_unread_and_real_model_effort() {
+        let mut agent = row("agent1", "completed", "inspect files");
+        agent.task_type = "local_agent".into();
+        agent.unread = true;
+        agent.model = Some("Sonnet".into());
+        agent.effort = Some("high".into());
+        let text = view(vec![agent])
+            .lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("done, unread · Sonnet (high)"), "{text}");
+        assert!(!text.contains("parked"));
+    }
+
+    #[test]
     fn empty_snapshot_renders_the_in_view_empty_state() {
         let v = view(Vec::new());
         let body: Vec<String> = v
@@ -339,7 +545,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert_eq!(body[0], "Background Tasks (0)");
+        assert_eq!(body[0], "Background");
         assert!(
             body.contains(&"No tasks currently running".to_string()),
             "empty state missing: {body:?}"
@@ -529,7 +735,8 @@ mod tests {
                 })
             })
             .collect();
-        assert!(text.contains("Background Tasks"), "{text}");
+        assert!(text.contains("Background"), "{text}");
+        assert!(!text.contains("Background Tasks"), "{text}");
         assert!(text.contains("cargo build"), "{text}");
     }
 
@@ -568,6 +775,96 @@ mod tests {
     }
 
     #[test]
+    fn queued_and_pending_tasks_cannot_be_stopped_but_parked_agents_can() {
+        for status in ["queued", "pending"] {
+            let mut v = view(vec![row("b1", status, "waiting")]);
+            assert!(matches!(
+                v.handle_key(press(KeyCode::Char('x'))),
+                ViewOutcome::Pending
+            ));
+        }
+        let mut parked = row("agent1", "completed", "resting");
+        parked.task_type = "local_agent".into();
+        let mut v = view(vec![parked]);
+        v.parked_agents.insert("agent1".into());
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Char('x'))),
+            ViewOutcome::RunTaskAction(TaskAction::Kill { .. })
+        ));
+    }
+
+    struct LiveRegistry(std::sync::Mutex<Vec<platform_api::task_registry::TaskRecord>>);
+    #[async_trait::async_trait]
+    impl platform_api::task_registry::TaskRegistryHandle for LiveRegistry {
+        async fn create(
+            &self,
+            _i: platform_api::task_registry::TaskCreateInput,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _id: &str,
+        ) -> Result<
+            Option<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _f: platform_api::task_registry::TaskListFilter,
+        ) -> Result<
+            Vec<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: platform_api::task_registry::TaskUpdatePatch,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn kill(
+            &self,
+            _id: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _o: Option<u64>,
+        ) -> Result<
+            platform_api::task_registry::TaskOutputChunk,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+    }
+
+    #[test]
     fn fusion_refresh_updates_selected_stage_in_the_rendered_buffer() {
         let mut first = row("a00000001", "running", "ordinary task");
         first.task_type = "local_agent".into();
@@ -581,6 +878,10 @@ mod tests {
         v.apply_multiagent_event(&MultiAgentEvent::TasksRefreshed(vec![
             row("a00000001", "running", "ordinary task"),
             TaskRow {
+                unread: false,
+                model: None,
+                effort: None,
+                awaiting_plan_approval: false,
                 task_id: "f00000002".into(),
                 task_type: "local_fusion".into(),
                 status: "running".into(),
@@ -611,7 +912,10 @@ mod tests {
     }
 
     #[test]
-    fn fusion_label_keeps_command_precedence_and_whole_graphemes() {
+    /// The command, not the description, names a Fusion row. The grapheme half
+    /// of this test went with `row_line`: `main`'s renderer truncates only
+    /// `local_agent` rows, so a Fusion label is never cut here at all.
+    fn fusion_label_keeps_command_precedence() {
         let mut fusion = row(
             "f00000001",
             "running",
@@ -622,35 +926,67 @@ mod tests {
             Some("e\u{301}e\u{301}e\u{301} \u{1f469}\u{200d}\u{1f4bb} command tail".into());
         fusion.stage = Some("P".into());
 
-        let v = view(vec![fusion]);
-        let priority_line = v.row_line(&v.rows[0], 0, Some(0));
-        let priority_width = priority_line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>()
-            .width();
-        let viewport = u16::try_from(priority_width + 2 + 7).expect("small fixture width");
-        let line = v.row_line(&v.rows[0], 0, Some(viewport));
-        let line_text = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(
-            line_text.ends_with("e\u{301}e\u{301}e\u{301} \u{1f469}\u{200d}\u{1f4bb}\u{2026}"),
-            "truncation split a grapheme cluster: {line_text:?}"
-        );
-        assert!(
-            line_text.width() <= usize::from(viewport),
-            "row exceeded its viewport: {line_text:?}"
-        );
-
-        let rendered = rendered_buffer(&v, viewport.saturating_add(2), 8);
+        let rendered = rendered_buffer(&view(vec![fusion]), 120, 8);
         assert!(rendered.contains("[P]"), "{rendered:?}");
+        assert!(rendered.contains("command tail"), "{rendered:?}");
         assert!(
             !rendered.contains("description-must-not-replace-command"),
             "command precedence changed: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn mounted_dialog_refreshes_registry_and_preserves_selected_identity() {
+        let registry = Arc::new(LiveRegistry(std::sync::Mutex::new(vec![])));
+        let mut view = TasksView::new(vec![], Theme::dark()).with_registry(registry.clone());
+        let mut record = platform_api::task_registry::TaskRecord {
+            task_id: "agent1".into(),
+            task_type: "local_agent".into(),
+            status: "running".into(),
+            description: "working".into(),
+            ..Default::default()
+        };
+        let finished = platform_api::task_registry::TaskRecord {
+            task_id: "shell-done".into(),
+            task_type: "local_bash".into(),
+            status: "completed".into(),
+            ..Default::default()
+        };
+        let foreground = platform_api::task_registry::TaskRecord {
+            task_id: "shell-fg".into(),
+            task_type: "local_bash".into(),
+            status: "running".into(),
+            is_backgrounded: Some(false),
+            ..Default::default()
+        };
+        *registry.0.lock().unwrap() = vec![record.clone(), finished, foreground];
+        let now = Instant::now() + Duration::from_secs(1);
+        view.handle_tick(now);
+        assert_eq!(
+            view.rows().len(),
+            1,
+            "terminal shells and foreground rows stay out of the dialog"
+        );
+        assert_eq!(view.rows()[0].status, "running");
+        record.status = "completed".into();
+        record.is_parked = true;
+        record.is_backgrounded = Some(true);
+        // The live registry computes Cj eligibility, rather than the dialog
+        // treating every parked row as a visible completed task.
+        record.completed_agent_visible = true;
+        *registry.0.lock().unwrap() = vec![record];
+        view.handle_tick(now + Duration::from_secs(1));
+        assert_eq!(view.rows()[0].status, "completed");
+        assert!(
+            view.is_killable(&view.rows()[0]),
+            "a parked persistent agent remains stoppable"
+        );
+        registry.0.lock().unwrap().clear();
+        view.handle_tick(now + Duration::from_secs(2));
+        assert!(view.rows().is_empty());
+        assert!(view
+            .lines()
+            .iter()
+            .any(|line| line.to_string() == "No tasks currently running"));
     }
 }

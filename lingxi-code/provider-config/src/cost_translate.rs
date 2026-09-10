@@ -304,7 +304,10 @@ mod tests {
         };
         let (p, _res) = cat.resolve(&mr).expect("priced");
         let output = p.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token;
-        assert_eq!(output, 20_000, "sanity: gpt-5.6-sol bills output at $20/Mtok");
+        assert_eq!(
+            output, 20_000,
+            "sanity: gpt-5.6-sol bills output at $20/Mtok"
+        );
         let reasoning = p
             .token_rates
             .get(&cost::pricing::TokenClass::ReasoningOutput)
@@ -348,7 +351,8 @@ mod tests {
         };
         let (p, _res) = cat.resolve(&mr).expect("priced");
         let output = p.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token;
-        let reasoning = p.token_rates[&cost::pricing::TokenClass::ReasoningOutput].nano_usd_per_token;
+        let reasoning =
+            p.token_rates[&cost::pricing::TokenClass::ReasoningOutput].nano_usd_per_token;
         assert_eq!(output, 8_000);
         assert_eq!(
             reasoning, 3_000,

@@ -35,6 +35,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.lang.ref.WeakReference
+import java.net.URI
 
 data class LocalAppBridgeMessage(
     val appId: String,
@@ -76,6 +77,445 @@ sealed interface LocalAppUiAutomationAction {
 
     /// Keyboard event. There was no key action at all before this.
     data class Key(val key: String, val phase: String) : LocalAppUiAutomationAction
+
+    /** Host-owned QA identity; the nested action retains the original value bytes. */
+    data class Qa(
+        val expectedRuntimeUrl: String,
+        val action: LocalAppUiAutomationAction,
+    ) : LocalAppUiAutomationAction
+}
+
+internal data class LocalAppQaEnvelope(
+    val expectedRuntimeUrl: String,
+    val actionValue: String?,
+)
+
+internal data class LocalAppQaDocument(
+    val loadedRuntimeUrl: String,
+    val navigationGeneration: Long,
+    /**
+     * How many full documents this WebView has started loading. Every
+     * cross-document load raises it in `onPageStarted`; a same-document
+     * history commit never does. `navigationGeneration` alone cannot separate
+     * the two, so this is what lets an event action attest an SPA route it
+     * committed without also attesting a whole new document it merely raced.
+     * Never reset, for the same reason `navigationGeneration` is not: a stale
+     * snapshot must never compare equal to a later one.
+     */
+    val documentLoadGeneration: Long = 0,
+)
+
+/** Pure lifecycle state so same-port A → B races can be regression-tested on the JVM. */
+internal class LocalAppQaDocumentState(initialRuntimeUrl: String) {
+    private var expectedRuntimeUrl = initialRuntimeUrl.asUriOrNull()
+    private var pendingStartUrl: URI? = null
+    private var pendingHistoryNavigation = false
+    private var activeStartGeneration: Long? = null
+    private var activeStartUrl: URI? = null
+    private var committedUrl: URI? = null
+    private var deferredVisitedHistoryObserved = false
+    private var deferredVisitedHistoryUrl: URI? = null
+    /**
+     * The last document that reached a committed state. `committedUrl` is
+     * cleared as soon as Host navigation starts; retaining this identity lets
+     * Back reject a delayed callback for the current entry and authenticate
+     * only the requested copied-list destination.
+     */
+    private var lastCommittedUrl: URI? = null
+    private var documentLoadGeneration: Long = 0
+    private var ready = false
+    private var visualReadyGeneration: Long? = null
+    private var activeVisualFenceToken: Long? = null
+    private var nextVisualFenceToken = 0L
+    var isDetached = false
+        private set
+
+    var navigationGeneration: Long = 0
+        private set
+
+    fun beginNavigation(url: String, isHistoryNavigation: Boolean = false): Long {
+        navigationGeneration += 1
+        val requested = url.asUriOrNull()
+        if (requested?.let(::isLocalAppQaRuntimeUrl) == true || expectedRuntimeUrl == null) {
+            expectedRuntimeUrl = requested
+        }
+        pendingStartUrl = requested
+        pendingHistoryNavigation = isHistoryNavigation
+        activeStartGeneration = null
+        activeStartUrl = null
+        committedUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
+        ready = false
+        visualReadyGeneration = null
+        activeVisualFenceToken = null
+        return navigationGeneration
+    }
+
+    fun onPageStarted(url: String) {
+        if (isDetached) return
+        val started = url.asUriOrNull()
+        if (!pendingHistoryNavigation && started != pendingStartUrl) navigationGeneration += 1
+        documentLoadGeneration += 1
+        pendingStartUrl = null
+        pendingHistoryNavigation = false
+        activeStartGeneration = navigationGeneration
+        activeStartUrl = started
+        committedUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
+        ready = false
+        visualReadyGeneration = null
+        activeVisualFenceToken = null
+    }
+
+    fun onPageFinished(url: String): Long? {
+        if (isDetached || activeStartGeneration != navigationGeneration) return null
+        val finished = url.asUriOrNull() ?: return null
+        val started = activeStartUrl
+        val deferred = deferredVisitedHistoryUrl
+        if (deferredVisitedHistoryObserved && deferred == null) {
+            // A foreign or malformed same-document URL was committed while
+            // this document was loading. The later load event must not revive
+            // the pre-history URL as a trusted QA document.
+            invalidateDocument()
+            return null
+        }
+        // Ignore an old runtime's late finish without consuming the current
+        // generation; the current document may still finish afterward.
+        if (!sameLocalAppRuntimeIdentity(expectedRuntimeUrl, finished) ||
+            (finished != started && finished != deferred)
+        ) return null
+        val committed = deferred ?: finished
+        if (deferredVisitedHistoryObserved && committed != started) navigationGeneration += 1
+        committedUrl = committed
+        lastCommittedUrl = committed
+        activeStartGeneration = null
+        activeStartUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
+        ready = true
+        visualReadyGeneration = null
+        activeVisualFenceToken = null
+        return navigationGeneration
+    }
+
+    /**
+     * Fragment history does not reliably produce onPageStarted callbacks.
+     * This is the explicit Host fallback for a navigation already classified
+     * as same-document (Navigate/Back); the native history callback is the
+     * normal path below.
+     */
+    fun onSameDocumentNavigationObserved(url: String): Long? =
+        commitSameDocumentNavigation(url, requirePriorDocument = false)
+
+    /**
+     * Mirrors WebViewClient.doUpdateVisitedHistory. Chromium invokes this for
+     * pushState/replaceState/hash history commits without onPageStarted. An
+     * update observed during a full page-start sequence is retained until its
+     * finish so startup routing cannot be dropped; a full navigation's own
+     * same-URL history callback then collapses to a no-op.
+     */
+    fun onVisitedHistoryUpdated(url: String, isReload: Boolean = false): Long? {
+        if (isDetached || isReload) return null
+        val observed = url.asUriOrNull()
+        if (activeStartGeneration != null) {
+            // Chromium reports same-document commits as soon as that nested
+            // navigation commits, which can be before the enclosing document's
+            // onPageFinished (startup routers commonly replaceState here).
+            // Retain the latest observed URL and fold it into that finish.
+            // A null value deliberately records an untrusted observation.
+            deferredVisitedHistoryObserved = true
+            deferredVisitedHistoryUrl = observed?.takeIf {
+                sameLocalAppRuntimeIdentity(expectedRuntimeUrl, it)
+            }
+            visualReadyGeneration = null
+            activeVisualFenceToken = null
+            return null
+        }
+        if (observed == null || !sameLocalAppRuntimeIdentity(expectedRuntimeUrl, observed)) {
+            // A same-document callback carrying a foreign/malformed runtime
+            // must invalidate the old ready document. Otherwise a QA Inspect
+            // could attest stale state after the page changed its URL.
+            invalidateDocument()
+            return null
+        }
+        return commitSameDocumentNavigation(url, requirePriorDocument = true)
+    }
+
+    private fun commitSameDocumentNavigation(
+        url: String,
+        requirePriorDocument: Boolean,
+    ): Long? {
+        if (isDetached || activeStartGeneration != null) return null
+        val committed = url.asUriOrNull() ?: return null
+        if (!sameLocalAppRuntimeIdentity(expectedRuntimeUrl, committed)) return null
+        val pending = pendingStartUrl
+        val historyNavigation = pendingHistoryNavigation
+        val prior = committedUrl ?: lastCommittedUrl
+        if (historyNavigation) {
+            if (pending == null || prior == null || committed != pending || committed == prior) return null
+        } else if (pending != null) {
+            if (pending != committed ||
+                (requirePriorDocument &&
+                    !isSameLocalAppHistoryDocument(expectedRuntimeUrl, prior, committed))
+            ) return null
+        } else {
+            // A page-created history entry must move from the currently loaded
+            // URL. Duplicate doUpdateVisitedHistory callbacks are no-ops.
+            if (!ready || committedUrl == null || committedUrl == committed) return null
+        }
+        pendingStartUrl = null
+        pendingHistoryNavigation = false
+        activeStartGeneration = null
+        activeStartUrl = null
+        if (pending == null && !historyNavigation) navigationGeneration += 1
+        committedUrl = committed
+        lastCommittedUrl = committed
+        ready = true
+        visualReadyGeneration = null
+        activeVisualFenceToken = null
+        return navigationGeneration
+    }
+
+    fun isCurrentVisualDocument(url: String, generation: Long): Boolean {
+        val committed = committedUrl
+        return !isDetached && generation == navigationGeneration &&
+            committed?.toString() == url &&
+            sameLocalAppRuntimeIdentity(expectedRuntimeUrl, committed)
+    }
+
+    fun beginVisualFrameFence(url: String, generation: Long): Long? {
+        if (!isCurrentVisualDocument(url, generation)) return null
+        nextVisualFenceToken += 1
+        activeVisualFenceToken = nextVisualFenceToken
+        visualReadyGeneration = null
+        return nextVisualFenceToken
+    }
+
+    fun onVisualFrame(url: String, generation: Long, token: Long? = null): Boolean {
+        if (!isCurrentVisualDocument(url, generation) ||
+            (token != null && activeVisualFenceToken != token)
+        ) return false
+        visualReadyGeneration = generation
+        return true
+    }
+
+    fun document(
+        expected: URI,
+        minimumGeneration: Long = 0,
+        requireVisualFrame: Boolean = false,
+    ): LocalAppQaDocument? {
+        val committed = committedUrl
+        if (isDetached || !ready || navigationGeneration < minimumGeneration ||
+            !sameLocalAppRuntimeIdentity(expected, committed) ||
+            (requireVisualFrame && visualReadyGeneration != navigationGeneration)
+        ) return null
+        return LocalAppQaDocument(committed.toString(), navigationGeneration, documentLoadGeneration)
+    }
+
+    /** Validate the observed route against the canonical Host runtime identity. */
+    fun currentDocument(
+        minimumGeneration: Long = 0,
+        requireVisualFrame: Boolean = false,
+    ): LocalAppQaDocument? = expectedRuntimeUrl?.let {
+        document(it, minimumGeneration, requireVisualFrame)
+    }
+
+    fun detach() {
+        isDetached = true
+        pendingStartUrl = null
+        pendingHistoryNavigation = false
+        activeStartGeneration = null
+        activeStartUrl = null
+        committedUrl = null
+        lastCommittedUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
+        ready = false
+        visualReadyGeneration = null
+        activeVisualFenceToken = null
+    }
+
+    private fun invalidateDocument() {
+        pendingStartUrl = null
+        pendingHistoryNavigation = false
+        activeStartGeneration = null
+        activeStartUrl = null
+        committedUrl = null
+        lastCommittedUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
+        ready = false
+        visualReadyGeneration = null
+        activeVisualFenceToken = null
+    }
+}
+
+internal fun isLocalAppQaRequestId(requestId: String): Boolean = requestId.startsWith("qa-ui-")
+
+/** Decode only the Host-reserved wrapper; ordinary action values remain opaque. */
+internal fun parseLocalAppQaEnvelope(value: String?, requestId: String): LocalAppQaEnvelope? {
+    // The request id is minted by the Host and cannot be supplied by page
+    // content. Value shape alone would hijack literal JSON text entry.
+    if (!isLocalAppQaRequestId(requestId)) return null
+    val root = runCatching { JSONObject(value.orEmpty()) }.getOrNull() ?: return null
+    val qa = root.optJSONObject("lingxi_qa") ?: return null
+    val version = qa.opt("version")
+    if (version !is Number || version.toDouble() != 1.0) return null
+    val expected = qa.optString("expected_runtime_url", "")
+    val parsed = expected.asUriOrNull() ?: return null
+    if (!isLocalAppQaRuntimeUrl(parsed) || root.keys().asSequence().any { it != "lingxi_qa" } ||
+        qa.keys().asSequence().any { it !in setOf("version", "expected_runtime_url", "action_value") }) {
+        return null
+    }
+    val actionValue = when {
+        !qa.has("action_value") || qa.isNull("action_value") -> null
+        qa.opt("action_value") is String -> qa.getString("action_value")
+        else -> return null
+    }
+    return LocalAppQaEnvelope(expected, actionValue)
+}
+
+private fun String.asUriOrNull(): URI? = runCatching { URI(this) }.getOrNull()
+
+private fun URI.normalizedLoopbackHost(): String? =
+    host?.lowercase()?.removePrefix("[")?.removeSuffix("]")
+        ?.takeIf { it in setOf("127.0.0.1", "localhost", "::1") }
+
+private fun URI.runtimeMarkers(): List<String> =
+    rawQuery.orEmpty().split('&').mapNotNull { item ->
+        item.split('=', limit = 2).takeIf { it.size == 2 && it[0] == "lingxi_runtime" }?.get(1)
+    }
+
+internal fun isLocalAppQaRuntimeUrl(url: URI): Boolean {
+    val markers = url.runtimeMarkers()
+    return url.scheme.equals("http", ignoreCase = true) &&
+        url.normalizedLoopbackHost() != null &&
+        url.userInfo == null && url.fragment == null && url.rawPath == "/" &&
+        url.port in 1..65_535 && markers.size == 1 &&
+        markers[0].isNotEmpty() && markers[0].all(Char::isDigit) &&
+        url.rawQuery.orEmpty().split('&').size == 1
+}
+
+internal fun sameLocalAppRuntimeIdentity(expected: URI?, committed: URI?): Boolean {
+    if (expected == null || committed == null || !isLocalAppQaRuntimeUrl(expected)) return false
+    val expectedMarker = expected.runtimeMarkers().single()
+    val committedMarkers = committed.runtimeMarkers()
+    return committed.scheme.equals(expected.scheme, ignoreCase = true) &&
+        committed.normalizedLoopbackHost() == expected.normalizedLoopbackHost() &&
+        committed.port == expected.port && committed.userInfo == null &&
+        committedMarkers.size == 1 && committedMarkers[0] == expectedMarker
+}
+
+/** A Host-requested fragment history step must stay in the same document. */
+private fun isSameLocalAppHistoryDocument(
+    expected: URI?,
+    previous: URI?,
+    next: URI?,
+): Boolean =
+    previous != null && next != null &&
+        sameLocalAppRuntimeIdentity(expected, previous) &&
+        sameLocalAppRuntimeIdentity(expected, next) &&
+        previous.rawPath == next.rawPath &&
+        previous.rawQuery == next.rawQuery &&
+        previous.fragment != next.fragment
+
+internal fun sameLocalAppQaDocument(
+    before: LocalAppQaDocument,
+    after: LocalAppQaDocument,
+    intentionalNavigation: Boolean,
+    allowInteractiveNavigation: Boolean = false,
+): Boolean = if (intentionalNavigation) {
+    after.navigationGeneration > before.navigationGeneration
+} else if (allowInteractiveNavigation) {
+    // Event actions may synchronously commit a same-document SPA route, so a
+    // successful action may advance the generation -- but ONLY through
+    // same-document history commits. A full document load starting during the
+    // action raises documentLoadGeneration, and the action's result was
+    // produced in the document that load replaced: attesting it against the
+    // new one would bind the evidence to a route it never ran in, and which
+    // route won would depend on when awaitQaDocument happened to poll. A no-op
+    // event still has to certify the exact pre-action document.
+    after.documentLoadGeneration == before.documentLoadGeneration &&
+        (after.navigationGeneration > before.navigationGeneration ||
+            (after.navigationGeneration == before.navigationGeneration &&
+                after.loadedRuntimeUrl == before.loadedRuntimeUrl))
+} else {
+    after.navigationGeneration == before.navigationGeneration &&
+        after.loadedRuntimeUrl == before.loadedRuntimeUrl
+}
+
+internal fun localAppQaNavigationWasAccepted(
+    action: LocalAppUiAutomationAction,
+    result: LocalAppUiExecutionResult,
+): Boolean = result.error == null && (
+    action is LocalAppUiAutomationAction.Navigate ||
+        action is LocalAppUiAutomationAction.Back ||
+        action is LocalAppUiAutomationAction.Reload
+    )
+
+/** Event actions can legitimately submit a form or commit an SPA history entry. */
+internal fun localAppQaActionMayAdvanceDocument(
+    action: LocalAppUiAutomationAction,
+    result: LocalAppUiExecutionResult,
+): Boolean = result.error == null && when (action) {
+    is LocalAppUiAutomationAction.Click,
+    is LocalAppUiAutomationAction.Fill,
+    is LocalAppUiAutomationAction.Select,
+    is LocalAppUiAutomationAction.Toggle,
+    is LocalAppUiAutomationAction.Pointer,
+    is LocalAppUiAutomationAction.Key -> true
+    else -> false
+}
+
+internal fun localAppFrameCommitFenceAvailable(
+    sdkInt: Int,
+    attached: Boolean,
+    hardwareAccelerated: Boolean,
+): Boolean = sdkInt >= Build.VERSION_CODES.Q && attached && hardwareAccelerated
+
+internal fun localAppCaptureFrameFenceUnavailable(
+    qaCapture: Boolean,
+    sdkInt: Int,
+    attached: Boolean,
+    hardwareAccelerated: Boolean,
+): Boolean = qaCapture && !localAppFrameCommitFenceAvailable(sdkInt, attached, hardwareAccelerated)
+
+internal fun buildLocalAppQaExecutionResult(
+    originalResultJson: String?,
+    operationError: String? = null,
+    requested: URI,
+    document: LocalAppQaDocument,
+    platform: String,
+    formFactor: String,
+    width: Int,
+    height: Int,
+    devicePixelRatio: Float,
+): String {
+    val metadata = jsonObjectString(
+        "version" to 1,
+        "requested_runtime_url" to requested.toString(),
+        "loaded_runtime_url" to document.loadedRuntimeUrl,
+        "platform" to platform,
+        "form_factor" to formFactor,
+        "navigation_generation" to document.navigationGeneration,
+        "width" to width,
+        "height" to height,
+        "device_pixel_ratio" to devicePixelRatio,
+    )
+    val result = operationError?.let { error ->
+        val objectResult = runCatching { JSONObject(originalResultJson ?: "{}") }
+            .getOrElse { JSONObject() }
+            .put("ok", false)
+            .put("error", error)
+        RawJson(objectResult.toString())
+    } ?: originalResultJson?.let(::RawJson)
+        ?: RawJson(JSONObject.NULL.toString())
+    return jsonObjectString(
+        "lingxi_qa" to RawJson(metadata),
+        "result" to result,
+    )
 }
 
 data class LocalAppUiExecutionResult(
@@ -92,6 +532,9 @@ private data class RawJson(val json: String)
  * One literal, not a copy at each call site, so the three cannot drift apart.
  */
 private const val LOCAL_APP_CAPTURE_UNAVAILABLE_ERROR = "The app view could not be captured; it may be offscreen."
+private const val LOCAL_APP_CAPTURE_FRAME_FENCE_UNAVAILABLE_ERROR =
+    "The app view could not be captured; a hardware frame-commit fence is unavailable."
+private const val LOCAL_APP_VISUAL_FENCE_TIMEOUT_MS = 1_500L
 
 /**
  * Executes only the versioned, structured UI action vocabulary.
@@ -106,11 +549,226 @@ class LocalAppWebViewController internal constructor(
     private val guardedWebViewClient: WebViewClient,
     private val initialUrl: String,
 ) {
+    private val platform = "android"
+    private val formFactor = androidFormFactor(webView.resources.configuration)
     private var suspendedUrl: String? = null
     private var deletionSuspended = false
+    private val qaDocumentState = LocalAppQaDocumentState(initialUrl)
+
+    internal fun beginNavigation(url: String, isHistoryNavigation: Boolean = false) {
+        qaDocumentState.beginNavigation(url, isHistoryNavigation)
+    }
+
+    internal fun onPageStarted(url: String) {
+        qaDocumentState.onPageStarted(url)
+    }
+
+    internal fun onPageFinished(url: String) {
+        val generation = qaDocumentState.onPageFinished(url) ?: return
+        val committed = qaDocumentState.currentDocument(minimumGeneration = generation) ?: return
+        armVisualReadiness(committed.loadedRuntimeUrl, committed.navigationGeneration)
+    }
+
+    internal fun onVisitedHistoryUpdated(url: String, isReload: Boolean) {
+        // Chromium queues onPageStarted before this callback for a committed
+        // cross-document load, while same-document commits deliberately have
+        // no page-start callback. Observe this callback on its native UI turn;
+        // another post would reorder startup replaceState after onPageFinished.
+        val generation = qaDocumentState.onVisitedHistoryUpdated(url, isReload) ?: return
+        armVisualReadiness(url, generation)
+    }
+
+    internal fun observeSameDocumentNavigation(expectedUrl: String, attempts: Int = 0) {
+        val url = webView.url ?: return
+        if (url != expectedUrl) {
+            if (attempts < 8) {
+                webView.postOnAnimation {
+                    observeSameDocumentNavigation(expectedUrl, attempts + 1)
+                }
+            }
+            return
+        }
+        val generation = qaDocumentState.onSameDocumentNavigationObserved(url) ?: return
+        armVisualReadiness(url, generation)
+    }
+
+    private fun armVisualReadiness(url: String, generation: Long) {
+        requestVisualFrameFence(url, generation) {}
+    }
+
+    /**
+     * Requests a new DOM-state and compositor-frame proof. A navigation's
+     * readiness proof is deliberately not reusable for a later QA capture:
+     * the page may have painted new canvas/DOM content without changing URL.
+     */
+    private fun requestVisualFrameFence(
+        url: String,
+        generation: Long,
+        onReady: (Boolean) -> Unit,
+    ) {
+        if (localAppCaptureFrameFenceUnavailable(
+                qaCapture = true,
+                sdkInt = Build.VERSION.SDK_INT,
+                attached = webView.isAttachedToWindow,
+                hardwareAccelerated = webView.isHardwareAccelerated,
+            )
+        ) {
+            onReady(false)
+            return
+        }
+        val token = qaDocumentState.beginVisualFrameFence(url, generation)
+        if (token == null) {
+            onReady(false)
+            return
+        }
+        var completed = false
+        fun complete(success: Boolean) {
+            if (completed) return
+            completed = true
+            onReady(success)
+        }
+        webView.postDelayed({ complete(false) }, LOCAL_APP_VISUAL_FENCE_TIMEOUT_MS)
+        webView.postVisualStateCallback(
+            token,
+            object : WebView.VisualStateCallback() {
+                override fun onComplete(requestId: Long) {
+                    if (completed) return
+                    if (requestId != token ||
+                        !qaDocumentState.isCurrentVisualDocument(url, generation)
+                    ) {
+                        complete(false)
+                        return
+                    }
+                    val observer = webView.viewTreeObserver
+                    if (!observer.isAlive) {
+                        complete(false)
+                        return
+                    }
+                    // registerFrameCommitCallback was added in API 29; keep
+                    // the platform proof explicit for lint and future callers.
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                        complete(false)
+                        return
+                    }
+                    observer.registerFrameCommitCallback {
+                        if (completed) return@registerFrameCommitCallback
+                        // The visual-state callback proves WebView's DOM state;
+                        // the frame-commit callback proves the host compositor
+                        // submitted that frame before PixelCopy samples it.
+                        complete(qaDocumentState.onVisualFrame(url, generation, token))
+                    }
+                    webView.postInvalidateOnAnimation()
+                }
+            },
+        )
+    }
+
+    private fun awaitQaDocument(
+        expected: URI,
+        minimumGeneration: Long,
+        requireVisualFrame: Boolean = false,
+        attempts: Int = 0,
+        onReady: (LocalAppQaDocument?) -> Unit,
+    ) {
+        qaDocumentState.document(expected, minimumGeneration, requireVisualFrame)
+            ?.takeIf { document -> webView.url == document.loadedRuntimeUrl }
+            ?.let { document ->
+                onReady(document)
+                return
+            }
+        if (qaDocumentState.isDetached || attempts >= 100) {
+            onReady(null)
+            return
+        }
+        webView.postDelayed({
+            awaitQaDocument(expected, minimumGeneration, requireVisualFrame, attempts + 1, onReady)
+        }, 50L)
+    }
+
     fun execute(
         action: LocalAppUiAutomationAction,
         onResult: (LocalAppUiExecutionResult) -> Unit = {},
+    ) {
+        val qa = action as? LocalAppUiAutomationAction.Qa
+        if (qa != null) {
+            val expected = qa.expectedRuntimeUrl.asUriOrNull()
+            if (expected == null || !isLocalAppQaRuntimeUrl(expected)) {
+                onResult(LocalAppUiExecutionResult(null, "Invalid Local App QA runtime URL"))
+                return
+            }
+            val startedGeneration = qaDocumentState.navigationGeneration
+            val requiresVisualFrame = qa.action is LocalAppUiAutomationAction.CaptureView
+            if (localAppCaptureFrameFenceUnavailable(
+                    qaCapture = requiresVisualFrame,
+                    sdkInt = Build.VERSION.SDK_INT,
+                    attached = webView.isAttachedToWindow,
+                    hardwareAccelerated = webView.isHardwareAccelerated,
+                )
+            ) {
+                onResult(LocalAppUiExecutionResult(null, LOCAL_APP_CAPTURE_FRAME_FENCE_UNAVAILABLE_ERROR))
+                return
+            }
+            // A capture requests its own fresh frame fence below. Navigation's
+            // earlier visual proof is only a lifecycle hint, never capture
+            // evidence for the current DOM/canvas state.
+            awaitQaDocument(expected, startedGeneration) { before ->
+                if (before == null) {
+                    val error = if (requiresVisualFrame) {
+                        "Local App QA capture unavailable: hardware frame-commit fence is unsupported"
+                    } else {
+                        "Local App QA document identity did not become ready"
+                    }
+                    onResult(LocalAppUiExecutionResult(null, error))
+                    return@awaitQaDocument
+                }
+                executeOrdinary(
+                    action = qa.action,
+                    onResult = { result ->
+                        val intentionalNavigation = localAppQaNavigationWasAccepted(qa.action, result)
+                        val interactiveNavigation = localAppQaActionMayAdvanceDocument(qa.action, result)
+                        val minimumGeneration = if (intentionalNavigation) {
+                            before.navigationGeneration + 1
+                        } else {
+                            before.navigationGeneration
+                        }
+                        // Give synchronous page navigation (for example a click
+                        // handler) one UI turn to enter onPageStarted before the
+                        // post-action identity validation.
+                        webView.postDelayed({
+                            awaitQaDocument(expected, minimumGeneration, requiresVisualFrame) { after ->
+                                if (after == null) {
+                                    val error = if (requiresVisualFrame) {
+                                        "Local App QA capture unavailable: visual frame was not committed"
+                                    } else {
+                                        "Local App QA document identity changed during the action"
+                                    }
+                                    onResult(LocalAppUiExecutionResult(null, error))
+                                } else if (!sameLocalAppQaDocument(
+                                        before,
+                                        after,
+                                        intentionalNavigation,
+                                        allowInteractiveNavigation = interactiveNavigation,
+                                    )
+                                ) {
+                                    onResult(LocalAppUiExecutionResult(null, "Local App QA document changed during the action"))
+                                } else {
+                                    onResult(attestQaResult(result, expected, after))
+                                }
+                            }
+                        }, 50L)
+                    },
+                    qaCapture = requiresVisualFrame,
+                )
+            }
+            return
+        }
+        executeOrdinary(action, onResult)
+    }
+
+    private fun executeOrdinary(
+        action: LocalAppUiAutomationAction,
+        onResult: (LocalAppUiExecutionResult) -> Unit,
+        qaCapture: Boolean = false,
     ) {
         when (action) {
             LocalAppUiAutomationAction.Inspect,
@@ -123,14 +781,13 @@ class LocalAppWebViewController internal constructor(
             is LocalAppUiAutomationAction.Key -> executeStructuredAction(action, onResult)
             is LocalAppUiAutomationAction.Navigate -> {
                 val current = Uri.parse(webView.url.orEmpty())
-                val requested = Uri.parse(action.path)
-                val target = if (requested.isAbsolute) {
-                    requested
-                } else {
-                    current.buildUpon().encodedPath(action.path).clearQuery().build()
-                }
+                val target = Uri.parse(resolveLocalAppNavigation(webView.url.orEmpty(), action.path))
                 if (target.sameTrustedOrigin(current)) {
+                    beginNavigation(target.toString())
                     webView.loadUrl(target.toString())
+                    if (isSameDocumentNavigation(current, target)) {
+                        webView.post { observeSameDocumentNavigation(target.toString()) }
+                    }
                     onResult(
                         LocalAppUiExecutionResult(
                             resultJson = jsonObjectString(
@@ -145,18 +802,36 @@ class LocalAppWebViewController internal constructor(
                     onResult(LocalAppUiExecutionResult(resultJson = null, error = "Only trusted loopback navigation is allowed"))
                 }
             }
-            LocalAppUiAutomationAction.Back -> if (webView.canGoBack()) {
-                webView.goBack()
+            LocalAppUiAutomationAction.Back -> {
+                val current = Uri.parse(webView.url ?: initialUrl)
+                val history = webView.copyBackForwardList()
+                val target = history.currentIndex
+                    .takeIf { it > 0 }
+                    ?.let { history.getItemAtIndex(it - 1)?.url }
+                    ?.let(Uri::parse)
+                if (target == null) {
+                    onResult(LocalAppUiExecutionResult(resultJson = null, error = "WebView cannot navigate back"))
+                    return
+                }
+                // canGoBack()/goBack() can ignore same-document pushState
+                // entries even though the authoritative copied list exposes a
+                // previous item. Use that list for admission and the document's
+                // History traversal; the native history callback still owns
+                // destination authentication and completion.
+                beginNavigation(target.toString(), isHistoryNavigation = true)
+                fixedScript("window.history.back();") {}
+                if (isSameDocumentNavigation(current, target)) {
+                    webView.post { observeSameDocumentNavigation(target.toString()) }
+                }
                 onResult(
                     LocalAppUiExecutionResult(
                         resultJson = jsonObjectString("ok" to true, "action" to "back"),
                         error = null,
                     ),
                 )
-            } else {
-                onResult(LocalAppUiExecutionResult(resultJson = null, error = "WebView cannot navigate back"))
             }
             LocalAppUiAutomationAction.Reload -> {
+                beginNavigation(webView.url ?: initialUrl)
                 webView.reload()
                 onResult(
                     LocalAppUiExecutionResult(
@@ -165,8 +840,41 @@ class LocalAppWebViewController internal constructor(
                     ),
                 )
             }
-            is LocalAppUiAutomationAction.CaptureView -> captureFrame(webView, action.value, onResult)
+            is LocalAppUiAutomationAction.CaptureView -> captureFrame(
+                webView = webView,
+                value = action.value,
+                qaCapture = qaCapture,
+                onResult = onResult,
+            )
+            is LocalAppUiAutomationAction.Qa -> error("QA action must be unwrapped before execution")
         }
+    }
+
+    private fun isSameDocumentNavigation(current: Uri, target: Uri): Boolean =
+        target.sameTrustedOrigin(current) &&
+            target.path == current.path &&
+            target.query == current.query &&
+            target.fragment != current.fragment
+
+    private fun attestQaResult(
+        result: LocalAppUiExecutionResult,
+        requested: URI,
+        document: LocalAppQaDocument,
+    ): LocalAppUiExecutionResult {
+        return LocalAppUiExecutionResult(
+            resultJson = buildLocalAppQaExecutionResult(
+                originalResultJson = result.resultJson,
+                operationError = result.error,
+                requested = requested,
+                document = document,
+                platform = platform,
+                formFactor = formFactor,
+                width = webView.width,
+                height = webView.height,
+                devicePixelRatio = webView.resources.displayMetrics.density,
+            ),
+            error = null,
+        )
     }
 
     /**
@@ -203,7 +911,63 @@ class LocalAppWebViewController internal constructor(
      * returned at the whole-view's capped resolution would sample out of a
      * frame already thrown away ~2.3x too much detail.
      */
-    private fun captureFrame(webView: WebView, value: String?, onResult: (LocalAppUiExecutionResult) -> Unit) {
+    private fun captureFrame(
+        webView: WebView,
+        value: String?,
+        qaCapture: Boolean = false,
+        expectedQaDocument: LocalAppQaDocument? = null,
+        onResult: (LocalAppUiExecutionResult) -> Unit,
+    ) {
+        if (qaCapture) {
+            val currentDocument = webView.url?.asUriOrNull()
+            val document = currentDocument?.let { observedURL ->
+                qaDocumentState.currentDocument()
+                    ?.takeIf { it.loadedRuntimeUrl == observedURL.toString() }
+            }
+            if (document == null) {
+                onResult(
+                    LocalAppUiExecutionResult(
+                        resultJson = null,
+                        error = LOCAL_APP_CAPTURE_FRAME_FENCE_UNAVAILABLE_ERROR,
+                    ),
+                )
+                return
+            }
+            requestVisualFrameFence(document.loadedRuntimeUrl, document.navigationGeneration) { ready ->
+                if (!ready) {
+                    onResult(
+                        LocalAppUiExecutionResult(
+                            resultJson = null,
+                            error = LOCAL_APP_CAPTURE_FRAME_FENCE_UNAVAILABLE_ERROR,
+                        ),
+                    )
+                } else {
+                    captureFrame(
+                        webView = webView,
+                        value = value,
+                        expectedQaDocument = document,
+                        onResult = onResult,
+                    )
+                }
+            }
+            return
+        }
+        if (expectedQaDocument != null) {
+            val currentDocument = webView.url?.asUriOrNull()
+            val current = currentDocument?.let { observedURL ->
+                qaDocumentState.currentDocument(requireVisualFrame = true)
+                    ?.takeIf { it.loadedRuntimeUrl == observedURL.toString() }
+            }
+            if (current == null || current != expectedQaDocument) {
+                onResult(
+                    LocalAppUiExecutionResult(
+                        resultJson = null,
+                        error = LOCAL_APP_CAPTURE_FRAME_FENCE_UNAVAILABLE_ERROR,
+                    ),
+                )
+                return
+            }
+        }
         val width = webView.width
         val height = webView.height
         if (width <= 0 || height <= 0) {
@@ -517,6 +1281,7 @@ class LocalAppWebViewController internal constructor(
     }
 
     internal fun detach() {
+        qaDocumentState.detach()
         broker.failAllInFlight()
         webView.stopLoading()
         WebViewCompat.removeWebMessageListener(webView, LINGXI_V1_MESSAGE_OBJECT)
@@ -548,6 +1313,7 @@ class LocalAppWebViewController internal constructor(
         val url = suspendedUrl ?: initialUrl
         suspendedUrl = null
         webView.webViewClient = guardedWebViewClient
+        beginNavigation(url)
         webView.loadUrl(url)
     }
 
@@ -682,6 +1448,7 @@ private fun Any?.asFiniteCssNumber(): Double? =
 
 internal fun buildLocalAppUiExecutionRequest(action: LocalAppUiAutomationAction): String {
     return when (action) {
+        is LocalAppUiAutomationAction.Qa -> buildLocalAppUiExecutionRequest(action.action)
         LocalAppUiAutomationAction.Inspect -> jsonObjectString("action" to "inspect")
         is LocalAppUiAutomationAction.Click -> {
             jsonObjectString(
@@ -1598,7 +2365,16 @@ fun LocalAppWebView(
                     }
 
                     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                        controller?.onPageStarted(url)
                         if (!Uri.parse(url).sameTrustedOrigin(trustedOrigin)) view.stopLoading()
+                    }
+
+                    override fun onPageFinished(view: WebView, url: String) {
+                        controller?.onPageFinished(url)
+                    }
+
+                    override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                        controller?.onVisitedHistoryUpdated(url, isReload)
                     }
 
                     override fun onSafeBrowsingHit(
@@ -1623,6 +2399,7 @@ fun LocalAppWebView(
                 controller = LocalAppWebViewController(this, broker, guardedClient, url).also { attached ->
                     LocalAppWebViewRegistry.register(appId, attached)
                     currentControllerHandler(attached)
+                    attached.beginNavigation(url)
                 }
                 tag = url
                 loadUrl(url)
@@ -1631,6 +2408,7 @@ fun LocalAppWebView(
         update = { view ->
             if (view.tag != url) {
                 view.tag = url
+                controller?.beginNavigation(url)
                 view.loadUrl(url)
             }
         },
@@ -1680,6 +2458,76 @@ private fun Uri?.sameTrustedOrigin(other: Uri?): Boolean =
     this != null && other != null &&
         isTrustedLoopback() && other.isTrustedLoopback() &&
         scheme == other.scheme && normalizedHost() == other.normalizedHost() && effectivePort() == other.effectivePort()
+
+/** Resolve page navigation like `new URL(value, location.href)` without
+ * carrying the current page's ordinary query parameters across routes. */
+internal fun resolveLocalAppNavigation(currentUrl: String, requested: String): String {
+    val base = runCatching { URI(currentUrl) }.getOrNull() ?: return requested
+    val destination = runCatching { URI(requested) }.getOrNull() ?: return requested
+    val baseWithoutQueryOrFragment = runCatching {
+        URI(base.toString().substringBefore('#').substringBefore('?'))
+    }.getOrNull() ?: return requested
+    // Preserve an explicit authority (including a scheme-relative URL) so the
+    // caller's same-origin gate can reject it instead of silently rebasing it.
+    val resolved = if (destination.isAbsolute || destination.rawAuthority != null) {
+        destination
+    } else if (destination.rawPath.isNullOrEmpty()) {
+        // java.net.URI resolves `?query` against the containing directory and
+        // resolves `#fragment` by inheriting the complete old query. Neither
+        // matches the Local App contract: retain the document path, but let
+        // the destination own its query/fragment so old business parameters
+        // cannot leak into the next route.
+        val query = destination.rawQuery?.let { "?$it" }.orEmpty()
+        val fragment = destination.rawFragment?.let { "#$it" }.orEmpty()
+        URI("$baseWithoutQueryOrFragment$query$fragment")
+    } else {
+        baseWithoutQueryOrFragment.resolve(destination)
+    }
+    val marker = rawRuntimeMarker(base.rawQuery)
+    val target = if (marker != null) {
+        replaceRuntimeMarker(resolved.toString(), resolved.rawQuery, marker)
+    } else {
+        resolved.toString()
+    }
+    return target
+}
+
+private fun rawRuntimeMarker(rawQuery: String?): String? =
+    rawQuery.orEmpty().split('&').filter { item ->
+        item.substringBefore('=') == "lingxi_runtime" && item.contains('=')
+    }.singleOrNull()?.substringAfter('=')
+
+private fun replaceRuntimeMarker(raw: String, rawQuery: String?, marker: String): String {
+    val fragmentStart = raw.indexOf('#')
+    val beforeFragment = if (fragmentStart >= 0) raw.substring(0, fragmentStart) else raw
+    val fragment = if (fragmentStart >= 0) raw.substring(fragmentStart) else ""
+    val withoutQuery = beforeFragment.substringBefore('?')
+    val ordinaryItems = rawQuery.orEmpty().split('&').filter { item ->
+        item.isNotEmpty() && !isRuntimeMarkerKey(item.substringBefore('='))
+    }
+    val query = (ordinaryItems + "lingxi_runtime=$marker").joinToString("&")
+    return "$withoutQuery?$query$fragment"
+}
+
+/** Match URLSearchParams' percent-decoded key semantics for this ASCII-only
+ * reserved name without pulling Android URI decoding into pure JVM tests. */
+private fun isRuntimeMarkerKey(rawKey: String): Boolean {
+    val expected = "lingxi_runtime"
+    var rawIndex = 0
+    var expectedIndex = 0
+    while (rawIndex < rawKey.length && expectedIndex < expected.length) {
+        val actual = if (rawKey[rawIndex] == '%' && rawIndex + 2 < rawKey.length) {
+            val high = rawKey[rawIndex + 1].digitToIntOrNull(16) ?: return false
+            val low = rawKey[rawIndex + 2].digitToIntOrNull(16) ?: return false
+            rawIndex += 3
+            (high * 16 + low).toChar()
+        } else {
+            rawKey[rawIndex++]
+        }
+        if (actual != expected[expectedIndex++]) return false
+    }
+    return rawIndex == rawKey.length && expectedIndex == expected.length
+}
 
 private fun Uri.isTrustedLoopback(): Boolean =
     scheme == "http" && normalizedHost() in setOf("127.0.0.1", "localhost", "::1")

@@ -254,6 +254,44 @@ pub fn build_observer_launch(
     }
 }
 
+/// A passive lifecycle tap that never alters the observed agent's result.
+pub(crate) struct ActivityObserver {
+    pub request: platform_api::SubagentSpawnRequest,
+    pub inheritance: platform_api::SubagentInheritance,
+    pub registry: std::sync::Weak<dyn platform_api::task_registry::TaskRegistryHandle>,
+}
+
+#[async_trait::async_trait]
+impl platform_api::subagent_spawn::SubagentSpawnObserver for ActivityObserver {
+    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+        use platform_api::subagent_spawn::SubagentObservation;
+        let (agent_id, digest) = match event {
+            SubagentObservation::Message { agent_id, message } => {
+                (agent_id, serde_json::json!({"message": message}))
+            }
+            SubagentObservation::Completed {
+                agent_id, content, ..
+            } => (agent_id, serde_json::json!({"completed": content})),
+            SubagentObservation::Failed { agent_id, error } => {
+                (agent_id, serde_json::json!({"failed": error}))
+            }
+            SubagentObservation::Killed { agent_id } => {
+                (agent_id, serde_json::json!({"killed": true}))
+            }
+            _ => return,
+        };
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        if let Err(error) = registry.observe_agent_activity(
+            self.request.clone(), self.inheritance.clone(), agent_id,
+            format!("<observer-activity observed-agent-id=\"{agent_id}\">\n{digest}\n</observer-activity>"),
+        ).await {
+            tracing::warn!(%agent_id, %error, "observer activity could not be delivered");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

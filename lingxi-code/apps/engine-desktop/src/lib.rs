@@ -29,15 +29,23 @@
 pub mod agent_restore;
 mod agent_skill_loader;
 pub mod auto_mode_propose;
+/// Session-owned teammate registry shared with CLI hosts.
+pub use coordinator::TeamRegistry;
+
+/// Shared teammate envelope used by host message queues.
+pub use tasks::handlers::in_process_teammate::teammate_message_envelope_with_summary;
+
 mod background_agent;
 mod connect;
 mod cron_command;
+pub mod cron_management;
 pub mod file_changed_watch;
 pub mod fork_resume;
 mod fusion_command;
 mod fusion_attempts;
 pub mod fusion_recorder;
 pub mod ide;
+mod pane_teammate;
 pub mod session_agents;
 pub mod session_state;
 pub mod settings_watch;
@@ -1207,7 +1215,10 @@ struct BootPermissionTiers {
     classify_all_shell: bool,
     /// Union of every tier's `permissions.additionalDirectories` (raw paths;
     /// `authorize` resolves them against the policy roots via `expand_path`).
-    additional_working_dirs: Vec<std::path::PathBuf>,
+    additional_working_dirs: permission::working_dirs::AdditionalWorkingDirs,
+    /// Sticky OR of `permissions.blockReadsOutsideWorkingDirectories` across every
+    /// settings tier — `true` in ANY source wins (oracle managed merge).
+    block_reads_outside_working_directories: bool,
     /// Raw tier texts in ASCENDING priority INCLUDING the managed tier(s) —
     /// feeds the sandbox-auto-allow derivation (last write wins, so a managed
     /// `sandbox.*` overrides user/project/local).
@@ -1264,7 +1275,8 @@ async fn load_boot_permission_tiers_with_flag(
     let mut bypass_disabled = false;
     let mut auto_mode_disabled = false;
     let mut classify_all_shell = false;
-    let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut additional_working_dirs = permission::working_dirs::AdditionalWorkingDirs::new();
+    let mut block_reads_outside_working_directories = false;
     // Retain each tier's raw text (in ascending priority) so the
     // sandbox-auto-allow config can be derived from the SAME settings.
     let mut raw_tiers: Vec<String> = Vec::new();
@@ -1341,8 +1353,13 @@ async fn load_boot_permission_tiers_with_flag(
             }
             // (#34) Union this tier's additionalDirectories into the
             // working-dir set (claude-code merges across SETTING_SOURCES).
-            additional_working_dirs
-                .extend(permission::additional_directories_from_settings_json(&raw));
+            additional_working_dirs.extend_from_source(
+                permission::additional_directories_from_settings_json(&raw),
+                source,
+            );
+            if permission::block_reads_outside_working_directories_from_settings_json(&raw) {
+                block_reads_outside_working_directories = true; // sticky: any tier arming wins
+            }
             raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
         }
     }
@@ -1382,7 +1399,13 @@ async fn load_boot_permission_tiers_with_flag(
         if permission::classify_all_shell_from_settings_json(&raw) {
             classify_all_shell = true;
         }
-        additional_working_dirs.extend(permission::additional_directories_from_settings_json(&raw));
+        additional_working_dirs.extend_from_source(
+            permission::additional_directories_from_settings_json(&raw),
+            source,
+        );
+        if permission::block_reads_outside_working_directories_from_settings_json(&raw) {
+            block_reads_outside_working_directories = true;
+        }
         raw_tiers.push(raw);
     }
     // Managed (policySettings) tier — HIGHEST priority, read LAST. Deliberately
@@ -1421,7 +1444,13 @@ async fn load_boot_permission_tiers_with_flag(
         if permission::classify_all_shell_from_settings_json(raw) {
             classify_all_shell = true; // managed classifyAllShell binds (sticky, QOi)
         }
-        additional_working_dirs.extend(permission::additional_directories_from_settings_json(raw));
+        additional_working_dirs.extend_from_source(
+            permission::additional_directories_from_settings_json(raw),
+            permission::PermissionRuleSource::PolicySettings,
+        );
+        if permission::block_reads_outside_working_directories_from_settings_json(raw) {
+            block_reads_outside_working_directories = true; // managed arming binds (sticky)
+        }
     }
     let allow_managed_permission_rules_only = managed_tiers
         .iter()
@@ -1437,6 +1466,7 @@ async fn load_boot_permission_tiers_with_flag(
         auto_mode_disabled,
         classify_all_shell,
         additional_working_dirs,
+        block_reads_outside_working_directories,
         raw_tiers,
         allow_managed_permission_rules_only,
     }
@@ -2232,6 +2262,29 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    async fn invoke_detailed(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+    ) -> Result<
+        platform_api::tool_invoker::ToolInvocationResult,
+        platform_api::tool_invoker::ToolInvokerError,
+    > {
+        match self.inner.get() {
+            Some(invoker) => {
+                invoker
+                    .invoke_detailed(name, input, ctx, workspace_lease_token)
+                    .await
+            }
+            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
+                    .to_string(),
+            )),
+        }
+    }
+
     async fn invoke(
         &self,
         name: &str,
@@ -2360,6 +2413,28 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
             .await;
     }
 
+    async fn set_teammate_idle(&self, task_id: &str) {
+        tasks::handlers::TaskStatusSink::set_teammate_idle(self.task_registry.as_ref(), task_id)
+            .await;
+        tasks::handlers::TaskStatusSink::set_teammate_idle(self.coordinator.as_ref(), task_id)
+            .await;
+    }
+
+    async fn set_awaiting_plan_approval(&self, task_id: &str, awaiting: bool) {
+        tasks::handlers::TaskStatusSink::set_awaiting_plan_approval(
+            self.task_registry.as_ref(),
+            task_id,
+            awaiting,
+        )
+        .await;
+        tasks::handlers::TaskStatusSink::set_awaiting_plan_approval(
+            self.coordinator.as_ref(),
+            task_id,
+            awaiting,
+        )
+        .await;
+    }
+
     async fn set_failed(&self, task_id: &str, error: &str) {
         tasks::handlers::TaskStatusSink::set_failed(self.task_registry.as_ref(), task_id, error)
             .await;
@@ -2448,17 +2523,19 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         .await;
     }
 
-    async fn notify_monitor_event(&self, task_id: &str, event: &str) {
+    async fn notify_monitor_event(&self, task_id: &str, event: &str, housekeeping: bool) {
         tasks::handlers::TaskStatusSink::notify_monitor_event(
             self.task_registry.as_ref(),
             task_id,
             event,
+            housekeeping,
         )
         .await;
         tasks::handlers::TaskStatusSink::notify_monitor_event(
             self.coordinator.as_ref(),
             task_id,
             event,
+            housekeeping,
         )
         .await;
     }
@@ -2492,54 +2569,74 @@ impl Default for DesktopEngineConfig {
     }
 }
 
-/// M10 (T12): the three coordinator handles a coordinator-capable session
-/// passes to [`register_desktop_tools`] / [`desktop_tool_registry`] so the
-/// composition root can register the coordinator `TeamCreate` / `TeamDelete`
-/// tools IN PLACE OF `tool_team`'s pair.
-///
-/// All four coordinator tool names collide byte-for-byte with the already
-/// registered `tool_team` / `tool_ui` builtins, and [`ToolRegistry`] is
-/// push-no-dedup with first-match-wins ([`ToolRegistry::find_by_name`]).
-/// Naively splicing the coordinator tools *after* `tool_team::register_all`
-/// would therefore silently shadow nothing (the `tool_team` copy wins every
-/// lookup). Mode-exclusivity is the only safe option, and the registry is
-/// built-once-and-moved, so the choice MUST be made at BUILD time — hence this
-/// is threaded through as an `Option` rather than toggled later.
-///
-/// `build()` populates this with `Some(..)` ONLY when
-/// `DesktopConfig::session_started_as_coordinator` is `true`; a default session
-/// passes `None`, leaving the assembled tool set byte-identical to the pre-M10
-/// build.
+/// Session-owned routing for teammate messages. Team creation is implicit;
+/// the tool registry exposes only SendMessage alongside Agent.
 pub struct CoordinatorWiring {
-    /// The per-session team registry the coordinator tools mutate.
+    /// Shared per-session member registry.
     pub team: Arc<coordinator::TeamRegistry>,
-    /// The coordinator-mode gate the tools consult in `call()`
-    /// (defense-in-depth) so a future `/coordinator exit()` can neutralize them
-    /// without rebuilding the registry.
-    pub mode: Arc<coordinator::CoordinatorMode>,
-    /// The spawn/kill seam the tools use to start / stop the real backing
-    /// `InProcessTeammate` task.
+    /// Backing task cancellation and message delivery.
     pub spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam>,
-    /// The orchestrator-facing output stream the `TeamCreate` tool pushes the
-    /// live active-worker count through immediately after a spawn is reconciled
-    /// — the same `Arc<dyn OutputStream>` `build()` gives the orchestrator and
-    /// the `CoordinatorStatusSink`. This makes `active_workers > 0` reach every
-    /// client deterministically, independent of the teammate's racy startup
-    /// status emit.
-    pub output: Arc<dyn platform_api::OutputStream>,
-    /// The (optional) analytics bus the coordinator `TeamCreate` / `TeamDelete`
-    /// tools fire their telemetry through (`tengu_team_created` /
-    /// `tengu_team_deleted`). `build()` passes the orchestrator bus; the offline
-    /// snapshot factory passes `None` (telemetry → `tracing`).
-    pub bus: Option<Arc<telemetry::AnalyticsBus>>,
-    /// The (optional) background-task spawner the coordinator `TeamCreate` tool
-    /// uses to start each teammate's mailbox→runner PUMP — the bridge that
-    /// delivers a coordinator `SendMessage` into the teammate's turn loop. `None`
-    /// ⇒ no pump (routed messages queue in the mailbox but are not auto-drained;
-    /// the offline registry-snapshot factory passes `None`). `build()` passes the
-    /// session `PosixRuntime` so the pump runs (D17 — never a direct
-    /// `tokio::spawn`).
-    pub runtime: Option<Arc<dyn platform_api::RuntimeSpawner>>,
+}
+
+fn teammate_backend_selector(
+    cwd: std::path::PathBuf,
+    flag_mode: Option<lingxi_core::settings::schema::TeammateMode>,
+    is_tty: bool,
+) -> Arc<dyn Fn() -> pane_teammate::PaneBackendSelection + Send + Sync> {
+    use platform_posix::swarm::detection::{
+        detect_terminal_env, select_backend, BackendChoice, TeammateMode,
+    };
+    let backends = std::sync::Mutex::new(std::collections::HashMap::<
+        &'static str,
+        Arc<dyn platform_api::SwarmBackend>,
+    >::new());
+    Arc::new(move || {
+        let mode = match flag_mode
+            .or_else(|| load_merged_settings(&cwd).and_then(|s| s.settings.teammate_mode))
+        {
+            Some(lingxi_core::settings::schema::TeammateMode::InProcess) => TeammateMode::InProcess,
+            Some(lingxi_core::settings::schema::TeammateMode::Tmux) => TeammateMode::Tmux,
+            Some(lingxi_core::settings::schema::TeammateMode::ITerm2) => TeammateMode::ITerm2,
+            _ => TeammateMode::Auto,
+        };
+        let terminal = detect_terminal_env();
+        let interactive = is_tty && !platform_api::session_flags::is_non_interactive_session();
+        let selection = select_backend(&terminal, mode, interactive, false);
+        let acquisition_error = if mode == TeammateMode::Auto
+            && interactive
+            && (terminal.inside_tmux || terminal.iterm_app)
+        {
+            select_backend(&terminal, TeammateMode::Tmux, true, false)
+                .err()
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let (backend, error) = match selection {
+            Ok(BackendChoice::InProcess) => (None, acquisition_error),
+            Ok(choice) => {
+                let mut cache = backends
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let key = if choice == BackendChoice::Tmux {
+                    "tmux"
+                } else {
+                    "iterm2"
+                };
+                let backend = cache.entry(key).or_insert_with(|| match choice {
+                    BackendChoice::Tmux => Arc::new(platform_posix::swarm::TmuxBackend::new()),
+                    _ => Arc::new(platform_posix::swarm::ITermSwarmBackend::new()),
+                });
+                (Some(backend.clone()), None)
+            }
+            Err(error) => (None, Some(error.to_string())),
+        };
+        pane_teammate::PaneBackendSelection {
+            backend,
+            explicit: matches!(mode, TeammateMode::Tmux | TeammateMode::ITerm2),
+            error,
+        }
+    })
 }
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -2597,14 +2694,9 @@ impl tool_cron::ClaudeAiAuthProvider for CredentialStoreAuthProvider {
 /// Assemble the desktop builtin **tool** registry from a freshly-built
 /// [`BuiltinToolContext`].
 ///
-/// This is the canonical desktop tool set: 9 cross-platform crates
-/// (`tool-file/shell/task/web/plan/meta/cron/ui/skill`) + 5 desktop-only
-/// crates (`tool-agent/team/worktree/mcp/lsp`). The mobile composition root
-/// links only the cross-platform subset plus mobile-specific crates.
-///
-/// `coordinator` selects the team-tool variant at build time: `None` registers
-/// `tool_team`'s `TeamCreate` / `TeamDelete` (default), `Some(..)` registers the
-/// coordinator pair IN PLACE OF them. See [`CoordinatorWiring`].
+/// Includes cross-platform tools and desktop Agent, worktree, MCP and LSP tools.
+/// `coordinator` selects the session-backed SendMessage implementation.
+/// Team lifecycle is implicit in both registry variants.
 ///
 /// `cron_auth` is the in-process OAuth resolver `RemoteTrigger` uses; `None`
 /// leaves the tool on its "not authenticated" pre-flight path (used by the
@@ -2621,7 +2713,7 @@ pub fn desktop_tool_registry(
     // No `CwdChanged` firer here either (offline factory has no hook executor) —
     // the BashTool is the byte-identical no-firer variant. No shared live-cwd
     // cell either: every tool falls back to `ctx.workspace` / the process cwd.
-    register_desktop_tools(
+    let _ = register_desktop_tools(
         &mut reg,
         ctx,
         coordinator,
@@ -3081,16 +3173,8 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
 /// Each `tool_*::register_all` consumes a clone of `ctx`; the final crate
 /// takes ownership to avoid a redundant clone.
 ///
-/// When `coordinator` is `Some(..)` (a coordinator-capable session), the
-/// coordinator `TeamCreate` / `TeamDelete` / `SendMessage` tools are registered
-/// IN PLACE OF their builtin namesakes: `tool_team::register_all` is SKIPPED
-/// entirely (it registers exactly `TeamCreate` + `TeamDelete`), and
-/// `tool_ui::register_all_except_send_message` drops the builtin `SendMessage`,
-/// so the richer coordinator versions are the ONLY ones with those names. This
-/// keeps exactly ONE of each in the registry (no silent shadow — `find_by_name`
-/// is builtin-first — and no duplicate name in the system prompt). When `None`,
-/// `tool_team::register_all` + the full `tool_ui::register_all` run as before and
-/// the coordinator tools are absent — byte-identical to the pre-M10 build.
+/// When `coordinator` is present, its session-backed SendMessage replaces
+/// the builtin implementation. Each tool name is registered exactly once.
 /// JSONL-backed [`tool_api::WorktreeStatePersister`] (parity 2.1.212's
 /// `saveWorktreeState`): appends a `worktree-state` entry — carrying the active
 /// worktree's serialized session, or `null` on exit — to the session transcript,
@@ -5417,7 +5501,10 @@ pub fn register_desktop_tools(
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
     fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
-) -> tool_cron::WakeupSchedulerCell {
+) -> (
+    tool_cron::WakeupSchedulerCell,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     register_desktop_tools_with_fusion_recorder(
         reg,
         ctx,
@@ -5457,7 +5544,10 @@ pub fn register_desktop_tools_with_fusion_recorder(
     fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
     fusion_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
     fusion_recorder_factory: Option<Arc<dyn platform_api::FusionRunRecorderFactory>>,
-) -> tool_cron::WakeupSchedulerCell {
+) -> (
+    tool_cron::WakeupSchedulerCell,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     // (P2-08) The shared live-cwd cell (`getCwd()`/`Ct()`): the desktop `BashTool`
     // writes it on a `cd`, and Read/Glob/Grep + the LSP tool read it as their live
@@ -5517,13 +5607,13 @@ pub fn register_desktop_tools_with_fusion_recorder(
     // and `ScheduleWakeup`; it returns the wakeup cell threaded out to `build`
     // → `DesktopRuntime` so the bridge fills it once the per-connection queue +
     // spawner exist (see `boot::assemble`).
-    let wakeup_cell = tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
+    let (wakeup_cell, loop_wakeup_armed) =
+        tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
     // In coordinator mode the richer `coordinator` `SendMessage` (registered
     // below, IN PLACE OF this builtin) carries the swarm routing surface, so we
     // skip the leaner `tool_ui` `SendMessage` here — otherwise, because the
     // registry's `find_by_name` is builtin-first, the earlier `tool_ui` copy
-    // would silently shadow the coordinator one. Mirrors the `tool_team`-skip
-    // for `TeamCreate` / `TeamDelete`.
+    // would silently shadow the coordinator one.
     if coordinator.is_some() {
         if let Some(resolver) = ask_user_question_resolver.clone() {
             tool_ui::register_all_except_send_message_with_ask_resolver(reg, ctx.clone(), resolver);
@@ -5574,26 +5664,14 @@ pub fn register_desktop_tools_with_fusion_recorder(
         fusion_recorder.clone(),
         fusion_recorder_factory,
     );
-    match coordinator {
-        // Coordinator-capable session: register the coordinator `TeamCreate` /
-        // `TeamDelete` IN PLACE OF `tool_team`'s pair. `tool_team::register_all`
-        // is deliberately NOT called — splicing-after would silently shadow.
-        Some(CoordinatorWiring {
+    if let Some(CoordinatorWiring { team, spawn_seam }) = coordinator {
+        for tool in coordinator::internal_tools::coordinator_internal_tools(
             team,
-            mode,
             spawn_seam,
-            output,
-            bus,
-            runtime,
-        }) => {
-            for tool in coordinator::internal_tools::coordinator_internal_tools(
-                team, mode, spawn_seam, output, bus, runtime,
-            ) {
-                reg.register_builtin(tool);
-            }
+            tool_ui::send_message::truncate_preview,
+        ) {
+            reg.register_builtin(tool);
         }
-        // Default session: `tool_team`'s pair, coordinator tools absent.
-        None => tool_team::register_all(reg, ctx.clone()),
     }
     // (parity 2.1.212) Thread the transcript persister into EnterWorktree /
     // ExitWorktree so a create/enter writes a `worktree-state` entry and an exit
@@ -5603,7 +5681,7 @@ pub fn register_desktop_tools_with_fusion_recorder(
     tool_worktree::register_all_with_persister(reg, ctx.clone(), worktree_state_persister);
     tool_mcp::register_all(reg, ctx.clone());
     tool_lsp::register_all_with_live_cwd(reg, ctx, live_cwd);
-    wakeup_cell
+    (wakeup_cell, loop_wakeup_armed)
 }
 
 /// Assemble the desktop builtin **skill** registry.
@@ -5734,6 +5812,7 @@ impl std::fmt::Debug for DesktopAudio {
 ///     json_schema: None,
 ///     injected_permission_gate: None,
 ///     session_started_as_coordinator: false,
+///     initial_teammate_team_name: None,
 ///     // `None` ⟶ empty memory (deterministic). A production host injects
 ///     // `Some(orchestrator::prompt::real_provider())` to load real LINGXI.md.
 ///     memory_provider: None,
@@ -5940,14 +6019,11 @@ pub struct DesktopConfig {
     /// (the default + every headless/transport caller) keeps the prior
     /// selection, byte-identical.
     pub injected_permission_gate: Option<Arc<dyn PermissionGate>>,
-    /// M10 build-time coordinator-activation flag. When `true`, `build()`
-    /// enters coordinator multi-agent mode and registers the coordinator
-    /// `TeamCreate`/`TeamDelete` tools IN PLACE OF `tool_team`'s pair (decided
-    /// at build time — the registry is built-once-and-moved). Defaults to
-    /// `false`: a default session is byte-identical to the pre-M10 build
-    /// (mode off, `tool_team` unchanged, no teammate spawned). Additive to the
-    /// frozen field set.
+    /// Enter coordinator mode at session startup. Teammate availability is
+    /// controlled independently by the experimental agent-teams setting.
     pub session_started_as_coordinator: bool,
+    /// Parent-owned implicit team when this host is a terminal teammate.
+    pub initial_teammate_team_name: Option<String>,
     /// The LINGXI.md hierarchy provider the orchestrator loads project/user
     /// memory from. `None` (the default) ⟶ the empty
     /// [`StaticMemoryProvider::empty`], so a default build loads NO memory and
@@ -6230,6 +6306,13 @@ impl DesktopSessionComposition {
     #[must_use]
     pub fn is_interactive_session(self) -> bool {
         matches!(self, Self::InteractiveCli)
+    }
+
+    /// Whether the host can resolve permission prompts, including over the
+    /// bridge transport without adopting interactive CLI session semantics.
+    #[must_use]
+    pub fn supports_interactive_permissions(self) -> bool {
+        matches!(self, Self::InteractiveCli | Self::Transport)
     }
 
     /// Claude Code 2.1.245 main-query identity: `(querySource, print)`.
@@ -6546,6 +6629,7 @@ impl Default for DesktopConfig {
             json_schema: None,
             injected_permission_gate: None,
             session_started_as_coordinator: false,
+            initial_teammate_team_name: None,
             memory_provider: None,
             permission_mode: permission::PermissionMode::Auto,
             permission_mode_cli: None,
@@ -6721,6 +6805,12 @@ pub async fn desktop_command_registry(
     connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
     gates: CustomizationGates,
     strict_plugin_only_skills: bool,
+    // `--add-dir` roots. Each contributes `<root>/<DOT_DIR>/skills` to skill
+    // discovery, mirroring upstream's
+    // `for(let e of Up()){ let S = P.join(e,".claude","skills"); … }`
+    // (2.1.267 `src_172414592.js` @5180). Raw roots, NOT skill dirs: the join
+    // happens below so all three registration sites share one answer.
+    add_dir_roots: &[std::path::PathBuf],
     // SKILLEXEC: the SAME shared command-registry slot the slash dispatcher and
     // `Skill` tool loader observe (filled by `build()` right after this returns).
     // `/reload-skills` (batch 8) mutates it live so a reload refreshes the set
@@ -6767,6 +6857,13 @@ pub async fn desktop_command_registry(
     // same-named custom command shadows a builtin (TS findCommand order).
     let home = dirs::home_dir().unwrap_or_else(|| lingxi_home.to_path_buf());
     let managed_dir = crate::settings_watch::managed_settings_dir();
+    // The `--add-dir` skill tier. `load_skill_markdown_files_with_roots` takes
+    // ALREADY-RESOLVED skill directories (a test pins that contract), so the
+    // `<root>/<DOT_DIR>/skills` join belongs to the caller — here.
+    let additional_skill_dirs: Vec<std::path::PathBuf> = add_dir_roots
+        .iter()
+        .map(|root| root.join(branding::DOT_DIR).join("skills"))
+        .collect();
     // Batch 8: the newly-ported implemented commands (`/fork`, `/goal`,
     // `/recap`, `/reload-skills`, `/skill-doctor`, `/stop`). Wired here (after
     // the skill-discovery roots are known, before the `disables_skills` early
@@ -6779,7 +6876,7 @@ pub async fn desktop_command_registry(
         lingxi_home.to_path_buf(),
         Some(managed_dir.clone()),
         home.clone(),
-        Vec::new(),
+        additional_skill_dirs.clone(),
         gates.safe_mode,
         load_merged_disable_agent_view(cwd),
     );
@@ -6812,7 +6909,7 @@ pub async fn desktop_command_registry(
                 lingxi_home,
                 Some(&managed_dir),
                 &home,
-                &[],
+                &additional_skill_dirs,
             )
             .await,
         )
@@ -6821,7 +6918,7 @@ pub async fn desktop_command_registry(
         cwd.to_path_buf(),
         lingxi_home.to_path_buf(),
         Some(managed_dir),
-        Vec::new(),
+        additional_skill_dirs,
     )));
     tracing::debug!(
         custom_commands = registered,
@@ -7470,7 +7567,7 @@ pub struct DesktopRuntime {
     /// M10: the per-session coordinator team registry. One is constructed per
     /// `build()` regardless of mode so the status feed (and the PHASE-2 command
     /// router) always have a handle to read; it is observable but empty (no
-    /// workers) unless a coordinator session spawns teammates via `TeamCreate`.
+    /// workers) until Agent launches teammates.
     pub coordinator: Arc<coordinator::TeamRegistry>,
     /// M10: the per-session coordinator-mode flag. Entered at build time only
     /// when `cfg.session_started_as_coordinator` is `true`; otherwise this is
@@ -8386,6 +8483,13 @@ fn load_merged_agent_push_notif_enabled(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Load the merged `settings.taskOutputMaxChars`. `None` when unset — the
+/// oracle's `Ge().taskOutputMaxChars === undefined` branch, which is what makes
+/// `TASK_MAX_OUTPUT_LENGTH` apply.
+fn load_merged_task_output_max_chars(project_dir: &std::path::Path) -> Option<u32> {
+    load_merged_settings(project_dir).and_then(|eff| eff.settings.task_output_max_chars)
+}
+
 /// Load `settings.workflowKeywordTriggerEnabled`. The default remains off,
 /// matching Claude Code's optional setting.
 fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -> bool {
@@ -8691,13 +8795,18 @@ fn merge_agent_frontmatter_mcp_servers(
 /// Its `Drop` mirrors `agent::handle::McpCleanupGuard`'s: best-effort teardown
 /// on the current runtime, nothing to do once no runtime is left.
 struct AgentMcpConnectLoopGuard {
+    lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
     cleanups: Vec<agent::agent_mcp_tools::AgentMcpCleanupHandle>,
     agent_type: String,
 }
 
 impl AgentMcpConnectLoopGuard {
-    fn new(agent_type: String) -> Self {
+    fn new(
+        agent_type: String,
+        lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
+    ) -> Self {
         Self {
+            lease,
             cleanups: Vec::new(),
             agent_type,
         }
@@ -8721,9 +8830,11 @@ impl Drop for AgentMcpConnectLoopGuard {
             return;
         }
         let cleanups = std::mem::take(&mut self.cleanups);
+        let lease = self.lease.take();
         let agent_type = std::mem::take(&mut self.agent_type);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
+                let _lease = lease;
                 agent::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &agent_type).await;
             });
         }
@@ -8750,6 +8861,7 @@ async fn build_agent_mcp_tool_set(
     strict_mcp_config: bool,
     agent_id: protocol::AgentId,
     def: agent::AgentDefinition,
+    lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
 ) -> agent::agent_mcp_tools::AgentMcpToolSet {
     if def.mcp_servers.is_empty() {
         return agent::agent_mcp_tools::AgentMcpToolSet::default();
@@ -8767,7 +8879,7 @@ async fn build_agent_mcp_tool_set(
     let mut tools: Vec<Arc<dyn tool_api::Tool>> = Vec::new();
     // Armed BEFORE the first dial: every await inside the loop is a window in
     // which the caller can drop this future (round-5 review item 11).
-    let mut cleanups = AgentMcpConnectLoopGuard::new(def.agent_type.clone());
+    let mut cleanups = AgentMcpConnectLoopGuard::new(def.agent_type.clone(), lease);
     for entry in scoped {
         let plain_name = entry.config.name.clone();
         let config_role = entry.config.metadata.role;
@@ -8805,6 +8917,25 @@ async fn build_agent_mcp_tool_set(
                 }
             }
         };
+        // Record ownership before the first post-connect await. Cancellation
+        // while waiting for the catalog read must still close this connection.
+        if entry.is_newly_created {
+            let cleanup_registry = mcp_registry.clone();
+            let cleanup_key = table_key.clone();
+            cleanups.push(agent::agent_mcp_tools::AgentMcpCleanupHandle {
+                server_name: plain_name.clone(),
+                run: Arc::new(move || {
+                    let registry = cleanup_registry.clone();
+                    let key = cleanup_key.clone();
+                    Box::pin(async move {
+                        registry
+                            .disconnect_agent_scoped(&key)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                }),
+            });
+        }
         let dtos: Vec<platform_api::McpToolDto> = {
             let conns = mcp_registry.connections.read().await;
             match conns.get(&table_key) {
@@ -8853,23 +8984,6 @@ async fn build_agent_mcp_tool_set(
                 (config_role == Some(mcp::McpServerRole::Comms)).then(|| "comms".to_string()),
             );
             tools.push(Arc::new(tool) as Arc<dyn tool_api::Tool>);
-        }
-        if entry.is_newly_created {
-            let cleanup_registry = mcp_registry.clone();
-            let cleanup_key = table_key.clone();
-            cleanups.push(agent::agent_mcp_tools::AgentMcpCleanupHandle {
-                server_name: plain_name,
-                run: Arc::new(move || {
-                    let registry = cleanup_registry.clone();
-                    let key = cleanup_key.clone();
-                    Box::pin(async move {
-                        registry
-                            .disconnect_agent_scoped(&key)
-                            .await
-                            .map_err(|error| error.to_string())
-                    })
-                }),
-            });
         }
     }
     agent::agent_mcp_tools::AgentMcpToolSet {
@@ -9530,10 +9644,7 @@ fn sanitize_path_component(name: &str) -> String {
 /// `checkReadableInternalPath`.
 #[must_use]
 pub fn session_task_output_dir(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
-    lingxi_temp_dir_path()
-        .join(sanitize_path_component(&cwd.to_string_lossy()))
-        .join(session_id)
-        .join("tasks")
+    platform_api::task_output::session_output_dir(&lingxi_temp_dir_path(), cwd, session_id)
 }
 
 /// # Errors
@@ -9865,7 +9976,10 @@ pub async fn build_shared_credential_stack_with_policy(
     isolated_credential_storage: bool,
     credential_storage_policy: CredentialStoragePolicy,
 ) -> Result<SharedCredentialStack, BuildError> {
-    let http = Arc::new(PosixHttp::new());
+    let http = Arc::new(
+        PosixHttp::new()
+            .with_monitor_proxy(Arc::new(sandbox_runtime_runner::MonitorProxyConnector)),
+    );
     let clock = Arc::new(PosixClock::new());
     let credentials_path = lingxi_home.join(".credentials.json");
     let storage = if isolated_credential_storage {
@@ -11492,9 +11606,9 @@ pub async fn build(
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     let mut orch_cfg = OrchestratorConfig::default();
     orch_cfg.interactive_session = interactive_session;
-    // Keep the legacy main-loop interactive bit aligned for CLI TUI / stdio
-    // REPL sessions until every remaining consumer reads `interactive_session`.
-    orch_cfg.interactive_permissions = interactive_session;
+    // Bridge hosts have a live permission surface even though their session
+    // identity remains SDK. Treating them as headless denies Plan-mode questions.
+    orch_cfg.interactive_permissions = session_composition.supports_interactive_permissions();
     // Resolve output style before query identity: Claude Code includes builtin
     // output-style names in `repl_main_thread:outputStyle:*`.
     let output_style = if cfg.restricted {
@@ -11589,6 +11703,16 @@ pub async fn build(
     } else {
         load_merged_agent_push_notif_enabled(&cfg.cwd)
     });
+    // `settings.taskOutputMaxChars` — the soft cap `TaskOutput` truncates a
+    // task's model-facing output to, and the base its result budget is derived
+    // from. Published RAW; `tool_task` applies the oracle's `see()` clamp.
+    platform_api::session_flags::set_task_output_max_chars(if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.task_output_max_chars)
+    } else {
+        load_merged_task_output_max_chars(&cfg.cwd)
+    });
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
     // project style overrides a user one and both override the builtins. A
@@ -11612,7 +11736,35 @@ pub async fn build(
     // `settings.json` `plansDirectory` (206 `iT`): custom plan-file directory,
     // resolved against the project root with a within-root containment check by
     // the orchestrator. `None` keeps the default `<config-home>/plans/`.
+    // 2.1.266 `Zl`/`ay`: the session's plan-file identity. Published into the
+    // permission policy (so plan mode's one write carve-out fires — without it
+    // the plan-mode reminder tells the model to write a file the gate then
+    // prompts on) and read back by `ExitPlanMode` through the same policy, so
+    // the file the model was allowed to write is exactly the file whose contents
+    // are echoed on approval. The plans directory derivation is shared with the
+    // orchestrator's reminder (`ConversationOrchestrator::plans_dir`) rather than
+    // re-derived here.
+    // 2.1.266 `getPlanSlug`: the plan file is named by a random three-word slug
+    // (`brave-quiet-otter.md`), re-rolled on collision, NOT by the session id.
+    // Upstream can seed it from the transcript (`planSlugSeed`); LingXi has no
+    // seed source, so it takes the unseeded form.
+    let plans_dir =
+        orchestrator::ConversationOrchestrator::plans_dir(&cwd, cfg.plans_directory.as_deref());
+    let plan_slug = platform_api::plan_slug::generate_slug(None, &|candidate| {
+        platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+    });
+    let plan_files = std::sync::Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
+        permission::plan_files::PlanFileIdentity {
+            plans_dir,
+            slug: plan_slug,
+            // `ZUe()` — LingXi ships no workshop skill.
+            workshop_enabled: false,
+        },
+    ));
     orch_cfg.plans_directory.clone_from(&cfg.plans_directory);
+    // ONE plan-file identity: the reminder's path, the permission carve-out and
+    // `ExitPlanMode`'s read-back all resolve through this object.
+    orch_cfg.plan_files = Some(plan_files.clone());
     // CLI `--exclude-dynamic-system-prompt-sections`: move the per-machine env
     // block out of the (cacheable) system prompt into the first user message.
     orch_cfg.exclude_dynamic_system_prompt_sections = cfg.exclude_dynamic_system_prompt_sections;
@@ -11850,6 +12002,7 @@ pub async fn build(
     // session's hard-429 checkpoint.
     let subagent_hook_session_id = main_session_id;
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_session_interactive(interactive_session)
         .with_api_client(subagent_api)
         // #15: the parent model handed to the spawner must be the RESOLVED
@@ -11955,6 +12108,12 @@ pub async fn build(
     // below from `policy.tool_wide_deny_names()`; left empty otherwise ⇒ the
     // subagent tool pool is unfiltered (byte-identical to before).
     let subagent_tool_wide_deny_cell = subagent_spawner_concrete.tool_wide_deny_names_handle();
+    // (2.1.263 `bs(Rn)`) The spawn-time bypass clamps: an agent definition's
+    // `permissionMode: bypassPermissions` must NOT raise a restrictive parent
+    // session. Grabbed before boxing because `bypass_disabled` only exists once
+    // the boot permission tiers load, far below. Filled in BOTH arms of the
+    // enforcement branch so the cell is never left at its no-clamp default.
+    let subagent_bypass_gates_cell = subagent_spawner_concrete.spawn_bypass_gates_handle();
     // Coordinator mode is constructed below because it owns the session
     // lifecycle. Capture the spawner's set-once seam now and fill it once the
     // live mode exists, so each spawn consults `is_enabled()` at spawn time.
@@ -11977,7 +12136,8 @@ pub async fn build(
     let lifecycle_subagent_spawner = subagent_spawner_arc.clone();
     let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
-    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> = subagent_spawner_arc;
+    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> =
+        subagent_spawner_arc.clone();
 
     //       The budget enforcer shares both the process `CostTracker` and the
     //       CLI `--max-budget` ceiling with the main orchestrator. Claude Code
@@ -12212,19 +12372,31 @@ pub async fn build(
     //       list. Nothing between here and the former position reads the
     //       catalog; plugin agents still land later via the plugin bootstrap's
     //       `plugin_agent_catalog` writes.
-    let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
     let user_agents_dir = cfg.lingxi_home.join("agents");
+    // claude `O5` walks UP from the cwd collecting `<dir>/<DOT_DIR>/agents` at
+    // every level to the enclosing project root, so a monorepo's per-package
+    // agents and its root agents are both in scope, with the definition closest
+    // to the cwd winning. The port used to read the cwd's directory alone.
+    // `HOME` is the ceiling (never itself collected); `project_root_of` is the
+    // `kQr(cwd)` boundary — its absence just lets the walk run to the ceiling.
+    // `--add-dir` roots contribute their own `<dir>/<DOT_DIR>/agents` between
+    // the user tier and the project tier (`Rp()` in `wQr`, agents-only).
+    let agent_dirs = agent::catalog::agent_dir_precedence(
+        user_agents_dir,
+        &cwd,
+        std::env::var_os("HOME")
+            .map_or_else(|| std::path::PathBuf::from("/"), std::path::PathBuf::from)
+            .as_path(),
+        permission::set_cwd::project_root_of(&cwd).as_deref(),
+        &cfg.add_dir,
+    );
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
     // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
     let mut agents =
         if cfg.customization_gates.disables_custom_agents() || strict_plugin_only_agents {
             Vec::new()
         } else {
-            agent::load_agents_from_dirs(&[
-                (user_agents_dir, agent::definition::AgentSource::UserDefined),
-                (project_agents_dir, agent::definition::AgentSource::Project),
-            ])
-            .await
+            agent::load_agents_from_dirs(&agent_dirs).await
         };
     // (M4 cc2.1.198) `--agents <json>` flag agents — see
     // [`merge_cli_flag_agents`].
@@ -12234,6 +12406,21 @@ pub async fn build(
             cfg.cli_agents_json.as_deref(),
             cfg.customization_gates.safe_mode,
         );
+    }
+    // `Z$`'s TOP tier: `[built-in, plugin, userSettings, projectSettings,
+    // flagSettings, policySettings]` applied later-wins, so an org-provisioned
+    // agent outranks every other source — `--agents` included. Hence AFTER the
+    // flag merge. `wQr` gives this tier no `Fr(...)` / `ku("agents")` gate of
+    // its own (unlike user and project), because org policy is not user
+    // customization; the safe-mode / `--bare` arm above still suppresses the
+    // whole disk catalog before this runs.
+    if !cfg.customization_gates.disables_custom_agents() {
+        let policy_agents = agent::load_agents_from_dirs(&[(
+            agent::catalog::policy_agent_dir(&crate::settings_watch::managed_settings_dir()),
+            agent::definition::AgentSource::PolicySettings,
+        )])
+        .await;
+        agent::catalog::merge_agents_later_wins(&mut agents, policy_agents);
     }
 
     // (P2-02 cc2.1.207 / M7 cc2.1.220) The agent to apply to the MAIN loop: an
@@ -12546,6 +12733,7 @@ pub async fn build(
             auto_mode_disabled,
             classify_all_shell,
             mut additional_working_dirs,
+            block_reads_outside_working_directories,
             mut raw_tiers,
             allow_managed_permission_rules_only,
         } = load_boot_permission_tiers_with_flag(
@@ -12555,8 +12743,18 @@ pub async fn build(
             cfg.flag_settings.as_ref(),
         )
         .await;
+        // (2.1.263 `bs(Rn)`) All three clamp inputs exist here: `ey()` is this
+        // tier fold's `disableBypassPermissionsMode == "disable"`, `Rn.restricted`
+        // is the `--restricted` bit, and `YYe()` is read ONCE at this edge — never
+        // inside the clamp, because `CLAUDE_CODE_EVAL_CONFINED` is a process global
+        // and an env-reading gate makes a parallel test suite flaky.
+        let _ = subagent_bypass_gates_cell.set(agent::permission_mode::SpawnBypassGates {
+            confined: platform_api::env::is_eval_confined_session(),
+            bypass_disabled,
+            restricted: cfg.restricted,
+        });
         if cfg.restricted {
-            additional_working_dirs.clear();
+            additional_working_dirs = permission::working_dirs::AdditionalWorkingDirs::new();
         }
         append_mcp_permission_rules(
             &mut rules,
@@ -12570,10 +12768,14 @@ pub async fn build(
         // the working-dir set, exactly like a settings-tier
         // `additionalDirectories` entry (claude-code "Additional directories
         // to allow tool access to").
-        additional_working_dirs.extend(cfg.add_dir.iter().cloned());
+        additional_working_dirs.extend_from_source(
+            cfg.add_dir.iter().cloned(),
+            permission::PermissionRuleSource::CliArg,
+        );
         // Capture the union (settings additionalDirectories + --add-dir) for the
-        // file-tool `trusted_dirs` and MCP `roots/list` source below.
-        boot_additional_working_dirs = additional_working_dirs.clone();
+        // file-tool `trusted_dirs` and MCP `roots/list` source below. These
+        // consumers want the FULL `rb` union, not the read block's narrower set.
+        boot_additional_working_dirs = additional_working_dirs.paths();
         let rule_count = rules.len();
         // Phase 3a: supply the filesystem roots so file-path CONTENT rules
         // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
@@ -12612,8 +12814,26 @@ pub async fn build(
             mode = cfg.permission_mode;
         } else if !env_scrub_active {
             if let Some(agent_mode) = selected_main_agent_permission_mode {
-                if !(agent_mode == permission::PermissionMode::BypassPermissions && bypass_disabled)
-                {
+                // claude-code `Qu`: the `disableBypassPermissionsMode` killswitch
+                // is only HALF the gate. Bypass must also have been EARNED —
+                // the disclaimer accepted once, or a tier waiving the prompt —
+                // or a single frontmatter line in a discovered agent file grants
+                // full bypass at startup to a user who was never asked.
+                let bypass_ok = permission::boot_agent_may_adopt_bypass(
+                    bypass_disabled,
+                    // `kM()` — truthy in ANY tier.
+                    raw_tier_refs.iter().copied().any(
+                        permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json,
+                    ),
+                    migrations::global_config::global_config_path()
+                        .and_then(|p| migrations::global_config::read_map(&p).ok())
+                        .and_then(|m| {
+                            m.get("bypassPermissionsModeAccepted")
+                                .and_then(serde_json::Value::as_bool)
+                        })
+                        .unwrap_or(false),
+                );
+                if !(agent_mode == permission::PermissionMode::BypassPermissions && !bypass_ok) {
                     mode = agent_mode;
                 }
             }
@@ -12650,6 +12870,9 @@ pub async fn build(
             permission::PermissionPolicy::from_rules(permission::PermissionMode::Default, rules)
                 .with_roots(roots)
                 .with_working_dirs(additional_working_dirs)
+                .with_block_reads_outside_working_directories(
+                    block_reads_outside_working_directories,
+                )
                 .with_workspace_leases(workspace_leases.clone())
                 .with_sandbox_runtime(sandbox_auto_allow)
                 .with_managed_permission_rules_only(allow_managed_permission_rules_only)
@@ -12676,7 +12899,8 @@ pub async fn build(
                 // `pwsh`/`powershell` is not on PATH, exactly like claude-code.
                 .with_pwsh_parser(std::sync::Arc::new(
                     permission::powershell_parse::SystemPwshParser,
-                ));
+                ))
+                .with_plan_files(plan_files.clone());
         policy.bypass_killswitch_active = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
         // refuses `auto` when any tier set `disableAutoMode: "disable"`.
@@ -12718,6 +12942,14 @@ pub async fn build(
         boot_additional_working_dirs = cfg.add_dir.clone();
         perms
     };
+    // Enforcement-off fallback for the clamp inputs: the settings tiers were not
+    // loaded, so `disableBypassPermissionsMode` is unknown (⇒ `false`). A no-op
+    // when the enforcing arm above already filled the cell.
+    let _ = subagent_bypass_gates_cell.set(agent::permission_mode::SpawnBypassGates {
+        confined: platform_api::env::is_eval_confined_session(),
+        bypass_disabled: false,
+        restricted: cfg.restricted,
+    });
     // Capture the enforcing gate for the interactive TUI's Shift+Tab live
     // permission-mode cycling (`set_permission_mode`), before `perms` is moved
     // into the tool context below.
@@ -13048,8 +13280,11 @@ pub async fn build(
     //        out of the working tree / git status (T16). The spawner is the
     //        tokio-backed `PosixRuntime`. The same handle is returned for a
     //        transport/TUI poller to read live state.
-    let task_session_id = protocol::SessionId::new().to_string();
-    let task_output_dir = session_task_output_dir(&cwd, &task_session_id);
+    // Key the directory by THIS session's id, not a fresh one: claude-code's
+    // `o1e()` derives it from `K()` (the live session id), so the task spools
+    // sit beside the session's other per-session state instead of under a uuid
+    // that exists nowhere else in the process.
+    let task_output_dir = session_task_output_dir(&cwd, &main_session_uuid);
     // Eagerly create the dir (claude-code `ensureOutputDir`'s `mkdir(recursive)`)
     // so the very first spool `allocate` (exclusive create) finds its parent.
     if let Err(e) = std::fs::create_dir_all(&task_output_dir) {
@@ -13115,7 +13350,29 @@ pub async fn build(
     //        tool selection must be decided here); a default session leaves it
     //        DISABLED so the build is byte-identical to the pre-M10 build.
     let coordinator_id = protocol::AgentId::new();
-    let coordinator = Arc::new(coordinator::TeamRegistry::new(coordinator_id));
+    let coordinator = Arc::new(
+        coordinator::TeamRegistry::new(coordinator_id).with_config_home(cfg.lingxi_home.clone()),
+    );
+    coordinator.set_permission_gate(perms.clone()).await;
+    // Named background agents can address main even without experimental teams.
+    coordinator
+        .mailbox_router
+        .register(
+            coordinator_id,
+            Arc::new(coordinator::TeammateMailbox::new(coordinator_id)),
+        )
+        .await;
+    coordinator
+        .mailbox_router
+        .register_alias("main", coordinator_id)
+        .await;
+    coordinator
+        .mailbox_router
+        .register_alias("team-lead", coordinator_id)
+        .await;
+    if let Some(team_name) = &cfg.initial_teammate_team_name {
+        coordinator.set_team_name(Some(team_name.clone())).await;
+    }
     let coordinator_mode = {
         let mut mode = coordinator::CoordinatorMode::new();
         mode.session_started_as_coordinator = cfg.session_started_as_coordinator;
@@ -13270,7 +13527,13 @@ pub async fn build(
     // not a chat-only stub.
     .with_budget_enforcer(budget_enforcer.clone())
     .with_hook_executor(hooks.clone())
-    .with_hook_context(subagent_hook_session_id, cwd.clone());
+    .with_plan_approval_mailbox(coordinator.mailbox_router.clone())
+    .with_plan_approval_gate(perms.clone())
+    .with_hook_context(subagent_hook_session_id, cwd.clone())
+    .with_transcript(
+        Arc::new(PosixFileSystem::new(cwd.clone())),
+        main_subagents_dir.clone(),
+    );
     // Grab the teammate handler's set-once cells BEFORE boxing, to fill once the
     // tool registry / skill loader exist (same deferred-fill the spawner uses).
     let teammate_tool_registry_cell = teammate_handler.tool_registry_handle();
@@ -13493,6 +13756,7 @@ pub async fn build(
     );
 
     let task_registry = Arc::new(task_registry_inner);
+    subagent_spawner_arc.set_task_registry(task_registry.clone());
     teammate_registry_status_sink.bind(task_registry.clone());
 
     // (5.46f) Bind the deferred LocalAgent status sink now that the registry
@@ -13550,12 +13814,55 @@ pub async fn build(
         None
     };
 
-    // (5.47) M10 (T13): the typed spawn/kill seam the coordinator's `TeamCreate` /
-    //        `TeamDelete` use to start / stop the real backing `InProcessTeammate`
-    //        task. `TaskRegistry` impls `TeamSpawnSeam` (T04); the same `Arc` the
-    //        tool context holds is reused so the spawned teammate is keyed on the
-    //        worker identity threaded through.
-    let spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam> = task_registry.clone();
+    // Share task delivery and cancellation with the implicit team service.
+    let spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam> =
+        if platform_api::env::agent_swarms_enabled() {
+            let executable = std::env::current_exe()
+                .ok()
+                .filter(|path| {
+                    path.file_stem()
+                        .is_some_and(|name| name == "lingxi-cli" || name == "lingxi")
+                })
+                .or_else(|| {
+                    std::env::var_os("PATH").and_then(|path| {
+                        std::env::split_paths(&path)
+                            .map(|dir| dir.join("lingxi-cli"))
+                            .find(|candidate| candidate.is_file())
+                    })
+                })
+                .unwrap_or_else(|| std::path::PathBuf::from("lingxi-cli"));
+            let seam = pane_teammate::PaneTeammateSpawner::new(
+                task_registry.clone(),
+                coordinator.clone(),
+                Arc::new(PosixRuntime::new()),
+                output.clone(),
+                main_session_id,
+                std::path::PathBuf::from("/tmp"),
+                None,
+                false,
+                executable,
+            )
+            .with_backend_selector(teammate_backend_selector(
+                cwd.clone(),
+                cfg.flag_settings.as_ref().and_then(|s| s.teammate_mode),
+                cfg.is_tty,
+            ));
+            Arc::new(seam)
+        } else {
+            task_registry.clone()
+        };
+
+    let departure_owner: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> =
+        coordinator.clone();
+    task_registry
+        .set_teammate_departure_cleanup(Arc::downgrade(&departure_owner))
+        .await;
+
+    if platform_api::env::agent_swarms_enabled() {
+        task_registry
+            .set_external_teammate_controller(Arc::downgrade(&spawn_seam))
+            .await;
+    }
 
     // (5.5) Assemble the desktop tool registry through the composition root.
     //       A coordinator session shares the team's `MailboxRouter` with the
@@ -13668,6 +13975,11 @@ pub async fn build(
         let deny_seed = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
         let ctx = sandbox::policy_convert::SandboxConvertContext {
             lingxi_temp_dir: Some(lingxi_temp_dir()),
+            task_output_dir: Some(
+                session_task_output_dir(&cwd, &main_session_uuid)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             settings_file_paths: vec![
                 deny_seed(cfg.lingxi_home.join("settings.json")),
                 deny_seed(cwd.join(branding::DOT_DIR).join("settings.json")),
@@ -13752,9 +14064,23 @@ pub async fn build(
     // after `task_registry` exists — so NO deferred cell is needed; the
     // one-shot / teammate / workflow handlers keep the raw spawner captured
     // earlier (they only use the sync `spawn`, which the decorator delegates).
+    let teammate_spawner = if platform_api::env::agent_swarms_enabled() {
+        let spawner = Arc::new(coordinator::ImplicitTeammateSpawner::new(
+            coordinator.clone(),
+            spawn_seam.clone(),
+            Arc::new(PosixRuntime::new()),
+            output.clone(),
+            main_session_id.to_string(),
+        ));
+        spawner.initialize().await;
+        Some(spawner)
+    } else {
+        None
+    };
     let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         Arc::new(background_agent::BackgroundAgentSpawner {
             inner: subagent_spawner,
+            teammate_spawner,
             registry: task_registry.clone(),
             mailbox_router: coordinator.mailbox_router.clone(),
             runtime: Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
@@ -13961,7 +14287,8 @@ pub async fn build(
                     })
                     .with_pwsh_parser(std::sync::Arc::new(
                         permission::powershell_parse::SystemPwshParser,
-                    )),
+                    ))
+                    .with_plan_files(plan_files.clone()),
             )
         }),
         sandbox_available,
@@ -14066,44 +14393,12 @@ pub async fn build(
     // for that worktree — independently inert when `None` (see the function
     // doc); a tmux failure is logged, not a hard boot failure.
     apply_worktree_launch(&cfg.worktree_launch, &cfg.tmux_launch, &tool_ctx).await?;
-    // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
-    //        coordinator session passes `Some(CoordinatorWiring { team, mode,
-    //        spawn_seam })` so the coordinator `TeamCreate` / `TeamDelete` are
-    //        registered IN PLACE OF `tool_team`'s pair; a default session passes
-    //        `None`, leaving `tool_team`'s pair and the coordinator tools absent
-    //        — byte-identical to the pre-M10 build.
-    let coordinator_wiring = if cfg.session_started_as_coordinator {
-        Some(CoordinatorWiring {
+    let coordinator_wiring = (platform_api::env::agent_swarms_enabled()
+        || cfg.session_started_as_coordinator)
+        .then(|| CoordinatorWiring {
             team: coordinator.clone(),
-            mode: coordinator_mode.clone(),
             spawn_seam: spawn_seam.clone(),
-            // The SAME output stream the orchestrator + CoordinatorStatusSink use,
-            // so the TeamCreate activation PUSH and the sink's later transitions
-            // share one client feed. Cloned here because `output` is moved into
-            // the `ConversationOrchestrator` below.
-            output: output.clone(),
-            // The tool-context analytics bus, so TeamCreate/TeamDelete fire
-            // tengu_team_created / tengu_team_deleted through the same bus the
-            // rest of the builtin tools use.
-            bus: Some(tool_ctx.bus.clone()),
-            // (5.47a) The background-task spawner for each teammate's mailbox→
-            //         runner PUMP. A fresh `PosixRuntime` (the canonical desktop
-            //         `RuntimeSpawner`, as used for the task registry / hooks /
-            //         cron throughout `build`); D17-compliant (no direct
-            //         `tokio::spawn`). With this wired, a coordinator
-            //         `SendMessage` to a teammate is drained from its mailbox
-            //         into the teammate's turn loop (via the `TaskRegistry`
-            //         `TeamSpawnSeam::send_message` override) — the
-            //         `injectUserMessageToTeammate` path. The pump exits on its
-            //         own when the teammate is killed (send → Terminated), so it
-            //         needs no separate teardown hook.
-            runtime: Some(Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>),
-        })
-    } else {
-        // Drop the spawn-seam clone path; it is unused in a default session.
-        let _ = &spawn_seam;
-        None
-    };
+        });
     // (5.5b) MCP-invocation Batch 3: expose each Connected server's tools by
     //        their real `mcp__<server>__<tool>` FQN as individual wire entries
     //        (server `inputSchema` + truncated description), routed back to that
@@ -14281,7 +14576,8 @@ pub async fn build(
         Arc::new(tool_computer_use::TuiBridgeResolver::new(tx))
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
-    let wakeup_scheduler_cell = register_desktop_tools_with_fusion_recorder(
+    let (wakeup_scheduler_cell, loop_wakeup_armed) =
+        register_desktop_tools_with_fusion_recorder(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
@@ -14637,7 +14933,7 @@ pub async fn build(
     {
         let mcp_registry_for_agents = mcp_registry.clone();
         let mcp_tool_ctx_for_agents = mcp_tool_ctx.clone();
-        let _ = subagent_mcp_tool_builder_cell.set(Arc::new(move |agent_id, def| {
+        let _ = subagent_mcp_tool_builder_cell.set(Arc::new(move |agent_id, def, lease| {
             let mcp_registry = mcp_registry_for_agents.clone();
             let mcp_tool_ctx = mcp_tool_ctx_for_agents.clone();
             Box::pin(build_agent_mcp_tool_set(
@@ -14647,6 +14943,7 @@ pub async fn build(
                 cfg.strict_mcp_config,
                 agent_id,
                 def,
+                lease,
             ))
                 as std::pin::Pin<
                     Box<
@@ -14938,6 +15235,13 @@ pub async fn build(
     // EndConversation: hand the orchestrator the SAME end-request slot the tool
     // holds, so the turn loop can terminate on a confirmed (2nd) call. `None`
     // (feature disabled, the default) leaves the turn loop byte-identical.
+    // `/loop` dynamic mode: the turn loop ends a turn whose only tool call was
+    // the `ScheduleWakeup` that armed a wakeup (binary's lone-wakeup arm). Same
+    // `Arc` the tool raises.
+    let orch_builder = orch_builder.with_loop_wakeup_armed_slot(loop_wakeup_armed);
+    let orch_builder = orch_builder
+        .with_coordinator_mode(coordinator_mode.clone()
+            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
     let orch_builder = match end_conversation_slot.clone() {
         Some(slot) => orch_builder.with_end_conversation_slot(slot),
         None => orch_builder,
@@ -14949,7 +15253,10 @@ pub async fn build(
     // non-CLI hosts) leaves that `/fork` variant failing with a clear
     // `ActionFailed`, byte-identical to before this seam existed.
     let orch_builder = match cfg.bg_session_forker.clone() {
-        Some(forker) => orch_builder.with_bg_session_forker(forker),
+        Some(forker) => {
+            forker.set_task_registry(task_registry.clone());
+            orch_builder.with_bg_session_forker(forker)
+        }
         None => orch_builder,
     };
 
@@ -15237,6 +15544,7 @@ pub async fn build(
         connect_chatgpt,
         cfg.customization_gates,
         strict_plugin_only_skills,
+        &cfg.add_dir,
         shared_command_registry.clone(),
     )
     .await;
@@ -15301,6 +15609,7 @@ pub async fn build(
             cfg.cwd.clone(),
             cfg.lingxi_home.clone(),
             transcript_dir,
+            task_registry.clone(),
         ));
         let apply = std::sync::Arc::new(auto_mode_propose::DesktopApplyRunner::new(
             command_core::auto_mode_setup::apply_file_roots(&cfg.lingxi_home),
@@ -16528,6 +16837,7 @@ mod tests {
             Arc::new(G),
             super::CustomizationGates::default(),
             false,
+            &[],
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
         )
         .await;
@@ -16635,6 +16945,7 @@ mod tests {
                 Arc::new(G),
                 gates,
                 false,
+                &[],
                 Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
             )
             .await;
@@ -16646,6 +16957,113 @@ mod tests {
             assert!(
                 reg.get_handler("connect").is_some(),
                 "{gates:?}: builtins must stay registered"
+            );
+        }
+    }
+
+    /// An `--add-dir` root contributes `<root>/<DOT_DIR>/skills` to discovery.
+    ///
+    /// Upstream 2.1.267 (`src_172414592.js` @5180) closes its skill-directory
+    /// assembly with
+    /// `for(let e of Up()){ let S = P.join(e,".claude","skills"); … s.push(S) }`.
+    /// This port had the parameter all the way down to the loader and passed
+    /// `Vec::new()` at all three registration sites, so the tier existed and was
+    /// never populated — and the loader would have used the root DIRECTLY as a
+    /// skills dir rather than joining, so wiring it naively would still have
+    /// found nothing.
+    ///
+    /// Two arms on purpose: the first proves the skill is not reachable by some
+    /// ambient path, so the second is really testing the root.
+    #[tokio::test]
+    async fn an_add_dir_root_contributes_its_skills() {
+        use async_trait::async_trait;
+        use command_core::{
+            ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
+            CopilotConnectStep,
+        };
+        use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+
+        struct MockAuth;
+        #[async_trait]
+        impl AuthHandle for MockAuth {
+            async fn login(&self) -> Result<LoginInfo, AuthError> {
+                Err(AuthError::Cancelled)
+            }
+            async fn logout(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+            async fn current_user(&self) -> Option<LoginInfo> {
+                None
+            }
+        }
+        struct W;
+        #[async_trait]
+        impl ConnectCredentialWriter for W {
+            async fn prompt_and_store_key(&self, _id: &str) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct C;
+        #[async_trait]
+        impl CopilotConnectDriver for C {
+            async fn begin(
+                &self,
+                _domain: Option<&str>,
+            ) -> Result<CopilotConnectStep, ConnectError> {
+                Ok(CopilotConnectStep {
+                    user_code: "X".into(),
+                    verification_uri: "u".into(),
+                })
+            }
+            async fn poll_to_completion(
+                &self,
+                _s: &CopilotConnectStep,
+            ) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct G;
+        #[async_trait]
+        impl ChatGptConnectDriver for G {
+            async fn connect(&self) -> Result<String, ConnectError> {
+                Ok("Connected chatgpt.".into())
+            }
+        }
+
+        let cwd_tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = cwd_tmp.path().to_path_buf();
+        let root_tmp = tempfile::tempdir().expect("tempdir");
+        let root = root_tmp.path().to_path_buf();
+        let skill_dir = root.join(branding::DOT_DIR).join("skills").join("addskill");
+        std::fs::create_dir_all(&skill_dir).expect("mk skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: From an add-dir\n---\nbody\n",
+        )
+        .expect("write SKILL.md");
+
+        for (roots, want) in [(Vec::new(), false), (vec![root.clone()], true)] {
+            let handle: Arc<dyn OrchestratorHandle> =
+                Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+            let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth);
+            let reg = super::desktop_command_registry(
+                handle,
+                auth,
+                &cwd,
+                &cwd,
+                Arc::new(W),
+                Arc::new(C),
+                Arc::new(G),
+                super::CustomizationGates::default(),
+                false,
+                &roots,
+                Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
+            )
+            .await;
+            assert_eq!(
+                reg.resolve("addskill").is_some(),
+                want,
+                "add-dir roots {roots:?}: the skill must be reachable only through the root"
             );
         }
     }
@@ -18348,6 +18766,22 @@ still flip to available"
     }
 
     #[test]
+    fn desktop_permission_prompts_are_independent_of_cli_session_semantics() {
+        for (composition, interactive_session, interactive_permissions) in [
+            (DesktopSessionComposition::InteractiveCli, true, true),
+            (DesktopSessionComposition::HeadlessCli, false, false),
+            (DesktopSessionComposition::Transport, false, true),
+        ] {
+            assert_eq!(composition.is_interactive_session(), interactive_session);
+            assert_eq!(
+                composition.supports_interactive_permissions(),
+                interactive_permissions,
+                "permission prompt capability for {composition:?}"
+            );
+        }
+    }
+
+    #[test]
     fn desktop_session_composition_distinguishes_interactive_cli_from_headless_and_transport() {
         let mut cfg = DesktopConfig::default();
         assert_eq!(
@@ -18938,7 +19372,8 @@ still flip to available"
             vec![std::path::PathBuf::from("/tmp")],
         );
         ctx.mcp_registry = Some(registry.clone());
-        let set = super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def).await;
+        let set =
+            super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def, None).await;
         assert_eq!(set.tools.len(), 3);
 
         let deny = set
@@ -19149,6 +19584,7 @@ still flip to available"
             json_schema: None,
             injected_permission_gate: None,
             session_started_as_coordinator: false,
+            initial_teammate_team_name: None,
             // Boot tests stay deterministic: empty memory, never the real FS.
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
@@ -23113,87 +23549,28 @@ must be filtered out: got {after:?}"
     fn coordinator_wiring() -> CoordinatorWiring {
         CoordinatorWiring {
             team: Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new())),
-            mode: Arc::new(coordinator::CoordinatorMode::new()),
             spawn_seam: Arc::new(NoopSeam),
-            output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
-            bus: None,
-            // Tool-selection tests don't exercise the pump; no spawner needed.
-            runtime: None,
         }
     }
 
-    /// T12: a default session (`coordinator: None`) registers exactly ONE
-    /// `TeamCreate`, and it is `tool_team`'s — distinguished by its behavior
-    /// marker `max_result_size_chars() == 30_000` (`MAX_TOOL_OUTPUT_LENGTH`),
-    /// vs. the coordinator tool's `100_000`. Guardrail: byte-identical default.
     #[test]
-    fn tool_registry_default_mode_registers_tool_team_create() {
-        let reg = desktop_tool_registry(stub_tool_ctx(), None, None);
-
-        let names = reg.all_names();
-        assert_eq!(
-            names.iter().filter(|n| *n == "TeamCreate").count(),
-            1,
-            "default mode must register exactly one TeamCreate"
-        );
-        assert_eq!(
-            names.iter().filter(|n| *n == "TeamDelete").count(),
-            1,
-            "default mode must register exactly one TeamDelete"
-        );
-
-        // Behavior marker: tool_team's TeamCreate caps results at 30_000;
-        // the coordinator's caps at 100_000.
-        let create = reg
-            .find_by_name("TeamCreate")
-            .expect("TeamCreate must be registered");
-        assert_eq!(
-            create.max_result_size_chars(),
-            tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH,
-            "default mode must register tool_team's TeamCreate (30_000 cap)"
-        );
-    }
-
-    /// T12: a coordinator-capable session (`coordinator: Some`) registers the
-    /// coordinator `TeamCreate` IN PLACE OF `tool_team`'s — still exactly ONE
-    /// `TeamCreate` and ONE `TeamDelete` (no silent shadow, no duplicate name
-    /// in the system prompt). The registered `TeamCreate` is the coordinator's,
-    /// distinguished by `max_result_size_chars() == 100_000`.
-    #[test]
-    fn tool_registry_coordinator_mode_registers_coordinator_create() {
-        let reg = desktop_tool_registry(stub_tool_ctx(), Some(coordinator_wiring()), None);
-
-        let names = reg.all_names();
-        assert_eq!(
-            names.iter().filter(|n| *n == "TeamCreate").count(),
-            1,
-            "coordinator mode must register exactly one TeamCreate (no shadow)"
-        );
-        assert_eq!(
-            names.iter().filter(|n| *n == "TeamDelete").count(),
-            1,
-            "coordinator mode must register exactly one TeamDelete (no shadow)"
-        );
-
-        // No duplicate names ANYWHERE in the assembled registry.
-        let mut sorted = names.clone();
-        sorted.sort();
-        let mut deduped = sorted.clone();
-        deduped.dedup();
-        assert_eq!(
-            sorted, deduped,
-            "no tool name may appear twice in the assembled registry"
-        );
-
-        // Behavior marker: the registered TeamCreate is the coordinator's.
-        let create = reg
-            .find_by_name("TeamCreate")
-            .expect("TeamCreate must be registered");
-        assert_eq!(
-            create.max_result_size_chars(),
-            100_000,
-            "coordinator mode must register the coordinator TeamCreate (100_000 cap)"
-        );
+    fn tool_registry_uses_implicit_teams_in_every_mode() {
+        for wiring in [None, Some(coordinator_wiring())] {
+            let reg = desktop_tool_registry(stub_tool_ctx(), wiring, None);
+            let names = reg.all_names();
+            assert!(!names
+                .iter()
+                .any(|name| name == "TeamCreate" || name == "TeamDelete"));
+            assert_eq!(
+                names.iter().filter(|name| *name == "SendMessage").count(),
+                1
+            );
+            let mut sorted = names.clone();
+            sorted.sort();
+            let mut deduped = sorted.clone();
+            deduped.dedup();
+            assert_eq!(sorted, deduped);
+        }
     }
 
     // ----- T13: build() composition-root coordinator wiring -----------------
@@ -23328,13 +23705,7 @@ must be filtered out: got {after:?}"
         );
         let wiring = CoordinatorWiring {
             team: team.clone(),
-            mode: Arc::new(coordinator::CoordinatorMode::new()),
             spawn_seam: Arc::new(NoopSeam),
-            output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
-            bus: None,
-            // This test exercises SendMessage→mailbox routing only, not the
-            // teammate pump; no spawner needed.
-            runtime: None,
         };
         let reg = desktop_tool_registry(ctx, Some(wiring), None);
 
@@ -23371,7 +23742,7 @@ must be filtered out: got {after:?}"
         let err = default_send
             .call(
                 serde_json::json!({
-                    "to_agent_id": worker.as_uuid().to_string(),
+                    "to": worker.as_uuid().to_string(),
                     "message": "hello teammate",
                 }),
                 tool_api::test_support::fresh_ctx(),
@@ -26762,6 +27133,20 @@ mod workspace_lease_forwarding_tests {
 
     #[async_trait::async_trait]
     impl ToolInvoker for RecordingInvoker {
+        async fn invoke_detailed(
+            &self,
+            _name: &str,
+            _input: serde_json::Value,
+            _ctx: SubagentInvocationContext,
+            workspace_lease_token: Option<u64>,
+        ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+            *self.seen.lock().unwrap() = Some(workspace_lease_token);
+            Ok(platform_api::tool_invoker::ToolInvocationResult {
+                data: serde_json::json!({"awaitingLeaderApproval": true}),
+                model_content: Some("Wait for the team lead to review your plan".into()),
+            })
+        }
+
         async fn invoke(
             &self,
             _name: &str,
@@ -26790,6 +27175,7 @@ mod workspace_lease_forwarding_tests {
 
     fn bare_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
@@ -26830,6 +27216,26 @@ mod workspace_lease_forwarding_tests {
             "the deferred invoker must forward the lease token, not swallow it"
         );
     }
+
+    #[tokio::test]
+    async fn deferred_invoker_preserves_model_content_and_workspace_lease() {
+        let seen = Arc::new(StdMutex::new(None));
+        let deferred = super::DeferredToolInvoker::new();
+        deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
+        let result = deferred
+            .invoke_detailed("ExitPlanMode", serde_json::json!({}), bare_ctx(), Some(77))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.data,
+            serde_json::json!({"awaitingLeaderApproval": true})
+        );
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some("Wait for the team lead to review your plan")
+        );
+        assert_eq!(*seen.lock().unwrap(), Some(Some(77)));
+    }
 }
 
 /// Round-5 review item 11's class member (1), handed to the gate by that
@@ -26853,11 +27259,14 @@ mod desktop_agent_mcp_cleanup_guard_tests {
     /// server is already live and its cleanup handle already sits in the
     /// function's local `cleanups` vec. Dropping the future there is exactly
     /// the Fusion `join_set.abort_all()` race the finding describes.
-    struct HangingConnectTransport;
+    struct HangingConnectTransport {
+        entered: Arc<tokio::sync::Notify>,
+    }
 
     #[async_trait::async_trait]
     impl McpTransport for HangingConnectTransport {
         async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            self.entered.notify_one();
             std::future::pending::<()>().await;
             unreachable!("pending() never resolves")
         }
@@ -26869,6 +27278,7 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         ) -> Result<McpConnectResult, McpError> {
             // Overridden: the trait default wraps `connect` in a DEADLINE, and
             // a deadline would let the loop move on instead of parking.
+            self.entered.notify_one();
             std::future::pending::<()>().await;
             unreachable!("pending() never resolves")
         }
@@ -26957,11 +27367,20 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         agent::AgentMcpServerSpec::Record(server)
     }
 
-    #[tokio::test]
-    async fn a_dropped_connect_loop_tears_down_the_servers_it_already_opened() {
+    async fn connect_loop_fixture() -> (
+        protocol::AgentId,
+        String,
+        Arc<mcp::McpRegistry>,
+        tool_api::BuiltinToolContext,
+        agent::AgentDefinition,
+        Arc<tokio::sync::Notify>,
+    ) {
         let agent_id = protocol::AgentId::new();
         let opened_key = mcp::registry::agent_scope_table_key(agent_id, "opened");
-        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport)));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport {
+            entered: entered.clone(),
+        })));
         // `opened` is already live, so `connect_agent_scoped` short-circuits
         // on it and the loop pushes its cleanup handle; `hangs` is not, so
         // its connect parks in the transport forever.
@@ -27012,9 +27431,23 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         );
         ctx.mcp_registry = Some(registry.clone());
 
+        (agent_id, opened_key, registry, ctx, def, entered)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connect_loop_tears_down_the_servers_it_already_opened() {
+        let (agent_id, opened_key, registry, ctx, def, _) = connect_loop_fixture().await;
         let outcome = tokio::time::timeout(
             Duration::from_millis(300),
-            super::build_agent_mcp_tool_set(registry.clone(), ctx, false, false, agent_id, def),
+            super::build_agent_mcp_tool_set(
+                registry.clone(),
+                ctx,
+                false,
+                false,
+                agent_id,
+                def,
+                None,
+            ),
         )
         .await;
         assert!(
@@ -27040,4 +27473,187 @@ disconnected when the future is dropped mid-loop — the half-built `cleanups` v
 a plain local that no caller has ever seen, so nothing else can ever tear it down"
         );
     }
+
+    #[tokio::test]
+    async fn restored_identity_stays_reserved_until_cancelled_connect_loop_cleanup_finishes() {
+        use agent::StreamingSubagentSpawner;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct NoWork;
+        #[async_trait::async_trait]
+        impl platform_api::ToolInvoker for NoWork {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            async fn invoke(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: platform_api::tool_invoker::SubagentInvocationContext,
+            ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError>
+            {
+                Ok(serde_json::Value::Null)
+            }
+        }
+        #[async_trait::async_trait]
+        impl platform_api::BudgetEnforcerHandle for NoWork {
+            async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::BudgetError> {
+                Ok(())
+            }
+            async fn snapshot_total_nano_usd(&self) -> u64 {
+                0
+            }
+        }
+        #[async_trait::async_trait]
+        impl platform_api::subagent_spawn::SubagentSpawnObserver for NoWork {
+            async fn on_event(&self, _: platform_api::subagent_spawn::SubagentObservation) {}
+        }
+        struct LeaseProbe {
+            _lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
+            released: Arc<AtomicBool>,
+        }
+        impl Drop for LeaseProbe {
+            fn drop(&mut self) {
+                drop(self._lease.take());
+                self.released.store(true, Ordering::SeqCst);
+            }
+        }
+        let (id, opened_key, registry, ctx, definition, entered) = connect_loop_fixture().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let build_calls = calls.clone();
+        let release_probe = released.clone();
+        let build_registry = registry.clone();
+        let builder: agent::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |actual, _, lease| {
+                assert_eq!(actual, id);
+                build_calls.fetch_add(1, Ordering::SeqCst);
+                let lease = Arc::new(LeaseProbe {
+                    _lease: Some(
+                        lease.expect("restored construction must carry its identity reservation"),
+                    ),
+                    released: release_probe.clone(),
+                }) as agent::agent_mcp_tools::AgentMcpConstructionLease;
+                Box::pin(super::build_agent_mcp_tool_set(
+                    build_registry.clone(),
+                    ctx.clone(),
+                    false,
+                    false,
+                    actual,
+                    definition.clone(),
+                    Some(lease),
+                ))
+            });
+        let pool = Arc::new(agent::StateMachinePool::new(
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+            2,
+        ));
+        let spawner =
+            Arc::new(agent::PoolSubagentSpawner::new(pool).with_mcp_tool_builder(builder));
+        let request = platform_api::SubagentSpawnRequest {
+            subagent_type: "general-purpose".into(),
+            resumed_history: Some(vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "restored history".into(),
+            )]),
+            ..Default::default()
+        };
+        let inherit = || platform_api::SubagentInheritance {
+            tool_invoker: Arc::new(NoWork),
+            budget: Arc::new(NoWork),
+        };
+        let worker_spawner = spawner.clone();
+        let worker_request = request.clone();
+        let worker_inherit = inherit();
+        let worker = tokio::spawn(async move {
+            worker_spawner
+                .restore_persistent_with_observer(
+                    id,
+                    worker_request,
+                    worker_inherit,
+                    Arc::new(NoWork),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        // The first connection has a cleanup receipt; the second dial is held.
+        // Block that real cleanup, then cancel the builder before it returns.
+        let connection_gate = registry.connections.write().await;
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        assert!(
+            !released.load(Ordering::SeqCst),
+            "the construction lease must move into the asynchronous cleanup"
+        );
+        let collision = tokio::time::timeout(
+            Duration::from_secs(1),
+            spawner.restore_persistent_with_observer(
+                id,
+                request.clone(),
+                inherit(),
+                Arc::new(NoWork),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(collision, Ok(Err(_))),
+            "retry must fail before entering the builder while old cleanup is pending"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(connection_gate);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !released.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!registry.connections.read().await.contains_key(&opened_key));
+        let retry_spawner = spawner.clone();
+        let retry_inherit = inherit();
+        let retry = tokio::spawn(async move {
+            retry_spawner
+                .restore_persistent_with_observer(id, request, retry_inherit, Arc::new(NoWork))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "identity must become reusable after cleanup, not leak forever"
+        );
+        retry.abort();
+        let _ = retry.await;
+    }
+}
+
+/// Platform supervisor selected by the desktop composition root. Hosts use
+/// this alias so bridge startup does not need another platform dependency.
+#[cfg(unix)]
+pub use platform_posix::process::supervisor as shell_supervisor;
+#[cfg(windows)]
+pub use platform_windows::process::supervisor as shell_supervisor;
+
+/// Shared CLI/bridge factory for the independent shell supervisor. Its writer
+/// uses the same rooted spool, framing, caps and flush boundary as live tasks.
+#[cfg(any(unix, windows))]
+pub fn supervisor_exit_sink(
+    path: &std::path::Path,
+) -> std::sync::Arc<dyn platform_api::BackgroundExitSink> {
+    let root = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/"))
+        .to_path_buf();
+    #[cfg(unix)]
+    let fs = std::sync::Arc::new(platform_posix::PosixFileSystem::new(root.clone()));
+    #[cfg(windows)]
+    let fs = std::sync::Arc::new(platform_windows::WindowsFileSystem::new(root.clone()));
+    let manager = std::sync::Arc::new(tasks::output_manager::TaskOutputManager::new(root, fs));
+    std::sync::Arc::new(tasks::output_manager::TaskOutputSink::new(
+        manager,
+        path.to_path_buf(),
+    ))
 }

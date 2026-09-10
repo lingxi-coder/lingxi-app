@@ -1,85 +1,116 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lingxi.local/local-app/qa-report.schema.json",
-  "title": "Local App QA report (frontend-qa / verifier verification result)",
-  "$comment": "PHASE 2 CONTENT, transcription not invention. VERIFICATION_RESULT_SCHEMA was drafted as near-identical across two builtin workflows once planned for this plugin, tagged below as `local_app_build_workflow.js` (react_dom) and `local_app_canvas_workflow.js` (canvas/three/phaser/babylon) — neither file exists anywhere in this repo (grepped; zero hits). The plugin ships ONE unified build workflow instead, `lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js`, whose shipped `reportSchema` already carries this same shape (ok/findings/checked_matrix/browser_available/webview_checked/degraded_verification/data_roundtrip/render_check/motion_check/summary), enforced at that file's `blockingFindings`. The two drafted schemas differed in exactly the way design §11.2's Profile verification policy already documents in prose: DOM's render_check.status allows 'not_applicable' ('无 canvas 时 render_check.status=not_applicable 合法') and DOM has no motion_check property at all; the canvas family's render_check.status has no not_applicable branch and REQUIRES motion_check ('motion_check.frames_compared >= 2'). This file expresses that as one schema — render_check.status keeps the not_applicable option, motion_check is present but not in the top-level required list — with an documented profile-conditional requirement below, rather than inventing a merged shape design §18 Phase 4 has not settled. Only the reconciliation of which fields are unconditionally required is new, and it transcribes §11.2's prose rather than adding anything §11.2 does not already say.",
+  "title": "Local App immutable QA result",
+  "description": "Exact durable QaResult DTO. Compact operator/tester/verifier role output is defined separately in workflow-agent-results.schema.json.",
   "type": "object",
+  "additionalProperties": false,
   "properties": {
-    "ok": { "type": "boolean" },
-    "findings": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Unresolved defects that still need a source change, each with its evidence and the file to change. NOT a record of what was checked and NOT a summary — an entry here sends the app into a repair round. Empty when verification found nothing wrong."
-    },
-    "checked_matrix": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Targets actually exercised."
-    },
-    "browser_available": { "type": "boolean" },
-    "webview_checked": { "type": "boolean" },
-    "degraded_verification": { "type": "boolean" },
-    "data_roundtrip": {
-      "type": "object",
-      "description": "Native persistence check. For a drawn surface that declares no collection this answers not_applicable, which is why render_check (not this field) is the canvas family's hard render gate — design §11.2.",
-      "properties": {
-        "status": { "type": "string", "enum": ["passed", "not_applicable", "failed"] },
-        "collections": { "type": "array", "items": { "type": "string" } },
-        "evidence": { "type": "string" }
-      },
-      "required": ["status", "collections", "evidence"]
-    },
-    "render_check": {
-      "type": "object",
-      "description": "canvas_surfaces keys on the PRESENCE of a canvas, not an empty DOM element list, per the shipped canvas render gate in lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js (`countAtLeast(report.render_check?.canvas_surfaces, 1)`); `local_app_build_workflow.js` does not exist in this repo. status=not_applicable is legal only for a DOM app with zero canvas_surfaces (design §11.2 DOM policy); the canvas family (§11.2 Canvas2D/Three/Phaser/Babylon policy) must never answer not_applicable and requires canvas_surfaces >= 1 and frames_captured >= 1.",
-      "properties": {
-        "status": { "type": "string", "enum": ["passed", "not_applicable", "failed"] },
-        "canvas_surfaces": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "canvasCount from the last inspect-view call. Non-zero means the DOM path cannot see part of this app."
-        },
-        "frames_captured": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Frames actually returned by a capture-view call."
-        },
-        "interactions_driven": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Pointer/key actions actually driven, e.g. [\"pointer 120,300 tap\", \"key ArrowLeft down\"]."
-        },
-        "evidence": {
-          "type": "string",
-          "description": "What was SEEN in the captured frames, in concrete visual terms. Naming the app or restating the spec is not evidence that it rendered."
-        }
-      },
-      "required": ["status", "canvas_surfaces", "frames_captured", "interactions_driven", "evidence"]
-    },
-    "motion_check": {
-      "type": "object",
-      "description": "Proof the frame loop is actually running, which a single still frame cannot show. REQUIRED (design §11.2: 'motion_check.frames_compared >= 2') for canvas_2d/three_3d/phaser_2d/babylon_3d verification policy; absent for a DOM (react_dom) verification that has no embedded canvas. This property is intentionally NOT in this schema's top-level `required` list because that requirement is profile-conditional, not universal — see the shipped `countAtLeast(report.motion_check?.frames_compared, 2)` gate in lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js (`local_app_canvas_workflow.js` does not exist in this repo).",
-      "properties": {
-        "status": { "type": "string", "enum": ["passed", "failed"] },
-        "frames_compared": { "type": "integer", "minimum": 0 },
-        "difference": {
-          "type": "string",
-          "description": "What changed between two frames captured at different times, and after which input. \"Nothing changed\" is a FAILED motion check unless the app was deliberately paused."
-        }
-      },
-      "required": ["status", "frames_compared", "difference"]
-    },
-    "summary": { "type": "string" }
+    "schema_version": { "const": 1 },
+    "status": { "const": "candidate" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "scenario_judgements": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/judgement" } },
+    "findings": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/finding" } },
+    "evidence": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/evidence" } },
+    "verification_scope": { "$ref": "#/$defs/verification_scope" },
+    "previous_result_id": { "anyOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+    "finalized_at_ms": { "$ref": "#/$defs/positive_integer" },
+    "result_sha256": { "$ref": "#/$defs/digest" }
   },
-  "required": [
-    "ok",
-    "findings",
-    "checked_matrix",
-    "browser_available",
-    "webview_checked",
-    "degraded_verification",
-    "data_roundtrip",
-    "render_check",
-    "summary"
-  ]
+  "required": ["schema_version", "status", "identity", "scenario_judgements", "findings", "evidence", "verification_scope", "previous_result_id", "finalized_at_ms", "result_sha256"],
+  "$defs": {
+    "token": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9_.:-]+$" },
+    "qa_handle": { "type": "string", "pattern": "^qa_[A-Za-z0-9]{32}$" },
+    "app_id": { "type": "string", "minLength": 1, "maxLength": 54, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "positive_integer": { "type": "integer", "minimum": 1 },
+    "runtime_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "family": { "enum": ["react_dom", "canvas_2d", "three_3d", "phaser_2d", "babylon_3d"] },
+        "revision": { "$ref": "#/$defs/positive_integer" },
+        "contractSha256": { "$ref": "#/$defs/digest" }
+      },
+      "required": ["family", "revision", "contractSha256"]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "app_id": { "$ref": "#/$defs/app_id" },
+        "workflow_run_id": { "$ref": "#/$defs/token" },
+        "qa_handle": { "$ref": "#/$defs/qa_handle" },
+        "build_id": { "$ref": "#/$defs/token" },
+        "runtime_profile": { "$ref": "#/$defs/runtime_profile" },
+        "verification_strategy": { "enum": ["fast", "balanced", "thorough"] },
+        "dependency_snapshot_sha256": { "$ref": "#/$defs/digest" },
+        "authoring_contract_sha256": { "$ref": "#/$defs/digest" },
+        "manifest_revision": { "$ref": "#/$defs/positive_integer" },
+        "runtime_generation": { "$ref": "#/$defs/positive_integer" }
+      },
+      "required": ["app_id", "workflow_run_id", "qa_handle", "build_id", "runtime_profile", "verification_strategy", "dependency_snapshot_sha256", "authoring_contract_sha256", "manifest_revision", "runtime_generation"]
+    },
+    "verification_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "declared_target_ids": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "in_scope_target_ids": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "unverified_target_ids": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "unverified_scenario_ids": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } }
+      },
+      "required": ["declared_target_ids", "in_scope_target_ids", "unverified_target_ids", "unverified_scenario_ids"]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/token" },
+        "format": { "enum": ["json", "txt", "png", "jpg", "webp"] },
+        "byte_len": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "created_at_ms": { "$ref": "#/$defs/positive_integer" }
+      },
+      "required": ["artifact_id", "format", "byte_len", "sha256", "created_at_ms"]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": { "$ref": "#/$defs/token" },
+        "scenario_id": { "$ref": "#/$defs/token" },
+        "target_id": { "$ref": "#/$defs/token" },
+        "kind": { "enum": ["inspect", "ui_action", "bridge_write", "query", "capture", "native_target_provenance", "console", "runtime_error"] },
+        "source": { "const": "host" },
+        "recorded_at_ms": { "$ref": "#/$defs/positive_integer" },
+        "event_id": { "$ref": "#/$defs/token" },
+        "caused_by": { "anyOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      },
+      "required": ["evidence_id", "scenario_id", "target_id", "kind", "source", "recorded_at_ms", "event_id", "caused_by", "artifact"]
+    },
+    "judgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scenario_id": { "$ref": "#/$defs/token" },
+        "status": { "enum": ["passed", "failed"] },
+        "evidence_ids": { "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 16384 }
+      },
+      "required": ["scenario_id", "status", "evidence_ids", "summary"]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/token" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 16384 },
+        "blocking": { "type": "boolean" },
+        "resolved_by_evidence_ids": { "type": "array", "maxItems": 4096, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } }
+      },
+      "required": ["id", "message", "blocking", "resolved_by_evidence_ids"]
+    }
+  }
 }

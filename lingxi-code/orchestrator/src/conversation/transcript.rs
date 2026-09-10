@@ -218,6 +218,10 @@ impl ConversationOrchestrator {
     /// `automode-blocked`, `automode-unavailable`, `automode-parsing-error`,
     /// plus the abort kinds `cancelled` / `interrupted`.
     pub(crate) async fn record_tool_denial_kind(&self, id: &protocol::ToolUseId, kind: &str) {
+        // The `/loop` fold's `tool_denial` / `tool_abort` vetoes. This is the
+        // single funnel every denial passes through, so counting here cannot
+        // miss one the way a per-call-site count could.
+        self.turn_span.note_denial(kind);
         self.transcript
             .tool_denial_kinds
             .lock()
@@ -728,8 +732,9 @@ impl ConversationOrchestrator {
         // `JsonlMessage`'s hand-written `Serialize` (session/jsonl/schema.rs)
         // now places them in claude's EXACT per-kind outer-key order
         // (api-error head: type, uuid, timestamp, message, requestId?, error?,
-        // isApiErrorMessage, apiErrorStatus?) — presence + values + ORDER are
-        // 1:1. See [`ApiErrorEnvelope`].
+        // errorDetails?, truncatedAfterOutput?, isApiErrorMessage,
+        // apiErrorStatus?) — presence + values + ORDER are 1:1. See
+        // [`ApiErrorEnvelope`].
         if let Some(ae) = api_error {
             if let Some(cat) = ae.error {
                 extra.insert(
@@ -741,6 +746,12 @@ impl ConversationOrchestrator {
                 "isApiErrorMessage".to_string(),
                 serde_json::Value::Bool(true),
             );
+            if ae.truncated_after_output {
+                extra.insert(
+                    "truncatedAfterOutput".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
             if let Some(status) = ae.api_error_status {
                 extra.insert(
                     "apiErrorStatus".to_string(),
@@ -988,6 +999,85 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Persist before retry, while the rejected snapshot is still the transcript
+    /// tail. The scope owns these handles so lazy streams can await durability
+    /// after the caller's task-local scope has ended.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn persist_thinking_recovery_snapshot(
+        writer: Arc<JsonlWriter>,
+        last_uuid: Arc<Mutex<Option<String>>>,
+        session: Arc<Mutex<SessionState>>,
+        expected_session: protocol::SessionId,
+        cwd: std::path::PathBuf,
+        git_branch: Option<String>,
+        mut ranges: std::collections::HashMap<MessageId, usize>,
+    ) {
+        let mut state = session.lock().await;
+        // An in-place resume may replace the owning session while an older
+        // stream is being cancelled. Its recovery cannot extend the new chain.
+        if state.session_id != expected_session {
+            return;
+        }
+        ranges.retain(|id, _| state.history.iter().any(|message| message.id() == *id));
+        if !ranges.iter().any(|(id, from)| {
+            state
+                .thinking_stripped_messages
+                .get(id)
+                .is_none_or(|current| from < current)
+        }) {
+            return;
+        }
+        let mut parent = last_uuid.lock().await;
+        let session_id = expected_session.to_string();
+        let row = session::JsonlMessage {
+            message_type: "attachment".into(),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            parent_uuid: parent.clone(),
+            session_id: session_id.clone(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch,
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra: [(
+                "attachment".into(),
+                serde_json::json!({
+                    "type": "thinking_stripped", "scope": "all"
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        match writer.append(&row).await {
+            Ok(()) => {
+                *parent = Some(row.uuid.clone());
+                // Updating the session only after durable append also prevents
+                // the normal post-call synchronization from writing a duplicate.
+                state.thinking_signature_stripped = true;
+                for (id, from) in ranges {
+                    state
+                        .thinking_stripped_messages
+                        .entry(id)
+                        .and_modify(|current| *current = (*current).min(from))
+                        .or_insert(from);
+                }
+                telemetry::emit_session_appended(&session_id, &row.uuid);
+            }
+            Err(error) => {
+                tracing::error!(%error, "thinking recovery transcript append failed");
+                telemetry::emit_session_persistence_failed();
+            }
+        }
+    }
+
     /// Atomically persist oversized hook output below this session's
     /// root-confined `tool-results` directory and return the attachment copy.
     pub(crate) async fn persist_large_hook_output(&self, text: &str) -> Option<String> {
@@ -1031,6 +1121,25 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Retract a rejected attempt from live display, active history and disk.
+    pub(crate) async fn discard_retry_attempt(&self, assistant_id: MessageId) {
+        self.session
+            .lock()
+            .await
+            .history
+            .retain(|message| message.id() != assistant_id);
+        self.output.emit_message_retracted(&assistant_id).await;
+        if let Some(writer) = self.transcript.jsonl_writer.as_ref() {
+            match writer
+                .remove_retry_attempt(&assistant_id.as_uuid().to_string())
+                .await
+            {
+                Ok(tail) => *self.transcript.last_jsonl_uuid.lock().await = tail,
+                Err(error) => tracing::warn!(%error, "failed to remove rejected retry attempt"),
+            }
+        }
+    }
+
     /// Persist the latest active-goal snapshot as a transcript metadata line.
     ///
     /// This keeps `/goal` resumable on non-compacted transcripts; compact
@@ -1070,15 +1179,35 @@ impl ConversationOrchestrator {
             iterations: goal.iterations,
             tokens_at_start: goal.tokens_at_start,
         };
-        let attachment = platform_api::GoalStatusAttachment {
-            kind: "goal_status".to_string(),
-            status,
-            condition: goal.condition.clone(),
-            iterations: goal.iterations,
-            duration_ms,
-            tokens: total_tokens.saturating_sub(goal.tokens_at_start),
-            last_reason: goal.last_reason.clone(),
-            goal_state: matches!(status, platform_api::GoalStatusKind::Set).then_some(snapshot),
+        let condition = goal.condition.clone();
+        let reason = goal.last_reason.clone();
+        let tokens = total_tokens.saturating_sub(goal.tokens_at_start);
+        let attachment = match status {
+            platform_api::GoalStatusKind::Set => {
+                platform_api::GoalStatusAttachment::sentinel_set(condition, Some(snapshot))
+            }
+            platform_api::GoalStatusKind::Cleared => {
+                platform_api::GoalStatusAttachment::sentinel_cleared(condition)
+            }
+            platform_api::GoalStatusKind::Achieved => platform_api::GoalStatusAttachment::achieved(
+                condition,
+                reason,
+                goal.iterations,
+                duration_ms,
+                tokens,
+            ),
+            platform_api::GoalStatusKind::Failed => platform_api::GoalStatusAttachment::failed(
+                condition,
+                reason,
+                goal.iterations,
+                duration_ms,
+                tokens,
+            ),
+            // The goal survives a not-met turn, so the resume snapshot rides
+            // along with it; upstream's record carries only condition+reason.
+            platform_api::GoalStatusKind::NotMet => {
+                platform_api::GoalStatusAttachment::not_met(condition, reason, Some(snapshot))
+            }
         };
         match serde_json::to_value(attachment) {
             Ok(value) => self.persist_hook_attachment_to_jsonl(value).await,

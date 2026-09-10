@@ -88,6 +88,22 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// parked permission `check()`); the implementation streams its events out
     /// through the connection's [`ClientEventSink`] as a side effect.
     async fn run_turn(&self, prompt: String);
+    async fn run_queued_turn(
+        &self,
+        prompt: String,
+        _in_human_turn: bool,
+        cancel: CancellationToken,
+    ) {
+        self.run_turn_with_cancel(prompt, cancel).await;
+    }
+
+    /// A registry completion starts a machine turn, without a synthetic prompt.
+    async fn run_task_notification_turn(
+        &self,
+        _registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        _cancel: CancellationToken,
+    ) {
+    }
 
     /// Drive ONE turn for `prompt` carrying the inline images pasted/attached by
     /// the client (the wire [`ImageRefDto`]s from
@@ -456,6 +472,8 @@ pub struct BridgeConnection {
     /// abort it so stale turn work cannot survive into the next reconnect and
     /// emit onto a newly-claimed outbound sink.
     active_turn_task: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>,
+    queue_wakeup_task: Option<tokio::task::AbortHandle>,
+    task_notification_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
 }
 
 #[derive(Clone, Default)]
@@ -532,6 +550,15 @@ impl ActiveTurnControl {
         {
             *owner = None;
         }
+    }
+
+    fn cancellation_target(&self, turn_id: Option<u64>) -> Option<(u64, CancellationToken)> {
+        self.owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .filter(|active| !active.terminal && (turn_id.is_none() || active.turn_id == turn_id))
+            .map(|active| (active.generation, active.cancel.clone()))
     }
 
     fn cancel(&self, turn_id: Option<u64>) -> bool {
@@ -696,7 +723,13 @@ async fn drain_main_thread(
                                 t,
                             );
                             let (generation, cancel) = active_turn.begin(None);
-                            driver.run_turn_with_cancel(t.to_string(), cancel).await;
+                            driver
+                                .run_queued_turn(
+                                    t.to_string(),
+                                    cmd.source == QueueSource::PromptInput && !cmd.is_meta,
+                                    cancel,
+                                )
+                                .await;
                             interactions.drain().await;
                             active_turn.finish(generation);
                         }
@@ -723,7 +756,10 @@ async fn drain_main_thread(
             .consume(&consumed, "drained into follow-up turn")
             .await;
         let (generation, cancel) = active_turn.begin(None);
-        driver.run_turn_with_cancel(joined, cancel).await;
+        let in_human_turn = batch.iter().any(|cmd| {
+            consumed.contains(&cmd.uuid) && cmd.source == QueueSource::PromptInput && !cmd.is_meta
+        });
+        driver.run_queued_turn(joined, in_human_turn, cancel).await;
         interactions.drain().await;
         active_turn.finish(generation);
     }
@@ -738,6 +774,16 @@ fn tag_loop_tick_in_flight(loop_runtime: &tool_cron::LoopRuntime, is_cron: bool,
         loop_runtime.begin_tick(text.to_string());
     } else {
         loop_runtime.take_in_flight_prompt();
+    }
+}
+
+impl Drop for BridgeConnection {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.queue_wakeup_task {
+            handle.abort();
+        }
+        self.abort_active_turn_task();
+        self.active_turn.clear();
     }
 }
 
@@ -776,7 +822,100 @@ impl BridgeConnection {
             turn_handoff: Arc::new(tokio::sync::Mutex::new(())),
             active_turn: ActiveTurnControl::default(),
             active_turn_task: Arc::new(StdMutex::new(None)),
+            queue_wakeup_task: None,
+            task_notification_registry: None,
         }
+    }
+
+    /// Wake an idle main loop when teammates enqueue a noninterrupting prompt.
+    pub fn with_task_notification_registry(
+        mut self,
+        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    ) -> Self {
+        self.task_notification_registry = Some(registry);
+        self
+    }
+
+    pub fn with_queue_wakeup(mut self) -> Self {
+        let Some(driver) = self.driver.clone() else {
+            return self;
+        };
+        let queue = self.queue.clone();
+        let running = self.turn_running.clone();
+        let handshaken = self.handshaken.clone();
+        let active_turn = self.active_turn.clone();
+        let active_task = self.active_turn_task.clone();
+        let loop_runtime = self.loop_runtime.clone();
+        let interactions = TurnInteractions {
+            gate: self.gate.clone(),
+            computer_access_broker: self.computer_access_broker.clone(),
+            ask_user_question_broker: self.ask_user_question_broker.clone(),
+            tool_names: self.tool_names.clone(),
+        };
+        let registry = self.task_notification_registry.clone();
+        let watcher = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if handshaken.load(Ordering::SeqCst)
+                    && running.load(Ordering::SeqCst)
+                    && queue.has_main_thread_commands().await
+                    && !platform_api::env::background_tasks_disabled()
+                {
+                    if let Some(registry) = &registry {
+                        registry
+                            .background_all_tasks_with_reason(
+                                platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                            )
+                            .await;
+                    }
+                    continue;
+                }
+                let pending_notifications = match &registry {
+                    Some(registry) => registry.has_pending_task_notifications_for(None).await,
+                    None => false,
+                };
+                if !handshaken.load(Ordering::SeqCst)
+                    || (!queue.has_main_thread_commands().await && !pending_notifications)
+                    || running
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_err()
+                {
+                    continue;
+                }
+                let mut task_slot = active_task
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if !handshaken.load(Ordering::SeqCst) {
+                    running.store(false, Ordering::SeqCst);
+                    continue;
+                }
+                let (driver, queue, running, active_turn, loop_runtime, interactions) = (
+                    driver.clone(),
+                    queue.clone(),
+                    running.clone(),
+                    active_turn.clone(),
+                    loop_runtime.clone(),
+                    interactions.clone(),
+                );
+                let registry = registry.clone();
+                let task = tokio::spawn(async move {
+                    if let Some(registry) = registry {
+                        if registry.has_pending_task_notifications_for(None).await {
+                            let (generation, cancel) = active_turn.begin(None);
+                            driver.run_task_notification_turn(registry, cancel).await;
+                            interactions.drain().await;
+                            active_turn.finish(generation);
+                        }
+                    }
+                    drain_main_thread(&driver, &queue, &loop_runtime, &active_turn, &interactions)
+                        .await;
+                    running.store(false, Ordering::SeqCst);
+                });
+                *task_slot = Some(task);
+            }
+        });
+        self.queue_wakeup_task = Some(watcher.abort_handle());
+        self
     }
 
     /// The connection-scoped [`ClientEventSink`] to bind into the orchestrator's
@@ -789,6 +928,18 @@ impl BridgeConnection {
             active_turn: self.active_turn.clone(),
             ask_user_question_broker: self.ask_user_question_broker_ref.clone(),
         })
+    }
+
+    /// Sink for a `/loop` wakeup's own announcement.
+    ///
+    /// A wakeup fires BETWEEN turns by construction — it is what starts the
+    /// next turn — so no turn owns it and [`Self::event_sink`] would drop the
+    /// announcement on the floor (`is_owned_turn_event` covers `SystemNotice`).
+    /// Narrow on purpose: the general unscoped sink stays private so
+    /// orchestrator events cannot bypass turn ownership.
+    #[must_use]
+    pub fn loop_wakeup_event_sink(&self) -> Arc<dyn ClientEventSink> {
+        self.unscoped_event_sink()
     }
 
     /// Sink reserved for command output that is not part of a turn lifecycle.
@@ -1058,6 +1209,11 @@ impl BridgeConnection {
 
     /// Route one decoded [`ClientCommand`].
     async fn dispatch(&self, command: ClientCommand) {
+        if matches!(&command, ClientCommand::SendPrompt { .. } | ClientCommand::RunSlashCommand { .. } | ClientCommand::TaskMessage { .. }) {
+            if let Some(registry) = &self.task_notification_registry {
+                registry.update_shell_session_activity(true, self.turn_running.load(Ordering::SeqCst), true);
+            }
+        }
         match command {
             ClientCommand::SendPrompt {
                 text,
@@ -1278,6 +1434,15 @@ impl BridgeConnection {
             .is_err()
         {
             self.queue.enqueue(prompt_command(text)).await;
+            if !platform_api::env::background_tasks_disabled() {
+                if let Some(registry) = &self.task_notification_registry {
+                    registry
+                        .background_all_tasks_with_reason(
+                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                        )
+                        .await;
+                }
+            }
             return;
         }
 
@@ -1331,8 +1496,27 @@ impl BridgeConnection {
     }
 
     async fn cancel_active_turn(&self, turn_id: Option<u64>) {
-        if !self.active_turn.cancel(turn_id) {
+        let Some((generation, cancel)) = self.active_turn.cancellation_target(turn_id) else {
             tracing::debug!(?turn_id, "bridge-server: ignored stale or idle turn cancel");
+            return;
+        };
+        if !platform_api::env::background_tasks_disabled() {
+            if let Some(registry) = &self.task_notification_registry {
+                registry
+                    .background_all_tasks_with_reason(
+                        platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                    )
+                    .await;
+            }
+        }
+        cancel.cancel();
+        // Awaiting a detach can finish the old turn. Never drain a newer
+        // owner's interaction requests when that happens.
+        if self
+            .active_turn
+            .cancellation_target(None)
+            .is_none_or(|(current, _)| current != generation)
+        {
             return;
         }
 
@@ -1518,7 +1702,23 @@ impl FramePump for BridgeConnection {
 }
 
 impl BridgeConnection {
-    async fn abort_active_turn_task(&self) {
+    /// Abort without waiting. `Drop` cannot await, and a caller that is
+    /// tearing the connection down anyway has nothing to learn from the join.
+    fn abort_active_turn_task(&self) {
+        let active_turn_task = {
+            self.active_turn_task
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+        };
+        if let Some(handle) = active_turn_task {
+            handle.abort();
+        }
+    }
+
+    /// Abort and wait for the task to actually be destroyed. Acknowledging a
+    /// cancellation is not proof the future released what it held.
+    async fn abort_and_join_active_turn_task(&self) {
         let active_turn_task = {
             self.active_turn_task
                 .lock()
@@ -1544,7 +1744,7 @@ impl BridgeConnection {
         drop(active);
         self.handshaken.store(false, Ordering::SeqCst);
         self.handshake_refused.store(false, Ordering::SeqCst);
-        self.abort_active_turn_task().await;
+        self.abort_and_join_active_turn_task().await;
         self.turn_running.store(false, Ordering::SeqCst);
         self.active_turn.clear();
         self.queue.clear_active_turn().await;
@@ -1671,6 +1871,18 @@ mod tests {
                 display_path: "late".to_string(),
             },
         }));
+        // A `/loop` fold announces the wakeup that is about to START a turn, so
+        // no turn owns it. If it were owned, the ownership filter would drop
+        // every one of them — which is exactly what happened to the plain
+        // `SystemNotice` resume line until it moved to the unscoped sink.
+        assert!(!is_owned_turn_event(&ClientEvent::LoopWakeup {
+            message: "Claude resuming /loop wakeup (Sep 7 3:04pm)".to_string(),
+            companion: Some(
+                "[2 prior /loop wakeups found nothing actionable; loop is healthy.]".to_string(),
+            ),
+            streak: 2,
+            since_ms: 1_788_790_449_000,
+        }));
     }
 
     /// Shared cell capturing the `(prompt, images)` a driver was driven with.
@@ -1706,6 +1918,242 @@ mod tests {
     #[async_trait]
     impl PermissionRequestSink for NoopPermissionSink {
         async fn emit_request(&self, _request: PermissionRequest) {}
+    }
+
+    #[tokio::test]
+    async fn queued_teammate_message_wakes_idle_driver_without_interrupting_busy_turn() {
+        let captured = Arc::new(Mutex::new(None));
+        let notify = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: captured.clone(),
+            notify: notify.clone(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, driver)
+            .with_queue_wakeup();
+        connection.handshaken.store(true, Ordering::SeqCst);
+        connection.turn_running.store(true, Ordering::SeqCst);
+        let active = CancellationToken::new();
+        connection.queue.register_active_turn(active.clone()).await;
+        let mut command = super::prompt_command(
+            "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>".into(),
+        );
+        command.source = msgqueue::QueueSource::AgentSendMessage;
+        command.skip_slash_commands = true;
+        command.is_meta = true;
+        connection.queue.enqueue(command).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!active.is_cancelled());
+        assert!(captured.lock().await.is_none());
+        connection.turn_running.store(false, Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            captured.lock().await.as_ref().unwrap().0,
+            "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>"
+        );
+        assert!(connection.queue.is_empty().await);
+    }
+
+    struct PendingNotificationRegistry(AtomicBool, AtomicBool, Notify);
+    #[async_trait]
+    impl platform_api::task_registry::TaskRegistryHandle for PendingNotificationRegistry {
+        async fn background_all_tasks_with_reason(
+            &self,
+            reason: platform_api::task_registry::TaskBackgroundReason,
+        ) -> usize {
+            if self.1.swap(false, Ordering::SeqCst) {
+                assert_eq!(
+                    reason,
+                    platform_api::task_registry::TaskBackgroundReason::DeliverMessage
+                );
+                self.2.notify_one();
+                1
+            } else {
+                0
+            }
+        }
+        async fn has_pending_task_notifications_for(
+            &self,
+            recipient: Option<protocol::AgentId>,
+        ) -> bool {
+            recipient.is_none() && self.0.load(Ordering::SeqCst)
+        }
+        async fn create(
+            &self,
+            _i: platform_api::task_registry::TaskCreateInput,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _id: &str,
+        ) -> Result<
+            Option<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _f: platform_api::task_registry::TaskListFilter,
+        ) -> Result<
+            Vec<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: platform_api::task_registry::TaskUpdatePatch,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn kill(
+            &self,
+            _id: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _o: Option<u64>,
+        ) -> Result<
+            platform_api::task_registry::TaskOutputChunk,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+    }
+
+    struct NotificationDriver {
+        started: Notify,
+        cancelled: Notify,
+    }
+    #[async_trait]
+    impl TurnDriver for NotificationDriver {
+        async fn run_turn(&self, _: String) {
+            panic!("completion must never become a human prompt");
+        }
+        async fn run_task_notification_turn(
+            &self,
+            _: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+            cancel: CancellationToken,
+        ) {
+            self.started.notify_one();
+            cancel.cancelled().await;
+            self.cancelled.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn task_completion_wakeup_owns_bridge_cancellation_and_waits_for_idle_handshake() {
+        let registry = Arc::new(PendingNotificationRegistry(
+            AtomicBool::new(true),
+            AtomicBool::new(false),
+            Notify::new(),
+        ));
+        let driver = Arc::new(NotificationDriver {
+            started: Notify::new(),
+            cancelled: Notify::new(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, driver.clone())
+            .with_task_notification_registry(registry.clone())
+            .with_queue_wakeup();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !connection.turn_running.load(Ordering::SeqCst),
+            "no model turn before handshake"
+        );
+        connection.turn_running.store(true, Ordering::SeqCst);
+        connection.handshaken.store(true, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            driver.started.notified()
+        )
+        .await
+        .is_err());
+        connection.turn_running.store(false, Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(2), driver.started.notified())
+            .await
+            .unwrap();
+        assert!(
+            connection.active_turn.accepts_interactions(),
+            "wake tools must own permission requests"
+        );
+        registry.0.store(false, Ordering::SeqCst);
+        connection.cancel_active_turn(None).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            driver.cancelled.notified(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_message_backgrounds_a_shell_that_arms_after_the_message_arrives() {
+        let registry = Arc::new(PendingNotificationRegistry(
+            AtomicBool::new(false),
+            AtomicBool::new(false),
+            Notify::new(),
+        ));
+        let captured = Arc::new(Mutex::new(None));
+        let driver = Arc::new(RecordingDriver {
+            captured,
+            notify: Arc::new(Notify::new()),
+        });
+        let connection = BridgeConnection::new()
+            .bind(
+                Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink))),
+                driver,
+            )
+            .with_task_notification_registry(registry.clone())
+            .with_queue_wakeup();
+        connection.handshaken.store(true, Ordering::SeqCst);
+        connection.turn_running.store(true, Ordering::SeqCst);
+        let (_, cancel) = connection.active_turn.begin(None);
+        connection
+            .queue
+            .enqueue(super::prompt_command(
+                "arrived while shell was young".into(),
+            ))
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        registry.1.store(true, Ordering::SeqCst); // foreground arming after queued input
+        tokio::time::timeout(std::time::Duration::from_secs(2), registry.2.notified())
+            .await
+            .unwrap();
+        assert!(
+            !cancel.is_cancelled(),
+            "delivering a queued message must not cancel the old model turn"
+        );
     }
 
     /// A `SendPrompt` carrying inline images must dispatch through

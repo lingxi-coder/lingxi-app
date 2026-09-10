@@ -28,6 +28,54 @@ pub type RawByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> +
 /// provider protocols that deliver one JSON event per WebSocket message.
 pub type WebSocketMessageStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> + Send>>;
 
+/// Whether a socket address is eligible for arbitrary-URL Monitor egress.
+pub fn is_public_monitor_address(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let o = ip.octets();
+            !(ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+                || ip.is_broadcast() || ip.is_documentation() || ip.is_multicast()
+                || o[0] == 0 || o[0] >= 240 || (o[0] == 100 && (64..128).contains(&o[1]))
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)))
+        }
+        std::net::IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() { return is_public_monitor_address(std::net::IpAddr::V4(v4)); }
+            let first = ip.segments()[0];
+            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast()
+                && first & 0xfe00 != 0xfc00 && first & 0xffc0 != 0xfe80
+                && first & 0xe000 == 0x2000 && !(first == 0x2001 && ip.segments()[1] == 0xdb8)
+        }
+    }
+}
+
+/// A tunneled native socket, before the destination's TLS/WebSocket handshake.
+pub trait MonitorSocketIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> MonitorSocketIo for T {}
+
+/// Optional host adapter for an existing enterprise/environment proxy connector.
+#[async_trait]
+pub trait MonitorWebSocketProxy: Send + Sync {
+    /// Return a tunnel, or None when the host's proxy/NO_PROXY policy says direct.
+    async fn connect_proxy(&self, host: &str, port: u16, secure: bool)
+        -> std::io::Result<Option<Box<dyn MonitorSocketIo>>>;
+}
+
+/// Frames delivered by a passive Monitor WebSocket (no request frame is sent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorWebSocketFrame {
+    /// UTF-8 text event.
+    Text(String),
+    /// Binary frame length; bytes never enter a model prompt.
+    Binary(usize),
+    /// Frame exceeded the one-megabyte monitor bound; the socket is closed.
+    Oversized(usize),
+    /// Peer close code and reason.
+    Closed(u16, String),
+}
+
+/// Bounded passive socket event channel. Dropping it closes the socket.
+pub type MonitorWebSocketReceiver = tokio::sync::mpsc::Receiver<Result<MonitorWebSocketFrame, HttpError>>;
+
 /// SSE stream together with the HTTP response metadata that preceded it.
 ///
 /// Returned by [`HttpTransport::stream_sse_with_meta`]. The status and headers
@@ -315,6 +363,23 @@ pub trait HttpTransport: Send + Sync {
             headers,
             stream,
         })
+    }
+
+    /// Validate Monitor endpoint DNS before any task is registered.
+    /// The connection path must validate again and pin its vetted addresses.
+    async fn preflight_monitor_websocket(&self, _url: &str) -> Result<(), HttpError> {
+        Err(HttpError::InvalidRequest("passive websocket monitoring is unsupported".into()))
+    }
+
+    /// Open a passive, public-network-only WebSocket with no initial frame.
+    /// Native implementations validate DNS and pin the vetted address; they
+    /// must not follow redirects or connect to private/metadata addresses.
+    async fn monitor_websocket(
+        &self,
+        _url: String,
+        _protocols: Vec<String>,
+    ) -> Result<MonitorWebSocketReceiver, HttpError> {
+        Err(HttpError::InvalidRequest("passive websocket monitoring is unsupported".into()))
     }
 
     /// Open a provider WebSocket stream, send the request body as the first

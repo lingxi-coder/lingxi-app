@@ -28,6 +28,7 @@ pub mod read_file_state;
 pub mod registry;
 pub mod sandbox_runner;
 pub mod session_cwd;
+pub mod todo_tools_gate;
 pub mod tool_invoker_impl;
 pub mod tool_result_media;
 pub mod tool_search_view;
@@ -56,6 +57,7 @@ pub use read_file_state::{ReadFileEntry, ReadFileStateMap};
 pub use registry::ToolRegistry;
 pub use sandbox_runner::{default_sandbox_runner, LegacyWrapRunner, SandboxRunner};
 pub use session_cwd::SessionCwd;
+pub use todo_tools_gate::todo_tools_enabled;
 pub use tool_invoker_impl::RegistryToolInvoker;
 pub use tool_search_view::{
     SharedToolSearchView, StaticRegistryView, ToolRegistryView, ToolSearchEntry,
@@ -64,3 +66,9 @@ pub use tool_trait::*;
 pub use worktree_session::{
     new_worktree_session_cell, WorktreeSession, WorktreeSessionCell, WorktreeStatePersister,
 };
+
+/// Shared current SendMessage schema, prose, and input coercion.
+pub mod send_message_contract;
+
+// Native sandbox adapters implement this without depending on a concrete HTTP client.
+pub use platform_api::http::{MonitorSocketIo, MonitorWebSocketProxy};

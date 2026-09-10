@@ -20,6 +20,8 @@ use thiserror::Error;
 
 /// Current persisted observer schema version.
 pub const OBSERVER_SCHEMA_VERSION: u32 = 1;
+/// Internal query-source identity for independent observer sidecars.
+pub const OBSERVER_QUERY_SOURCE: &str = "observer_activity";
 
 const fn observer_schema_version() -> u32 {
     OBSERVER_SCHEMA_VERSION
@@ -120,6 +122,10 @@ pub struct SubagentSpawnRequest {
     /// default-provider path).
     #[serde(default)]
     pub model_profile: Option<String>,
+    /// Session-assigned teammate display color. Internal runtime metadata,
+    /// populated by identity reservation rather than model-facing Agent input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teammate_color: Option<String>,
     /// Whether to run the spawned agent in the background (TS `run_in_background`,
     /// `AgentTool.tsx:87` `z.boolean().optional()`). claude treats it as a
     /// boolean predicate (`run_in_background === true`), so it is collapsed to a
@@ -150,13 +156,11 @@ pub struct SubagentSpawnRequest {
     /// fields above, and defaulted so legacy serialized payloads still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_agent_id: Option<AgentId>,
-    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`).
-    /// DEPRECATED and ignored as of claude-code 2.1.212: the Agent/Task entrypoint
-    /// no longer threads the call param here (it always sends `None`), and the
-    /// spawner no longer applies it. A spawned subagent inherits the parent's live
-    /// permission mode (claude `_=yn(l),y=_.mode`), with the agent-definition
-    /// frontmatter as the only override. The field is retained for back-compat with
-    /// callers that still populate it, but the spawner does not consult it.
+    /// Internal inherited permission mode for a persistent teammate. The Agent
+    /// tool resolves this from the live parent mode, never from its deprecated
+    /// model-facing `mode` parameter. The teammate runtime uses it for plan-mode
+    /// requirements and child permission inheritance; ordinary Agent calls send
+    /// `None` and inherit through their regular runtime context.
     #[serde(default)]
     pub mode: Option<String>,
     /// Isolation mode (`"worktree"` | `"remote"`, TS `isolation`). `worktree`
@@ -510,6 +514,14 @@ pub enum SubagentObservation {
 /// Structured observer for a spawned subagent's live lifecycle.
 #[async_trait]
 pub trait SubagentSpawnObserver: Send + Sync {
+    /// Selected model/effort after definition inheritance, before model work.
+    async fn on_model_selected(&self, _event: &SubagentObservation, _effort: Option<&str>) {}
+
+    /// Acknowledged startup hook after allocation, before any model/tool work.
+    /// Unlike the asynchronous UI observer, foreground task registration must
+    /// finish here so a fast child cannot outrun its owner record.
+    async fn before_start(&self, _event: &SubagentObservation) -> Result<(), SubagentSpawnError> { Ok(()) }
+
     /// Synchronous receipt emitted at the allocation boundary, before the
     /// normal asynchronous lifecycle stream.  Hosts use this for facts that
     /// affect accounting (for example, Fusion spawn-quota settlement) and
@@ -719,16 +731,36 @@ impl std::fmt::Debug for SubagentInheritance {
 pub struct SubagentListingEntry {
     /// Agent type label (TS `agentType`).
     pub agent_type: String,
-    /// "When to use" guidance (TS `whenToUse`).
+    /// "When to use" guidance (TS `whenToUse`) — the FULL text, which is what
+    /// every non-listing surface reads.
     pub when_to_use: String,
+    /// The shorter "when to use" a LEAN session renders instead (TS
+    /// `whenToUseLean`). `None` for every definition that does not declare one,
+    /// which in 2.1.266 is all of them but the built-in `Explore`.
+    #[serde(default)]
+    pub when_to_use_lean: Option<String>,
     /// Pre-rendered tools description (TS `getToolsDescription`): `All tools`,
     /// `All tools except X, Y`, an explicit `A, B, C`, or `None`.
     pub tools_description: String,
 }
 
 /// Format one agent catalog line, the single source of truth for claude-code's
-/// `formatAgentLine` (`AgentTool/prompt.ts:43-46`):
-/// `- {agentType}: {whenToUse} (Tools: {toolsDescription})`.
+/// `formatAgentLine` — 2.1.266 `U2n` (src_162329786.js @3554069):
+///
+/// ```js
+/// function U2n(e,n){let r=H4o(e),o=n&&e.whenToUseLean||e.whenToUse;
+///                   return `- ${e.agentType}: ${o} (Tools: ${r})`}
+/// ```
+///
+/// `n` is the LEAN-prompt flag, computed by the caller from the model it is
+/// rendering for (`VU(YK(mainLoopModel))` in the `agent_listing_delta`
+/// producer, the tool's own `PromptOptions.model` in the inline path). A
+/// non-lean session renders the FULL `whenToUse` even for a definition that
+/// declares a lean variant.
+///
+/// The `||` is JS truthiness, so an EMPTY `whenToUseLean` falls through to
+/// `whenToUse` rather than rendering a blank description; `filter(…is_empty)`
+/// keeps that.
 ///
 /// Lives here (a leaf crate) so BOTH the inline tool-prompt path (`tool-agent`)
 /// and the `agent_listing_delta` attachment path (`agent` crate → orchestrator)
@@ -736,10 +768,19 @@ pub struct SubagentListingEntry {
 /// `agent` engine crate. The `tools_description` is pre-rendered by the
 /// spawner / catalog (TS `getToolsDescription`).
 #[must_use]
-pub fn format_agent_line(entry: &SubagentListingEntry) -> String {
+pub fn format_agent_line(entry: &SubagentListingEntry, lean: bool) -> String {
+    let when_to_use = if lean {
+        entry
+            .when_to_use_lean
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&entry.when_to_use)
+    } else {
+        &entry.when_to_use
+    };
     format!(
         "- {}: {} (Tools: {})",
-        entry.agent_type, entry.when_to_use, entry.tools_description
+        entry.agent_type, when_to_use, entry.tools_description
     )
 }
 
@@ -874,6 +915,39 @@ pub trait SubagentSpawner: Send + Sync {
     ) -> Result<SubagentResult, SubagentSpawnError> {
         Err(SubagentSpawnError::Runtime(
             "admitted panel spawning is unavailable".into(),
+        ))
+    }
+
+    /// Deliver an intentional user message to a retained foreground runner.
+    async fn resume_foreground(&self, _agent_id: &AgentId, _message: String) -> Result<(), SubagentSpawnError> {
+        Err(SubagentSpawnError::Internal("foreground resume is not wired".into()))
+    }
+    /// Connect the allocated foreground runner to the host's mailbox router.
+    async fn connect_foreground_route(&self, _agent_id: AgentId, _task_id: &str, _name: Option<&str>) -> Result<(), SubagentSpawnError> { Ok(()) }
+
+    /// Trusted transcript path for a child when this spawner persists it.
+    fn transcript_path(&self, _agent_id: protocol::AgentId) -> Option<std::path::PathBuf> { None }
+
+    /// Normalize a recipient for the Agent schema's reserved-name refinement.
+    /// Hosts with a Unicode-aware catalog override this with the same canonical
+    /// normalizer used by live name resolution, avoiding a second name policy.
+    fn normalize_teammate_recipient(&self, name: &str) -> String {
+        crate::live_sessions::normalize_name(name)
+    }
+
+    /// Whether this session exposes its implicit teammate team.
+    fn teammate_enabled(&self) -> bool {
+        false
+    }
+
+    /// Launch a persistent member of this session's implicit team.
+    async fn spawn_teammate(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<crate::team_spawn::TeammateLaunch, SubagentSpawnError> {
+        Err(SubagentSpawnError::Internal(
+            "Teammate spawner is not wired".into(),
         ))
     }
 
@@ -1059,6 +1133,15 @@ pub trait SubagentSpawner: Send + Sync {
         self.spawn_async(request, inherit).await
     }
 
+    /// Restore the persisted agent identity and its previously exposed task
+    /// address. Durable implementations install the task alias before startup.
+    async fn restore_async_task(
+        &self, _task_id: &str, agent_id: protocol::AgentId,
+        request: SubagentSpawnRequest, inherit: SubagentInheritance,
+    ) -> Result<AsyncLaunch, SubagentSpawnError> {
+        self.restore_async(agent_id, request, inherit).await
+    }
+
     /// Register `name → agent_id` for `SendMessage` routing of a spawned ASYNC
     /// subagent (claude `AppState.agentNameRegistry.set`, `AgentTool.tsx:704-711`).
     ///
@@ -1106,11 +1189,46 @@ mod tests {
         let entry = SubagentListingEntry {
             agent_type: "Explore".into(),
             when_to_use: "Read-only search agent".into(),
+            when_to_use_lean: None,
             tools_description: "All tools except Edit, Write".into(),
         };
+        // No lean variant declared: both arms render `whenToUse`.
+        for lean in [false, true] {
+            assert_eq!(
+                format_agent_line(&entry, lean),
+                "- Explore: Read-only search agent (Tools: All tools except Edit, Write)"
+            );
+        }
+    }
+
+    /// `U2n`'s `o = n && e.whenToUseLean || e.whenToUse`: the lean text is
+    /// rendered ONLY on the lean arm, and an empty one falls through to
+    /// `whenToUse` the way JS truthiness does.
+    #[test]
+    fn format_agent_line_renders_the_lean_variant_only_on_the_lean_arm() {
+        let entry = SubagentListingEntry {
+            agent_type: "Explore".into(),
+            when_to_use: "the long one".into(),
+            when_to_use_lean: Some("the short one".into()),
+            tools_description: "All tools".into(),
+        };
         assert_eq!(
-            format_agent_line(&entry),
-            "- Explore: Read-only search agent (Tools: All tools except Edit, Write)"
+            format_agent_line(&entry, false),
+            "- Explore: the long one (Tools: All tools)"
+        );
+        assert_eq!(
+            format_agent_line(&entry, true),
+            "- Explore: the short one (Tools: All tools)"
+        );
+
+        let empty = SubagentListingEntry {
+            when_to_use_lean: Some(String::new()),
+            ..entry
+        };
+        assert_eq!(
+            format_agent_line(&empty, true),
+            "- Explore: the long one (Tools: All tools)",
+            "an empty lean variant is falsy in JS and must fall through",
         );
     }
 

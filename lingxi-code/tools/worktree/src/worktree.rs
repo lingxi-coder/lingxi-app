@@ -955,6 +955,7 @@ impl Tool for EnterWorktreeTool {
             reason: PermissionDecisionReason::SafetyCheck {
                 reason,
                 classifier_approvable: false,
+                circuit_breaker: None,
             },
             prompt: PermissionPrompt {
                 title: ENTER_TOOL_NAME.into(),
@@ -3422,6 +3423,7 @@ mod tests {
                     PermissionDecisionReason::SafetyCheck {
                         reason,
                         classifier_approvable,
+                        ..
                     } => {
                         assert!(!classifier_approvable, "must not be classifier-approvable");
                         assert_eq!(

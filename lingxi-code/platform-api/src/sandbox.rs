@@ -231,10 +231,13 @@ pub struct SandboxedCommand {
     inner: ProcessCommand,
     tag: SandboxedTag,
     plan: Option<BackendPlanHandle>,
+    background: Option<crate::process::BackgroundTaskBinding>,
+    auto_background_on_timeout: bool,
+    process_owner: Option<String>,
 }
 
 /// Provenance of a [`SandboxedCommand`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SandboxedTag {
     /// Command was wrapped by a real sandbox backend.
     Wrapped {
@@ -250,6 +253,13 @@ pub enum SandboxedTag {
 }
 
 impl SandboxedCommand {
+    /// Attribute this OS process group to the subagent that launched it.
+    #[must_use]
+    pub fn with_process_owner(mut self, owner: Option<String>) -> Self { self.process_owner = owner; self }
+    /// The subagent owning this command's process group.
+    #[must_use]
+    pub fn process_owner(&self) -> Option<&str> { self.process_owner.as_deref() }
+
     /// INTERNAL constructor for [`Sandbox`] implementations.
     ///
     /// Only [`Sandbox::prepare`] and [`Sandbox::bypass_with_audit`] impls
@@ -263,6 +273,9 @@ impl SandboxedCommand {
             inner,
             tag,
             plan: None,
+            background: None,
+            auto_background_on_timeout: true,
+            process_owner: None,
         }
     }
 
@@ -280,7 +293,50 @@ impl SandboxedCommand {
             inner,
             tag,
             plan: Some(plan),
+            background: None,
+            auto_background_on_timeout: true,
+            process_owner: None,
         }
+    }
+
+    /// Bind a caller-owned task identity to this command, so that backgrounding
+    /// it uses the caller's task id and output file instead of a runner-private
+    /// one.
+    ///
+    /// This is the seam that keeps the id the model is handed, the id the task
+    /// registry records, and the file the child writes to as ONE identity
+    /// (claude-code mints all three together in its single shell spawn).
+    #[must_use]
+    pub fn with_background_task(mut self, binding: crate::process::BackgroundTaskBinding) -> Self {
+        self.background = Some(binding);
+        self
+    }
+
+    /// The caller-bound task identity, when one was attached.
+    #[must_use]
+    pub fn background_task(&self) -> Option<&crate::process::BackgroundTaskBinding> {
+        self.background.as_ref()
+    }
+
+    /// Declare whether exceeding the timeout may move this command to the
+    /// background instead of killing it.
+    ///
+    /// claude-code decides this per command before spawning
+    /// (`dn = !Dl() && $es(command)`) and hands it to the shell as
+    /// `shouldAutoBackground`; with it false the timeout kills the child
+    /// (`Jje`'s `static #T`: `if (#h && #d) #d(background) else #b(143)`).
+    /// Defaults to `true`, which is the behaviour every caller had before this
+    /// existed.
+    #[must_use]
+    pub fn with_auto_background_on_timeout(mut self, allowed: bool) -> Self {
+        self.auto_background_on_timeout = allowed;
+        self
+    }
+
+    /// Whether a timeout may background this command rather than kill it.
+    #[must_use]
+    pub fn auto_background_on_timeout(&self) -> bool {
+        self.auto_background_on_timeout
     }
 
     /// Access the underlying [`ProcessCommand`] (for the runner to actually

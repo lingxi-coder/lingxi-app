@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Card, isEditableLayer, MergedBadge, MergedNotice, OverriddenNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
@@ -23,45 +23,11 @@ import { ghostButtonStyle } from './ghostButton';
 // Minor — every page needing this predicate now shares one copy).
 export { isEditableLayer };
 
-export const SUPPORTED_PROVIDER_TYPES = [
-  'openai', 'openai-responses', 'anthropic', 'gemini', 'azure-openai',
-  'bedrock-claude', 'vertex-claude', 'vertex-gemini', 'foundry-claude',
-] as const;
-
-export type SupportedProviderType = (typeof SUPPORTED_PROVIDER_TYPES)[number];
-
-export interface CustomProviderModelDraft {
-  id: string;
-  aliases?: string[];
-}
-
-export interface CustomProviderDraft {
-  type: string;
-  baseUrl?: string;
-  apiKeyEnv?: string;
-  models: CustomProviderModelDraft[];
-}
-
-/**
- * The write-time gate this task exists for. `settings.providers`' own schema
- * documentation says `models` is required per entry and that an absent or
- * empty list is an error at ENGINE STARTUP, not at save time — so without
- * this check, saving a provider with no models looks like it succeeded and
- * only breaks the next time the engine launches. Returns `null` when the
- * draft may be written.
- */
-export function validateCustomProvider(draft: CustomProviderDraft): string | null {
-  if (!SUPPORTED_PROVIDER_TYPES.includes(draft.type as SupportedProviderType)) {
-    return `unsupported provider type \`${draft.type}\`; supported types are ${SUPPORTED_PROVIDER_TYPES.join(', ')}`;
-  }
-  if (!draft.models || draft.models.length === 0) {
-    return 'this provider needs at least one entry in `models`; an empty list makes the engine fail to start';
-  }
-  if (draft.models.some((m) => !m.id.trim())) {
-    return 'every entry in `models` needs a non-empty `id`';
-  }
-  return null;
-}
+export { SUPPORTED_PROVIDER_TYPES, validateCustomProvider } from './customProviderImport';
+export type { CustomProviderDraft, CustomProviderModelDraft, SupportedProviderType } from './customProviderImport';
+import { validateCustomProvider, validateProfileName, parseProviderImport, validateImportEntry, mergeProviderImport, type CustomProviderDraft, type CustomProviderModelDraft, type ProviderImportEntry } from './customProviderImport';
+import { trimProviderDraft, editableProviderDraft } from './customProviderDraft';
+import { ProviderEditorFields } from './ProviderEditorFields';
 
 /**
  * `settings.providers` as `editingLayer`'s OWN raw value — NOT
@@ -134,7 +100,7 @@ const inputStyle = (t: ReturnType<typeof useT>) => ({
 /**
  * Edits `settings.providers` and `settings.routing`. Both are new UI — the
  * old settings modal had no equivalent, there is nothing to lift here. Writes go
- * through `bridge.updateEngineSettings(editingLayer, patch)`, this task's
+ * through `bridge.updateProviderSettings(editingLayer, patch)`, this task's
  * addition wrapping the engine's generic `update_settings` wire command
  * (`clients/electron/src/renderer/bridge/useBridge.ts`); no per-key command
  * exists for either settings key, unlike `permissions` or workspace
@@ -153,19 +119,35 @@ const inputStyle = (t: ReturnType<typeof useT>) => ({
  * cross-layer merge) was the wrong source for a page that writes one layer
  * WHOLESALE.
  */
-export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
+export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer, onLayerLockChange }: PageContentProps) {
   const t = useT();
+  const primaryButtonStyle = { ...ghostButtonStyle(t), background: t.accent, borderColor: t.accent, color: t.surface, fontWeight: 600 };
   const providers = providersFromLayer(snapshot, editingLayer);
   const routing = routingFromLayer(snapshot, editingLayer);
 
+  const credentialConfigured = (name: string) => bridge.bootstrap?.providerCredentials?.some((entry) => entry.providerId === name && entry.configured) === true;
+  const importEntryError = (entry: ProviderImportEntry) => validateImportEntry(entry, { credentialConfigured: credentialConfigured(entry.name) });
+  const configuredNames = Object.keys(providers).sort().join('\n');
+  useEffect(() => {
+    for (const name of configuredNames.split('\n').filter((name) => name && validateProfileName(name) === null)) void bridge.refreshProviderCredential(name).catch(() => {});
+  }, [configuredNames, bridge.refreshProviderCredential]);
+
   const [profileName, setProfileName] = useState('');
-  const [type, setType] = useState<string>(SUPPORTED_PROVIDER_TYPES[0]);
-  const [baseUrl, setBaseUrl] = useState('');
-  const [apiKeyEnv, setApiKeyEnv] = useState('');
-  const [modelsText, setModelsText] = useState('');
+  const [originalName, setOriginalName] = useState<string | null>(null);
+  const [draft, setDraft] = useState<CustomProviderDraft>({ type: 'openai', models: [{ id: '' }] });
+  const [apiKey, setApiKey] = useState('');
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [entries, setEntries] = useState<ProviderImportEntry[] | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importWarning, setImportWarning] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [pendingCredentials, setPendingCredentials] = useState<Record<string, string>>({});
+  const generation = useRef(0);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const [aliasName, setAliasName] = useState('');
   const [aliasTarget, setAliasTarget] = useState('');
@@ -173,90 +155,91 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
   const [backoffMs, setBackoffMs] = useState(routing.retry?.backoffMs?.toString() ?? '');
   const [routingError, setRoutingError] = useState<string | null>(null);
   const [routingSaving, setRoutingSaving] = useState(false);
+  const busy = saving || routingSaving;
 
   const providersRowState = snapshot ? rowState(snapshot, 'providers', editingLayer) : null;
   const routingRowState = snapshot ? rowState(snapshot, 'routing', editingLayer) : null;
 
   const resetForm = () => {
-    setProfileName('');
-    setType(SUPPORTED_PROVIDER_TYPES[0]);
-    setBaseUrl('');
-    setApiKeyEnv('');
-    setModelsText('');
-    setFormError(null);
+    setProfileName(''); setOriginalName(null); setDraft({ type: 'openai', models: [{ id: '' }] });
+    setApiKey(''); setFormError(null); setEditorOpen(false);
   };
-
-  // Switching the edited layer changes what `providers`/`routing` above
-  // resolve to entirely (a different layer's own map). A form still holding
-  // a draft loaded from the PREVIOUS layer (via `loadForEdit`, or typed
-  // retry values) must not silently land in the newly selected layer when
-  // saved — that would be the exact cross-layer-fork bug this fix exists to
-  // prevent, just triggered by the layer switcher instead of a stale read.
   useEffect(() => {
-    resetForm();
-    setAliasName('');
-    setAliasTarget('');
-    setRoutingError(null);
+    generation.current += 1;
+    resetForm(); setImportOpen(false); setImportText(''); setEntries(null); setPendingCredentials({});
+    setSaveError(null); setImportError(null); setAliasName(''); setAliasTarget(''); setRoutingError(null);
     setMaxAttempts(routing.retry?.maxAttempts?.toString() ?? '');
     setBackoffMs(routing.retry?.backoffMs?.toString() ?? '');
+    return () => { generation.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingLayer]);
-
-  const loadForEdit = (name: string, draft: CustomProviderDraft) => {
-    setProfileName(name);
-    setType(draft.type);
-    setBaseUrl(draft.baseUrl ?? '');
-    setApiKeyEnv(draft.apiKeyEnv ?? '');
-    setModelsText(draft.models.map((m) => m.id).join(', '));
-    setFormError(null);
+  }, [editingLayer, bridge.activeSession?.sessionId]);
+  const loadForEdit = (name: string, value: CustomProviderDraft) => {
+    setProfileName(name); setOriginalName(name); setDraft(editableProviderDraft(value)); setApiKey('');
+    setFormError(null); setEditorOpen(true); setImportOpen(false);
   };
-
-  const writeProviders = (next: Record<string, CustomProviderDraft>) => {
-    setSaving(true);
-    setSaveError(null);
-    void bridge.updateEngineSettings(editingLayer, { providers: next })
-      .then(() => resetForm())
-      .catch((cause) => setSaveError(cause instanceof Error ? cause.message : '无法保存 Provider 设置。'))
-      .finally(() => setSaving(false));
+  const persist = async (next: Record<string, CustomProviderDraft> | null, credentials: Record<string, string> = {}, removedProviderId?: string) => {
+    if (busy) return false;
+    const token = generation.current;
+    setSaving(true); onLayerLockChange?.(true); setSaveError(null);
+    let configSaved = next === null;
+    const remaining = { ...credentials };
+    try {
+      if (next) await bridge.updateProviderSettings(editingLayer, { providers: next });
+      if (generation.current !== token) return false;
+      configSaved = true;
+      // Continue only in the page/session that initiated this save.
+      for (const [name, key] of Object.entries(credentials)) {
+        if (generation.current !== token) return false;
+        await bridge.setProviderCredential(name, key);
+        delete remaining[name];
+      }
+      if (generation.current !== token) return false;
+      if (removedProviderId) await bridge.setModelPickerVisibility(withoutProviderModelPickerVisibility(modelPickerVisibility, removedProviderId));
+      if (generation.current === token) {
+        resetForm(); setImportOpen(false); setImportText(''); setEntries(null); setPendingCredentials({});
+      }
+      return true;
+    } catch {
+      if (generation.current === token) {
+        setPendingCredentials(configSaved ? remaining : {});
+        setSaveError(configSaved ? removedProviderId ? 'Provider 已移除，模型显示设置未能清理。' : '配置已保存，凭据保存失败。请重试保存凭据。' : '无法保存 Provider 设置，请检查配置后重试。');
+      }
+      return false;
+    } finally {
+      if (generation.current === token) setSaving(false);
+      onLayerLockChange?.(false);
+    }
   };
-
   const handleSaveProvider = () => {
     const name = profileName.trim();
-    if (!name) { setFormError('需要一个 Profile 名称。'); return; }
-    const draft: CustomProviderDraft = {
-      type,
-      baseUrl: baseUrl.trim() || undefined,
-      apiKeyEnv: apiKeyEnv.trim() || undefined,
-      models: parseModelsInput(modelsText),
-    };
-    const error = validateCustomProvider(draft);
+    const normalizedDraft = trimProviderDraft(draft);
+    const error = (!originalName ? validateProfileName(name) : null) || validateCustomProvider(normalizedDraft);
     if (error) { setFormError(error); return; }
+    if (draft.type !== 'bedrock-claude' && !apiKey.trim() && !draft.apiKeyEnv?.trim() && !bridge.bootstrap?.providerCredentials?.some((entry) => entry.providerId === name && entry.configured)) { setFormError('请填写 API Key 或环境变量名称。'); return; }
+    if (!originalName && providers[name]) { setFormError('该 Profile 已存在，请从列表编辑。'); return; }
     setFormError(null);
-    writeProviders({ ...providers, [name]: draft });
+    void persist({ ...providers, [name]: normalizedDraft }, apiKey.trim() ? { [name]: apiKey.trim() } : {});
   };
-
   const handleRemoveProvider = (name: string) => {
-    const next = { ...providers };
-    delete next[name];
-    setSaving(true);
-    setSaveError(null);
-    void Promise.all([
-      bridge.updateEngineSettings(editingLayer, { providers: next }),
-      bridge.setModelPickerVisibility(withoutProviderModelPickerVisibility(modelPickerVisibility, name)),
-    ])
-      .then(() => {
-        if (profileName.trim() === name) resetForm();
-      })
-      .catch((cause) => setSaveError(cause instanceof Error ? cause.message : '无法保存 Provider 设置。'))
-      .finally(() => setSaving(false));
+    const next = { ...providers }; delete next[name];
+    return persist(next, {}, name);
   };
-
+  const parseImport = () => {
+    setImportWarning(null);
+    try {
+      const result = parseProviderImport(importText, providers);
+      setEntries(result.diagnostics.some((entry) => entry.severity === 'error') ? null : result.entries);
+      setImportError(result.diagnostics.filter((entry) => entry.severity === 'error').map((entry) => entry.message).join('\n') || null);
+      setImportWarning(result.diagnostics.filter((entry) => entry.severity === 'warning').map((entry) => entry.message).join('\n') || null);
+    } catch { setImportError('JSON 无效，请检查格式。'); setEntries(null); }
+  };
   const writeRouting = (next: RoutingDraft) => {
-    setRoutingSaving(true);
-    setRoutingError(null);
-    void bridge.updateEngineSettings(editingLayer, { routing: next })
-      .catch((cause) => setRoutingError(cause instanceof Error ? cause.message : '无法保存路由设置。'))
-      .finally(() => setRoutingSaving(false));
+    if (busy) return;
+    const token = generation.current;
+    setRoutingSaving(true); onLayerLockChange?.(true); setRoutingError(null);
+    void bridge.updateProviderSettings(editingLayer, { routing: next })
+      .catch(() => { if (token === generation.current) setRoutingError('无法保存路由设置。'); })
+      .finally(() => { if (token === generation.current) setRoutingSaving(false); onLayerLockChange?.(false); });
   };
 
   const handleAddAlias = () => {
@@ -279,11 +262,11 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
   const handleSaveRetry = () => {
     const parsedMaxAttempts = maxAttempts.trim() ? Number(maxAttempts) : undefined;
     const parsedBackoffMs = backoffMs.trim() ? Number(backoffMs) : undefined;
-    if (maxAttempts.trim() && (!Number.isFinite(parsedMaxAttempts) || (parsedMaxAttempts as number) <= 0)) {
+    if (maxAttempts.trim() && (!Number.isSafeInteger(parsedMaxAttempts) || (parsedMaxAttempts as number) <= 0)) {
       setRoutingError('retry.maxAttempts 必须是正整数。');
       return;
     }
-    if (backoffMs.trim() && (!Number.isFinite(parsedBackoffMs) || (parsedBackoffMs as number) < 0)) {
+    if (backoffMs.trim() && (!Number.isSafeInteger(parsedBackoffMs) || (parsedBackoffMs as number) < 0)) {
       setRoutingError('retry.backoffMs 必须是非负整数。');
       return;
     }
@@ -304,8 +287,9 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
     providerModelCatalog.map((provider) => [provider.provider_id, provider] as const),
   );
   const draftProviderId = profileName.trim();
-  const draftModelIds = parseModelsInput(modelsText).map((model) => model.id);
+  const draftModelIds = draft.models.map((model) => model.id).filter(Boolean);
   const updateVisibility = (providerId: string, next: ProviderModelPickerVisibility) => {
+    if (busy) return;
     void bridge.setModelPickerVisibility({
       ...(modelPickerVisibility ?? {}),
       [providerId]: next,
@@ -314,7 +298,8 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
 
   return (
     <>
-      <Card title="自定义 Provider">
+      {(editorOpen || importOpen) && <button disabled={busy} style={{ ...ghostButtonStyle(t), marginBottom: 16 }} onClick={() => { resetForm(); setImportOpen(false); setImportText(''); setEntries(null); setImportError(null); }}>← 返回 Provider 列表</button>}
+      {!editorOpen && !importOpen && <Card title="自定义 Provider">
         {providersRowState?.kind === 'merged' && (
           <Row title="生效层" badge={<MergedBadge />} align="center">
             <MergedNotice editingLayer={editingLayer} />
@@ -329,43 +314,48 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
             />
           </Row>
         )}
-        {providerNames.length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有自定义 Provider。</div>
-        )}
-        {providerNames.map((name) => {
-          const draft = providers[name];
-          return (
-            <Row
-              key={name}
-              align="center"
-              title={<span className="mono" style={{ fontSize: 13 }}>{name}</span>}
-              desc={`${draft.type} · ${draft.models?.length ?? 0} 个模型${draft.baseUrl ? ` · ${draft.baseUrl}` : ''}`}
-            >
-              <div style={{ display: 'flex', gap: 7 }}>
-                <button type="button" onClick={() => loadForEdit(name, draft)} style={ghostButtonStyle(t)}>编辑</button>
-                <button type="button" onClick={() => handleRemoveProvider(name)} style={ghostButtonStyle(t, false, true)}>移除</button>
-              </div>
-            </Row>
-          );
-        })}
-
-        <Row title={profileName && providers[profileName] ? `编辑 ${profileName}` : '新增 Provider'} desc="Profile 名称、类型、baseUrl、apiKeyEnv 与至少一个模型 id。" align="start">
-          <div style={{ display: 'grid', gap: 7 }}>
-            <input value={profileName} onChange={(e) => setProfileName(e.target.value)} placeholder="Profile 名称" aria-label="Profile 名称" style={inputStyle(t)} />
-            <select value={type} onChange={(e) => setType(e.target.value)} aria-label="Provider 类型" style={inputStyle(t)}>
-              {SUPPORTED_PROVIDER_TYPES.map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
-            <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="baseUrl（可选）" aria-label="baseUrl" style={inputStyle(t)} />
-            <input value={apiKeyEnv} onChange={(e) => setApiKeyEnv(e.target.value)} placeholder="apiKeyEnv（可选）" aria-label="apiKeyEnv" style={inputStyle(t)} />
-            <input value={modelsText} onChange={(e) => setModelsText(e.target.value)} placeholder="模型 id，用逗号分隔" aria-label="模型列表" style={inputStyle(t)} />
-            {formError && <span role="alert" style={{ color: t.danger, fontSize: 12 }}>{formError}</span>}
-            <div style={{ display: 'flex', gap: 7 }}>
-              <button type="button" disabled={saving} onClick={handleSaveProvider} style={ghostButtonStyle(t, saving)}>{saving ? '保存中…' : '保存'}</button>
-              <button type="button" disabled={saving} onClick={resetForm} style={ghostButtonStyle(t, saving)}>清空</button>
-            </div>
-            {saveError && <span role="alert" style={{ color: t.danger, fontSize: 12 }}>{saveError}</span>}
+        <div style={{ padding: 18, display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ color: t.text3, fontSize: 12.5 }}>连接自己的模型服务 · {providerNames.length} 个 Provider</span>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button disabled={busy} style={ghostButtonStyle(t)} onClick={() => { resetForm(); setEditorOpen(true); setImportOpen(false); }}>＋ 新增 Provider</button>
+            <button disabled={busy} style={ghostButtonStyle(t)} onClick={() => { resetForm(); setImportOpen(true); }}>导入 JSON</button>
           </div>
-        </Row>
+        </div>
+        {providerNames.length === 0 && <div style={{ padding: '24px 18px 32px', color: t.text3, textAlign: 'center' }}>还没有自定义 Provider。新增服务，或从 LingXi / OpenCode JSON 导入。</div>}
+        {providerNames.map((name) => {
+          const value = providers[name];
+          const validValue = value && typeof value === 'object' && !Array.isArray(value);
+          const credential = bridge.bootstrap?.providerCredentials?.find((entry) => entry.providerId === name);
+          return <div key={name} style={{ display: 'flex', flexWrap: 'wrap', padding: 18, gap: 14, alignItems: 'center', borderTop: `1px solid ${t.border}` }}>
+            <div style={{ flex: '1 1 200px', minWidth: 0, display: 'grid', gap: 6 }}>
+              <strong className="mono" style={{ fontSize: 13, overflowWrap: 'anywhere' }}>{name}</strong>
+              <span style={{ color: t.text3, fontSize: 12, overflowWrap: 'anywhere' }}>{validValue ? `${value.type} · ${value.models?.length ?? 0} 个模型${value.baseUrl ? ` · ${value.baseUrl}` : ''}` : '配置无效，请编辑修复或移除'}</span>
+              <span style={{ color: t.text3, fontSize: 12, overflowWrap: 'anywhere' }}>{credential?.storageError ? '安全存储不可用' : credential?.runtimeOnly ? '仅运行时凭据' : credential?.configured ? (credential.credentialPreview || '•••••••• 已配置') : validValue && value.apiKeyEnv ? `环境变量 · ${value.apiKeyEnv}` : '未配置凭据'}</span>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button disabled={busy} onClick={() => loadForEdit(name, value)} style={ghostButtonStyle(t)}>编辑</button>
+              <button disabled={busy} onClick={() => void handleRemoveProvider(name)} style={ghostButtonStyle(t, busy, true)}>移除</button>
+            </div>
+          </div>;
+        })}
+      </Card>}
+        {saveError && <div role="alert" style={{ padding: 18, color: t.danger }}>{saveError}
+          {Object.keys(pendingCredentials).length > 0 && <button disabled={busy} onClick={() => void persist(null, pendingCredentials)} style={ghostButtonStyle(t)}>重试保存凭据</button>}
+        </div>}
+      {editorOpen && <Card title={originalName ? `编辑 ${originalName}` : '新增 Provider'}>
+        <fieldset disabled={busy} style={{ border: 0, padding: 20, margin: 0, minWidth: 0 }}>
+          <ProviderEditorFields envOnly={originalName !== null && validateProfileName(originalName) !== null} key={originalName ?? "new"} name={profileName} onName={setProfileName} nameLocked={originalName !== null} draft={draft} onDraft={setDraft} apiKey={apiKey} onApiKey={setApiKey} credentialConfigured={bridge.bootstrap?.providerCredentials?.some((entry) => entry.providerId === profileName && entry.configured)} />
+          {formError && <p role="alert" style={{ color: t.danger }}>{formError}</p>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 20, flexWrap: 'wrap' }}>
+            <button onClick={handleSaveProvider} style={primaryButtonStyle}>{saving ? '保存中…' : '保存 Provider'}</button>
+            <button onClick={resetForm} style={ghostButtonStyle(t)}>取消</button>
+            {originalName && validateProfileName(originalName) === null && bridge.bootstrap?.providerCredentials?.some((entry) => entry.providerId === originalName && entry.configured) && <button onClick={() => {
+              const token = generation.current;
+              setSaving(true); onLayerLockChange?.(true);
+              void bridge.clearProviderCredential(originalName).catch(() => { if (token === generation.current) setSaveError('无法删除凭据，请重试。'); }).finally(() => { if (token === generation.current) setSaving(false); onLayerLockChange?.(false); });
+            }} style={ghostButtonStyle(t, false, true)}>删除已保存凭据</button>}
+          </div>
+        </fieldset>
         {draftProviderId && (
           <Row
             title="对话模型列表"
@@ -392,6 +382,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
                         showInModelPicker: visibility?.showInModelPicker === false,
                         visibleModelIds: visibility?.visibleModelIds,
                       })}
+                      disabled={busy}
                       style={ghostButtonStyle(t)}
                     >
                       {visibility?.showInModelPicker === false ? '当前已隐藏 Provider' : '当前显示 Provider'}
@@ -415,6 +406,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
                                 visibleModelIds: [...new Set(next)],
                               });
                             }}
+                            disabled={busy}
                             style={{ ...ghostButtonStyle(t), justifyContent: 'space-between' }}
                           >
                             <span style={{ display: 'grid', gap: 2, textAlign: 'left' }}>
@@ -438,8 +430,35 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
             </div>
           </Row>
         )}
-      </Card>
+      </Card>}
 
+      {importOpen && <Card title="导入 JSON">
+        <fieldset disabled={busy} style={{ border: 0, padding: 20, margin: 0, minWidth: 0 }}>
+          <p style={{ color: t.text3, marginTop: 0 }}>粘贴 LingXi 或 OpenCode 配置，预览并修正后导入当前层。API Key 将单独保存到设备凭据存储。</p>
+          {!entries ? <>
+            <label style={{ display: 'grid', gap: 8 }}>JSON 配置<textarea aria-label="JSON 配置" value={importText} onChange={(event) => setImportText(event.target.value)} spellCheck={false} rows={10} style={{ ...inputStyle(t), width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', resize: 'vertical' }} /></label>
+            <input ref={fileRef} hidden type="file" accept=".json,application/json" onChange={(event) => {
+              const file = event.target.files?.[0]; const token = generation.current;
+              if (file) void file.text().then((text) => { if (token === generation.current) { setImportText(text); setImportError(null); } }).catch(() => { if (token === generation.current) setImportError('无法读取 JSON 文件。'); });
+              event.target.value = '';
+            }} />
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}><button style={ghostButtonStyle(t)} onClick={() => { setImportText(JSON.stringify({ providers: { 'my-provider': { type: 'openai', baseUrl: 'https://api.example.com/v1', apiKeyEnv: 'MY_PROVIDER_API_KEY', models: [{ id: 'my-model' }] } } }, null, 2)); setImportError(null); }}>插入示例</button><button style={ghostButtonStyle(t)} onClick={() => fileRef.current?.click()}>选择 .json 文件</button><button disabled={!importText.trim()} style={primaryButtonStyle} onClick={parseImport}>解析并预览</button><button style={ghostButtonStyle(t)} onClick={() => { setImportOpen(false); setImportText(''); }}>取消</button></div>
+          </> : <>
+            {entries.map((entry, index) => <section key={index} style={{ padding: '16px 0', borderBottom: `1px solid ${t.border}` }}>
+              <label style={{ display: 'flex', gap: 8, marginBottom: 16, fontWeight: 600 }}><input type="checkbox" checked={entry.selected} onChange={(event) => setEntries(entries.map((value, i) => i === index ? { ...value, selected: event.target.checked } : value))} />{entry.name} · {entry.conflict ? '同名冲突（勾选后替换）' : '新增'}</label>
+              <div hidden={!entry.selected}><ProviderEditorFields credentialConfigured={credentialConfigured(entry.name)} name={entry.name} onName={(name) => setEntries(entries.map((value, i) => i === index ? { ...value, name, conflict: Object.prototype.hasOwnProperty.call(providers, name), selected: Object.prototype.hasOwnProperty.call(providers, name) ? false : value.selected } : value))} draft={entry.draft} onDraft={(value) => setEntries(entries.map((item, i) => i === index ? { ...item, draft: value } : item))} apiKey={entry.apiKey ?? ''} onApiKey={(value) => setEntries(entries.map((item, i) => i === index ? { ...item, apiKey: value } : item))} /></div>
+              {entry.diagnostics.map((diagnostic, i) => <p key={i} style={{ color: diagnostic.severity === 'error' ? t.danger : t.warn }}>{diagnostic.message}</p>)}
+              {entry.selected && importEntryError(entry) && <p role="alert" style={{ color: t.danger }}>{importEntryError(entry)}</p>}
+            </section>)}
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}><button style={ghostButtonStyle(t)} onClick={() => setEntries(null)}>返回修改 JSON</button><button disabled={!entries.some((entry) => entry.selected) || entries.some((entry) => entry.selected && importEntryError(entry) !== null)} style={primaryButtonStyle} onClick={() => {
+              try { const result = mergeProviderImport(providers, entries, { credentialConfigured }); void persist(result.providers, result.credentials); } catch { setImportError('导入项校验失败，请修正后重试。'); }
+            }}>{saving ? '导入中…' : `确认导入 ${entries.filter((entry) => entry.selected).length} 个 Provider`}</button></div>
+          </>}
+          {entries && importWarning && <p style={{ color: t.warn, whiteSpace: 'pre-wrap' }}>{importWarning}</p>}
+          {importError && <p role="alert" style={{ color: t.danger, whiteSpace: 'pre-wrap' }}>{importError}</p>}
+        </fieldset>
+      </Card>}
+      <details style={{ marginTop: 24 }}><summary style={{ cursor: 'pointer', color: t.text3, fontWeight: 600, marginBottom: 16 }}>高级设置 · 路由与重试</summary>
       <Card title="路由 (routing)">
         {routingRowState?.kind === 'merged' && (
           <Row title="生效层" badge={<MergedBadge />} align="center">
@@ -461,27 +480,28 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
             {aliasNames.map((alias) => (
               <div key={alias} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span className="mono" style={{ fontSize: 12 }}>{alias} → {routing.aliases?.[alias]}</span>
-                <button type="button" onClick={() => handleRemoveAlias(alias)} style={ghostButtonStyle(t, false, true)}>移除</button>
+                <button type="button" disabled={busy} onClick={() => handleRemoveAlias(alias)} style={ghostButtonStyle(t, routingSaving, true)}>移除</button>
               </div>
             ))}
-            <div style={{ display: 'flex', gap: 7 }}>
+            <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
               <input value={aliasName} onChange={(e) => setAliasName(e.target.value)} placeholder="alias" aria-label="alias 名称" style={inputStyle(t)} />
               <input value={aliasTarget} onChange={(e) => setAliasTarget(e.target.value)} placeholder="profile/model" aria-label="alias 目标" style={inputStyle(t)} />
-              <button type="button" disabled={routingSaving} onClick={handleAddAlias} style={ghostButtonStyle(t, routingSaving)}>添加</button>
+              <button type="button" disabled={busy} onClick={handleAddAlias} style={ghostButtonStyle(t, routingSaving)}>添加</button>
             </div>
           </div>
         </Row>
         <Row title="重试 (retry)" desc="retry.maxAttempts / retry.backoffMs" align="center">
-          <div style={{ display: 'flex', gap: 7 }}>
+          <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
             <input value={maxAttempts} onChange={(e) => setMaxAttempts(e.target.value)} placeholder="maxAttempts" aria-label="maxAttempts" style={{ ...inputStyle(t), width: 110 }} />
             <input value={backoffMs} onChange={(e) => setBackoffMs(e.target.value)} placeholder="backoffMs" aria-label="backoffMs" style={{ ...inputStyle(t), width: 110 }} />
-            <button type="button" disabled={routingSaving} onClick={handleSaveRetry} style={ghostButtonStyle(t, routingSaving)}>{routingSaving ? '保存中…' : '保存'}</button>
+            <button type="button" disabled={busy} onClick={handleSaveRetry} style={ghostButtonStyle(t, routingSaving)}>{routingSaving ? '保存中…' : '保存'}</button>
           </div>
         </Row>
         {routingError && (
           <Row title="错误" align="center"><span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{routingError}</span></Row>
         )}
       </Card>
+      </details>
     </>
   );
 }

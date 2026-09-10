@@ -1504,6 +1504,15 @@ impl StreamJsonStream {
 
 #[async_trait]
 impl OutputStream for StreamJsonStream {
+    async fn emit_task_lifecycle(&self, event: &Value) {
+        if self.suppress_frames { return; }
+        let mut frame = event.clone();
+        let Some(frame_object) = frame.as_object_mut() else { return; };
+        frame_object.insert("session_id".into(), json!(self.session_id.lock().await.clone()));
+        frame_object.insert("uuid".into(), json!(uuid::Uuid::new_v4().to_string()));
+        self.enqueue(&frame);
+    }
+
     async fn emit_compaction_started(&self) {
         if self.suppress_frames {
             return;
@@ -2920,6 +2929,19 @@ mod tests {
         let frame: Value = serde_json::from_str(&lines[0]).expect("valid heartbeat json");
         assert_eq!(frame["elapsed_ms"], 3_000);
         assert!(rx.try_recv().is_err(), "only one wake-up may be queued");
+    }
+
+    #[tokio::test]
+    async fn task_lifecycle_reaches_stream_json_with_session_envelope() {
+        let stream = StreamJsonStream::new(make_params("sess-task"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream.emit_task_lifecycle(&json!({"type":"system", "subtype":"task_started", "task_id":"b12345678", "description":"build", "task_type":"local_bash"})).await;
+        let OutboundMsg::Line(line) = rx.try_recv().unwrap() else { panic!("expected SDK frame"); };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["subtype"], "task_started");
+        assert_eq!(frame["task_id"], "b12345678");
+        assert_eq!(frame["session_id"], "sess-task");
+        assert!(frame["uuid"].as_str().is_some());
     }
 
     #[tokio::test]

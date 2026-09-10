@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import { app, BrowserWindow } from 'electron';
 
 // Electron may insert its own switches into argv before app arguments. Pick
@@ -74,6 +75,14 @@ async function main() {
       activeIsSidebar: document.activeElement?.classList.contains('sidebar-primary-action') === true,
     })`);
 
+    if (process.env.LINGXI_SIDEBAR_SCREENSHOT) {
+      const bounds = await webContents.executeJavaScript(`(() => {
+        const rect = document.querySelector('.desktop-sidebar-footer').getBoundingClientRect();
+        return { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
+      })()`);
+      await writeFile(process.env.LINGXI_SIDEBAR_SCREENSHOT, (await webContents.capturePage(bounds)).toPNG());
+    }
+
     const resizeGeometry = await webContents.executeJavaScript(`(() => {
       const handle = document.querySelector('[aria-label="Resize sidebar"]');
       const sidebar = handle?.closest('aside');
@@ -91,7 +100,8 @@ async function main() {
     await delay(50);
     webContents.sendInputEvent({ type: 'mouseDown', x: Math.round(resizeGeometry.handleX), y: Math.round(resizeGeometry.handleY), button: 'left', clickCount: 1 });
     await delay(50);
-    webContents.sendInputEvent({ type: 'mouseMove', x: 360, y: Math.round(resizeGeometry.handleY), button: 'left' });
+    // Electron 43 derives pointermove.buttons from modifiers, not button alone.
+    webContents.sendInputEvent({ type: 'mouseMove', x: 360, y: Math.round(resizeGeometry.handleY), button: 'left', modifiers: ['leftButtonDown'] });
     await waitFor(webContents, `Math.round(document.querySelector('[aria-label="Resize sidebar"]')?.closest('aside')?.getBoundingClientRect().width ?? 0) === 360`);
     webContents.sendInputEvent({ type: 'mouseUp', x: 360, y: Math.round(resizeGeometry.handleY), button: 'left', clickCount: 1 });
     await delay(50);

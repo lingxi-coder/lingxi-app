@@ -439,8 +439,17 @@ fn load_settings_blocks() -> (
 }
 
 #[must_use]
-fn settings_credential_sources_allowed(args: &BridgeArgs) -> bool {
-    args.trusted_workspace && !args.packaged_credential_stdin_only
+fn without_settings_credentials(
+    profiles: Option<BTreeMap<String, serde_json::Value>>,
+) -> Option<BTreeMap<String, serde_json::Value>> {
+    profiles.map(|mut profiles| {
+        for profile in profiles.values_mut() {
+            if let Some(fields) = profile.as_object_mut() {
+                fields.remove("apiKeyEnv");
+            }
+        }
+        profiles
+    })
 }
 
 /// User config-home: `$LINGXI_CONFIG_DIR` when set (including an empty value),
@@ -486,10 +495,16 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
 
     let (provider_profiles, routing, api_key_helper) = if args.trusted_workspace {
         let (provider_profiles, routing, api_key_helper) = load_settings_blocks();
-        if settings_credential_sources_allowed(args) {
+        if !args.packaged_credential_stdin_only {
             (provider_profiles, routing, api_key_helper)
         } else {
-            (None, routing, None)
+            // Keep routes available for credentials supplied by the parent,
+            // without permitting settings to introduce credential sources.
+            (
+                without_settings_credentials(provider_profiles),
+                routing,
+                None,
+            )
         }
     } else {
         (None, None, None)
@@ -497,6 +512,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let trusted = args.trusted_workspace;
 
     DesktopConfig {
+        initial_teammate_team_name: None,
         api_base: resolve_api_base(),
         // Credentials are supplied explicitly by the parent over stdin and
         // assigned by `main` immediately before assembly. Never inherit them
@@ -576,8 +592,13 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
         memory_provider: trusted.then(orchestrator::prompt::real_provider),
-        // The Electron bridge has no permission-mode CLI flag; default mode.
-        permission_mode: permission::PermissionMode::Default,
+        // Trusted desktop sessions share the engine Auto default. Workspace
+        // trust is still required before granting autonomous permissions.
+        permission_mode: if trusted {
+            permission::PermissionMode::Auto
+        } else {
+            permission::PermissionMode::Default
+        },
         permission_mode_cli: None,
         permission_mode_cli_explicit: false,
         // Plan 3c: bridge has no interactive secure prompt; headless no-op.
@@ -1314,13 +1335,55 @@ pub async fn assemble_with_provider_keys(
     // `Now`-command abort from a user interrupt) and the queue's now-abort hook
     // (sets it to `QueueNowCommand` right before firing the active-turn token).
     let queue = connection.queue_handle();
+    if let Some(inbox) = runtime
+        .coordinator
+        .mailbox_router
+        .get(&runtime.coordinator.coordinator_id)
+        .await
+    {
+        let weak_queue = Arc::downgrade(&queue);
+        tokio::spawn(async move {
+            while weak_queue.strong_count() > 0 {
+                let Some(message) = inbox
+                    .wait_for_message(std::time::Duration::from_millis(500))
+                    .await
+                else {
+                    continue;
+                };
+                let Some(queue) = weak_queue.upgrade() else {
+                    break;
+                };
+                queue
+                    .enqueue(msgqueue::QueuedCommand {
+                        uuid: message.message_id,
+                        content: msgqueue::QueuedCommandContent::UserInput {
+                            text: engine_desktop::teammate_message_envelope_with_summary(
+                                &message.from_name,
+                                &message.content,
+                                message.summary.as_deref(),
+                            ),
+                        },
+                        priority: msgqueue::QueuePriority::Next,
+                        queued_at: message.timestamp,
+                        source: msgqueue::QueueSource::AgentSendMessage,
+                        agent_id: None,
+                        skip_slash_commands: true,
+                        is_meta: true,
+                    })
+                    .await;
+            }
+        });
+    }
     let loop_runtime = connection.loop_runtime_handle();
     let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
+    let mid_turn_input = crate::driver::MsgQueueMidTurnInput::new(queue.clone());
+    // The `/loop` fold's `foreign_user_input` veto reads this counter at the
+    // turn edge; the source bumps it whenever a human's prompt is folded into a
+    // turn already in flight.
+    let foreign_input_counter = mid_turn_input.foreign_input_counter();
     runtime
         .orchestrator
-        .set_mid_turn_input(Arc::new(crate::driver::MsgQueueMidTurnInput::new(
-            queue.clone(),
-        )));
+        .set_mid_turn_input(Arc::new(mid_turn_input));
     runtime
         .orchestrator
         .set_cancel_reason(cancel_reason.clone());
@@ -1341,12 +1404,19 @@ pub async fn assemble_with_provider_keys(
     // threaded out of `engine_desktop::build` on `DesktopRuntime` precisely because
     // the tool is constructed before this seam. Setting it more than once is a no-op
     // (`OnceLock`); a fresh per-connection `assemble` builds a fresh runtime + cell.
-    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> =
-        Arc::new(crate::driver::MsgQueueWakeupScheduler::with_loop_runtime(
+    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> = Arc::new(
+        crate::driver::MsgQueueWakeupScheduler::with_loop_runtime(
             queue.clone(),
             runtime.runtime_spawner.clone(),
             loop_runtime,
-        ));
+        )
+        // Announce each fire on the connection's UNSCOPED sink (binary
+        // `onFireTask`), including the no-op fold's streak line after quiet
+        // ticks. Unscoped because a wakeup fires between turns: the
+        // turn-ownership filter on the regular sink drops a `SystemNotice` that
+        // no active turn owns, which is every wakeup announcement.
+        .with_event_sink(connection.loop_wakeup_event_sink()),
+    );
     // The driver re-uses the SAME scheduler at its turn-completion edge to arm the
     // `/loop` keepalive fallback (binary `lKi`); clone before the cell consumes it.
     let driver_wakeup_scheduler = wakeup_scheduler.clone();
@@ -1365,7 +1435,8 @@ pub async fn assemble_with_provider_keys(
             OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
                 .with_message_output(message_output)
                 .with_queue(queue, cancel_reason)
-                .with_wakeup_scheduler(driver_wakeup_scheduler),
+                .with_wakeup_scheduler(driver_wakeup_scheduler)
+                .with_foreign_input_counter(foreign_input_counter),
         )
     };
 
@@ -1406,6 +1477,12 @@ pub async fn assemble_with_provider_keys(
         // this connection resolve a call the engine parked on this connection,
         // and a disconnect drain them.
         .bind_audio(audio_responder);
+    let connection = if credential_required {
+        connection
+    } else {
+        connection.with_task_notification_registry(runtime.task_registry.clone())
+    }
+    .with_queue_wakeup();
     Ok(BoundServer {
         connection,
         runtime,
@@ -2016,6 +2093,8 @@ mod tests {
             trusted_workspace: true,
             ..BridgeArgs::default()
         });
+        assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
+        assert!(!cfg.permission_mode_cli_explicit);
         assert_eq!(cfg.setting_source_scope, (true, true));
         assert_eq!(
             cfg.customization_gates,
@@ -2030,12 +2109,35 @@ mod tests {
     }
 
     #[test]
+    fn packaged_provider_routes_survive_without_settings_credentials() {
+        let profiles = BTreeMap::from([(
+            "custom".to_string(),
+            serde_json::json!({
+                "type": "openai",
+                "baseUrl": "http://127.0.0.1:12345/v1",
+                "models": [{"id": "smoke-model"}],
+                "apiKeyEnv": "CUSTOM_SECRET"
+            }),
+        )]);
+        let filtered = without_settings_credentials(Some(profiles)).unwrap();
+        let (parsed, warnings) = provider_config::parse_user_providers(&filtered);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].profile.profile_name, "custom");
+        assert_eq!(parsed[0].profile.models[0].request_model, "smoke-model");
+        assert_eq!(parsed[0].env_var, None);
+        assert!(without_settings_credentials(None).is_none());
+    }
+
+    #[test]
     fn packaged_boundary_keeps_trusted_customizations_but_rejects_settings_credentials() {
         let cfg = resolve_desktop_config(&BridgeArgs {
             trusted_workspace: true,
             packaged_credential_stdin_only: true,
             ..BridgeArgs::default()
         });
+        assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
+        assert!(!cfg.permission_mode_cli_explicit);
         assert_eq!(cfg.setting_source_scope, (true, true));
         assert_eq!(
             cfg.customization_gates,
@@ -2044,8 +2146,12 @@ mod tests {
         assert_eq!(cfg.mcp_paths.len(), 2);
         assert!(cfg.memory_provider.is_some());
         assert!(cfg.api_key_helper.is_none());
-        assert!(cfg.provider_profiles.is_none());
-        assert!(has_no_credential_source(&cfg));
+        assert!(cfg
+            .provider_profiles
+            .as_ref()
+            .is_none_or(|profiles| profiles
+                .values()
+                .all(|profile| profile.get("apiKeyEnv").is_none())));
         assert_eq!(
             cfg.credential_storage_policy,
             CredentialStoragePolicy::NativeOrMemory,
@@ -2093,6 +2199,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            initial_teammate_team_name: None,
             // This unit test must not require the signed macOS Credential
             // Broker or inherit a developer login keychain.
             isolated_credential_storage: true,

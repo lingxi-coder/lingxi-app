@@ -42,6 +42,7 @@ pub mod sse;
 pub mod ssl;
 pub mod stream_accumulator;
 pub mod strict_schema;
+pub mod thinking_scope;
 pub mod transport;
 pub mod transport_bridge;
 pub mod types;

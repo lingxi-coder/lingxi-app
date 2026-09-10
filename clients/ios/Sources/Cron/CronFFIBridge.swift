@@ -63,7 +63,8 @@ final class FfiCronStoreClient: CronStoreClient, @unchecked Sendable {
             lastFiredAtMs: dto.lastFiredAtMs,
             recurring: dto.recurring,
             nextFireMs: dto.nextFireMs,
-            human: dto.human
+            human: dto.human,
+            unsupportedReason: dto.mobileSupported ? nil : (dto.unsupportedReason ?? String(localized: "cron_unsupported_generic"))
         )
     }
 }

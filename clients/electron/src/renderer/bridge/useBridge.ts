@@ -1,5 +1,9 @@
+import { saveProviderSettings } from './providerSettingsSave';
+import { requestCronManagement } from './cronManagement';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  CronJobDto,
+  CronRequestDto,
   AgentDto,
   AskUserQuestionRequestDto,
   AuthStateDto,
@@ -60,6 +64,8 @@ import {
   openRuntimeCenterItem,
   promptRuntimeResources,
   reduceRuntimeCenterEvent,
+  reduceRuntimeCenterPermission,
+  resetRuntimeCenterConnection,
   resourcesFromRestoredMessages,
   rollbackRuntimeResources,
   setRuntimeCenterOverviewOpen,
@@ -196,6 +202,8 @@ export interface UseBridge {
   addProject(): Promise<WorkspaceMetadata | null>;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;
+  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
+  archiveSession(projectPath: string, sessionId: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
   openSession(projectPath: string, sessionId: string): Promise<void>;
   listProjectSessions(projectPath: string): Promise<void>;
@@ -209,6 +217,7 @@ export interface UseBridge {
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
+  setCollapseThoughtsByDefault(collapseThoughtsByDefault: boolean): Promise<void>;
   /** The device-level (Electron store) custom API base URL override — `null` clears it. Distinct from `updateEngineSettings` below, which writes to an engine settings FILE layer. */
   setApiBaseUrl(apiBaseUrl: string | null): Promise<void>;
   /**
@@ -235,6 +244,8 @@ export interface UseBridge {
    * prop reflects the write without a separate caller-side refresh call.
    */
   updateEngineSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
+  /** Save provider settings and wait for confirmation from the persisted file layer. */
+  updateProviderSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
   /**
    * `update_permission_rules` — the ONLY write path for `permissions.{allow,deny,ask}`.
    * `apply_patch` refuses the `permissions` key outright, so there is no
@@ -270,6 +281,7 @@ export interface UseBridge {
   /** `remove_mcp_server` — idempotent removal from exactly the named scope. Refetches the MCP listing afterward. */
   removeMcpServer(scope: McpScopeDto, name: string): Promise<void>;
   /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
+  manageCron(request: CronRequestDto): Promise<CronJobDto[]>;
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
   mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
@@ -346,6 +358,11 @@ function getHost() {
 function messageFrom(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return 'The desktop host could not complete that action.';
+}
+
+/** An interaction can race an engine-side expiry or another window's answer. */
+export function isPermissionRequestGone(error: unknown): boolean {
+  return /\bpermission request is not pending\b/.test(messageFrom(error));
 }
 
 export const BRIDGE_RESTART_TIMEOUT_MS = 20_000;
@@ -658,6 +675,7 @@ interface RuntimeState {
   askUserQuestionQueue: AskUserQuestionRequestDto[];
   pendingInteractionsOverride?: number;
   pendingAskUserQuestionsOverride?: number;
+  resolvedPermissionIds: Set<number>;
   resolvedAskUserQuestionIds: Set<number>;
   isCancelling: boolean;
   error?: string;
@@ -789,6 +807,7 @@ function emptyRuntimeState(connection: ConnectionState = { status: 'idle' }): Ru
     permissionQueue: [],
     computerAccessQueue: [],
     askUserQuestionQueue: [],
+    resolvedPermissionIds: new Set(),
     resolvedAskUserQuestionIds: new Set(),
     isCancelling: false,
   };
@@ -803,6 +822,7 @@ export function useBridge(): UseBridge {
   const [pendingSession, setPendingSession] = useState<SessionRef | null>(null);
   const [runtimeStates, setRuntimeStates] = useState<Map<string, RuntimeState>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const clearError = useCallback(() => setError(null), []);
   const [audioSnapshot, setAudioSnapshot] = useState<NativeAudioSnapshot>(defaultNativeAudioSnapshot());
   // Settings are file-layer state, not per-conversation state, so this is
   // one value for the whole app rather than something keyed into `runtimeStates`.
@@ -867,6 +887,11 @@ export function useBridge(): UseBridge {
   const activeSession = displayedSession(persistedActiveSession, pendingSession);
   const sessionLoading = pendingSession !== null;
   const activeSessionId = activeSession?.sessionId ?? null;
+  const providerSettingsSaves = useRef(new Set<AbortController>());
+  useEffect(() => () => {
+    for (const controller of providerSettingsSaves.current) controller.abort();
+    providerSettingsSaves.current.clear();
+  }, [activeSessionId]);
   const activeSessionIdRef = useRef<string | null>(null);
   activeSessionIdRef.current = activeSessionId;
   sessionLoadingRef.current = sessionLoading;
@@ -1270,6 +1295,23 @@ export function useBridge(): UseBridge {
             ),
           };
         }
+        if (event.type === 'permission_request_resolved') {
+          const resolvedPermissionIds = new Set(state.resolvedPermissionIds);
+          resolvedPermissionIds.add(event.request_id);
+          const summary = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId);
+          next = {
+            ...next,
+            permissionQueue: state.permissionQueue.filter((entry) => entry.request_id !== event.request_id),
+            resolvedPermissionIds,
+            pendingInteractionsOverride: pendingCountAfterResponse(
+              state.pendingInteractionsOverride,
+              Math.max(
+                summary?.pendingInteractions ?? 0,
+                state.permissionQueue.length + state.computerAccessQueue.length + state.askUserQuestionQueue.length,
+              ),
+            ),
+          };
+        }
         if (event.type === 'turn_ended' || event.type === 'session_ended') {
           next = {
             ...next,
@@ -1278,6 +1320,7 @@ export function useBridge(): UseBridge {
             askUserQuestionQueue: [],
             pendingInteractionsOverride: 0,
             pendingAskUserQuestionsOverride: 0,
+            resolvedPermissionIds: new Set(),
             resolvedAskUserQuestionIds: new Set(),
             isCancelling: false,
           };
@@ -1376,7 +1419,7 @@ export function useBridge(): UseBridge {
           return {
             ...reset,
             connection: state,
-            runtimeCenter: { ...current.runtimeCenter, overviewOpen: false },
+            runtimeCenter: resetRuntimeCenterConnection(current.runtimeCenter),
           };
         }
         if (shouldClearPendingPermissions(state)) {
@@ -1389,6 +1432,7 @@ export function useBridge(): UseBridge {
           next.askUserQuestionQueue = [];
           next.pendingInteractionsOverride = 0;
           next.pendingAskUserQuestionsOverride = 0;
+          next.resolvedPermissionIds = new Set();
           next.resolvedAskUserQuestionIds = new Set();
           next.isCancelling = false;
         }
@@ -1412,9 +1456,11 @@ export function useBridge(): UseBridge {
     const offPermission = host.onPermission((envelope) => {
       if (removedRuntimeIds.current.has(envelope.sessionId)) return;
       updateRuntime(envelope.sessionId, (state) => {
+        if (state.resolvedPermissionIds.has(envelope.event.request_id)) return state;
         const alreadyQueued = state.permissionQueue.some((entry) => entry.request_id === envelope.event.request_id);
         return {
           ...state,
+          runtimeCenter: reduceRuntimeCenterPermission(state.runtimeCenter, envelope.event, envelope.sessionId),
           permissionQueue: [
             ...state.permissionQueue.filter((entry) => entry.request_id !== envelope.event.request_id),
             envelope.event,
@@ -1636,6 +1682,7 @@ export function useBridge(): UseBridge {
         askUserQuestionQueue: [],
         pendingInteractionsOverride: 0,
         pendingAskUserQuestionsOverride: 0,
+        resolvedPermissionIds: new Set(),
         resolvedAskUserQuestionIds: new Set(),
       }));
     }).catch((cause) => {
@@ -1654,14 +1701,26 @@ export function useBridge(): UseBridge {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
     try { await host.approve(sessionId, requestId, response); acknowledgeInteraction(sessionId, requestId, 'permission'); }
-    catch (cause) { capture(cause); }
+    catch (cause) {
+      if (isPermissionRequestGone(cause)) {
+        acknowledgeInteraction(sessionId, requestId, 'permission');
+        return;
+      }
+      capture(cause);
+    }
   }, [acknowledgeInteraction, capture, host]);
 
   const deny = useCallback(async (requestId: number) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
     try { await host.deny(sessionId, requestId); acknowledgeInteraction(sessionId, requestId, 'permission'); }
-    catch (cause) { capture(cause); }
+    catch (cause) {
+      if (isPermissionRequestGone(cause)) {
+        acknowledgeInteraction(sessionId, requestId, 'permission');
+        return;
+      }
+      capture(cause);
+    }
   }, [acknowledgeInteraction, capture, host]);
 
   const approveComputerAccess = useCallback(async (requestId: number, response: ComputerAccessResponseDto) => {
@@ -1741,6 +1800,21 @@ export function useBridge(): UseBridge {
     catch (cause) { if (isCurrentNavigationOperation(operationId)) capture(cause); }
   }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
 
+  const preflightSessionArchive = useCallback((projectPath: string, sessionId: string) => {
+    if (!host) return Promise.reject(new Error('Desktop host unavailable.'));
+    return host.preflightSessionArchive(projectPath, sessionId);
+  }, [host]);
+  const archiveSession = useCallback(async (projectPath: string, sessionId: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    const operationId = beginNavigationOperation();
+    try {
+      const snapshot = await host.archiveSession(projectPath, sessionId);
+      if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+    } catch (error) {
+      try { const snapshot = await host.bootstrap(); if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot); } catch { /* Preserve the original archival error. */ }
+      throw error;
+    }
+  }, [host, beginNavigationOperation, isCurrentNavigationOperation, applyBootstrap]);
   const setSessionPinned = useCallback(async (session: SessionPinInput, pinned: boolean) => {
     if (!host) return;
     const operationId = nextOperationId(pinOperationRef.current);
@@ -1821,19 +1895,24 @@ export function useBridge(): UseBridge {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
       const update = await host.setProviderCredential(providerId, credential);
-      patchBootstrap({ settings: update.settings, providerCredentials: (bootstrap?.providerCredentials ?? []).map((entry) => entry.providerId === providerId ? update.credential : entry) });
+      setBootstrap((previous) => previous ? {
+        ...previous, settings: update.settings,
+        providerCredentials: [...(previous.providerCredentials ?? []).filter((entry) => entry.providerId !== providerId), update.credential],
+      } : previous);
       return update;
     } catch (cause) { return capture(cause); }
-  }, [bootstrap?.providerCredentials, capture, host, patchBootstrap]);
+  }, [capture, host]);
 
   const clearProviderCredential = useCallback(async (providerId: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
       const metadata = await host.clearProviderCredential(providerId);
-      patchBootstrap({ providerCredentials: (bootstrap?.providerCredentials ?? []).map((entry) => entry.providerId === providerId ? metadata : entry) });
+      setBootstrap((previous) => previous ? {
+        ...previous, providerCredentials: [...(previous.providerCredentials ?? []).filter((entry) => entry.providerId !== providerId), metadata],
+      } : previous);
       return metadata;
     } catch (cause) { return capture(cause); }
-  }, [bootstrap?.providerCredentials, capture, host, patchBootstrap]);
+  }, [capture, host]);
 
   const testProviderConnection = useCallback(async (providerId: string, credentialOverride?: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
@@ -1869,6 +1948,11 @@ export function useBridge(): UseBridge {
   const setThemePreference = useCallback(async (theme: 'dark' | 'light' | 'system') => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ theme }) }); } catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
+  const setCollapseThoughtsByDefault = useCallback(async (collapseThoughtsByDefault: boolean) => {
+    if (!host) return;
+    try { patchBootstrap({ settings: await host.updateSettings({ collapseThoughtsByDefault }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
 
   const setApiBaseUrl = useCallback(async (apiBaseUrl: string | null) => {
@@ -2089,10 +2173,11 @@ export function useBridge(): UseBridge {
     if (!sessionId || sessionLoadingRef.current) return;
     updateRuntime(sessionId, (state) => ({
       ...state,
-      runtimeCenter: setRuntimeCenterOverviewOpen(openRuntimeCenterItem(state.runtimeCenter, item), false),
+      runtimeCenter: openRuntimeCenterItem(state.runtimeCenter, item),
     }));
     if (item.kind === 'agent') void loadSessionAgentTranscript(item.id).catch(() => undefined);
-  }, [loadSessionAgentTranscript, updateRuntime]);
+    if (item.kind === 'section' && item.id === 'agents') void refreshSessionAgents().catch(() => undefined);
+  }, [loadSessionAgentTranscript, refreshSessionAgents, updateRuntime]);
   const closeRuntimeItem = useCallback((item: RuntimeCenterItemRef): void => {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
@@ -2124,6 +2209,21 @@ export function useBridge(): UseBridge {
   const refreshSettingsSnapshot = useCallback(
     () => command({ type: 'refresh_listings', which: [{ type: 'settings' }] }),
     [command],
+  );
+  const updateProviderSettings = useCallback(
+    async (destination: 'user' | 'project' | 'local', patch: Record<string, unknown>) => {
+      const sessionId = activeSessionIdRef.current;
+      if (sessionLoadingRef.current || !host || !sessionId) throw new Error('Open a connected session before saving provider settings.');
+      if (providerSettingsSaves.current.size > 0) throw new Error('A provider settings save is already in progress.');
+      const controller = new AbortController();
+      providerSettingsSaves.current.add(controller);
+      try {
+        await saveProviderSettings(host, sessionId, destination, patch, controller.signal);
+        if (activeSessionIdRef.current !== sessionId) throw new Error('Provider settings session changed.');
+      } finally {
+        providerSettingsSaves.current.delete(controller);
+      }
+    }, [host],
   );
   const updateEngineSettings = useCallback(
     async (destination: 'user' | 'project' | 'local', patch: Record<string, unknown>) => {
@@ -2175,6 +2275,13 @@ export function useBridge(): UseBridge {
     },
     [command, refreshMcpServers],
   );
+  const manageCron = useCallback((request: CronRequestDto): Promise<CronJobDto[]> => {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionLoadingRef.current || !host || !sessionId) {
+      return Promise.reject(new Error('Open a connected session before managing scheduled tasks.'));
+    }
+    return requestCronManagement(host, sessionId, request);
+  }, [host]);
   const runConfigurationAdmin = useCallback(async (
     domain: ConfigurationDomainDto,
     envelope:
@@ -2231,6 +2338,7 @@ export function useBridge(): UseBridge {
   );
 
   return {
+    manageCron,
     hosted,
     loading,
     bootstrap,
@@ -2263,7 +2371,7 @@ export function useBridge(): UseBridge {
     pendingComputerAccess: computerAccessQueue[0] ?? null,
     pendingAskUserQuestion: askUserQuestionQueue[0] ?? null,
     error,
-    clearError: () => setError(null),
+    clearError,
     sendTrackedPrompt,
     subscribeTrackedSpeech,
     sendPrompt,
@@ -2283,6 +2391,8 @@ export function useBridge(): UseBridge {
     addProject,
     activateProject,
     removeProject,
+    archiveSession,
+    preflightSessionArchive,
     setSessionPinned,
     openSession,
     listProjectSessions,
@@ -2296,9 +2406,11 @@ export function useBridge(): UseBridge {
     setPluginSecret,
     clearPluginSecret,
     setThemePreference,
+    setCollapseThoughtsByDefault,
     setApiBaseUrl,
     setVoicePreferences,
     setModelPickerVisibility,
+    updateProviderSettings,
     updateEngineSettings,
     updatePermissionRules,
     setDefaultPermissionMode,

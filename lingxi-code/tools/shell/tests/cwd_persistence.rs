@@ -217,6 +217,59 @@ async fn foreground_cd_persists_to_next_call() {
     );
 }
 
+/// claude-code has ONE shell spawn for both modes (`vV`); `run_in_background`
+/// only decides what happens after the shell is already running in the session
+/// cwd. So a `cd` persisted by an earlier FOREGROUND call must be where the
+/// next backgrounded command starts — it used to start in the workspace, i.e.
+/// somewhere else than the command right before it.
+#[tokio::test]
+async fn background_spawns_in_the_persisted_shell_cwd() {
+    let _g = maintain_lock();
+    // The target must be INSIDE the workspace or the `cd` is refused and the
+    // shell cwd never advances — without this the test would pass vacuously
+    // against the old behaviour.
+    let workspace = TempDir::new().unwrap();
+    let workspace_canon = std::fs::canonicalize(workspace.path()).unwrap();
+    let target_canon = workspace_canon.join("sub");
+    std::fs::create_dir(&target_canon).unwrap();
+
+    let runner = RecordingRunner::new(vec![Some(target_canon.clone())], true);
+    let tool = tool_with(&workspace_canon, runner.clone());
+
+    tool.call(
+        json!({ "command": format!("cd {}", target_canon.display()) }),
+        fresh_ctx(),
+        fresh_tx(),
+    )
+    .await
+    .expect("foreground cd ok");
+
+    tool.call(
+        json!({ "command": "ls", "run_in_background": true }),
+        fresh_ctx(),
+        fresh_tx(),
+    )
+    .await
+    .expect("background call ok");
+
+    // Anti-vacuity: the shell STARTED at the workspace, so the bg assertion
+    // below is about the `cd` having landed and not about the two paths having
+    // been the same all along. (That the `cd` landed is what the bg assertion
+    // itself proves — there is no earlier observation of `shell_cwd`.)
+    {
+        let fg = runner.fg.lock().unwrap();
+        assert_eq!(fg.len(), 1, "one foreground spawn expected");
+        assert_eq!(fg[0].cwd.as_deref(), Some(workspace_canon.as_path()));
+    }
+    let bg = runner.bg.lock().unwrap();
+    assert_eq!(bg.len(), 1, "one background spawn expected");
+    assert_eq!(
+        bg[0].cwd.as_deref(),
+        Some(target_canon.as_path()),
+        "the backgrounded command must start where the shell already is",
+    );
+}
+
 #[tokio::test]
 async fn background_does_not_mutate_shell_cwd_and_omits_readback() {
     let workspace = TempDir::new().unwrap();

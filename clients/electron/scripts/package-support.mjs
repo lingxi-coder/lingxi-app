@@ -133,6 +133,13 @@ export function runtimePackageJson(source) {
     packageManager: _packageManager,
     ...runtime
   } = source;
+  for (const field of ['dependencies', 'optionalDependencies']) {
+    if (runtime[field]) {
+      runtime[field] = Object.fromEntries(
+        Object.entries(runtime[field]).filter(([name]) => !name.startsWith('@types/')),
+      );
+    }
+  }
   return runtime;
 }
 
@@ -225,8 +232,9 @@ function copyPackagePayload(sourceRoot, destinationRoot, manifest) {
   // cannot be silently truncated, while still honoring a package's allowlist.
   const entries = Array.isArray(manifest.files) && manifest.files.length > 0
     ? [...new Set(manifest.files.flatMap((entry) => {
-        const normalized = String(entry).replaceAll('\\', '/').replace(/^\.\//, '');
-        if (!normalized || normalized.startsWith('/') || normalized.split('/').includes('..')) {
+        // Installed npm manifests can anchor entries at the package root (/cjs).
+        const normalized = String(entry).replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '');
+        if (!normalized || normalized.split('/').includes('..')) {
           throw new Error(`unsafe package files entry in ${manifest.name}: ${entry}`);
         }
         if (!/[?*[]/.test(normalized)) return [normalized];
@@ -261,6 +269,9 @@ export function copyProductionDependencies(dependencies, sourceRoot, targetNodeM
   const copied = new Map();
 
   function copyOne(name, fromRoot, optional = false) {
+    // DefinitelyTyped declarations are build inputs, even when a library
+    // lists them as production dependencies. They have no runtime payload.
+    if (name.startsWith('@types/')) return;
     let dependencyRoot;
     try {
       dependencyRoot = packageRootFor(name, fromRoot);

@@ -27,11 +27,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use platform_api::mailbox::{MailboxMessage, MailboxRouterHandle};
-use serde_json::{json, Map, Value};
+use platform_api::task_registry::TaskRegistryHandle;
+use serde_json::{json, Value};
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{SEND_MESSAGE_COMPLETED, SEND_MESSAGE_FAILED, SEND_MESSAGE_STARTED};
@@ -77,7 +77,7 @@ const ROUTING_CONTENT_PREVIEW_CHARS: usize = 50;
 /// `max_width - 1` terminal cells and append the ellipsis. Reuse the TUI's
 /// shared width primitive so CJK and multi-codepoint emoji follow the same
 /// display-width contract everywhere.
-fn truncate_preview(s: &str, max_width: usize) -> String {
+pub fn truncate_preview(s: &str, max_width: usize) -> String {
     tui_core::render::truncate_to_width_ellipsis(s, max_width)
 }
 
@@ -90,69 +90,10 @@ fn agent_swarms_enabled() -> bool {
     platform_api::env::agent_swarms_enabled()
 }
 
-static SEND_MESSAGE_SCHEMA: Lazy<Value> = Lazy::new(build_input_schema);
-
-/// Build the JSON Schema for `SendMessage` inputs.
-///
-/// Mirrors the TS `z.object({ to, summary, message })` 1:1: `to` and `message`
-/// are required, `summary` is optional, and `message` is a `oneOf`
-/// plain-string / structured-message discriminated union. The structured
-/// branch's only required key is `type` (one of the three protocol variants),
-/// matching `StructuredMessage` in the TS — additional shape constraints
-/// (`request_id`, `approve`, `reason`, `feedback`) are advertised per-property
-/// just as the zod union does.
-fn build_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["to"],
-        "properties": {
-            "to": {
-                "type": "string",
-                "description": "Recipient: teammate name or session:<uuid>"
-            },
-            "notify_when_idle": {
-                "type": "boolean",
-                "description": "For local live sessions, send the message now and send one notice here when they next become idle or exit."
-            },
-            "summary": {
-                "type": "string",
-                "maxLength": 200,
-                "description": "A 5-10 word summary shown as a preview in the UI (required when message is a string)"
-            },
-            "message": {
-                "oneOf": [
-                    {
-                        "type": "string",
-                        "description": "Plain text message content"
-                    },
-                    {
-                        "type": "object",
-                        "required": ["type"],
-                        "properties": {
-                            "type": {
-                                "type": "string",
-                                "enum": [
-                                    "shutdown_request",
-                                    "shutdown_response",
-                                    "plan_approval_response"
-                                ]
-                            },
-                            "request_id": { "type": "string" },
-                            "approve": { "type": "boolean" },
-                            "reason": { "type": "string" },
-                            "feedback": { "type": "string" }
-                        }
-                    }
-                ]
-            }
-        }
-    })
-}
-
 /// Resolved `to` recipient.
 ///
 /// `parse_recipient` resolves by teammate **name** first, then the explicit
-/// `agent:<uuid>` reference form — mirroring the TS `call` resolution order
+/// raw agent ID form — mirroring the TS `call` resolution order
 /// (`agentNameRegistry.get(to) ?? toAgentId(to)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Recipient {
@@ -160,7 +101,7 @@ enum Recipient {
     Broadcast,
     /// A teammate addressed by name (the primary path).
     Teammate(String),
-    /// An explicit `agent:<uuid>` reference (prefix stripped).
+    /// A raw host agent ID.
     Agent(String),
     /// A live Claude session addressed by its canonical UUID.
     Session(String),
@@ -206,7 +147,7 @@ impl SendMessageTool {
     /// Parse the `to` field into a [`Recipient`].
     ///
     /// Resolves by teammate **name** first (any bare string), then the
-    /// explicit `agent:<uuid>` reference form, and recognises `"*"` as a
+    /// explicit raw agent ID form, and recognises `"*"` as a
     /// broadcast. Rejection strings are byte-faithful with the TS
     /// `validateInput`.
     ///
@@ -234,8 +175,10 @@ impl SendMessageTool {
             })?;
             return Ok(Recipient::Session(parsed.as_uuid().to_string()));
         }
-        if let Some(uuid) = trimmed.strip_prefix("agent:") {
-            return Ok(Recipient::Agent(uuid.to_string()));
+        if !trimmed.contains(':') {
+            if let Some(agent) = protocol::AgentId::parse_prefixed(trimmed) {
+                return Ok(Recipient::Agent(agent.as_uuid().to_string()));
+            }
         }
         Ok(Recipient::Teammate(trimmed.to_string()))
     }
@@ -280,7 +223,7 @@ impl SendMessageTool {
     ) -> Option<String> {
         match recipient {
             Recipient::Agent(id) => ctx.agent_id.and_then(|self_id| {
-                (self_id.to_string() == *id).then(|| {
+                (self_id.as_uuid().to_string() == *id).then(|| {
                     format!(
                         "'{to_display}' is this session's own address — a message or file sent there would only come back to this conversation; there is no one else at that address to send to."
                     )
@@ -326,30 +269,7 @@ impl SendMessageTool {
     }
 
     fn protocol_timestamp() -> String {
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let seconds = duration.as_secs();
-        let millis = duration.subsec_millis();
-        let days = (seconds / 86_400) as i64;
-        let seconds_of_day = seconds % 86_400;
-        let z = days + 719_468;
-        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-        let day_of_era = z - era * 146_097;
-        let year_of_era =
-            (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-        let mut year = year_of_era + era * 400;
-        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-        let month_prime = (5 * day_of_year + 2) / 153;
-        let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-        let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-        year += i64::from(month <= 2);
-        format!(
-            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
-            seconds_of_day / 3_600,
-            (seconds_of_day % 3_600) / 60,
-            seconds_of_day % 60
-        )
+        tool_api::send_message_contract::protocol_timestamp(SystemTime::now())
     }
 
     fn require_team_lead(ctx: &ToolUseContext, action: &str) -> Result<(), ToolError> {
@@ -376,6 +296,30 @@ impl SendMessageTool {
         }
     }
 
+    /// Refuse a message aimed at an agent the USER stopped (AGT-07).
+    ///
+    /// Best-effort by construction: no registry wired, an id that does not
+    /// resolve, or a lookup error all fall through to the ordinary delivery
+    /// path. The gate exists to convert a KNOWN cancellation into something the
+    /// model can act on, not to add a new way for `SendMessage` to fail.
+    async fn refuse_if_stopped_by_user(
+        registry: Option<&Arc<dyn TaskRegistryHandle>>,
+        target: &str,
+    ) -> Result<(), ToolError> {
+        let Some(registry) = registry else {
+            return Ok(());
+        };
+        let Ok(Some(record)) = registry.get(target).await else {
+            return Ok(());
+        };
+        if record.killed_by.as_deref() == Some("user") {
+            return Err(ToolError::InvalidInput(
+                platform_api::task_registry::stopped_by_user_message(&record.task_id),
+            ));
+        }
+        Ok(())
+    }
+
     /// Deliver through the live mailbox seam. Delivery failures are surfaced;
     /// returning a success result after `NotFound`/`Full` would falsely tell the
     /// model that a background agent received a course correction.
@@ -384,38 +328,52 @@ impl SendMessageTool {
         from: &str,
         target: &str,
         content: String,
-    ) -> Result<(), ToolError> {
+    ) -> Result<String, ToolError> {
+        let message_id = tool_api::util::ids::ulid_or_uuid();
         let msg = MailboxMessage {
-            message_id: tool_api::util::ids::ulid_or_uuid(),
+            message_id: message_id.clone(),
             content,
             timestamp: SystemTime::now(),
-            // No teammate-color seam threaded into SendMessage; `None` is omitted
-            // from the wire form (parity with claude-code `color: undefined`).
-            color: None,
+            color: if from == TEAM_LEAD_NAME {
+                None
+            } else {
+                router.teammate_color(from).await
+            },
         };
         router
             .route(from, target, msg)
             .await
-            .map(|_| ())
+            .map(|_| message_id)
             .map_err(|e| {
                 ToolError::Internal(format!("SendMessage: failed to deliver to '{target}': {e}"))
             })
     }
 
-    /// Build a `routing` object, omitting `summary`/`content` when absent
-    /// (mirrors `jsonStringify` dropping `undefined`). Teammate colours are a
-    /// PARITY-GAP — there is no team context in `tool-ui` — so they are omitted.
     fn routing(sender: &str, target: &str, summary: Option<&str>, content: Option<&str>) -> Value {
-        let mut m = Map::new();
-        m.insert("sender".into(), json!(sender));
-        m.insert("target".into(), json!(target));
-        if let Some(s) = summary {
-            m.insert("summary".into(), json!(s));
-        }
-        if let Some(c) = content {
-            m.insert("content".into(), json!(c));
-        }
-        Value::Object(m)
+        tool_api::send_message_contract::routing(sender, None, target, None, summary, content)
+    }
+
+    async fn teammate_routing(
+        router: &Arc<dyn MailboxRouterHandle>,
+        sender: &str,
+        target: &str,
+        summary: Option<&str>,
+        content: Option<&str>,
+    ) -> Value {
+        let sender_color = if sender == TEAM_LEAD_NAME {
+            None
+        } else {
+            router.teammate_color(sender).await
+        };
+        let target_color = router.teammate_color(target.trim_start_matches('@')).await;
+        tool_api::send_message_contract::routing(
+            sender,
+            sender_color.as_deref(),
+            target,
+            target_color.as_deref(),
+            summary,
+            content,
+        )
     }
 
     /// `handleMessage` — a plain-text note to a single teammate.
@@ -433,24 +391,32 @@ impl SendMessageTool {
         summary: Option<&str>,
         sender: &str,
         notify_when_idle: bool,
+        task_registry: Option<&Arc<dyn TaskRegistryHandle>>,
     ) -> Result<Value, ToolError> {
         // A teammate name belongs to the current team before it is considered
         // a live-session alias. The router's named-recipient snapshot tells us
         // whether the name is actually owned by the current team; otherwise
         // the compatibility live-session alias may handle it.
         if let Recipient::Teammate(target) = recipient {
+            // AGT-07 pre-flight. `deliver` returns as soon as the MAILBOX
+            // accepts the message, so the registry's own refusal surfaces a hop
+            // later inside the pump and can never reach this tool's return
+            // value. Asking first is what makes the user's cancellation legible
+            // to the model SYNCHRONOUSLY, in the result of the call it made.
+            Self::refuse_if_stopped_by_user(task_registry, target).await?;
             let is_team_recipient = router
                 .named_recipients()
                 .await
                 .into_iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case(target));
             if is_team_recipient {
-                Self::deliver(router, from, target, content.to_string()).await?;
+                let message_id = Self::deliver(router, from, target, content.to_string()).await?;
                 let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
                 return Ok(json!({
                     "success": true,
                     "message": format!("Message sent to {to_display}'s inbox"),
-                    "routing": Self::routing(sender, &format!("@{to_display}"), summary, Some(&preview)),
+                    "msg_id": message_id,
+                    "routing": Self::teammate_routing(router, sender, &format!("@{to_display}"), summary, Some(&preview)).await,
                 }));
             }
         }
@@ -533,17 +499,19 @@ impl SendMessageTool {
                 "notify_when_idle is only supported for local live sessions".into(),
             ));
         }
-        Self::deliver(router, from, recipient.route_target(), content.to_string()).await?;
+        let message_id =
+            Self::deliver(router, from, recipient.route_target(), content.to_string()).await?;
         let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
         Ok(json!({
             "success": true,
             "message": format!("Message sent to {to_display}'s inbox"),
-            "routing": Self::routing(
-                sender,
+            "msg_id": message_id,
+            "routing": Self::teammate_routing(
+                router, sender,
                 &format!("@{to_display}"),
                 summary,
                 Some(&preview),
-            ),
+            ).await,
         }))
     }
 
@@ -638,13 +606,12 @@ impl SendMessageTool {
         sender: &str,
     ) -> Result<Value, ToolError> {
         let request_id = Self::generate_request_id("shutdown", to_display);
-        let payload = json!({
-            "type": "shutdown_request",
-            "requestId": request_id,
-            "from": sender,
-            "reason": reason,
-            "timestamp": Self::protocol_timestamp(),
-        });
+        let payload = tool_api::send_message_contract::shutdown_request(
+            &request_id,
+            sender,
+            reason,
+            &Self::protocol_timestamp(),
+        );
         Self::deliver(
             router,
             from,
@@ -670,11 +637,13 @@ impl SendMessageTool {
         agent_name: &str,
         ctx: &ToolUseContext,
     ) -> Result<Value, ToolError> {
-        let payload = json!({
-            "type": "shutdown_approved",
-            "requestId": request_id,
-            "from": agent_name,
-        });
+        let payload = tool_api::send_message_contract::shutdown_approved(
+            request_id,
+            agent_name,
+            &Self::protocol_timestamp(),
+            None,
+            None,
+        );
         Self::deliver(
             router,
             from,
@@ -717,12 +686,12 @@ impl SendMessageTool {
         reason: &str,
         agent_name: &str,
     ) -> Result<Value, ToolError> {
-        let payload = json!({
-            "type": "shutdown_rejected",
-            "requestId": request_id,
-            "from": agent_name,
-            "reason": reason,
-        });
+        let payload = tool_api::send_message_contract::shutdown_rejected(
+            request_id,
+            agent_name,
+            reason,
+            &Self::protocol_timestamp(),
+        );
         Self::deliver(
             router,
             from,
@@ -863,19 +832,20 @@ impl Tool for SendMessageTool {
         SEND_MESSAGE_TOOL_NAME
     }
     fn search_hint(&self) -> Option<&str> {
-        Some("send messages to agent teammates (swarm protocol)")
+        Some("send messages to agent teammates")
     }
     fn input_schema(&self) -> &Value {
-        &SEND_MESSAGE_SCHEMA
+        tool_api::send_message_contract::schema(
+            platform_api::live_sessions::cross_session_messaging_enabled(),
+            agent_swarms_enabled(),
+        )
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        // TS `isEnabled()` = `isAgentSwarmsEnabled()`, which binds the tool to a
-        // live team/teammate context.
-        //
-        // The port additionally requires a wired `MailboxRouterHandle`:
-        // without one, `call()` cannot route at all. Both conditions must hold
-        // before the tool is advertised.
-        self.ctx.mailbox_router.is_some() && agent_swarms_enabled()
+        // Ordinary named/background agents can receive messages without teams.
+        self.ctx.mailbox_router.is_some()
+    }
+    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+        tool_api::send_message_contract::coerce(input)
     }
     fn should_defer(&self) -> bool {
         // TS `shouldDefer: true`.
@@ -919,105 +889,17 @@ impl Tool for SendMessageTool {
         }
     }
 
-    /// Port of the TS `validateInput`. Runs before [`Tool::call`] in the
-    /// orchestrator; rejection strings are byte-faithful with the reference.
     async fn validate_input(
         &self,
         input: &Value,
-        _ctx: &ToolUseContext,
+        ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let to = input.get("to").and_then(Value::as_str).unwrap_or("");
-        let notify_when_idle = input
-            .get("notify_when_idle")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        // The 2.1.218 oracle's SendMessage validateInput STILL hard-rejects a
-        // broadcast unconditionally (`if(e.to==="*")return{result:!1,message:'…',
-        // errorCode:9}`). The internal fan-out plumbing (handle_broadcast /
-        // MailboxRouterHandle::broadcast) stays wired but DORMANT — unreachable
-        // through this gate — until the oracle re-adds broadcast; the model is
-        // not granted a fan-out capability the oracle denies.
-        if to == "*" {
-            return Err(ValidationError(
-                "broadcast (to: \"*\") is no longer supported — send a message per recipient"
-                    .into(),
-            ));
-        }
-        if to.trim().is_empty() {
-            return Err(ValidationError("to must not be empty".into()));
-        }
-        if to.contains('@') {
-            return Err(ValidationError(
-                "to must be a bare teammate name — there is only one team per session".into(),
-            ));
-        }
-        if input.get("message").is_none() {
-            if notify_when_idle {
-                return Ok(());
-            }
-            return Err(ValidationError(
-                "message is required unless notify_when_idle is true".into(),
-            ));
-        }
-
-        // Plain-string message: guard against protocol frames embedded in text,
-        // then require a non-empty `summary`.
-        if let Some(Value::String(msg_str)) = input.get("message") {
-            // Plaintext protocol-frame guard: a JSON string that parses to an
-            // object with a `type` field that looks like a protocol message type
-            // must not be sent as a plain-string message.
-            if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(msg_str.trim()) {
-                let mtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
-                if matches!(
-                    mtype,
-                    "shutdown_request" | "shutdown_response" | "plan_approval_response"
-                ) {
-                    return Err(ValidationError(
-                        "message text must not be a teammate protocol frame — use the structured message object form instead".into(),
-                    ));
-                }
-            }
-            let summary = input.get("summary").and_then(Value::as_str);
-            if summary.is_none_or(|s| s.trim().is_empty()) {
-                return Err(ValidationError(
-                    "summary is required when message is a string".into(),
-                ));
-            }
-            return Ok(());
-        }
-
-        // Structured message from here on. Runtime gating is enforced by
-        // `is_enabled()`, so validation only checks the message shape.
-
-        if let Some(Value::Object(obj)) = input.get("message") {
-            let mtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
-            if mtype == "shutdown_response" {
-                if to != TEAM_LEAD_NAME {
-                    return Err(ValidationError(format!(
-                        "shutdown_response must be sent to \"{TEAM_LEAD_NAME}\""
-                    )));
-                }
-                let approve = obj
-                    .get("approve")
-                    .and_then(Self::semantic_bool)
-                    .unwrap_or(false);
-                // Reason-on-approval guard: `reason` is only delivered on
-                // rejections; providing it on an approval is invalid.
-                let reason = obj.get("reason").and_then(Value::as_str);
-                if approve && reason.is_some() {
-                    return Err(ValidationError(
-                        "reason is only delivered on rejections (approve: false) — remove it from an approval response".into(),
-                    ));
-                }
-                if !approve && reason.is_none_or(|r| r.trim().is_empty()) {
-                    return Err(ValidationError(
-                        "reason is required when rejecting a shutdown request".into(),
-                    ));
-                }
-            }
-        }
-
-        Ok(())
+        tool_api::send_message_contract::validate(
+            input,
+            agent_swarms_enabled(),
+            ctx.agent_id.is_some() || ctx.agent_name.is_some(),
+        )
+        .map_err(ValidationError)
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
@@ -1025,56 +907,11 @@ impl Tool for SendMessageTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        let mut body = String::from(
-            r#"# SendMessage
-
-Send a message to another agent.
-
-```json
-{"to": "researcher", "summary": "assign task 1", "message": "start on task #1"}
-```
-
-| `to` | |
-|---|---|
-| `"researcher"` | Teammate by name |
-| `"main"` | The main conversation (background subagents only) |
-"#,
-        );
-        if platform_api::live_sessions::cross_session_messaging_enabled() {
-            body.push_str(
-                r#"
-| `"worker"` | Any agent from `ListAgents` — subagent, another local Claude session |
-| `"worker [3fa9c1]"` | Same, plus its `[ref]` — only when a listing or an error shows one |
-
-## Cross-session
-
-Use `ListAgents` to discover targets. Every row leads with the agent's `name [ref]` — the name IS the address; there is no separate address syntax.
-```json
-{"to": "worker", "message": "check if tests pass over there"}
-{"to": "worker [3fa9c1]", "message": "you, specifically"}
-```
-Send the bare name — a name that exactly matches one live agent or session (on this machine) delivers directly. Append the ` [ref]` only when the bare name is not enough — `ListAgents` shows two rows with it, or an error asks you to disambiguate (you typed only a prefix, or a session list could not be checked). A ref you did not just read from a listing or an error will not resolve, and if the same name also names an in-process agent, the bare name always wins — use the in-process one.
-A listed peer is alive and will process your message; messages enqueue and drain at the receiver's next tool round (its `ListAgents` row says whether it is busy or idle right now). Your message arrives wrapped as `<cross-session-message from="...">`. **To reply to an incoming message, copy its `from` attribute as your `to`.**
-Permission boundaries are per-session: NEVER ask a peer to perform an action that was denied or blocked in your session, or that you expect your own permission settings would block — a peer doing it for you bypasses the user's permission decision (cross-session permission laundering). Route blocked work back to your user instead.
-"#,
-            );
-        }
-        body.push_str(
-            r#"
-Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to agents by name — names keep working after an agent completes (a send resumes it from its transcript). Use the raw `agentId` (format `a...-...`) from its spawn result only when the agent has no name, or when a newer agent took the name (latest wins). When relaying, don't quote the original — it's already rendered to the user.
-
-## Protocol responses (legacy)
-
-If you receive a JSON message with `type: "shutdown_request"` or `type: "plan_approval_request"`, respond with the matching `_response` type — echo the `request_id`, set `approve` true/false:
-
-```json
-{"to": "team-lead", "message": {"type": "shutdown_response", "request_id": "...", "approve": true}}
-{"to": "researcher", "message": {"type": "plan_approval_response", "request_id": "...", "approve": false, "feedback": "add error handling"}}
-```
-
-Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — report progress through your task tools if you have them, otherwise in plain prose."#,
-        );
-        body
+        tool_api::send_message_contract::prompt(
+            platform_api::live_sessions::cross_session_messaging_enabled(),
+            agent_swarms_enabled(),
+        )
+        .into()
     }
 
     async fn call(
@@ -1086,6 +923,32 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
         let started = Instant::now();
         let invocation_id = Self::fresh_invocation_id();
         let bus = self.ctx.bus.clone();
+
+        // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
+        // (see `agent_processes::mark_stop_pending`).
+        if let Some(agent_id) = ctx.agent_id {
+            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+                return Err(ToolError::InvalidInput(
+                    platform_api::agent_processes::stop_pending_refusal("send messages."),
+                ));
+            }
+        }
+
+        let input = tool_api::send_message_contract::coerce(&input)
+            .map_or(input.clone(), |coerced| coerced.input);
+        if input.get("to").and_then(Value::as_str) == Some("*") {
+            return Err(ToolError::InvalidInput(
+                "broadcast (to: \"*\") is no longer supported — send a message per recipient"
+                    .into(),
+            ));
+        }
+
+        tool_api::send_message_contract::validate(
+            &input,
+            true,
+            ctx.agent_id.is_some() || ctx.agent_name.is_some(),
+        )
+        .map_err(ToolError::InvalidInput)?;
 
         // --- Mailbox-seam guard (Rust-port artifact) -------------------------
         // PARITY-GAP: claude-code appends to a file mailbox directly; the Rust
@@ -1109,16 +972,8 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
             }
         };
 
-        // --- Parse `to` (defensive — schema/validate_input ran upstream) -----
-        // PARITY-GAP compat: the desktop coordinator-wiring integration path
-        // drives a legacy `{to_agent_id, message}` payload. Accept `to_agent_id`
-        // as an alias for `to` so that wiring keeps routing; new callers use the
-        // `to` field the schema advertises.
-        let to = match input
-            .get("to")
-            .and_then(Value::as_str)
-            .or_else(|| input.get("to_agent_id").and_then(Value::as_str))
-        {
+        // The latest protocol only accepts `to`.
+        let to = match input.get("to").and_then(Value::as_str) {
             Some(s) => s.to_string(),
             None => {
                 Self::emit_failed(
@@ -1159,7 +1014,14 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
         let from = Self::route_from(&ctx);
         let sender = Self::sender_name(&ctx);
 
-        if let Some(message) = Self::self_target_error(&recipient, &to, &ctx) {
+        let main_message =
+            to.trim().eq_ignore_ascii_case("main") && message.is_some_and(Value::is_string);
+        let self_error = if main_message {
+            None
+        } else {
+            Self::self_target_error(&recipient, &to, &ctx)
+        };
+        if let Some(message) = self_error {
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -1202,6 +1064,18 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                     ))
                 }
             }
+            Some(Value::String(content)) if main_message => {
+                if ctx.agent_id.is_none() {
+                    Ok(
+                        json!({"success":false,"message":"You are the main conversation — \"main\" addresses you. Send to a named agent instead."}),
+                    )
+                } else {
+                    Self::deliver(&router, &from, "main", content.clone()).await?;
+                    Ok(
+                        json!({"success":true,"message":"Message queued for the main conversation's next turn."}),
+                    )
+                }
+            }
             Some(Value::String(content)) => match recipient {
                 Recipient::Broadcast => Self::handle_broadcast(&router, &from, content).await,
                 _ => {
@@ -1214,6 +1088,7 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                         summary.as_deref(),
                         &sender,
                         notify_when_idle,
+                        self.ctx.task_registry.as_ref(),
                     )
                     .await
                 }
@@ -1233,8 +1108,7 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                 }
                 if matches!(recipient, Recipient::Session(_)) {
                     return Err(ToolError::InvalidInput(
-                        "structured protocol messages cannot target session:<uuid>; use a team teammate address"
-                            .into(),
+                        "structured messages cannot be sent cross-session — only plain text".into(),
                     ));
                 }
                 let mtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
@@ -1345,15 +1219,16 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
         };
 
         Self::emit_completed(&bus, &invocation_id, started.elapsed().as_millis() as u64).await;
-        // Model-facing content is the brief status string (`data["message"]`),
-        // not the full routing/recipients JSON dump. claude-code surfaces the
-        // `Message sent…`/shutdown/plan status line to the model; the routing
-        // metadata stays in `data` for the UI only. Without this the dispatch
-        // falls back to serialising `data` (the JSON dump) for the model.
-        let model_content = data
-            .get("message")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        // The oracle serializes the result object, excluding UI-only fields.
+        let mut model_data = data.clone();
+        if let Some(object) = model_data.as_object_mut() {
+            object.remove("display");
+            object.remove("inlineHandback");
+        }
+        let model_content = Some(
+            serde_json::to_string(&model_data)
+                .map_err(|error| ToolError::Internal(error.to_string()))?,
+        );
         Ok(ToolCallResult {
             data,
             model_content,
@@ -1429,6 +1304,8 @@ mod tests {
     struct RecordingRouter {
         routed: Mutex<Vec<(String, String, String)>>,
         broadcasted: Mutex<Vec<(String, String)>>,
+        colors: Mutex<HashMap<String, String>>,
+        routed_colors: Mutex<Vec<Option<String>>>,
     }
 
     struct RejectingRouter;
@@ -1436,6 +1313,28 @@ mod tests {
     #[derive(Default)]
     struct RecordingTaskRegistry {
         killed: Mutex<Vec<String>>,
+        /// Alias-or-id → record, so `get` can answer the AGT-07 pre-flight the
+        /// way the production registry does (`canonical_or_raw` resolves a
+        /// teammate NAME to its task id before the map lookup).
+        records: Mutex<HashMap<String, TaskRecord>>,
+    }
+
+    impl RecordingTaskRegistry {
+        fn with_record(address: &str, killed_by: Option<&str>) -> Arc<Self> {
+            let me = Self::default();
+            me.records.lock().unwrap().insert(
+                address.to_string(),
+                TaskRecord {
+                    task_id: "a1b2c3d4e".to_string(),
+                    task_type: "in_process_teammate".to_string(),
+                    status: if killed_by.is_some() { "killed" } else { "running" }.to_string(),
+                    description: "research".to_string(),
+                    killed_by: killed_by.map(str::to_string),
+                    ..TaskRecord::default()
+                },
+            );
+            Arc::new(me)
+        }
     }
 
     #[async_trait]
@@ -1444,8 +1343,8 @@ mod tests {
             unreachable!("not used by SendMessage")
         }
 
-        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
-            Ok(None)
+        async fn get(&self, id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(self.records.lock().unwrap().get(id).cloned())
         }
 
         async fn list(
@@ -1506,18 +1405,27 @@ mod tests {
             Self {
                 routed: Mutex::new(Vec::new()),
                 broadcasted: Mutex::new(Vec::new()),
+                colors: Mutex::new(HashMap::new()),
+                routed_colors: Mutex::new(Vec::new()),
             }
         }
     }
 
     #[async_trait]
     impl MailboxRouterHandle for RecordingRouter {
+        async fn teammate_color(&self, name: &str) -> Option<String> {
+            self.colors.lock().unwrap().get(name).cloned()
+        }
         async fn route(
             &self,
             from_agent: &str,
             to_agent: &str,
             message: MailboxMessage,
         ) -> Result<RouteAck, MailboxError> {
+            self.routed_colors
+                .lock()
+                .unwrap()
+                .push(message.color.clone());
             self.routed.lock().unwrap().push((
                 from_agent.to_string(),
                 to_agent.to_string(),
@@ -1569,25 +1477,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_shape_matches_ts() {
+    fn schema_shape_matches_latest_shared_contract() {
+        // Both sides read the SAME two env-backed flags, one after the other,
+        // so a sibling test flipping `LINGXI_EXPERIMENTAL_AGENT_TEAMS` between
+        // the two reads makes them disagree about the structured-message
+        // variants — a real flake, not a schema divergence. Every mutator here
+        // already takes this lock; this reader has to as well.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
-        let schema = tool.input_schema();
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["required"], json!(["to"]));
-        assert!(schema["properties"]["to"].is_object());
-        assert_eq!(schema["properties"]["notify_when_idle"]["type"], "boolean");
-        assert!(schema["properties"]["summary"].is_object());
-        assert!(schema["properties"]["message"]["oneOf"].is_array());
-        let variants = schema["properties"]["message"]["oneOf"].as_array().unwrap();
-        assert_eq!(variants.len(), 2);
-        assert_eq!(variants[0]["type"], "string");
         assert_eq!(
-            variants[1]["properties"]["type"]["enum"],
-            json!([
-                "shutdown_request",
-                "shutdown_response",
-                "plan_approval_response"
-            ])
+            tool.input_schema(),
+            tool_api::send_message_contract::schema(
+                platform_api::live_sessions::cross_session_messaging_enabled(),
+                agent_swarms_enabled()
+            )
         );
     }
 
@@ -1608,7 +1511,7 @@ mod tests {
         );
         assert_eq!(
             SendMessageTool::parse_recipient("agent:abc-123").unwrap(),
-            Recipient::Agent("abc-123".into())
+            Recipient::Teammate("agent:abc-123".into())
         );
         assert_eq!(
             SendMessageTool::parse_recipient("*").unwrap(),
@@ -1651,16 +1554,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_string_message_requires_summary() {
+    async fn validate_string_message_without_summary_is_valid() {
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
-        let err = tool
-            .validate_input(
-                &json!({ "to": "researcher", "message": "hi" }),
-                &fresh_ctx(),
-            )
+        tool.validate_input(&json!({"to":"researcher","message":"hi"}), &fresh_ctx())
             .await
-            .expect_err("string message without summary must reject");
-        assert_eq!(err.0, "summary is required when message is a string");
+            .expect("latest derives the optional summary");
     }
 
     #[tokio::test]
@@ -1741,7 +1639,7 @@ mod tests {
             .expect("send succeeds");
 
         assert_eq!(
-            result.model_content.as_deref(),
+            result.data["message"].as_str(),
             Some(
                 "Subscribed — you will get one notice here when \"peer\" is next idle (or exits). Do not poll or wait for it; carry on."
             )
@@ -1857,7 +1755,7 @@ mod tests {
         let expected = format!(
             "Subscribed — you will get one notice here when \"session:{peer_session_id}\" is next idle (or exits). Do not poll or wait for it; carry on."
         );
-        assert_eq!(result.model_content.as_deref(), Some(expected.as_str()));
+        assert_eq!(result.data["message"].as_str(), Some(expected.as_str()));
         assert!(router.routed.lock().unwrap().is_empty());
         let queued = dir.drain_idle_subscriptions(peer_session_id).unwrap();
         assert_eq!(queued.len(), 1);
@@ -1880,7 +1778,7 @@ mod tests {
             .expect_err("team protocol messages must not target a session");
         assert!(err
             .model_facing_message()
-            .contains("structured protocol messages cannot target session:<uuid>"));
+            .contains("structured messages cannot be sent cross-session"));
     }
 
     #[tokio::test]
@@ -1903,6 +1801,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_shutdown_response_must_target_team_lead() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS", "1");
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
         let err = tool
             .validate_input(
@@ -1915,10 +1815,13 @@ mod tests {
             .await
             .expect_err("shutdown_response to a non-lead must reject");
         assert_eq!(err.0, "shutdown_response must be sent to \"team-lead\"");
+        std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS");
     }
 
     #[tokio::test]
     async fn validate_shutdown_rejection_requires_reason() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS", "1");
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
         let err = tool
             .validate_input(
@@ -1934,6 +1837,7 @@ mod tests {
             err.0,
             "reason is required when rejecting a shutdown request"
         );
+        std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS");
     }
 
     #[tokio::test]
@@ -1948,6 +1852,137 @@ mod tests {
     }
 
     // ----- call() routing + handler shapes ----------------------------------
+
+    #[tokio::test]
+    async fn main_recipient_rejects_main_caller_without_a_delivery() {
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let result = tool
+            .call(
+                json!({"to":"main","message":"hello"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some(
+                r#"{"success":false,"message":"You are the main conversation — \"main\" addresses you. Send to a named agent instead."}"#
+            )
+        );
+        assert!(router.routed.lock().unwrap().is_empty());
+        assert!(result.data.get("routing").is_none());
+        assert!(result.data.get("msg_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn ordinary_child_can_send_to_main_with_exact_queued_result() {
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let mut ctx = fresh_ctx();
+        ctx.agent_id = Some(protocol::AgentId::new());
+        ctx.agent_name = Some("scout".into());
+        let result = tool
+            .call(
+                json!({"to":"main","message":"Finished checking"}),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some(
+                r#"{"success":true,"message":"Message queued for the main conversation's next turn."}"#
+            )
+        );
+        assert_eq!(
+            router.routed.lock().unwrap().as_slice(),
+            &[("scout".into(), "main".into(), "Finished checking".into())]
+        );
+        assert!(result.data.get("routing").is_none());
+        assert!(result.data.get("msg_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn main_route_keeps_plain_message_validation() {
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let error = tool
+            .call(json!({"to":"main","message":"  "}), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
+        assert!(error
+            .model_facing_message()
+            .contains("message must not be empty"));
+        assert!(router.routed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn teammate_colors_are_read_from_the_actual_router() {
+        let router = Arc::new(RecordingRouter::new());
+        router.colors.lock().unwrap().extend([
+            ("scout".into(), "blue".into()),
+            ("reviewer".into(), "green".into()),
+            ("team-lead".into(), "red".into()),
+        ]);
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let mut ctx = fresh_ctx();
+        ctx.agent_id = Some(protocol::AgentId::new());
+        ctx.agent_name = Some("scout".into());
+        let result = tool
+            .call(
+                json!({"to":"reviewer","message":"Finished"}),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.data["routing"].to_string(),
+            r#"{"sender":"scout","senderColor":"blue","target":"@reviewer","targetColor":"green","summary":"Finished","content":"Finished"}"#
+        );
+        assert_eq!(
+            router.routed_colors.lock().unwrap()[0].as_deref(),
+            Some("blue")
+        );
+        let result = tool
+            .call(
+                json!({"to":"reviewer","message":"Finished"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.data["routing"].get("senderColor").is_none(),
+            "leader roster color is not a teammate context color"
+        );
+        assert_eq!(result.data["routing"]["targetColor"], "green");
+    }
+
+    #[tokio::test]
+    async fn raw_agent_id_emitted_by_agent_tool_routes_without_prefix_translation() {
+        let id = protocol::AgentId::new();
+        let emitted = id.as_uuid().to_string();
+        assert_eq!(
+            SendMessageTool::parse_recipient(&emitted).unwrap(),
+            Recipient::Agent(emitted.clone())
+        );
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let result = tool
+            .call(
+                json!({"to":emitted,"message":"Continue"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["success"], true);
+        assert_eq!(router.routed.lock().unwrap()[0].1, id.as_uuid().to_string());
+    }
 
     #[tokio::test]
     async fn delivers_string_message_resolved_by_name() {
@@ -1965,9 +2000,9 @@ mod tests {
         assert_eq!(res.data["message"], "Message sent to researcher's inbox");
         assert_eq!(res.data["routing"]["target"], "@researcher");
         assert_eq!(res.data["routing"]["content"], "start on task #1");
-        // The model sees only the brief status string, never the routing JSON dump.
+        // The UI status remains available alongside the model JSON result.
         assert_eq!(
-            res.model_content.as_deref(),
+            res.data["message"].as_str(),
             Some("Message sent to researcher's inbox")
         );
 
@@ -2071,32 +2106,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_returns_broadcast_shape() {
-        // DORMANT PLUMBING: the model can never reach this — validateInput now
-        // hard-rejects `to: "*"` (see validate_broadcast_rejected_unconditionally).
-        // This exercises the internal fan-out mechanism directly (bypassing the
-        // gate) so it stays functional for the day the oracle re-adds broadcast.
+    async fn call_rejects_broadcast_without_delivery() {
         let router = Arc::new(RecordingRouter::new());
         let tool = SendMessageTool::new(ctx_with(router.clone()));
-        let res = tool
+        let error = tool
+            .call(json!({"to":"*","message":"hi"}), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
+        assert!(error.model_facing_message().contains("broadcast (to:"));
+        assert!(router.broadcasted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn result_content_serializes_the_result_object() {
+        let tool = SendMessageTool::new(ctx_with(Arc::new(RecordingRouter::new())));
+        let result = tool
             .call(
-                json!({ "to": "*", "summary": "all hands", "message": "standup in 5" }),
+                json!({"to":"worker","message":"First line\nsecond"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect("broadcast must succeed");
-        assert_eq!(res.data["success"], true);
-        assert_eq!(res.data["recipients"], json!(["alpha", "beta"]));
-        // Model-facing text is the brief broadcast status string, not the data dump.
+            .unwrap();
         assert_eq!(
-            res.model_content.as_deref(),
-            Some("Message broadcast to 2 teammate(s): alpha, beta")
+            serde_json::from_str::<Value>(result.model_content.as_deref().unwrap()).unwrap(),
+            result.data
         );
-        assert_eq!(
-            router.broadcasted.lock().unwrap().as_slice(),
-            &[("team-lead".to_string(), "standup in 5".to_string())]
-        );
+        assert_eq!(result.data["routing"]["summary"], "First line");
     }
 
     #[tokio::test]
@@ -2122,8 +2158,8 @@ mod tests {
             .starts_with("shutdown-"));
         let msg = res.data["message"].as_str().unwrap();
         assert!(msg.starts_with("Shutdown request sent to researcher. Request ID: shutdown-"));
-        // Model-facing text mirrors the brief status string, not the data dump.
-        assert_eq!(res.model_content.as_deref(), Some(msg));
+        // The status is preserved in the serialized result object.
+        assert_eq!(res.data["message"].as_str(), Some(msg));
         // The structured payload was delivered to the named recipient.
         let routed = router.routed.lock().unwrap();
         assert_eq!(routed[0].1, "researcher");
@@ -2347,6 +2383,81 @@ mod tests {
         );
     }
 
+    /// AGT-07. A user stop is a decision, not a transient failure: the model
+    /// must learn about it in the RESULT of the call it made, not one hop later
+    /// inside the pump (which logs `Terminated` at debug and stops).
+    #[tokio::test]
+    async fn a_message_to_a_user_stopped_teammate_is_refused_synchronously() {
+        let router = Arc::new(RecordingRouter::new());
+        let registry = RecordingTaskRegistry::with_record("researcher", Some("user"));
+        let tool = SendMessageTool::new(ctx_with_shutdown(router.clone(), registry));
+
+        let err = tool
+            .call(
+                json!({ "to": "researcher", "summary": "s", "message": "keep going" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("a user-stopped agent must not silently accept messages");
+
+        assert_eq!(
+            err.model_facing_message(),
+            platform_api::task_registry::stopped_by_user_message("a1b2c3d4e")
+        );
+        // The refusal is a PRE-flight: nothing may reach the mailbox, because
+        // `deliver` returns as soon as the mailbox accepts and the registry's
+        // own refusal could then never surface in this tool's return value.
+        assert!(
+            router.routed.lock().unwrap().is_empty(),
+            "the message must not be routed"
+        );
+    }
+
+    /// The gate is keyed on WHO stopped it. A parent/model stop carries no user
+    /// intent, so it keeps the ordinary delivery path (the seam still answers
+    /// `Terminated` if the agent is really gone).
+    #[tokio::test]
+    async fn a_parent_stopped_teammate_still_takes_the_ordinary_path() {
+        let router = Arc::new(RecordingRouter::new());
+        let registry = RecordingTaskRegistry::with_record("researcher", Some("parent"));
+        let tool = SendMessageTool::new(ctx_with_shutdown(router.clone(), registry));
+
+        let res = tool
+            .call(
+                json!({ "to": "researcher", "summary": "s", "message": "keep going" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("a parent stop must not be reported as a user cancellation");
+
+        assert_eq!(res.data["success"], true);
+        assert_eq!(router.routed.lock().unwrap().len(), 1);
+    }
+
+    /// Best-effort by construction: an address the registry cannot resolve
+    /// falls through. The gate exists to convert a KNOWN cancellation into
+    /// something the model can act on, not to add a new way to fail.
+    #[tokio::test]
+    async fn an_unresolvable_target_falls_through_to_delivery() {
+        let router = Arc::new(RecordingRouter::new());
+        let registry = Arc::new(RecordingTaskRegistry::default());
+        let tool = SendMessageTool::new(ctx_with_shutdown(router.clone(), registry));
+
+        let res = tool
+            .call(
+                json!({ "to": "researcher", "summary": "s", "message": "keep going" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("an unknown address must not be refused");
+
+        assert_eq!(res.data["success"], true);
+        assert_eq!(router.routed.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn router_not_wired_is_internal_error() {
         // Default shell ctx leaves `mailbox_router` = None.
@@ -2380,15 +2491,15 @@ mod tests {
     }
 
     #[test]
-    fn send_message_is_disabled_when_agent_teams_gate_is_off() {
+    fn ordinary_agent_messages_are_enabled_when_agent_teams_gate_is_off() {
         let _guard = env_lock().lock().unwrap();
         std::env::remove_var("USER_TYPE");
         std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS");
 
         let tool = SendMessageTool::new(ctx_with(Arc::new(RecordingRouter::new())));
         assert!(
-            !tool.is_enabled(&ToolStaticContext::default()),
-            "external runs without the experimental gate must not advertise SendMessage"
+            tool.is_enabled(&ToolStaticContext::default()),
+            "ordinary background messages do not require the teams gate"
         );
     }
 

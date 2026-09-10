@@ -25,7 +25,8 @@ pub mod plan;
 pub mod result;
 
 pub use header::{
-    activity_label, tool_header, tool_icon, ToolHeader, ToolIcon, ToolSubLine, ToolVerb,
+    activity_label, tool_header, tool_header_with_result, tool_icon, ToolHeader, ToolIcon,
+    ToolSubLine, ToolVerb,
 };
 pub use plan::{PlanTask, PlanTaskState};
 pub use result::{added_removed_header, result_body, result_headline, result_is_error};

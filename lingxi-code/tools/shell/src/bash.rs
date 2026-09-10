@@ -32,7 +32,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{BASH_COMPLETED, BASH_FAILED, BASH_STARTED, BASH_TIMEOUT};
+use telemetry::tengu::tool::{
+    BASH_COMPLETED, BASH_EXPLICITLY_BACKGROUNDED, BASH_FAILED, BASH_STARTED, BASH_TIMEOUT,
+    BASH_TIMEOUT_BACKGROUNDED,
+};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -91,10 +94,6 @@ pub fn resolve_max_timeout_ms(raw: Option<&str>, default: u64) -> u64 {
         .map(|n| (n as u64).max(default))
         .unwrap_or_else(|| BASH_MAX_TIMEOUT_MS.max(default))
 }
-/// Linux/WSL shell path.
-pub const BASH_SHELL_LINUX: &str = "/bin/bash";
-/// macOS shell path.
-pub const BASH_SHELL_MACOS: &str = "/bin/zsh";
 /// Tool name byte-lock — matches claude-code tool registry.
 pub const TOOL_NAME: &str = "Bash";
 
@@ -258,252 +257,14 @@ pub fn resolve_timeout_ms(input: &Value) -> u64 {
     }
 }
 
-/// Resolve the shell binary to spawn under.
-///
-/// Mirrors `findSuitableShell()` in `src/utils/Shell.ts`: if
-/// `LINGXI_SHELL` is set to a non-empty value that contains `"bash"` or
-/// `"zsh"`, return it verbatim (no executable-check — that matches the TS
-/// behaviour which only validates that the path exists/is-executable, not
-/// that it runs successfully). Fall back to the compile-time OS default when
-/// the env var is absent, empty, or names an unsupported shell.
-///
-/// The return value is either the env-var string (leaked to `'static` so the
-/// signature stays `&'static str`) or a compile-time constant. Unique env
-/// values are leaked at most once (tests may mutate `LINGXI_SHELL`).
-#[must_use]
-pub fn resolve_shell_path() -> &'static str {
-    static CACHE: std::sync::Mutex<Option<(String, &'static str)>> = std::sync::Mutex::new(None);
-    let env_key = std::env::var("LINGXI_SHELL").unwrap_or_default();
-    let mut cache = CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((k, v)) = cache.as_ref() {
-        if k == &env_key {
-            return v;
-        }
-    }
-    let resolved = resolve_shell_path_uncached(&env_key);
-    *cache = Some((env_key, resolved));
-    resolved
-}
-
-fn resolve_shell_path_uncached(env_key: &str) -> &'static str {
-    if !env_key.is_empty() && (env_key.contains("bash") || env_key.contains("zsh")) {
-        return Box::leak(env_key.to_string().into_boxed_str());
-    }
-    // Windows: Git Bash discovery (cc 2.1.219 `MQ`/`P6n`) — env override with
-    // validation, then Program Files probes, then git-on-PATH. Falls through to
-    // the compile-time default when nothing resolves (the `P6n` "Git Bash not
-    // found" case; the unavailable line is logged inside `git_bash_path`).
-    if cfg!(windows) {
-        if let Some(p) = git_bash_path() {
-            return p;
-        }
-    }
-    if cfg!(target_os = "macos") {
-        BASH_SHELL_MACOS
-    } else {
-        BASH_SHELL_LINUX
-    }
-}
-
-// ===== BASH.GITBASH — Windows Git Bash resolution (cc 2.1.219 `MQ`/`P6n`) ===
-
-/// Verdict on a `CLAUDE_CODE_GIT_BASH_PATH` override (cc 2.1.219 `MQ` head).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitBashOverride {
-    /// Basename is a bash/sh binary AND the file exists — use it verbatim.
-    Valid,
-    /// Basename is acceptable but the file does not exist.
-    NotFound,
-    /// Basename is not `bash.exe`/`sh.exe`/`bash`/`sh` (existence is NOT
-    /// probed — the oracle short-circuits `o && e(v)` before the filesystem).
-    NotBashBinary,
-}
-
-/// Classify an override path: `basename(v).toLowerCase()` must be in
-/// `["bash.exe","sh.exe","bash","sh"]`, and only then is existence probed.
-/// Pure (existence injected) so the matrix is unit-testable on every OS.
-pub fn classify_git_bash_override(path: &str, exists: &dyn Fn(&str) -> bool) -> GitBashOverride {
-    // Node `path.basename` on win32 splits on both separators.
-    let basename = path
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(path)
-        .to_ascii_lowercase();
-    if !matches!(basename.as_str(), "bash.exe" | "sh.exe" | "bash" | "sh") {
-        return GitBashOverride::NotBashBinary;
-    }
-    if exists(path) {
-        GitBashOverride::Valid
-    } else {
-        GitBashOverride::NotFound
-    }
-}
-
-/// The byte-exact `MQ` rejection warning:
-/// `` CLAUDE_CODE_GIT_BASH_PATH "{v}" {not found|is not a bash/sh binary}; falling back to auto-detection ``.
-/// `var` is the env spelling that supplied the value (`LINGXI_GIT_BASH_PATH`
-/// is accepted as the rebrand twin; the `CLAUDE_CODE_` spelling reproduces the
-/// oracle bytes).
-#[must_use]
-pub fn git_bash_override_warning(var: &str, value: &str, verdict: GitBashOverride) -> String {
-    let reason = match verdict {
-        // `${o?"not found":"is not a bash/sh binary"}` — o = basename valid,
-        // so reaching the warning with a valid basename means the probe failed.
-        GitBashOverride::NotFound => "not found",
-        _ => "is not a bash/sh binary",
-    };
-    format!("{var} \"{value}\" {reason}; falling back to auto-detection")
-}
-
-/// Resolve the Git Bash binary (cc 2.1.219 `MQ` body, dependency-injected):
-/// validated env override first (invalid → warn + auto-detect), then the two
-/// Program Files installs, then git-on-PATH `join(git, "..","..","bin",
-/// "bash.exe")`.
-pub fn resolve_git_bash_path_with(
-    env_override: Option<(&str, &str)>,
-    exists: &dyn Fn(&str) -> bool,
-    which_git: &dyn Fn() -> Option<std::path::PathBuf>,
-) -> Option<String> {
-    if let Some((var, value)) = env_override {
-        match classify_git_bash_override(value, exists) {
-            GitBashOverride::Valid => return Some(value.to_string()),
-            verdict => {
-                tracing::warn!("{}", git_bash_override_warning(var, value, verdict));
-            }
-        }
-    }
-    for candidate in [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
-    ] {
-        if exists(candidate) {
-            return Some(candidate.to_string());
-        }
-    }
-    if let Some(git) = which_git() {
-        // `WMe.join(git, "..", "..", "bin", "bash.exe")` — git.exe lives in
-        // `Git\cmd\` (or `Git\bin\`), so two `..` from the FILE path land on
-        // the install root.
-        let candidate = git_bash_beside_git(&git.to_string_lossy());
-        if exists(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// `WMe.join(git, "..", "..", "bin", "bash.exe")` where `WMe` is
-/// `R(require("path/win32"))` (@226607353) — Node's `path.win32.join`
-/// NORMALIZES, so the two `..` are collapsed and
-/// `C:\Custom\Git\cmd\git.exe` resolves to `C:\Custom\Git\bin\bash.exe`.
-///
-/// Deliberately string-level rather than `PathBuf::join`, which appends `..`
-/// verbatim: the result is not just probed, it is what `resolve_shell_path`
-/// returns, what `P6n` (@226606409) exports as `SHELL` to every child, and
-/// what the `Using bash path: "…"` line prints. Off Windows `std::path` also
-/// sees a backslash path as a SINGLE component, so it has nothing to pop.
-fn git_bash_beside_git(git: &str) -> String {
-    let is_sep = |c: char| c == '\\' || c == '/';
-    let root_len = win32_root_len(git);
-    let (root, rest) = git.split_at(root_len);
-    let rooted = root.ends_with(['\\', '/']);
-
-    let mut comps: Vec<&str> = rest
-        .split(is_sep)
-        .filter(|c| !c.is_empty() && *c != ".")
-        .collect();
-    // The two `..`. A rooted path swallows an over-pop at its root; a relative
-    // one keeps the leftovers as leading `..` (Node's `normalizeString`).
-    let mut deficit = 0;
-    for _ in 0..2 {
-        if comps.pop().is_none() {
-            deficit += 1;
-        }
-    }
-
-    let mut parts: Vec<&str> = Vec::new();
-    if !rooted {
-        parts.extend(std::iter::repeat_n("..", deficit));
-    }
-    parts.extend(comps);
-    parts.push("bin");
-    parts.push("bash.exe");
-    // `path/win32` renders every separator as a backslash.
-    format!("{}{}", root.replace('/', "\\"), parts.join("\\"))
-}
-
-/// Length of the win32 root prefix that `..` may not climb past: `\\` (UNC or
-/// `\\?\`), a drive spec (`C:` / `C:\`), or a bare leading separator.
-fn win32_root_len(path: &str) -> usize {
-    let b = path.as_bytes();
-    let sep = |c: u8| c == b'\\' || c == b'/';
-    if b.len() >= 2 && sep(b[0]) && sep(b[1]) {
-        return 2;
-    }
-    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-        return if b.len() >= 3 && sep(b[2]) { 3 } else { 2 };
-    }
-    usize::from(!b.is_empty() && sep(b[0]))
-}
-
-/// Locate `git` on `PATH` (the `O6n("git")` which-alike used by `MQ`).
-/// Windows executable extensions only — this auto-detection chain is
-/// windows-only in the oracle.
-fn which_git_on_path() -> Option<std::path::PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        for name in ["git.exe", "git.cmd", "git"] {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-/// Memoized process-wide Git Bash path (`MQ` is memoized; `P6n` runs once at
-/// startup). On success the path is exported as `SHELL` and logged
-/// (`Using bash path: "{p}"`); on failure the `P6n` unavailable line is
-/// logged. Consulted by [`resolve_shell_path`] on Windows.
-///
-/// Env override: `LINGXI_GIT_BASH_PATH` first, then the upstream
-/// `CLAUDE_CODE_GIT_BASH_PATH` spelling; empty values count as unset.
-#[must_use]
-pub fn git_bash_path() -> Option<&'static str> {
-    static RESOLVED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    RESOLVED
-        .get_or_init(|| {
-            let override_owned = ["LINGXI_GIT_BASH_PATH", "CLAUDE_CODE_GIT_BASH_PATH"]
-                .iter()
-                .find_map(|var| {
-                    std::env::var(var)
-                        .ok()
-                        .filter(|v| !v.is_empty())
-                        .map(|v| (*var, v))
-                });
-            let resolved = resolve_git_bash_path_with(
-                override_owned.as_ref().map(|(var, v)| (*var, v.as_str())),
-                &|p| std::path::Path::new(p).exists(),
-                &which_git_on_path,
-            );
-            // `P6n` side effects belong to the real windows runtime only —
-            // resolution stays testable everywhere.
-            if cfg!(windows) {
-                match &resolved {
-                    Some(p) => {
-                        std::env::set_var("SHELL", p);
-                        tracing::info!("Using bash path: \"{p}\"");
-                    }
-                    None => tracing::warn!("Git Bash not found; BashTool will be unavailable"),
-                }
-            }
-            resolved
-        })
-        .as_deref()
-}
+// Shared with Monitor; reexport preserves the established shell-tool API.
+#[cfg(test)]
+use platform_api::shell_support::git_bash_beside_git;
+pub use platform_api::shell_support::{
+    classify_git_bash_override, format_duration_ms, git_bash_override_warning, git_bash_path,
+    resolve_git_bash_path_with, resolve_shell_path, GitBashOverride, BASH_SHELL_LINUX,
+    BASH_SHELL_MACOS,
+};
 
 // ===== BASH.3 — output-length env override ==================================
 
@@ -722,12 +483,12 @@ fn bash_model_content(
     parts.join("\n")
 }
 
-/// Build the BashTool result `data` — claude-code 2.1.191 `BashTool` outputSchema
+/// Build the BashTool result `data` — claude-code 2.1.263 `BashTool` outputSchema
 /// (pure metadata; the model-facing render rides on `ToolCallResult.model_content`,
 /// NOT inside `data`). Field order mirrors the binary's `return{data:{…}}`
 /// construction (`preserve_order` is on): `stdout, stderr, interrupted, isImage,
 /// returnCodeInterpretation?, noOutputExpected, backgroundTaskId?,
-/// outputTaskId?, outputFilePath?, outputFileSize?`. Every `?`-field is
+/// persistedOutputPath?, persistedOutputSize?`. Every `?`-field is
 /// omitted when absent, matching the binary's `undefined` values that
 /// `JSON.stringify` drops. The
 /// telemetry-only fields LingXi used to carry here (`exit_code`, `is_error`,
@@ -735,9 +496,12 @@ fn bash_model_content(
 /// `tengu`/`BASH_COMPLETED` analytics payload only.
 ///
 /// `output_file` is set only when a completed foreground process spilled to its
-/// rooted task-output file. Its three fields are emitted together, immediately
-/// after `backgroundTaskId` (when present), so a completed auto-backgrounded
-/// task can clear `backgroundTaskId` while retaining the output identity.
+/// rooted task-output file. 2.1.263 maps that identity onto
+/// `persistedOutputPath` / `persistedOutputSize` (the 2.1.191
+/// `outputTaskId`/`outputFilePath`/`outputFileSize` trio is gone from the
+/// schema). The two fields are emitted together, immediately after
+/// `backgroundTaskId` (when present), so a completed auto-backgrounded task
+/// can clear `backgroundTaskId` while retaining the output identity.
 /// `timed_out_after_ms` is set only when the command hit its timeout and was
 /// auto-moved to the background (claude-code 2.1.210+ `timedOutAfterMs`); it
 /// carries the exceeded timeout in ms and follows the output identity fields.
@@ -782,15 +546,11 @@ fn bash_result_data(
     }
     if let Some(output_file) = output_file {
         m.insert(
-            "outputTaskId".into(),
-            serde_json::Value::String(output_file.task_id.clone()),
-        );
-        m.insert(
-            "outputFilePath".into(),
+            "persistedOutputPath".into(),
             serde_json::Value::String(output_file.path.clone()),
         );
         m.insert(
-            "outputFileSize".into(),
+            "persistedOutputSize".into(),
             serde_json::Value::Number(output_file.size.into()),
         );
     }
@@ -814,29 +574,55 @@ fn bash_result_data(
     serde_json::Value::Object(m)
 }
 
-/// Port of claude-code 2.1.238 `L0i` — the model-facing note attached to a
-/// backgrounded command (`mapToolResultToToolResultBlockParam`'s `y`).
+/// Port of claude-code 2.1.263 `$2t` (`src_160988549.js` @1886651) — the
+/// model-facing note attached to a backgrounded command
+/// (`mapToolResultToToolResultBlockParam`'s `y`). The 2.1.238 spelling was
+/// `L0i`, with three head arms instead of four.
 ///
 /// ```js
-/// function L0i({backgroundTaskId:e,outputPath:t,backgroundedByUser:r,timedOutAfterMs:n,
-///               reapedAtFinalResponse:o,readToolName:i}){
-///  let s=r?`Command was manually backgrounded by user with ID: ${e}. Output is being written to: ${t}.`
-///       :n!==void 0?`Command did not complete within its ${Math.max(1,Math.round(n/1000))}s timeout and was moved to the background (ID: ${e}). Output is being written to: ${t}.`
+/// function $2t({backgroundTaskId:e,outputPath:t,backgroundedByUser:r,
+///               backgroundedToDeliverMessage:o,timedOutAfterMs:d,
+///               reapedAtFinalResponse:p,readToolName:_}){
+///  let E=r?`Command was manually backgrounded by user with ID: ${e}. Output is being written to: ${t}.`
+///       :o?`Command was moved to the background (ID: ${e}) so that a message that arrived while it was running can reach you; it was not interrupted. Output is being written to: ${t}.`
+///       :d!==void 0?`Command did not complete within its ${Math.max(1,Math.round(d/1000))}s timeout and was moved to the background (ID: ${e}). Output is being written to: ${t}.`
 ///       :`Command running in background with ID: ${e}. Output is being written to: ${t}.`,
-///   a=o?"If it exits while you are still working…":r?void 0:"You will be notified when it completes.",
-///   l=r?void 0:`To check interim output, use ${i} on that file path.`;
-///  return[s,a,l].filter(Boolean).join(" ")}
+///   C=p?"If it exits while you are still working…":r?void 0:"You will be notified when it completes.",
+///   I=r?void 0:`To check interim output, use ${_} on that file path.`;
+///  return[E,C,I].filter(Boolean).join(" ")}
 /// ```
 ///
-/// RESIDUAL (unchanged by this port): LingXi has no Ctrl+B manual-background
-/// path, so the `backgroundedByUser` arm has no call site and is not modelled.
+/// The trigger is preserved through the foreground requester; timeout,
+/// manual backgrounding and message delivery choose distinct oracle heads.
 fn background_note(
     background_task_id: &str,
     output_path: &str,
     timed_out_after_ms: Option<u64>,
     reaped_at_final_response: bool,
 ) -> String {
-    let head = match timed_out_after_ms {
+    background_note_for_reason(
+        background_task_id,
+        output_path,
+        timed_out_after_ms,
+        reaped_at_final_response,
+        0,
+    )
+}
+
+fn background_note_for_reason(
+    background_task_id: &str,
+    output_path: &str,
+    timed_out_after_ms: Option<u64>,
+    reaped_at_final_response: bool,
+    reason: u8,
+) -> String {
+    use platform_api::task_registry::TaskBackgroundReason;
+    let head = if reason == TaskBackgroundReason::User as u8 {
+        format!("Command was manually backgrounded by user with ID: {background_task_id}. Output is being written to: {output_path}.")
+    } else if reason == TaskBackgroundReason::DeliverMessage as u8 {
+        format!("Command was moved to the background (ID: {background_task_id}) so that a message that arrived while it was running can reach you; it was not interrupted. Output is being written to: {output_path}.")
+    } else {
+        match timed_out_after_ms {
         // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`.
         Some(ms) => {
             let secs = (((ms as f64) / 1000.0).round() as i64).max(1);
@@ -847,6 +633,7 @@ fn background_note(
         None => format!(
             "Command running in background with ID: {background_task_id}. Output is being written to: {output_path}."
         ),
+    }
     };
     // NOTE the U+2014 EM DASH in the reaped sentence (oracle stores it as the
     // JS escape `—`).
@@ -886,42 +673,80 @@ fn background_ends_with_final_response(ctx: &ToolUseContext) -> bool {
 /// `<error>Command was aborted before completion</error>` marker appended to
 /// stderr (`BashTool.tsx:602-604`). `is_error` follows `interrupted` (TS
 /// `is_error: interrupted`) and is therefore `true`.
-/// Human-readable duration — claude-code's `qs()` in its default (no-options)
-/// form: a sub-minute value is `"<floor(seconds)>s"`; otherwise the largest
-/// units down, `"Xd Yh Zm"` / `"Yh Zm Ws"` / `"Zm Ws"` / `"Ws"`, with the
-/// seconds field rounded and 60→carry normalization (`60s→+1m`, `60m→+1h`,
-/// `24h→+1d`). Used for the timed-out-command annotation (94 call sites in the
-/// binary; ported for the one the Bash tool needs).
-#[must_use]
-pub fn format_duration_ms(ms: u64) -> String {
-    if ms < 60_000 {
-        return format!("{}s", ms / 1000);
+/// claude-code `yWt` + `"wget"` (= `Les`) — the command names the backgrounding
+/// telemetry reports as a `command_type`, in the oracle's order.
+const TELEMETRY_COMMAND_TYPES: &[&str] = &[
+    "npm",
+    "yarn",
+    "pnpm",
+    "node",
+    "python",
+    "python3",
+    "go",
+    "cargo",
+    "make",
+    "docker",
+    "terraform",
+    "webpack",
+    "vite",
+    "jest",
+    "pytest",
+    "curl",
+    "git",
+    "gh",
+    "dotnet",
+    "msbuild",
+    "nuget",
+    "bun",
+    "bunx",
+    "npx",
+    "deno",
+    "pwsh",
+    "pip",
+    "uv",
+    "poetry",
+    "gradle",
+    "mvn",
+    "nx",
+    "turbo",
+    "tsc",
+    "eslint",
+    "prettier",
+    "build",
+    "test",
+    "serve",
+    "watch",
+    "dev",
+    "xcodebuild",
+    "swift",
+    "bazel",
+    "nix",
+    "nix-shell",
+    "nix-build",
+    "nix-env",
+    "wget",
+];
+
+/// claude-code `Npe(command)` — the `command_type` field on the backgrounding
+/// events:
+///
+/// ```js
+/// function Npe(e){let t=Lm(e);if(t.length===0)return S("other");
+///   for(let r of t){let o=ft(r," ");let d=Les.find((p)=>p===o);if(d)return u(d)}
+///   return S("other")}
+/// ```
+///
+/// Split the command line, take each sub-command's FIRST token, and report the
+/// first one that is a known name — else `"other"`. The first MATCH wins, not
+/// the first sub-command: `cd foo && cargo build` reports `cargo`.
+fn telemetry_command_type(command: &str) -> &'static str {
+    for part in permission::shell_command::split_command(command) {
+        let head = part.trim().split(' ').next().unwrap_or_default();
+        if let Some(known) = TELEMETRY_COMMAND_TYPES.iter().find(|c| **c == head) {
+            return known;
+        }
     }
-    let mut days = ms / 86_400_000;
-    let mut hours = (ms % 86_400_000) / 3_600_000;
-    let mut mins = (ms % 3_600_000) / 60_000;
-    let mut secs = ((ms % 60_000) as f64 / 1000.0).round() as u64;
-    if secs == 60 {
-        secs = 0;
-        mins += 1;
-    }
-    if mins == 60 {
-        mins = 0;
-        hours += 1;
-    }
-    if hours == 24 {
-        hours = 0;
-        days += 1;
-    }
-    if days > 0 {
-        format!("{days}d {hours}h {mins}m")
-    } else if hours > 0 {
-        format!("{hours}h {mins}m {secs}s")
-    } else if mins > 0 {
-        format!("{mins}m {secs}s")
-    } else {
-        format!("{secs}s")
-    }
+    "other"
 }
 
 /// Build the model-facing result for a killed command. `timeout_ms = Some(ms)`
@@ -1606,6 +1431,209 @@ fn match_null_redirect(b: &[u8], p: usize) -> Option<usize> {
     Some(nul_start)
 }
 
+/// Whether the FIRST word of the FIRST statement is `sleep`.
+///
+/// Port of claude-code `$es` (2.1.263 `src_160988549.js` @4326943) over
+/// `Des = ["sleep"]`: an empty command, or one whose first segment has no first
+/// word, is auto-backgroundable (both of `$es`'s early `return !0`s). This is
+/// deliberately NOT the sleep-block predicate, which additionally requires a
+/// standalone `sleep N` with N above a threshold.
+fn first_statement_is_sleep(command: &str) -> bool {
+    permission::shell_command::split_command(command)
+        .first()
+        .and_then(|segment| segment.trim().split_whitespace().next().map(str::to_string))
+        .is_some_and(|word| word == "sleep")
+}
+
+/// Settles a background shell's task record when its child is reaped.
+///
+/// claude-code `cnr` — how long a foreground command must run before it earns a
+/// `local_bash` row (2.1.263 `src_160988549.js` @4321443: `cnr=2000`).
+const FOREGROUND_ARMING_DELAY: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// The registry's end of claude-code `I_t`'s `t.background(e)`.
+///
+/// Firing the notify is all it takes: the process runner is already waiting on
+/// it alongside the deadline, and takes the identical move-to-background path.
+struct BackgroundBashRequester {
+    notify: std::sync::Arc<tokio::sync::Notify>,
+    reason: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    settled: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+struct BackgroundRequestSettled(std::sync::Arc<tokio::sync::watch::Sender<bool>>);
+impl Drop for BackgroundRequestSettled {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
+#[async_trait::async_trait]
+impl platform_api::task_registry::TaskBackgrounder for BackgroundBashRequester {
+    async fn background(&self) {
+        self.background_with_reason(platform_api::task_registry::TaskBackgroundReason::User)
+            .await;
+    }
+    async fn background_with_reason(
+        &self,
+        reason: platform_api::task_registry::TaskBackgroundReason,
+    ) {
+        // First trigger wins, so an arriving message cannot relabel Ctrl+B.
+        let _ = self.reason.compare_exchange(
+            0,
+            reason as u8,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let mut settled = self.settled.subscribe();
+        self.notify.notify_one();
+        // Do not cancel the owning turn until its process has actually detached.
+        while !*settled.borrow_and_update() {
+            if settled.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// The live arming of one foreground command: the 2 s timer, plus what it takes
+/// to withdraw the row again.
+struct ForegroundArming {
+    timer: Option<tokio::task::JoinHandle<()>>,
+    withdraw_on_drop: bool,
+    task_id: String,
+    registry: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+}
+
+impl ForegroundArming {
+    /// claude-code `W6t` — the command finished in the foreground, so cancel the
+    /// timer and withdraw the row if it ever appeared.
+    ///
+    /// Withdrawing is not optional: a row left behind is `running` forever, and
+    /// the registry would eventually narrate a completion for a command the
+    /// model was never told had started.
+    async fn join_timer(&mut self) {
+        if let Some(timer) = self.timer.as_mut() {
+            timer.abort();
+            // Keep the handle in self until joined: dropping this await must
+            // still let Drop serialize withdrawal after the timer terminates.
+            let _ = timer.await;
+        }
+        self.timer = None;
+    }
+
+    async fn disarm(mut self) {
+        self.join_timer().await;
+        self.registry
+            .unregister_foreground_bash(&self.task_id)
+            .await;
+        self.withdraw_on_drop = false;
+    }
+
+    async fn keep_for_background(mut self) {
+        self.join_timer().await;
+        self.withdraw_on_drop = false;
+    }
+}
+
+impl Drop for ForegroundArming {
+    fn drop(&mut self) {
+        let timer = self.timer.take();
+        if let Some(timer) = &timer {
+            timer.abort();
+        }
+        if !self.withdraw_on_drop {
+            return;
+        }
+        let registry = self.registry.clone();
+        let task_id = self.task_id.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Some(timer) = timer {
+                    let _ = timer.await;
+                }
+                // This only withdraws an unpromoted foreground row. It neither
+                // kills a process nor removes an acknowledged background task.
+                registry.unregister_foreground_bash(&task_id).await;
+            });
+        }
+    }
+}
+
+/// Port of claude-code `Ger` (2.1.263 `src_160988549.js` @4284565): the shell's
+/// result promise drives the record to its terminal status, which is what makes
+/// the completion `<task-notification>` fire.
+struct BackgroundBashExitSink {
+    registry: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+}
+
+#[async_trait::async_trait]
+impl platform_api::BackgroundExitSink for BackgroundBashExitSink {
+    async fn on_supervised_start(&self, task_id: &str) {
+        self.registry.mark_shell_supervised(task_id).await;
+    }
+
+    async fn on_supervised_exit(&self, task_id: &str, exit_code: Option<i32>) {
+        self.registry.mark_shell_supervised(task_id).await;
+        self.on_exit(task_id, exit_code).await;
+    }
+
+    fn manages_output(&self) -> bool {
+        true
+    }
+
+    async fn append_output(
+        &self,
+        task_id: &str,
+        content: &str,
+    ) -> Result<(), platform_api::ProcessError> {
+        self.registry
+            .append_bash_output(task_id, content)
+            .await
+            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+    }
+
+    async fn finalize_persisted_output(&self, task_id: &str, max_bytes: u64) -> Result<Option<u64>, platform_api::ProcessError> {
+        self.registry.finalize_persisted_output(task_id, max_bytes).await.map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+    }
+
+    async fn flush_output(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
+        self.registry
+            .flush_bash_output(task_id)
+            .await
+            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+    }
+
+    async fn on_stall(&self, task_id: &str, tail: &str) {
+        self.registry.notify_bash_stall(task_id, tail).await;
+    }
+
+    async fn on_memory_pressure(&self, task_id: &str) -> bool {
+        self.registry.claim_bash_memory_pressure_stop(task_id).await
+    }
+
+    async fn on_exit(&self, task_id: &str, exit_code: Option<i32>) {
+        // Best-effort: a settle for a since-evicted task is a benign NotFound.
+        let _ = self
+            .registry
+            .settle_background_bash(task_id, exit_code, false)
+            .await;
+    }
+}
+
+/// Terminates a backgrounded shell's OS process on `TaskStop` or teardown.
+struct BackgroundBashKiller {
+    process: std::sync::Arc<dyn platform_api::ProcessRunner>,
+    handle: platform_api::ProcessHandle,
+}
+
+#[async_trait::async_trait]
+impl platform_api::task_registry::TaskKiller for BackgroundBashKiller {
+    async fn kill(&self) {
+        let _ = self.process.kill(&self.handle).await;
+    }
+}
+
 /// Compute the per-task output file path used when `run_in_background=true`.
 ///
 /// Mirrors `platform_posix::process::task_output_path` (which we
@@ -1613,9 +1641,7 @@ fn match_null_redirect(b: &[u8], p: usize) -> Option<usize> {
 /// lingxi-tools → lingxi-platform-posix → lingxi-lsp → lingxi-tools).
 #[must_use]
 pub fn task_output_path(task_id: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("lingxi-task-output")
-        .join(format!("{task_id}.out"))
+    platform_api::task_output::legacy_output_path(task_id)
 }
 
 /// A per-call id, unique within the process AND across processes.
@@ -1739,6 +1765,235 @@ pub struct BashTool {
 }
 
 impl BashTool {
+    /// Mint the task identity for this shell command: a registry task id and an
+    /// output file for the process runner to append to.
+    ///
+    /// Returns `None` when no registry is wired, in which case the runner keeps
+    /// minting its own identity and behaviour is unchanged.
+    async fn allocate_task_identity(&self) -> Option<(String, String)> {
+        let registry = self.ctx.task_registry.as_ref()?;
+        match registry.allocate_bash_output().await {
+            Ok(handle) => Some((handle.task_id, handle.output_path)),
+            Err(error) => {
+                // Fail open: a registry that cannot mint an identity must not
+                // stop the command from running, it only costs this command its
+                // registry record.
+                tracing::warn!(
+                    target: "tool_shell::bash",
+                    %error,
+                    "could not allocate a task identity for the shell command; falling back to a runner-owned id"
+                );
+                None
+            }
+        }
+    }
+
+    /// Bind the [`BackgroundTaskBinding`] for an allocated identity onto the
+    /// command, so the runner writes to that file and reports that id.
+    ///
+    /// [`BackgroundTaskBinding`]: platform_api::BackgroundTaskBinding
+    fn bind_identity(
+        &self,
+        sandboxed: platform_api::SandboxedCommand,
+        bound: Option<&(String, String)>,
+        on_demand: Option<std::sync::Arc<tokio::sync::Notify>>,
+    ) -> platform_api::SandboxedCommand {
+        let Some((task_id, output_path)) = bound else {
+            return sandboxed;
+        };
+        sandboxed.with_background_task(platform_api::BackgroundTaskBinding {
+            task_id: task_id.clone(),
+            output_path: std::path::PathBuf::from(output_path),
+            on_exit: self.ctx.task_registry.clone().map(|registry| {
+                std::sync::Arc::new(BackgroundBashExitSink { registry })
+                    as std::sync::Arc<dyn platform_api::BackgroundExitSink>
+            }),
+            on_demand,
+        })
+    }
+
+    /// Create the `local_bash` record for an identity that is actually being
+    /// backgrounded (claude-code `Xne`). Foreground commands never get a record.
+    async fn register_background_task(
+        &self,
+        ctx: &ToolUseContext,
+        bound: Option<&(String, String)>,
+        command: &str,
+        description: Option<&str>,
+        cwd: &std::path::Path,
+    ) -> Result<(), ToolError> {
+        let (Some((task_id, _)), Some(registry)) = (bound, self.ctx.task_registry.as_ref()) else {
+            return Ok(());
+        };
+        let registration = platform_api::task_registry::BackgroundBashRegistration {
+            command: command.to_string(),
+            // claude-code stores `description || command` on the record
+            // (`Xne`'s `description: Me || ve`); the completion summary renders
+            // it as `Background command "{description}" completed (exit code N)`.
+            description: description
+                .filter(|d| !d.is_empty())
+                .unwrap_or(command)
+                .to_string(),
+            tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
+            // The directory the child is actually spawned in — NOT a fresh read
+            // of `shell_cwd`, which ignores a subagent's per-call `ctx.cwd` and
+            // would advertise a directory the command never ran in.
+            cwd: Some(cwd.display().to_string()),
+            // The launching agent owns the task; `None` means the main session
+            // does (claude-code stamps the record's `agentId` the same way).
+            creator_agent_id: ctx.agent_id.clone(),
+        };
+        registry.register_background_bash(task_id, registration).await
+            .map_err(|error| ToolError::Io(format!("could not register background shell: {error}")))
+    }
+
+    /// Arm the 2 s foreground record (claude-code `U6t`, fired once the poll
+    /// loop sees the command has been running for `cnr` = 2000 ms).
+    ///
+    /// Nothing is registered at spawn: arming immediately would flash a
+    /// `/tasks` row for every `ls` and `git status`. Only a command that is
+    /// still running after two seconds becomes addressable, and it is withdrawn
+    /// again by [`ForegroundArming::disarm`] if it then finishes in the
+    /// foreground.
+    fn arm_foreground_record(
+        &self,
+        ctx: &ToolUseContext,
+        task_id: &str,
+        command: &str,
+        description: Option<&str>,
+        notify: std::sync::Arc<tokio::sync::Notify>,
+        reason: std::sync::Arc<std::sync::atomic::AtomicU8>,
+        settled: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+        progress: ToolProgressSender,
+    ) -> Option<ForegroundArming> {
+        let registry = self.ctx.task_registry.clone()?;
+        let registration = platform_api::task_registry::BackgroundBashRegistration {
+            command: command.to_string(),
+            description: description
+                .filter(|d| !d.is_empty())
+                .unwrap_or(command)
+                .to_string(),
+            tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
+            cwd: Some(self.shell_cwd.lock().unwrap().display().to_string()),
+            creator_agent_id: ctx.agent_id.clone(),
+        };
+        let auto_background_armed =
+            !crate::prompt::background_tasks_disabled() && !first_statement_is_sleep(command);
+        let id = task_id.to_string();
+        let arming_registry = registry.clone();
+        let tool_use_id = ctx.tool_use_id.clone();
+        let hint_enabled = !crate::prompt::background_tasks_disabled();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(FOREGROUND_ARMING_DELAY).await;
+            if let Err(error) = arming_registry
+                .register_foreground_bash(&id, registration, auto_background_armed)
+                .await
+            {
+                tracing::debug!(
+                    target: "tool_shell::bash",
+                    %error,
+                    "could not arm the foreground shell record"
+                );
+                return;
+            }
+            // Only now is the row addressable, so bind the handle that moves it
+            // to the background before anything can ask for that.
+            let _ = arming_registry
+                .bind_background_requester(
+                    &id,
+                    std::sync::Arc::new(BackgroundBashRequester {
+                        notify,
+                        reason,
+                        settled,
+                    }),
+                )
+                .await;
+            if hint_enabled {
+                if let Some(tool_use_id) = tool_use_id {
+                    let _ = progress.try_send(tool_api::progress::ToolProgress {
+                        data: serde_json::json!({"kind":"background_hint", "toolUseId":tool_use_id.to_string()}),
+                        tool_use_id,
+                    });
+                }
+            }
+        });
+        Some(ForegroundArming {
+            timer: Some(timer),
+            withdraw_on_drop: true,
+            task_id: task_id.to_string(),
+            registry,
+        })
+    }
+
+    /// Keep the minted identity only if the process runner actually used it.
+    ///
+    /// A runner that ignores the binding writes the child's output to a file of
+    /// its own and reports its own id; claiming the registry path in that case
+    /// would advertise a file nothing ever writes to. Drop the allocation
+    /// instead and fall back to the runner's identity.
+    async fn take_honoured_identity(
+        &self,
+        bound: Option<(String, String)>,
+        handle: &platform_api::ProcessHandle,
+    ) -> Option<(String, String)> {
+        let (task_id, output_path) = bound?;
+        if handle.task_id == task_id {
+            return Some((task_id, output_path));
+        }
+        if let Some(registry) = self.ctx.task_registry.as_ref() {
+            registry.discard_bash_output(&task_id).await;
+        }
+        tracing::debug!(
+            target: "tool_shell::bash",
+            minted = %task_id,
+            reported = %handle.task_id,
+            "process runner did not honour the bound task identity; keeping its own"
+        );
+        None
+    }
+
+    /// Attach the killer for a backgrounded shell so `TaskStop` and teardown can
+    /// terminate a child the registry did not spawn itself.
+    ///
+    /// `task_id` is the id the REGISTRY knows; `handle` is what the runner needs
+    /// to signal the process, and the two differ when the runner ignored the
+    /// binding.
+    async fn bind_background_task(&self, task_id: &str, handle: &platform_api::ProcessHandle) -> Result<(), ToolError> {
+        let Some(registry) = self.ctx.task_registry.as_ref() else {
+            return Ok(());
+        };
+        let killer = std::sync::Arc::new(BackgroundBashKiller {
+            process: self.ctx.process.clone(),
+            handle: handle.clone(),
+        }) as std::sync::Arc<dyn platform_api::task_registry::TaskKiller>;
+        registry.bind_background_process(task_id, handle.pid, killer).await
+            .map_err(|error| ToolError::Io(format!("could not bind background shell: {error}")))
+    }
+
+    /// Registration is the receipt that permits a supervisor to outlive this host.
+    #[allow(clippy::too_many_arguments)]
+    async fn acknowledge_background_task(
+        &self, ctx: &ToolUseContext, bound: Option<&(String, String)>, command: &str,
+        description: Option<&str>, cwd: &std::path::Path, handle: &platform_api::ProcessHandle,
+    ) -> Result<String, ToolError> {
+        let task_id = bound.map_or_else(|| handle.task_id.clone(), |(id, _)| id.clone());
+        let result = async {
+            self.register_background_task(ctx, bound, command, description, cwd).await?;
+            if bound.is_some() { self.bind_background_task(&task_id, handle).await?; }
+            self.ctx.process.acknowledge_shell(handle).await
+                .map_err(|error| ToolError::Io(format!("could not acknowledge background shell: {error}")))
+        }.await;
+        if let Err(error) = result {
+            let _ = self.ctx.process.kill(handle).await;
+            if let (Some(registry), Some((id, _))) = (self.ctx.task_registry.as_ref(), bound) {
+                let _ = registry.settle_background_bash(id, None, true).await;
+                registry.discard_bash_output(id).await;
+            }
+            return Err(error);
+        }
+        Ok(task_id)
+    }
+
     /// Construct a fresh tool bound to the given builtin context.
     ///
     /// The `CwdChanged` firer defaults to `None` (no fire). Inject one via
@@ -1747,6 +2002,7 @@ impl BashTool {
     /// and every other `BashTool::new(ctx)` caller keep compiling untouched.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
+        tool_api::builtin_context::install_shell_discovery_logging();
         let boot_cwd = ctx.cwd();
         let shell_cwd = std::sync::Arc::new(std::sync::Mutex::new(boot_cwd.clone()));
         let synced_session_cwd = std::sync::Arc::new(std::sync::Mutex::new(boot_cwd));
@@ -1888,12 +2144,12 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
-/// The Bash input schema with `run_in_background` OMITTED — claude-code 2.1.238
-/// `egm`:
+/// The Bash input schema with `run_in_background` OMITTED — claude-code 2.1.263
+/// `gnr` (`src_160988549.js` @4323900):
 ///
 /// ```js
-/// egm=we(()=>(WA()?Qhm().omit({run_in_background:!0,_simulatedSedEdit:!0})
-///                 :Qhm().omit({_simulatedSedEdit:!0})).superRefine(…))
+/// gnr=m(()=>(Dl()?dnr().omit({run_in_background:!0,_simulatedSedEdit:!0})
+///                 :dnr().omit({_simulatedSedEdit:!0})).superRefine(…))
 /// ```
 ///
 /// When background tasks are disabled the oracle strips the property from the
@@ -1920,8 +2176,8 @@ impl Tool for BashTool {
         Some("execute shell commands")
     }
 
-    /// claude-code 2.1.238 `egm` selects between the full schema and one with
-    /// `run_in_background` omitted, keyed on `WA()` (background tasks disabled).
+    /// claude-code 2.1.263 `gnr` selects between the full schema and one with
+    /// `run_in_background` omitted, keyed on `Dl()` (background tasks disabled).
     /// Evaluated per call — like the oracle's `we(...)` memo, which re-reads the
     /// same switch — so a session that flips the env var sees a consistent
     /// prompt + schema pair.
@@ -2260,14 +2516,46 @@ impl Tool for BashTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
             .to_string();
+        // 2.1.266 `a0` (`src_163219561.js` @1939367): refuse to start a process
+        // while THIS agent's own stop is still completing, so a dying agent
+        // cannot leave one running behind it.
+        //
+        // Upstream returns `rSe()` here — the SAME value its abort path returns
+        // (`xDt`: `status:"killed"`, `interrupted:true`) — rather than an error
+        // carrying the sentence, and logs the sentence instead. This port keeps
+        // that invariant in its own vocabulary: `ToolError::Aborted` is what its
+        // cancel path returns, and `turn_loop` maps it to the `"interrupted"`
+        // `toolDenialKind`. Synthesizing upstream's `code:145` /
+        // "Command aborted before execution" body would mean inventing a result
+        // shape that exists nowhere else here, and would report a refusal as a
+        // command that ran and failed.
+        if let Some(agent_id) = ctx.agent_id {
+            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+                tracing::debug!(
+                    "Shell exec refused: agent {agent_id} has a kill pending loop settlement"
+                );
+                return Err(ToolError::Aborted);
+            }
+        }
         // claude-code `BashTool.tsx` sends the timeout as `timeout` (ms). Resolve
         // it with the faithful `VF` (numeric-string coercion) + `H5a` (use iff a
         // finite number > 0, else default) logic — no upper clamp/rejection (#4/#5).
         let timeout_ms = resolve_timeout_ms(&input);
+        // claude-code gates the explicit-background branch on the same
+        // background-tasks-disabled flag that removes the parameter from the
+        // schema (`if (Oe === !0 && !It)`), so a call that carries the
+        // parameter anyway still runs in the foreground.
         let run_bg = input
             .get("run_in_background")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && !crate::prompt::background_tasks_disabled();
+        // Whether exceeding the timeout may move this command to the background
+        // rather than kill it (claude-code `dn = !Dl() && $es(command)`). A
+        // command whose first statement starts with `sleep` is excluded: the
+        // point of a sleep is to finish, so backgrounding it just hides it.
+        let can_auto_background =
+            !crate::prompt::background_tasks_disabled() && !first_statement_is_sleep(&cmd_str);
         // BASH.5: optional `dangerouslyDisableSandbox` override.
         let dangerously_disable_sandbox = input
             .get("dangerouslyDisableSandbox")
@@ -2344,6 +2632,46 @@ impl Tool for BashTool {
                 *synced = workspace.clone();
             }
         }
+        // ===== BASH.4 persistent cwd, resolved ONCE for BOTH modes =====
+        // A subagent isolated in a worktree (`isolation:"worktree"`) or given an
+        // explicit `cwd` runs EACH command in that directory, reset per call
+        // (claude-code's "Agent threads always have their cwd reset between bash
+        // calls"), WITHOUT touching the shared persistent shell cwd (which the
+        // main loop owns). The main loop (`ctx.cwd` None) reads the live
+        // persistent shell cwd as before.
+        //
+        // claude-code has ONE shell spawn for both modes (`vV`), so this is
+        // derived above the `run_bg` branch and consumed by both arms —
+        // including the recovery below, which the background arm used to get
+        // for free by being pinned to the workspace.
+        let agent_cwd = ctx.cwd.clone();
+        let cwd = match &agent_cwd {
+            Some(c) => c.clone(),
+            None => self.shell_cwd.lock().unwrap().clone(),
+        };
+        // Deleted-cwd recovery (Shell.ts:220-238): if the live cwd no longer
+        // exists on disk (e.g. a prior command deleted its own dir), fall back
+        // to the tool workspace (TS `getOriginalCwd`); if that is also gone,
+        // fail with the byte-locked message.
+        let cwd = if std::fs::canonicalize(&cwd).is_ok() {
+            cwd
+        } else if std::fs::canonicalize(&workspace).is_ok() {
+            // Only the main loop's FOREGROUND path persists the recovered cwd to
+            // the shared shell: a subagent's cwd is per-call, and a background
+            // launch must never mutate the shared cwd (BASH.4). A background
+            // command still RUNS in the recovered directory; it just leaves the
+            // repair to the next foreground call.
+            if agent_cwd.is_none() && !run_bg {
+                self.shell_cwd.lock().unwrap().clone_from(&workspace);
+            }
+            workspace.clone()
+        } else {
+            return Err(ToolError::Internal(format!(
+                "Working directory \"{}\" no longer exists. Please restart Claude from an existing directory.",
+                cwd.display()
+            )));
+        };
+
         let decision = should_use_sandbox(
             &cmd_str,
             self.ctx.sandbox_available,
@@ -2414,32 +2742,75 @@ impl Tool for BashTool {
             }
         };
 
-        // ===== Background path (UNCHANGED — TS `!result.backgroundTaskId`) =====
+        // ===== Background path (TS `!result.backgroundTaskId`) =====
         // Background tasks never mutate the shared cwd, so they skip the
-        // `pwd -P` readback entirely and keep spawning under the workspace.
+        // `pwd -P` readback entirely — but they START in it, same as the
+        // foreground arm (see the shared `cwd` derivation above).
         if run_bg {
+            // bg-08: the oracle emits this the moment an explicit background
+            // launch is taken (`i("tengu_bash_command_explicitly_backgrounded",
+            // {command_type:Npe(ve)})`, `src_160988549.js` @4343453).
+            {
+                let mut meta: LogEventMetadata = HashMap::new();
+                meta.insert(
+                    "command_type".into(),
+                    AnalyticsValue::String(telemetry_command_type(&cmd_str).into()),
+                );
+                self.ctx
+                    .bus
+                    .log_event(BASH_EXPLICITLY_BACKGROUNDED, meta)
+                    .await;
+            }
             let pcmd = SbxCommand {
                 command: shell,
                 // BASH.4: login-shell init (see the foreground site) — `-l`
                 // after `-c`, matching `bashProvider.ts:201-205` with the
                 // snapshot path deferred.
                 args: vec!["-c".into(), "-l".into(), inner_cmd],
-                cwd: Some(workspace.clone()),
+                // The PERSISTENT shell cwd, the SAME binding the foreground
+                // arm uses. claude-code has ONE spawn for both modes (`vV`);
+                // `run_in_background` only decides what happens AFTER the shell
+                // is already running in the session cwd, so a `cd sub` from an
+                // earlier foreground call must be visible here too. Spawning in
+                // the workspace instead made a backgrounded command silently
+                // run somewhere else than the command before it.
+                cwd: Some(cwd.clone()),
                 env: HashMap::new(),
                 timeout: Some(Duration::from_millis(timeout_ms)),
                 stdin: None,
             };
             let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
+            // Mint the task identity BEFORE spawning, so the id handed to the
+            // model, the record the registry keeps and the file the child
+            // writes to are one identity (claude-code `vV` mints it in the one
+            // shell spawn; `Xne` then registers that same id). Without a wired
+            // registry the runner keeps minting its own — the previous
+            // behaviour, retained for hosts that have no task registry.
+            let bound = self.allocate_task_identity().await;
+            let sandboxed = self.bind_identity(sandboxed, bound.as_ref(), None);
+            let sandboxed = sandboxed.with_process_owner(ctx.agent_id.map(|id| id.to_string()));
             return match self.ctx.process.spawn_background(&sandboxed).await {
                 Ok(handle) => {
-                    let out_path = task_output_path(&handle.task_id).display().to_string();
+                    // Only claim the registry identity if the runner actually
+                    // honoured it; a runner that mints its own id is writing to
+                    // its own file, so the registry must not advertise a path
+                    // nothing writes to.
+                    let bound = self.take_honoured_identity(bound, &handle).await;
+                    let task_id = self.acknowledge_background_task(
+                        &ctx, bound.as_ref(), &cmd_str,
+                        input.get("description").and_then(Value::as_str), &cwd, &handle,
+                    ).await?;
+                    let out_path = match bound.as_ref() {
+                        Some((_, path)) => path.clone(),
+                        None => task_output_path(&handle.task_id).display().to_string(),
+                    };
                     // Model-facing background note (`y` in the binary's mapper,
-                    // built by `L0i`): `Command running in background with ID: …
+                    // built by `$2t`): `Command running in background with ID: …
                     // Output is being written to: … use Read on that file path.`
                     // (offset 183106320), with the 2.1.238 lifetime sentence
                     // selected by `reapedAtFinalResponse`.
                     let reaped = background_ends_with_final_response(&ctx);
-                    let mut note = background_note(&handle.task_id, &out_path, None, reaped);
+                    let mut note = background_note(&task_id, &out_path, None, reaped);
                     // PARITY 2.1.210 (`backgroundCwdHint`): when the backgrounded
                     // command contains a statement-level `cd`/`pushd`/`popd`/`chdir`
                     // (`ror`), the binary appends this hint on a new line so the
@@ -2448,7 +2819,7 @@ impl Tool for BashTool {
                     if crate::read_only::command_has_statement_level_cd(&cmd_str) {
                         note.push_str(&format!(
                             "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
-                            workspace.display()
+                            cwd.display()
                         ));
                     }
                     let model_content = bash_model_content("", "", false, Some(&note));
@@ -2463,7 +2834,7 @@ impl Tool for BashTool {
                             false,
                             None,
                             crate::silent::is_silent_bash_command(&cmd_str),
-                            Some(&handle.task_id),
+                            Some(&task_id),
                             None,
                             None,
                             reaped,
@@ -2476,43 +2847,19 @@ impl Tool for BashTool {
                     })
                 }
                 Err(e) => {
+                    // The identity was allocated before spawning. Retire its
+                    // pending receipt and spool if no task row was published.
+                    if let (Some((task_id, _)), Some(registry)) =
+                        (bound.as_ref(), self.ctx.task_registry.as_ref())
+                    {
+                        let _ = registry.settle_background_bash(task_id, None, false).await;
+                        registry.discard_bash_output(task_id).await;
+                    }
                     emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
                     Err(ToolError::Io(format!("{e}")))
                 }
             };
         }
-
-        // ===== Foreground: BASH.4 persistent cwd =====
-        // A subagent isolated in a worktree (`isolation:"worktree"`) or given an
-        // explicit `cwd` runs EACH command in that directory, reset per call
-        // (claude-code's "Agent threads always have their cwd reset between bash
-        // calls"), WITHOUT touching the shared persistent shell cwd (which the
-        // main loop owns). The main loop (`ctx.cwd` None) reads the live
-        // persistent shell cwd as before.
-        let agent_cwd = ctx.cwd.clone();
-        let cwd = match &agent_cwd {
-            Some(c) => c.clone(),
-            None => self.shell_cwd.lock().unwrap().clone(),
-        };
-        // Deleted-cwd recovery (Shell.ts:220-238): if the live cwd no longer
-        // exists on disk (e.g. a prior command deleted its own dir), fall back
-        // to the tool workspace (TS `getOriginalCwd`); if that is also gone,
-        // fail with the byte-locked message.
-        let cwd = if std::fs::canonicalize(&cwd).is_ok() {
-            cwd
-        } else if std::fs::canonicalize(&workspace).is_ok() {
-            // Only the main loop persists the recovered cwd to the shared
-            // shell; a subagent's cwd is per-call.
-            if agent_cwd.is_none() {
-                self.shell_cwd.lock().unwrap().clone_from(&workspace);
-            }
-            workspace.clone()
-        } else {
-            return Err(ToolError::Internal(format!(
-                "Working directory \"{}\" no longer exists. Please restart Claude from an existing directory.",
-                cwd.display()
-            )));
-        };
 
         // Internal cwd-tracking temp file (not model-facing): the shell writes
         // its physical cwd here via `pwd -P` once the user command succeeds.
@@ -2542,14 +2889,54 @@ impl Tool for BashTool {
             timeout: Some(Duration::from_millis(timeout_ms)),
             stdin: None,
         };
-        let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
+        let sandboxed = self
+            .ctx
+            .sandbox
+            .bypass_with_audit(pcmd, "bash_tool_call")
+            .with_auto_background_on_timeout(can_auto_background)
+            .with_process_owner(ctx.agent_id.map(|id| id.to_string()));
+        // A foreground command can still be moved to the background when it
+        // exceeds its timeout (claude-code 2.1.210 `timedOutAfterMs`), and the
+        // id it is then given must be a registry id for the same reason the
+        // explicit-background path needs one. Mint it up front — claude-code
+        // does the same, minting one identity per shell command in `vV`
+        // regardless of whether it is ever backgrounded — and settle it as
+        // completed when the command actually finishes in the foreground.
+        let fg_bound = self.allocate_task_identity().await;
+        // The other end of claude-code `I_t`'s `t.background(e)`. Ctrl+B,
+        // background-all and the SDK `background_tasks` request all reach a
+        // still-running foreground shell through this, and the runner treats it
+        // exactly like the deadline firing.
+        let on_demand = fg_bound
+            .as_ref()
+            .filter(|_| self.ctx.process.supports_foreground_backgrounding())
+            .map(|_| std::sync::Arc::new(tokio::sync::Notify::new()));
+        let sandboxed = self.bind_identity(sandboxed, fg_bound.as_ref(), on_demand.clone());
+        // claude-code `U6t` after `cnr` (2000) ms: a foreground command that is
+        // still running becomes a visible `local_bash` row so `/tasks`, Ctrl+B
+        // and background-all have something to address. Short commands never
+        // appear — arming at spawn would flash a row for every `ls`.
+        let background_reason = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let settled = std::sync::Arc::new(tokio::sync::watch::channel(false).0);
+        let _background_settled = BackgroundRequestSettled(settled.clone());
+        let arming = match (fg_bound.as_ref(), on_demand.as_ref()) {
+            (Some((task_id, _)), Some(notify)) => self.arm_foreground_record(
+                &ctx,
+                task_id,
+                &cmd_str,
+                input.get("description").and_then(Value::as_str),
+                notify.clone(),
+                background_reason.clone(),
+                settled,
+                _progress_tx.clone(),
+            ),
+            _ => None,
+        };
 
         // ===== Foreground spawn =====
-        // PHASE-2: race the run against the sibling cancel token. On cancel the
-        // `run` future is dropped — the posix `ProcessRunner` set
-        // `kill_on_drop(true)`, so the child is SIGKILLed — and we return
-        // `Aborted`; the streaming executor substitutes the synthetic
-        // sibling-cancel result. With no token, await the run directly.
+        // Race the live runner against turn/sibling cancellation. When
+        // backgrounding is enabled, preserve the child before returning;
+        // forbidden/unbound runners retain the abort-and-kill fallback.
         // PARITY 2.1.210: `run_foreground` moves a timed-out command to the
         // background (returning `MovedToBackground`) rather than killing it; the
         // default trait impl still maps a normal finish to `Completed` and a
@@ -2558,14 +2945,24 @@ impl Tool for BashTool {
             .ctx
             .process
             .run_foreground_with_output_limit(&sandboxed, Some(bash_max_output_length()));
+        tokio::pin!(run_fut);
         let run_result = match &cancel {
             Some(token) => {
                 tokio::select! {
                     biased;
                     () = token.cancelled() => {
-                        return Err(ToolError::Aborted);
+                        // `turnAbortBackgrounds: !Dl()` applies even before the
+                        // 2 s UI row is armed. Keep polling the same runner so
+                        // detachment does not drop (and kill) its OS child.
+                        if !crate::prompt::background_tasks_disabled() {
+                            if let Some(notify) = &on_demand {
+                                let _ = background_reason.compare_exchange(0, platform_api::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+                                notify.notify_one();
+                                run_fut.await
+                            } else { return Err(ToolError::Aborted); }
+                        } else { return Err(ToolError::Aborted); }
                     }
-                    res = run_fut => res,
+                    res = &mut run_fut => res,
                 }
             }
             None => run_fut.await,
@@ -2586,6 +2983,36 @@ impl Tool for BashTool {
         // timeout arms below build such a result via `build_interrupted_result`.
         // `format_timeout_error` / `BASH_TIMEOUT_ERROR_TEMPLATE` are retained
         // (still referenced by the locked-constant test) but no longer returned.
+        // The identity minted before the spawn is only used when the command is
+        // moved to the background; on every other outcome its file is redundant,
+        // so delete it rather than leaving one file per shell call behind
+        // (claude-code `deleteOutputFile` under `outputFileRedundant`).
+        let moved_to_background = matches!(
+            &run_result,
+            Ok(platform_api::ForegroundRunResult {
+                outcome: platform_api::ForegroundOutcome::MovedToBackground(_),
+                ..
+            })
+        );
+        // claude-code `W6t`: a command that finished in the FOREGROUND gives its
+        // armed row back. A command that moved to the background keeps it — it
+        // owns a live child now, and the background arm below flips
+        // `isBackgrounded` and takes over the record.
+        if let Some(arming) = arming {
+            if moved_to_background {
+                arming.keep_for_background().await;
+            } else {
+                arming.disarm().await;
+            }
+        }
+        if !moved_to_background {
+            if let (Some(registry), Some((task_id, _))) =
+                (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
+            {
+                registry.discard_bash_output(task_id).await;
+            }
+        }
+
         match run_result {
             // PARITY 2.1.210: the command exceeded its timeout and the runner
             // moved it to the background instead of killing it. Surface the
@@ -2597,19 +3024,63 @@ impl Tool for BashTool {
                 outcome: platform_api::ForegroundOutcome::MovedToBackground(handle),
                 ..
             }) => {
-                let mut meta: LogEventMetadata = HashMap::new();
-                meta.insert(
-                    "request_id".into(),
-                    AnalyticsValue::String(request_id.clone()),
-                );
-                meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
-                self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
-                let out_path = task_output_path(&handle.task_id).display().to_string();
-                // `L0i`'s `timedOutAfterMs !== undefined` arm; the seconds shown
+                let reason = background_reason.load(std::sync::atomic::Ordering::SeqCst);
+                let timed_out = (reason == 0).then_some(timeout_ms);
+                if reason == 0 {
+                    let mut meta: LogEventMetadata = HashMap::new();
+                    meta.insert(
+                        "request_id".into(),
+                        AnalyticsValue::String(request_id.clone()),
+                    );
+                    meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
+                    self.ctx.bus.log_event(BASH_TIMEOUT, meta.clone()).await;
+                    // bg-08: the oracle's OWN event for this path
+                    // (`wn("tengu_bash_command_timeout_backgrounded",hn)`). It is
+                    // additional to the LingXi `tengu_tool_bash_timeout` above,
+                    // which has no upstream twin and other tooling reads.
+                    let mut bg_meta: LogEventMetadata = HashMap::new();
+                    bg_meta.insert(
+                        "command_type".into(),
+                        AnalyticsValue::String(telemetry_command_type(&cmd_str).into()),
+                    );
+                    bg_meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
+                    self.ctx
+                        .bus
+                        .log_event(BASH_TIMEOUT_BACKGROUNDED, bg_meta)
+                        .await;
+                } else if reason
+                    == platform_api::task_registry::TaskBackgroundReason::TurnAbort as u8
+                {
+                    self.ctx
+                        .bus
+                        .log_event(
+                            telemetry::tengu::tool::BASH_TURN_ABORT_BACKGROUNDED,
+                            HashMap::from([(
+                                "command_type".into(),
+                                AnalyticsValue::String(telemetry_command_type(&cmd_str).into()),
+                            )]),
+                        )
+                        .await;
+                }
+                // The command is now a background task: give the identity we
+                // minted up front an actual record, so its id resolves in
+                // TaskOutput / TaskStop / TaskList and its completion produces a
+                // `<task-notification>` (claude-code `wn` → `Xne` on the
+                // timeout path).
+                let fg_bound = self.take_honoured_identity(fg_bound, &handle).await;
+                let task_id = self.acknowledge_background_task(
+                    &ctx, fg_bound.as_ref(), &cmd_str,
+                    input.get("description").and_then(Value::as_str), &cwd, &handle,
+                ).await?;
+                let out_path = match fg_bound.as_ref() {
+                    Some((_, path)) => path.clone(),
+                    None => task_output_path(&handle.task_id).display().to_string(),
+                };
+                // `$2t`'s `timedOutAfterMs !== undefined` arm; the seconds shown
                 // are `Math.max(1, Math.round(timeoutMs / 1000))`.
                 let reaped = background_ends_with_final_response(&ctx);
                 let mut note =
-                    background_note(&handle.task_id, &out_path, Some(timeout_ms), reaped);
+                    background_note_for_reason(&task_id, &out_path, timed_out, reaped, reason);
                 // PARITY 2.1.210 (`backgroundCwdHint`): same hint as an explicit
                 // background launch — a timed-out-and-backgrounded command whose
                 // text contains a statement-level `cd` never mutates the session
@@ -2618,25 +3089,42 @@ impl Tool for BashTool {
                 if crate::read_only::command_has_statement_level_cd(&cmd_str) {
                     note.push_str(&format!(
                         "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
-                        workspace.display()
+                        cwd.display()
                     ));
                 }
                 let model_content = bash_model_content("", "", false, Some(&note));
                 Ok(ToolCallResult {
                     // Same empty main shape as an explicit background launch,
                     // plus `timedOutAfterMs` = the exceeded timeout in ms.
-                    data: bash_result_data(
-                        "",
-                        "",
-                        false,
-                        false,
-                        None,
-                        crate::silent::is_silent_bash_command(&cmd_str),
-                        Some(&handle.task_id),
-                        None,
-                        Some(timeout_ms),
-                        reaped,
-                    ),
+                    data: {
+                        let mut data = bash_result_data(
+                            "",
+                            "",
+                            false,
+                            false,
+                            None,
+                            crate::silent::is_silent_bash_command(&cmd_str),
+                            Some(&task_id),
+                            None,
+                            timed_out,
+                            reaped,
+                        );
+                        if reason == platform_api::task_registry::TaskBackgroundReason::User as u8 {
+                            data["backgroundedByUser"] = json!(true);
+                        }
+                        if reason
+                            == platform_api::task_registry::TaskBackgroundReason::DeliverMessage
+                                as u8
+                        {
+                            data["backgroundedToDeliverMessage"] = json!(true);
+                        }
+                        if reason
+                            == platform_api::task_registry::TaskBackgroundReason::TurnAbort as u8
+                        {
+                            data["backgroundedByTurnAbort"] = json!(true);
+                        }
+                        data
+                    },
                     model_content: Some(model_content),
                     new_messages: vec![],
                     context_modifier: None,
@@ -2856,6 +3344,13 @@ impl Tool for BashTool {
                             AnalyticsValue::Int((ansi_dropped_out + ansi_dropped_err) as i64),
                         );
                         meta.insert("truncated".into(), AnalyticsValue::Bool(false));
+                        // bg-08: `was_backgrounded: Boolean(Se.backgroundTaskId)`
+                        // (`src_160988549.js` @4338725). This arm is the
+                        // FOREGROUND completion, so the command was never
+                        // backgrounded — the field is emitted as `false` rather
+                        // than omitted, because "absent" and "ran in the
+                        // foreground" are different answers to the query.
+                        meta.insert("was_backgrounded".into(), AnalyticsValue::Bool(false));
                         self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
 
                         let interp = crate::command_semantics::interpret_command_result(
@@ -2933,6 +3428,9 @@ impl Tool for BashTool {
                     AnalyticsValue::Int((ansi_dropped_out + ansi_dropped_err) as i64),
                 );
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated_out));
+                // bg-08: see the image arm above — this is the foreground
+                // completion, so `was_backgrounded` is `false`, not absent.
+                meta.insert("was_backgrounded".into(), AnalyticsValue::Bool(false));
                 self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
                 // `staleReadFileStateHint` — computed BEFORE the read-state
                 // refresh (oracle order: `te = …OcT(…)` then `await Zmm(…)`),
@@ -3083,6 +3581,24 @@ mod tests {
             h.join().expect("thread");
         }
         assert_eq!(seen.lock().unwrap().len(), 16_000);
+    }
+
+    /// bg-08: `Npe` reports the FIRST KNOWN command name across the whole
+    /// command line, not the first sub-command's name — `cd foo && cargo build`
+    /// is a `cargo` invocation as far as the backgrounding telemetry is
+    /// concerned.
+    #[test]
+    fn telemetry_command_type_reports_the_first_known_name() {
+        assert_eq!(telemetry_command_type("cargo build --release"), "cargo");
+        assert_eq!(telemetry_command_type("cd foo && cargo build"), "cargo");
+        assert_eq!(telemetry_command_type("ls -la"), "other");
+        assert_eq!(telemetry_command_type(""), "other");
+        // The match is on the whole first token, not a prefix: `nix-build` and
+        // `nix` are separate entries and `cargofmt` is neither.
+        assert_eq!(telemetry_command_type("nix-build ."), "nix-build");
+        assert_eq!(telemetry_command_type("cargofmt"), "other");
+        // `wget` is `Les`'s one addition on top of `yWt`.
+        assert_eq!(telemetry_command_type("wget https://x"), "wget");
     }
 
     #[test]
@@ -3718,6 +4234,56 @@ mod tests {
         );
     }
 
+    /// 2.1.266 `a0` (`src_163219561.js` @1939367): a stopping agent must not
+    /// start a process that would outlive it.
+    ///
+    /// Upstream returns `rSe()` — the very value its abort path returns — and
+    /// logs the sentence rather than surfacing it. The port's abort value is
+    /// `ToolError::Aborted`, which `turn_loop` maps to the `"interrupted"`
+    /// `toolDenialKind`; reporting this as a command that ran and failed would
+    /// be the wrong shape.
+    #[tokio::test]
+    async fn a_stopping_agent_cannot_start_a_shell_command() {
+        let out = ProcessOutput {
+            stdout: "should-not-be-seen\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let mut ctx = use_ctx();
+        let agent_id = protocol::AgentId::new();
+        ctx.agent_id = Some(agent_id);
+        let _stopping = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
+
+        let err = tool
+            .call(json!({"command": "echo hi"}), ctx, fresh_tx())
+            .await
+            .expect_err("an agent whose stop is still completing must not exec");
+        assert!(
+            matches!(err, ToolError::Aborted),
+            "the refusal reuses the abort shape, as `rSe()` does upstream; got {err:?}"
+        );
+    }
+
+    /// Control: the same call with no stop pending runs, so the test above is
+    /// pinning the gate rather than a broken fixture.
+    #[tokio::test]
+    async fn a_shell_command_runs_when_its_agent_is_not_stopping() {
+        let out = ProcessOutput {
+            stdout: "hi\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let mut ctx = use_ctx();
+        ctx.agent_id = Some(protocol::AgentId::new());
+        tool.call(json!({"command": "echo hi"}), ctx, fresh_tx())
+            .await
+            .expect("no stop pending ⇒ the command runs");
+    }
+
     /// Control: with NO cancel token (`ctx.cancel == None`) the run is awaited
     /// directly and completes normally — proving the select wrap is inert for
     /// every non-streaming caller (byte-for-byte unchanged behavior).
@@ -4249,7 +4815,7 @@ mod tests {
 
     // `BACKGROUND_TASKS_ENV_LOCK` lived here. `input_schema()` selects between
     // the full schema and the `run_in_background`-omitted one on
-    // `LINGXI_DISABLE_BACKGROUND_TASKS` (claude-code `egm`/`WA()`), and the
+    // `LINGXI_DISABLE_BACKGROUND_TASKS` (claude-code 2.1.263 `gnr`/`Dl()`), and the
     // Bash PROMPT reads the same var for its detached-run bullet — so schema
     // tests and prompt tests must serialize against each other, not merely
     // within their own file. They all take
@@ -4310,8 +4876,8 @@ mod tests {
         );
     }
 
-    /// BASH-09 / claude-code 2.1.238 `egm`:
-    /// `WA()?Qhm().omit({run_in_background:!0,_simulatedSedEdit:!0}):…`.
+    /// BASH-09 / claude-code 2.1.263 `gnr`:
+    /// `Dl()?dnr().omit({run_in_background:!0,_simulatedSedEdit:!0}):…`.
     /// With background tasks disabled the property must vanish from the tool
     /// definition entirely — the prompt already drops its bullet on the same
     /// switch (`getBackgroundUsageNote`), so advertising the parameter would
@@ -4356,7 +4922,7 @@ mod tests {
 
     // ===== BASH-03 — `backgroundEndsWithFinalResponse` (2.1.238) =============
 
-    /// `L0i` with `reapedAtFinalResponse` absent: byte-identical to the
+    /// `$2t` with `reapedAtFinalResponse` absent: byte-identical to the
     /// pre-2.1.238 note (both the explicit-background and the
     /// timeout-auto-background heads).
     #[test]
@@ -4771,11 +5337,13 @@ mod tests {
             "stdout must reach the result mapper verbatim"
         );
         assert!(res.data.get("outputTaskId").is_none());
+        assert!(res.data.get("outputFilePath").is_none());
+        assert!(res.data.get("persistedOutputPath").is_none());
     }
 
     /// A completed task that was auto-backgrounded briefly retains its rooted
     /// output identity after the background id is cleared. The result map keeps
-    /// the three optional fields together and in stable insertion order.
+    /// the 2.1.263 persist fields together and in stable insertion order.
     #[tokio::test]
     async fn completed_auto_background_keeps_output_identity_without_background_id() {
         struct SpilledStub;
@@ -4833,12 +5401,13 @@ mod tests {
             .expect("spilled completion");
 
         assert!(result.data.get("backgroundTaskId").is_none());
-        assert_eq!(result.data["outputTaskId"], "local_bash_spilled");
+        assert!(result.data.get("outputTaskId").is_none());
+        assert!(result.data.get("outputFilePath").is_none());
         assert_eq!(
-            result.data["outputFilePath"],
+            result.data["persistedOutputPath"],
             "/tmp/lingxi-task-output/local_bash_spilled.out"
         );
-        assert_eq!(result.data["outputFileSize"], 30_001);
+        assert_eq!(result.data["persistedOutputSize"], 30_001);
         let keys = result
             .data
             .as_object()
@@ -4854,9 +5423,8 @@ mod tests {
                 "interrupted",
                 "isImage",
                 "noOutputExpected",
-                "outputTaskId",
-                "outputFilePath",
-                "outputFileSize",
+                "persistedOutputPath",
+                "persistedOutputSize",
             ]
         );
     }
@@ -4908,6 +5476,48 @@ mod tests {
         }
     }
 
+    /// bg-08 wiring: the oracle's own backgrounding event has to actually FIRE
+    /// on the explicit-background path, carrying the `command_type`. Pinning the
+    /// classifier alone would leave the emitter free to not exist.
+    #[tokio::test]
+    async fn an_explicit_background_launch_emits_the_oracle_event() {
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = Arc::new(BgStub);
+        let sink = Arc::new(telemetry::InMemorySink::default());
+        ctx.bus.attach_sink(sink.clone()).await;
+        BashTool::new(ctx)
+            .call(
+                json!({"command": "cd repo && cargo build", "run_in_background": true}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+
+        let events = sink.events().await;
+        let hit = events
+            .iter()
+            .find(|e| e.name == "tengu_bash_command_explicitly_backgrounded")
+            .expect("the explicit-background event must fire");
+        let Some(telemetry::AnalyticsValue::String(command_type)) =
+            hit.metadata.get("command_type")
+        else {
+            panic!(
+                "the event must carry a string `command_type`: {:?}",
+                hit.metadata
+            );
+        };
+        assert_eq!(
+            command_type, "cargo",
+            "the first KNOWN command name across the line, not `cd`"
+        );
+    }
+
     #[tokio::test]
     async fn background_returns_background_task_id() {
         let mut ctx = shell_test_ctx(ProcessOutput {
@@ -4943,6 +5553,668 @@ mod tests {
         assert!(
             !note.contains("Session cwd remains"),
             "non-cd bg command must not carry the cwd hint, got: {note}",
+        );
+    }
+
+    /// Records what the Bash tool asks of the task registry, so a test can
+    /// assert the background path mints ONE identity and registers it.
+    #[derive(Default)]
+    struct RecordingRegistry {
+        fail_register: bool,
+        fail_bind: bool,
+        bound_pids: std::sync::Mutex<Vec<u32>>,
+        output_chunks: std::sync::Mutex<Vec<(String, String)>>,
+        output_flushes: std::sync::Mutex<Vec<String>>,
+
+        allocated: std::sync::Mutex<Vec<String>>,
+        registered: std::sync::Mutex<
+            Vec<(
+                String,
+                platform_api::task_registry::BackgroundBashRegistration,
+            )>,
+        >,
+        bound: std::sync::Mutex<Vec<String>>,
+        discarded: std::sync::Mutex<Vec<String>>,
+        armed: std::sync::Mutex<Vec<String>>,
+        requesters: std::sync::Mutex<Vec<String>>,
+        unarmed: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[tokio::test]
+    async fn background_bash_sink_routes_output_and_flush_to_registry_writer() {
+        use platform_api::BackgroundExitSink as _;
+        let registry = std::sync::Arc::new(RecordingRegistry::default());
+        let sink = BackgroundBashExitSink {
+            registry: registry.clone(),
+        };
+        assert!(sink.manages_output());
+        sink.append_output("boutput01", "[stderr] 中🦀")
+            .await
+            .unwrap();
+        sink.flush_output("boutput01").await.unwrap();
+        assert_eq!(
+            registry.output_chunks.lock().unwrap().as_slice(),
+            [("boutput01".to_string(), "[stderr] 中🦀".to_string())]
+        );
+        assert_eq!(
+            registry.output_flushes.lock().unwrap().as_slice(),
+            ["boutput01"]
+        );
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::task_registry::TaskRegistryHandle for RecordingRegistry {
+        async fn append_bash_output(
+            &self,
+            task_id: &str,
+            content: &str,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.output_chunks
+                .lock()
+                .unwrap()
+                .push((task_id.into(), content.into()));
+            Ok(())
+        }
+        async fn flush_bash_output(
+            &self,
+            task_id: &str,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.output_flushes.lock().unwrap().push(task_id.into());
+            Ok(())
+        }
+
+        async fn register_foreground_bash(
+            &self,
+            task_id: &str,
+            _r: platform_api::task_registry::BackgroundBashRegistration,
+            _armed: bool,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.armed.lock().unwrap().push(task_id.to_string());
+            Ok(())
+        }
+        async fn unregister_foreground_bash(&self, task_id: &str) {
+            self.unarmed.lock().unwrap().push(task_id.to_string());
+        }
+        async fn bind_background_requester(
+            &self,
+            task_id: &str,
+            _r: std::sync::Arc<dyn platform_api::task_registry::TaskBackgrounder>,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.requesters.lock().unwrap().push(task_id.to_string());
+            Ok(())
+        }
+        async fn create(
+            &self,
+            _i: platform_api::task_registry::TaskCreateInput,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _id: &str,
+        ) -> Result<
+            Option<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _f: platform_api::task_registry::TaskListFilter,
+        ) -> Result<
+            Vec<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: platform_api::task_registry::TaskUpdatePatch,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn kill(
+            &self,
+            _id: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _o: Option<u64>,
+        ) -> Result<
+            platform_api::task_registry::TaskOutputChunk,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn allocate_bash_output(
+            &self,
+        ) -> Result<
+            platform_api::task_registry::BackgroundBashHandle,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            let id = "b1a2b3c4d".to_string();
+            self.allocated.lock().unwrap().push(id.clone());
+            Ok(platform_api::task_registry::BackgroundBashHandle {
+                task_id: id,
+                output_path: "/session/tasks/b1a2b3c4d.output".to_string(),
+            })
+        }
+        async fn register_background_bash(
+            &self,
+            task_id: &str,
+            registration: platform_api::task_registry::BackgroundBashRegistration,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            if self.fail_register { return Err(platform_api::task_registry::TaskRegistryError::Internal("registration failed".into())); }
+            self.registered
+                .lock()
+                .unwrap()
+                .push((task_id.to_string(), registration));
+            Ok(())
+        }
+        async fn discard_bash_output(&self, task_id: &str) {
+            self.discarded.lock().unwrap().push(task_id.to_string());
+        }
+        async fn bind_background_process(&self, id: &str, pid: u32, killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            if self.fail_bind { return Err(platform_api::task_registry::TaskRegistryError::Internal("binding failed".into())); }
+            self.bound_pids.lock().unwrap().push(pid);
+            self.bind_background_killer(id, killer).await
+        }
+
+        async fn bind_background_killer(
+            &self,
+            id: &str,
+            _killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.bound.lock().unwrap().push(id.to_string());
+            Ok(())
+        }
+    }
+
+    /// A runner that honours a bound task identity, as the real posix runner
+    /// does: it reports back the id the caller bound rather than minting one.
+    struct BindingAwareBgStub;
+
+    #[async_trait::async_trait]
+    impl ProcessRunner for BindingAwareBgStub {
+        async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            unreachable!("background test never runs in the foreground")
+        }
+        async fn spawn_background(
+            &self,
+            cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            let task_id = cmd
+                .background_task()
+                .map_or_else(|| "runner-minted".to_string(), |b| b.task_id.clone());
+            Ok(ProcessHandle { task_id, pid: 4242 })
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_disarm_joins_timer_before_withdrawing_its_row() {
+        struct TimerDropped(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for TimerDropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let timer = tokio::spawn({
+            let dropped = dropped.clone();
+            let ready = ready.clone();
+            async move {
+                let _guard = TimerDropped(dropped);
+                ready.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        ready.notified().await;
+        let registry = Arc::new(RecordingRegistry::default());
+        ForegroundArming {
+            timer: Some(timer),
+            withdraw_on_drop: true,
+            task_id: "barming01".into(),
+            registry: registry.clone(),
+        }
+        .disarm()
+        .await;
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(*registry.unarmed.lock().unwrap(), vec!["barming01"]);
+    }
+
+    #[tokio::test]
+    async fn dropping_bash_call_cancels_arming_and_withdraws_only_foreground_state() {
+        struct PendingRunner {
+            entered: Arc<tokio::sync::Notify>,
+            kills: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for PendingRunner {
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.kills.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        for arm_first in [false, true] {
+            let registry = Arc::new(RecordingRegistry::default());
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let runner = Arc::new(PendingRunner {
+                entered: entered.clone(),
+                kills: Default::default(),
+            });
+            let mut ctx = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            ctx.task_registry = Some(registry.clone());
+            ctx.process = runner.clone();
+            let tool = BashTool::new(ctx);
+            let mut call =
+                Box::pin(tool.call(json!({"command":"sleep 10"}), use_ctx(), fresh_tx()));
+            tokio::select! {
+                result = &mut call => panic!("pending runner unexpectedly returned {result:?}"),
+                () = entered.notified() => {},
+            }
+            if arm_first {
+                tokio::time::sleep(FOREGROUND_ARMING_DELAY + std::time::Duration::from_millis(100))
+                    .await;
+                assert_eq!(registry.armed.lock().unwrap().len(), 1);
+            }
+            // Models the owning host aborting its task without polling Bash's
+            // cooperative cancellation branch again.
+            drop(call);
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    if !registry.unarmed.lock().unwrap().is_empty() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("dropping the call must withdraw its foreground row");
+            if !arm_first {
+                tokio::time::sleep(FOREGROUND_ARMING_DELAY + std::time::Duration::from_millis(100))
+                    .await;
+                assert!(
+                    registry.armed.lock().unwrap().is_empty(),
+                    "detached arming timer published a phantom task after call drop"
+                );
+            }
+            assert_eq!(
+                runner.kills.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "arming cleanup does not kill background processes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn promoted_arming_does_not_withdraw_background_ownership_on_drop() {
+        let registry = Arc::new(RecordingRegistry::default());
+        let timer = tokio::spawn(std::future::pending::<()>());
+        ForegroundArming {
+            timer: Some(timer),
+            withdraw_on_drop: true,
+            task_id: "bpromoted".into(),
+            registry: registry.clone(),
+        }
+        .keep_for_background()
+        .await;
+        tokio::task::yield_now().await;
+        assert!(registry.unarmed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn background_registration_and_pid_binding_precede_detachment_ack() {
+        struct AckRunner {
+            registry: Arc<RecordingRegistry>,
+            acks: std::sync::atomic::AtomicUsize,
+            kills: std::sync::atomic::AtomicUsize,
+            fail_ack: bool,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for AckRunner {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> { unreachable!() }
+            async fn spawn_background(&self, cmd: &SandboxedCommand) -> Result<ProcessHandle, ProcessError> { BindingAwareBgStub.spawn_background(cmd).await }
+            async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+                assert_eq!(self.registry.registered.lock().unwrap()[0].0, handle.task_id);
+                assert_eq!(*self.registry.bound_pids.lock().unwrap(), vec![handle.pid]);
+                self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.fail_ack { Err(ProcessError::Io("ack failed".into())) } else { Ok(()) }
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> { self.kills.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Ok(()) }
+            fn is_available(&self) -> bool { true }
+        }
+        for failure in ["none", "register", "bind", "ack"] {
+            let registry = Arc::new(RecordingRegistry { fail_register: failure == "register", fail_bind: failure == "bind", ..Default::default() });
+            let runner = Arc::new(AckRunner { registry: registry.clone(), acks: Default::default(), kills: Default::default(), fail_ack: failure == "ack" });
+            let mut ctx = shell_test_ctx(ProcessOutput { stdout: String::new(), stderr: String::new(), exit_code: 0, timed_out: false });
+            ctx.process = runner.clone();
+            ctx.task_registry = Some(registry);
+            let result = BashTool::new(ctx).call(json!({"command":"sleep 5", "run_in_background":true}), use_ctx(), fresh_tx()).await;
+            assert_eq!(result.is_ok(), failure == "none", "{failure}");
+            assert_eq!(runner.acks.load(std::sync::atomic::Ordering::SeqCst), usize::from(matches!(failure, "none" | "ack")), "{failure}");
+            assert_eq!(runner.kills.load(std::sync::atomic::Ordering::SeqCst), usize::from(failure != "none"), "{failure}");
+        }
+    }
+
+    #[tokio::test]
+    async fn background_task_id_is_the_registry_id_and_the_task_is_registered() {
+        // The defect this pins: the model was handed the runner's private id
+        // (`local_bash_<pid>_<nonce>_<seq>`) while the registry knew nothing, so
+        // TaskOutput/TaskStop on that id answered "No task found with ID".
+        // claude-code mints ONE identity per shell command (`vV`) and registers
+        // that same id when the command is backgrounded (`Xne`).
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = Arc::new(BindingAwareBgStub);
+        ctx.task_registry = Some(registry.clone());
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(
+                json!({"command": "sleep 5", "description": "wait a bit", "run_in_background": true}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+
+        // The id the model sees is the registry's, NOT the runner stub's.
+        assert_eq!(res.data["backgroundTaskId"], "b1a2b3c4d");
+        assert_eq!(registry.allocated.lock().unwrap().len(), 1);
+
+        // …and a record exists for exactly that id, carrying the command and
+        // the description the completion summary renders.
+        let registered = registry.registered.lock().unwrap().clone();
+        assert_eq!(registered.len(), 1, "exactly one record for one command");
+        assert_eq!(registered[0].0, "b1a2b3c4d");
+        assert_eq!(registered[0].1.command, "sleep 5");
+        assert_eq!(registered[0].1.description, "wait a bit");
+
+        // The killer is bound so TaskStop can reach the child.
+        assert_eq!(registry.bound.lock().unwrap().as_slice(), ["b1a2b3c4d"]);
+        // Nothing was discarded: the identity was used, not redundant.
+        assert!(registry.discarded.lock().unwrap().is_empty());
+
+        // The note points at the registry's output file, which is the file the
+        // registry can actually read back through TaskOutput.
+        let note = res.model_content.as_deref().expect("background model note");
+        assert!(
+            note.contains("b1a2b3c4d") && note.contains("/session/tasks/b1a2b3c4d.output"),
+            "note must carry the registry id and its output path, got: {note}",
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_command_registers_no_task_and_discards_its_output_file() {
+        // claude-code mints the identity for every shell command but only
+        // creates a record when the command is actually backgrounded. Creating
+        // one per foreground command would put a completed row in TaskList and a
+        // `<task-notification>` in the transcript for every shell call.
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: "done\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.task_registry = Some(registry.clone());
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(json!({"command": "echo done"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        assert!(res.data.get("backgroundTaskId").is_none());
+        assert!(
+            registry.registered.lock().unwrap().is_empty(),
+            "a foreground command must not become a task record",
+        );
+        assert_eq!(
+            registry.discarded.lock().unwrap().as_slice(),
+            ["b1a2b3c4d"],
+            "the unused output file must be discarded, not left behind",
+        );
+    }
+
+    /// claude-code `U6t` after `cnr` = 2000 ms, then `W6t` on foreground
+    /// completion. This is the wiring test: the pieces are unit-tested
+    /// elsewhere, but nothing else proves `call()` actually starts the timer,
+    /// binds the requester, and withdraws the row afterwards.
+    #[tokio::test]
+    async fn a_slow_foreground_command_arms_a_row_and_gives_it_back() {
+        let _gate = crate::prompt::background_env_lock();
+        struct SlowRunner;
+        #[async_trait::async_trait]
+        impl ProcessRunner for SlowRunner {
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _cmd: &SandboxedCommand,
+                _max: Option<usize>,
+            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+                // Past `cnr`, then a normal foreground finish.
+                tokio::time::sleep(std::time::Duration::from_millis(2400)).await;
+                Ok(platform_api::ForegroundRunResult {
+                    outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: "done\n".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        timed_out: false,
+                    }),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.task_registry = Some(registry.clone());
+        ctx.process = Arc::new(SlowRunner);
+        let tool = BashTool::new(ctx);
+        let (progress, mut progress_rx) = tool_api::progress::progress_channel();
+        let mut use_context = use_ctx();
+        use_context.tool_use_id = Some(protocol::ToolUseId::new());
+        tool.call(json!({"command": "sleep 3"}), use_context, progress)
+            .await
+            .expect("ok");
+
+        let hint = progress_rx
+            .try_recv()
+            .expect("foreground arming must publish background_hint");
+        assert_eq!(hint.data["kind"], "background_hint");
+        assert_eq!(hint.data["toolUseId"], hint.tool_use_id.to_string());
+        assert_eq!(
+            registry.armed.lock().unwrap().as_slice(),
+            ["b1a2b3c4d"],
+            "a command still running at 2 s must become an addressable row",
+        );
+        assert_eq!(
+            registry.requesters.lock().unwrap().as_slice(),
+            ["b1a2b3c4d"],
+            "and it must carry the handle that backgrounds it, or Ctrl+B has no target",
+        );
+        assert_eq!(
+            registry.unarmed.lock().unwrap().as_slice(),
+            ["b1a2b3c4d"],
+            "finishing in the foreground must give the row back (`W6t`)",
+        );
+        assert!(
+            registry.registered.lock().unwrap().is_empty(),
+            "arming is not a background registration",
+        );
+    }
+
+    #[test]
+    fn first_statement_is_sleep_matches_the_oracle_predicate() {
+        // `$es`: only the FIRST word of the FIRST statement counts.
+        assert!(first_statement_is_sleep("sleep 30"));
+        assert!(first_statement_is_sleep("  sleep 5 && echo done"));
+        assert!(first_statement_is_sleep("sleep 0.5"));
+        // A sleep that is not the leading statement does not disqualify.
+        assert!(!first_statement_is_sleep("echo hi && sleep 30"));
+        assert!(!first_statement_is_sleep("cargo build"));
+        // Unlike the sleep-BLOCK predicate there is no duration threshold and no
+        // standalone requirement, so a short or trailing-argument sleep counts.
+        assert!(first_statement_is_sleep("sleep 1"));
+        // Both of `$es`'s early returns: nothing to inspect means eligible.
+        assert!(!first_statement_is_sleep(""));
+        assert!(!first_statement_is_sleep("   "));
+    }
+
+    #[tokio::test]
+    async fn a_sleep_command_is_not_eligible_for_auto_background() {
+        // claude-code computes `dn = !Dl() && $es(command)` and hands it to the
+        // shell as `shouldAutoBackground`; with it false the deadline kills the
+        // child instead of backgrounding it.
+        let ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+
+        struct FlagRecorder {
+            seen: Arc<std::sync::Mutex<Vec<bool>>>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for FlagRecorder {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                cmd: &SandboxedCommand,
+                _max: Option<usize>,
+            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(cmd.auto_background_on_timeout());
+                Ok(platform_api::ForegroundRunResult {
+                    outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        timed_out: false,
+                    }),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let mut sleep_ctx = ctx;
+        sleep_ctx.process = Arc::new(FlagRecorder {
+            seen: recorded.clone(),
+        });
+        let tool = BashTool::new(sleep_ctx.clone());
+        tool.call(json!({"command": "sleep 30"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        tool.call(json!({"command": "cargo build"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            recorded.lock().unwrap().as_slice(),
+            [false, true],
+            "a sleep-led command must not be auto-backgroundable; an ordinary one must be",
         );
     }
 
@@ -5811,5 +7083,142 @@ mod tests {
             !p.contains("## Command sandbox"),
             "sandbox section should be absent when sandbox disabled"
         );
+    }
+    #[tokio::test]
+    async fn background_request_waits_for_process_detachment_before_host_cancel() {
+        use platform_api::task_registry::{TaskBackgroundReason, TaskBackgrounder};
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let reason = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let settled = Arc::new(tokio::sync::watch::channel(false).0);
+        let requester = Arc::new(BackgroundBashRequester {
+            notify: notify.clone(),
+            reason: reason.clone(),
+            settled: settled.clone(),
+        });
+        let task = tokio::spawn(async move {
+            requester
+                .background_with_reason(TaskBackgroundReason::DeliverMessage)
+                .await;
+        });
+        notify.notified().await;
+        assert!(
+            !task.is_finished(),
+            "the host may not cancel before the shell has detached"
+        );
+        assert_eq!(
+            reason.load(std::sync::atomic::Ordering::SeqCst),
+            TaskBackgroundReason::DeliverMessage as u8
+        );
+        drop(BackgroundRequestSettled(settled));
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn background_heads_preserve_manual_and_message_triggers() {
+        use platform_api::task_registry::TaskBackgroundReason;
+        let manual = background_note_for_reason(
+            "b1",
+            "/tmp/b1.output",
+            None,
+            false,
+            TaskBackgroundReason::User as u8,
+        );
+        let message = background_note_for_reason(
+            "b1",
+            "/tmp/b1.output",
+            None,
+            false,
+            TaskBackgroundReason::DeliverMessage as u8,
+        );
+        assert!(manual.starts_with("Command was manually backgrounded by user with ID: b1."));
+        assert!(message.contains("so that a message that arrived while it was running can reach you; it was not interrupted."));
+        assert!(!manual.contains("timeout") && !message.contains("timeout"));
+    }
+    #[tokio::test]
+    async fn turn_abort_before_foreground_arming_detaches_the_same_runner() {
+        let _gate = crate::prompt::background_env_lock();
+        struct AbortRunner(Arc<tokio::sync::Notify>, bool);
+        #[async_trait::async_trait]
+        impl ProcessRunner for AbortRunner {
+            fn supports_foreground_backgrounding(&self) -> bool {
+                self.1
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                cmd: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+                let binding = cmd.background_task().expect("bound identity");
+                self.0.notify_one();
+                if let Some(notify) = binding.on_demand.as_ref() {
+                    notify.notified().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+                Ok(platform_api::ForegroundRunResult {
+                    outcome: platform_api::ForegroundOutcome::MovedToBackground(ProcessHandle {
+                        task_id: binding.task_id.clone(),
+                        pid: 4242,
+                    }),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                panic!("must preserve the foreground runner");
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                panic!("abort must not kill the preserved process");
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        for supports_detach in [false, true] {
+            let registry = Arc::new(RecordingRegistry::default());
+            let started = Arc::new(tokio::sync::Notify::new());
+            let mut context = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            context.task_registry = Some(registry.clone());
+            context.process = Arc::new(AbortRunner(started.clone(), supports_detach));
+            let tool = BashTool::new(context);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let mut use_context = use_ctx();
+            use_context.cancel = Some(cancel.clone());
+            let run = tokio::spawn(async move {
+                tool.call(json!({"command":"sleep 10"}), use_context, fresh_tx())
+                    .await
+            });
+            started.notified().await;
+            cancel.cancel();
+            let outcome = tokio::time::timeout(Duration::from_secs(1), run)
+                .await
+                .unwrap()
+                .unwrap();
+            if !supports_detach {
+                assert!(matches!(outcome, Err(ToolError::Aborted)));
+                continue;
+            }
+            let result = outcome.expect("detached result");
+            assert_eq!(result.data["backgroundedByTurnAbort"], true);
+            assert!(result.data.get("timedOutAfterMs").is_none());
+            assert_eq!(result.data["backgroundTaskId"], "b1a2b3c4d");
+            assert!(
+                registry.armed.lock().unwrap().is_empty(),
+                "test must exercise the pre-2s path"
+            );
+        }
     }
 }

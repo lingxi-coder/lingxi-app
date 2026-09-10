@@ -1,9 +1,13 @@
 import { useT } from '../../theme/ThemeContext';
 
-export function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+export function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label?: string }) {
   const t = useT();
   return (
     <button
+      type="button"
+      role="switch"
+      aria-checked={value}
+      aria-label={label}
       onClick={() => onChange(!value)}
       style={{
         width: 38, height: 22, borderRadius: 99, border: 'none', cursor: 'pointer', padding: 0,

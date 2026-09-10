@@ -225,6 +225,17 @@ pub struct CommandFrontmatter {
     pub background: Option<bool>,
     /// Agent type a forking command spawns. `None` ⇒ `general-purpose`.
     pub agent: Option<String>,
+    /// Frontmatter `effort`, raw. Upstream's skill→command builder carries it
+    /// (`wXe({… effort: De …})`, 2.1.267 `src_163219561.js` @4555866) and a
+    /// forked skill's scoping record spreads it in conditionally
+    /// (`…n.effort !== void 0 && { effort: n.effort }`). Validated at the
+    /// conversion site, not here.
+    pub effort: Option<String>,
+    /// Frontmatter `user-invocable`. `None` ⇒ the key was absent, which upstream
+    /// reads as invocable (`userInvocable: dt===void 0 ? !0 : htt(dt)`); a
+    /// declared value has already been through the `htt` coercion, so a
+    /// `Some(false)` here hides the skill from the `/` menu.
+    pub user_invocable: Option<bool>,
 }
 
 /// Shell selected by a markdown command's frontmatter for embedded shell

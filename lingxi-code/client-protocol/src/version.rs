@@ -106,4 +106,6 @@
 /// `CompactionStatus` is appended after every existing ClientEvent variant;
 /// existing native ordinals and field layouts are unchanged. Per §0.10 this
 /// additive lifecycle event keeps 13.0.0 and updates the contract index only.
-pub const CLIENT_PROTOCOL_VERSION: &str = "13.0.0";
+/// 13.1.0 appends TaskMessage for trusted human task follow-ups. Existing
+/// variant ordinals and payload layouts are unchanged.
+pub const CLIENT_PROTOCOL_VERSION: &str = "13.1.0";

@@ -147,19 +147,17 @@ impl ConversationOrchestrator {
     /// per-turn OUTGOING snapshot (never `session.history` / JSONL) so it never
     /// accumulates; `None` keeps the locked turn-loop fixtures byte-identical
     /// (default: plan mode OFF).
-    pub(crate) async fn plan_mode_reminder_message(&self) -> Option<ConversationMessage> {
-        let (path, exists, real_user_turns, entered_plan_mode) = {
+    /// Upstream returns a LIST here (`J_s`): a `plan_mode_reentry` attachment
+    /// may precede the `plan_mode` one on the entry that finds an existing plan
+    /// file, and both sit behind the SAME cadence gate — `lyr`'s early return
+    /// runs before the reentry push, so a suppressed turn emits neither.
+    pub(crate) async fn plan_mode_turn_messages(&self) -> Vec<ConversationMessage> {
+        let (path, exists, real_user_turns, entered_plan_mode, reentry) = {
             let mut s = self.session.lock().await;
             if !s.plan_mode {
-                return None;
+                return Vec::new();
             }
-            let path = Self::plan_file_path(
-                &s.session_id,
-                // 206 `Ct()` = the original project root (session-init cwd), NOT
-                // the post-`cd` shell cwd.
-                &self.cwd,
-                self.config.plans_directory.as_deref(),
-            );
+            let path = self.session_plan_file_path(&s.session_id);
             let exists = std::path::Path::new(&path).exists();
             // `ixl`'s turn counter: non-meta user messages carrying NO
             // `tool_result` block. Tool-result continuations within one turn are
@@ -184,7 +182,15 @@ impl ConversationOrchestrator {
             // `plan_mode_exit` boundary `Y4T` stops counting at.
             let entered_plan_mode = !s.plan_reminder_shown;
             s.plan_reminder_shown = true;
-            (path, exists, real_user_turns, entered_plan_mode)
+            // `if(nPt()&&y!==null){C.push({type:"plan_mode_reentry",…}),NM(!1)}`
+            // — one reentry reminder per exit→enter cycle, and only when a plan
+            // file from the previous session is actually on disk. A missing file
+            // leaves the flag set for the next entry, exactly as upstream does.
+            let reentry = s.plan_mode_exited && exists;
+            if reentry {
+                s.plan_mode_exited = false;
+            }
+            (path, exists, real_user_turns, entered_plan_mode, reentry)
         };
         // Decide emission + full/sparse under the cadence lock so two concurrent
         // turns cannot both render attachment `c`.
@@ -196,7 +202,7 @@ impl ConversationOrchestrator {
             if let Some(last) = c.real_user_turns_at_last_emission {
                 // `if(_ && y < TURNS_BETWEEN_ATTACHMENTS) return []`
                 if real_user_turns.saturating_sub(last) < PLAN_TURNS_BETWEEN_ATTACHMENTS {
-                    return None;
+                    return Vec::new();
                 }
             }
             c.attachments_emitted += 1;
@@ -213,6 +219,12 @@ impl ConversationOrchestrator {
             custom_instructions: self.config.plan_mode_instructions.as_deref(),
             is_subagent: false,
             reminder_type_sparse: sparse,
+            // `zx()==="default"` — an unset `output_style` IS the default style.
+            output_style_is_default: self
+                .config
+                .output_style
+                .as_deref()
+                .map_or(true, |style| style == "default"),
         };
         // All three plan-mode renderers (`M5T` full / `L5T` sparse / `H5T`
         // subagent) return through the batch wrapper `Zy` (2.1.238 @296675470),
@@ -222,13 +234,61 @@ impl ConversationOrchestrator {
         // envelope is applied here, exactly as the other per-turn reminders do.
         let body = crate::prompt::plan_reminder::render_plan_mode_reminder(&params);
         let content = format!("<system-reminder>\n{body}\n</system-reminder>");
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
+        let mut out = Vec::with_capacity(2);
+        if reentry {
+            let reentry_body = crate::prompt::plan_reminder::render_plan_mode_reentry(&path);
+            out.push(ConversationMessage::user_meta(
+                MessageId::new(),
+                format!("<system-reminder>\n{reentry_body}\n</system-reminder>"),
+            ));
+        }
+        out.push(ConversationMessage::user_meta(MessageId::new(), content));
+        out
+    }
+
+    /// The `plan_mode_exit` reminder — 2.1.266 `Z_s`:
+    ///
+    /// ```js
+    /// async function Z_s(e,n){if(ue(n).mode==="plan")return Vz(!1),[];
+    ///   let{foundPlanModeAttachment:r}=lyr(e??[]);
+    ///   if(!n$n()&&!r)return[];
+    ///   Vz(!1);
+    ///   let o=ay(n.agentId),d=zF(n.agentId)!==null;
+    ///   return[{type:"plan_mode_exit",planFilePath:o,planExists:d}]}
+    /// ```
+    ///
+    /// Still in plan mode ⇒ clear the pending flag and emit nothing. Otherwise
+    /// emit when the flag is set. The `!r` half of upstream's guard (a
+    /// `plan_mode` attachment still visible in history even with no pending
+    /// flag) is not reproduced: LingXi's plan-mode reminders live only in the
+    /// per-turn outgoing snapshot, never in `session.history`, so there is no
+    /// history to scan — the flag is the only witness.
+    pub(crate) async fn plan_mode_exit_message(&self) -> Option<ConversationMessage> {
+        let (path, exists) = {
+            let mut s = self.session.lock().await;
+            if s.plan_mode {
+                s.plan_mode_exit_pending = false;
+                return None;
+            }
+            if !s.plan_mode_exit_pending {
+                return None;
+            }
+            s.plan_mode_exit_pending = false;
+            let path = self.session_plan_file_path(&s.session_id);
+            let exists = std::path::Path::new(&path).exists();
+            (path, exists)
+        };
+        let body = crate::prompt::plan_reminder::render_plan_mode_exit(&path, exists);
+        Some(ConversationMessage::user_meta(
+            MessageId::new(),
+            format!("<system-reminder>\n{body}\n</system-reminder>"),
+        ))
     }
 
     pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.prompt_runtime.skill_listing.as_ref()?;
         // Gate on the Skill tool being available this turn (attachments.ts:2668).
-        if self.tools.find_by_name("Skill").is_none() {
+        if self.find_dispatchable_tool("Skill").is_none() {
             return None;
         }
         let entries = provider.skill_entries().await;
@@ -285,14 +345,16 @@ impl ConversationOrchestrator {
         Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
-    /// T35: the per-turn, transient `task-notification` reminder, or `None` when
-    /// no source is wired or no background task finished since the last turn.
+    /// T35: the per-turn `task-notification` reminders — one message per
+    /// completion, empty when no source is wired or no background task finished
+    /// since the last turn.
     ///
     /// Mirrors [`Self::async_hook_response_reminder_message`]: drains the
     /// registry's terminal-not-notified tasks (CONSUME-ONCE — the registry marks
     /// each `notified` + evicts on drain) and renders their `<task-notification>`
     /// blocks (claude-code's per-task-type `enqueue*Notification` formats) inside
-    /// one `<system-reminder>` meta user message whose first line is the
+    /// one `<system-reminder>` meta user message PER completion, each whose
+    /// first line is the
     /// `NON_USER_INPUT_HEADER` provenance header (2.1.238 `b_a` @285068292,
     /// applied to every `task-notification`-origin user message so the model
     /// never treats a machine-generated completion as user consent; it also
@@ -306,12 +368,28 @@ impl ConversationOrchestrator {
     /// this is where the oracle's `setAppState({pendingMemoryUpdates:[…]})`
     /// enqueue lands. The queue is drained separately by
     /// [`Self::memory_update_reminder_messages`].
-    pub(crate) async fn task_notification_reminder_message(&self) -> Option<ConversationMessage> {
-        let provider = self.prompt_runtime.task_notifications.as_ref()?;
+    pub(crate) async fn task_notification_reminder_messages(&self) -> Vec<ConversationMessage> {
+        self.task_notification_reminder_messages_in_turn(false)
+            .await
+    }
+
+    pub(crate) async fn task_notification_reminder_messages_in_turn(
+        &self,
+        in_human_turn: bool,
+    ) -> Vec<ConversationMessage> {
+        let Some(provider) = self.prompt_runtime.task_notifications.as_ref() else {
+            return Vec::new();
+        };
         let notifications = provider.take_pending_task_notifications().await;
         self.enqueue_memory_updates_from(&notifications);
-        let content = crate::prompt::task_notification::render_reminder(&notifications)?;
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
+        // ONE message per completion: claude-code's `ha(…)` enqueue runs once
+        // per notification and the envelope is applied per message, so two
+        // tasks finishing in the same turn are two user messages. Folding them
+        // into one envelope also folded two provenance headers into one.
+        crate::prompt::task_notification::render_reminders_in_turn(&notifications, in_human_turn)
+            .into_iter()
+            .map(|content| ConversationMessage::user_meta(MessageId::new(), content))
+            .collect()
     }
 
     /// Cap on [`Self::pending_memory_updates`]. The BATCHED turn driver calls
@@ -506,11 +584,20 @@ impl ConversationOrchestrator {
             return None;
         }
         // (2) Brief (`SendUserMessage`/`Brief`) present ⇒ skip (both variants).
-        if self.tools.find_by_name("SendUserMessage").is_some() {
+        if self.find_dispatchable_tool("SendUserMessage").is_some() {
             return None;
         }
 
-        let mode = tool_task::reminder::select_mode();
+        // (2b) the `OO()` model gate. `select_mode` returns `None` when the
+        // todo/task tools have been withdrawn, porting BOTH oracle guards
+        // (`if(X_()||!OO())return[]` for V1, `if(!h3())return[]` for V2) — the
+        // reminder must not describe tools the model was never offered. The
+        // canonical main-loop model is the one the registry publishes, so this
+        // and `available_tools` cannot disagree.
+        let Some(mode) = tool_task::reminder::select_mode(self.tools.main_loop_model().as_deref())
+        else {
+            return None;
+        };
 
         // (3) tool-presence gate + (4) non-empty history + (5) counters, all
         // read under one session lock so the snapshot is consistent. We reset
@@ -531,7 +618,7 @@ impl ConversationOrchestrator {
         match mode {
             tool_task::reminder::ReminderMode::V1Todo => {
                 // (3) TodoWrite must be present this turn.
-                if self.tools.find_by_name("TodoWrite").is_none() {
+                if self.find_dispatchable_tool("TodoWrite").is_none() {
                     return None;
                 }
                 let items: Vec<(lingxi_core::TodoState, String)> = s
@@ -552,7 +639,7 @@ impl ConversationOrchestrator {
             }
             tool_task::reminder::ReminderMode::V2Task => {
                 // (3) TaskUpdate must be present this turn.
-                if self.tools.find_by_name("TaskUpdate").is_none() {
+                if self.find_dispatchable_tool("TaskUpdate").is_none() {
                     return None;
                 }
                 let session_id = s.session_id;
@@ -654,10 +741,8 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// capability/env gate is on. `CDt()` is the focus/brief-transcript view
     /// mode, which LingXi does not have ⇒ always `false` ⇒ never suppresses.
     ///
-    /// `u3m` (@296477528) consults `CLAUDE_CODE_SILENT_TURN_REMINDER` and then
-    /// the model capability table; the port has no capability table, so the
-    /// DEFAULT IS OFF and this method is a strict no-op for stock sessions —
-    /// the locked streaming fixtures stay byte-identical.
+    /// 2.1.263 `jfr` consults the explicit env override, then the current
+    /// model's Fable 5.1 prompt bundle / silent-turn reminder capability.
     ///
     /// On fire the body is wrapped in the usual `<system-reminder>` envelope
     /// (renderer @296738727: `[kn({content:NT(e.text),isMeta:!0})]`) and the
@@ -665,11 +750,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// reconstructed on later turns. Appended to THIS turn's OUTGOING snapshot
     /// only — never `session.history` / JSONL.
     pub(crate) async fn silent_turn_reminder_message(&self) -> Option<ConversationMessage> {
-        if !crate::prompt::silent_turn::is_enabled() {
-            return None;
-        }
         let history = {
             let s = self.session.lock().await;
+            if !crate::prompt::silent_turn::is_enabled(&s.model) {
+                return None;
+            }
             s.history.clone()
         };
         if !Self::step_follows_tool_results(&history) {
@@ -832,7 +917,10 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// last such tool_use in the message log (which zeroes their `r` counter).
     /// `tool_names` is the set of tool names invoked in the assistant turn.
     pub(crate) async fn note_todo_reminder_tool_call(&self, tool_names: &[String]) {
-        let resets = match tool_task::reminder::select_mode() {
+        // Ungated (`select_mode_raw`): the oracle's counters advance and reset
+        // regardless of whether the reminder can currently render, so a session
+        // that re-enables the tools mid-flight does not inherit a stale count.
+        let resets = match tool_task::reminder::select_mode_raw() {
             tool_task::reminder::ReminderMode::V1Todo => {
                 tool_names.iter().any(|n| n == "TodoWrite")
             }
@@ -920,10 +1008,10 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             return None;
         }
         // Gate on the Agent tool being available this turn (attachments.ts:1497).
-        // `find_by_name` also matches the legacy `Task` alias. This is the ONLY
+        // Dispatch lookup also matches the legacy `Task` alias. This is the ONLY
         // structural gate in the binary's `aLe` — it does NOT gate on a wired
         // DISK catalog (see below).
-        if self.tools.find_by_name("Agent").is_none() {
+        if self.find_dispatchable_tool("Agent").is_none() {
             return None;
         }
 
@@ -993,9 +1081,14 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             } else {
                 "New agent types are now available for the Agent tool:"
             };
+            // `U2n(N, D)` where `D = VU(YK(e.options.mainLoopModel))` (producer
+            // @5174317): the catalog lines are rendered for the MAIN-LOOP model,
+            // so a non-lean session gets a definition's full `whenToUse` even
+            // when it declares a lean variant.
+            let lean = tool_api::dh_simple_system_prompt(self.tools.main_loop_model().as_deref());
             let lines = new_entries
                 .iter()
-                .map(agent::format_agent_line)
+                .map(|entry| agent::format_agent_line(entry, lean))
                 .collect::<Vec<_>>()
                 .join("\n");
             sections.push(format!("{header}\n{lines}"));
@@ -1077,7 +1170,7 @@ message with multiple tool uses so they run concurrently."
             return None;
         }
         // (5) the ToolSearch tool must be available this turn.
-        let tool_search = self.tools.find_by_name("ToolSearch")?;
+        let tool_search = self.find_dispatchable_tool("ToolSearch")?;
         let tool_search_name = tool_search.name().to_string();
 
         // (2)+(3) history + both turn counters.
@@ -1608,6 +1701,61 @@ message with multiple tool uses so they run concurrently."
         *self.prompt_runtime.pending_skill_prefetch.lock().await = None;
     }
 
+    fn has_visible_prefetch_text(text: &str) -> bool {
+        text.chars().any(|ch| {
+            !ch.is_whitespace()
+                && !matches!(ch, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}')
+        })
+    }
+
+    fn latest_prefetch_query(history: &[ConversationMessage]) -> String {
+        Self::latest_prefetch_query_and_tools(history).0
+    }
+
+    fn latest_prefetch_query_and_tools(
+        history: &[ConversationMessage],
+    ) -> (String, Vec<String>) {
+        let query = history
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                ConversationMessage::User {
+                    content,
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                    ..
+                } => {
+                    let text = content
+                        .iter()
+                        .filter_map(|block| match block {
+                            protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Self::has_visible_prefetch_text(&text).then_some(text)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let last_assistant_tools = history
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role(), protocol::MessageRole::Assistant))
+            .map(|m| {
+                m.tool_calls()
+                    .into_iter()
+                    .filter_map(|b| match b {
+                        protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        (query, last_assistant_tools)
+    }
+
     pub(crate) async fn start_memory_prefetch(&self) {
         let Some(prefetch) = self.prompt_runtime.memory_prefetch.as_ref() else {
             return; // no prefetch wired ⇒ surfacing channel stays inert
@@ -1629,32 +1777,12 @@ message with multiple tool uses so they run concurrently."
         // are synthetic context rather than user intent.
         let (query, session_id) = {
             let s = self.session.lock().await;
-            let query = s
-                .history
-                .iter()
-                .rev()
-                .find_map(|message| match message {
-                    ConversationMessage::User {
-                        content,
-                        is_meta: false,
-                        is_compact_summary: false,
-                        is_visible_in_transcript_only: false,
-                        ..
-                    } => {
-                        let text = content
-                            .iter()
-                            .filter_map(|block| match block {
-                                protocol::ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (!text.is_empty()).then_some(text)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default();
-            (query, s.session_id.to_string())
+            // Memory selection must follow the same model-visible history as
+            // request assembly. Transcript-only/background rows can remain in
+            // the UI history, but they are not a valid user query and must not
+            // move the selector's starting point.
+            let history = s.model_context_history();
+            (Self::latest_prefetch_query(&history), s.session_id.to_string())
         };
         // Task 5 (worktree 206 session-cwd plumbing): the live cwd, so a future
         // non-stub prefetch derives the memdir from the post-swap worktree, not
@@ -1774,47 +1902,10 @@ message with multiple tool uses so they run concurrently."
         // predicate — both read in one history lock.
         let (query, last_assistant_tools) = {
             let s = self.session.lock().await;
-            let query = s
-                .history
-                .iter()
-                .rev()
-                .find_map(|message| match message {
-                    ConversationMessage::User {
-                        content,
-                        is_meta: false,
-                        is_compact_summary: false,
-                        is_visible_in_transcript_only: false,
-                        ..
-                    } => {
-                        let text = content
-                            .iter()
-                            .filter_map(|block| match block {
-                                protocol::ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (!text.is_empty()).then_some(text)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let last_assistant_tools = s
-                .history
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role(), protocol::MessageRole::Assistant))
-                .map(|m| {
-                    m.tool_calls()
-                        .into_iter()
-                        .filter_map(|b| match b {
-                            protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<String>>()
-                })
-                .unwrap_or_default();
-            (query, last_assistant_tools)
+            // Keep the query and write-pivot scan on the exact same
+            // model-visible slice. UI-only rows are deliberately excluded.
+            let history = s.model_context_history();
+            Self::latest_prefetch_query_and_tools(&history)
         };
         let is_write_pivot = skill_api::find_write_pivot(&last_assistant_tools);
         let pending = prefetch.start(query, is_write_pivot).await;
@@ -1923,5 +2014,32 @@ message with multiple tool uses so they run concurrently."
         let delta = self.tools.deferral().compute_deferred_delta(&current);
         let body = delta.render_reminder()?;
         Some(ConversationMessage::user_meta(MessageId::new(), body))
+    }
+}
+
+#[cfg(test)]
+mod prefetch_history_tests {
+    use super::*;
+    use lingxi_core::SessionState;
+    use protocol::{ConversationMessage, MessageId, SessionId};
+
+    fn user(text: &str) -> ConversationMessage {
+        ConversationMessage::user(MessageId::new(), text.to_string())
+    }
+
+    #[test]
+    fn prefetch_starts_from_model_visible_history() {
+        let excluded = user("background transcript row");
+        let invisible = user("\u{200B}\u{FEFF}");
+        let current = user("current request");
+        let mut state = SessionState::empty(SessionId::nil(), "model".into());
+        state.model_context_excluded_messages.insert(excluded.id());
+        state.history.extend([excluded, invisible, current]);
+
+        let visible = state.model_context_history();
+        let (query, tools) = ConversationOrchestrator::latest_prefetch_query_and_tools(&visible);
+
+        assert_eq!(query, "current request");
+        assert!(tools.is_empty());
     }
 }

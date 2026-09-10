@@ -5,6 +5,7 @@ import {
   createMacCredentialBrokerClient,
   resolveProviderCredential,
   resolveProviderIdForModel,
+  resolveModelCredentialProviderIds,
   resolveProviderTestCredential,
   resolveSessionLaunchCredentials,
   resolveSessionLaunchPluginSecrets,
@@ -253,4 +254,21 @@ test('unpackaged macOS refuses to execute an unverified helper path', async () =
     binaryPath: '/tmp/untrusted/lingxi-credential-client',
   });
   await assert.rejects(broker!.health(), /Apple Development signed package/);
+});
+
+test('custom aliases resolve only the selected profile and its model fallback chain', () => {
+  const settings = {
+    providers: {
+      primary: { models: [{ id: 'model', aliases: ['fast', 'vendor/wire'] }] },
+      backup: { models: ['backup-model'] },
+      unrelated: { models: ['other-model'] },
+    },
+    routing: { aliases: { boss: 'primary/model' }, fallback: { model: ['backup/backup-model', 'missing/model'] } },
+  };
+  for (const model of ['boss', 'fast', 'model', 'primary/model', 'primary/fast', 'vendor/wire']) {
+    assert.deepEqual(resolveModelCredentialProviderIds(model, settings), ['primary', 'backup']);
+  }
+  assert.deepEqual(resolveModelCredentialProviderIds('unknown', settings), []);
+  assert.deepEqual(resolveModelCredentialProviderIds('unrelated/other-model', settings), ['unrelated']);
+  assert.deepEqual(resolveModelCredentialProviderIds('fast', { providers: { ...settings.providers, duplicate: { models: [{ id: 'second', aliases: ['fast'] }] } } }), []);
 });

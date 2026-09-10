@@ -1,0 +1,255 @@
+# Skills vs Claude Code 2.1.267
+
+First alignment audit of this subsystem. There has never been one: no prior doc
+covers skills, and `grep -rl '2\.1\.26[0-9]' docs/` finds nothing for it.
+
+Oracle: `~/.local/share/claude/versions/2.1.267`, sha256
+`a681f3008f0050029aeebcab3af51bb6a55ddeb625a3af3141a4416d43cd2558`, extracted to
+`~/.claude/oracle-chunks/2.1.267/` (1657 chunks). Tree at `2d081b3dd`.
+
+🚨 **Every claim below is checked against the executable.** An early pass of
+this audit used `claude-code/src/skills/*.ts`, and that mirror is stale enough to
+produce wrong findings — it lists `skillify` and `lorem-ipsum` as bundled skills
+and both are **0 hits in the 2.1.267 binary**. Skill names survive minification
+as string literals, so that is decisive: they do not exist upstream and must not
+be ported. Anything sourced from the mirror was re-derived or dropped.
+
+---
+
+## 1. Shape: there are two parsers and two scanners, and the obvious one is not live
+
+| | parses | reaches the model? |
+|---|---|---|
+| `skill-api/src/{model,frontmatter}.rs` | the FULL key set (21 keys) | **no** — feeds bundled/plugin registration and the `/skills` listing |
+| `command-api/src/markdown_loader.rs` | a subset | **yes** — this is what turns `SKILL.md` into an invocable `SlashCommand` |
+
+A skill reaches the model as a `SlashCommand`, through
+`load_skill_markdown_files_with_roots` → `load_skill_dir` → `build_skill_command`.
+Reading `skill-api` and concluding a key is supported is the trap this subsystem
+sets; two of the three defects below were exactly that.
+
+## 2. Source tiers
+
+| tier | upstream | port |
+|---|---|---|
+| managed / policy | ✅ | ✅ |
+| user (`~/<DOT_DIR>/skills`) | ✅ | ✅ |
+| project, walking UP to the repo root | ✅ | ✅ `project_dirs_up_to_home` |
+| `--add-dir` roots | ✅ | ✅ **fixed in `e63f84d11`** — see §4.2 |
+| bundled | ✅ 21 | ⚠️ 11 + 1, see §3 |
+| plugin | ✅ | ✅ |
+| MCP-derived | ✅ | partial — resolves as `Other` and is rejected by the tool |
+| legacy `commands/`-as-skills | ❓ unverified | ❌ `LoadedFrom::CommandsDeprecated` declared, never constructed |
+| conditional / `paths:`-activated | ✅ **verified present** (see §2.1) | ❌ absent |
+
+### 2.1 ✅ Conditional (`paths:`) skills — verified, 2026-09-10
+
+The needle the old note asked for, found without relying on symbol names:
+`"skill_paths"` is a real pattern-source tag (`Yf` in `src_161574736.js`, beside
+`claudemd_rule_globs` / `permission_rules`), and the activator is `lhr`
+(`src_163219561.js` @4573642):
+
+```js
+function lhr(e,n){ if((g_e()?.conditionalSkills.size??0)===0) return [];
+  let r=[];
+  for(let[o,d] of PR().conditionalSkills){
+    if(d.type!=="prompt"||!d.paths||d.paths.length===0) continue;
+    let p=uhr.default().add(y8(d.paths,"skill_paths"));      // gitignore-style
+    for(let y of e){ let v=sCt(y)?dhr(n,y):y;
+      if(!v||v.startsWith("..")||sCt(v)) continue;
+      if(p.ignores(v)){ PR().dynamicSkills.set(MGe(d),d);
+        PR().conditionalSkills.delete(o);
+        PR().activatedConditionalSkillNames.add(o);
+        r.push(o), t(`[skills] Activated conditional skill '${o}' (matched path: ${v})`);
+        break } } }
+  if(r.length>0) i("tengu_dynamic_skills_changed",{source:_("conditional_paths"),…}) }
+```
+
+So the shape is:
+
+* a skill whose frontmatter carries `paths:` is loaded into **`conditionalSkills`**,
+  NOT into the listed set — it is invisible until activated;
+* when the session touches a file matching any of its patterns
+  (**gitignore semantics**, the `ignore` library, same compiler as
+  `claudemd_rule_globs`), it moves into `dynamicSkills` and becomes available;
+* the move is **one-way and once** (`conditionalSkills.delete`, and the name is
+  recorded in `activatedConditionalSkillNames`);
+* relative paths escaping the root (`v.startsWith("..")`) are skipped;
+* it emits `tengu_dynamic_skills_changed` with `source: "conditional_paths"`, and
+  logs `[skills] Activated conditional skill '{name}' (matched path: {path})`.
+
+`paths` is also in the recognized-frontmatter-key union `O` (`src_161416353.js`)
+alongside `when_to_use` / `hooks` / `context`, and in the command-metadata shape
+next to `whenToUse` — consistent with skills surfacing as commands.
+
+### 2.2 Mechanism landed (`4c7fb33bd`), listing filter still to wire
+
+`skill_api::ConditionalSkills` implements the state machine:
+`is_conditional` (non-empty `paths`), `is_available`, and `activate_for_paths`,
+which matches gitignore-style through the `ignore` crate — the same crate the
+`.worktreeinclude` matcher uses, and reporting through the already-declared
+`SITE_SKILL_PATHS` telemetry site. Activation is one-way and once, and a path
+that escapes the root is skipped.
+
+⚠️ **Two bugs worth knowing about, both caught by the tests:** `docs/` matched
+nothing until the matcher moved to `matched_path_or_any_parents` (plain `matched`
+only tests the final component), and a path outside the workspace activated a
+repo-scoped skill because the first version fell back to the absolute path when
+it could not be made relative.
+
+**What is left is one plumbing layer, not the mechanism.** The model-facing
+listing is built at the composition roots from **`command_api` commands**
+(`LazySkillListingProvider`, desktop `lib.rs:8957` / mobile `host.rs:2515`), and
+a command record carries no `paths` — so the filter has nothing to key on yet.
+Upstream's command metadata DOES carry `paths` (it sits next to `whenToUse` in
+the command shape), so the step is to plumb the frontmatter field onto the
+command and then drop un-activated conditional skills in those two closures,
+calling `activate_for_paths` with `tool_api::read_file_state::keys()` — which is
+this port's version of the touched-path list `lhr` takes. ⚠️ The sibling
+`tengu_dynamic_skills_changed` `source: "file_operation"` belongs to DYNAMIC skill
+discovery (`Dynamically discovered {n} skills from {m} directories`) — a
+different mechanism that is also absent; do not conflate them.
+
+⛔ The remaining unverified row is `commands/`-as-skills. Their upstream identifiers
+(`loadSkillsFromCommandsDir`, `activateConditionalSkillsForPaths`,
+`getDynamicSkills`) are **0 hits in the binary — which proves nothing**, because
+minification erases source-level function names. They must be established by a
+behaviour needle or a string literal before anyone builds them.
+
+**The single-level `read_dir` is CORRECT — do not "fix" it.** Upstream's scan is
+also one level (`skill-name/SKILL.md` only). This is *not* the shape of hole the
+agent audit found in the agent-catalog loader, and the two should not be
+conflated.
+
+## 3. Bundled skills — the name set
+
+Upstream 2.1.267 registers **21** (`uo({name:…})`, variable names resolved):
+`artifact-components`, `batch`, `claude-api`, `claude-in-chrome`, `code-review`,
+`dataviz`, `debug`, `design-sync`, `doctor`, `explain-usage`,
+`fewer-permission-prompts`, `keybindings-help`, `loop`, `memory-types`, `run`,
+`run-skill-generator`, `setup-claude`, `update-config`, `whiteboard`,
+`workflow-authoring`, `workshop`.
+
+The port registers 11 through `register_bundled_skills`, plus `claude-api` as
+the `skill-api` compiled-in builtin.
+
+| in both (8) | LingXi-only (4) | upstream-only (13) |
+|---|---|---|
+| batch, claude-api, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, doctor, explain-usage, keybindings-help, memory-types, setup-claude, update-config, whiteboard, workflow-authoring, workshop |
+
+⚠️ **The 13 are not a backlog.** Most ride surfaces this port does not have:
+`artifact-components` / `whiteboard` / `workshop` / `design-sync` need the
+Artifact and Design surfaces (the Artifact tool here is a deliberate
+register-but-disabled skeleton pinned at 2.1.207), and `claude-in-chrome` needs
+the browser extension. Each needs adjudicating on its own substrate before
+anyone ports it. The ones with no obvious blocker and therefore worth triaging
+first are `update-config`, `keybindings-help`, `explain-usage` and `doctor`.
+
+⚠️ **A near miss worth recording.** `stuck` was reported out of this audit as a
+fourth portable name. It is not a bundled skill — it has ~50 occurrences in the
+2.1.267 binary and **no `uo({name:"stuck"` registration**; they are the English
+word. The list above never contained it, because it was built from
+registrations; the claim came from reading a substring count as if it were one.
+🚨 A bundled name is only a bundled name when a registration says so — literal
+`uo({name:"…"})` or a resolved variable. `skillify` and `lorem-ipsum` fail the
+same test from the other direction (present in the stale TS mirror, absent from
+the binary).
+
+**Now locked.** `the_bundled_skill_name_set_is_locked`
+(`commands/core/src/bundled/mod.rs`) pins the set in BOTH directions — it
+enumerates `list_all()` rather than filtering a hardcoded list, so an addition
+fails as loudly as a removal — and separately asserts that five
+surface-dependent upstream names stay absent. Nothing pinned this before: the
+per-skill tests each check one skill, so gaining or losing a whole skill changed
+no assertion. Assert names, never a count.
+
+## 4. Defects found and fixed
+
+### 4.1 `user-invocable: false` was a no-op — `e6d65a403`
+
+`build_skill_command` hardcoded `user_invocable: Some(true)`, and the production
+frontmatter reader never parsed the key at all. Upstream:
+`let dt=v["user-invocable"], en=dt===void 0?!0:htt(dt)` with
+`htt(e)=c1(e)??!1` — absent means invocable, and a value that coerces to neither
+boolean set means `false`. Load-bearing on two surfaces that filter on it
+(`CommandRegistry`'s listing and the TUI slash menu), so a skill asking to be
+hidden now is.
+
+### 4.2 The `--add-dir` tier was plumbed and never populated — `e63f84d11`
+
+All three desktop registration sites passed `Vec::new()`. Wiring it naively
+would still have found nothing: upstream joins each root with `.claude/skills`
+(`for(let e of Up()){ let S=P.join(e,".claude","skills"); … }`,
+`src_172414592.js` @5180) while the port's loader takes already-resolved skill
+dirs. This repo already agreed — the repo-root reload path has always built
+`root.join(branding::DOT_DIR).join("skills")`. Only initial registration was
+empty. Desktop-only; engine-mobile has no `add_dir` concept.
+
+### 4.3 A skill's declared `effort` never reached its fork — `2d081b3dd`
+
+`ForkedSkillScoping.effort` exists, validates against a faithful port of
+`union([enum(low|medium|high|xhigh|max), int().min(1).max(1000)])`, is persisted
+beside the fork's transcript and replayed on resume — and was **always `None`**,
+because nothing above it parsed the key. Upstream's generic skill→command
+builder carries it (`wXe({… effort: De …})`, `src_163219561.js` @4555866) and
+the scoping spreads it in conditionally.
+
+The raw carrier is an untagged enum because `effort: high` arrives as YAML text
+and `effort: 500` as an integer. Conversion is deliberately lenient, mirroring
+`Gx`: outside the union yields `None`, so a typo means "declared no effort" and
+the fork still launches.
+
+## 5. ⛔ Seven keys that are NOT worth porting the way they look
+
+`version`, `hooks`, `paths`, `metadata`, `created_by`, `improved_by`,
+`hide-from-slash-command-tool` are absent from the production reader — and
+**already parsed, with tests, in `skill-api`, where nothing reads any of them**
+(`skill-api/src/model.rs:39` labels one "P2 gap" in so many words).
+
+Adding them to `CommandFrontmatter` would produce a second parsed-and-unread
+copy: the exact "named, computed, never wired" shape this audit exists to find,
+doubled. **Build the consumer first, then the plumbing.** `effort` was the one
+member of this group with a live consumer, which is why it is in §4 and these
+are not.
+
+## 5b. The two portable bundled skills — sized
+
+`update-config` and `keybindings-help` are the two upstream-only names with no
+substrate blocker, and both are genuinely LIVE upstream:
+
+| | gate | user-invocable |
+|---|---|---|
+| `update-config` | none — always on | yes |
+| `keybindings-help` | `OF(){return H("tengu_keybinding_customization_release",!0)}` — default **true** | **no** (model-only) |
+
+⚠️ **Neither is a quick win, and an earlier note here implied otherwise.** Both
+carry a DYNAMIC prompt: `getPromptForCommand(e)` assembled from live host state,
+not a static body. `update-config` additionally branches on a `[hooks-only]`
+prefix; `keybindings-help` composes roughly nine sections plus the session's
+actual keybindings. The port has the substrate for this (`dynamic_body` /
+`BundledPromptFn` on `SkillDescriptor`), so it is a port rather than an
+invention — but it is a feature each, not an afternoon.
+
+They also both name Claude Code and `~/.claude/` paths in copy the model reads,
+so porting them lands on the established branding divergence and needs the
+LingXi rebrand rather than a byte-exact copy. That is a decision to take
+deliberately, not incidentally.
+
+## 6. Gates
+
+- `scripts/check_skill_frontmatter.py` is a real fail-closed gate (name == dir,
+  description ≤ 180 display columns, frontmatter parsable) but `SKILL_ROOTS`
+  covers only `plugins/lingxi-local-app/skills` — not the bundled skills and not
+  `<DOT_DIR>/skills`. Widening it is cheap and unclaimed.
+- No fixture anywhere pins bundled skill BODIES against the oracle. The
+  `*_body.md` files are `include_str!`-ed and never diffed.
+
+## 7. Open, with blockers
+
+| item | blocker |
+|---|---|
+| conditional / `paths:`-activated skills | ⛔ establish the behaviour at the binary first; the symbol-name greps prove nothing |
+| legacy `commands/`-as-skills tier | same |
+| the 13 upstream-only bundled skills | most need a surface this port does not ship; triage `update-config` / `keybindings-help` / `explain-usage` / `doctor` first |
+| MCP-derived skills | resolve as `Other` and are rejected by the tool |
+| the seven unread keys (§5) | need a consumer before they need a parser |

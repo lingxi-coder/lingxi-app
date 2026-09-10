@@ -115,7 +115,9 @@ impl AskUserQuestionView {
     /// remove a dialog that went ownerless while it was already open.
     #[must_use]
     pub fn is_asker_gone(&self) -> bool {
-        self.resp_tx.as_ref().is_some_and(oneshot::Sender::is_closed)
+        self.resp_tx
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed)
     }
 
     /// Build the widget for `exchange` (questions + optional timeout + the

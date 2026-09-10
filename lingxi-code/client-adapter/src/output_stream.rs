@@ -215,6 +215,10 @@ impl AdapterOutputStream {
 
 #[async_trait]
 impl OutputStream for AdapterOutputStream {
+    async fn emit_task_lifecycle(&self, event: &serde_json::Value) {
+        self.sink.emit(ClientEvent::TaskLifecycle { event_json: event.to_string() }).await;
+    }
+
     async fn emit_text(&self, text: &str) {
         let mut blocks = self.message_blocks.lock().await;
         if let Some(MessageBlockDto::Text { text: current }) = blocks.last_mut() {
@@ -228,6 +232,23 @@ impl OutputStream for AdapterOutputStream {
         self.sink
             .emit(ClientEvent::TextDelta {
                 text: text.to_string(),
+            })
+            .await;
+    }
+
+    async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
+        self.sink
+            .emit(ClientEvent::MessageIdentity {
+                message_id: message_id.as_uuid().to_string(),
+            })
+            .await;
+    }
+
+    async fn emit_message_retracted(&self, message_id: &protocol::MessageId) {
+        self.message_blocks.lock().await.clear();
+        self.sink
+            .emit(ClientEvent::MessageRetracted {
+                message_id: message_id.as_uuid().to_string(),
             })
             .await;
     }
@@ -477,6 +498,14 @@ impl OutputStream for AdapterOutputStream {
     /// so there is NO transport change — only the trait override lights up the
     /// previously-no-op (T08) default. `team` maps `Option<&str>` →
     /// `Option<String>` 1:1 (no placeholder substitution).
+    async fn emit_coordinator_worker(&self, worker: &platform_api::team_registry::WorkerInfo) {
+        self.sink
+            .emit(ClientEvent::CoordinatorWorker {
+                worker: crate::lowering::lower_worker_agent(worker),
+            })
+            .await;
+    }
+
     async fn emit_coordinator_status(&self, active_workers: u32, team: Option<&str>) {
         self.sink
             .emit(ClientEvent::CoordinatorStatus {
@@ -523,6 +552,15 @@ mod tests {
 
     /// `emit_text` → exactly one `TextDelta` carrying the payload verbatim.
     #[tokio::test]
+    async fn task_lifecycle_reaches_client_event_sink() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let event = serde_json::json!({"type":"system", "subtype":"task_updated", "task_id":"b12345678", "patch":{"status":"completed"}});
+        stream.emit_task_lifecycle(&event).await;
+        assert_eq!(sink.events().await, vec![ClientEvent::TaskLifecycle { event_json: event.to_string() }]);
+    }
+
+    #[tokio::test]
     async fn emit_text_produces_text_delta() {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
@@ -536,6 +574,44 @@ mod tests {
             ClientEvent::TextDelta {
                 text: "hello world".to_string()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_retraction_carries_identity_and_clears_partial_blocks() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let id = protocol::MessageId::new();
+        stream.emit_text("rejected").await;
+        stream.emit_assistant_message_identity(&id).await;
+        stream.emit_message_retracted(&id).await;
+        stream.emit_text("clean").await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let events = sink.events().await;
+        assert_eq!(
+            events[1],
+            ClientEvent::MessageIdentity {
+                message_id: id.as_uuid().to_string()
+            }
+        );
+        assert_eq!(
+            events[2],
+            ClientEvent::MessageRetracted {
+                message_id: id.as_uuid().to_string()
+            }
+        );
+        let ClientEvent::MessageComplete {
+            message: Some(message),
+            ..
+        } = events.last().unwrap()
+        else {
+            panic!("missing completed message")
+        };
+        assert_eq!(
+            message.blocks,
+            vec![MessageBlockDto::Text {
+                text: "clean".into()
+            }]
         );
     }
 

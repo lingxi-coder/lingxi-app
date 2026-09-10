@@ -179,10 +179,11 @@ export function verifyPackage(root = packageRoot) {
   const runtimeMetadata = readJson(join(extractedApp, 'package.json'));
   if (runtimeMetadata.main !== 'out/main/index.js') throw new Error('runtime package main is incorrect');
   if ('devDependencies' in runtimeMetadata) throw new Error('runtime package contains devDependencies');
-  if (Object.keys(runtimeMetadata.dependencies ?? {}).sort().join(',') !== '@lingxi/bridge-client') {
+  const expectedDependencies = Object.keys(metadata.dependencies ?? {}).sort();
+  if (Object.keys(runtimeMetadata.dependencies ?? {}).sort().join(',') !== expectedDependencies.join(',')) {
     throw new Error('runtime package contains unexpected production dependencies');
   }
-  for (const dependency of ['@lingxi/bridge-client', 'ws']) {
+  for (const dependency of new Set([...expectedDependencies, 'ws'])) {
     const dependencyMetadata = readJson(join(extractedApp, 'node_modules', ...dependency.split('/'), 'package.json'));
     if ('devDependencies' in dependencyMetadata) {
       throw new Error(`${dependency} package contains devDependencies`);

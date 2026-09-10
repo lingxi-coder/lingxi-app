@@ -8,7 +8,7 @@
 //! - `PANE_SHELL_INIT_DELAY_MS = 200`
 //! - global pane-creation lock to prevent concurrent `tmux split-window` races
 //! - color map literal (see `agent_color_to_tmux`)
-//! - requires tmux >= 3.2 (`set-option -p` is per-pane only in 3.2+)
+//! - probes availability through `tmux -V` exit status
 
 use async_trait::async_trait;
 use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
@@ -183,6 +183,8 @@ pub fn build_send_keys_argv(pane_id: &str, cmd: &str) -> Vec<String> {
 pub struct TmuxBackend {
     /// Optional per-pid socket name; defaults to `current_socket_name()`.
     socket_name: Option<String>,
+    #[cfg(test)]
+    command_override: Option<std::path::PathBuf>,
 }
 
 impl TmuxBackend {
@@ -190,7 +192,11 @@ impl TmuxBackend {
     /// running process pid.
     #[must_use]
     pub fn new() -> Self {
-        Self { socket_name: None }
+        Self {
+            socket_name: None,
+            #[cfg(test)]
+            command_override: None,
+        }
     }
 
     fn socket(&self) -> String {
@@ -201,11 +207,22 @@ impl TmuxBackend {
 
     /// Internal helper: shell out to `tmux` with the requested argv.
     async fn run_tmux(&self, in_swarm_socket: bool, args: &[String]) -> Result<String, SwarmError> {
-        let mut cmd = Command::new(SwarmConstants::TMUX_COMMAND);
+        #[cfg(test)]
+        let executable = self
+            .command_override
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new(SwarmConstants::TMUX_COMMAND));
+        #[cfg(not(test))]
+        let executable = SwarmConstants::TMUX_COMMAND;
+        let mut cmd = Command::new(executable);
         if in_swarm_socket {
             cmd.arg("-L").arg(self.socket());
+        } else if let Ok(tmux) = std::env::var("TMUX") {
+            if let Some(socket) = tmux.split(',').next().filter(|socket| !socket.is_empty()) {
+                cmd.arg("-S").arg(socket);
+            }
         }
-        cmd.args(args);
+        cmd.args(args).kill_on_drop(true);
         let out = cmd
             .output()
             .await
@@ -220,11 +237,48 @@ impl TmuxBackend {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
+    async fn create_configured_pane(
+        &self,
+        target: &str,
+        horizontal: bool,
+        in_swarm_socket: bool,
+    ) -> Result<PaneId, SwarmError> {
+        let pane = self
+            .run_tmux(
+                in_swarm_socket,
+                &build_split_window_argv(target, horizontal, Some("70%")),
+            )
+            .await?;
+        let configured = async {
+            let color = agent_color_to_tmux(AgentColor::Red);
+            self.run_tmux(in_swarm_socket, &build_select_pane_color_argv(&pane, color))
+                .await?;
+            self.run_tmux(in_swarm_socket, &build_set_pane_border_argv(&pane, color))
+                .await?;
+            Ok::<(), SwarmError>(())
+        }
+        .await;
+        if configured.is_err() {
+            // Keep the split's ID owned here until every initialization step
+            // succeeds, so a styling failure cannot leave an untracked pane.
+            let args = ["kill-pane".into(), "-t".into(), pane.clone()];
+            let rollback = self.run_tmux(in_swarm_socket, &args);
+            match tokio::time::timeout(Duration::from_secs(5), rollback).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!("Failed to roll back tmux pane {pane}: {error}"),
+                Err(_) => tracing::warn!("Timed out rolling back tmux pane {pane}"),
+            }
+        }
+        configured?;
+        tokio::time::sleep(Duration::from_millis(PANE_SHELL_INIT_DELAY_MS)).await;
+        Ok(PaneId { raw: pane })
+    }
+
     /// Synchronous "are we inside a tmux session" probe — claude-code only
     /// reads `$TMUX`, never shells out (see `detection.ts:35-37`).
     #[must_use]
     pub fn is_running_inside() -> bool {
-        std::env::var("TMUX").is_ok()
+        std::env::var("TMUX").is_ok_and(|value| !value.is_empty())
     }
 }
 
@@ -309,23 +363,68 @@ impl SwarmBackend for TmuxBackend {
                 .to_string()
         };
 
-        // For the first inside-tmux teammate, claude-code uses 70% width split.
-        let split_argv = build_split_window_argv(&target_pane, horizontal, Some("70%"));
-        let new_pane = self.run_tmux(!inside, &split_argv).await?;
+        self.create_configured_pane(&target_pane, horizontal, !inside)
+            .await
+    }
 
-        // Apply default color (red as a placeholder; production callers pass
-        // the agent's color via a separate API the engine layers on top).
-        let tmux_color = agent_color_to_tmux(AgentColor::Red);
-        let color_argv = build_select_pane_color_argv(&new_pane, tmux_color);
-        self.run_tmux(!inside, &color_argv).await?;
+    async fn pane_metadata(
+        &self,
+        pane: &PaneId,
+    ) -> Result<platform_api::team_spawn::PaneLaunchMetadata, SwarmError> {
+        // Model-facing labels are logical coordinates in upstream pe, even
+        // when the user's tmux session or window has a different actual name.
+        let inside = Self::is_running_inside();
+        Ok(platform_api::team_spawn::PaneLaunchMetadata {
+            backend_type: "tmux".into(),
+            session_name: if inside { "current" } else { "lingxi-swarm" }.into(),
+            window_name: if inside {
+                "current"
+            } else {
+                SwarmConstants::VIEW_WINDOW_NAME
+            }
+            .into(),
+            pane_id: pane.raw.clone(),
+        })
+    }
 
-        let border_argv = build_set_pane_border_argv(&new_pane, tmux_color);
-        self.run_tmux(!inside, &border_argv).await?;
+    async fn send_command_to_pane(&self, pane: &PaneId, command: &str) -> Result<(), SwarmError> {
+        super::validate_pane_command(command)?;
+        let external = !Self::is_running_inside();
+        let _ = self
+            .run_tmux(
+                external,
+                &[
+                    "set-option".into(),
+                    "-p".into(),
+                    "-t".into(),
+                    pane.raw.clone(),
+                    "remain-on-exit".into(),
+                    "failed".into(),
+                ],
+            )
+            .await;
+        self.run_tmux(
+            external,
+            &[
+                "respawn-pane".into(),
+                "-k".into(),
+                "-t".into(),
+                pane.raw.clone(),
+                "--".into(),
+                command.into(),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
 
-        // Wait for shell init.
-        tokio::time::sleep(Duration::from_millis(PANE_SHELL_INIT_DELAY_MS)).await;
-
-        Ok(PaneId { raw: new_pane })
+    async fn kill_pane(&self, pane: &PaneId) -> Result<(), SwarmError> {
+        self.run_tmux(
+            !Self::is_running_inside(),
+            &["kill-pane".into(), "-t".into(), pane.raw.clone()],
+        )
+        .await?;
+        Ok(())
     }
 
     async fn destroy_swarm(&self, handle: SwarmHandle) -> Result<(), SwarmError> {
@@ -350,6 +449,48 @@ impl SwarmBackend for TmuxBackend {
     }
 
     fn is_available(&self) -> bool {
-        which::which("tmux").is_ok() && detection::tmux_version_ok()
+        detection::tmux_available()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn post_split_styling_failure_rolls_back_the_created_pane() {
+        for failing_command in ["select-pane", "set-option"] {
+            let root = tempfile::tempdir().unwrap();
+            let command = root.path().join("mock-tmux");
+            let script = format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.log\"\ncase \" $* \" in\n  *\" split-window \"*) printf '%%42\\n' ;;\n  *\" {failing_command} \"*) printf 'injected styling failure\\n' >&2; exit 7 ;;\nesac\n"
+            );
+            std::fs::write(&command, script).unwrap();
+            std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let backend = TmuxBackend {
+                socket_name: Some("isolated-test".into()),
+                command_override: Some(command.clone()),
+            };
+            let error = backend
+                .create_configured_pane("%0", true, true)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("injected styling failure"));
+            let calls = std::fs::read_to_string(command.with_extension("log")).unwrap();
+            let calls: Vec<_> = calls.lines().collect();
+            assert!(calls[0].contains("split-window -t %0"));
+            assert_eq!(
+                calls.last().copied(),
+                Some("-L isolated-test kill-pane -t %42")
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call.contains("kill-pane"))
+                    .count(),
+                1
+            );
+        }
     }
 }

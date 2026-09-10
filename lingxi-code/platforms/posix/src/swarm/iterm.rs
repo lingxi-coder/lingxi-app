@@ -1,131 +1,159 @@
-//! iTerm2 `SwarmBackend` using `AppleScript` via `osascript`.
-//!
-//! Deliberate divergence from claude-code: claude-code uses the `it2` Python
-//! CLI (`src/utils/swarm/backends/ITermBackend.ts`). We use `AppleScript`
-//! instead because it's built into `macOS` and avoids the Python-API-disabled
-//! trap (`it2 --version` succeeds even when iTerm2's API toggle is off,
-//! causing `it2 session split` to fail with no fallback). See M2-05 plan
-//! "Deliberate divergences" §1.
-//!
-//! Color + title setters are intentionally no-ops to match claude-code's
-//! `ITermBackend.ts:270-300` performance posture.
+//! Native iTerm2 panes through the it2 CLI, matching Claude Code 2.1.263.
 
 use async_trait::async_trait;
 use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 use protocol::AgentId;
-use std::sync::OnceLock;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-/// Per-process pane-creation lock, matching the tmux backend's serialization.
-fn pane_creation_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+/// Pane state also serializes creation and pruning of dead sessions.
+#[derive(Default)]
+pub struct ITermSwarmBackend {
+    sessions: Mutex<Vec<String>>,
 }
 
-/// iTerm2 backend using `osascript` to drive `AppleScript`.
-#[derive(Default)]
-pub struct ITermSwarmBackend;
-
 impl ITermSwarmBackend {
-    /// Construct a new `iTerm` `AppleScript` backend.
+    /// Construct a native iTerm2 backend.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
-    /// Run an `AppleScript` snippet through `osascript -e <script>`.
-    async fn run_osascript(&self, script: &str) -> Result<String, SwarmError> {
-        let out = Command::new("osascript")
-            .arg("-e")
-            .arg(script)
+    async fn run(args: &[&str]) -> Result<std::process::Output, SwarmError> {
+        Command::new(super::detection::it2_command())
+            .args(args)
             .output()
             .await
-            .map_err(|e| SwarmError::Tmux(format!("spawn osascript failed: {e}")))?;
-        if !out.status.success() {
-            return Err(SwarmError::Tmux(format!(
-                "osascript exited {}: stderr={}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .map_err(|error| SwarmError::Tmux(format!("spawn it2 failed: {error}")))
     }
 
-    /// Pure helper, exposed for unit testing — assemble the `AppleScript` for
-    /// "open a new `iTerm` window, return its session id".
-    #[must_use]
-    pub fn build_new_window_script(default_command: &str) -> String {
-        // AppleScript single-quote-safety: callers must pre-escape any single
-        // quotes in `default_command`. The engine never lets agent-provided
-        // strings reach this function, so we keep escape rules simple.
-        format!(
-            r#"tell application "iTerm"
-    set newWindow to (create window with default profile)
-    tell current session of newWindow
-        write text "{default_command}"
-        return id
-    end tell
-end tell"#
-        )
-    }
-
-    /// Pure helper — assemble the `AppleScript` for "split current session".
-    #[must_use]
-    pub fn build_split_script(vertical: bool) -> String {
-        let direction = if vertical {
-            "vertically"
-        } else {
-            "horizontally"
-        };
-        format!(
-            r#"tell application "iTerm"
-    tell current session of current window
-        set newSession to (split {direction} with default profile)
-        return id of newSession
-    end tell
-end tell"#
-        )
+    fn parse_session_id(output: &str) -> Option<&str> {
+        output.lines().find_map(|line| {
+            line.split_once("Created new pane:")
+                .map(|(_, id)| id.trim())
+                .filter(|id| !id.is_empty())
+        })
     }
 }
 
 #[async_trait]
 impl SwarmBackend for ITermSwarmBackend {
     async fn start_swarm(&self, _layout: SwarmLayout) -> Result<SwarmHandle, SwarmError> {
-        // Open a fresh iTerm window to host the swarm.
-        let id = self
-            .run_osascript(&Self::build_new_window_script(":"))
-            .await?;
-        Ok(SwarmHandle { session_name: id })
+        // iTerm2 splits the leader's existing session; it never creates a window.
+        Ok(SwarmHandle {
+            session_name: "current".to_owned(),
+        })
     }
 
     async fn create_teammate_pane(
         &self,
         _agent_id: &AgentId,
-        position: PanePosition,
+        _position: PanePosition,
     ) -> Result<PaneId, SwarmError> {
-        let _guard = pane_creation_lock().lock().await;
-        let vertical = matches!(position, PanePosition::Top | PanePosition::Bottom);
-        let id = self
-            .run_osascript(&Self::build_split_script(vertical))
-            .await?;
-        tracing::debug!("ITermSwarmBackend: created pane {}", id);
-        Ok(PaneId { raw: id })
+        let mut sessions = self.sessions.lock().await;
+        let leader = std::env::var("ITERM_SESSION_ID")
+            .ok()
+            .and_then(|value| value.split_once(':').map(|(_, id)| id.to_owned()));
+        loop {
+            let mut args = vec!["session", "split"];
+            let target = if sessions.is_empty() {
+                args.push("-v");
+                leader.as_deref()
+            } else {
+                sessions.last().map(String::as_str)
+            };
+            if let Some(target) = target {
+                args.extend(["-s", target]);
+            }
+            let output = Self::run(&args).await?;
+            if !output.status.success() {
+                if let Some(previous) = sessions.last() {
+                    let listing = Self::run(&["session", "list"]).await?;
+                    if listing.status.success()
+                        && !String::from_utf8_lossy(&listing.stdout).contains(previous)
+                    {
+                        sessions.pop();
+                        continue;
+                    }
+                }
+                return Err(SwarmError::Tmux(format!(
+                    "Failed to create iTerm2 split pane: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let id = Self::parse_session_id(&stdout)
+                .ok_or_else(|| {
+                    SwarmError::Tmux(format!(
+                        "Failed to parse session ID from split output: {stdout}"
+                    ))
+                })?
+                .to_owned();
+            sessions.push(id.clone());
+            return Ok(PaneId { raw: id });
+        }
     }
 
-    async fn destroy_swarm(&self, handle: SwarmHandle) -> Result<(), SwarmError> {
-        // Closing the host window is the user's choice; we don't force-close
-        // (matching claude-code's iTerm backend posture).
-        tracing::debug!(
-            "ITermSwarmBackend::destroy_swarm: leaving iTerm window {} intact",
-            handle.session_name
-        );
+    async fn pane_metadata(
+        &self,
+        pane: &PaneId,
+    ) -> Result<platform_api::team_spawn::PaneLaunchMetadata, SwarmError> {
+        // iTerm2 has no tmux session/window coordinates. These are the logical
+        // swarm-view labels emitted by upstream spawnTeammate (pe).
+        let inside_tmux = super::tmux::TmuxBackend::is_running_inside();
+        Ok(platform_api::team_spawn::PaneLaunchMetadata {
+            backend_type: "iterm2".into(),
+            session_name: if inside_tmux {
+                "current"
+            } else {
+                "lingxi-swarm"
+            }
+            .into(),
+            window_name: if inside_tmux {
+                "current"
+            } else {
+                super::tmux::SwarmConstants::VIEW_WINDOW_NAME
+            }
+            .into(),
+            pane_id: pane.raw.clone(),
+        })
+    }
+
+    async fn send_command_to_pane(&self, pane: &PaneId, command: &str) -> Result<(), SwarmError> {
+        super::validate_pane_command(command)?;
+        let _ = Self::run(&["session", "send", "-s", &pane.raw, "\u{15}"]).await?;
+        let output = Self::run(&["session", "run", "-s", &pane.raw, command]).await?;
+        if !output.status.success() {
+            return Err(SwarmError::Tmux(format!(
+                "Failed to send command to iTerm2 pane {}: {}",
+                pane.raw,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(())
+    }
+
+    async fn kill_pane(&self, pane: &PaneId) -> Result<(), SwarmError> {
+        let output = Self::run(&["session", "close", "-f", "-s", &pane.raw]).await?;
+        self.sessions.lock().await.retain(|id| id != &pane.raw);
+        if !output.status.success() {
+            return Err(SwarmError::Tmux(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn destroy_swarm(&self, _handle: SwarmHandle) -> Result<(), SwarmError> {
+        let sessions = self.sessions.lock().await.clone();
+        for raw in sessions {
+            self.kill_pane(&PaneId { raw }).await?;
+        }
         Ok(())
     }
 
     fn is_available(&self) -> bool {
-        std::env::var("TERM_PROGRAM").as_deref() == Ok("iTerm.app")
-            && which::which("osascript").is_ok()
+        std::env::var("TERM_PROGRAM").as_deref() == Ok("iTerm.app") && which::which("it2").is_ok()
     }
 }
 
@@ -134,17 +162,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_window_script_contains_tell_iterm() {
-        let s = ITermSwarmBackend::build_new_window_script(":");
-        assert!(s.contains("tell application \"iTerm\""));
-        assert!(s.contains("create window with default profile"));
-    }
-
-    #[test]
-    fn split_script_horizontal_vs_vertical() {
-        let v = ITermSwarmBackend::build_split_script(true);
-        let h = ITermSwarmBackend::build_split_script(false);
-        assert!(v.contains("split vertically"));
-        assert!(h.contains("split horizontally"));
+    fn split_response_requires_upstream_prefix() {
+        assert_eq!(
+            ITermSwarmBackend::parse_session_id("Created new pane: session-123\n"),
+            Some("session-123")
+        );
+        assert_eq!(ITermSwarmBackend::parse_session_id("session-123"), None);
+        assert_eq!(
+            ITermSwarmBackend::parse_session_id("Created new pane: \n"),
+            None
+        );
     }
 }

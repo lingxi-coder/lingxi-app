@@ -47,6 +47,21 @@ fn flag_test_override() -> &'static StdRwLock<HashMap<String, bool>> {
 /// `default`. With no fetcher wired (the prod default) the snapshot is empty and
 /// every read returns `default` — matching the shipped binary's GrowthBook-absent
 /// behavior.
+/// claude-code `oJ()` (2.1.263; `Yke()` in the older builds) — whether the
+/// PushNotification surface is live for this session:
+/// `nt("tengu_kairos_push_notifications", false) && mc("agentPushNotifEnabled",
+/// false).value`.
+///
+/// Hosted here rather than in `cron` because three unrelated callers need the
+/// SAME answer: the Monitor tool's description addendum (`ybn`), the
+/// `ScheduleWakeup`/loop copy, and the orchestrator's per-monitor-event hint
+/// (`GM`). `cron::is_push_notif_enabled` forwards to it.
+#[must_use]
+pub fn push_notifications_enabled() -> bool {
+    flag_bool("tengu_kairos_push_notifications", false)
+        && platform_api::session_flags::agent_push_notif_enabled()
+}
+
 #[must_use]
 pub fn flag_bool(key: &str, default: bool) -> bool {
     if let Some(v) = flag_test_override().read().unwrap().get(key) {

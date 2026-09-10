@@ -365,6 +365,41 @@ pub const WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM: &str = "\n\n---\n\nNOTE: You ar
 /// `${Lp}` is resolved to `StructuredOutput`.
 pub const WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM: &str = "\n\n---\n\nNOTE: You are running inside a workflow script. You MUST return your final answer by calling the StructuredOutput tool exactly once \u{2014} the tool's input schema defines the required shape. Do your work, then call StructuredOutput; do NOT put your answer in a text response (the script reads ONLY the tool call). If validation fails, read the error and call StructuredOutput again with a corrected shape.";
 
+/// claude `vto` (@1495xxx) — the built-in `Explore` agent's FULL `whenToUse`,
+/// the text a NON-lean session renders and the one every non-listing surface
+/// (the SDK's `bKe`, `claude-code-guide`'s custom-agent block) reads.
+pub const EXPLORE_WHEN_TO_USE: &str = "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.";
+
+/// claude `Cto` (@1495xxx) — the same agent's `whenToUseLean`, rendered in
+/// place of [`EXPLORE_WHEN_TO_USE`] when the session is on the lean prompt.
+/// `Explore` is the ONLY definition in 2.1.266 that declares one.
+pub const EXPLORE_WHEN_TO_USE_LEAN: &str = "Read-only search agent for broad fan-out searches — when answering means sweeping many files, directories, or naming conventions and you only need the conclusion, not the file dumps. It reads excerpts rather than whole files, so it locates code; it doesn't review or audit it. Specify search breadth: \"medium\" for moderate exploration, \"very thorough\" for multiple locations and naming conventions.";
+
+/// The `whenToUseLean` a definition declares, or `None`.
+///
+/// Only BUILT-IN definitions can carry one — a user/project/plugin agent that
+/// overrides a built-in by name brings its own single `description` and must
+/// render that in both prompt modes, so the source check is load-bearing rather
+/// than defensive.
+#[must_use]
+pub fn when_to_use_lean(def: &AgentDefinition) -> Option<&'static str> {
+    if !matches!(def.source, AgentSource::BuiltIn) {
+        return None;
+    }
+    match def.agent_type.as_str() {
+        "Explore" => Some(EXPLORE_WHEN_TO_USE_LEAN),
+        _ => None,
+    }
+}
+
+/// The workflow runtime's private subagent type (oracle `bn.agentType`,
+/// src_173804794.js @34591).
+///
+/// It is deliberately NOT part of the model-facing catalog: the oracle declares
+/// it in the workflow chunk, never in `cre()`. `crate::agent_listing_entries`
+/// filters it out of both listings by this name.
+pub const WORKFLOW_SUBAGENT_TYPE: &str = "workflow-subagent";
+
 /// Tools disallowed for the workflow-subagent in Claude Code 2.1.245.
 ///
 /// Resolves: `i1` → `"SendUserMessage"`, `ns` → `"Agent"`, `SI` → `"Workflow"`.
@@ -385,7 +420,7 @@ pub fn workflow_subagent_disallowed() -> Vec<String> {
 #[must_use]
 pub fn workflow_subagent_definition() -> AgentDefinition {
     AgentDefinition {
-        agent_type: "workflow-subagent".to_string(),
+        agent_type: WORKFLOW_SUBAGENT_TYPE.to_string(),
         when_to_use: "Internal subagent for workflow script orchestration.".to_string(),
         tools: AgentToolPolicy::All {
             use_exact_tools: false,
@@ -583,6 +618,36 @@ fn def(
 /// divergence (see module docs). The oracle registers `workflow-subagent` via
 /// the workflow path rather than `builtInAgents`; the port keeps it here as
 /// its resolution registry.
+/// claude `d8()` (@1520340) — `!a.CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS`,
+/// latched once per host. `cre()` pushes `Explore` and `Plan` only behind it
+/// (`if(d8())n.push(b0,$Ee)`), so a deployment that sets the kill-switch has a
+/// roster — and a model-facing catalog — without those two entries. The port
+/// registered them unconditionally.
+#[must_use]
+pub fn explore_plan_agents_enabled() -> bool {
+    !platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_DISABLE_EXPLORE_PLAN_AGENTS")
+            .or_else(|_| std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS"))
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// claude `Ir()` — `CLAUDE_CODE_SAFE_MODE` truthy, or the `--safe-mode` flag.
+/// `cre()` registers `statusline-setup` only when it is FALSE
+/// (`if(!Ir())n.push(xnn)`): safe mode exists to keep the session from writing
+/// executable configuration, and that agent's entire job is to write a
+/// `statusLine` command into settings.
+#[must_use]
+pub fn safe_mode_enabled() -> bool {
+    platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_SAFE_MODE")
+            .or_else(|_| std::env::var("CLAUDE_CODE_SAFE_MODE"))
+            .ok()
+            .as_deref(),
+    )
+}
+
 #[must_use]
 pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
     builtin_agent_definitions_gated(web_fetch_agent_enabled())
@@ -595,6 +660,22 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
 /// without touching process-global env.
 #[must_use]
 pub fn builtin_agent_definitions_gated(include_web_fetch: bool) -> Vec<AgentDefinition> {
+    builtin_agent_definitions_with_gates(
+        include_web_fetch,
+        explore_plan_agents_enabled(),
+        safe_mode_enabled(),
+    )
+}
+
+/// [`builtin_agent_definitions_gated`] with `cre()`'s two remaining registration
+/// gates supplied by the caller, so the roster composition stays testable
+/// without mutating process-global env.
+#[must_use]
+pub fn builtin_agent_definitions_with_gates(
+    include_web_fetch: bool,
+    include_explore_plan: bool,
+    safe_mode: bool,
+) -> Vec<AgentDefinition> {
     let mut defs = vec![
         def(
             "general-purpose",
@@ -605,7 +686,10 @@ pub fn builtin_agent_definitions_gated(include_web_fetch: bool) -> Vec<AgentDefi
             AgentModel::Inherit,
             GENERAL_PURPOSE_PROMPT,
         ),
-        {
+    ];
+    // `if(!Ir())n.push(xnn)` — safe mode withdraws the statusline-setup agent.
+    if !safe_mode {
+        defs.push({
             // claude statusline-setup is the only built-in declaring a `color`
             // (`color:"orange"`), surfaced in `tengu_agent_tool_selected` and the
             // user-facing-name background color. The `def` helper sets `color: None`,
@@ -619,16 +703,19 @@ pub fn builtin_agent_definitions_gated(include_web_fetch: bool) -> Vec<AgentDefi
             );
             d.color = Some("orange".to_string());
             d
-        },
-        // claude 2.1.193 Explore carries BOTH `whenToUse` (M6p, full) and
-        // `whenToUseLean` (N6p, lean); the model-facing agent listing renders the
-        // LEAN variant, so `when_to_use` (the port's single listing field) holds
-        // N6p verbatim. The full M6p text is used only by non-listing surfaces the
-        // port does not have yet; adding a separate `when_to_use_lean` field is
-        // deferred (it would ripple to 40+ AgentDefinition literals).
+        });
+    }
+    // `if(d8())n.push(b0,$Ee)` — Explore and Plan are registered as a pair.
+    if include_explore_plan {
+        defs.push(
+        // `Explore` carries BOTH `whenToUse` (`vto`, full) and `whenToUseLean`
+        // (`Cto`, lean). `when_to_use` holds the FULL text — `U2n` renders the
+        // lean one only when the session is lean, and every non-listing surface
+        // reads the full one. The lean variant is supplied by
+        // [`when_to_use_lean`] and carried on the listing entry.
         def(
             "Explore",
-            "Read-only search agent for broad fan-out searches — when answering means sweeping many files, directories, or naming conventions and you only need the conclusion, not the file dumps. It reads excerpts rather than whole files, so it locates code; it doesn't review or audit it. Specify search breadth: \"medium\" for moderate exploration, \"very thorough\" for multiple locations and naming conventions.",
+            EXPLORE_WHEN_TO_USE,
             AgentToolPolicy::Except(read_only_disallowed()),
             // claude-code 2.1.198 `qme` frontmatter is `model:"inherit"` (was
             // `"haiku"`): the effective model is computed per-session by `GAe`
@@ -637,15 +724,15 @@ pub fn builtin_agent_definitions_gated(include_web_fetch: bool) -> Vec<AgentDefi
             // firstParty sessions.
             AgentModel::Inherit,
             EXPLORE_PROMPT,
-        ),
-        def(
+        ));
+        defs.push(def(
             "Plan",
             "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
             AgentToolPolicy::Except(read_only_disallowed()),
             AgentModel::Inherit,
             PLAN_PROMPT,
-        ),
-    ];
+        ));
+    }
     // claude `vyt()` (@287981417) registers the sixth built-in AFTER Explore /
     // Plan and ONLY behind its gate: `if(xgi())t.push(Hlr)`. Gate default is
     // OFF (`tengu_clever_orbit` defaults false and `LINGXI_WEB_FETCH_AGENT` is
@@ -1044,6 +1131,41 @@ mod tests {
             "general-purpose must end with the anti-re-delegation bullet, got tail: {:?}",
             &p[p.len().saturating_sub(220)..]
         );
+    }
+
+    /// `cre()`'s two registration gates (@1520500):
+    /// `if(!Ir())n.push(xnn)` and `if(d8())n.push(b0,$Ee)`. Exercised through
+    /// the pure arm so the roster composition is testable without touching
+    /// process-global env.
+    #[test]
+    fn roster_gates_withdraw_statusline_setup_and_the_explore_plan_pair() {
+        let types = |defs: &[AgentDefinition]| {
+            defs.iter()
+                .map(|d| d.agent_type.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let all = builtin_agent_definitions_with_gates(false, true, false);
+        let names = types(&all);
+        for expected in ["general-purpose", "statusline-setup", "Explore", "Plan"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "default roster carries {expected}, got: {names:?}"
+            );
+        }
+
+        // `d8()` false — Explore AND Plan go together; nothing else moves.
+        let no_explore_plan = types(&builtin_agent_definitions_with_gates(false, false, false));
+        assert!(!no_explore_plan.iter().any(|n| n == "Explore"));
+        assert!(!no_explore_plan.iter().any(|n| n == "Plan"));
+        assert!(no_explore_plan.iter().any(|n| n == "statusline-setup"));
+        assert_eq!(no_explore_plan.len(), names.len() - 2);
+
+        // `Ir()` true — safe mode withdraws only statusline-setup.
+        let safe = types(&builtin_agent_definitions_with_gates(false, true, true));
+        assert!(!safe.iter().any(|n| n == "statusline-setup"));
+        assert!(safe.iter().any(|n| n == "Explore"));
+        assert_eq!(safe.len(), names.len() - 1);
     }
 
     // ── workflow-subagent tests (Task 1, oracle: agentdef-and-validation.md) ──

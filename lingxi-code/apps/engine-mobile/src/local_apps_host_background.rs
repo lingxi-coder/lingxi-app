@@ -876,7 +876,7 @@ impl LocalAppsHostBroker {
             CapabilityId::DataMutate => {
                 self.ensure_background_step_authorized(app_id, *capability, &input)
                     .await?;
-                self.mutate_data_value(input, false).await
+                self.mutate_data_value(input, false, None).await
             }
             CapabilityId::RuntimeStatus => {
                 let runtime = self

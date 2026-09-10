@@ -15,6 +15,7 @@ use crate::settings::schema::{strategy_for, MergeStrategy, SettingsJson};
 #[must_use]
 pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
     SettingsJson {
+        teammate_mode: next.teammate_mode.or(prev.teammate_mode),
         dollar_schema: next.dollar_schema.or(prev.dollar_schema),
         trusted_directories: concat_dedup(prev.trusted_directories, next.trusted_directories),
         additional_directories: concat_dedup(
@@ -101,6 +102,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         agent_push_notif_enabled: next
             .agent_push_notif_enabled
             .or(prev.agent_push_notif_enabled),
+        task_output_max_chars: next
+            .task_output_max_chars
+            .or(prev.task_output_max_chars),
         workflow_keyword_trigger_enabled: next
             .workflow_keyword_trigger_enabled
             .or(prev.workflow_keyword_trigger_enabled),
@@ -1134,6 +1138,12 @@ mod tests {
             (json!("lower"), json!("upper")),
             (json!(true), json!(false)),
             (json!(1), json!(2)),
+            // String ENUMS reject the generic `"lower"`/`"upper"` pair, so they
+            // need real variants. Appended last on purpose: the search takes the
+            // first shape that round-trips, so this can only ever be reached by a
+            // field for which every shape above already failed — which is the
+            // case that used to panic.
+            (json!("auto"), json!("tmux")),
         ];
 
         // Whether `{field: value}` survives a `SettingsJson` round trip

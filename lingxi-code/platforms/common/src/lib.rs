@@ -31,7 +31,7 @@ pub use llm_config::{
 };
 pub use mcp_http::{connect_http, HttpConnectError};
 pub use mcp_remote::RemoteMcpTransport;
-pub use mcp_sse::{connect_sse, SseConnectError, IDE_AUTH_HEADER};
+pub use mcp_sse::{connect_sse, SseConnectError, SseEndpointMode, IDE_AUTH_HEADER};
 pub use mobile_linux::{
     MobileLinuxProcessRunner, MobileLinuxSandbox, RootfsArchive, RootfsEntryKind,
     RootfsImmutableEntry, RootfsImmutableKind, RootfsManifest, RootfsManifestEntry,

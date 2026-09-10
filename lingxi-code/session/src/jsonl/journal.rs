@@ -1256,7 +1256,10 @@ impl DurableJournal {
                 dir_mode: SESSION_STATE_DIR_MODE,
                 file_mode: SESSION_STATE_FILE_MODE,
             },
-            Some(&self.identity),
+            // `main` requires an identity here rather than accepting `None`:
+            // this write always has one, and demanding it keeps a caller from
+            // silently skipping the pinned-root check.
+            &self.identity,
         )?;
         Ok(())
     }

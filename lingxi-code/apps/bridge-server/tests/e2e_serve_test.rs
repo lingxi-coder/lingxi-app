@@ -74,6 +74,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         use_noop_permission_gate: false,
         deny_unresolved_ask: false,
         is_tty: false,
+        initial_teammate_team_name: None,
         injected_permission_gate: None,
         injected_plugin_secrets: Default::default(),
         ask_user_question_tx: None,

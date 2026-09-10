@@ -49,6 +49,7 @@ pub mod contacts;
 pub mod coordinator_mode;
 pub mod deep_link;
 pub mod device_status;
+pub mod display;
 pub mod effect_handler;
 pub mod env;
 pub mod file_history_sink;
@@ -74,7 +75,10 @@ pub mod orchestrator;
 pub mod panel_pool;
 pub mod parked_agent_store;
 pub mod permission_gate;
+pub mod plan_files;
+pub mod plan_slug;
 pub mod platform;
+pub mod agent_processes;
 pub mod process;
 pub mod prompting_gate;
 pub mod repo_root_reload;
@@ -88,13 +92,16 @@ pub mod session_retention;
 pub mod share;
 pub mod skill_loader;
 pub mod stt;
+pub mod subagent_output;
 pub mod subagent_output_guard;
 pub mod subagent_spawn;
 pub mod subscription;
 pub mod swarm;
 pub mod task_registry;
+pub mod task_activity;
 pub mod team_registry;
 pub mod team_spawn;
+pub mod teammate_worker;
 pub mod tool_invoker;
 pub mod traffic_mode;
 pub mod tts;
@@ -203,14 +210,14 @@ pub use orchestrator::{
     ContextPressureLevel, ContextUsageCategory, ContextUsageCategoryKind, ContextUsageSnapshot,
     ConversationControls, CostSnapshot, CurrentUsageSnapshot, DeferredToolReplay,
     DirectoryAddedHookSummary, DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome,
-    GoalStatusAttachment, GoalStatusKind, HandleError, HookInfo, McpActionState, McpServerInfo,
-    McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelBillingMode, ModelCapabilities,
-    ModelListing, ModelMetadata, ModelPricing, ModelPricingTier, ModelProvenance, ModelUsageRow,
-    OrchestratorHandle, OutputEvent, OutputStream, PermissionControlState,
-    PermissionModeAvailability, PlanSnapshot, PromptSnapshot, PromptToolDescription,
-    RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec, ReasoningSelection,
-    RecapOutcome, RegisterRepoRootOutcome, RegisterRepoRootRequest, ResumeRuntimeSnapshot,
-    RewindRowData, SkillInfo, StatusSnapshot, TurnOutcome,
+    GoalClearedReason, GoalStatusAttachment, GoalStatusKind, HandleError, HookInfo, McpActionState,
+    McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelBillingMode,
+    ModelCapabilities, ModelListing, ModelMetadata, ModelPricing, ModelPricingTier,
+    ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent, OutputStream,
+    PermissionControlState, PermissionModeAvailability, PlanSnapshot, PromptSnapshot,
+    PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec,
+    ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome, RegisterRepoRootRequest,
+    ResumeRuntimeSnapshot, RewindRowData, SkillInfo, StatusSnapshot, TurnOutcome,
 };
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{
@@ -218,8 +225,9 @@ pub use permission_gate::{
 };
 pub use platform::Platform;
 pub use process::{
-    ForegroundOutcome, ForegroundRunResult, HookOutputObserver, HookRunOutcome, ProcessError,
-    ProcessHandle, ProcessOutput, ProcessOutputFile, ProcessRunner, ProcessStreamSink,
+    BackgroundExitSink, BackgroundTaskBinding, ForegroundOutcome, ForegroundRunResult,
+    HookOutputObserver, HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput,
+    ProcessOutputFile, ProcessRunner, ProcessStreamSink,
 };
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
@@ -230,6 +238,8 @@ pub use rooted_fs::{
     truncate_file_pinned, AtomicWriteOptions, RootIdentity, RootedFileLock,
 };
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+/// Shared cancellation handle for host-initiated interactive turns.
+pub use tokio_util::sync::CancellationToken;
 pub use sandbox::{
     BackendPlanHandle, NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend,
     SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand,
@@ -266,3 +276,36 @@ pub use workflow_output::{
 #[allow(unused_imports)]
 pub use worktree::*;
 pub use worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
+
+pub mod teammate_plan;
+
+pub mod task_notification;
+mod task_notification_sanitize;
+
+/// Shared task output layout and direct-child display parsing.
+pub mod task_output;
+
+/// Shared shell discovery and duration formatting.
+pub mod shell_support;
+
+pub mod shell_handoff;
+
+/// Shared acknowledged shell supervision protocol.
+pub mod shell_supervisor;
+/// Platform-independent shell stall detector.
+pub mod shell_watchdog;
+
+pub mod human_task_message;
+
+/// The refusal-fallback CHAIN walk (which model to try next).
+///
+/// Lives here rather than in `orchestrator` because both turn loops need it:
+/// the main thread's, and the subagent runner's in the `agent` crate, which
+/// cannot depend on `orchestrator`.
+pub mod refusal_cascade;
+
+/// The refusal-notice episode accumulator and collapse queue.
+pub mod refusal_notice;
+
+/// One refusal hop, decided identically for both turn loops.
+pub mod refusal_driver;

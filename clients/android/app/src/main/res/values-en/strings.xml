@@ -353,6 +353,8 @@
     <string name="cron_one_time_datetime_button">One-Time Date &amp; Time</string>
     <string name="cron_open_alarm_settings_button">Open “Alarms &amp; Reminders”</string>
     <string name="cron_pending">Pending</string>
+    <string name="cron_unsupported_generic">This schedule cannot run on this device</string>
+    <string name="cron_unsupported_schedule_fmt">Will not run: %1$s</string>
     <string name="cron_preset_every_hour">Hourly</string>
     <string name="cron_preset_every_monday_9am">Mondays at 09:00</string>
     <string name="cron_prompt_field_label">Prompt / Task</string>
@@ -955,6 +957,9 @@
     <string name="local_apps_verification_summary_needs_revalidation">The approved MCP catalog no longer matches the active build and must be revalidated.</string>
     <string name="local_apps_verification_summary_needs_setup">No approved Local App MCP catalog is active yet.</string>
     <string name="local_apps_verification_summary_passed">MCP schema, Flow, call and isolation verification passed.</string>
+    <string name="local_apps_verification_summary_ui_verification_corrupt">Stored UI verification evidence is corrupt.</string>
+    <string name="local_apps_verification_summary_ui_verification_passed">Host UI and data verification evidence passed.</string>
+    <string name="local_apps_verification_summary_ui_verification_required">UI verification has not completed on the active app.</string>
     <string name="local_apps_verification_summary_verification_unavailable">UI verification evidence is unavailable on this host.</string>
     <string name="local_apps_verification_ui">UI verification</string>
     <string name="local_apps_view_all">View All Apps</string>

@@ -46,5 +46,5 @@ pub use secure_storage::{
     plaintext_secure_storage, secure_storage_for_platform, secure_storage_for_policy,
     LinuxSecretStorage, MacOsKeychainStorage, PlainTextSecureStorage,
 };
-pub use swarm::TmuxSwarmBackend;
+pub use swarm::TmuxBackend;
 pub use worktree::PosixWorktreeManager;

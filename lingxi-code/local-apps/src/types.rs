@@ -145,7 +145,7 @@ impl fmt::Display for AppRuntimeProfile {
 }
 
 /// Outcome of the create-time MCP interview: whether the agent asked the
-/// user, during the requirements interview, if they want MCP services set up
+/// user, during the requirements interview, if they want MCP capabilities set up
 /// for this app, and if so, what they answered.
 ///
 /// THREE states, deliberately not a bool and not a plain list — those two
@@ -158,7 +158,7 @@ impl fmt::Display for AppRuntimeProfile {
 ///
 /// - Absent from the record (`None`): never asked.
 /// - [`Self::Declined`]: asked; the user said no.
-/// - [`Self::Requested`]: asked; the user wants these MCP services. `services`
+/// - [`Self::Requested`]: asked; the user wants these MCP capabilities. `capabilities`
 ///   are concrete names drawn from `LocalAppTemplateCatalog`'s
 ///   `mcpSuggestions` for the confirmed shape's family, never free text the
 ///   agent invented.
@@ -167,11 +167,11 @@ impl fmt::Display for AppRuntimeProfile {
 pub enum AppMcpIntent {
     /// Asked; the user declined MCP for this app.
     Declined,
-    /// Asked; the user wants these MCP services set up.
+    /// Asked; the user wants these MCP capabilities set up.
     Requested {
-        /// Concrete MCP service names, drawn from
+        /// Concrete MCP capability names, drawn from
         /// `LocalAppTemplateCatalog`'s `mcpSuggestions`.
-        services: Vec<String>,
+        capabilities: Vec<String>,
     },
 }
 
@@ -438,7 +438,7 @@ mod tests {
             brief: "Track daily habits".into(),
             workflow_model: None,
             mcp_intent: Some(AppMcpIntent::Requested {
-                services: vec!["github".into()],
+                capabilities: vec!["github".into()],
             }),
             git_enabled: true,
             scaffolded: true,
@@ -450,7 +450,7 @@ mod tests {
             workspace_rel: "apps/abc123/workspace".into(),
         };
         let json = serde_json::to_string(&record).unwrap();
-        assert!(json.contains(r#""mcpIntent":{"status":"requested","services":["github"]}"#));
+        assert!(json.contains(r#""mcpIntent":{"status":"requested","capabilities":["github"]}"#));
         let back: AppRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);
     }

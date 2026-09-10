@@ -504,6 +504,18 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
             });
     }
 
+    let live = orch
+        .expansion_hook_context()
+        .await
+        .prompt_transcript
+        .unwrap();
+    assert_eq!(live.messages, orch.session().lock().await.history);
+    assert_eq!(
+        live.messages.len(),
+        2,
+        "unpersisted assistant is visible to prompt hooks"
+    );
+
     assert_eq!(
         orch.expansion_hook_context().await.last_assistant_message,
         Some("first line \nsecond line".to_string()),

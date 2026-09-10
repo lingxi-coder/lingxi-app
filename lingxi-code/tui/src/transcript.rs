@@ -26,6 +26,10 @@ use crate::history_cell::{cell_for_message, HistoryCell, RenderMode};
 /// cursor + render mode (rich/raw and verbose/expanded state).
 #[derive(Default)]
 pub struct Transcript {
+    turn_start: usize,
+    response_start: usize,
+    assistant_message_ids: std::collections::HashMap<usize, protocol::MessageId>,
+    terminal_replay_required: bool,
     /// Finalized cells, in commit order.
     committed: Vec<Box<dyn HistoryCell>>,
     /// The in-flight (actively streaming) cell, if any. Held out of
@@ -57,6 +61,77 @@ struct CommittedWrapCache {
 }
 
 impl Transcript {
+    /// Start collecting cells for the next assistant response.
+    pub fn start_assistant_response(&mut self) {
+        self.response_start = self.committed.len();
+        self.turn_start = self.response_start;
+    }
+
+    /// Associate only narrative/reasoning cells with a completed response.
+    pub fn identify_assistant_response(&mut self, id: protocol::MessageId) {
+        use crate::history_cell::message::{AssistantTextCell, RedactedThinkingCell, ThinkingCell};
+        for index in self.response_start..self.committed.len() {
+            let cell = self.committed[index].as_any();
+            if cell.is::<AssistantTextCell>()
+                || cell.is::<ThinkingCell>()
+                || cell.is::<RedactedThinkingCell>()
+            {
+                self.assistant_message_ids.insert(index, id);
+            }
+        }
+        self.response_start = self.committed.len();
+    }
+
+    /// Remove one identified response, preserving unrelated timeline cells.
+    pub fn retract_assistant_response(&mut self, id: protocol::MessageId) {
+        let old_ids = std::mem::take(&mut self.assistant_message_ids);
+        let mut old_index = 0;
+        let mut new_index = 0;
+        let mut removed_before_start = 0;
+        let mut removed_before_turn = 0;
+        let mut removed = false;
+        self.committed.retain(|_| {
+            let message_id = old_ids.get(&old_index);
+            let keep = message_id != Some(&id);
+            if keep {
+                if let Some(message_id) = message_id {
+                    self.assistant_message_ids.insert(new_index, *message_id);
+                }
+                new_index += 1;
+            } else {
+                removed = true;
+                removed_before_start += usize::from(old_index < self.response_start);
+                removed_before_turn += usize::from(old_index < self.turn_start);
+                self.terminal_replay_required |= old_index < self.committed_to_terminal;
+            }
+            old_index += 1;
+            keep
+        });
+        self.response_start -= removed_before_start;
+        self.turn_start -= removed_before_turn;
+        if removed {
+            self.committed_to_terminal = 0;
+            self.terminal_replay_required = true;
+            self.invalidate_wrap_cache();
+        }
+    }
+
+    /// Whether native scrollback must be rebuilt after a retraction.
+    pub fn take_terminal_replay_required(&mut self) -> bool {
+        std::mem::take(&mut self.terminal_replay_required)
+    }
+
+    /// Current turn prose for background handoff after identity-based removal.
+    pub fn current_turn_assistant_text(&self) -> String {
+        use crate::history_cell::message::AssistantTextCell;
+        self.committed[self.turn_start..]
+            .iter()
+            .chain(self.active.iter())
+            .filter_map(|cell| cell.as_any().downcast_ref::<AssistantTextCell>())
+            .map(AssistantTextCell::body)
+            .collect()
+    }
+
     /// An empty transcript.
     #[must_use]
     pub fn new() -> Self {
@@ -293,6 +368,9 @@ impl Transcript {
     /// Drop all transcript state: committed cells, the active cell, and the
     /// native-scrollback commit cursor (`/clear`).
     pub fn clear(&mut self) {
+        self.turn_start = 0;
+        self.response_start = 0;
+        self.assistant_message_ids.clear();
         self.committed.clear();
         self.active = None;
         self.committed_to_terminal = 0;
@@ -477,6 +555,39 @@ mod tests {
 
     fn assistant_cell(body: &str) -> Box<dyn HistoryCell> {
         Box::new(AssistantTextCell::new(body.to_string()))
+    }
+
+    #[test]
+    fn retracts_only_identified_assistant_cells_and_preserves_later_response() {
+        let mut transcript = Transcript::new();
+        let failed = protocol::MessageId::new();
+        let retained = protocol::MessageId::new();
+        transcript.push_message(system("before"));
+        transcript.start_assistant_response();
+        transcript.push_committed(assistant_cell("failed"));
+        transcript.push_message(system("unrelated notice"));
+        transcript.identify_assistant_response(failed);
+        transcript.push_committed(assistant_cell("retained"));
+        transcript.identify_assistant_response(retained);
+        transcript.committed_to_terminal = transcript.committed.len();
+        transcript.retract_assistant_response(protocol::MessageId::new());
+        assert_eq!(transcript.committed.len(), 4);
+        transcript.retract_assistant_response(failed);
+        assert_eq!(transcript.committed.len(), 3);
+        assert!(transcript.take_terminal_replay_required());
+        assert_eq!(transcript.committed_to_terminal(), 0);
+        assert_eq!(
+            transcript.committed[2]
+                .as_any()
+                .downcast_ref::<AssistantTextCell>()
+                .unwrap()
+                .body(),
+            "retained"
+        );
+        transcript.retract_assistant_response(failed);
+        assert_eq!(transcript.committed.len(), 3);
+        transcript.retract_assistant_response(retained);
+        assert_eq!(transcript.committed.len(), 2);
     }
 
     /// Append `delta` to the active assistant cell; `false` when the active

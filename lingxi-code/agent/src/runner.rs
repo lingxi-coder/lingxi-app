@@ -270,6 +270,24 @@ fn with_workflow_stream_watchdog(
     .boxed()
 }
 
+/// A cancelled/dropped worker future must not leave a pending hook snapshot.
+struct PromptTranscriptCancellationGuard {
+    executor: Option<std::sync::Arc<hooks::HookExecutorImpl>>,
+    session_id: protocol::SessionId,
+    agent_id: protocol::AgentId,
+    completed: bool,
+}
+
+impl Drop for PromptTranscriptCancellationGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            if let Some(executor) = &self.executor {
+                executor.take_agent_prompt_transcript(self.session_id, self.agent_id);
+            }
+        }
+    }
+}
+
 /// Subagent state-machine loop.
 ///
 /// When [`SubagentContext::api_client`] is `Some`, drives the real
@@ -281,14 +299,24 @@ pub async fn run_subagent(
     event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
+    let mut snapshot_cleanup = PromptTranscriptCancellationGuard {
+        executor: ctx.hook_executor.clone(),
+        session_id: ctx.hook_session_id,
+        agent_id: ctx.agent_id,
+        completed: false,
+    };
     let non_interactive = ctx
         .session_interactive
         .map_or(ctx.is_async, |interactive| !interactive || ctx.is_async);
-    platform_api::session_flags::scope_non_interactive_session(
-        non_interactive,
-        run_subagent_inner(ctx, event_rx, out_tx),
+    llm_client::thinking_scope::scope_thinking_recovery(
+        llm_client::thinking_scope::ThinkingRecoveryScope::default(),
+        platform_api::session_flags::scope_non_interactive_session(
+            non_interactive,
+            run_subagent_inner(ctx, event_rx, out_tx),
+        ),
     )
     .await;
+    snapshot_cleanup.completed = true;
 }
 
 async fn run_subagent_inner(
@@ -399,6 +427,7 @@ async fn run_subagent_inner(
         )
     });
 
+    let mut live_hook_transcript = hooks::PromptHookTranscript::default();
     let terminal_status = if agent_scoped_stop.is_some() {
         // Proxy: forward events, capture the terminal disposition.
         let (proxy_tx, mut proxy_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -429,7 +458,7 @@ async fn run_subagent_inner(
         // Run the body against the proxy, then drop our proxy sender so the
         // forwarder's `recv()` loop ends and we can read the captured status.
         if ctx.api_client.is_some() {
-            run_subagent_loop(ctx, event_rx, proxy_tx).await;
+            run_subagent_loop(ctx, event_rx, proxy_tx, &mut live_hook_transcript).await;
         } else {
             run_subagent_stub(ctx, event_rx, proxy_tx).await;
         }
@@ -437,7 +466,7 @@ async fn run_subagent_inner(
     } else {
         // No frontmatter hooks: straight passthrough, no proxy overhead.
         if ctx.api_client.is_some() {
-            run_subagent_loop(ctx, event_rx, out_tx).await;
+            run_subagent_loop(ctx, event_rx, out_tx, &mut live_hook_transcript).await;
         } else {
             run_subagent_stub(ctx, event_rx, out_tx).await;
         }
@@ -454,6 +483,7 @@ async fn run_subagent_inner(
     ) = (agent_scoped_stop, terminal_status)
     {
         let stop_ctx = hooks::registry::HookContext {
+            prompt_transcript: Some(live_hook_transcript),
             session_id,
             agent_id: Some(agent_id),
             cwd,
@@ -626,8 +656,19 @@ fn build_completed_result(
     history: &[protocol::ConversationMessage],
     final_assistant_blocks: &[protocol::ContentBlock],
     stop_reason: Option<&str>,
+    serving_model: &str,
 ) -> serde_json::Value {
-    let blocks = final_text_blocks(history, final_assistant_blocks);
+    // `ICe`: retracted messages come out before the answer is picked, so a
+    // superseded hop's output cannot become the report.
+    let live = drop_retracted(history);
+    let mut blocks = final_text_blocks(&live, final_assistant_blocks);
+    // The `⚠ {notice}` harness note. Upstream unshifts it in `iht` AFTER the
+    // turn-limit note; here the turn-limit note is inserted at index 0 by the
+    // agent tool's finalizer, so prepending here lands the pair in upstream's
+    // order — turn-limit, then this, then the report.
+    if let Some(notice) = local_refusal_notice(&live, serving_model) {
+        blocks.insert(0, format!("\u{26A0} {notice}\n"));
+    }
     let content: Vec<serde_json::Value> = blocks
         .iter()
         .map(|t| serde_json::json!({ "type": "text", "text": t }))
@@ -669,7 +710,7 @@ fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &
         )),
         LlmError::Transport { .. } => Some((
             "server_error",
-            "API Error: Connection closed mid-response. The response above may be incomplete.",
+            "API Error: Connection lost mid-response. The response above may be incomplete.",
         )),
         // A stall is NOT in `CTy`. Claude Code 2.1.238 classifies it through
         // `xtt`:
@@ -707,7 +748,7 @@ fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &
         }
         LlmError::StreamInterrupted { .. } => Some((
             "server_error",
-            "API Error: Response stalled mid-stream. The response above may be incomplete.",
+            "API Error: The response stopped arriving. The response above may be incomplete.",
         )),
         // Auth / permission / invalid-request / quota / context / TLS / cost /
         // unsupported-capability / model-unavailable are terminal — CC rethrows
@@ -996,6 +1037,32 @@ async fn flush_transcript(
     }
 }
 
+fn publish_prompt_hook_transcript(
+    ctx: &SubagentContext,
+    history: &[protocol::ConversationMessage],
+    usage: &llm_client::Usage,
+) {
+    if let Some(executor) = &ctx.hook_executor {
+        executor.publish_agent_prompt_transcript(
+            ctx.hook_session_id,
+            ctx.agent_id,
+            hooks::PromptHookTranscript {
+                messages: history.to_vec(),
+                last_usage_tokens: usize::try_from(
+                    usage
+                        .billable_tokens
+                        .input
+                        .saturating_add(usage.billable_tokens.output)
+                        .saturating_add(usage.billable_tokens.cache_read)
+                        .saturating_add(usage.billable_tokens.cache_write),
+                )
+                .unwrap_or(usize::MAX),
+                ..Default::default()
+            },
+        );
+    }
+}
+
 async fn emit_failed(
     out_tx: &mpsc::Sender<SubagentEvent>,
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
@@ -1099,9 +1166,10 @@ fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<S
     reason = "imperative multi-turn agentic loop — splitting the turn body hurts readability"
 )]
 async fn run_subagent_loop(
-    ctx: SubagentContext,
+    mut ctx: SubagentContext,
     mut event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
+    live_hook_transcript: &mut hooks::PromptHookTranscript,
 ) {
     use protocol::{ContentBlock, ConversationMessage, MessageId};
 
@@ -1114,7 +1182,11 @@ async fn run_subagent_loop(
     // `Some` consults the parent's cumulative cost once per turn; `None`
     // disables enforcement (legacy/test contexts).
     let budget = ctx.budget.clone();
-    let model = resolve_model(&ctx);
+    let mut model = resolve_model(&ctx);
+    // Per-run refusal cascade. claude-code's subagents share the main thread's
+    // because they share its query generator; here the loops are separate, so
+    // each run walks its own chain (handed down on the context).
+    let mut refusal_cascade = platform_api::refusal_driver::RefusalCascadeState::default();
     let system: Option<String> = ctx
         .rendered_system_prompt
         .as_ref()
@@ -1225,9 +1297,12 @@ async fn run_subagent_loop(
     // that history (they were persisted on the original run), so re-adding them
     // would duplicate context the agent has seen and re-fire `SubagentStart`
     // for a run that began in another process.
-    let mut history: Vec<ConversationMessage> = Vec::new();
+    let history = &mut live_hook_transcript.messages;
     if let Some(resumed) = &ctx.resumed_history {
         history.extend(resumed.iter().cloned());
+        if let Some(scope) = llm_client::thinking_scope::current() {
+            crate::transcript::restore_thinking_recovery(history, &scope);
+        }
     } else {
         // Keep the engine-owned mobile snapshot at the fixed first-message
         // position, before the variable task/fork prompt. That preserves the
@@ -1286,6 +1361,19 @@ async fn run_subagent_loop(
         )
         .with_correlation_id(ctx.correlation_id.clone())
     });
+    if let (Some(writer), Some(scope)) =
+        (transcript.as_ref(), llm_client::thinking_scope::current())
+    {
+        let writer = writer.clone();
+        scope.set_recorder(std::sync::Arc::new(move |messages| {
+            let writer = writer.clone();
+            Box::pin(async move {
+                if let Err(error) = writer.record_thinking_recovery(messages).await {
+                    tracing::warn!(%error, "could not persist worker thinking recovery");
+                }
+            })
+        }));
+    }
     // Mark a child as live before its first round-trip. A persistent child may
     // later transition to `idle` without terminating; the lifecycle records
     // make that distinction observable to mobile clients tailing the file.
@@ -1310,9 +1398,17 @@ async fn run_subagent_loop(
     // transcript load races this first append. Restored agents skip both paths
     // because their seed is already durable and replayable.
     if ctx.resumed_history.is_none() {
-        flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+        flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
         for message in &ctx.prompt_messages {
             emit_message(&out_tx, agent_id, message).await;
+        }
+    }
+
+    // A restored human-owned turn drains its typed inbox before the first API
+    // request. The persisted-history watermark above excludes these new inputs.
+    if ctx.resumed_history.is_some() {
+        if fold_task_notifications(&ctx, history).await {
+            flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
         }
     }
 
@@ -1341,6 +1437,10 @@ async fn run_subagent_loop(
     // `tengu_cache_eviction_hint`.
     let mut assistant_message_count: u64 = 0;
     let mut last_request_id: Option<String> = None;
+    let mut notification_changes = ctx
+        .task_registry
+        .as_ref()
+        .and_then(|registry| registry.subscribe_task_notifications());
 
     // Outer loop: one iteration per turn-set. In non-persistent mode the
     // turn-set runs exactly once (we `return` after it). In persistent mode the
@@ -1354,7 +1454,9 @@ async fn run_subagent_loop(
         // already emitted its `Completed`). Stays `false` if the loop instead falls
         // through by exhausting `max_turns`, which needs the max-turns `Completed`.
         let mut terminated_cleanly = false;
+        let mut foreground_parked = false;
         for turn_idx in 0..max_turns {
+            fold_task_notifications(&ctx, history).await;
             // Per-turn budget gate. This is the achievable analog of
             // `QueryEngine.ts`'s `error_max_budget_usd` loop-terminator, built on
             // the same frozen seam `AgentTool`'s pre-spawn gate uses
@@ -1391,10 +1493,11 @@ async fn run_subagent_loop(
                             )
                         },
                     );
+                    publish_prompt_hook_transcript(&ctx, history, &last_usage);
                     emit_failed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                         error,
@@ -1475,7 +1578,7 @@ async fn run_subagent_loop(
                     history.push(ConversationMessage::user(MessageId::new(), content));
                 }
                 maybe_emit_near_limit_wrap_up(
-                    &mut history,
+                    history,
                     &ctx,
                     api_client.as_ref(),
                     &out_tx,
@@ -1502,8 +1605,10 @@ async fn run_subagent_loop(
                     // partial (empty vec); a mid-stream error yields whatever
                     // blocks were finalized.
                     let profile = ctx.model_profile.as_deref();
-                    let messages_for_api = cap_input_bytes(&history, ctx.max_input_bytes_per_turn)
-                        .map_err(|message| (Vec::new(), LlmError::InvalidRequest { message }))?;
+                    let messages_for_api = cap_input_bytes(history, ctx.max_input_bytes_per_turn)
+                        .map_err(|message| {
+                        (Vec::new(), LlmError::InvalidRequest { message })
+                    })?;
                     let call_opts = crate::api::SubagentApiCallOpts {
                         model_attempt: model_attempt.clone(),
                         max_output_tokens: ctx.max_output_tokens_per_turn,
@@ -1635,10 +1740,13 @@ async fn run_subagent_loop(
                         ev = event_rx.recv() => {
                             match ev {
                                 Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
+                                    if let Some(executor) = &ctx.hook_executor {
+                                        executor.take_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id);
+                                    }
                                     emit_killed(
                                         &out_tx,
                                         transcript.as_ref(),
-                                        &history,
+                                        history,
                                         &mut transcript_written,
                                         agent_id,
                                     )
@@ -1650,10 +1758,11 @@ async fn run_subagent_loop(
                                 // future, append the message to history (above), and
                                 // re-issue the round-trip NOW — previously this fell
                                 // into the catch-all below and silently DISCARDED the
-                                // text. Persistent (teammate) runners only; one-shot
-                                // subagents keep the legacy drop-and-retry semantics.
+                                // text. A registry-backed foreground runner can also
+                                // become resumable after Ctrl+B, so preserve intentional
+                                // messages there. Task notifications never use this arm.
                                 Some(lingxi_core::Event::UserMessage { content, .. })
-                                    if ctx.persistent =>
+                                    if ctx.persistent || ctx.task_registry.is_some() =>
                                 {
                                     wake_message = Some(content);
                                     continue;
@@ -1699,10 +1808,11 @@ async fn run_subagent_loop(
                 Ok(r) => r,
                 Err((partial_blocks, e)) => {
                     if is_workflow_watchdog_timeout(&e) {
+                        publish_prompt_hook_transcript(&ctx, history, &last_usage);
                         emit_failed(
                             &out_tx,
                             transcript.as_ref(),
-                            &history,
+                            history,
                             &mut transcript_written,
                             agent_id,
                             format!(
@@ -1728,10 +1838,10 @@ async fn run_subagent_loop(
                     let salvaged = translate_response_blocks(&partial_blocks);
                     match classify_api_termination(&e) {
                         Some((_error_kind, api_error_text))
-                            if !final_text_blocks(&history, &salvaged).is_empty() =>
+                            if !final_text_blocks(history, &salvaged).is_empty() =>
                         {
                             let cutoff_note = build_cutoff_note(api_error_text);
-                            let result = build_recovered_result(&history, &salvaged, &cutoff_note);
+                            let result = build_recovered_result(history, &salvaged, &cutoff_note);
                             if !salvaged.is_empty() {
                                 let partial_message = ConversationMessage::Assistant {
                                     id: MessageId::new(),
@@ -1745,15 +1855,12 @@ async fn run_subagent_loop(
                             // Make the transcript observable before publishing the
                             // terminal event. The receiver may release the runner as
                             // soon as it sees `Completed`.
-                            flush_transcript(
-                                transcript.as_ref(),
-                                &history,
-                                &mut transcript_written,
-                            )
-                            .await;
+                            flush_transcript(transcript.as_ref(), history, &mut transcript_written)
+                                .await;
                             if let Some(writer) = transcript.as_ref() {
                                 let _ = writer.record_terminal("completed", None).await;
                             }
+                            publish_prompt_hook_transcript(&ctx, history, &last_usage);
                             let _ = out_tx
                                 .send(SubagentEvent::Completed {
                                     agent_id,
@@ -1774,10 +1881,11 @@ async fn run_subagent_loop(
                             return;
                         }
                         _ => {
+                            publish_prompt_hook_transcript(&ctx, history, &last_usage);
                             emit_failed(
                                 &out_tx,
                                 transcript.as_ref(),
-                                &history,
+                                history,
                                 &mut transcript_written,
                                 agent_id,
                                 format!("subagent api error: {e}"),
@@ -1801,6 +1909,15 @@ async fn run_subagent_loop(
             // hid a provider overrun from `cumulative_usage`/settlement instead
             // of surfacing it; report the provider's real usage verbatim.
             last_usage = response.usage.clone();
+            live_hook_transcript.last_usage_tokens = usize::try_from(
+                last_usage
+                    .billable_tokens
+                    .input
+                    .saturating_add(last_usage.billable_tokens.output)
+                    .saturating_add(last_usage.billable_tokens.cache_read)
+                    .saturating_add(last_usage.billable_tokens.cache_write),
+            )
+            .unwrap_or(usize::MAX);
             accumulate_usage(&mut cumulative_usage, &last_usage);
             emit_progress(
                 &out_tx,
@@ -1885,10 +2002,11 @@ async fn run_subagent_loop(
                     .any(|(_, name, _, _)| matches!(name.as_str(), "Write" | "Edit"));
                 // Dispatch each tool_use through the inherited invoker.
                 let Some(invoker) = &ctx.tool_invoker else {
+                    publish_prompt_hook_transcript(&ctx, history, &last_usage);
                     emit_failed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                         "subagent requested a tool but no tool_invoker was inherited".to_string(),
@@ -1966,7 +2084,15 @@ async fn run_subagent_loop(
                         continue;
                     }
                     let inv_ctx = platform_api::tool_invoker::SubagentInvocationContext {
-                        parent_agent_id: ctx.parent_agent_id,
+                        permission_pause_observer: ctx.task_registry.clone().map(|registry| {
+                            platform_api::permission_gate::PermissionPauseObserver::new(move |ms| {
+                                registry.add_permission_paused_ms(agent_id, ms);
+                            })
+                        }),
+                        // The tools run on behalf of THIS agent. The field is
+                        // named parent because it becomes the parent of any
+                        // recursively spawned child, not this agent's parent.
+                        parent_agent_id: Some(agent_id),
                         origin_session_id: ctx.origin_session_id,
                         // This is selected from the host-resolved definition,
                         // never from the model's tool input or telemetry. The
@@ -2044,8 +2170,12 @@ async fn run_subagent_loop(
                         // dispatches (claude `freezeCommandDenies`).
                         frozen_command_denies: ctx.frozen_command_denies.clone(),
                     };
-                    match invoker.invoke(name, input.clone(), inv_ctx).await {
-                        Ok(value) => {
+                    match invoker
+                        .invoke_detailed(name, input.clone(), inv_ctx, None)
+                        .await
+                    {
+                        Ok(invocation) => {
+                            let value = invocation.data;
                             // A subagent reads tool results through the same
                             // eyes the main loop does. Deriving the media blocks
                             // here — from the SHARED rule, not a copy of it — is
@@ -2071,6 +2201,7 @@ async fn run_subagent_loop(
                                 (None, serde_json::Value::String(s)) => s.clone(),
                                 (None, other) => other.to_string(),
                             };
+                            let content = invocation.model_content.unwrap_or(content);
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
                                 content,
@@ -2080,10 +2211,11 @@ async fn run_subagent_loop(
                             });
                         }
                         Err(platform_api::tool_invoker::ToolInvokerError::Abort(error)) => {
+                            publish_prompt_hook_transcript(&ctx, history, &last_usage);
                             emit_failed(
                                 &out_tx,
                                 transcript.as_ref(),
-                                &history,
+                                history,
                                 &mut transcript_written,
                                 agent_id,
                                 error,
@@ -2147,10 +2279,11 @@ async fn run_subagent_loop(
                 } else {
                     "calls"
                 };
+                publish_prompt_hook_transcript(&ctx, history, &last_usage);
                 emit_failed(
                     &out_tx,
                     transcript.as_ref(),
-                    &history,
+                    history,
                     &mut transcript_written,
                     agent_id,
                     format!(
@@ -2169,6 +2302,31 @@ async fn run_subagent_loop(
             // the truncated turn carried tool_uses we just dispatched.
             // A captured structured output terminates the run (it IS the result),
             // even though the forced tool call carries a `tool_use` stop reason.
+            // A `refusal` stop is NOT terminal while the cascade still has a
+            // hop left: swap the model and re-issue this turn against it, the
+            // same as both main-thread loops (`turn_loop.rs:1333`,
+            // `drivers/mod.rs:3192`, which likewise just Continue — neither
+            // tombstones the refused turn). Without this a refusing subagent
+            // simply ended its run.
+            if stop_reason.as_deref() == Some("refusal") {
+                let frame_id = MessageId::new();
+                let notice_uuid = frame_id.as_uuid().to_string();
+                if let Some(hop) =
+                    refusal_cascade.next_hop(&ctx.refusal_fallback_chain, &model, notice_uuid)
+                {
+                    for report in &hop.declines {
+                        tracing::info!(
+                            event = "tengu_refusal_fallback_route_declined",
+                            reason = report.as_str(),
+                        );
+                    }
+                    model = hop.fallback_model.clone();
+                    for emitted in hop.notices {
+                        history.push(refusal_fallback_frame(frame_id, &emitted.banner));
+                    }
+                    continue;
+                }
+            }
             let should_continue = stop_reason.as_deref() == Some("tool_use")
                 && !tool_uses.is_empty()
                 && structured_result.is_none();
@@ -2193,7 +2351,7 @@ async fn run_subagent_loop(
                     // without relying on this escalation at all.
                     //
                     // The next round-trip's request is built straight from
-                    // `history` (`cap_input_bytes(&history, ..)` at the top of
+                    // `history` (`cap_input_bytes(history, ..)` at the top of
                     // the turn loop) — every OTHER exit from this arm, and
                     // every tool-dispatch continuation, appends a user message
                     // (the nudge below, or the pushed tool_results) before
@@ -2224,10 +2382,11 @@ async fn run_subagent_loop(
                         // by `max_turns`).
                         continue;
                     }
+                    publish_prompt_hook_transcript(&ctx, history, &last_usage);
                     emit_failed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                         // Byte-locked to claude 2.1.195 (binary strings :331985 /
@@ -2242,6 +2401,11 @@ async fn run_subagent_loop(
                     .await;
                     return;
                 }
+                // A completion that arrived during the model request is folded only
+                // after its stream finished, before publishing a terminal event.
+                if turn_idx + 1 < max_turns && fold_task_notifications(&ctx, history).await {
+                    continue;
+                }
                 // claude `finalizeAgentTool`: the result's `content` is the LAST
                 // assistant message's text blocks, with a backward-scan fallback to
                 // the most recent assistant message that has text when the final turn
@@ -2250,13 +2414,32 @@ async fn run_subagent_loop(
                 // A `schema` run returns the captured StructuredOutput tool input.
                 let result = match structured_result.take() {
                     Some(structured) => structured,
-                    None => {
-                        build_completed_result(&history, &assistant_blocks, stop_reason.as_deref())
-                    }
+                    None => build_completed_result(
+                        history,
+                        &assistant_blocks,
+                        stop_reason.as_deref(),
+                        &model,
+                    ),
                 };
                 // Persist all messages before publishing the terminal event; the
                 // consumer is allowed to tear down a one-shot runner immediately.
-                flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+                flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
+                foreground_parked = park_foreground_owner(
+                    &ctx,
+                    &result,
+                    &last_usage,
+                    total_tool_use_count,
+                    elapsed_ms(run_start),
+                )
+                .await;
+                if foreground_parked {
+                    ctx.is_async = true;
+                    if let Some(writer) = transcript.as_ref() {
+                        let _ = writer.record_terminal("idle", None).await;
+                    }
+                    terminated_cleanly = true;
+                    break;
+                }
                 // Keep lifecycle state alongside the transcript so clients that
                 // discover an agent after completion can distinguish it from a
                 // still-running child. Persistent agents retain their parked row
@@ -2265,6 +2448,7 @@ async fn run_subagent_loop(
                     let status = if ctx.persistent { "idle" } else { "completed" };
                     let _ = writer.record_terminal(status, None).await;
                 }
+                publish_prompt_hook_transcript(&ctx, history, &last_usage);
                 let _ = out_tx
                     .send(SubagentEvent::Completed {
                         agent_id,
@@ -2307,10 +2491,11 @@ async fn run_subagent_loop(
             // `max_turns` at all; now that it chooses freely, it can — so this exit
             // has to carry the schema contract too.
             if force_structured_tool.is_some() && structured_result.is_none() {
+                publish_prompt_hook_transcript(&ctx, history, &last_usage);
                 emit_failed(
                     &out_tx,
                     transcript.as_ref(),
-                    &history,
+                    history,
                     &mut transcript_written,
                     agent_id,
                     "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
@@ -2323,27 +2508,58 @@ async fn run_subagent_loop(
             // stop. claude-code surfaces this as a completion carrying a max-turns
             // reason rather than a hard failure, so the parent can still consume
             // whatever work was produced.
-            flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+            flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
             if let Some(writer) = transcript.as_ref() {
                 let status = if ctx.persistent { "idle" } else { "completed" };
                 let _ = writer.record_terminal(status, None).await;
             }
-            let _ = out_tx
-                .send(SubagentEvent::Completed {
-                    agent_id,
-                    result: serde_json::json!({
-                        "reason": "max_turns_exhausted",
-                        "max_turns": max_turns,
-                    }),
-                    usage: last_usage.clone(),
-                    total_tool_use_count,
-                    total_duration_ms: elapsed_ms(run_start),
-                    assistant_message_count,
-                    last_request_id: last_request_id.clone(),
-                    cumulative_usage: cumulative_usage.clone(),
-                    usage_complete: true,
-                })
-                .await;
+            publish_prompt_hook_transcript(&ctx, history, &last_usage);
+            // The oracle's `bft` (src_162329786.js @3532630) finalizes a
+            // max-turns exit through the SAME path as any other completion: the
+            // last assistant message's text blocks are the result content, and a
+            // `max_turns_reached` attachment only adds a harness NOTE in front of
+            // them. Dropping the blocks here made every turn-limited subagent
+            // return `(Subagent completed but returned no output.)` — the caller
+            // lost whatever partial work the agent had reported. Build the normal
+            // result and carry the reason alongside it, so the reason readers
+            // (`tasks::handlers::local_agent::max_turns_reached_from`,
+            // `fusion::panel::max_turns_exhausted_detail`) still see it.
+            let mut result = build_completed_result(history, &[], None, &model);
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert(
+                    "reason".to_string(),
+                    serde_json::Value::String("max_turns_exhausted".to_string()),
+                );
+                obj.insert("max_turns".to_string(), serde_json::json!(max_turns));
+            }
+            foreground_parked = park_foreground_owner(
+                &ctx,
+                &result,
+                &last_usage,
+                total_tool_use_count,
+                elapsed_ms(run_start),
+            )
+            .await;
+            if foreground_parked {
+                ctx.is_async = true;
+                if let Some(writer) = transcript.as_ref() {
+                    let _ = writer.record_terminal("idle", None).await;
+                }
+            } else {
+                let _ = out_tx
+                    .send(SubagentEvent::Completed {
+                        agent_id,
+                        result,
+                        usage: last_usage.clone(),
+                        total_tool_use_count,
+                        total_duration_ms: elapsed_ms(run_start),
+                        assistant_message_count,
+                        last_request_id: last_request_id.clone(),
+                        cumulative_usage: cumulative_usage.clone(),
+                        usage_complete: true,
+                    })
+                    .await;
+            }
         }
 
         // Flush the turn-set's messages to the per-agent transcript. Runs for
@@ -2351,13 +2567,13 @@ async fn run_subagent_loop(
         // much a record as a persistent one's, and the `SubagentStop` hook
         // reports its path either way. Best-effort: a transcript write failure
         // must never mask the agent's result.
-        flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+        flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
 
         // ----- Persist decision ------------------------------------------------
         // Non-persistent (batch-8) behavior: end after one turn-set. This preserves
         // today's exact semantics — every existing call site sets `persistent`
         // false, so they `return` here as before.
-        if !ctx.persistent {
+        if !ctx.persistent && !foreground_parked {
             return;
         }
 
@@ -2371,7 +2587,35 @@ async fn run_subagent_loop(
             return;
         }
         loop {
-            match event_rx.recv().await {
+            // Subscribe was established before the turn; checking after registering
+            // the revision prevents a notification between check and park being lost.
+            // Completed is consumed asynchronously by the handler. Wait for
+            // its rest acknowledgement before starting a notification turn,
+            // otherwise the old Completed can park a newly running owner.
+            let handler_rested = match &ctx.task_registry {
+                Some(registry) => {
+                    registry
+                        .can_wake_agent_for_task_notification(agent_id)
+                        .await
+                }
+                None => true,
+            };
+            if handler_rested && fold_task_notifications(&ctx, history).await {
+                break;
+            }
+            let event = tokio::select! {
+                event = event_rx.recv() => event,
+                changed = async {
+                    match notification_changes.as_mut() {
+                        Some(receiver) => receiver.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed.is_err() { notification_changes = None; }
+                    continue;
+                }
+            };
+            match event {
                 Some(lingxi_core::Event::UserMessage { content, .. }) => {
                     if let Some(writer) = transcript.as_ref() {
                         let _ = writer.record_terminal("running", None).await;
@@ -2384,10 +2628,13 @@ async fn run_subagent_loop(
                     break;
                 }
                 Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
+                    if let Some(executor) = &ctx.hook_executor {
+                        executor.take_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id);
+                    }
                     emit_killed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                     )
@@ -2407,6 +2654,71 @@ async fn run_subagent_loop(
             }
         }
     }
+}
+
+async fn park_foreground_owner(
+    ctx: &SubagentContext,
+    result: &serde_json::Value,
+    usage: &llm_client::Usage,
+    tool_uses: u64,
+    duration_ms: u64,
+) -> bool {
+    if ctx.persistent {
+        return false;
+    }
+    let Some(registry) = &ctx.task_registry else {
+        return false;
+    };
+    registry
+        .park_foreground_agent(
+            ctx.agent_id,
+            platform_api::task_registry::AgentTerminalOutcome {
+                result: result
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                usage: Some(platform_api::task_registry::AgentRunUsage {
+                    subagent_tokens: crate::handle::subagent_usage_from_llm_usage(usage)
+                        .total_tokens,
+                    tool_uses,
+                    duration_ms,
+                }),
+                max_turns_reached: result.get("max_turns").and_then(serde_json::Value::as_u64),
+                ..Default::default()
+            },
+        )
+        .await
+}
+
+/// Fold only at model boundaries or while parked, never racing the provider future.
+async fn fold_task_notifications(
+    ctx: &SubagentContext,
+    history: &mut Vec<ConversationMessage>,
+) -> bool {
+    let Some(registry) = &ctx.task_registry else {
+        return false;
+    };
+    let notifications = registry
+        .take_pending_task_notifications_for(Some(ctx.agent_id))
+        .await
+        .unwrap_or_default();
+    let reminders = platform_api::task_notification::render_reminders_with_options(
+        &notifications,
+        false,
+        telemetry::push_notifications_enabled(),
+    );
+    let human = registry.take_human_task_messages_for(ctx.agent_id).await;
+    let any = !reminders.is_empty() || !human.is_empty();
+    if any {
+        registry
+            .activate_agent_for_task_notification(ctx.agent_id)
+            .await;
+    }
+    for reminder in reminders {
+        history.push(ConversationMessage::user_meta(MessageId::new(), reminder));
+    }
+    for message in human { history.push(ConversationMessage::user_meta(MessageId::new(), message)); }
+    any
 }
 
 /// Legacy reducer-driven stub.
@@ -2771,3 +3083,113 @@ fn cap_input_bytes(
 #[cfg(test)]
 #[path = "runner_test.rs"]
 mod runner_test;
+
+/// The typed `model_refusal_fallback` system message for a subagent hop.
+///
+/// `convert_messages` drops every `System` before the wire, so this rides in
+/// the run's history and its transcript without becoming model context — which
+/// is exactly where claude-code's `ICe` looks for it when the agent finalizes.
+///
+/// `scope` is `"local"`, not the main thread's `"session"`: a subagent's swap
+/// lasts for this run only and does not touch the session model.
+fn refusal_fallback_frame(
+    id: MessageId,
+    banner: &platform_api::refusal_notice::RefusalNotice,
+) -> ConversationMessage {
+    ConversationMessage::System {
+        id,
+        content: format!(
+            "This model's safeguards flagged this message. Switched to {}.",
+            banner.serving_model
+        ),
+        subtype: Some("model_refusal_fallback".to_string()),
+        compact_metadata: None,
+        refusal_fallback: Some(protocol::RefusalFallbackMetadata {
+            trigger: "refusal".to_string(),
+            direction: "retry".to_string(),
+            scope: Some("local".to_string()),
+            original_model: banner.origin_model.clone(),
+            fallback_model: banner.serving_model.clone(),
+            request_id: banner.request_id.clone(),
+            api_refusal_category: banner.api_refusal_category.clone(),
+            retracted_message_uuids: banner.retracted_message_uuids.clone(),
+            refused_user_message_uuid: banner.refused_user_message_uuid.clone(),
+        }),
+    }
+}
+
+/// The uuid prefix length `PZo` compares on (claude `D4n = 24`).
+const RETRACTED_UUID_PREFIX: usize = 24;
+
+/// `PZo` — drop the messages a refusal notice retracted.
+///
+/// A cascade that supersedes an earlier hop names the messages that hop
+/// produced; replaying them would show the user work the session has already
+/// moved past. System messages always survive: the notices themselves are how
+/// the retraction is expressed.
+fn drop_retracted(history: &[ConversationMessage]) -> Vec<ConversationMessage> {
+    let retracted: std::collections::HashSet<String> = history
+        .iter()
+        .filter_map(|m| match m {
+            ConversationMessage::System {
+                subtype: Some(subtype),
+                refusal_fallback: Some(meta),
+                ..
+            } if subtype == "model_refusal_fallback" => Some(&meta.retracted_message_uuids),
+            _ => None,
+        })
+        .flatten()
+        .map(|u| u.chars().take(RETRACTED_UUID_PREFIX).collect())
+        .collect();
+    if retracted.is_empty() {
+        return history.to_vec();
+    }
+    let live: Vec<ConversationMessage> = history
+        .iter()
+        .filter(|m| {
+            matches!(m, ConversationMessage::System { .. })
+                || !retracted.contains(
+                    &m.id()
+                        .as_uuid()
+                        .to_string()
+                        .chars()
+                        .take(RETRACTED_UUID_PREFIX)
+                        .collect::<String>(),
+                )
+        })
+        .cloned()
+        .collect();
+    if live.len() != history.len() {
+        tracing::info!(
+            event = "tengu_resume_retracted_dropped",
+            dropped = history.len() - live.len(),
+            chain_length = history.len(),
+        );
+    }
+    live
+}
+
+/// `ICe`'s notice half — the `scope: "local"` refusal frame that explains the
+/// model which actually produced this run's answer.
+///
+/// Upstream finds the last non-error assistant message with real text, reads
+/// its `model`, and matches a frame whose `fallbackModel` equals it. This
+/// port's `Assistant` carries no model, but the runner knows the serving model
+/// outright — and that IS the model that produced the answer, because every hop
+/// retries the turn. So the match is on the same value, not an approximation.
+fn local_refusal_notice(live: &[ConversationMessage], serving_model: &str) -> Option<String> {
+    live.iter().rev().find_map(|m| match m {
+        ConversationMessage::System {
+            subtype: Some(subtype),
+            refusal_fallback: Some(meta),
+            content,
+            ..
+        } if subtype == "model_refusal_fallback"
+            && meta.scope.as_deref() == Some("local")
+            && meta.fallback_model == serving_model =>
+        {
+            Some(content.clone())
+        }
+        _ => None,
+    })
+}

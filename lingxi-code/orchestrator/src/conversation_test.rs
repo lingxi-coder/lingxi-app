@@ -276,7 +276,7 @@ mod changed_files_reminder_tests;
 // Proves the two halves of the port of `jzm` @296554545:
 // - ENQUEUE: a terminal `dream` task notification queues a pending update
 //   (`ConversationOrchestrator::enqueue_memory_updates_from`, reached from
-//   `task_notification_reminder_message`, which BOTH turn drivers call);
+//   `task_notification_reminder_messages`, which BOTH turn drivers call);
 // - DRAIN: `memory_update_reminder_messages` renders it once, with the memdir
 //   files that moved and the subset the model is still holding.
 #[cfg(test)]
@@ -292,6 +292,10 @@ mod memory_update_reminder_tests;
 #[cfg(test)]
 #[path = "conversation/tests/goal_checkin_wiring_tests.rs"]
 mod goal_checkin_wiring_tests;
+#[path = "conversation/tests/goal_cleared_reason_tests.rs"]
+mod goal_cleared_reason_tests;
+#[path = "conversation/tests/goal_evaluated_analytics_tests.rs"]
+mod goal_evaluated_analytics_tests;
 
 // ── REM-10: the periodic `tool_search_usage_reminder` ────────────────────────
 //

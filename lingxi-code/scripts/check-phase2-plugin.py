@@ -58,14 +58,14 @@ EXPECTED_SKILLS = {
 }
 EXPECTED_COMPONENT_FILES = {
     "agents": {
-        "builder.md", "designer.md", "mcp-designer.md", "operator.md",
+        "builder.md", "create-preparer.md", "designer.md", "mcp-designer.md", "mcp-promoter.md", "operator.md",
         "template-selector.md", "tester.md", "verifier.md",
     },
     "workflows": {
         "local-app-build.js", "local-app-mcp-authoring.js", "local-app-use-test.js",
     },
     "schemas": {
-        "design-spec.schema.json", "mcp-proposal.schema.json", "qa-report.schema.json",
+        "authoring-spec.schema.json", "design-spec.schema.json", "mcp-proposal.schema.json", "qa-report.schema.json", "workflow-agent-results.schema.json",
         "use-test-report.schema.json",
     },
 }
@@ -445,8 +445,8 @@ def check_build_inventory_and_permissions() -> None:
             "build inventory must equal the actual Plugin directory: "
             f"missing={sorted(actual - set(inventory_lines))[:4]}, extra={sorted(set(inventory_lines) - actual)[:4]}"
         )
-    if len(inventory_lines) != 209:
-        fail(f"build inventory expected 209 exact files for the current package, got {len(inventory_lines)}")
+    if len(inventory_lines) != 213:
+        fail(f"build inventory expected 213 exact files for the current package, got {len(inventory_lines)}")
     source = require_file(PERMISSIONS_ASSET, "permission settings asset")
     if "default-workspace-settings.local.json" not in PERMISSIONS_RS.read_text(encoding="utf-8"):
         fail("permissions.rs must include the migrated production settings asset")
@@ -496,7 +496,7 @@ def main() -> int:
     check_migration(migration)
     check_build_inventory_and_permissions()
     check_phase2_task_evidence()
-    print("PHASE2-PLUGIN OK: 27 skills, 7 agents, 3 workflows, 4 schemas, 112 base profile assets, 5 shared MCP widget assets, 12 excluded orphans, and exact build inventory")
+    print("PHASE2-PLUGIN OK: 27 skills, 9 agents, 3 workflows, 6 schemas, 112 base profile assets, 5 shared MCP widget assets, 12 excluded orphans, and exact build inventory")
     return 0
 
 

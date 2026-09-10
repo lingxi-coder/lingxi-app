@@ -347,6 +347,8 @@
     <string name="cron_one_time_datetime_button">単発の日時</string>
     <string name="cron_open_alarm_settings_button">「アラームとリマインダー」を開く</string>
     <string name="cron_pending">保留中</string>
+    <string name="cron_unsupported_generic">このデバイスではこのスケジュールを実行できません</string>
+    <string name="cron_unsupported_schedule_fmt">実行されません: %1$s</string>
     <string name="cron_preset_every_hour">毎時</string>
     <string name="cron_preset_every_monday_9am">毎週月曜 09:00</string>
     <string name="cron_prompt_field_label">プロンプト／タスク</string>
@@ -949,6 +951,9 @@
     <string name="local_apps_verification_summary_needs_revalidation">承認済みの MCP カタログが有効なビルドと一致しなくなったため、再検証が必要です。</string>
     <string name="local_apps_verification_summary_needs_setup">承認済みのローカルアプリ MCP カタログはまだ有効になっていません。</string>
     <string name="local_apps_verification_summary_passed">MCP スキーマ・Flow・呼び出し・分離の検証に合格しました。</string>
+    <string name="local_apps_verification_summary_ui_verification_corrupt">保存済みの UI 検証証跡が破損しています。</string>
+    <string name="local_apps_verification_summary_ui_verification_passed">ホストの UI／データ検証証跡に合格しました。</string>
+    <string name="local_apps_verification_summary_ui_verification_required">現在のアプリでは UI 検証がまだ完了していません。</string>
     <string name="local_apps_verification_summary_verification_unavailable">このホストでは UI 検証の証跡を取得できません。</string>
     <string name="local_apps_verification_ui">UI 検証</string>
     <string name="local_apps_view_all">すべてのアプリを見る</string>

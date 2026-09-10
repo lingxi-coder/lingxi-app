@@ -1046,6 +1046,9 @@ fn flush_message_item(role: &str, parts: &mut Vec<Value>, input: &mut Vec<Value>
 }
 
 fn tool_result_output(output: &Value) -> Value {
+    if let Some(text) = protocol::js_utf16::tool_result_display(output) {
+        return Value::String(text);
+    }
     match output {
         Value::String(text) => Value::String(text.clone()),
         other => Value::String(other.to_string()),

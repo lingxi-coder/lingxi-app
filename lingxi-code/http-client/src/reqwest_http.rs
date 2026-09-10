@@ -61,6 +61,7 @@ pub struct ReqwestHttp {
     /// identity as `tls`. Configuration errors are deferred until a WebSocket
     /// is actually opened so ordinary HTTP remains available for diagnostics.
     websocket_tls: Result<Arc<rustls::ClientConfig>, String>,
+    monitor_proxy: Option<Arc<dyn platform_api::http::MonitorWebSocketProxy>>,
 }
 
 impl ReqwestHttp {
@@ -109,7 +110,15 @@ impl ReqwestHttp {
             detailed_connection_errors,
             tls,
             websocket_tls,
+            monitor_proxy: None,
         }
+    }
+
+    /// Inject the host's existing HTTP(S) CONNECT policy for Monitor sockets.
+    #[must_use]
+    pub fn with_monitor_proxy(mut self, proxy: Arc<dyn platform_api::http::MonitorWebSocketProxy>) -> Self {
+        self.monitor_proxy = Some(proxy);
+        self
     }
 
     fn client_for_resolved_request(
@@ -736,6 +745,20 @@ impl HttpTransport for ReqwestHttp {
             headers,
             stream: Box::pin(byte_stream),
         })
+    }
+
+    async fn preflight_monitor_websocket(&self, url: &str) -> Result<(), HttpError> {
+        crate::monitor_websocket::preflight(url).await.map(|_| ())
+    }
+
+    async fn monitor_websocket(
+        &self,
+        url: String,
+        protocols: Vec<String>,
+    ) -> Result<platform_api::http::MonitorWebSocketReceiver, HttpError> {
+        let tls = self.websocket_tls.as_ref()
+            .map_err(|error| HttpError::InvalidRequest(error.clone()))?.clone();
+        crate::monitor_websocket::connect(url, protocols, tls, self.monitor_proxy.clone()).await
     }
 
     async fn stream_websocket_messages_with_meta(

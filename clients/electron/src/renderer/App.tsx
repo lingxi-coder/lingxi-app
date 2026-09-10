@@ -10,14 +10,16 @@ import {
 import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
 import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
-import { PlanTasks } from './components/PlanTasks';
 import { SettingsScreen } from './components/settings/SettingsScreen';
+import { ScheduledTasks } from './components/ScheduledTasks';
 import { Stage } from './components/Stage';
 import { Theme } from './theme/ThemeContext';
 import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
 import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/RuntimeCenter';
+import './components/RuntimeCenter.css';
 
 export function App() {
+  const [page, setPage] = useState<'chat' | 'scheduled'>('chat');
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
@@ -66,16 +68,21 @@ export function App() {
         <SettingsBackground active={settingsRoute !== null}>
           <BetaSidebar
             bridge={bridge}
+            scheduled={page === 'scheduled'}
+            onOpenScheduled={() => setPage('scheduled')}
+            onOpenChat={() => setPage('chat')}
             onOpenSettings={() => openSettings()}
           />
 
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
+          <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
+          <ScheduledTasks key={bridge.activeSession?.sessionId ?? workspace?.path ?? 'no-project'} bridge={bridge} visible={page === 'scheduled'} />
+          </div>
+          <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <BetaTopBar
             bridge={bridge}
             runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
             onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
-            theme={theme}
-            onTheme={changeTheme}
           />
           {!bridge.sessionLoading && <RuntimeCenterOverview bridge={bridge} />}
           <ErrorBanner bridge={bridge} />
@@ -83,21 +90,17 @@ export function App() {
             <div role="status" style={{ flex: 1, display: 'grid', placeItems: 'center', color: palette.text3, fontSize: 13 }}>Loading secure desktop state…</div>
           ) : (
             <>
-              {/*
-                Three flex siblings in a column: the Stage takes the remaining
-                height, the plan strip and the composer keep theirs. Making the
-                plan a SIBLING rather than an overlay is the point — it shrinks
-                the scroll viewport instead of covering the newest tool output.
-              */}
+              {/* The transcript keeps all remaining height; Todos live in Summary. */}
               <Stage
                 liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
                 running={!bridge.sessionLoading && bridge.running}
+                collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                 emptyMessage={emptyMessage}
                 // Item ids restart at `i1` in every session; the Stage's
                 // collapse map is scoped by this and dropped when it changes.
                 sessionKey={bridge.conversation.sessionKey}
+                foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
               />
-              <PlanTasks tasks={bridge.sessionLoading ? [] : bridge.conversation.plan} />
               <BetaComposer
                 bridge={bridge}
                 ready={ready}
@@ -115,6 +118,8 @@ export function App() {
               />
             </>
           )}
+
+          </div>
 
           <PermissionPrompt
             request={bridge.sessionLoading ? null : bridge.pendingPermission}
@@ -135,7 +140,7 @@ export function App() {
             onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
           />
           </main>
-          {!bridge.sessionLoading && <RuntimeCenterInspector bridge={bridge} />}
+          {page === 'chat' && !bridge.sessionLoading && <RuntimeCenterInspector bridge={bridge} />}
         </SettingsBackground>
 
         {settingsRoute && (

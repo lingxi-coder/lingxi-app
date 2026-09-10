@@ -94,7 +94,7 @@ struct LivePermissionState {
     allow_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
     deny_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
     ask_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
-    additional_working_dirs: Vec<PathBuf>,
+    additional_working_dirs: crate::working_dirs::AdditionalWorkingDirs,
 }
 
 fn directory_update_null_byte_reason(update_type: &str, directory: &str) -> String {
@@ -160,6 +160,15 @@ pub struct PolicyPermissionGate {
 }
 
 impl PolicyPermissionGate {
+    async fn check_prompt_transport(
+        &self, name: &str, input: &Value, ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        // 2.1.263 Ge: only the actual prompt wait counts; policy/classifier
+        // work happens before this boundary. Drop also covers cancellation.
+        let _pause = ctx.pause_observer.as_ref().map(|observer| observer.begin());
+        self.inner.check_with_context(name, input, ctx).await
+    }
+
     fn parse_update_destination(value: &Value) -> Option<PermissionRuleSource> {
         match value.as_str()? {
             "userSettings" => Some(PermissionRuleSource::UserSettings),
@@ -602,7 +611,7 @@ impl PolicyPermissionGate {
                 if metadata.blocked_path.is_some() {
                     ctx2.blocked_path = metadata.blocked_path.clone();
                 }
-                let outcome = self.inner.check_with_context(name, input, &ctx2).await;
+                let outcome = self.check_prompt_transport(name, input, &ctx2).await;
                 match self.consume_auto_outcome(outcome, &ctx2).await {
                     PermissionOutcome::Allow {
                         updated_input,
@@ -949,9 +958,13 @@ impl PolicyPermissionGate {
             &folded.deny_command_rules,
             PermissionBehavior::Deny,
         );
+        // PARITY `Zm` `case "working_directory"`:
+        // `if (!ctx.additionalWorkingDirectories.has(dir))
+        //    …set(dir, {path: dir, source: "session"})` — an existing entry keeps
+        // its original source, so the guard is `!contains` and not a re-insert.
         if let Some(dir) = folded.additional_working_directory.as_ref() {
-            if !working_dirs.iter().any(|existing| existing == dir) {
-                working_dirs.push(dir.clone());
+            if !working_dirs.contains(dir) {
+                working_dirs.insert(dir.clone(), PermissionRuleSource::Session);
             }
         }
         self.policy
@@ -1255,7 +1268,7 @@ impl PolicyPermissionGate {
                     }
                     let outcome = self
                         .consume_auto_outcome(
-                            self.inner.check_with_context(name, input, &ctx2).await,
+                            self.check_prompt_transport(name, input, &ctx2).await,
                             &ctx2,
                         )
                         .await;
@@ -1634,11 +1647,14 @@ impl PolicyPermissionGate {
                 }
             }
             Some("addDirectories") | Some("removeDirectories") => {
-                if Self::parse_update_destination(update.get("destination").unwrap_or(&Value::Null))
-                    .is_none()
-                {
+                // PARITY `Oc(ctx,{type:"addDirectories",directories,destination})`:
+                // the destination is the SOURCE recorded on each entry, not just a
+                // validity check — `mEt` later drops the `projectSettings` ones.
+                let Some(update_source) = Self::parse_update_destination(
+                    update.get("destination").unwrap_or(&Value::Null),
+                ) else {
                     return;
-                }
+                };
                 let Some(directories) = update.get("directories").and_then(Value::as_array) else {
                     return;
                 };
@@ -1669,21 +1685,14 @@ impl PolicyPermissionGate {
                 match update.get("type").and_then(Value::as_str) {
                     Some("addDirectories") => {
                         for dir in directories {
-                            let dir = PathBuf::from(dir);
-                            if !live
-                                .additional_working_dirs
-                                .iter()
-                                .any(|existing| existing == &dir)
-                            {
-                                live.additional_working_dirs.push(dir);
-                            }
+                            live.additional_working_dirs
+                                .insert(PathBuf::from(dir), update_source);
                         }
                     }
                     Some("removeDirectories") => {
-                        let to_remove: Vec<PathBuf> =
-                            directories.into_iter().map(PathBuf::from).collect();
-                        live.additional_working_dirs
-                            .retain(|dir| !to_remove.iter().any(|remove| remove == dir));
+                        for dir in directories {
+                            live.additional_working_dirs.remove(&PathBuf::from(dir));
+                        }
                     }
                     _ => {}
                 }
@@ -1933,7 +1942,7 @@ impl PermissionGate for PolicyPermissionGate {
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         let outcome = self
-            .consume_auto_outcome(self.inner.check_with_context(name, input, ctx).await, ctx)
+            .consume_auto_outcome(self.check_prompt_transport(name, input, ctx).await, ctx)
             .await;
         match &outcome {
             PermissionOutcome::Allow {
@@ -2792,6 +2801,7 @@ mod gate_sysmsg_test {
             sysmsg_decision_reason(&PermissionDecisionReason::SafetyCheck {
                 reason: "danger".into(),
                 classifier_approvable: false,
+                circuit_breaker: None,
             })
             .as_deref(),
             Some("danger")
@@ -2910,5 +2920,53 @@ mod gate_sysmsg_test {
             .check_with_context("Read", &json!({}), &PermissionCheckContext::default())
             .await;
         assert!(calls.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod task_pause_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Prompt;
+    #[async_trait]
+    impl PermissionGate for Prompt {
+        async fn check(&self, _: &str, _: &Value) -> PermissionDecision {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            PermissionDecision::Allow
+        }
+    }
+    fn fixture(mode: PermissionMode) -> (PolicyPermissionGate, PermissionCheckContext, Arc<AtomicU64>) {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{"permissions":{}}"#, PermissionRuleSource::LocalSettings,
+        ).unwrap();
+        let total = Arc::new(AtomicU64::new(0));
+        let sink = total.clone();
+        let ctx = PermissionCheckContext {
+            pause_observer: Some(platform_api::permission_gate::PermissionPauseObserver::new(move |ms| {
+                sink.fetch_add(ms, Ordering::SeqCst);
+            })),
+            ..Default::default()
+        };
+        (PolicyPermissionGate::new(Arc::new(PermissionPolicy::from_rules(mode, rules)), Arc::new(Prompt)), ctx, total)
+    }
+
+    #[tokio::test]
+    async fn task_pause_records_real_ask_but_not_policy_allow() {
+        let (gate, ctx, total) = fixture(PermissionMode::Default);
+        gate.ask_via_transport("Bash", &serde_json::json!({"command":"echo probe"}), &ctx).await;
+        assert!(total.load(Ordering::SeqCst) >= 20);
+        let (gate, ctx, total) = fixture(PermissionMode::BypassPermissions);
+        gate.check_with_context_or_abort("Bash", &serde_json::json!({"command":"echo probe"}), &ctx).await.unwrap();
+        assert_eq!(total.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn task_pause_records_cancelled_prompt_wait() {
+        let (gate, ctx, total) = fixture(PermissionMode::Default);
+        let input = serde_json::json!({"command":"echo probe"});
+        let pending = gate.ask_via_transport("Bash", &input, &ctx);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), pending).await.is_err());
+        assert!(total.load(Ordering::SeqCst) >= 5);
     }
 }

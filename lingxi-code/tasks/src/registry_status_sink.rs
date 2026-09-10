@@ -26,7 +26,7 @@ use async_trait::async_trait;
 /// it once the registry `Arc` exists.
 #[derive(Default)]
 pub struct RegistryStatusSink {
-    registry: OnceLock<std::sync::Weak<TaskRegistry>>,
+    registry: OnceLock<Arc<TaskRegistry>>,
 }
 
 impl RegistryStatusSink {
@@ -40,26 +40,59 @@ impl RegistryStatusSink {
 
     /// Bind the registry handle. Idempotent — a second bind is ignored.
     pub fn bind(&self, registry: Arc<TaskRegistry>) {
-        let _ = self.registry.set(Arc::downgrade(&registry));
-    }
-
-    fn registry(&self) -> Option<Arc<TaskRegistry>> {
-        self.registry.get().and_then(std::sync::Weak::upgrade)
+        registry.bind_self(&registry);
+        let _ = self.registry.set(registry);
     }
 }
 
 #[async_trait]
 impl TaskStatusSink for RegistryStatusSink {
+    async fn set_agent_display(&self, id: &str, model: String, effort: Option<String>) {
+        if let Some(registry) = self.registry.get() {
+            registry.set_agent_display(id, model, effort).await;
+        }
+    }
+
+    async fn bind_agent_id(
+        &self,
+        task_id: &str,
+        agent_id: protocol::AgentId,
+    ) -> Result<(), String> {
+        if let Some(registry) = self.registry.get() {
+            registry
+                .bind_agent_id(task_id, agent_id)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    fn task_registry(&self) -> Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>> {
+        self.registry.get().map(|registry| {
+            registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+        })
+    }
     fn requires_explicit_activation(&self) -> bool {
         true
     }
 
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             // Best-effort: a status write for a since-evicted task is a benign
             // `NotFound` we deliberately swallow (mirrors the bash sink's
             // tolerance for a racing teardown).
             let _ = reg.set_status(task_id, status).await;
+        }
+    }
+
+    async fn set_teammate_idle(&self, task_id: &str) {
+        if let Some(registry) = self.registry.get() {
+            let _ = registry.set_teammate_idle(task_id).await;
+        }
+    }
+
+    async fn set_awaiting_plan_approval(&self, task_id: &str, awaiting: bool) {
+        if let Some(registry) = self.registry.get() {
+            let _ = registry.set_awaiting_plan_approval(task_id, awaiting).await;
         }
     }
 
@@ -69,8 +102,14 @@ impl TaskStatusSink for RegistryStatusSink {
         // this the stored state kept `exit_code: None` and the panel/output
         // projection could never show the real completion. Best-effort like
         // `set_status`.
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             let _ = reg.set_bash_exit_code(task_id, exit_code).await;
+        }
+    }
+
+    async fn set_monitor_stdout_bytes(&self, task_id: &str, bytes: u64) {
+        if let Some(reg) = self.registry.get() {
+            let _ = reg.set_monitor_stdout_bytes(task_id, bytes).await;
         }
     }
 
@@ -83,7 +122,7 @@ impl TaskStatusSink for RegistryStatusSink {
         agent_name: Option<String>,
         team_name: Option<String>,
     ) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             reg.mark_task_rested(task_id, result, usage, agent_id, agent_name, team_name)
                 .await;
         }
@@ -94,7 +133,7 @@ impl TaskStatusSink for RegistryStatusSink {
         task_id: &str,
         outcome: platform_api::task_registry::AgentTerminalOutcome,
     ) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             reg.set_agent_outcome(task_id, outcome).await;
         }
     }
@@ -104,19 +143,19 @@ impl TaskStatusSink for RegistryStatusSink {
         task_id: &str,
         outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             reg.set_workflow_outcome(task_id, outcome).await;
         }
     }
 
     async fn set_fusion_outcome(&self, task_id: &str, run_id: String, final_text: String) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             reg.set_fusion_outcome(task_id, run_id, final_text).await;
         }
     }
 
     async fn set_fusion_error(&self, task_id: &str, error: String) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             reg.set_fusion_error(task_id, error).await;
         }
     }
@@ -127,14 +166,14 @@ impl TaskStatusSink for RegistryStatusSink {
         egress_profiles: Vec<String>,
         usage: Option<platform_api::task_registry::AgentRunUsage>,
     ) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             reg.set_fusion_egress_and_usage(task_id, egress_profiles, usage)
                 .await;
         }
     }
 
     async fn set_fusion_stage(&self, task_id: &str, stage: String) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             reg.set_fusion_stage(task_id, stage).await;
         }
     }
@@ -144,7 +183,7 @@ impl TaskStatusSink for RegistryStatusSink {
         task_id: &str,
         receipt: platform_api::FusionPublicationReceipt,
     ) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             reg.set_fusion_publication(task_id, receipt).await;
         }
     }
@@ -156,7 +195,7 @@ impl TaskStatusSink for RegistryStatusSink {
         final_text: String,
         status: TaskStatus,
     ) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             let _ = reg
                 .finish_fusion_terminal(task_id, run_id, final_text, status)
                 .await;
@@ -172,7 +211,7 @@ impl TaskStatusSink for RegistryStatusSink {
         outcome: platform_api::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             let _ = reg.finish_workflow_terminal(task_id, outcome, status).await;
         } else {
             self.set_workflow_outcome(task_id, outcome).await;
@@ -180,14 +219,16 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
-    async fn notify_monitor_event(&self, task_id: &str, event: &str) {
-        if let Some(reg) = self.registry() {
-            let _ = reg.enqueue_monitor_event(task_id, event).await;
+    async fn notify_monitor_event(&self, task_id: &str, event: &str, housekeeping: bool) {
+        if let Some(reg) = self.registry.get() {
+            let _ = reg
+                .enqueue_monitor_event(task_id, event, housekeeping)
+                .await;
         }
     }
 
     async fn is_registered(&self, task_id: &str) -> bool {
-        match self.registry() {
+        match self.registry.get() {
             Some(reg) => reg.get(task_id).await.is_some(),
             // An unbound sink is inert and should not stall a standalone
             // handler forever.
@@ -201,9 +242,9 @@ impl TaskStatusSink for RegistryStatusSink {
     /// since-evicted terminal task's `set_status` is already a benign `NotFound`
     /// no-op, so nothing is clobbered either way.
     async fn is_terminal(&self, task_id: &str) -> bool {
-        if let Some(reg) = self.registry() {
+        if let Some(reg) = self.registry.get() {
             if let Some(rec) = reg.get(task_id).await {
-                return rec.base().status.is_terminal();
+                return rec.is_terminated();
             }
         }
         false

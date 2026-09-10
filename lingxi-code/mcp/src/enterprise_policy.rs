@@ -1468,6 +1468,73 @@ fn spec_matcher_view(spec: &McpTransportSpec) -> Value {
     }
 }
 
+/// claude `Fxo(entry)` — does a RAW `.mcp.json` entry read the environment?
+///
+/// Tested before expansion, on exactly the fields that expand:
+///
+/// ```js
+/// case void 0: case "stdio": return HY(command) || args.some(HY) || Object.values(env??{}).some(HY)
+/// case "sse": case "http": case "ws": return HY(url) || Object.values(headers??{}).some(HY)
+/// case "sse-ide": case "ws-ide": case "sdk": case "claudeai-proxy": return !1
+/// ```
+///
+/// The field list is the same one [`crate::config_diagnostics`] already uses
+/// for unresolved-reference reporting (claude `Osg`).
+#[must_use]
+pub fn entry_reads_environment(entry: &Value) -> bool {
+    let has_ref = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .is_some_and(|s| crate::env_expansion::env_ref_regex().is_match(s))
+    };
+    let any_value_has_ref = |v: Option<&Value>| {
+        v.and_then(Value::as_object)
+            .is_some_and(|map| map.values().any(|value| has_ref(Some(value))))
+    };
+    let any_item_has_ref = |v: Option<&Value>| {
+        v.and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| has_ref(Some(item))))
+    };
+    match entry.get("type").and_then(Value::as_str) {
+        None | Some("stdio") => {
+            has_ref(entry.get("command"))
+                || any_item_has_ref(entry.get("args"))
+                || any_value_has_ref(entry.get("env"))
+        }
+        Some("sse" | "http" | "ws") => {
+            has_ref(entry.get("url")) || any_value_has_ref(entry.get("headers"))
+        }
+        // These expand nothing, so they can never have read the environment.
+        _ => false,
+    }
+}
+
+/// claude `F6`'s second line — a server the ORGANIZATION delivered needs no
+/// `allowedMcpServers` entry:
+///
+/// ```js
+/// if (n?.scope !== void 0 && XJ(n.scope) && !n.expandedFromEnv && !n.pluginSource) return !0;
+/// ```
+///
+/// with `XJ(e) = ["enterprise","managed"].includes(e)`.
+///
+/// 🚨 The `expandedFromEnv` conjunct is the whole point, not a detail. A
+/// managed document that cannot read the user's environment is fully trusted;
+/// one that CAN is still checked against the allowlist, because its effective
+/// command or url is not fully determined by the document the organization
+/// signed off on.
+///
+/// The denylist is unaffected either way — upstream runs `Pme` before this line
+/// and so does [`is_server_allowed`].
+///
+/// ⚠️ `!n.pluginSource` has no port analogue: `mcp` carries no plugin-source
+/// provenance on a server config, and a plugin-contributed server is never
+/// loaded at `Enterprise`/`Managed` scope, so the conjunct is vacuous here.
+#[must_use]
+fn org_delivered_needs_no_allowlist_entry(config: &McpServerConfig) -> bool {
+    matches!(config.scope, ConfigScope::Enterprise | ConfigScope::Managed)
+        && !config.metadata.expanded_from_env
+}
+
 /// claude `Ree`'s per-server predicate — a loaded server is kept iff it is an
 /// SDK-control server or the allow/deny policy permits it.
 #[must_use]
@@ -1475,7 +1542,17 @@ pub fn is_server_allowed(config: &McpServerConfig, policy: &McpPolicy) -> bool {
     if matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
         return true; // claude `i.type === "sdk"` short-circuit
     }
-    is_allowed(&config.name, &spec_matcher_view(&config.spec), policy)
+    let view = spec_matcher_view(&config.spec);
+    let envs = policy_expansion_env();
+    // `F6`'s order, exactly: deny wins over everything, then the
+    // organization-delivered exemption, then the allowlist.
+    if is_denied_with_env(&config.name, &view, policy, &envs) {
+        return false;
+    }
+    if org_delivered_needs_no_allowlist_entry(config) {
+        return true;
+    }
+    is_allowed_with_env(&config.name, &view, policy, &envs)
 }
 
 /// Parse the managed MCP config (`managed-mcp.json`) into server configs
@@ -1504,7 +1581,145 @@ pub fn load_enterprise_servers_at(path: &Path) -> Vec<McpServerConfig> {
     else {
         return Vec::new();
     };
-    crate::json_config::parse_mcp_json_string(&raw, ConfigScope::Enterprise).unwrap_or_default()
+    let mut configs = crate::json_config::parse_mcp_json_string(&raw, ConfigScope::Enterprise)
+        .unwrap_or_default();
+    // `if (o === "enterprise" && Fxo(entry)) xe = {...xe, expandedFromEnv: !0}`.
+    // Computed from the RAW document, before expansion, because after it the
+    // `${VAR}` is gone and the entry looks like any other literal.
+    if let Ok(Value::Object(root)) = serde_json::from_str::<Value>(&raw) {
+        let entries = root.get("mcpServers").and_then(Value::as_object);
+        if let Some(entries) = entries {
+            for config in &mut configs {
+                if let Some(entry) = entries.get(&config.name) {
+                    config.metadata.expanded_from_env = entry_reads_environment(entry);
+                }
+            }
+        }
+    }
+    configs
+}
+
+/// claude's byte-exact shape rejection for the settings key.
+pub const MANAGED_MCP_SERVERS_SHAPE_INVALID: &str = "\"managedMcpServers\" must be an object keyed by server name (the .mcp.json mcpServers shape; Claude Desktop's array form of its same-named key is not accepted here: use the server name as the key and \"type\" instead of \"transport\"). No managed MCP servers are installed from it until it is fixed.";
+
+/// claude's byte-exact server-name rejection for the settings key.
+pub const MANAGED_MCP_SERVER_NAME_INVALID: &str = "server names may only contain letters, numbers, hyphens and underscores, and may not be __proto__, constructor or prototype";
+
+/// `a3t`-style name validation for `managedMcpServers` keys.
+fn managed_settings_server_name_ok(name: &str) -> bool {
+    if matches!(name, "__proto__" | "constructor" | "prototype") {
+        return false;
+    }
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// `managedMcpServers` — the organization's OWN MCP servers, delivered inside
+/// managed settings rather than through `managed-mcp.json`.
+///
+/// Upstream's `case "managed"` arm of `BTn`:
+///
+/// ```js
+/// case "managed": { let o = cTn();
+///   if (!o) return {servers: Wk(), errors: mTn()};
+///   let {config:d, errors:p} = h$e({configObject:{mcpServers:o}, expandVars:!1, scope:"managed"});
+///   return {servers: mde(d?.mcpServers, e), errors: p} }
+/// ```
+///
+/// The key's own contract (schema `describe`): *"MCP servers the organization
+/// provides to every user, keyed by server name, each with the .mcp.json entry
+/// shape; **only "http" and "sse" servers are accepted (nothing that names a
+/// program to run, no `${VAR}` references)**. Honored from managed settings
+/// only; users cannot remove them, deniedMcpServers still applies, and they
+/// need no allowedMcpServers entry."*
+///
+/// Three restrictions, all enforced here:
+///
+/// * **http/sse only.** An organization may push a URL to every user; it may
+///   not push a program to run on their machine. A `stdio` entry is dropped.
+/// * **No `${VAR}`.** Upstream has belt and braces: the managed-settings schema
+///   refuses a `${VAR}` outright (*"a managed settings document must not read
+///   the user's environment"*) AND the load runs with `expandVars: false`. This
+///   port implements the belt — an entry that reads the environment is
+///   rejected before it reaches the parser — which is why it needs no
+///   no-expansion parse path. Strictly the safe direction: upstream would keep
+///   such an entry with the reference unexpanded and let it fail at dial time.
+/// * **Name shape**, byte-exact with [`MANAGED_MCP_SERVER_NAME_INVALID`].
+///
+/// Scope is [`ConfigScope::Managed`], which is in claude's exempt set
+/// `XJ = ["enterprise","managed"]`, so these need no `allowedMcpServers` entry.
+/// `expanded_from_env` is never set for them — upstream only ever sets it at
+/// `enterprise` scope — which is consistent: an entry that reads the
+/// environment never becomes a managed server in the first place.
+#[must_use]
+pub fn load_managed_settings_servers() -> Vec<McpServerConfig> {
+    load_managed_settings_servers_in(&managed_dir())
+}
+
+/// The [`load_managed_settings_servers`] core, parameterized on the managed dir.
+#[must_use]
+pub fn load_managed_settings_servers_in(dir: &Path) -> Vec<McpServerConfig> {
+    let mut merged = serde_json::Map::new();
+    let mut shape_rejected = false;
+    for_each_managed_settings_tier(dir, &mut |source| {
+        match source.get("managedMcpServers") {
+            None => {}
+            Some(Value::Object(entries)) => {
+                // Later tier wins, the same fold order the policy read uses.
+                for (name, entry) in entries {
+                    merged.insert(name.clone(), entry.clone());
+                }
+            }
+            Some(_) => shape_rejected = true,
+        }
+    });
+    if shape_rejected {
+        tracing::warn!(target: "lingxi_mcp::policy", "{MANAGED_MCP_SERVERS_SHAPE_INVALID}");
+        // "No managed MCP servers are installed from it until it is fixed."
+        return Vec::new();
+    }
+    if merged.is_empty() {
+        return Vec::new();
+    }
+
+    let mut accepted = serde_json::Map::new();
+    for (name, entry) in merged {
+        if !managed_settings_server_name_ok(&name) {
+            tracing::warn!(target: "lingxi_mcp::policy", server = %name, "{MANAGED_MCP_SERVER_NAME_INVALID}");
+            continue;
+        }
+        let kind = entry.get("type").and_then(Value::as_str);
+        if !matches!(kind, Some("http" | "sse")) {
+            tracing::warn!(
+                target: "lingxi_mcp::policy",
+                server = %name,
+                "managedMcpServers accepts only \"http\" and \"sse\" servers; nothing that names a program to run"
+            );
+            continue;
+        }
+        if entry_reads_environment(&entry) {
+            tracing::warn!(
+                target: "lingxi_mcp::policy",
+                server = %name,
+                "${{VAR}} references are not expanded in managed settings; use a literal value"
+            );
+            continue;
+        }
+        accepted.insert(name, entry);
+    }
+    if accepted.is_empty() {
+        return Vec::new();
+    }
+
+    let document = Value::Object(
+        [("mcpServers".to_string(), Value::Object(accepted))]
+            .into_iter()
+            .collect(),
+    );
+    crate::json_config::parse_mcp_json_string(&document.to_string(), ConfigScope::Managed)
+        .unwrap_or_default()
 }
 
 /// Apply the enterprise MCP policy to the assembled to-connect list, in place —
@@ -1524,13 +1739,40 @@ pub fn apply_enterprise_mcp_policy(configs: &mut Vec<McpServerConfig>) {
 
 /// Apply enterprise exclusivity plus an already-composed effective policy.
 pub fn apply_enterprise_mcp_policy_with(configs: &mut Vec<McpServerConfig>, policy: &McpPolicy) {
+    // claude `$Tn = [...FTn, "local", "project", "user"]` with
+    // `FTn = ["enterprise","managed"]` — an EARLIER scope wins a name, so the
+    // organization's two delivery channels both outrank the user's tiers, and
+    // `managed-mcp.json` outranks the settings key.
+    let managed_settings = load_managed_settings_servers();
     if enterprise_mcp_active() {
-        *configs = load_enterprise_servers()
+        // Exclusive control: only what the ORGANIZATION delivered loads. That
+        // is both org channels, not just the file — `managedMcpServers` is
+        // documented as something "users cannot remove", and dropping the org's
+        // other channel because the org also shipped a file would be odd.
+        let mut kept: Vec<McpServerConfig> = load_enterprise_servers()
             .into_iter()
             .filter(|c| is_server_allowed(c, policy))
             .collect();
+        for server in managed_settings {
+            if !is_server_allowed(&server, policy) {
+                continue;
+            }
+            if !kept.iter().any(|c| c.name == server.name) {
+                kept.push(server);
+            }
+        }
+        *configs = kept;
     } else {
         configs.retain(|c| is_server_allowed(c, policy));
+        for server in managed_settings {
+            if !is_server_allowed(&server, policy) {
+                continue;
+            }
+            // `managed` sits ahead of local/project/user, so the organization's
+            // entry takes the name rather than being skipped as a duplicate.
+            configs.retain(|c| c.name != server.name);
+            configs.push(server);
+        }
     }
 }
 
@@ -2341,6 +2583,284 @@ mod tests {
             metadata: Default::default(),
         }
     }
+    fn managed_settings_dir_with(json: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("managed-settings.json"), json).unwrap();
+        dir
+    }
+
+    /// The organization's second delivery channel loads, at `Managed` scope.
+    #[test]
+    fn managed_settings_servers_load_as_managed_scope() {
+        let dir = managed_settings_dir_with(
+            r#"{"managedMcpServers":{"org-http":{"type":"http","url":"https://x.test/mcp"},
+                                     "org-sse":{"type":"sse","url":"https://x.test/sse"}}}"#,
+        );
+        let servers = super::load_managed_settings_servers_in(dir.path());
+        assert_eq!(servers.len(), 2, "both remote entries load");
+        for s in &servers {
+            assert_eq!(s.scope, ConfigScope::Managed);
+            assert!(
+                !s.metadata.expanded_from_env,
+                "a managed-settings entry never reads the environment"
+            );
+        }
+        // …and being Managed scope, they need no allowlist entry.
+        assert!(is_server_allowed(
+            &servers[0],
+            &allowlist_of(&["something-else"])
+        ));
+    }
+
+    /// 🚨 An organization may push a URL to every user. It may NOT push a
+    /// program to run on their machine.
+    #[test]
+    fn a_stdio_entry_is_not_accepted_from_managed_settings() {
+        let dir = managed_settings_dir_with(
+            r#"{"managedMcpServers":{"local-exec":{"type":"stdio","command":"/bin/sh"},
+                                     "ok":{"type":"http","url":"https://x.test/mcp"}}}"#,
+        );
+        let names: Vec<String> = super::load_managed_settings_servers_in(dir.path())
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["ok".to_string()], "only http/sse survive");
+    }
+
+    /// A managed settings document must not read the user's environment.
+    #[test]
+    fn a_managed_settings_entry_that_reads_the_env_is_rejected() {
+        let dir = managed_settings_dir_with(
+            r#"{"managedMcpServers":{"leaky":{"type":"http","url":"https://x.test/${LINGXI_TEST_NEVER_SET_XYZ}"},
+                                     "ok":{"type":"http","url":"https://x.test/mcp"}}}"#,
+        );
+        let names: Vec<String> = super::load_managed_settings_servers_in(dir.path())
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["ok".to_string()]);
+    }
+
+    /// Claude Desktop's array form of the same-named key must not be read as if
+    /// it were this one, and it takes the WHOLE key down: "No managed MCP
+    /// servers are installed from it until it is fixed."
+    ///
+    /// The valid sibling in the drop-in tier is the point. Asserting only that
+    /// an array installs nothing proves nothing — an implementation that merely
+    /// IGNORED the array would pass that too, because there would be nothing
+    /// left to install. The sibling is what separates "rejected the key" from
+    /// "skipped a value I did not understand".
+    #[test]
+    fn claude_desktops_array_form_installs_nothing_at_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("managed-settings.json"),
+            r#"{"managedMcpServers":[{"name":"org","transport":"http","url":"https://x.test/mcp"}]}"#,
+        )
+        .unwrap();
+        let drop_in = dir.path().join("managed-settings.d");
+        std::fs::create_dir_all(&drop_in).unwrap();
+        std::fs::write(
+            drop_in.join("10-extra.json"),
+            r#"{"managedMcpServers":{"perfectly-fine":{"type":"http","url":"https://y.test/mcp"}}}"#,
+        )
+        .unwrap();
+
+        assert!(
+            super::load_managed_settings_servers_in(dir.path()).is_empty(),
+            "a malformed managedMcpServers anywhere installs NO managed servers, \
+             not merely none of its own"
+        );
+
+        // Control: with the malformed tier gone, the sibling does install — so
+        // the assertion above is about the rejection, not about the fixture.
+        std::fs::write(dir.path().join("managed-settings.json"), "{}").unwrap();
+        let names: Vec<String> = super::load_managed_settings_servers_in(dir.path())
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["perfectly-fine".to_string()]);
+    }
+
+    #[test]
+    fn a_server_name_outside_the_allowed_shape_is_dropped() {
+        let dir = managed_settings_dir_with(
+            r#"{"managedMcpServers":{"__proto__":{"type":"http","url":"https://x.test/a"},
+                                     "has space":{"type":"http","url":"https://x.test/b"},
+                                     "ok-name_1":{"type":"http","url":"https://x.test/c"}}}"#,
+        );
+        let names: Vec<String> = super::load_managed_settings_servers_in(dir.path())
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["ok-name_1".to_string()]);
+    }
+
+    /// The stamp itself: the flag the exemption reads must actually be set by
+    /// the loader, from the RAW document, per entry. The tests above set it by
+    /// hand; this one proves nothing has to.
+    #[test]
+    fn the_loader_stamps_which_entries_read_the_environment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("managed-mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{
+                 "literal":{"type":"stdio","command":"/bin/srv"},
+                 "reads-env":{"type":"stdio","command":"/bin/srv","args":["--t","${LINGXI_TEST_NEVER_SET_XYZ}"]},
+                 "url-literal":{"type":"http","url":"https://x.test/mcp"},
+                 "url-reads-env":{"type":"http","url":"https://x.test/${LINGXI_TEST_NEVER_SET_XYZ}"}
+               }}"#,
+        )
+        .unwrap();
+
+        let servers = super::load_enterprise_servers_at(&path);
+        let flag = |name: &str| {
+            servers
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} must load"))
+                .metadata
+                .expanded_from_env
+        };
+        assert!(
+            !flag("literal"),
+            "a literal stdio entry reads no environment"
+        );
+        assert!(
+            flag("reads-env"),
+            "a variable reference in args is an environment read"
+        );
+        assert!(!flag("url-literal"));
+        assert!(
+            flag("url-reads-env"),
+            "a variable reference in a url is an environment read"
+        );
+    }
+
+    fn managed_cfg(name: &str, spec: McpTransportSpec, expanded_from_env: bool) -> McpServerConfig {
+        let mut c = cfg(name, spec);
+        c.scope = ConfigScope::Enterprise;
+        c.metadata.expanded_from_env = expanded_from_env;
+        c
+    }
+
+    fn allowlist_of(names: &[&str]) -> McpPolicy {
+        McpPolicy {
+            denied: None,
+            allowed: Some(
+                names
+                    .iter()
+                    .map(|n| McpServerMatcher {
+                        server_name: Some((*n).to_string()),
+                        server_command: None,
+                        server_url: None,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// `F6`'s second line: an organization-delivered server that did NOT read
+    /// the user's environment needs no `allowedMcpServers` entry.
+    ///
+    /// This port previously filtered every managed server through the
+    /// allowlist, which is STRICTER than upstream: an organization shipping
+    /// both `managed-mcp.json` and an allowlist had its own literal servers
+    /// dropped unless it also listed them.
+    #[test]
+    fn an_org_delivered_server_that_reads_no_env_needs_no_allowlist_entry() {
+        let policy = allowlist_of(&["something-else"]);
+
+        assert!(
+            is_server_allowed(
+                &managed_cfg("org-tool", stdio_spec("/bin/srv", &[]), false),
+                &policy
+            ),
+            "a literal managed entry is delivered by the organization itself"
+        );
+
+        // …and the exemption is scoped: an ordinary user-scope server with the
+        // same shape is still governed by the list.
+        assert!(
+            !is_server_allowed(&cfg("org-tool", stdio_spec("/bin/srv", &[])), &policy),
+            "the exemption is for organization-delivered servers only"
+        );
+    }
+
+    /// 🚨 The conjunct that carries the security property. A managed entry that
+    /// reads the environment is NOT fully determined by the document the
+    /// organization signed off on, so it stays on the allowlist's hook.
+    #[test]
+    fn an_org_delivered_server_that_reads_env_is_still_checked() {
+        let policy = allowlist_of(&["something-else"]);
+        assert!(
+            !is_server_allowed(
+                &managed_cfg("org-tool", stdio_spec("/bin/srv", &[]), true),
+                &policy
+            ),
+            "an entry that expanded a variable reference must still be listed"
+        );
+        // Listing it is enough — the rule adds a check, it does not deny.
+        assert!(is_server_allowed(
+            &managed_cfg("org-tool", stdio_spec("/bin/srv", &[]), true),
+            &allowlist_of(&["org-tool"])
+        ));
+    }
+
+    /// Upstream runs the denylist BEFORE the exemption (`if(Pme(e,n)) return !1`),
+    /// so an organization cannot deliver its way past its own denylist.
+    #[test]
+    fn the_denylist_still_wins_over_the_exemption() {
+        let policy = McpPolicy {
+            denied: Some(vec![McpServerMatcher {
+                server_name: Some("org-tool".to_string()),
+                server_command: None,
+                server_url: None,
+            }]),
+            allowed: None,
+        };
+        assert!(!is_server_allowed(
+            &managed_cfg("org-tool", stdio_spec("/bin/srv", &[]), false),
+            &policy
+        ));
+    }
+
+    /// `Fxo`, on the raw entry and only on the fields that expand.
+    #[test]
+    fn entry_reads_environment_matches_fxo() {
+        use serde_json::json;
+        // stdio: command, args, env values
+        assert!(entry_reads_environment(&json!({"command": "${HOME}/srv"})));
+        assert!(entry_reads_environment(
+            &json!({"command": "/s", "args": ["--t", "${TOKEN}"]})
+        ));
+        assert!(entry_reads_environment(
+            &json!({"command": "/s", "env": {"K": "${V}"}})
+        ));
+        assert!(!entry_reads_environment(
+            &json!({"command": "/s", "args": ["--t"]})
+        ));
+        // http/sse/ws: url, header values
+        assert!(entry_reads_environment(
+            &json!({"type": "http", "url": "https://x/${P}"})
+        ));
+        assert!(entry_reads_environment(
+            &json!({"type": "sse", "url": "https://x", "headers": {"A": "Bearer ${T}"}})
+        ));
+        assert!(!entry_reads_environment(
+            &json!({"type": "http", "url": "https://x"})
+        ));
+        // A `${VAR}` on a field that never expands is not an env read.
+        assert!(!entry_reads_environment(
+            &json!({"type": "http", "url": "https://x", "description": "${NOPE}"})
+        ));
+        // These types expand nothing at all.
+        assert!(!entry_reads_environment(
+            &json!({"type": "sdk", "url": "${X}"})
+        ));
+    }
+
     fn stdio_spec(command: &str, args: &[&str]) -> McpTransportSpec {
         McpTransportSpec::Stdio {
             command: command.to_string(),

@@ -1,43 +1,5 @@
-//! M10 (T15) — ANTI-HOLLOW end-to-end coordinator-activation gate.
-//!
-//! This is the key real-run gate for the FULL coordinator multi-agent
-//! activation: it proves that `active_workers > 0` flows from a real
-//! `TeamCreate` tool call all the way to a `ClientEvent::CoordinatorStatus`,
-//! exercising the entire load-bearing path the program adds, end to end, with
-//! the SAME components `engine_desktop::build()` wires for a coordinator
-//! session:
-//!
-//! * `coordinator::TeamRegistry` (the per-session worker registry),
-//! * `tasks::registry::TaskRegistry` with a directly-registered
-//!   `InProcessTeammateHandler` (the T13 escape-hatch registration that attaches
-//!   the status sink), whose `TaskRegistry::spawn(..)` (T01) is the real handler
-//!   dispatch the hollow `create()` never performed,
-//! * `TaskRegistry as platform_api::team_spawn::TeamSpawnSeam` (T04),
-//! * the coordinator `TeamCreate` tool from
-//!   `coordinator::internal_tools::coordinator_internal_tools(..)` (T03/T05) —
-//!   the exact factory `desktop_tool_registry` assembles in coordinator mode,
-//! * `coordinator::CoordinatorStatusSink` (T07) feeding a REAL
-//!   `client_adapter::AdapterOutputStream` (T08/T09) behind a `MockSink`, the
-//!   precise PUSH wiring `build()` uses: `set_status -> WorkerStatus transition
-//!   -> OutputStream::emit_coordinator_status -> ClientEvent::CoordinatorStatus`.
-//!
-//! The teammate runs under the production `PosixRuntime` spawner (the same one
-//! `build()` gives the teammate pool) so the persistent worker future ACTUALLY
-//! executes; a scripted `SubagentApiClient` makes the teammate's model
-//! round-trip observable, so we can assert the handler truly ran rather than
-//! merely allocating a `Pending` row.
-//!
-//! ## Why this fails against the hollow `create()`-only implementation
-//!
-//! `TaskRegistry::create()` only inserts a `Pending` row and NEVER looks up or
-//! runs a handler. Against that implementation the spawn seam would never start
-//! a teammate, so: no scripted round-trip (b), no `Running` status transition
-//! (d), and therefore no `CoordinatorStatus` push (e). The
-//! `anti_hollow_create_path_emits_nothing` control wires the SAME graph through
-//! `create()` instead of `spawn()` and asserts exactly that absence, documenting
-//! that the gate is load-bearing on the T01 dispatch.
-
-#![allow(clippy::unwrap_used)]
+//! End-to-end implicit teammate activation: a real persistent worker drives
+//! model calls and client status without explicit team-management tools.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,10 +81,11 @@ struct CoordinatorFixture {
     _tmp: tempfile::TempDir,
     team: Arc<coordinator::TeamRegistry>,
     spawn_seam: Arc<dyn TeamSpawnSeam>,
+    registry: Arc<TaskRegistry>,
     sink: Arc<MockSink>,
     /// The SINGLE orchestrator-facing output stream — the real
     /// `AdapterOutputStream` behind the `MockSink`. Shared by the
-    /// `CoordinatorStatusSink` AND the `TeamCreate` tool exactly as `build()`
+    /// `CoordinatorStatusSink` and implicit spawner, as `build()`
     /// shares one `Arc<dyn OutputStream>` across the orchestrator, the sink, and
     /// the coordinator wiring.
     output: Arc<dyn OutputStream>,
@@ -135,19 +98,15 @@ struct CoordinatorFixture {
 /// pre-Arc registration.
 fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture {
     let tmp = tempfile::tempdir().unwrap();
-    // Redirect `$HOME` to the scratch dir so the coordinator `TeamCreate` tool
-    // writes its on-disk team file (`~/.lingxi/teams/{name}/config.json`,
-    // resolved from `$HOME`) under the tempdir instead of the developer's real
-    // home. The coordinator factory does not expose a home-override seam, so
-    // env-redirect is the hermeticity lever here.
-    std::env::set_var("HOME", tmp.path());
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(tmp.path().to_path_buf()));
     let runtime: Arc<dyn RuntimeSpawner> = Arc::new(PosixRuntime::new());
     let output_manager = Arc::new(TaskOutputManager::new(tmp.path().to_path_buf(), fs.clone()));
 
     // The per-session coordinator team registry + mode (mode ENABLED — a
     // coordinator session enters it at build time).
-    let team = Arc::new(coordinator::TeamRegistry::new(AgentId::new()));
+    let team = Arc::new(
+        coordinator::TeamRegistry::new(AgentId::new()).with_config_home(tmp.path().to_path_buf()),
+    );
     let mode = Arc::new(coordinator::CoordinatorMode::new());
     mode.enter();
 
@@ -179,7 +138,7 @@ fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture 
     registry.register_handler(TaskType::InProcessTeammate, Arc::new(teammate_handler));
     let registry = Arc::new(registry);
 
-    // The typed spawn/kill seam the coordinator `TeamCreate` uses (T04 impl on
+    // The typed spawn/kill seam the implicit spawner uses (implemented on
     // `TaskRegistry`).
     let spawn_seam: Arc<dyn TeamSpawnSeam> = registry.clone();
 
@@ -187,31 +146,36 @@ fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture 
         _tmp: tmp,
         team,
         spawn_seam,
+        registry,
         sink: mock_sink,
         output,
     }
 }
 
-/// Build the coordinator `TeamCreate` tool from the exact production factory
-/// (`coordinator_internal_tools`), with coordinator mode ENABLED, wired to the
-/// fixture's team, spawn seam, and the SHARED output stream (so the tool's
-/// activation PUSH and the sink's transitions feed the one `MockSink`).
-fn team_create_tool(fixture: &CoordinatorFixture) -> Arc<dyn tool_api::Tool> {
-    let mode = Arc::new(coordinator::CoordinatorMode::new());
-    mode.enter();
-    let tools = coordinator::internal_tools::coordinator_internal_tools(
-        fixture.team.clone(),
-        mode,
-        fixture.spawn_seam.clone(),
-        fixture.output.clone(),
-        None,
-        // Activation tests don't drive the mailbox→runner pump; no spawner.
-        None,
-    );
-    tools
-        .into_iter()
-        .find(|t| t.name() == "TeamCreate")
-        .expect("coordinator factory must return a TeamCreate tool")
+struct MockInvoker;
+#[async_trait]
+impl platform_api::tool_invoker::ToolInvoker for MockInvoker {
+    async fn invoke(
+        &self,
+        _: &str,
+        _: serde_json::Value,
+        _: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        Ok(serde_json::Value::Null)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+struct MockBudget;
+#[async_trait]
+impl platform_api::budget::BudgetEnforcerHandle for MockBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
+        Ok(())
+    }
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
 }
 
 /// Yield until the scripted api client has recorded at least one round-trip, or
@@ -226,13 +190,13 @@ async fn await_round_trip(api: &Arc<ScriptedApiClient>) -> bool {
     api.call_count() >= 1
 }
 
-/// Yield until the single worker reports `Working`, or the budget runs out.
-async fn await_worker_working(team: &Arc<coordinator::TeamRegistry>) -> bool {
+/// Yield until the completed scripted turn leaves the persistent worker idle.
+async fn await_worker_idle(team: &Arc<coordinator::TeamRegistry>) -> bool {
     for _ in 0..2000 {
         let workers = team.list().await;
         if matches!(
             workers.first().map(|w| &w.status),
-            Some(coordinator::WorkerStatus::Working { .. })
+            Some(coordinator::WorkerStatus::Idle)
         ) {
             return true;
         }
@@ -240,7 +204,7 @@ async fn await_worker_working(team: &Arc<coordinator::TeamRegistry>) -> bool {
     }
     matches!(
         team.list().await.first().map(|w| &w.status),
-        Some(coordinator::WorkerStatus::Working { .. })
+        Some(coordinator::WorkerStatus::Idle)
     )
 }
 
@@ -266,31 +230,34 @@ async fn await_coordinator_status(sink: &Arc<MockSink>) -> bool {
     })
 }
 
-/// THE anti-hollow gate. A real `TeamCreate` call against a coordinator session
-/// must (a) register a worker, (b) actually RUN a teammate (scripted model
-/// round-trip), (c) reconcile the handler-generated task_id onto the worker,
-/// (d) transition the worker `Idle -> Working` via the sink, and (e) push a
-/// `ClientEvent::CoordinatorStatus { active_workers > 0 }` to the client sink.
+/// Implicit creation starts the handler and feeds the real client adapter.
 #[tokio::test]
-async fn coordinator_activation_team_create_flows_active_workers_to_client_event() {
+async fn implicit_agent_spawn_flows_active_workers_to_client_event() {
     let api = ScriptedApiClient::new();
     let fixture = make_coordinator_fixture(&api);
-    let tool = team_create_tool(&fixture);
-
-    // Invoke the coordinator TeamCreate tool — the real-run entry point.
-    let (tx, _rx) = tool_api::progress::progress_channel();
-    let result = tool
-        .call(
-            serde_json::json!({
-                "team_name": "alpha",
-                "agent_type": "team-lead",
-                "description": "drive the activation gate",
-            }),
-            tool_api::test_support::fresh_ctx(),
-            tx,
+    let spawner = coordinator::ImplicitTeammateSpawner::new(
+        fixture.team.clone(),
+        fixture.spawn_seam.clone(),
+        Arc::new(PosixRuntime::new()),
+        fixture.output.clone(),
+        "12345678-0000-0000-0000-000000000000".into(),
+    );
+    spawner.initialize().await;
+    let result = spawner
+        .spawn(
+            platform_api::subagent_spawn::SubagentSpawnRequest {
+                name: Some("alpha".into()),
+                subagent_type: "general-purpose".into(),
+                prompt: "drive the activation gate".into(),
+                ..Default::default()
+            },
+            platform_api::subagent_spawn::SubagentInheritance {
+                tool_invoker: Arc::new(MockInvoker),
+                budget: Arc::new(MockBudget),
+            },
         )
         .await
-        .expect("TeamCreate must succeed in an enabled coordinator session");
+        .expect("implicit teammate spawn succeeds");
 
     // (a) A WorkerAgent now exists in the coordinator registry.
     let workers = fixture.team.list().await;
@@ -310,10 +277,9 @@ async fn coordinator_activation_team_create_flows_active_workers_to_client_event
         worker.agent_id.as_uuid().to_string(),
         "task_id must be the handler id, not the agent_id placeholder"
     );
-    // The tool result surfaces the same real task_id.
-    let result_task_id = result.data["task_id"].as_str().unwrap_or_default();
-    assert_eq!(result_task_id, worker.task_id);
-    assert_eq!(result.data["spawned"], serde_json::json!(true));
+    assert_eq!(result.name, "alpha");
+    assert_eq!(result.team_name, "session-12345678");
+    assert!(!result.is_splitpane);
 
     // (b) The teammate handler ACTUALLY ran: the persistent runner made at least
     //     one scripted model round-trip. The hollow `create()` path never
@@ -324,12 +290,11 @@ async fn coordinator_activation_team_create_flows_active_workers_to_client_event
          a hollow create()-only impl would leave it at 0"
     );
 
-    // (d) The worker transitioned Idle -> Working via the CoordinatorStatusSink
-    //     (the handler's spawned worker fires `set_status(task_id, Running)`).
+    // (d) A completed turn returns the persistent worker to Idle. A fast
+    //     scripted turn may finish before linking, so Working is transient.
     assert!(
-        await_worker_working(&fixture.team).await,
-        "worker must transition to Working via the sink (Idle -> Working); \
-         the hollow path never drives this transition"
+        await_worker_idle(&fixture.team).await,
+        "completed teammate turn must publish Idle through the sink"
     );
 
     // (e) A `ClientEvent::CoordinatorStatus { active_workers > 0 }` reached the
@@ -342,8 +307,8 @@ async fn coordinator_activation_team_create_flows_active_workers_to_client_event
     // Final, authoritative assertions.
     let workers = fixture.team.list().await;
     assert!(
-        matches!(workers[0].status, coordinator::WorkerStatus::Working { .. }),
-        "worker is Working after the Running transition; got {:?}",
+        matches!(workers[0].status, coordinator::WorkerStatus::Idle),
+        "persistent worker is Idle after its completed turn; got {:?}",
         workers[0].status
     );
 
@@ -365,7 +330,7 @@ async fn coordinator_activation_team_create_flows_active_workers_to_client_event
     );
     assert_eq!(
         status.1.as_deref(),
-        Some("alpha"),
+        Some("session-12345678"),
         "the team name must ride the CoordinatorStatus DTO"
     );
 }
@@ -407,6 +372,8 @@ async fn anti_hollow_create_path_emits_nothing() {
                     name: "alpha".into(),
                     team_name: "alpha".into(),
                     description: "hollow".into(),
+                    spawn_request: None,
+                    inheritance: None,
                 },
                 "hollow".into(),
             )
@@ -443,11 +410,7 @@ async fn anti_hollow_create_path_emits_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// DEFAULT-SESSION NO-REGRESSION — the additive guardrail. A non-coordinator
-// session (`desktop_tool_registry(.., None)`) must be byte-identical to the
-// pre-M10 build: `tool_team`'s TeamCreate/TeamDelete are the registered ones,
-// the coordinator tools are absent, and the advertised tool list is unchanged.
-// ---------------------------------------------------------------------------
+// Registry contract for every session.
 
 fn stub_ctx() -> tool_api::BuiltinToolContext {
     tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
@@ -458,35 +421,11 @@ fn stub_ctx() -> tool_api::BuiltinToolContext {
     })
 }
 
-/// A default session registers `tool_team`'s `TeamCreate` (distinguished by its
-/// 30_000-char result cap, vs the coordinator tool's `100_000`) and exactly one
-/// of each team tool — no coordinator shadow.
 #[test]
-fn default_session_registers_tool_team_pair_not_coordinator() {
+fn default_session_has_no_explicit_team_tools() {
     let reg = engine_desktop::desktop_tool_registry(stub_ctx(), None, None);
-    let names = reg.all_names();
-
-    assert_eq!(
-        names.iter().filter(|n| *n == "TeamCreate").count(),
-        1,
-        "exactly one TeamCreate in a default session"
-    );
-    assert_eq!(
-        names.iter().filter(|n| *n == "TeamDelete").count(),
-        1,
-        "exactly one TeamDelete in a default session"
-    );
-
-    // Behavior marker: tool_team's TeamCreate caps results at MAX_TOOL_OUTPUT_LENGTH
-    // (30_000); the coordinator's caps at 100_000.
-    let create = reg
-        .find_by_name("TeamCreate")
-        .expect("TeamCreate registered");
-    assert_eq!(
-        create.max_result_size_chars(),
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH,
-        "a default session must register tool_team's TeamCreate (30_000 cap), not the coordinator's"
-    );
+    assert!(reg.find_by_name("TeamCreate").is_none());
+    assert!(reg.find_by_name("TeamDelete").is_none());
 }
 
 /// The default-session advertised tool list has no duplicate names (the
@@ -517,11 +456,7 @@ fn coordinator_session_registers_coordinator_send_message_not_builtin() {
     let fx = make_coordinator_fixture(&api);
     let wiring = engine_desktop::CoordinatorWiring {
         team: fx.team.clone(),
-        mode: Arc::new(coordinator::CoordinatorMode::new()),
         spawn_seam: fx.spawn_seam.clone(),
-        output: fx.output.clone(),
-        bus: None,
-        runtime: None,
     };
     let reg = engine_desktop::desktop_tool_registry(stub_ctx(), Some(wiring), None);
 
@@ -532,18 +467,8 @@ fn coordinator_session_registers_coordinator_send_message_not_builtin() {
         "exactly one SendMessage in a coordinator session (no builtin shadow)"
     );
 
-    // Behavior marker: the coordinator `SendMessage`'s `to` description names the
-    // `uds:` / `bridge:` peer schemes; the `tool_ui` builtin's does not.
-    let send = reg
-        .find_by_name("SendMessage")
-        .expect("SendMessage registered");
-    let to_desc = send.input_schema()["properties"]["to"]["description"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        to_desc.contains("uds:") && to_desc.contains("bridge:"),
-        "a coordinator session must register the coordinator SendMessage (its `to` schema names uds:/bridge:), got: {to_desc:?}"
-    );
+    assert!(reg.find_by_name("TeamCreate").is_none());
+    assert!(reg.find_by_name("TeamDelete").is_none());
 }
 
 /// A coordinator-session registry also upholds the no-duplicate-names invariant
@@ -554,11 +479,7 @@ fn coordinator_session_tool_list_has_no_duplicate_names() {
     let fx = make_coordinator_fixture(&api);
     let wiring = engine_desktop::CoordinatorWiring {
         team: fx.team.clone(),
-        mode: Arc::new(coordinator::CoordinatorMode::new()),
         spawn_seam: fx.spawn_seam.clone(),
-        output: fx.output.clone(),
-        bus: None,
-        runtime: None,
     };
     let reg = engine_desktop::desktop_tool_registry(stub_ctx(), Some(wiring), None);
     let mut names = reg.all_names();
@@ -569,4 +490,187 @@ fn coordinator_session_tool_list_has_no_duplicate_names() {
         names, deduped,
         "no tool name may appear twice in a coordinator-session registry"
     );
+}
+
+/// A real persistent worker is already dead when departure I/O fails. The
+/// public TaskStop tool must still accept its terminal record for cleanup retry.
+#[tokio::test]
+async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed() {
+    use tool_api::Tool;
+    let api = ScriptedApiClient::new();
+    let fixture = make_coordinator_fixture(&api);
+    let cleanup: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> = fixture.team.clone();
+    fixture
+        .registry
+        .set_teammate_departure_cleanup(Arc::downgrade(&cleanup))
+        .await;
+    let spawner = coordinator::ImplicitTeammateSpawner::new(
+        fixture.team.clone(),
+        fixture.spawn_seam.clone(),
+        Arc::new(PosixRuntime::new()),
+        fixture.output.clone(),
+        "12345678-0000-0000-0000-000000000000".into(),
+    );
+    spawner.initialize().await;
+    spawner
+        .spawn(
+            platform_api::subagent_spawn::SubagentSpawnRequest {
+                name: Some("alpha".into()),
+                subagent_type: "general-purpose".into(),
+                prompt: "park until shutdown".into(),
+                ..Default::default()
+            },
+            platform_api::subagent_spawn::SubagentInheritance {
+                tool_invoker: Arc::new(MockInvoker),
+                budget: Arc::new(MockBudget),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(await_round_trip(&api).await);
+    assert!(await_worker_idle(&fixture.team).await);
+    let worker = fixture.team.list().await.remove(0);
+    let team_name = fixture.team.team_name().await.unwrap();
+    let mailbox = Arc::new(coordinator::mailbox::TeammateMailbox::new(
+        fixture.team.coordinator_id,
+    ));
+    fixture
+        .team
+        .mailbox_router
+        .register(fixture.team.coordinator_id, mailbox.clone())
+        .await;
+    let config_path = coordinator::team_file::team_file_path(fixture._tmp.path(), &team_name);
+    let config_before = std::fs::read(&config_path).unwrap();
+    let list_id = std::env::var("LINGXI_TASK_LIST_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| team_name.clone());
+    let component: String = list_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let task_path = fixture
+        ._tmp
+        .path()
+        .join("tasks")
+        .join(component)
+        .join("1.json");
+    std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+    let task = serde_json::json!({"id":"1", "subject":"Fix parser", "description":"work",
+        "status":"in_progress", "owner":"alpha", "blocks":[], "blockedBy":[]});
+    std::fs::write(&task_path, serde_json::to_vec(&task).unwrap()).unwrap();
+    let task_before = std::fs::read(&task_path).unwrap();
+    // Deterministic failure even when the test user can bypass file permissions.
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::create_dir(&config_path).unwrap();
+    let approval = coordinator::SendMessageTool::new(
+        fixture.team.clone(),
+        tool_ui::send_message::truncate_preview,
+    )
+    .with_spawn_seam(fixture.spawn_seam.clone());
+    let mut context = tool_api::ToolUseContext::model_seed("scripted".into());
+    context.agent_id = Some(worker.agent_id);
+    let (progress, _events) = tool_api::progress_channel();
+    let error = approval
+        .call(
+            serde_json::json!({"to":"team-lead", "message":{
+                "type":"shutdown_response", "request_id":"real-inprocess-stop", "approve":true
+            }}),
+            context,
+            progress,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Remove teammate membership"));
+    assert_eq!(
+        fixture
+            .registry
+            .get(&worker.task_id)
+            .await
+            .unwrap()
+            .base()
+            .status,
+        tasks::TaskStatus::Killed
+    );
+    assert!(
+        fixture
+            .registry
+            .has_pending_teammate_departure(&worker.task_id)
+            .await
+    );
+    assert_eq!(std::fs::read(&task_path).unwrap(), task_before);
+    let initial = mailbox.drain();
+    assert!(initial
+        .iter()
+        .any(
+            |message| serde_json::from_str::<serde_json::Value>(&message.content)
+                .is_ok_and(|value| value["type"] == "shutdown_approved")
+        ));
+    assert!(!initial
+        .iter()
+        .any(
+            |message| serde_json::from_str::<serde_json::Value>(&message.content)
+                .is_ok_and(|value| value["type"] == "teammate_terminated")
+        ));
+    std::fs::remove_dir(&config_path).unwrap();
+    std::fs::write(&config_path, config_before).unwrap();
+
+    let mut builtin = stub_ctx();
+    builtin.task_registry = Some(fixture.registry.clone());
+    let stop = tool_task::TaskStopTool::new(builtin);
+    let (progress, _events) = tool_api::progress_channel();
+    stop.call(
+        serde_json::json!({"task_id":worker.task_id}),
+        tool_api::ToolUseContext::model_seed("scripted".into()),
+        progress,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !fixture
+            .registry
+            .has_pending_teammate_departure(&worker.task_id)
+            .await
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    assert!(!config["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| member["name"] == "alpha"));
+    let task: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&task_path).unwrap()).unwrap();
+    assert!(task.get("owner").is_none());
+    assert_eq!(task["status"], "pending");
+    let completed = mailbox.drain();
+    assert_eq!(
+        completed
+            .iter()
+            .filter(
+                |message| serde_json::from_str::<serde_json::Value>(&message.content)
+                    .is_ok_and(|value| value["type"] == "teammate_terminated")
+            )
+            .count(),
+        1
+    );
+    let (progress, _events) = tool_api::progress_channel();
+    let error = stop
+        .call(
+            serde_json::json!({"task_id":worker.task_id}),
+            tool_api::ToolUseContext::model_seed("scripted".into()),
+            progress,
+        )
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("is not running (status: killed)"));
+    assert!(mailbox.drain().is_empty());
 }

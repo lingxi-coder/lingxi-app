@@ -1,94 +1,101 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lingxi.local/local-app/mcp-proposal.schema.json",
-  "title": "AppMcpProposal (mcp-designer agent output)",
-  "$comment": "DESIGN-ONLY. Transcribes the `AppMcpProposal` Rust struct at LOCAL-APP-PLUGIN-DESIGN-V2.md §12.4 (lines ~1535-1569), which does not exist in code yet (grepped `AppMcpProposal`/`AppMcpToolProposal`/`RequiredFlowChange`/`ExcludedCapability`; zero hits anywhere in the repo). §12.4's Rust block only names `tools: Vec<AppMcpToolProposal>`, `required_flow_changes: Vec<RequiredFlowChange>`, `excluded_capabilities: Vec<ExcludedCapability>` without spelling out those three item types; their shapes below are inferred from the surrounding prose (§12.4's bulleted 'Agent 只提议' list, §12.2's flow description, §12.3's tool quality gate, §13.2's tool schema limits) and are flagged per-field as inferred rather than sourced from a struct. §12.4 is explicit that server identity, connection scope, final Flow ID/build binding, annotations, icons, execution, _meta, permission ceiling, rate limit/timeout, and catalog digest are ALL Host-derived and the agent may not set them — none of those fields appear in this schema, on purpose.",
+  "title": "AppMcpProposal",
+  "description": "Exact agent-owned JSON shape accepted by the Host AppMcpProposal DTO. Host-owned catalog, approval, execution and permission fields are intentionally absent.",
   "type": "object",
+  "additionalProperties": false,
   "properties": {
-    "app_id": {
-      "type": "string",
-      "$comment": "BUILT field name/concept — §12.4 struct field `app_id: String`."
-    },
-    "manifest_revision": {
-      "type": "integer",
-      "minimum": 0,
-      "$comment": "§12.4 struct field `manifest_revision: u64`."
-    },
-    "user_goal_sha256": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{64}$",
-      "$comment": "§12.4 struct field `user_goal_sha256: String`; hex-64 pattern inferred from every other *_sha256 field this design doc defines the same way (e.g. runtime_profile.contract_sha256, validated by `contract_sha256` in lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs:558 — `local_app_workflow_core.js` does not exist in this repo)."
-    },
-    "summary": {
-      "type": "string",
-      "$comment": "§12.4 struct field `summary: String`."
-    },
+    "appId": { "$ref": "#/$defs/token" },
+    "manifestRevision": { "type": "integer", "minimum": 0 },
+    "userGoalSha256": { "$ref": "#/$defs/sha256" },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
     "tools": {
       "type": "array",
-      "minItems": 1,
       "maxItems": 16,
-      "$comment": "§12.4 struct field `tools: Vec<AppMcpToolProposal>`. minItems 1 / maxItems 16 is the published-App tool count bound from §1.7 ('1–16 tools') and §13.2 ('单 App 1–16 tools'); §12.3 states an authoring pass producing zero meaningful tools returns `mcp_authoring_required` instead of an empty proposal, so this schema treats an empty tools array as invalid rather than modeling that recoverable outcome — the workflow-level `mcp_authoring_required` path is a separate control-flow branch, not a shape this proposal schema represents.",
-      "items": {
-        "type": "object",
-        "$comment": "AppMcpToolProposal — INFERRED shape. §12.4's 'Agent 只提议' bullet list names name/title/description, inputSchema/outputSchema, and a 'business Flow semantic reference' (not the full Host-validated AppMcpFlowBinding of §12.5, which the agent cannot construct because final Flow ID binding is Host-derived per §12.4's exclusion list). name/title/description length limits are §13.2's Local App tool schema limits, applied here even though §13.2 states those are the HOST's product budget on the generated catalog rather than a proposal-time contract — enforcing them at proposal time is this schema's choice to fail fast, not a requirement §13.2 itself states for the proposal stage.",
-        "properties": {
-          "name": {
-            "type": "string",
-            "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$",
-            "minLength": 1,
-            "maxLength": 64,
-            "$comment": "§13.2: canonical lower snake case, 1-64 chars, no leading/trailing/consecutive underscore."
-          },
-          "title": {
-            "type": "string",
-            "maxLength": 100,
-            "$comment": "§13.2: title max 100 chars."
-          },
-          "description": {
-            "type": "string",
-            "maxLength": 1000,
-            "$comment": "§13.2: description max 1000 chars."
-          },
-          "input_schema": {
-            "type": "object",
-            "$comment": "§12.4: agent proposes inputSchema. §13.2 bounds it at 32 KiB / depth 8 with a closed object root and no remote $ref — not enforced by this JSON Schema's own type system (JSON Schema cannot size- or depth-bound an arbitrary sub-schema value it hosts) and left as a note for the Host validator §8.3/§12.2 describes, not something this file can gate."
-          },
-          "output_schema": {
-            "type": "object",
-            "$comment": "§12.4: agent proposes outputSchema (optional per §13.1's McpToolDefinitionDto.output_schema: Option<Value>, the partially-built wire DTO at lingxi-code/platform-api/src/mcp.rs:213-232 that this eventually composes into — that struct currently lacks title/output_schema/annotations/execution/icons/meta/effective_max_permission, matching the design table's note that platform-api/src/mcp.rs 'lacks standard Tool fields')."
-          },
-          "flow_reference": {
-            "type": "string",
-            "$comment": "INFERRED. §12.4 calls this a '业务 Flow semantic reference', distinct from the fully-typed `AppMcpFlowBinding` of §12.5 (flow_id/inputs/result with FlowValueBinding) which Host validation produces only after promotion — the agent cannot emit a validated AppMcpFlowBinding per §12.4's own exclusion list. Modeled here as an opaque free-text reference the mcp-flow-binding skill and Host resolve later; no concrete shape for it exists in the design doc."
-          }
-        },
-        "required": ["name", "title", "description", "input_schema", "flow_reference"]
-      }
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/tool" }
     },
-    "required_flow_changes": {
+    "requiredFlowChanges": {
       "type": "array",
-      "$comment": "§12.4 struct field `required_flow_changes: Vec<RequiredFlowChange>`; `RequiredFlowChange`'s own fields are not spelled out anywhere in the design doc or code (grepped; zero hits) — item shape below is the minimum §12.2's flow ('required_flow_changes? builder + refresh evidence + rerun') implies: something identifying which Flow and what change, plus why. Flagged INFERRED, not sourced.",
-      "items": {
-        "type": "object",
-        "properties": {
-          "flow_id": { "type": "string" },
-          "change_description": { "type": "string" }
-        },
-        "required": ["change_description"]
-      }
+      "maxItems": 128,
+      "items": { "type": "string", "minLength": 1, "maxLength": 16384 }
     },
-    "excluded_capabilities": {
+    "excludedCapabilities": {
       "type": "array",
-      "$comment": "§12.4 struct field `excluded_capabilities: Vec<ExcludedCapability>`; `ExcludedCapability`'s own fields are not spelled out anywhere either. §12.3 says a zero-meaningful-tool authoring pass '把原因写入 excluded_capabilities' (writes the reason here), which is the only concrete constraint the design gives this type — modeled below as {capability, reason}. Flagged INFERRED, not sourced.",
-      "items": {
-        "type": "object",
-        "properties": {
-          "capability": { "type": "string" },
-          "reason": { "type": "string" }
-        },
-        "required": ["capability", "reason"]
-      }
+      "maxItems": 128,
+      "items": { "type": "string", "minLength": 1, "maxLength": 16384 }
     }
   },
-  "required": ["app_id", "manifest_revision", "user_goal_sha256", "summary", "tools", "required_flow_changes", "excluded_capabilities"]
+  "required": ["appId", "manifestRevision", "userGoalSha256", "summary", "tools", "requiredFlowChanges", "excludedCapabilities"],
+  "$defs": {
+    "token": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "json_schema": { "type": "object" },
+    "flow_value_binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "literal": {} },
+          "required": ["literal"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tool_input": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": { "json_pointer": { "type": "string", "maxLength": 512 } },
+              "required": ["json_pointer"]
+            }
+          },
+          "required": ["tool_input"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "step_output": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "step_id": { "$ref": "#/$defs/token" },
+                "json_pointer": { "type": "string", "maxLength": 512 }
+              },
+              "required": ["step_id", "json_pointer"]
+            }
+          },
+          "required": ["step_output"]
+        }
+      ]
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "title": { "type": ["string", "null"], "maxLength": 100 },
+        "description": { "type": ["string", "null"], "maxLength": 1000 },
+        "inputSchema": { "$ref": "#/$defs/json_schema" },
+        "outputSchema": {
+          "anyOf": [{ "$ref": "#/$defs/json_schema" }, { "type": "null" }]
+        },
+        "semanticFlowId": { "$ref": "#/$defs/token" },
+        "inputs": {
+          "type": "object",
+          "maxProperties": 128,
+          "additionalProperties": { "$ref": "#/$defs/flow_value_binding" }
+        },
+        "result": { "$ref": "#/$defs/flow_value_binding" }
+      },
+      "required": ["name", "inputSchema", "semanticFlowId", "result"]
+    }
+  }
 }

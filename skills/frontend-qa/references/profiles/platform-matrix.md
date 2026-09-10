@@ -1,6 +1,10 @@
 # Platform matrix
 
-Run the same scenario across the requested targets and record what changed.
+Run the same scenario across targets only when the Host verification scope
+authorizes those targets on the current device. Keep the complete declared
+target matrix in the report, but record `unverified_target_ids` and
+`unverified_scenario_ids` for platforms not matched by the current Host
+device; do not attempt them through guessed device metadata or call them pass.
 
 - Browser preview: first paint, fatal console errors, primary interaction,
   navigation, back, loading and error handling.
@@ -20,7 +24,7 @@ double-frame motion observation for animated canvas or Three.js scenes.
 
 ## Sources
 
-Reviewed: 2026-08-27
+Reviewed: 2026-09-06
 
 - Apple Human Interface Guidelines: https://developer.apple.com/design/human-interface-guidelines
 - Android adaptive apps: https://developer.android.com/develop/adaptive-apps/guides/get-started-with-adaptive-apps

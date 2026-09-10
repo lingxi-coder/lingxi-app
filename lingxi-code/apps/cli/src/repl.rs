@@ -7,10 +7,11 @@ use crate::argv::Argv;
 use crate::exit_codes;
 use crate::output::{JsonSink, OutputSink, PlainSink};
 use crate::output_adapter::SinkAdapter;
-use crate::repl_loop::{step, StepOutcome};
+use crate::repl_loop::{step_with_notifications, StepOutcome, TaskNotificationWake};
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
 use orchestrator::{OrchestratorError, TurnOutcome};
+use platform_api::task_registry::TaskRegistryHandle;
 use platform_api::{OrchestratorHandle, OutputStream};
 use protocol::SessionId;
 use std::io::IsTerminal;
@@ -22,6 +23,121 @@ use tokio::io::{
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+struct ReplTaskWake {
+    orchestrator: Arc<orchestrator::ConversationOrchestrator>,
+    registry: Arc<dyn TaskRegistryHandle>,
+}
+
+#[async_trait::async_trait]
+impl TaskNotificationWake for ReplTaskWake {
+    async fn send_human_task_message(&self, task_id: &str, message: &str) -> Result<(), String> {
+        if !self.orchestrator.workspace_trusted().await {
+            return Err("Trust this workspace before messaging a task".into());
+        }
+        self.registry
+            .send_human_task_message(task_id, message)
+            .await
+            .map_err(|error| error.to_string())
+    }
+    async fn wait(&self) {
+        // Subscribe before checking; a completion already pending at prompt
+        // entry must wake just as reliably as a later revision.
+        let mut revision = self.registry.subscribe_task_notifications();
+        loop {
+            if self.registry.has_pending_task_notifications_for(None).await {
+                return;
+            }
+            if let Some(watch) = &mut revision {
+                if watch.changed().await.is_err() {
+                    revision = None;
+                }
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+    async fn run(&self, cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError> {
+        self.orchestrator
+            .run_task_notification_rewake(self.registry.as_ref(), cancel)
+            .await
+    }
+}
+
+/// Return false only when an interactive user explicitly stays or a handoff
+/// fails. EOF cannot answer a dialog, so it follows the explicit stop path.
+async fn confirm_repl_exit<R: AsyncBufRead + Send + Unpin + ?Sized>(
+    reader: &Arc<Mutex<R>>,
+    handle: &dyn OrchestratorHandle,
+    registry: &dyn TaskRegistryHandle,
+    sink: &dyn OutputSink,
+    interactive: bool,
+) -> bool {
+    let tasks = registry.list(Default::default()).await.unwrap_or_default();
+    let live: Vec<_> = tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status.as_str(),
+                "running" | "pending" | "paused" | "queued"
+            ) || task.is_parked
+        })
+        .collect();
+    if live.is_empty() {
+        return true;
+    }
+    if interactive {
+        let handoff = handle.can_background_conversation_on_exit().await;
+        let descriptions = live
+            .iter()
+            .map(|task| format!("  {}", task.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sink.text(&format!("Background work is running\nThe following will stop when you exit:\n{descriptions}\n1. Exit and stop tasks\n{}3. Stay\n", if handoff { "2. Move to background and exit\n" } else { "" })).await;
+        let mut reply = String::new();
+        let read = reader.lock().await.read_line(&mut reply).await;
+        if matches!(read, Ok(n) if n > 0) {
+            match reply.trim() {
+                "1" => {}
+                "2" if handoff => {
+                    let snapshot = platform_api::BackgroundingSnapshot::Idle {
+                        queued_commands: Vec::new(),
+                        draft: String::new(),
+                        boundary_id: uuid::Uuid::new_v4(),
+                    };
+                    match handle.background_conversation(snapshot).await {
+                        Ok(receipt) => {
+                            sink.text(&format!(
+                                "{receipt}\nLocal tasks that could not be moved will be stopped.\n"
+                            ))
+                            .await
+                        }
+                        Err(error) => {
+                            sink.error("background", &error.to_string()).await;
+                            return false;
+                        }
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+    // Handoff may disown adopted tasks, so refresh before stopping the rest.
+    if let Ok(tasks) = registry.list(Default::default()).await {
+        for task in tasks.into_iter().filter(|task| {
+            matches!(
+                task.status.as_str(),
+                "running" | "pending" | "paused" | "queued"
+            ) || task.is_parked
+        }) {
+            let _ = registry.mark_notified(&task.task_id).await;
+            if let Err(error) = registry.kill_with_reason(&task.task_id, "user").await {
+                sink.error("task_shutdown", &error.to_string()).await;
+            }
+        }
+    }
+    true
+}
 
 /// Pure decision: should the REPL surface an interactive permission prompt?
 ///
@@ -296,6 +412,10 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     let idle_notifier =
         crate::idle_notify::OrchestratorIdleNotifier::new(orch.clone(), notif_armed);
 
+    let task_wake = ReplTaskWake {
+        orchestrator: orch.clone(),
+        registry: runtime.task_registry.clone(),
+    };
     let ended_via;
     let exit_code;
     loop {
@@ -308,7 +428,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
                 Box::pin(async move { o.run_turn_with_cancel(&prompt, token).await })
             };
 
-        let outcome = step(
+        let outcome = step_with_notifications(
             stdin_reader.clone() as Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
             &mut err_writer,
             &runtime.dispatcher,
@@ -316,11 +436,24 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             sink.clone(),
             &sigint,
             Some(&idle_notifier),
+            Some(&task_wake),
             run_turn_fn,
         )
         .await;
 
         turn_count += 1;
+        if outcome != StepOutcome::Continue
+            && !confirm_repl_exit(
+                &stdin_reader,
+                handle.as_ref(),
+                runtime.task_registry.as_ref(),
+                sink.as_ref(),
+                std::io::stdin().is_terminal() && outcome != StepOutcome::Eof,
+            )
+            .await
+        {
+            continue;
+        }
         match outcome {
             StepOutcome::Continue => continue,
             StepOutcome::Eof => {
@@ -595,5 +728,86 @@ mod tests {
         assert!(!parse_trust_input(""));
         assert!(!parse_trust_input("maybe\n"));
         assert!(!parse_trust_input("yy\n"));
+    }
+    use platform_api::task_registry::*;
+    struct FixedRoster {
+        tasks: Vec<TaskRecord>,
+        killed: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskRegistryHandle for FixedRoster {
+        async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(self.tasks.clone())
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            self.killed.lock().unwrap().push(id.to_string());
+            self.tasks
+                .iter()
+                .find(|t| t.task_id == id)
+                .cloned()
+                .ok_or_else(|| TaskRegistryError::NotFound(id.to_string()))
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_exit_stay_preserves_work_and_stop_or_eof_tears_it_down() {
+        let registry = FixedRoster {
+            tasks: vec![TaskRecord {
+                task_id: "b1".into(),
+                task_type: "local_bash".into(),
+                status: "running".into(),
+                description: "build".into(),
+                ..Default::default()
+            }],
+            killed: std::sync::Mutex::new(Vec::new()),
+        };
+        let handle = orchestrator::test_support::MockOrchestratorHandle::new();
+        let sink = crate::output::PlainSink::new();
+        assert!(
+            !super::confirm_repl_exit(&scripted_reader(b"3\n"), &handle, &registry, &sink, true)
+                .await
+        );
+        assert!(registry.killed.lock().unwrap().is_empty());
+        assert!(
+            super::confirm_repl_exit(&scripted_reader(b"1\n"), &handle, &registry, &sink, true)
+                .await
+        );
+        assert_eq!(*registry.killed.lock().unwrap(), vec!["b1"]);
+        registry.killed.lock().unwrap().clear();
+        assert!(
+            super::confirm_repl_exit(&scripted_reader(b""), &handle, &registry, &sink, false).await
+        );
+        assert_eq!(*registry.killed.lock().unwrap(), vec!["b1"]);
     }
 }

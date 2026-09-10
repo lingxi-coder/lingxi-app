@@ -461,6 +461,10 @@ async fn only_meta_text_bodies_suppress_skill_registry_truncation() {
     }
 }
 
+/// The plan file never comes back through the FILE-restore arm (`Ets` filters
+/// it out of `yts`), because 2.1.266 re-attaches it through its own
+/// `plan_file_reference` provider (`_ts`) instead — `KOe` composes
+/// `[...files, ...skills, ...planFileReference, …]`.
 #[tokio::test]
 async fn plan_file_is_excluded_from_post_compact_restore() {
     let _rg = registry_guard();
@@ -479,8 +483,22 @@ async fn plan_file_is_excluded_from_post_compact_restore() {
     set(&map, path, stale_entry("stale plan"));
 
     let restored = orch.restore_post_compact_attachments().await;
-    assert!(restored.is_empty());
+    // No FILE restore happened — that is what the exclusion means, and the
+    // absence of restore telemetry is the witness.
     assert!(restore_names(&sink.events().await).is_empty());
+    // What DOES come back is the dedicated `plan_file_reference`, carrying the
+    // plan's real contents rather than the stale read-file snapshot.
+    assert_eq!(restored.len(), 1, "{restored:?}");
+    let body = restored[0].text_content();
+    assert!(
+        body.contains("A plan file exists from plan mode at: "),
+        "{body}"
+    );
+    assert!(body.contains("secret plan"), "{body}");
+    assert!(
+        !body.contains("stale plan"),
+        "the stale read-file snapshot must not be what is restored: {body}"
+    );
 }
 
 #[tokio::test]

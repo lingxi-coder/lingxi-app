@@ -835,4 +835,88 @@ for abi in ${COMMITTED_ABIS}; do
   esac
 done
 
+# The optimized create-skill gate must reject semantic regressions, not merely
+# match the current file on the happy path.
+python3 - "${REPO_ROOT}" <<'PY'
+import contextlib
+import importlib.util
+import io
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+module_path = repo / "lingxi-code/scripts/mobile-linux/verify-local-app-supply-chain.py"
+spec = importlib.util.spec_from_file_location("local_app_supply_verify", module_path)
+verify = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verify)
+text = (repo / "skills/create-local-app/SKILL.md").read_text(encoding="utf-8")
+mutations = {
+    "dynamic brief": ("never re-ask an answered decision", "repeat answered decisions"),
+    "compact UI summary": (
+        "structure/navigation, light/dark/system theme and accent, style/density",
+        "UI summary",
+    ),
+    "complete authoring spec": ('"authoring_spec":', '"partial_spec":'),
+    "business capability intent": ('"mcp_intent":', '"auto_mcp":'),
+    "no automatic MCP": (
+        "This does not configure or\n   publish MCP during creation",
+        "This configures MCP during creation",
+    ),
+}
+for label, (needle, replacement) in mutations.items():
+    mutated = text.replace(needle, replacement)
+    if mutated == text:
+        raise SystemExit(f"negative fixture {label!r} did not mutate the skill")
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            verify.validate_optimized_create_skill_contract(mutated)
+    except SystemExit:
+        continue
+    raise SystemExit(f"optimized create-skill gate accepted regression: {label}")
+
+workflow = (
+    repo / "lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js"
+).read_text(encoding="utf-8")
+workflow_mutations = {
+    "scaffold identity": (
+        "name=${JSON.stringify(confirmedName)}, brief=${JSON.stringify(confirmedBrief)}, ",
+        "",
+    ),
+    "update contract identity": (
+        "operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}",
+        "operation=stage",
+    ),
+    "tester finalize receipt": (
+        "const testerDisposition = finalizeDisposition(tester, 'tester', qaHandle)",
+        "const testerDisposition = { kind: 'candidate', report: tester }",
+    ),
+    "thorough result chain": (
+        "verifier.result.previous_result_id !== tester.receipt.result_id",
+        "false",
+    ),
+    "Host candidate pass": (
+        "result.scenario_judgements.every",
+        "report.ok === true",
+    ),
+    "infrastructure repair bypass": (
+        "input.operation === 'verify' || repairRounds >= repairBudget || qa.disposition !== 'candidate' || qa.source_findings.length === 0",
+        "false",
+    ),
+    "evidence preservation": (
+        "if (Array.isArray(value)) return value.map(",
+        "if (Array.isArray(value)) return value.slice(0, 40).map(",
+    ),
+}
+for label, (needle, replacement) in workflow_mutations.items():
+    mutated = workflow.replace(needle, replacement)
+    if mutated == workflow:
+        raise SystemExit(f"negative workflow fixture {label!r} did not mutate the source")
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            verify.validate_optimized_build_workflow_contract(mutated)
+    except SystemExit:
+        continue
+    raise SystemExit(f"optimized workflow gate accepted regression: {label}")
+PY
+
 echo "local-app supply-chain tests passed (release rootfs digest: KNOWN GAP, unanchored)"

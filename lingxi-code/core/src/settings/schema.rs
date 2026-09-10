@@ -116,6 +116,23 @@ pub fn strategy_for(field: &str) -> Option<MergeStrategy> {
         .find_map(|(k, v)| (*k == field).then_some(*v))
 }
 
+/// Execution backend requested for teammates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum TeammateMode {
+    /// Choose the current terminal backend automatically.
+    #[serde(rename = "auto")]
+    Auto,
+    /// Run inside the existing process.
+    #[serde(rename = "in-process")]
+    InProcess,
+    /// Require terminal panes.
+    #[serde(rename = "tmux")]
+    Tmux,
+    /// Require the native iTerm2 backend.
+    #[serde(rename = "iterm2")]
+    ITerm2,
+}
+
 /// Mirror of claude-code's `settings.json` shape.
 ///
 /// All fields `Option<T>` so a partial file (one layer of the 4-layer stack)
@@ -134,6 +151,10 @@ pub fn strategy_for(field: &str) -> Option<MergeStrategy> {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
+    /// Terminal backend used for experimental agent-team members.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teammate_mode: Option<TeammateMode>,
+
     /// Forward-compat: claude-code @ 6a25909 does NOT emit this; we keep it
     /// typed so a `$schema` reference injected by IDE tooling round-trips
     /// instead of being stripped on re-serialize.
@@ -307,6 +328,17 @@ pub struct SettingsJson {
     /// proactive agent/mobile push notification surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_push_notif_enabled: Option<bool>,
+
+    /// Scalar field (later source wins). Soft cap, in characters, on a task's
+    /// model-facing output before `TaskOutput` truncates it to the tail with a
+    /// `[Truncated. Full output: …]` header (claude-code `Ge().taskOutputMaxChars`).
+    ///
+    /// Read through `see()`, which CLAMPS it to `4_000..=128_000` — a value
+    /// outside that range is pulled to the nearest bound rather than rejected.
+    /// When set it wins over `TASK_MAX_OUTPUT_LENGTH`; absent, the env var
+    /// applies over a 32_000 default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_output_max_chars: Option<u32>,
 
     /// Scalar field (later source wins). When enabled, a literal `ultracode`
     /// token in a submitted prompt emits the Workflow authorization reminder.
@@ -997,8 +1029,7 @@ impl FusionSettingsJson {
         {
             if idle > panel_total {
                 return Err(SchemaViolation(
-                    "fusion.panelIdleTimeoutMs must not exceed fusion.panelTotalTimeoutMs"
-                        .into(),
+                    "fusion.panelIdleTimeoutMs must not exceed fusion.panelTotalTimeoutMs".into(),
                 ));
             }
         }

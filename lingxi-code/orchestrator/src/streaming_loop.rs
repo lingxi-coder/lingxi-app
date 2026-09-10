@@ -164,15 +164,18 @@ pub(crate) struct PumpFailure {
 }
 
 /// The finalize cause the caller stamps onto `tengu_streaming_partial_finalized`
-/// and uses to pick the byte-exact incomplete-response notice. Mirrors cc's
-/// `cause:Ws?"watchdog":La?"server_error":She.has(code)?"network_down":"stale_connection"`.
+/// and uses to pick the byte-exact incomplete-response notice. Mirrors cc 2.1.263
+/// `tee=Yg?"watchdog":Hu?"server_error":u4?"stream_suspended":SR.has(code)?"network_down":"stale_connection"`
+/// (`u4=rp?.code==="StreamSuspended"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PartialFinalizeCause {
-    /// Stream idle-timeout (watchdog) abort (`Cn`/`Ws`).
+    /// Stream idle-timeout (watchdog) abort (`Yg`).
     Watchdog,
-    /// Overloaded (529) / provider-internal (5xx) / api_error (`La`).
+    /// Overloaded (529) / provider-internal (5xx) / api_error (`Hu`).
     ServerError,
-    /// A recognized connection-drop error code (`She.has(code)`).
+    /// Watchdog abort because the machine slept (`u4`, `rp.code==="StreamSuspended"`).
+    StreamSuspended,
+    /// A recognized connection-drop error code (`SR.has(code)`).
     NetworkDown,
     /// Any other stale/closed connection.
     StaleConnection,
@@ -184,25 +187,30 @@ impl PartialFinalizeCause {
         match self {
             Self::Watchdog => "watchdog",
             Self::ServerError => "server_error",
+            Self::StreamSuspended => "stream_suspended",
             Self::NetworkDown => "network_down",
             Self::StaleConnection => "stale_connection",
         }
     }
 
     /// The byte-exact incomplete-response notice for a HAS-OUTPUT partial finalize
-    /// (cc 2.1.207 `jT="API Error"` + the cause-specific tail). Only the
-    /// has-output variants are ported here — the thinking-only "Try again"
-    /// variants are handled by the retry/exhaustion path, not this finalize.
+    /// (cc 2.1.263 `Bl="API Error"` + the cause-specific tail at src_160988549.js
+    /// @4784072). Only the has-output variants are ported here — the thinking-only
+    /// "Try again" variants are handled by the retry/exhaustion path, not this
+    /// finalize.
     pub(crate) fn incomplete_notice(self) -> &'static str {
         match self {
             Self::Watchdog => {
-                "API Error: Response stalled mid-stream. The response above may be incomplete."
+                "API Error: The response stopped arriving. The response above may be incomplete."
             }
             Self::ServerError => {
                 "API Error: Server error mid-response. The response above may be incomplete."
             }
+            Self::StreamSuspended => {
+                "API Error: Your computer went to sleep mid-response. The response above may be incomplete."
+            }
             Self::NetworkDown | Self::StaleConnection => {
-                "API Error: Connection closed mid-response. The response above may be incomplete."
+                "API Error: Connection lost mid-response. The response above may be incomplete."
             }
         }
     }
@@ -214,6 +222,11 @@ impl PartialFinalizeCause {
 /// server_error, then the connection-drop family.
 pub(crate) fn partial_finalize_cause(error: &OrchestratorError) -> Option<PartialFinalizeCause> {
     match error {
+        OrchestratorError::Streaming(e)
+            if llm_client::model::stream_watchdog::is_stream_suspended(e) =>
+        {
+            Some(PartialFinalizeCause::StreamSuspended)
+        }
         OrchestratorError::Streaming(e)
             if llm_client::model::stream_watchdog::is_stream_idle_timeout(e) =>
         {
@@ -589,6 +602,54 @@ mod tests {
 
     fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    /// 2.1.263 src_160988549.js @4784072 has-output notices + `tee` cause names.
+    #[test]
+    fn incomplete_notice_matches_2_1_263_has_output_copy() {
+        assert_eq!(
+            PartialFinalizeCause::Watchdog.incomplete_notice(),
+            "API Error: The response stopped arriving. The response above may be incomplete."
+        );
+        assert_eq!(
+            PartialFinalizeCause::ServerError.incomplete_notice(),
+            "API Error: Server error mid-response. The response above may be incomplete."
+        );
+        assert_eq!(
+            PartialFinalizeCause::StreamSuspended.incomplete_notice(),
+            "API Error: Your computer went to sleep mid-response. The response above may be incomplete."
+        );
+        assert_eq!(
+            PartialFinalizeCause::NetworkDown.incomplete_notice(),
+            "API Error: Connection lost mid-response. The response above may be incomplete."
+        );
+        assert_eq!(
+            PartialFinalizeCause::StaleConnection.incomplete_notice(),
+            "API Error: Connection lost mid-response. The response above may be incomplete."
+        );
+        assert_eq!(
+            PartialFinalizeCause::StreamSuspended.as_str(),
+            "stream_suspended"
+        );
+    }
+
+    #[test]
+    fn partial_finalize_cause_classifies_suspend_before_idle() {
+        let suspend = llm_client::model::stream_watchdog::watchdog_abort_error(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(
+            partial_finalize_cause(&OrchestratorError::Streaming(suspend)),
+            Some(PartialFinalizeCause::StreamSuspended)
+        );
+        let idle = llm_client::model::stream_watchdog::idle_timeout_error(
+            std::time::Duration::from_secs(1),
+        );
+        assert_eq!(
+            partial_finalize_cause(&OrchestratorError::Streaming(idle)),
+            Some(PartialFinalizeCause::Watchdog)
+        );
     }
 
     #[tokio::test]

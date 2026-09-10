@@ -1350,6 +1350,7 @@ mod tests {
             worktree_path: Some(managed.display().to_string()),
             worktree_ownership_token: write_token.then(|| token.clone()),
             initial_prompt: Some("clean up".to_string()),
+            shell_handoff: Vec::new(),
             handoff: None,
             options: BackgroundLaunchOptions::default(),
             env: std::collections::BTreeMap::new(),

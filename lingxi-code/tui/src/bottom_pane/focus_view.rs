@@ -155,6 +155,7 @@ mod tests {
         FocusProjection {
             lines: vec!["> Prompt".to_string(), "● Answer".to_string()],
             running_agents: vec![RunningAgentStatus {
+                awaiting_plan_approval: false,
                 id: "a1".to_string(),
                 task_type: "local_agent".to_string(),
                 agent_type: "Explore".to_string(),

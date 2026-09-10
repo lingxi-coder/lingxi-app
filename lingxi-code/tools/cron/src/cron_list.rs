@@ -231,10 +231,15 @@ impl Tool for CronListTool {
         &SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+        // PARITY 2.1.263 `EC()`: `!CLAUDE_CODE_DISABLE_CRON && gate(tengu_kairos_cron, true)`
+        // — the env kill switch hides the tool from the model.
+        crate::cron_tools_enabled()
     }
     fn max_result_size_chars(&self) -> usize {
         100_000
+    }
+    fn should_defer(&self) -> bool {
+        true
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -268,7 +273,8 @@ impl Tool for CronListTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "CronList: list every cron job scheduled via CronCreate.".into()
+        // PARITY 2.1.263 `hbn(true)`; `.claude/` → `.lingxi/`.
+        "List all cron jobs scheduled via CronCreate, both durable (.lingxi/scheduled_tasks.json) and session-only.".into()
     }
 
     async fn validate_input(
@@ -338,7 +344,10 @@ mod tests {
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
-        let doc = cron::tasks_file::ScheduledTasks { tasks };
+        let doc = cron::tasks_file::ScheduledTasks {
+            tasks,
+            ..Default::default()
+        };
         tokio::fs::write(&path, cron::tasks_file::serialize_tasks(&doc))
             .await
             .unwrap();
@@ -354,6 +363,8 @@ mod tests {
             last_fired_at: None,
             recurring: Some(recurring),
             permanent: None,
+            expires_at: None,
+            session_id: None,
         }
     }
 

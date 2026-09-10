@@ -13,7 +13,6 @@ import com.lingxi.code.bindings.buildAndroidCronStore
  */
 internal interface CronEngineGateway {
     suspend fun list(scope: CronScope): List<CronTaskDto>
-    suspend fun nextFire(scope: CronScope): Long?
     suspend fun dueOccurrences(scope: CronScope, nowMs: Long): List<Pair<String, Long>>
     suspend fun create(
         scope: CronScope,
@@ -47,9 +46,6 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
 
     override suspend fun list(scope: CronScope): List<CronTaskDto> =
         withStore(scope) { it.list() }
-
-    override suspend fun nextFire(scope: CronScope): Long? =
-        withStore(scope) { it.nextFireTime()?.toLong() }
 
     override suspend fun dueOccurrences(scope: CronScope, nowMs: Long): List<Pair<String, Long>> =
         withStore(scope) { store ->

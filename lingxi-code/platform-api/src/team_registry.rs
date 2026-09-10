@@ -17,47 +17,31 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
-/// Process-global leader team name (claude-code `leaderTeamName`,
-/// `utils/tasks.ts:25`). Set by `TeamCreate` (parity with TS `setLeaderTeamName`)
-/// and cleared by `TeamDelete` (parity with TS `clearLeaderTeamName`) so the
-/// leader's tasks resolve under the team name — matching where in-process
-/// teammates look — rather than under the session id.
-///
-/// Lives in `traits` (depended on by BOTH the `coordinator` crate that SETS it
-/// and the `tool-task` crate's `getTaskListId()` that READS it) so neither needs
-/// a cyclic dependency on the other.
-static LEADER_TEAM_NAME: RwLock<Option<String>> = RwLock::new(None);
+/// Session-owned leader names for task-list resolution. The upstream store is
+/// host-scoped (`ds().taskList`); desktop hosts must not share one mutable name.
+static LEADER_TEAM_NAMES: RwLock<std::collections::BTreeMap<String, String>> =
+    RwLock::new(std::collections::BTreeMap::new());
 
-/// Set the leader's team name for task-list resolution (claude-code
-/// `setLeaderTeamName`, `utils/tasks.ts:31-37`). Called by `TeamCreate` when a
-/// team is created. Idempotent on an unchanged name.
-pub fn set_leader_team_name(team_name: &str) {
-    let mut guard = LEADER_TEAM_NAME
+/// Register the implicit team's task-list identity, or remove it on teardown.
+pub fn set_leader_team_name_for_session(session_id: &str, team_name: Option<&str>) {
+    let mut names = LEADER_TEAM_NAMES
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if guard.as_deref() == Some(team_name) {
-        return;
+    if let Some(name) = team_name {
+        names.insert(session_id.to_owned(), name.to_owned());
+    } else {
+        names.remove(session_id);
     }
-    *guard = Some(team_name.to_string());
 }
 
-/// Clear the leader's team name (claude-code `clearLeaderTeamName`,
-/// `utils/tasks.ts:43-47`). Called when a team is deleted.
-pub fn clear_leader_team_name() {
-    let mut guard = LEADER_TEAM_NAME
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *guard = None;
-}
-
-/// Read the leader's team name, if set (claude-code `leaderTeamName`). Consulted
-/// by `getTaskListId()` (priority 4) after the env / teammate-context branches.
+/// Read only the calling session's implicit team identity.
 #[must_use]
-pub fn leader_team_name() -> Option<String> {
-    LEADER_TEAM_NAME
+pub fn leader_team_name_for_session(session_id: &str) -> Option<String> {
+    LEADER_TEAM_NAMES
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .get(session_id)
+        .cloned()
 }
 
 /// One coordinator worker as surfaced to the bridge / TUI read path.
@@ -66,6 +50,9 @@ pub fn leader_team_name() -> Option<String> {
 /// (`agent_id` / `name` / `agent_type` / `status`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerInfo {
+    /// A submitted plan has not received the leader's decision yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_plan_approval: bool,
     /// Worker agent id, stringified (the `AgentId` display / wire form).
     pub agent_id: String,
     /// Agent-type string (e.g. `"explorer"`, `"writer"`).
@@ -100,26 +87,34 @@ mod tests {
     }
 
     #[test]
-    fn leader_team_name_set_clear_roundtrip() {
-        // Parity with TS setLeaderTeamName / clearLeaderTeamName / leaderTeamName.
-        // (Process-global; this is the only test that touches it.)
-        clear_leader_team_name();
-        assert_eq!(leader_team_name(), None);
-        set_leader_team_name("alpha-team");
-        assert_eq!(leader_team_name(), Some("alpha-team".to_string()));
-        // Idempotent on unchanged name.
-        set_leader_team_name("alpha-team");
-        assert_eq!(leader_team_name(), Some("alpha-team".to_string()));
-        // Overwrite.
-        set_leader_team_name("beta");
-        assert_eq!(leader_team_name(), Some("beta".to_string()));
-        clear_leader_team_name();
-        assert_eq!(leader_team_name(), None);
+    fn leader_team_names_isolate_sessions_and_teardown() {
+        set_leader_team_name_for_session("registry-session-a", Some("alpha"));
+        set_leader_team_name_for_session("registry-session-b", Some("beta"));
+        assert_eq!(
+            leader_team_name_for_session("registry-session-a").as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            leader_team_name_for_session("registry-session-b").as_deref(),
+            Some("beta")
+        );
+        assert_eq!(
+            leader_team_name_for_session("registry-session-unknown"),
+            None
+        );
+        set_leader_team_name_for_session("registry-session-a", None);
+        assert_eq!(leader_team_name_for_session("registry-session-a"), None);
+        assert_eq!(
+            leader_team_name_for_session("registry-session-b").as_deref(),
+            Some("beta")
+        );
+        set_leader_team_name_for_session("registry-session-b", None);
     }
 
     #[test]
     fn worker_info_roundtrip_json() {
         let info = WorkerInfo {
+            awaiting_plan_approval: false,
             agent_id: "agent:00000000-0000-0000-0000-000000000001".into(),
             agent_type: "explorer".into(),
             name: "alpha".into(),

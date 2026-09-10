@@ -132,6 +132,19 @@ fn estimated_block_bytes(block: &crate::ContentBlock) -> u64 {
             utf16_code_units, ..
         } => crate::protocol::json_string_len_from_utf16(utf16_code_units)
             .saturating_add(TEXT_BLOCK_WRAPPER_BYTES),
+        crate::ContentBlock::ToolResult { output, .. }
+            if protocol::js_utf16::tool_result_units(output).is_some() =>
+        {
+            let units = protocol::js_utf16::tool_result_units(output).unwrap();
+            let text = String::from_utf16_lossy(&units);
+            let mut display = block.clone();
+            if let crate::ContentBlock::ToolResult { output, .. } = &mut display {
+                *output = serde_json::Value::String(text.clone());
+            }
+            serialized_len(&display)
+                .saturating_sub(serialized_len(&text))
+                .saturating_add(crate::protocol::json_string_len_from_utf16(&units))
+        }
         crate::ContentBlock::Image { .. } => APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN,
         crate::ContentBlock::ImageUrl { url } => {
             (APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN).saturating_add(url.len() as u64)
@@ -170,7 +183,11 @@ mod tests {
         // The accessor must be the exact same ceiling-division formula
         // `approximate_tokens` folds its own byte_len through — not a
         // separately-hand-rolled divisor that could silently drift from it.
-        assert_eq!(approximate_tokens_for_bytes(0), 1, "empty input floors to 1");
+        assert_eq!(
+            approximate_tokens_for_bytes(0),
+            1,
+            "empty input floors to 1"
+        );
         assert_eq!(
             approximate_tokens_for_bytes(REQUEST_BYTES_PER_TOKEN),
             1,

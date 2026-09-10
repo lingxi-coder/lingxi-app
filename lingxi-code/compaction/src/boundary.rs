@@ -12,8 +12,8 @@
 //! remains only as a compatibility fallback for legacy in-memory snapshots.
 
 pub use protocol::{
-    CompactActiveGoalState, CompactBoundaryMetadata, CompactTrigger, PreservedMessages,
-    PreservedSegment,
+    CompactActiveGoalState, CompactBoundaryMetadata, CompactGoalOrigin, CompactTrigger,
+    PreservedMessages, PreservedSegment,
 };
 use protocol::{ConversationMessage, MessageId};
 
@@ -36,6 +36,10 @@ pub fn compact_active_goal_from_engine(
         last_reason: goal.last_reason.clone(),
         iterations: goal.iterations,
         tokens_at_start: goal.tokens_at_start,
+        origin: match goal.origin {
+            lingxi_core::session::GoalOrigin::User => CompactGoalOrigin::User,
+            lingxi_core::session::GoalOrigin::Restored => CompactGoalOrigin::Restored,
+        },
     }
 }
 
@@ -50,6 +54,10 @@ pub fn compact_active_goal_into_engine(
         last_reason: goal.last_reason,
         iterations: goal.iterations,
         tokens_at_start: goal.tokens_at_start,
+        origin: match goal.origin {
+            CompactGoalOrigin::User => lingxi_core::session::GoalOrigin::User,
+            CompactGoalOrigin::Restored => lingxi_core::session::GoalOrigin::Restored,
+        },
     }
 }
 
@@ -349,6 +357,7 @@ mod tests {
             content: "some other system text".to_string(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         };
         assert!(!is_compact_boundary(&plain));
         assert!(!is_compact_boundary(&user("hi")));
@@ -361,6 +370,7 @@ mod tests {
             content: BOUNDARY_CONTENT.to_string(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         };
         assert!(is_compact_boundary(&legacy));
     }
@@ -374,6 +384,9 @@ mod tests {
             last_reason: Some("tests still running".to_string()),
             iterations: 3,
             tokens_at_start: 42,
+            // NOT the default: a roundtrip that drops `origin` would still
+            // compare equal if this were `User`.
+            origin: lingxi_core::session::GoalOrigin::Restored,
         };
         let wire = compact_active_goal_from_engine(&goal);
         let json = serde_json::to_value(&wire).unwrap();

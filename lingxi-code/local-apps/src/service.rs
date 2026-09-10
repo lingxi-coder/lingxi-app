@@ -78,10 +78,10 @@ pub const MAX_CONVERSATION_ID_BYTES: usize = 128;
 /// Maximum `AppRecord::origin_cwd` length in bytes. A remembered filesystem
 /// path, so it is sized like one rather than like an identifier.
 pub const MAX_ORIGIN_CWD_BYTES: usize = 4_096;
-/// Maximum number of MCP services an `AppMcpIntent::Requested` may name.
-pub const MAX_MCP_INTENT_SERVICES: usize = 16;
-/// Maximum length in bytes of one named MCP service in an `AppMcpIntent`.
-pub const MAX_MCP_INTENT_SERVICE_NAME_BYTES: usize = 200;
+/// Maximum number of MCP capabilities an `AppMcpIntent::Requested` may name.
+pub const MAX_MCP_INTENT_CAPABILITIES: usize = 16;
+/// Maximum length in bytes of one named MCP capability in an `AppMcpIntent`.
+pub const MAX_MCP_INTENT_CAPABILITY_NAME_BYTES: usize = 200;
 /// Maximum text value length in bytes (also the runtime `last_error` cap).
 pub const MAX_TEXT_VALUE_BYTES: usize = 20_000;
 
@@ -123,40 +123,40 @@ fn ensure_within(what: &str, len: usize, max: usize) -> Result<(), AppError> {
 /// Host already checked — the same "public API, own guarantee" reasoning
 /// `commit_scaffold`'s other field validation follows.
 ///
-/// A `Requested` intent with an empty `services` list is rejected: "asked,
+/// A `Requested` intent with an empty `capabilities` list is rejected: "asked,
 /// wants these" with no "these" is not a third state, it is a malformed
 /// `Requested` masquerading as one — the caller meant `Declined` and must say
 /// so.
 fn validate_mcp_intent(intent: &AppMcpIntent) -> Result<(), AppError> {
-    let AppMcpIntent::Requested { services } = intent else {
+    let AppMcpIntent::Requested { capabilities } = intent else {
         return Ok(());
     };
-    if services.is_empty() {
+    if capabilities.is_empty() {
         return Err(AppError::InvalidRequest(
-            "mcp_intent Requested must name at least one service".into(),
+            "mcp_intent Requested must name at least one capability".into(),
         ));
     }
     // Not `ensure_within`: that helper's message is "{what} is {len} bytes",
-    // and this bound counts SERVICES, not bytes. "17 bytes (limit 16)" for 17
-    // service names sends the reader hunting an over-long string that does not
+    // and this bound counts CAPABILITIES, not bytes. "17 bytes (limit 16)" for 17
+    // capability names sends the reader hunting an over-long string that does not
     // exist. The Host's twin check (`parse_staged_mcp_intent`) already words it
     // as a count; match it.
-    if services.len() > MAX_MCP_INTENT_SERVICES {
+    if capabilities.len() > MAX_MCP_INTENT_CAPABILITIES {
         return Err(AppError::InvalidRequest(format!(
-            "mcp_intent names {} services (limit {MAX_MCP_INTENT_SERVICES})",
-            services.len()
+            "mcp_intent names {} capabilities (limit {MAX_MCP_INTENT_CAPABILITIES})",
+            capabilities.len()
         )));
     }
-    for service in services {
-        if service.trim().is_empty() {
+    for capability in capabilities {
+        if capability.trim().is_empty() {
             return Err(AppError::InvalidRequest(
-                "mcp_intent service name must not be blank".into(),
+                "mcp_intent capability name must not be blank".into(),
             ));
         }
         ensure_within(
-            "mcp_intent service name",
-            service.len(),
-            MAX_MCP_INTENT_SERVICE_NAME_BYTES,
+            "mcp_intent capability name",
+            capability.len(),
+            MAX_MCP_INTENT_CAPABILITY_NAME_BYTES,
         )?;
     }
     Ok(())
@@ -1628,15 +1628,19 @@ impl AppService {
         mode: AppRuntimeMode,
     ) -> Result<AppRuntimeRecord, AppError> {
         self.with_app(app_id, move |app, now| {
-            app.set_runtime_mode(mode, now);
-            let runtime = app.runtime.clone();
-            (
-                Ok(runtime.clone()),
-                vec![AppEvent::RuntimeChanged {
-                    app_id: app.record.id.clone(),
-                    runtime,
-                }],
-            )
+            match app.set_runtime_mode(mode, now) {
+                Ok(()) => {
+                    let runtime = app.runtime.clone();
+                    (
+                        Ok(runtime.clone()),
+                        vec![AppEvent::RuntimeChanged {
+                            app_id: app.record.id.clone(),
+                            runtime,
+                        }],
+                    )
+                }
+                Err(error) => (Err(error), Vec::new()),
+            }
         })
         .await
     }
@@ -2506,7 +2510,7 @@ mod tests {
                 "  一个竖版射击小游戏  ",
                 Some("openai/gpt-5"),
                 Some(&AppMcpIntent::Requested {
-                    services: vec!["github".to_string()],
+                    capabilities: vec!["github".to_string()],
                 }),
             )
             .await
@@ -2518,7 +2522,7 @@ mod tests {
         assert_eq!(
             committed.mcp_intent,
             Some(AppMcpIntent::Requested {
-                services: vec!["github".to_string()]
+                capabilities: vec!["github".to_string()]
             }),
             "the staged mcp_intent must land on the committed record in the same transaction"
         );
@@ -2533,7 +2537,7 @@ mod tests {
         assert_eq!(
             after.mcp_intent,
             Some(AppMcpIntent::Requested {
-                services: vec!["github".to_string()]
+                capabilities: vec!["github".to_string()]
             }),
             "mcp_intent must survive a reload from disk, not just live in memory"
         );
@@ -2631,7 +2635,7 @@ mod tests {
 
     /// THREE states, not two: an app whose interview never ran must be
     /// distinguishable on the record from one where the user was asked and
-    /// said no. A bool or an empty `services` list would collapse them.
+    /// said no. A bool or an empty `capabilities` list would collapse them.
     #[tokio::test]
     async fn commit_scaffold_distinguishes_never_asked_from_declined() {
         let never_asked = test_service().await;
@@ -2701,7 +2705,7 @@ mod tests {
         );
     }
 
-    /// A `Requested` intent with no services is a malformed `Requested`, not
+    /// A `Requested` intent with no capabilities is a malformed `Requested`, not
     /// a valid third state — the service enforces its own bound the same as
     /// `commit_scaffold_enforces_its_own_field_bounds` does for name/brief.
     #[tokio::test]
@@ -2732,13 +2736,15 @@ mod tests {
                 "A",
                 "b",
                 None,
-                Some(&AppMcpIntent::Requested { services: vec![] }),
+                Some(&AppMcpIntent::Requested {
+                    capabilities: vec![],
+                }),
             )
             .await
             .unwrap_err();
         assert_eq!(error.code(), AppErrorCode::InvalidRequest);
         assert!(
-            error.to_string().contains("at least one service"),
+            error.to_string().contains("at least one capability"),
             "got {error}"
         );
         let after = service.record(&shell.id).await.unwrap();
@@ -2748,25 +2754,25 @@ mod tests {
         );
     }
 
-    /// This bound counts SERVICES. Reported through `ensure_within` it read
-    /// "mcp_intent services is 17 bytes (limit 16)", which sends the reader
+    /// This bound counts CAPABILITIES. Reported through `ensure_within` it read
+    /// "mcp_intent capabilities is 17 bytes (limit 16)", which sends the reader
     /// hunting an over-long string that does not exist — and diverges from the
     /// Host's twin check, which already words it as a count.
     #[test]
-    fn over_limit_mcp_intent_services_are_reported_as_a_count_not_bytes() {
-        let services: Vec<String> = (0..=MAX_MCP_INTENT_SERVICES)
+    fn over_limit_mcp_intent_capabilities_are_reported_as_a_count_not_bytes() {
+        let capabilities: Vec<String> = (0..=MAX_MCP_INTENT_CAPABILITIES)
             .map(|index| format!("s{index}"))
             .collect();
-        let over_by_one = services.len();
-        let error = validate_mcp_intent(&AppMcpIntent::Requested { services }).unwrap_err();
+        let over_by_one = capabilities.len();
+        let error = validate_mcp_intent(&AppMcpIntent::Requested { capabilities }).unwrap_err();
         let message = error.to_string();
         assert!(
-            message.contains(&format!("names {over_by_one} services")),
-            "the message must name the SERVICE COUNT: {message}"
+            message.contains(&format!("names {over_by_one} capabilities")),
+            "the message must name the CAPABILITY COUNT: {message}"
         );
         assert!(
             !message.contains("bytes"),
-            "a service count must not be reported as a byte length: {message}"
+            "a capability count must not be reported as a byte length: {message}"
         );
     }
 

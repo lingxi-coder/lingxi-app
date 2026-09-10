@@ -32,6 +32,15 @@ impl ConversationOrchestrator {
         // transport, so TUI/REPL sessions can carry interactive guidance even
         // when `interactive_permissions` remains on the headless default.
         platform_api::session_flags::set_non_interactive_session(!config.interactive_session);
+        // claude-code `Dx(()=>HR(rt()))` — publish the session main-loop model
+        // the `OO()` todo/task tool gate reads back through `J$e()`. This init
+        // value is the launch model; `build_wire_tools` republishes it from the
+        // live session each turn, so `/model` switches and resumes move the
+        // gate. Seeding it here matters because the reminder producer can run
+        // before the first wire-tools assembly.
+        tools.set_main_loop_model(
+            crate::conversation::tooling_impl::canonical_main_loop_model(&config.model),
+        );
         // Publish the session-scoped tool-search gate (Claude Code `$U()`) so the
         // request builder branches `tool_reference` normalization on the SESSION
         // decision, not on whether a given request's toolset carries a
@@ -103,6 +112,15 @@ impl ConversationOrchestrator {
             mid_turn_input: std::sync::OnceLock::new(),
             cancel_reason: std::sync::OnceLock::new(),
             end_conversation_slot: None,
+            loop_wakeup_armed_slot: None,
+            turn_span: crate::turn_span::TurnSpanTally::default(),
+            coordinator_mode: None,
+            #[cfg(test)]
+            coordinator_simple_mode_override: None,
+            #[cfg(test)]
+            coordinator_pool_override: None,
+            tool_pool_denied_names: std::sync::RwLock::new(Vec::new()),
+            main_agent_tool_names: std::sync::RwLock::new(None),
         }
     }
 
@@ -529,6 +547,163 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Wire the `/loop` wakeup-armed flag (shared with `ScheduleWakeup`). The
+    /// composition root passes the same `Arc` it took from
+    /// `tool_cron::register_all_with_auth`; the turn loop reads+consumes it
+    /// after tool execution. `None` keeps the turn loop byte-identical.
+    #[must_use]
+    pub fn with_loop_wakeup_armed_slot(
+        mut self,
+        slot: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.loop_wakeup_armed_slot = Some(slot);
+        self
+    }
+
+    /// Wire the live coordinator-mode flag (`Ci()`). Unwired sessions never
+    /// take the unknown-tool coordinator suffix.
+    #[must_use]
+    pub fn with_coordinator_mode(
+        mut self,
+        mode: std::sync::Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>,
+    ) -> Self {
+        self.coordinator_mode = Some(mode);
+        self
+    }
+
+    /// Whether this session is currently in coordinator mode and not simple
+    /// mode (`Ci() && !CLAUDE_CODE_SIMPLE`).
+    #[must_use]
+    pub(crate) fn is_coordinator_session(&self) -> bool {
+        #[cfg(test)]
+        let simple_mode = self
+            .coordinator_simple_mode_override
+            .unwrap_or_else(Self::coordinator_simple_mode);
+        #[cfg(not(test))]
+        let simple_mode = Self::coordinator_simple_mode();
+        self.is_coordinator_mode_enabled() && !simple_mode
+    }
+
+    pub(crate) fn is_coordinator_mode_enabled(&self) -> bool {
+        self.coordinator_mode
+            .as_ref()
+            .is_some_and(|mode| mode.is_enabled())
+    }
+
+    fn coordinator_simple_mode() -> bool {
+        platform_api::env::is_env_truthy(
+            std::env::var("LINGXI_SIMPLE")
+                .or_else(|_| std::env::var("CLAUDE_CODE_SIMPLE"))
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_coordinator_simple_mode_for_test(mut self, simple: bool) -> Self {
+        self.coordinator_simple_mode_override = Some(simple);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_coordinator_pool_for_test(mut self, brief: bool, extra: &[&str]) -> Self {
+        self.coordinator_pool_override = Some((brief, extra.iter().map(|s| (*s).into()).collect()));
+        self
+    }
+
+    /// 2.1.263 `Idr`: qbt base, PR subscriptions, MCP comms, brief and extra tools.
+    /// Unlike the Ldt suffix, pool assembly does not bypass filtering in simple mode.
+    pub(crate) fn is_coordinator_pool_tool(&self, tool: &dyn tool_api::Tool) -> bool {
+        let name = tool.name();
+        if crate::streaming_executor::is_coordinator_redirect_excluded(name)
+            || name.ends_with("subscribe_pr_activity")
+            || name.ends_with("unsubscribe_pr_activity")
+            || tool.mcp_role() == Some("comms")
+        {
+            return true;
+        }
+        #[cfg(test)]
+        if let Some((brief, extra)) = &self.coordinator_pool_override {
+            return Self::coordinator_optional_tool(tool, *brief, extra.iter().map(String::as_str));
+        }
+        let extra = std::env::var("LINGXI_COORDINATOR_EXTRA_TOOLS")
+            .or_else(|_| std::env::var("CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS"))
+            .unwrap_or_default();
+        Self::coordinator_optional_tool(
+            tool,
+            platform_api::session_flags::brief_mode_enabled(),
+            extra.split(',').map(str::trim).filter(|s| !s.is_empty()),
+        )
+    }
+
+    fn coordinator_optional_tool<'a>(
+        tool: &dyn tool_api::Tool,
+        brief: bool,
+        extra: impl Iterator<Item = &'a str>,
+    ) -> bool {
+        (brief && matches!(tool.name(), "SendUserMessage" | "SendUserFile"))
+            || extra.into_iter().any(|name| {
+                name == tool.name()
+                    || Some(name) == tool.underlying_v1_tool_name()
+                    || Some(name) == tool.family_parent_tool_name()
+            })
+    }
+
+    pub(crate) fn is_tool_pool_denied(&self, tool: &dyn tool_api::Tool) -> bool {
+        let denied = self
+            .tool_pool_denied_names
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        denied.iter().any(|rule| {
+            std::iter::once(tool.name())
+                .chain(tool.underlying_v1_tool_name())
+                .chain(tool.family_parent_tool_name().filter(|name| {
+                    self.tools.find_registered(name).is_some_and(|parent| {
+                        parent.is_enabled(&tool_api::tool_trait::ToolStaticContext {
+                            main_loop_model: self.tools.main_loop_model(),
+                            ..Default::default()
+                        })
+                    })
+                }))
+                .chain(tool.aliases().iter().copied())
+                .any(|name| permission::tool_wide_name_matches(rule, name))
+        })
+    }
+
+    /// Look up a tool the main loop may actually dispatch.
+    ///
+    /// Coordinator sessions keep their assembled pool and treat every other
+    /// registered name as unknown so `Ldt` can take the `Y7e` worker-redirect
+    /// arm. The shared registry stays full — workers still resolve from
+    /// `available_tools`.
+    #[must_use]
+    pub(crate) fn find_dispatchable_tool(
+        &self,
+        name: &str,
+    ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        let tool = self.tools.find_by_name(name)?;
+        if self
+            .main_agent_tool_names
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|names| !names.contains(tool.name()))
+        {
+            return None;
+        }
+        let ctx = tool_api::tool_trait::ToolStaticContext {
+            main_loop_model: self.tools.main_loop_model(),
+            ..Default::default()
+        };
+        if !tool.is_enabled(&ctx)
+            || self.is_tool_pool_denied(tool.as_ref())
+            || (self.is_coordinator_mode_enabled() && !self.is_coordinator_pool_tool(tool.as_ref()))
+        {
+            return None;
+        }
+        Some(tool)
+    }
+
     /// Whether a memory prefetcher has been wired via
     /// [`Self::with_memory_prefetch`]. (P0.1)
     #[must_use]
@@ -582,13 +757,37 @@ impl ConversationOrchestrator {
 
     /// T35: wire the source of terminal background tasks, folded back into the
     /// next turn as a `<task-notification>` reminder by
-    /// [`Self::task_notification_reminder_message`] (claude-code's per-task-type
+    /// [`Self::task_notification_reminder_messages`] (claude-code's per-task-type
     /// `enqueue*Notification`). Without it that method is a strict no-op.
     #[must_use]
     pub fn with_task_notifications(
         mut self,
         provider: Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>,
     ) -> Self {
+        if let (Ok(runtime), Some(mut events)) = (
+            tokio::runtime::Handle::try_current(), provider.subscribe_task_lifecycle()
+        ) {
+            let output = Arc::downgrade(&self.output);
+            let analytics_bus = self.model_runtime.analytics_bus.clone();
+            self.prompt_runtime.task_lifecycle_relay = Some(tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
+                while let Some(event) = events.recv().await {
+                    let Some(output) = output.upgrade() else { break; };
+                    if event.get("type").and_then(serde_json::Value::as_str) == Some("task_feature") {
+                        if let Some(bus) = analytics_bus.as_ref() {
+                            let mut metadata = telemetry::LogEventMetadata::new();
+                            if let Some(feature) = event.get("feature_name").and_then(serde_json::Value::as_str) {
+                                metadata.insert("feature_name".into(), telemetry::AnalyticsValue::String(feature.into()));
+                                let error = event.get("error_code").and_then(serde_json::Value::as_str);
+                                if let Some(error) = error { metadata.insert("error_code".into(), telemetry::AnalyticsValue::String(error.into())); }
+                                bus.log_event(if error.is_some() { "tengu_feature_bad" } else { "tengu_feature_ok" }, metadata).await;
+                            }
+                        }
+                    } else {
+                        output.emit_task_lifecycle(&event).await;
+                    }
+                }
+            })));
+        }
         self.prompt_runtime.task_notifications = Some(provider);
         self
     }
@@ -630,6 +829,14 @@ impl ConversationOrchestrator {
     pub fn with_cancel_reason(self, flag: crate::prompt::mid_turn_input::CancelReasonFlag) -> Self {
         self.set_cancel_reason(flag);
         self
+    }
+
+    /// The per-turn tallies the `/loop` no-op fold reads (see
+    /// [`crate::turn_span`]): reset at every turn's start, snapshotted at its
+    /// completion edge.
+    #[must_use]
+    pub fn turn_span(&self) -> &crate::turn_span::TurnSpanTally {
+        &self.turn_span
     }
 
     /// Finding #73: wire the V2 task source consulted by the per-turn

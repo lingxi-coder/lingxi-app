@@ -17,16 +17,21 @@ uuid = { version = "1", features = ["v4"] }
 # leaf crate (no `platform-api` dep) → no cycle.
 jsonrpc = { path = "../jsonrpc" }
 async-trait.workspace = true
+# `rg`'s width-aware truncation (`Xe`) segments by grapheme and measures display
+# columns, exactly like the oracle's `Intl.Segmenter` + `Bun.stringWidth` pair.
+unicode-segmentation = "=1.12.0"
+unicode-width = "=0.1.14"
 futures-core.workspace = true
 futures-util.workspace = true
 indexmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# `sync` supports progress/terminal channels; `time` carries the monotonic
-# activation deadline; `rt` owns an activated PreparedFusionRun independently
-# of a caller that drops its waiter.
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+# `sync` carries the mpsc progress/terminal channels, `time` the monotonic
+# activation deadline, and `rt` lets an activated PreparedFusionRun outlive a
+# caller that drops its waiter. `io-util`, `fs` and `process` back the rooted
+# filesystem and sandbox helpers.
+tokio = { workspace = true, features = ["sync", "io-util", "fs", "process", "rt", "time"] }
 tokio-util.workspace = true
 fs2 = "0.4"
 tempfile = "3.13"

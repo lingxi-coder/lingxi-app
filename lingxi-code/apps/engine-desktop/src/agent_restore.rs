@@ -174,7 +174,7 @@ pub async fn restore_parked_agents(
         // hooks for a run that began in another process.
         request.resumed_history = Some(transcript.history);
         request.prompt = String::new();
-        match spawner.restore_async(id, request, inherit.clone()).await {
+        match spawner.restore_async_task(&row.task_id, id, request, inherit.clone()).await {
             Ok(launch) => out.push((id, RestoreOutcome::Restored(launch.agent_id))),
             Err(e) => out.push((id, RestoreOutcome::Failed(e.to_string()))),
         }
@@ -194,6 +194,7 @@ mod tests {
 
     fn request() -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            teammate_color: None,
             subagent_type: "general-purpose".into(),
             prompt: "the original prompt".into(),
             observer: None,

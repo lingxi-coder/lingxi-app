@@ -45,6 +45,7 @@ fn counts_documents_and_images_across_user_and_assistant() {
             content: "system".into(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         },
     ];
     let (docs, imgs) = count_document_and_image_blocks(&msgs);

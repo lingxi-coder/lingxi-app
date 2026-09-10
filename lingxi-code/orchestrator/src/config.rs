@@ -309,7 +309,7 @@ pub struct OrchestratorConfig {
     /// `bin/claude.exe` offset ~205871579). When `Some(id)` and a turn's response
     /// arrives with `stop_reason == "refusal"`, BOTH drivers swap the session
     /// model to `id` (ONCE per session — the `refusalFallbackModelLatch` analog,
-    /// tracked by [`crate::ConversationOrchestrator::refusal_fallback_latched`]),
+    /// tracked by the session's `refusal_cascade` latch),
     /// warn the user, and retry the turn against the fallback model. This is the
     /// `s.refusalFallbackModel` half of the binary's
     /// `rc = s.refusalFallbackModel ?? (s.serverRefusalFallback?.model)` —
@@ -366,6 +366,18 @@ pub struct OrchestratorConfig {
     /// keeps the byte-identical default plans directory.
     #[serde(default)]
     pub plans_directory: Option<String>,
+    /// The session's plan-file identity, shared with the permission policy that
+    /// grants plan mode's write carve-out and with `ExitPlanMode`'s read-back.
+    ///
+    /// `None` (tests, and hosts that never wired one) falls back to deriving the
+    /// path from the session id, which is what the port did before 2.1.266's
+    /// random slugs. Set it and this is the ONLY derivation: the path the model
+    /// is told to write, the path the gate allows and the path the tool reads
+    /// are the same string by construction.
+    ///
+    /// Runtime-only: never serialized with the rest of the config.
+    #[serde(skip)]
+    pub plan_files: Option<std::sync::Arc<platform_api::plan_files::PlanFileMatcher>>,
 
     /// (2.1.212) The session's resolved reasoning-effort LEVEL string
     /// (`low`/`medium`/`high`/`xhigh`/`max`), sourced from CLI `--effort`
@@ -447,6 +459,7 @@ impl Default for OrchestratorConfig {
             user_email: None,
             plan_mode_instructions: None,
             plans_directory: None,
+            plan_files: None,
             effort: None,
             ultracode_feature_flag_cadence: None,
             ultracode_product_default_cadence: None,
@@ -512,6 +525,7 @@ mod tests {
             user_email: Some("u@example.com".into()),
             plan_mode_instructions: Some("MY BODY".into()),
             plans_directory: Some("docs/plans".into()),
+            plan_files: None,
             effort: Some("high".into()),
             ultracode_feature_flag_cadence: Some(12),
             ultracode_product_default_cadence: Some(10),
@@ -674,5 +688,23 @@ mod tests {
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.resume_session_id, Some(sid));
+    }
+}
+
+impl OrchestratorConfig {
+    /// The refusal-fallback chain to walk, in order.
+    ///
+    /// An empty [`Self::refusal_fallback_chain`] falls back to the historical
+    /// single [`Self::refusal_fallback_model`], which is exactly a one-element
+    /// chain — so the default path is byte-identical to before the cascade
+    /// existed. Both the main-thread loop and the subagent spawner read the
+    /// chain through here, so the two cannot drift apart on that rule.
+    #[must_use]
+    pub fn refusal_chain(&self) -> Vec<String> {
+        if self.refusal_fallback_chain.is_empty() {
+            self.refusal_fallback_model.clone().into_iter().collect()
+        } else {
+            self.refusal_fallback_chain.clone()
+        }
     }
 }

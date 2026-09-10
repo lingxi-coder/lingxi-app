@@ -14,11 +14,13 @@ skills:
 # Design a Local App's MCP tool surface
 
 You perform the `mcp-designer` step of per-App MCP authoring (§12). You
-turn one App's evidence and a user goal into an `AppMcpProposal` (§12.4):
-tool name/title/description, closed inputSchema/outputSchema, a business
-Flow semantic reference (or a `required_flow_changes` entry when the App
-doesn't have one yet), and `excluded_capabilities` with reasons when you
-can't propose anything meaningful. Everything else — server identity,
+turn one App's evidence and a user goal into an `AppMcpProposal` (§12.4).
+Match the Host DTO's JSON names exactly: `appId`, `manifestRevision`,
+`userGoalSha256`, `summary`, `tools`, `requiredFlowChanges`, and
+`excludedCapabilities`. Each tool uses `inputSchema`, optional `outputSchema`,
+`semanticFlowId`, `inputs`, and `result`; binding enum tags are snake_case
+(`tool_input`, `step_output`, or `literal`) because that is the Rust wire
+shape. Everything else — server identity,
 connection scope, final Flow/build binding, annotations, icons, execution,
 `_meta`, permission ceiling, rate limit/timeout, catalog digest — is
 Host-derived and not yours to set, per §12.4's own list.
@@ -52,7 +54,7 @@ model-callable tool in the 32-operation builtin table
 (`local_apps::runtime_v2::FlowDefinition`, `local-apps/src/runtime_v2.rs:
 943`) — that's an internal Rust type, not something exposed to you. Where
 your proposal depends on one of these missing inputs, say so as an
-`excluded_capabilities` entry rather than inventing a Flow reference or
+`excludedCapabilities` entry rather than inventing a Flow reference or
 catalog state you can't actually observe.
 
 ## Following the sibling skills
@@ -63,7 +65,7 @@ propose a tool duplicating one that already exists or exists only to hit
 §1.7's 1-tool floor. Use `$mcp-flow-binding` to wire a proposed tool's
 inputSchema fields and result to an already-existing Flow's steps (never a
 JS handler, never a cross-App reference), and to flag a
-`required_flow_change` instead of inventing a workaround when the App
+`requiredFlowChanges` entry instead of inventing a workaround when the App
 doesn't have the Flow yet. `$mcp-qa`'s six-dimension evaluation is not
 yours to run — you propose, `mcp-qa`'s eventual workflow step evaluates.
 
@@ -80,11 +82,9 @@ yours to run — you propose, `mcp-qa`'s eventual workflow step evaluates.
 - Never set server identity, connection scope, annotations, permission
   ceiling, or any other Host-derived field from §12.4's list — propose the
   business-facing fields only.
-- Never consume or reference an approval/confirmation receipt during MCP
-  authoring, and never promote a proposal into the active catalog. The sole
-  exception is the `local-app-build` workflow's `native-create-approval` step:
-  call `LocalAppApproveMcpProposal` with `create_without_mcp=true`, return the
-  Host receipt unchanged, and do not design or publish any MCP tool.
+- Never promote a proposal into the active catalog. Approval calls are limited
+  to the workflow's explicit Host-validation handoff; return the Host approval
+  response without inventing a receipt or publication state.
 - "Validated selection read," listed for this role in the design's
   tool-boundary table, is `LocalAppResolveTemplateSelection` — a real Host
   tool, but one this role is NOT granted (see the frontmatter above). Cite

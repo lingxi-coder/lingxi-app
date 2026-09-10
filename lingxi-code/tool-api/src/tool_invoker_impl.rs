@@ -204,7 +204,18 @@ impl ToolInvoker for RegistryToolInvoker {
         ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<Value, ToolInvokerError> {
-        let mut input = input;
+        self.invoke_detailed(name, input, ctx, workspace_lease_token)
+            .await
+            .map(|result| result.data)
+    }
+
+    async fn invoke_detailed(
+        &self,
+        name: &str,
+        mut input: Value,
+        ctx: SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+    ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         let tool = self
             .registry
             .find_by_name(name)
@@ -283,6 +294,25 @@ impl ToolInvoker for RegistryToolInvoker {
             )));
         }
 
+        // The trusted requester owns one file, not a directory-wide grant.
+        // A per-call allow layer only removes the plan-mode mutation ask;
+        // explicit deny/ask rules and all earlier safety checks still run.
+        let own_plan_path =
+            if ctx.mode_override.as_deref() == Some("plan") && matches!(name, "Write" | "Edit") {
+                input
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .and_then(|path| {
+                        platform_api::teammate_plan::own_plan_file_root(
+                            ctx.parent_agent_id.as_ref(),
+                            std::path::Path::new(path),
+                        )
+                        .map(|_| std::path::PathBuf::from(path))
+                    })
+            } else {
+                None
+            };
+
         // Permission gate (enforcement 3b). The subagent/teammate dispatch
         // surface now consults the same gate as the main loop — previously it
         // dispatched any registered tool unconditionally (the bypass). A `Deny`
@@ -316,6 +346,7 @@ impl ToolInvoker for RegistryToolInvoker {
             // a gate that only overrides `check_with_worker` (or `check`) is
             // unchanged. Behavior is identical when `updated_input` is `None`.
             let check_ctx = platform_api::permission_gate::PermissionCheckContext {
+                pause_observer: ctx.permission_pause_observer.clone(),
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
                 requires_user_interaction: tool.requires_user_interaction(),
@@ -338,7 +369,15 @@ impl ToolInvoker for RegistryToolInvoker {
                 // frozen deny wins over a live rule that would now allow the same
                 // command — which is the entire point: a settings edit made while
                 // a fork was parked must not WIDEN what it may run on resume.
-                permission_layers: frozen_command_deny_layers(&ctx.frozen_command_denies),
+                permission_layers: {
+                    let mut layers = frozen_command_deny_layers(&ctx.frozen_command_denies);
+                    if own_plan_path.is_some() {
+                        layers.push(
+                            serde_json::json!({"kind":"allowed_tools","allowedTools":[name]}),
+                        );
+                    }
+                    layers
+                },
                 // Finding 22: carry THIS invoker's background-owned marker
                 // (set only on the dedicated background-task invoker, see
                 // `with_background_owned`) onto every check so a transport
@@ -397,6 +436,25 @@ impl ToolInvoker for RegistryToolInvoker {
             }
         }
 
+        // A transport may rewrite input, but the one-file allowance must not
+        // follow that rewrite onto another path or a changed filesystem link.
+        if let Some(approved_path) = own_plan_path {
+            let unchanged = input
+                .get("file_path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| std::path::Path::new(path) == approved_path)
+                && platform_api::teammate_plan::own_plan_file_root(
+                    ctx.parent_agent_id.as_ref(),
+                    &approved_path,
+                )
+                .is_some();
+            if !unchanged {
+                return Err(ToolInvokerError::InvalidInput(
+                    "The teammate plan-file target changed after permission was checked.".into(),
+                ));
+            }
+        }
+
         // Drop the progress receiver immediately — production tools tolerate
         // a closed progress channel, and we don't surface progress here.
         let (progress_tx, _progress_rx) =
@@ -410,7 +468,10 @@ impl ToolInvoker for RegistryToolInvoker {
                 other => ToolInvokerError::Internal(format!("{other}")),
             })?;
 
-        Ok(result.data)
+        Ok(platform_api::tool_invoker::ToolInvocationResult {
+            data: result.data,
+            model_content: result.model_content,
+        })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -863,6 +924,7 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    permission_pause_observer: None,
                     parent_agent_id: None,
                     origin_session_id: Some(origin_session_id),
                     tool_execution_policy:
@@ -935,6 +997,7 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    permission_pause_observer: None,
                     parent_agent_id: None,
                     origin_session_id: None,
                     tool_execution_policy:
@@ -1100,6 +1163,7 @@ mod tests {
 
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
@@ -1286,6 +1350,7 @@ mod tests {
 
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
@@ -1428,6 +1493,7 @@ mod tests {
 
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
@@ -1465,11 +1531,14 @@ mod tests {
             },
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let pause = platform_api::permission_gate::PermissionPauseObserver::new(|_| {});
+        let mut invocation_context = ctx_with_tool_use_id("toolu_abc123");
+        invocation_context.permission_pause_observer = Some(pause.clone());
         invoker
             .invoke(
                 "TestEcho",
                 json!({ "a": 1 }),
-                ctx_with_tool_use_id("toolu_abc123"),
+                invocation_context,
             )
             .await
             .expect("allow dispatches");
@@ -1483,6 +1552,7 @@ mod tests {
             Some("toolu_abc123"),
             "the dispatching call's real tool_use_id reaches PermissionCheckContext.tool_use_id"
         );
+        assert_eq!(ctx.pause_observer, Some(pause), "real worker pause sink must reach the transport");
         assert!(!ctx.requires_user_interaction);
         let worker = ctx
             .worker
@@ -1923,5 +1993,179 @@ mod tests {
             seen.lock().unwrap().is_empty(),
             "gate not consulted for unknown tool"
         );
+    }
+    struct OwnPlanRequester(String);
+    #[async_trait]
+    impl platform_api::teammate_plan::TeammatePlanRequester for OwnPlanRequester {
+        fn writable_plan_path(&self) -> Option<&str> {
+            Some(&self.0)
+        }
+        async fn submit(&self, _: Value) -> Result<Value, String> {
+            unreachable!()
+        }
+    }
+    struct PlanWriteProbe;
+    #[async_trait]
+    impl Tool for PlanWriteProbe {
+        fn name(&self) -> &str {
+            "Write"
+        }
+        fn input_schema(&self) -> &Value {
+            &ECHO_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &Value) -> bool {
+            false
+        }
+        fn is_read_only(&self, _: &Value) -> bool {
+            false
+        }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+            allow_for_tests()
+        }
+        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+            String::new()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            input: Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            std::fs::write(
+                input["file_path"].as_str().unwrap(),
+                input["content"].as_str().unwrap(),
+            )
+            .unwrap();
+            Ok(ToolCallResult {
+                model_content: Some("Plan file written".into()),
+                ..ToolCallResult::from_data(json!({"written":true}))
+            })
+        }
+    }
+    fn plan_probe_registry() -> Arc<ToolRegistry> {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(PlanWriteProbe));
+        Arc::new(registry)
+    }
+    fn plan_probe_context(id: protocol::AgentId) -> SubagentInvocationContext {
+        let mut ctx = no_ctx();
+        ctx.parent_agent_id = Some(id);
+        ctx.mode_override = Some("plan".into());
+        ctx.is_non_interactive_session = true;
+        ctx
+    }
+    fn plan_policy_gate(behavior: Option<permission::PermissionBehavior>) -> Arc<dyn Gate> {
+        let mut policy = permission::PermissionPolicy::new(permission::PermissionMode::Plan);
+        if let Some(behavior) = behavior {
+            let rule = permission::PermissionRule {
+                value: permission::PermissionRuleValue::from_rule_string("Write"),
+                source: permission::PermissionRuleSource::Command,
+                behavior,
+            };
+            match behavior {
+                permission::PermissionBehavior::Deny => {
+                    policy.deny_rules.insert(rule.source, vec![rule]);
+                }
+                permission::PermissionBehavior::Ask => {
+                    policy.ask_rules.insert(rule.source, vec![rule]);
+                }
+                permission::PermissionBehavior::Allow => unreachable!(),
+            }
+        }
+        Arc::new(permission::PolicyPermissionGate::new(
+            Arc::new(policy),
+            Arc::new(FixedGate {
+                decision: GateDecision::Deny {
+                    reason: "no unattended approval".into(),
+                },
+                seen: Arc::new(StdMutex::new(vec![])),
+            }),
+        ))
+    }
+    #[tokio::test]
+    async fn own_plan_allowance_preserves_deny_ask_frozen_rules_and_structured_result() {
+        use permission::PermissionBehavior::{Ask, Deny};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap().join("plan.md");
+        let sibling = path.with_file_name("sibling.md");
+        let id = protocol::AgentId::new();
+        let requester: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+            Arc::new(OwnPlanRequester(path.to_string_lossy().into_owned()));
+        platform_api::teammate_plan::register(id, &requester);
+        let input = json!({"file_path":path,"content":"Review then implement"});
+        for rule in [Some(Deny), Some(Ask)] {
+            let invoker =
+                RegistryToolInvoker::new(plan_probe_registry()).with_gate(plan_policy_gate(rule));
+            assert!(invoker
+                .invoke("Write", input.clone(), plan_probe_context(id))
+                .await
+                .is_err());
+            assert!(!path.exists());
+        }
+        let invoker =
+            RegistryToolInvoker::new(plan_probe_registry()).with_gate(plan_policy_gate(None));
+        assert!(invoker
+            .invoke(
+                "Write",
+                json!({"file_path":sibling,"content":"no"}),
+                plan_probe_context(id)
+            )
+            .await
+            .is_err());
+        let mut frozen = plan_probe_context(id);
+        frozen.frozen_command_denies.push("Write".into());
+        assert!(invoker
+            .invoke("Write", input.clone(), frozen)
+            .await
+            .is_err());
+        let result = invoker
+            .invoke_detailed("Write", input.clone(), plan_probe_context(id), None)
+            .await
+            .unwrap();
+        assert_eq!(result.data, json!({"written":true}));
+        assert_eq!(result.model_content.as_deref(), Some("Plan file written"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "Review then implement"
+        );
+        assert!(!sibling.exists());
+    }
+    #[tokio::test]
+    async fn own_plan_allowance_rejects_permission_input_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap().join("plan.md");
+        let other = path.with_file_name("other.md");
+        let id = protocol::AgentId::new();
+        let requester: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+            Arc::new(OwnPlanRequester(path.to_string_lossy().into_owned()));
+        platform_api::teammate_plan::register(id, &requester);
+        let gate = Arc::new(ContextRecordingGate {
+            seen: Arc::new(StdMutex::new(None)),
+            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+                updated_input: Some(json!({"file_path":other,"content":"no"})),
+                permission_updates: vec![],
+                decision_classification: None,
+            },
+        });
+        let invoker = RegistryToolInvoker::new(plan_probe_registry()).with_gate(gate);
+        assert!(invoker
+            .invoke(
+                "Write",
+                json!({"file_path":path,"content":"plan"}),
+                plan_probe_context(id)
+            )
+            .await
+            .is_err());
+        assert!(!other.exists());
+        assert!(!path.exists());
     }
 }

@@ -12,7 +12,7 @@ import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
-import type { ThemeMode } from '../theme/tokens';
+import { settingsLabel } from '../settingsLabel';
 import {
   activeFileMention,
   promptWithFileMentions,
@@ -51,6 +51,8 @@ import {
 } from '../audio/flow/controller';
 import { sanitizeSpeakableText } from '../audio/flow/segmenter';
 import { shouldAutoplayTrackedReply } from '../audio/autoplay';
+import { ArchiveChatDialog } from './ArchiveChatDialog';
+import type { ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
 import { commandPaletteIcon } from './commandPaletteIcons';
 import { MarkdownContent } from './MarkdownContent';
@@ -143,32 +145,7 @@ function Button({ children, onClick, disabled = false, primary = false, success 
   );
 }
 
-function ConnectionDot({ bridge }: { bridge: UseBridge }) {
-  const t = useT();
-  const status = bridge.connection.status;
-  const color = status === 'connected' ? t.ok : status === 'error' || status === 'disconnected' ? t.danger : t.warn;
-  const label = status === 'connected'
-    ? 'Engine ready'
-    : status === 'spawning'
-      ? 'Starting engine'
-      : status === 'restarting'
-        ? 'Restarting engine'
-        : status === 'connecting'
-          ? 'Connecting'
-          : status === 'error'
-            ? 'Engine error'
-            : status === 'disconnected'
-              ? 'Disconnected'
-              : 'Engine idle';
-  return (
-    <span role="status" aria-live="polite" title={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: t.text3 }}>
-      <span style={{ width: 7, height: 7, borderRadius: 99, background: color, boxShadow: `0 0 0 3px color-mix(in oklab, ${color} 18%, transparent)` }} />
-      {label}
-    </span>
-  );
-}
-
-function SessionRow({ session, active, pinned, opening, status, onClick, onPin }: {
+function SessionRow({ session, active, pinned, opening, status, onClick, onPin, onArchive }: {
   session: SessionRowDto;
   active: boolean;
   pinned: boolean;
@@ -176,6 +153,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
   status?: ReturnType<UseBridge['sessionRuntimeStatus']>;
   onClick(): void;
   onPin(): void;
+  onArchive(): void;
 }) {
   const t = useT();
   const highlighted = active || opening;
@@ -199,7 +177,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
         title={session.title || 'Untitled session'}
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
-          padding: '6px 34px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
+          padding: '6px 62px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
           background: active ? t.surfaceActive : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
           fontSize: 13, fontWeight: active ? 600 : 500,
@@ -223,7 +201,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
         title={pinned ? 'Unpin session' : 'Pin session'}
         onClick={(event) => { event.stopPropagation(); onPin(); }}
         style={{
-          position: 'absolute', right: 4, top: 4, width: 26, height: 26,
+          position: 'absolute', right: 32, top: 4, width: 26, height: 26,
           display: 'grid', placeItems: 'center', border: 0, borderRadius: 6,
           background: active ? 'transparent' : t.sidebarBg, color: pinned ? t.accent : t.text3,
           cursor: 'pointer',
@@ -231,11 +209,19 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
       >
         <Icon name="pin" size={13} stroke={1.8} />
       </button>
+      <button type="button" className="sidebar-row-action" aria-label={`Archive ${session.title || 'Untitled chat'}`} title="Archive chat" disabled={opening} onClick={onArchive}
+        style={{ position: 'absolute', right: 4, top: 4, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, color: t.text3, background: 'transparent', cursor: 'pointer' }}><Icon name="archive" size={13} /></button>
     </div>
   );
 }
 
-export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onOpenSettings(): void }) {
+export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenScheduled, onOpenChat }: {
+  bridge: UseBridge;
+  onOpenSettings(): void;
+  scheduled?: boolean;
+  onOpenScheduled?(): void;
+  onOpenChat?(): void;
+}) {
   const t = useT();
   const asideRef = useRef<HTMLElement>(null);
   const resizingPointerRef = useRef<number | null>(null);
@@ -251,6 +237,28 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
   const [menuProject, setMenuProject] = useState<string | null>(null);
   const [openingSessionKey, setOpeningSessionKey] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<string | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<{projectPath: string; sessionId: string; title: string} | null>(null);
+  const [archiveJobs, setArchiveJobs] = useState<ScheduledCronJob[]>([]);
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState('');
+  const archiveRequest = useRef(0);
+  const closeArchive = () => { archiveRequest.current++; setArchiveTarget(null); };
+  const prepareArchive = async (projectPath: string, sessionId: string, title: string) => {
+    const version = ++archiveRequest.current;
+    setArchiveTarget({ projectPath, sessionId, title });
+    setArchiveJobs([]); setArchiveError(''); setArchiveLoading(true);
+    try { const jobs = await bridge.preflightSessionArchive(projectPath, sessionId); if (version === archiveRequest.current) setArchiveJobs(jobs); }
+    catch (cause) { if (version === archiveRequest.current) setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { if (version === archiveRequest.current) setArchiveLoading(false); }
+  };
+  const confirmArchive = async () => {
+    if (!archiveTarget || archiving) return;
+    setArchiving(true); setArchiveError('');
+    try { await bridge.archiveSession(archiveTarget.projectPath, archiveTarget.sessionId); closeArchive(); }
+    catch (cause) { setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setArchiving(false); }
+  };
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [resizingSidebar, setResizingSidebar] = useState(false);
 
@@ -291,19 +299,21 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
     [pinnedSessions],
   );
   const openSidebarSession = useCallback((projectPath: string, sessionId: string) => {
+    onOpenChat?.();
     const key = `${projectPath}\0${sessionId}`;
     setOpeningSessionKey(key);
     void bridge.openSession(projectPath, sessionId)
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
-  }, [bridge.openSession]);
+  }, [bridge.openSession, onOpenChat]);
   const editProject = useCallback((projectPath: string) => {
+    onOpenChat?.();
     setExpandedProjects((current) => current.has(projectPath) ? current : new Set([...current, projectPath]));
     setEditingProject(projectPath);
     void bridge.newSession(projectPath)
       .catch(() => undefined)
       .finally(() => setEditingProject((current) => current === projectPath ? null : current));
-  }, [bridge.newSession]);
+  }, [bridge.newSession, onOpenChat]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
   const startSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -336,6 +346,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
   }, []);
 
   return (
+    <>
     <aside
       className="desktop-sidebar"
       ref={asideRef}
@@ -353,21 +364,30 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
           className="sidebar-primary-action"
           type="button"
           disabled={bridge.sessionLoading || editingProject !== null}
-          onClick={() => selectedProject ? editProject(selectedProject) : invoke(bridge.addProject)}
+          onClick={() => { onOpenChat?.(); selectedProject ? editProject(selectedProject) : invoke(bridge.addProject); }}
           style={{
             width: '100%', minHeight: 42, display: 'flex', alignItems: 'center', gap: 11,
-            padding: '8px 11px', borderRadius: 11, border: 0, background: t.surface,
+            padding: '8px 11px', borderRadius: 11, border: 0, background: 'transparent',
             color: t.text, cursor: bridge.sessionLoading || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.sessionLoading || editingProject !== null ? .5 : 1,
-            textAlign: 'left', fontSize: 13.5, fontWeight: 600,
-            boxShadow: t.dark
-              ? '0 0 0 1px rgba(255,255,255,.055), 0 1px 2px rgba(0,0,0,.18)'
-              : '0 0 0 1px rgba(35,28,63,.055), 0 1px 2px rgba(35,28,63,.05), 0 5px 14px rgba(35,28,63,.035)',
+            textAlign: 'left', fontSize: 13.5, fontWeight: 500,
           }}
         >
           {editingProject
             ? <span className="beta-spinner" role="status" aria-label="Opening project draft" />
-            : <Icon name="pencil" size={16} color={t.text2} stroke={1.8} />}
-          <span>{editingProject ? 'Opening draft…' : selectedProject ? 'New session' : 'Add your first project'}</span>
+            : <Icon name="compose" size={20} color={t.text2} stroke={1.8} />}
+          <span>{editingProject ? 'Opening draft…' : 'New chat'}</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-primary-action"
+          aria-current={scheduled ? 'page' : undefined}
+          onClick={onOpenScheduled}
+          style={{ width: '100%', minHeight: 42, marginTop: 4, display: 'flex', alignItems: 'center', gap: 11,
+            padding: '8px 11px', borderRadius: 11, border: 0, background: scheduled ? t.surfaceActive : 'transparent',
+            color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 13.5, fontWeight: 500 }}
+        >
+          <Icon name="clock" size={20} stroke={1.8} />
+          <span>Scheduled</span>
         </button>
       </div>
 
@@ -384,7 +404,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                 : current
                   ? formatSessionMetadata(current.modified_rfc3339, current.message_count)
                   : 'Unavailable';
-              const active = visibleSession?.projectPath === pinned.projectPath && visibleSession.sessionId === pinned.sessionId;
+              const active = !scheduled && visibleSession?.projectPath === pinned.projectPath && visibleSession.sessionId === pinned.sessionId;
               const opening = openingSessionKey === `${pinned.projectPath}\0${pinned.sessionId}`;
               const status = bridge.sessionRuntimeStatus(pinned.sessionId);
               const attention = status?.connection.status === 'error' || status?.error
@@ -404,7 +424,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     onClick={() => openSidebarSession(pinned.projectPath, pinned.sessionId)}
                     title={`${title}\n${pinned.projectPath}`}
                     style={{
-                      width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 34px 6px 10px',
+                      width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 62px 6px 10px',
                       border: 0, borderRadius: 8, background: active ? t.surfaceActive : opening ? t.surface : 'transparent',
                       color: t.text2, textAlign: 'left', cursor: opening ? 'wait' : 'pointer',
                     }}
@@ -426,10 +446,12 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     aria-label={`Unpin ${title}`}
                     title="Unpin session"
                     onClick={() => invoke(() => bridge.setSessionPinned(pinInput(pinned.projectPath, pinned.sessionId, title), false))}
-                    style={{ position: 'absolute', right: 4, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.accent, cursor: 'pointer' }}
+                    style={{ position: 'absolute', right: 32, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.accent, cursor: 'pointer' }}
                   >
                     <Icon name="pin" size={13} stroke={1.8} />
                   </button>
+                  <button type="button" className="sidebar-row-action" aria-label={`Archive ${title}`} title="Archive chat" onClick={() => void prepareArchive(pinned.projectPath, pinned.sessionId, title)}
+                    style={{ position: 'absolute', right: 4, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, color: t.text3, background: 'transparent', cursor: 'pointer' }}><Icon name="archive" size={13} /></button>
                 </div>
               );
             })}
@@ -475,6 +497,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     aria-controls={open ? `project-sessions-${encodeURIComponent(projectPath)}` : undefined}
                     title={projectPath}
                     onClick={() => {
+                      onOpenChat?.();
                       setExpandedProjects((current) => {
                         const next = new Set(current);
                         if (next.has(projectPath)) next.delete(projectPath);
@@ -486,7 +509,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     style={{
                       width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 9,
                       padding: '7px 62px 7px 8px', border: 0, borderRadius: 8,
-                      background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text2,
+                      background: 'transparent', color: active ? t.text : t.text2,
                       cursor: 'pointer', textAlign: 'left',
                     }}
                   >
@@ -545,11 +568,12 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                         <SessionRow
                           key={session.uuid}
                           session={session}
-                          active={visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
+                          active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
                           pinned={pinned}
                           opening={opening}
                           status={bridge.sessionRuntimeStatus(session.uuid)}
                           onClick={() => openSidebarSession(projectPath, session.uuid)}
+                          onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
                           onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
                         />
                       );
@@ -565,16 +589,22 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
             );
           })}
         </section>
+        {!!settings?.archivedSessions?.length && <details style={{ marginTop: 16, padding: '0 8px', color: t.text3 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 12 }}>Archived chats ({settings.archivedSessions.length})</summary>
+          {settings.archivedSessions.map((session) => <button key={`${session.projectPath}-${session.sessionId}`} type="button" title="Restore and open chat" onClick={() => openSidebarSession(session.projectPath, session.sessionId)}
+            style={{ display: 'flex', width: '100%', gap: 8, padding: '10px 0', border: 0, background: 'transparent', color: t.text2, textAlign: 'left', cursor: 'pointer' }}>
+            <Icon name="archive" size={14} /><span>{session.title || 'Archived chat'}</span>
+          </button>)}
+        </details>}
       </nav>
 
       <div className="desktop-sidebar-footer" style={{ padding: 10, borderTop: `0.5px solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: 5 }}>
-        <ConnectionDot bridge={bridge} />
         <button
           type="button"
           onClick={onOpenSettings}
           style={{ minHeight: 40, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 5px', border: 0, borderRadius: 8, background: 'transparent', color: t.text2, cursor: 'pointer', fontSize: 12.5 }}
         >
-          <Icon name="cog" size={15} /> Settings & diagnostics
+          <Icon name="cog" size={15} /> {settingsLabel()}
         </button>
       </div>
 
@@ -600,6 +630,8 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
         style={{ color: t.accent }}
       />
     </aside>
+    {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} />}
+    </>
   );
 }
 
@@ -725,33 +757,36 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
   );
 }
 
-export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, theme, onTheme }: {
+export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter }: {
   bridge: UseBridge;
   runtimeCenterOpen: boolean;
   onToggleRuntimeCenter(): void;
-  theme: ThemeMode;
-  onTheme(value: ThemeMode): void;
 }) {
   const t = useT();
+  const [moreOpen, setMoreOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
-  const summaryTriggerRef = useRef<HTMLButtonElement>(null);
+  const moreTriggerRef = useRef<HTMLButtonElement>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
   const summaryPanelRef = useRef<HTMLDivElement>(null);
   const summaries = bridge.conversation.summaries;
-  const currentSummaryId = summaries.at(-1)?.id ?? null;
+  const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
 
   useEffect(() => {
-    if (!summaryOpen) return;
+    if (!moreOpen && !summaryOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
-      if (summaryTriggerRef.current?.contains(target) || summaryPanelRef.current?.contains(target)) return;
+      if (moreTriggerRef.current?.contains(target) || moreMenuRef.current?.contains(target) || summaryPanelRef.current?.contains(target)) return;
+      setMoreOpen(false);
       setSummaryOpen(false);
     };
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      setMoreOpen(false);
       setSummaryOpen(false);
-      summaryTriggerRef.current?.focus();
+      moreTriggerRef.current?.focus();
     };
     document.addEventListener('pointerdown', closeOnPointerDown, true);
     document.addEventListener('keydown', closeOnEscape);
@@ -759,66 +794,105 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
       document.removeEventListener('pointerdown', closeOnPointerDown, true);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [summaryOpen]);
+  }, [moreOpen, summaryOpen]);
 
   useEffect(() => {
+    setMoreOpen(false);
     setSummaryOpen(false);
     setSelectedSummaryId(null);
   }, [bridge.conversation.sessionKey]);
 
+  useEffect(() => {
+    if (moreOpen) moreMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+  }, [moreOpen]);
+
+  useEffect(() => {
+    if (summaryOpen) summaryPanelRef.current?.querySelector<HTMLButtonElement>('.context-summary-close')?.focus();
+  }, [summaryOpen]);
+
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
     '--topbar-action-active': t.surfaceHover,
-    '--topbar-action-ring': t.border,
+    '--topbar-action-ring': t.borderStrong,
     '--topbar-action-color': t.text3,
     '--topbar-action-hover-color': t.text,
     '--topbar-action-active-color': t.text,
   } as CSSProperties;
   return (
-    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 10px 0 18px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
+    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 12px 0 18px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
         <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
       </div>
       {bridge.usage && (
-        <span className="mono" style={{ color: t.text4, fontSize: 9.5 }} title="Input + output tokens">
+        <span className="mono desktop-topbar-usage" style={{ color: t.text4, fontSize: 9.5 }} title="Input + output tokens">
           {(bridge.usage.inputTokens + bridge.usage.outputTokens).toLocaleString()} tok
         </span>
       )}
-      <button className="no-drag desktop-topbar-action" type="button" aria-label="Toggle theme" onClick={() => onTheme(theme === 'dark' ? 'light' : 'dark')} style={topbarActionTokens}>
-        <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
-      </button>
       <button
-        ref={summaryTriggerRef}
+        ref={moreTriggerRef}
         className="no-drag desktop-topbar-action"
         type="button"
-        aria-label="Open context summaries"
-        aria-controls="context-summary-panel"
-        aria-expanded={summaryOpen}
-        data-active={summaryOpen ? 'true' : undefined}
+        aria-label="More chat actions"
+        title="More chat actions"
+        aria-expanded={moreOpen}
+        aria-controls="desktop-topbar-more"
+        data-active={moreOpen || summaryOpen ? 'true' : undefined}
+        onClick={() => { setMoreOpen((open) => !open); setSummaryOpen(false); }}
+        style={topbarActionTokens}
+      ><Icon name="more" size={18} /></button>
+      <button
+        className="no-drag desktop-topbar-action"
+        type="button"
+        data-runtime-center-trigger="true"
+        aria-label="Toggle pinned summary"
+        title="Toggle pinned summary"
+        aria-controls="runtime-center-overview"
+        aria-expanded={runtimeCenterOpen}
+        aria-pressed={runtimeCenterOpen}
+        data-active={runtimeCenterOpen ? 'true' : undefined}
+        onClick={onToggleRuntimeCenter}
+        style={topbarActionTokens}
+      ><Icon name="summary-list" size={20} /></button>
+      <button
+        className="no-drag desktop-topbar-action desktop-inspector-trigger"
+        type="button"
+        data-runtime-inspector-trigger="true"
+        aria-label="Toggle right panel"
+        title="Toggle right panel"
+        aria-controls="runtime-inspector"
+        aria-expanded={inspectorOpen}
+        aria-pressed={inspectorOpen}
+        data-active={inspectorOpen ? 'true' : undefined}
         onClick={() => {
-          setSummaryOpen((open) => {
-            if (!open) setSelectedSummaryId((current) => summaries.some((summary) => summary.id === current) ? current : currentSummaryId);
-            return !open;
+          bridge.setRuntimeInspectorOpen(!inspectorOpen);
+          if (!inspectorOpen) window.requestAnimationFrame(() => {
+            (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]')
+              ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button')
+              ?? document.querySelector<HTMLElement>('.runtime-panel-hide'))?.focus();
           });
         }}
         style={topbarActionTokens}
-      >
-        <Icon name="summary" size={17} stroke={1.7} />
-      </button>
-      <button className="no-drag desktop-topbar-action" type="button" data-runtime-center-trigger="true" aria-label="Toggle runtime center" aria-controls="runtime-center-overview" aria-expanded={runtimeCenterOpen} data-active={runtimeCenterOpen ? 'true' : undefined} onClick={onToggleRuntimeCenter} style={topbarActionTokens}>
-        <Icon name="tasks" size={17} stroke={1.7} />
-      </button>
-      {summaryOpen ? (
+      ><Icon name={inspectorOpen ? 'panel-right' : 'panel-right-hidden'} size={20} /></button>
+      {moreOpen && (
+        <div ref={moreMenuRef} id="desktop-topbar-more" className="no-drag desktop-topbar-more" style={{ background: t.surface, color: t.text, borderColor: t.border }}>
+          <button type="button" aria-label="Open context summaries" onClick={() => {
+            setMoreOpen(false);
+            setSelectedSummaryId(summaries.at(-1)?.id ?? null);
+            setSummaryOpen(true);
+          }}><Icon name="summary" size={16} /><span>Context summaries</span></button>
+        </div>
+      )}
+      {summaryOpen && (
         <div ref={summaryPanelRef} style={{ display: 'contents' }}>
           <ContextSummaryPanel
             summaries={summaries}
             selectedId={selectedSummaryId}
             onSelect={setSelectedSummaryId}
-            onClose={() => { setSummaryOpen(false); summaryTriggerRef.current?.focus(); }}
+            onClose={() => { setSummaryOpen(false); moreTriggerRef.current?.focus(); }}
           />
         </div>
-      ) : null}
+      )}
     </header>
   );
 }
@@ -829,11 +903,12 @@ function nativeAudioApi(): NativeAudioApi | undefined {
 
 const DICTATION_WAVEFORM_SAMPLES = 160;
 
-export function DictationRecorderBar({ audio, owner, onCancel, onFinish }: {
+export function DictationRecorderBar({ audio, owner, onCancel, onFinish, turnAction }: {
   audio: NativeAudioApi | undefined;
   owner: NativeAudioOwner;
   onCancel(): void;
   onFinish(): void;
+  turnAction?: ReactNode;
 }) {
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -939,6 +1014,7 @@ export function DictationRecorderBar({ audio, owner, onCancel, onFinish }: {
       <button className="dictation-recorder-action" type="button" aria-label="Stop dictation" title="Stop dictation" onClick={onFinish} style={actionStyle}>
         <span aria-hidden="true" style={{ width: 14, height: 14, borderRadius: 2, background: 'currentColor' }} />
       </button>
+      {turnAction}
     </div>
   );
 }
@@ -1787,6 +1863,27 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     });
   };
 
+  const addFiles = async (files: File[]) => {
+    if (!ready) return;
+    const images: File[] = [];
+    let notice: string | null = null;
+    for (const file of files) {
+      if (/^image\/(png|jpeg|gif|webp)$/.test(file.type) || /\.(png|jpe?g|gif|webp)$/i.test(file.name)) {
+        images.push(file);
+        continue;
+      }
+      try {
+        const path = window.lingxi?.getPathForFile(file);
+        if (!path) throw new Error(`无法获取“${file.name}”的本地路径，请先保存文件后再添加。`);
+        chooseFile(path, true);
+      } catch (error) {
+        notice = error instanceof Error ? error.message : `无法添加“${file.name}”。`;
+      }
+    }
+    if (images.length) await addImageFiles(images);
+    if (notice || !images.length) setImageNotice(notice);
+  };
+
   const removeImage = (id: string) => {
     setImageAttachments((current) => {
       const removed = current.find((attachment) => attachment.id === id);
@@ -1945,14 +2042,14 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     });
   };
 
-  const chooseFile = (path: string) => {
+  const chooseFile = (path: string, attachment = false) => {
     const editor = input.current;
-    if (!filePicker || !editor) return;
-    const range = filePicker.source === 'mention'
+    if ((!filePicker && !attachment) || !editor) return;
+    const range = !attachment && filePicker?.source === 'mention'
       ? activeMentionRange.current
       : savedEditorSelection.current;
     const insertion = range?.cloneRange() ?? editorSelection(editor);
-    if (filePicker.source === 'mention') insertion.deleteContents();
+    if (!attachment && filePicker?.source === 'mention') insertion.deleteContents();
 
     const duplicate = [...editor.querySelectorAll<HTMLElement>(FILE_MENTION_SELECTOR)]
       .some((token) => token.dataset.fileMention === path);
@@ -2067,12 +2164,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
   const pastePlainText = (event: ClipboardEvent<HTMLDivElement>) => {
     const clipboardImages = [...event.clipboardData.items]
-      .filter((item) => item.kind === 'file' && (item.type.startsWith('image/') || item.type === ''))
+      .filter((item) => item.kind === 'file')
       .map((item) => item.getAsFile())
       .filter((file): file is File => Boolean(file));
     if (clipboardImages.length) {
       event.preventDefault();
-      void addImageFiles(clipboardImages);
+      void addFiles(clipboardImages);
       return;
     }
     event.preventDefault();
@@ -2106,8 +2203,20 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           ? 'LingXi is working — draft your next message…'
           : 'Do anything';
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
+  const stopTurnButton = (
+    <button
+      type="button"
+      className="composer-submit-button"
+      disabled={!bridge.running || bridge.isCancelling}
+      tabIndex={bridge.running ? 0 : -1}
+      onClick={() => invoke(() => bridge.cancel())}
+      aria-label={bridge.isCancelling ? 'Stopping current turn' : 'Stop current turn'}
+      title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
+      style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
+    ><Icon name="stop" size={15} color="#fff" /></button>
+  );
   return (
-    <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '10px 18px 18px', background: t.stageBg }}>
+    <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '12px var(--conversation-gutter) 20px', background: t.stageBg }}>
       {flowMode && (
         <VoiceFlowPanel
           state={flowState}
@@ -2131,9 +2240,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         onDrop={(event) => {
           event.preventDefault();
           setImageDragActive(false);
-          void addImageFiles([...event.dataTransfer.files]);
+          void addFiles([...event.dataTransfer.files]);
         }}
-        style={{ position: 'relative', maxWidth: 980, margin: '0 auto', borderRadius: 26, border: `1px solid ${imageDragActive ? t.accent : ready ? t.borderStrong : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: t.dark ? '0 18px 46px rgba(0,0,0,.28), 0 2px 8px rgba(0,0,0,.18)' : '0 20px 52px rgba(47,39,78,.10), 0 3px 10px rgba(47,39,78,.055)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
+        style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 20, border: `1px solid ${imageDragActive ? t.accent : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: t.dark ? '0 8px 24px rgba(0,0,0,.20), 0 1px 3px rgba(0,0,0,.16)' : '0 8px 24px rgba(24,28,36,.06), 0 1px 3px rgba(24,28,36,.04)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
       >
         {imageAttachments.length > 0 && (
           <div aria-label="Image attachments" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
@@ -2173,7 +2282,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             : fileMenuOpen && filePicker?.source === 'mention' && fileResults[fileResultIndex]
               ? `workspace-file-result-${fileResultIndex}`
               : undefined}
-          style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 16, padding: '14px 18px 2px', fontWeight: 400, letterSpacing: '-.01em', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready ? 'text' : 'default', opacity: ready ? 1 : .68 }}
+          style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 15, padding: '16px 18px 8px', fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready ? 'text' : 'default', opacity: ready ? 1 : .68 }}
         />
         {slashMenuOpen && (
           <div ref={slashControl} id="slash-command-results" role="listbox" aria-label="Slash commands" style={{ ...composerMenuStyle(t, 'left'), width: 820, maxWidth: 'min(820px, calc(100vw - 44px))', maxHeight: 'min(420px, calc(100vh - 190px))', overflowY: 'auto', padding: 7 }}>
@@ -2227,16 +2336,17 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         {voiceState === 'listening' && !flowMode ? (
           <DictationRecorderBar
             audio={audio}
+            turnAction={bridge.running ? stopTurnButton : undefined}
             owner={dictationOwner.current ?? audioOwner('dictation')}
             onCancel={() => { void cancelStandardListening(); }}
             onFinish={() => { void finishStandardListening(); }}
           />
         ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 48, padding: '0 8px 8px 10px' }}>
-          <input ref={imageFileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => { void addImageFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
-          <button type="button" disabled={!ready} aria-label="Attach image" title="Attach image" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
+        <div className="composer-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 48, padding: '0 8px 8px' }}>
+          <input ref={imageFileInput} type="file" multiple onChange={(event) => { void addFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
+          <button type="button" disabled={!ready} className="composer-icon-action" aria-label="Attach files" title="Attach files or images" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <div ref={fileControl}>
-            <button type="button" disabled={!ready} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
+            <button type="button" disabled={!ready} className="composer-icon-action" aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
             {fileMenuOpen && (
               <div role="dialog" aria-label="Search workspace files" style={{ ...composerMenuStyle(t, 'left'), width: 560, maxWidth: 'min(560px, calc(100vw - 44px))', padding: 7, overflow: 'hidden' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '3px 4px 7px', borderBottom: `0.5px solid ${t.border}` }}>
@@ -2298,7 +2408,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             <button
               ref={permissionButton}
               type="button"
-              disabled={!ready || bridge.running}
+              disabled={!ready}
               aria-haspopup="menu"
               aria-expanded={permissionOpen}
               aria-label={`Permission mode: ${permissionMode.label}`}
@@ -2371,17 +2481,17 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
           <div style={{ flex: 1 }} />
 
-          <div ref={modelControl} style={{ position: 'relative' }}>
+          <div ref={modelControl} className="composer-model-control" style={{ position: 'relative', minWidth: 0 }}>
             <button
               ref={modelTrigger}
               type="button"
-              disabled={!ready || bridge.running || bridge.desktop.models.length === 0}
+              disabled={!ready || bridge.desktop.models.length === 0}
               aria-haspopup="menu"
               aria-expanded={modelOpen}
               aria-label={`${fastModeAvailable && bridge.desktop.fastMode ? 'Fast mode, ' : ''}Model: ${modelLabel(bridge.desktop.currentModel)}, reasoning ${reasoningSelectionLabel(selectedReasoning)}`}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
               onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); }}
-              style={{ ...composerPillStyle(t, modelOpen), maxWidth: 340, color: t.text }}
+              style={{ ...composerPillStyle(t, modelOpen), maxWidth: '100%', width: '100%', color: t.text }}
             >
               {fastModeAvailable && <Icon name="bolt" size={18} color={t.text} stroke={2.1} />}
               {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.accent, fontSize: 11.5, fontWeight: 700 }}>Fast</span>}
@@ -2550,11 +2660,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                 {modelSubmenu === 'speed' && fastModeAvailable && (
                   <div style={{ ...modelPickerSubmenuStyle(t), width: 300, maxWidth: 'min(300px, calc(100vw - 44px))', maxHeight: 'min(300px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Speed">
                     <div style={{ padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Speed</div>
-                    <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!ready || bridge.running} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !ready || bridge.running)}>
+                    <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !ready)}>
                       <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Standard</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>Default speed</span></span>
                       {(!bridge.desktop.fastMode || !fastModeAvailable) && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
                     </button>
-                    {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!ready || bridge.running} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !ready || bridge.running)}>
+                    {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !ready)}>
                       <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Fast</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>1.5x speed, more usage</span></span>
                       {bridge.desktop.fastMode && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
                     </button>}
@@ -2563,10 +2673,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               </div>
             )}
           </div>
-          <button type="button" disabled={!ready || flowMode} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
+          <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
           <button
             type="button"
             disabled={!ready}
+            className="composer-icon-action"
             aria-label={flowMode ? '关闭心流模式' : '开启心流模式'}
             aria-pressed={flowMode}
             title={flowMode ? '关闭心流模式' : '开启心流模式'}
@@ -2575,24 +2686,23 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           >
             <Icon name="waveform" size={18} color="currentColor" stroke={2.15} />
           </button>
-          {bridge.running && (
-            <button
-              type="button"
-              disabled={bridge.isCancelling}
-              onClick={() => invoke(() => bridge.cancel())}
-              aria-label={bridge.isCancelling ? 'Stopping current turn' : 'Stop current turn'}
-              title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
-              style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
-            ><Icon name="stop" size={15} color="#fff" /></button>
-          )}
-          <button
-            type="button"
-            disabled={!ready || !hasPrompt || flowMode}
-            onClick={() => { void submit(); }}
-            aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
-            title={bridge.running ? 'Send as pending message' : 'Send prompt'}
-            style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
-          ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? '#fff' : t.text4} /></button>
+          <div className="composer-submit-actions" data-pending={bridge.running && hasPrompt}>
+            <span className="composer-stop-presence" data-visible={bridge.running} aria-hidden={!bridge.running}>
+              {stopTurnButton}
+            </span>
+            <span className="composer-send-presence" data-visible={hasPrompt} aria-hidden={!hasPrompt}>
+              <button
+                type="button"
+                className="composer-submit-button"
+                disabled={!ready || !hasPrompt || flowMode}
+                tabIndex={hasPrompt ? 0 : -1}
+                onClick={() => { void submit(); }}
+                aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
+                title={bridge.running ? 'Send as pending message' : 'Send prompt'}
+                style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
+              ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? t.windowBg : t.text4} /></button>
+            </span>
+          </div>
         </div>
         )}
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
@@ -2613,11 +2723,11 @@ function composerPrimaryActionStyle(t: ReturnType<typeof useT>, enabled: boolean
 }
 
 function composerPillStyle(t: ReturnType<typeof useT>, active: boolean): CSSProperties {
-  return { display: 'inline-flex', alignItems: 'center', gap: 7, minHeight: 34, padding: '0 9px', border: 0, borderRadius: 9, background: active ? t.surfaceHover : 'transparent', cursor: 'pointer', font: 'inherit', fontSize: 13.5, fontWeight: 500 };
+  return { display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: 40, padding: '0 9px', border: 0, borderRadius: 9, background: active ? t.surfaceHover : 'transparent', cursor: 'pointer', font: 'inherit', fontSize: 12.5, fontWeight: 500 };
 }
 
 function composerSendStyle(t: ReturnType<typeof useT>, enabled: boolean): CSSProperties {
-  return { ...composerPrimaryActionStyle(t, enabled), background: enabled ? t.accent : t.surfaceActive, color: enabled ? '#fff' : t.text4, opacity: enabled ? 1 : .82 };
+  return { ...composerPrimaryActionStyle(t, enabled), background: enabled ? t.text : t.surfaceActive, color: enabled ? t.windowBg : t.text4, opacity: enabled ? 1 : .82 };
 }
 
 function composerMenuStyle(t: ReturnType<typeof useT>, side: 'left' | 'right'): CSSProperties {
@@ -2688,6 +2798,12 @@ export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): v
 
 export function ErrorBanner({ bridge }: { bridge: UseBridge }) {
   const t = useT();
+  useEffect(() => {
+    if (!bridge.error) return undefined;
+    const timeoutId = window.setTimeout(() => bridge.clearError(), 5_000);
+    return () => window.clearTimeout(timeoutId);
+  }, [bridge.error, bridge.clearError]);
+
   if (!bridge.error) return null;
   const error = classifyDesktopError(bridge.error);
   return (

@@ -1419,8 +1419,8 @@ mod fork_dispatch_tests {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-                        usage_complete: true,
-})
+                usage_complete: true,
+            })
         }
         async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
             vec![]
@@ -1831,4 +1831,43 @@ mod fork_dispatch_tests {
             .expect("fork");
         assert_eq!(registry.get_total_agent_spawns(), 1);
     }
+}
+
+/// `parse_declared_effort` is this port's `Gx`.
+///
+/// The union upstream validates against is
+/// `[enum(low|medium|high|xhigh|max), int().min(1).max(1000)]`, and a value
+/// matching neither arm yields `undefined` rather than an error — a skill with
+/// a typo'd effort still runs, it just declares none.
+#[test]
+fn declared_effort_matches_the_oracle_union() {
+    use session::forked_skill::Effort;
+
+    for level in ["low", "medium", "high", "xhigh", "max"] {
+        assert_eq!(
+            super::parse_declared_effort(level),
+            Some(Effort::Level(level.to_string())),
+            "{level} is a named arm"
+        );
+    }
+    for steps in [1_i64, 2, 500, 1000] {
+        assert_eq!(
+            super::parse_declared_effort(&steps.to_string()),
+            Some(Effort::Steps(steps)),
+            "{steps} is inside 1..=1000"
+        );
+    }
+    // Outside either arm ⇒ declared nothing usable, NOT an error.
+    for bad in ["0", "1001", "-1", "highest", "HIGH", "", "  ", "1.5"] {
+        assert_eq!(
+            super::parse_declared_effort(bad),
+            None,
+            "{bad:?} matches neither arm"
+        );
+    }
+    // Surrounding whitespace is not a declaration error.
+    assert_eq!(
+        super::parse_declared_effort("  high  "),
+        Some(Effort::Level("high".to_string()))
+    );
 }

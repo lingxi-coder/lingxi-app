@@ -47,7 +47,8 @@ use lingxi_core::TodoState;
 const HIGH_WATER_MARK_FILE: &str = ".highwatermark";
 
 /// Outcome of one atomic claim attempt — the oracle's discriminated result
-/// (2.1.223 `QOd` / `uTy`, `utils/tasks.ts`). The `reason` wire strings are
+/// (2.1.263 `RZn` / `$t`, `utils/tasks.ts`; the same pair was `QOd` / `uTy`
+/// in 2.1.223 — minified names are chunk-local). The `reason` wire strings are
 /// exposed via [`ClaimResult::reason`] for log parity (`rIp` logs
 /// `o.reason`).
 #[derive(Debug, Clone, PartialEq)]
@@ -80,7 +81,7 @@ pub enum ClaimResult {
         blocked_by_tasks: Vec<String>,
     },
     /// `reason:"agent_busy"` — [`ClaimOptions::check_agent_busy`] only
-    /// (`uTy`): the claimer already owns other non-completed tasks.
+    /// (`$t`): the claimer already owns other non-completed tasks.
     AgentBusy {
         /// The task as read under the lock.
         task: TodoTask,
@@ -104,28 +105,29 @@ impl ClaimResult {
     }
 }
 
-/// Options for [`TodoStore::claim_task`] (oracle `QOd`'s `n = {}`).
+/// Options for [`TodoStore::claim_task`] (oracle `RZn`'s `o = {}`).
 ///
-/// `check_agent_busy` mirrors `checkAgentBusy` — LATENT in 2.1.223: the flag
-/// is reachable in the oracle but `checkAgentBusy:!0` has ZERO call sites
-/// (the lone binary hit is a V8-snapshot table entry). Ported faithfully as
-/// an option nothing passes yet.
+/// `check_agent_busy` mirrors `checkAgentBusy` — still LATENT in 2.1.263: the
+/// flag is reachable (`if(o.checkAgentBusy)return $t(e,t,r,i)`) but a grep of
+/// the extracted 2.1.263 sources finds exactly ONE occurrence of the
+/// identifier — that read — so nothing passes `checkAgentBusy:!0`. Ported
+/// faithfully as an option nothing passes yet.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClaimOptions {
-    /// Route through the `uTy` busy-check variant.
+    /// Route through the `$t` busy-check variant.
     pub check_agent_busy: bool,
 }
 
-/// Why a teammate's tasks are being unassigned (oracle `RSr`'s 4th arg).
+/// Why a teammate's tasks are being unassigned (oracle `dCe`'s 4th arg).
 ///
-/// Both live 2.1.223 call sites pass `"shutdown"`; the `"terminated"` branch
+/// Both live 2.1.263 call sites pass `"shutdown"`; the `"terminated"` branch
 /// ("was terminated") has zero callers — ported latent, like
 /// [`ClaimOptions::check_agent_busy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeammateEndReason {
     /// `"shutdown"` → "has shut down."
     Shutdown,
-    /// `"terminated"` → "was terminated." (latent in 2.1.223).
+    /// `"terminated"` → "was terminated." (latent in 2.1.263).
     Terminated,
 }
 
@@ -138,13 +140,55 @@ pub struct UnassignedTask {
     pub subject: String,
 }
 
-/// Result of [`TodoStore::unassign_tasks_for_teammate`] (oracle `RSr`).
+/// Result of [`TodoStore::unassign_tasks_for_teammate`] (oracle `dCe`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnassignOutcome {
     /// The tasks reset to ownerless-pending, in list (id-ascending) order.
     pub unassigned_tasks: Vec<UnassignedTask>,
     /// The byte-exact notification for the lead's inbox.
     pub notification_message: String,
+}
+
+/// A retryable departure failure, retaining updates committed before the error.
+#[derive(Debug)]
+pub struct UnassignError {
+    /// Filesystem or decoding failure that prevented finishing the attempt.
+    pub source: std::io::Error,
+    /// Updates committed before the failure; retain these across retries.
+    pub unassigned_tasks: Vec<UnassignedTask>,
+}
+
+impl std::fmt::Display for UnassignError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, f)
+    }
+}
+impl std::error::Error for UnassignError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Format the oracle notification, including progress accumulated across retries.
+pub fn format_unassignment_notification(
+    name: &str,
+    reason: TeammateEndReason,
+    tasks: &[UnassignedTask],
+) -> String {
+    let verb = match reason {
+        TeammateEndReason::Terminated => "was terminated",
+        TeammateEndReason::Shutdown => "has shut down",
+    };
+    let mut message = format!("{name} {verb}.");
+    if !tasks.is_empty() {
+        let list = tasks
+            .iter()
+            .map(|task| format!("#{} \"{}\"", task.id, task.subject))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(" {} task(s) were unassigned: {list}. Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.", tasks.len()));
+    }
+    message
 }
 
 /// One V2 task as persisted on disk. 1:1 with claude-code `TaskSchema`
@@ -407,8 +451,9 @@ impl TodoStore {
     }
 
     /// List every parseable task, sorted by numeric id ascending. Port of
-    /// `listTasks` — oracle 2.1.223 `soe` sorts the same way
-    /// (`.sort((l,c)=>Number(l.id)-Number(c.id))`, binary @247329851); an older
+    /// `listTasks` — oracle 2.1.263 `RC` sorts the same way
+    /// (`.sort((u,_)=>Number(u.id)-Number(_.id))`,
+    /// `src_160357157.js` @17604); an older
     /// comment here claimed claude returns raw readdir order, which was stale.
     pub async fn list(&self) -> Vec<TodoTask> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
@@ -517,7 +562,7 @@ impl TodoStore {
     /// Unlocked read-merge-write of `{owner}` onto the task under `id` (the
     /// oracle's `XOd(e,t,{owner:r})` local branch). Callers hold whichever
     /// lock the variant requires; this helper itself takes NONE — the mkdir
-    /// lock in [`crate::proper_lockfile`] is not reentrant, so the QOd path
+    /// lock in [`crate::proper_lockfile`] is not reentrant, so the `RZn` path
     /// (which already holds `<id>.json`'s lock) must not go through
     /// [`Self::update`].
     fn xod_merge_owner(&self, id: &str, owner: &str) -> Option<TodoTask> {
@@ -545,14 +590,16 @@ impl TodoStore {
     }
 
     /// Atomically claim the task under `task_id` for `owner`. 1:1 port of the
-    /// oracle's `QOd` (and, with [`ClaimOptions::check_agent_busy`], its `uTy`
-    /// variant) from `utils/tasks.ts` (2.1.223 @247330643):
+    /// oracle's `RZn` (and, with [`ClaimOptions::check_agent_busy`], its `$t`
+    /// variant) from `utils/tasks.ts` (2.1.263 `src_160357157.js` @18248 /
+    /// @19948):
     ///
-    /// * `QOd`: unlocked existence pre-check → lock `<id>.json` → re-read →
+    /// * `RZn`: unlocked existence pre-check (`EK`) → lock `<id>.json` →
+    ///   re-read →
     ///   `already_claimed` (owner set ≠ claimer; empty owner is unowned, JS
     ///   falsy) / `already_resolved` (completed) / `blocked` (open blockers)
     ///   → single `{owner}` merge-write → success.
-    /// * `uTy`: the same checks under the LIST-level `.lock` instead, plus
+    /// * `$t`: the same checks under the LIST-level `.lock` instead, plus
     ///   `agent_busy` when the claimer owns other non-completed tasks; the
     ///   success write goes through a per-task file lock (oracle `WXe`).
     ///
@@ -604,8 +651,8 @@ impl TodoStore {
         }
     }
 
-    /// The `uTy` arm of [`Self::claim_task`] — see there. LATENT: nothing in
-    /// 2.1.223 passes `checkAgentBusy: true`.
+    /// The `$t` arm of [`Self::claim_task`] — see there. LATENT: nothing in
+    /// 2.1.263 passes `checkAgentBusy: true`.
     async fn claim_task_with_busy_check(&self, task_id: &str, owner: &str) -> ClaimResult {
         let _guard = self.lock.lock().await;
         // Oracle `m4s`: ensure + lock the LIST-level `.lock`.
@@ -614,7 +661,7 @@ impl TodoStore {
             .await
             .ok();
 
-        // `uTy` works from the full list snapshot (`soe`), not a point read.
+        // `$t` works from the full list snapshot (`RC`), not a point read.
         let all = self.list().await;
         let Some(task) = all.iter().find(|t| t.id == task_id).cloned() else {
             return ClaimResult::TaskNotFound;
@@ -660,15 +707,119 @@ impl TodoStore {
         }
     }
 
+    /// Strict departure cleanup. Every task is re-read under its file lock;
+    /// a failed attempt reports only updates already committed to disk.
+    ///
+    /// # Errors
+    /// Returns list, lock, read, decoding, or write errors with committed progress.
+    pub async fn try_unassign_tasks_for_teammate(
+        &self,
+        agent_id: &str,
+        name: &str,
+        reason: TeammateEndReason,
+    ) -> Result<UnassignOutcome, UnassignError> {
+        self.try_unassign_with_writer(agent_id, name, reason, |task| {
+            self.write_departure_task(task)
+        })
+        .await
+    }
+
+    // Atomic replacement leaves the original owner intact on failed writes so
+    // a later Stop can retry, rather than finding a truncated task file.
+    fn write_departure_task(&self, task: &TodoTask) -> std::io::Result<()> {
+        use std::io::Write;
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let bytes = serde_json::to_vec_pretty(task).map_err(std::io::Error::other)?;
+        let temporary = self.dir.join(format!(
+            ".departure-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        let result = file
+            .write_all(&bytes)
+            .and_then(|()| std::fs::rename(&temporary, self.task_path(&task.id)));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    async fn try_unassign_with_writer(
+        &self,
+        agent_id: &str,
+        name: &str,
+        reason: TeammateEndReason,
+        write: impl Fn(&TodoTask) -> std::io::Result<()>,
+    ) -> Result<UnassignOutcome, UnassignError> {
+        let _guard = self.lock.lock().await;
+        let mut progress = Vec::new();
+        let result: std::io::Result<()> = async {
+            let entries = match std::fs::read_dir(&self.dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            let mut ids = Vec::new();
+            for entry in entries {
+                let entry = entry?;
+                if let Some(id) = entry.file_name().to_string_lossy().strip_suffix(".json") {
+                    ids.push(id.to_owned());
+                }
+            }
+            ids.sort_by_key(|id| id.parse::<i64>().unwrap_or(i64::MAX));
+            for id in ids {
+                let path = self.task_path(&id);
+                let _file_lock = crate::proper_lockfile::lock(&path).await?;
+                let bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                let mut task: TodoTask = serde_json::from_slice(&bytes)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                if task.status == TodoState::Completed
+                    || !(task.owner.as_deref() == Some(agent_id)
+                        || task.owner.as_deref() == Some(name))
+                {
+                    continue;
+                }
+                task.id = id;
+                task.owner = None;
+                task.status = TodoState::Pending;
+                write(&task)?;
+                progress.push(UnassignedTask {
+                    id: task.id,
+                    subject: task.subject,
+                });
+            }
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => Ok(UnassignOutcome {
+                notification_message: format_unassignment_notification(name, reason, &progress),
+                unassigned_tasks: progress,
+            }),
+            Err(source) => Err(UnassignError {
+                source,
+                unassigned_tasks: progress,
+            }),
+        }
+    }
+
     /// Unassign every non-completed task owned by a departing teammate and
-    /// build the lead's notification. 1:1 port of the oracle's `RSr`
-    /// (`utils/tasks.ts`, 2.1.223 @247331880):
+    /// build the lead's notification. 1:1 port of the oracle's `dCe`
+    /// (`utils/tasks.ts`, 2.1.263 `src_160357157.js` @20832):
     ///
     /// * matches `owner === agent_id || owner === name`;
     /// * resets each match to ownerless `pending` (oracle
     ///   `WXe(e, id, {owner: void 0, status: "pending"})`);
     /// * notification: `` `${name} has shut down.` `` (or `"was terminated"`
-    ///   for [`TeammateEndReason::Terminated`] — latent in 2.1.223), and when
+    ///   for [`TeammateEndReason::Terminated`] — latent in 2.1.263), and when
     ///   any task was unassigned appends `` ` ${n} task(s) were unassigned:
     ///   #id "subj", …. Use TaskList to check availability and TaskUpdate
     ///   with owner to reassign them to idle teammates.` ``
@@ -697,31 +848,16 @@ impl TodoStore {
             .await;
         }
 
-        let verb = match reason {
-            TeammateEndReason::Terminated => "was terminated",
-            TeammateEndReason::Shutdown => "has shut down",
-        };
-        let mut notification_message = format!("{name} {verb}.");
-        if !matches.is_empty() {
-            let list = matches
-                .iter()
-                .map(|c| format!("#{} \"{}\"", c.id, c.subject))
-                .collect::<Vec<_>>()
-                .join(", ");
-            notification_message.push_str(&format!(
-                " {} task(s) were unassigned: {list}. Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.",
-                matches.len()
-            ));
-        }
+        let unassigned_tasks = matches
+            .into_iter()
+            .map(|task| UnassignedTask {
+                id: task.id,
+                subject: task.subject,
+            })
+            .collect::<Vec<_>>();
         UnassignOutcome {
-            unassigned_tasks: matches
-                .into_iter()
-                .map(|t| UnassignedTask {
-                    id: t.id,
-                    subject: t.subject,
-                })
-                .collect(),
-            notification_message,
+            notification_message: format_unassignment_notification(name, reason, &unassigned_tasks),
+            unassigned_tasks,
         }
     }
 }
@@ -932,7 +1068,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    // ── claim cluster (oracle 2.1.223 QOd / uTy / RSr) ──────────────────────
+    // ── claim cluster (oracle 2.1.263 RZn / $t / dCe) ───────────────────────
 
     async fn seed(
         store: &TodoStore,
@@ -944,6 +1080,137 @@ mod tests {
         t.status = status;
         t.owner = owner.map(str::to_string);
         store.create(t).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn strict_departure_reports_list_and_read_errors() {
+        let (store, dir) = temp_store();
+        std::fs::write(&dir, "not a directory").unwrap();
+        assert!(store
+            .try_unassign_tasks_for_teammate("id", "nova", TeammateEndReason::Shutdown)
+            .await
+            .is_err());
+        std::fs::remove_file(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("1.json"), "broken JSON").unwrap();
+        let error = store
+            .try_unassign_tasks_for_teammate("id", "nova", TeammateEndReason::Shutdown)
+            .await
+            .unwrap_err();
+        assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.unassigned_tasks.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_departure_lock_failure_does_not_mutate_task() {
+        let (store, dir) = temp_store();
+        let id = seed(&store, "locked", TodoState::InProgress, Some("nova")).await;
+        let before = std::fs::read(store.task_path(&id)).unwrap();
+        std::fs::write(dir.join(format!("{id}.json.lock")), "cannot acquire").unwrap();
+        let error = store
+            .try_unassign_tasks_for_teammate("id", "nova", TeammateEndReason::Shutdown)
+            .await
+            .unwrap_err();
+        assert!(error.unassigned_tasks.is_empty());
+        assert_eq!(std::fs::read(store.task_path(&id)).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_departure_preserves_partial_progress_for_write_retry() {
+        let (store, dir) = temp_store();
+        let first = seed(&store, "first", TodoState::InProgress, Some("nova")).await;
+        let second = seed(&store, "second", TodoState::InProgress, Some("nova")).await;
+        let before = std::fs::read(store.task_path(&second)).unwrap();
+        let error = store
+            .try_unassign_with_writer("id", "nova", TeammateEndReason::Shutdown, |task| {
+                if task.id == second {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected write failure",
+                    ))
+                } else {
+                    store.write_departure_task(task)
+                }
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.unassigned_tasks,
+            [UnassignedTask {
+                id: first,
+                subject: "first".into()
+            }]
+        );
+        assert_eq!(std::fs::read(store.task_path(&second)).unwrap(), before);
+        let retry = store
+            .try_unassign_tasks_for_teammate("id", "nova", TeammateEndReason::Shutdown)
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.unassigned_tasks,
+            [UnassignedTask {
+                id: second,
+                subject: "second".into()
+            }]
+        );
+        let mut all = error.unassigned_tasks;
+        all.extend(retry.unassigned_tasks);
+        assert_eq!(format_unassignment_notification("nova", TeammateEndReason::Shutdown, &all), "nova has shut down. 2 task(s) were unassigned: #1 \"first\", #2 \"second\". Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_departure_rechecks_owner_and_completion_after_file_lock() {
+        use std::future::Future;
+        use std::task::Poll;
+        for completed in [false, true] {
+            let (store, dir) = temp_store();
+            let id = seed(&store, "racing", TodoState::InProgress, Some("nova")).await;
+            let held = crate::proper_lockfile::lock(&store.task_path(&id))
+                .await
+                .unwrap();
+            let departure =
+                store.try_unassign_tasks_for_teammate("id", "nova", TeammateEndReason::Shutdown);
+            tokio::pin!(departure);
+            std::future::poll_fn(|cx| {
+                assert!(departure.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            let mut changed = store.get(&id).await.unwrap();
+            if completed {
+                changed.status = TodoState::Completed;
+            } else {
+                changed.owner = Some("other".into());
+            }
+            store.write_task(&changed).unwrap(); // another process holding the file lock
+            drop(held);
+            assert!(departure.await.unwrap().unassigned_tasks.is_empty());
+            assert_eq!(store.get(&id).await.unwrap(), changed);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_departure_atomic_write_failure_removes_temporary_file() {
+        let (store, dir) = temp_store();
+        std::fs::create_dir(&dir).unwrap();
+        let mut task = TodoTask::new("failure".into(), "desc".into(), None, Map::new());
+        task.id = "1".into();
+        let destination = store.task_path(&task.id);
+        std::fs::create_dir(&destination).unwrap();
+        // Renaming a staged regular file over a directory fails independently
+        // of user privileges or path-component sanitization.
+        assert!(store.write_departure_task(&task).is_err());
+        let entries = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, [destination.clone()]);
+        assert!(destination.is_dir());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -1226,7 +1493,7 @@ mod tests {
             .await;
         assert!(outcome.unassigned_tasks.is_empty());
         assert_eq!(outcome.notification_message, "nova has shut down.");
-        // Latent "terminated" branch (zero call sites in 2.1.223) byte-check.
+        // Latent "terminated" branch (zero call sites in 2.1.263) byte-check.
         let outcome = store
             .unassign_tasks_for_teammate("agent-uuid-1", "nova", TeammateEndReason::Terminated)
             .await;

@@ -438,6 +438,13 @@ fn encode_content_block(
                 "tool_use_id": tool_call_id,
                 "content": normalize_tool_result_content(output),
             });
+            if let Some(units) = protocol::js_utf16::tool_result_units(output) {
+                block["content"] = Value::String(String::from_utf16_lossy(&units));
+                overrides.insert(
+                    format!("/messages/{message_index}/content/{block_index}/content"),
+                    units,
+                );
+            }
             if *is_error {
                 block["is_error"] = Value::Bool(true);
             }

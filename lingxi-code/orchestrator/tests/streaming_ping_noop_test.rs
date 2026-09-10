@@ -42,11 +42,18 @@ async fn ping_between_deltas_does_not_disturb_output() {
     let events = output.snapshot().await;
     // The §0.7 "light up thinking/usage" follow-up adds additive `Usage`
     // emits (from `message_start` / `message_delta`); filter them (and
-    // `Thinking`) out so this test keeps asserting the text/end-turn
+    // `Thinking` and message identity metadata) out so this test keeps asserting the text/end-turn
     // sequence it cares about.
     let events: Vec<&OutputEvent> = events
         .iter()
-        .filter(|e| !matches!(e, OutputEvent::Usage { .. } | OutputEvent::Thinking { .. }))
+        .filter(|e| {
+            !matches!(
+                e,
+                OutputEvent::Usage { .. }
+                    | OutputEvent::Thinking { .. }
+                    | OutputEvent::MessageIdentity { .. }
+            )
+        })
         .collect();
     // Expect: Text("abc"), Text("def"), EndTurn — pings filtered out.
     assert_eq!(events.len(), 3, "got {events:?}");

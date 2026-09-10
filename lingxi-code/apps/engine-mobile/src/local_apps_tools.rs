@@ -51,7 +51,7 @@ use crate::local_apps_mcp::LocalAppsMcpTransport;
 /// PROMPT default for each name lives in `permission::defaults_per_tool` — one
 /// table for every tool in the product, rather than a second policy here.
 pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
-    // Read-only unless noted: SEVEN entries below this header are `false`.
+    // Read-only unless noted; the state-journaling entries below are `false`.
     // `LocalAppValidateTemplateSelection`, `LocalAppStageCreate`,
     // `LocalAppValidateMcpProposal`, `LocalAppApproveMcpProposal`,
     // `LocalAppQaMcpCandidate` and `LocalAppPromoteMcpCandidate` journal Host
@@ -73,6 +73,7 @@ pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
         true,
     ),
     ("LocalAppStageCreate", "stage_create", false),
+    ("LocalAppContract", "contract", false),
     (
         "LocalAppValidateMcpProposal",
         "validate_mcp_proposal",
@@ -102,6 +103,9 @@ pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
     ("LocalAppCaptureUi", "capture_ui", true),
     // Mutating.
     ("LocalAppBuild", "build", false),
+    ("LocalAppQaBegin", "qa_begin", false),
+    ("LocalAppQaReadEvidence", "qa_read_evidence", true),
+    ("LocalAppQaFinalize", "qa_finalize", false),
     ("LocalAppInstallDeps", "install_dependencies", false),
     // r2-never-wired-02: these two had a full provider catalog entry,
     // description and handler (host's native dependency-review confirmation
@@ -194,13 +198,27 @@ impl LocalAppTool {
 #[must_use]
 pub fn local_app_builtin_tools(
     transport: &Arc<LocalAppsMcpTransport>,
-    session_cwd: &std::path::Path,
+    session_app_id: Option<String>,
 ) -> Vec<Arc<dyn Tool>> {
-    let session_app_id = permission::local_app_id_for_root(session_cwd);
+    // The composition root passes the exact app id it resolved from the
+    // canonical, data-root-bounded workspace. Do not re-derive it from a raw
+    // cwd here: a symlink alias can otherwise make the Host grant the full
+    // inventory while these tools bind no app (or bind the alias's wrong id).
+    // Ordinary Code conversations outside a Local App workspace only need
+    // the three global management operations.  The full host surface is
+    // registered for an app workspace, where its id comes from the
+    // host-owned LINGXI.md binding and the tool permission refinement can
+    // scope calls to that app. Chat's existing session allowlist remains the
+    // policy boundary; this function is used by the Code/mobile host path.
+    const GLOBAL_LOCAL_APP_TOOLS: &[&str] = &["LocalAppCreate", "LocalAppList", "LocalAppGet"];
+    let global_session = session_app_id.is_none();
     let catalog = LocalAppsMcpTransport::host_tool_catalog();
     LOCAL_APP_TOOLS
         .iter()
         .filter_map(|&(name, operation, read_only)| {
+            if global_session && !GLOBAL_LOCAL_APP_TOOLS.contains(&name) {
+                return None;
+            }
             let entry = catalog.iter().find(|tool| tool.tool_name == operation)?;
             Some(Arc::new(LocalAppTool::new(
                 name,
@@ -224,13 +242,11 @@ pub fn local_app_builtin_tools(
 
 impl LocalAppTool {
     /// The local app this session is rooted in, if any.
-    fn bound_app_id(&self, ctx: &ToolUseContext) -> Option<String> {
-        // Construction-time binding first (the main turn loop). An isolated
-        // subagent DOES set `ctx.cwd`, so honour that when present.
-        ctx.cwd
-            .as_deref()
-            .and_then(permission::local_app_id_for_root)
-            .or_else(|| self.session_app_id.clone())
+    fn bound_app_id(&self, _ctx: &ToolUseContext) -> Option<String> {
+        // A call-time cwd is not an authority source. Isolated agents inherit
+        // the session's Host-resolved binding; a crafted A→B path or symlink
+        // must never retarget an already-registered builtin.
+        self.session_app_id.clone()
     }
 
     fn requires_bound_session_for_auto_allow(&self) -> bool {
@@ -474,6 +490,87 @@ impl Tool for LocalAppTool {
     }
 }
 
+/// Remove fields that could carry image bytes before metadata is copied into a
+/// model-facing summary.  The actual primary image remains in `file.base64`
+/// for the live media projection; this helper only protects the duplicate
+/// metadata/summary path.  Local App QA metadata is Host-shaped and small, but
+/// treating the envelope as untrusted keeps a malformed evidence response from
+/// smuggling a second pixel payload into session text.
+fn safe_ephemeral_metadata(value: &Value) -> Value {
+    const MAX_STRING_CHARS: usize = 4096;
+    const MAX_ARRAY_ITEMS: usize = 256;
+    const MAX_ID_LIST_ITEMS: usize = 4096;
+    const MAX_OBJECT_FIELDS: usize = 128;
+
+    fn is_pixel_field(key: &str) -> bool {
+        matches!(
+            key.to_ascii_lowercase().as_str(),
+            "data" | "base64" | "bytes" | "pixels" | "image_data" | "additional_images"
+        )
+    }
+
+    fn is_identity_list_field(key: &str) -> bool {
+        matches!(
+            key,
+            "qa_evidence_ids"
+                | "evidence_ids"
+                | "resolved_by_evidence_ids"
+                | "declared_target_ids"
+                | "in_scope_target_ids"
+                | "unverified_target_ids"
+                | "unverified_scenario_ids"
+        )
+    }
+
+    fn sanitize(value: &Value, array_limit: usize) -> Value {
+        match value {
+            Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+            Value::String(text) => {
+                if text.chars().count() <= MAX_STRING_CHARS {
+                    value.clone()
+                } else {
+                    Value::String(text.chars().take(MAX_STRING_CHARS).collect())
+                }
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .take(array_limit)
+                    .map(|item| sanitize(item, MAX_ARRAY_ITEMS))
+                    .collect(),
+            ),
+            Value::Object(fields) => Value::Object(
+                fields
+                    .iter()
+                    .filter(|(key, _)| !is_pixel_field(key))
+                    .take(MAX_OBJECT_FIELDS)
+                    .map(|(key, value)| {
+                        let limit = if is_identity_list_field(key) {
+                            MAX_ID_LIST_ITEMS
+                        } else {
+                            MAX_ARRAY_ITEMS
+                        };
+                        (key.clone(), sanitize(value, limit))
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    sanitize(value, MAX_ARRAY_ITEMS)
+}
+
+fn ephemeral_image_summary(metadata: &Value, image_count: usize) -> String {
+    let details = serde_json::json!({
+        "image_count": image_count,
+        "metadata": metadata,
+    });
+    format!(
+        "Temporary local-app view capture attached; pixels are not persisted. QA metadata: {}",
+        serde_json::to_string(&details).unwrap_or_else(|_| "{}".into())
+    )
+}
+
 /// Turn the provider's MCP envelope into a builtin tool result.
 ///
 /// Extracted so it can be tested WITHOUT a live transport and host. It was
@@ -531,28 +628,43 @@ fn envelope_to_tool_result(result: platform_api::McpToolResultDto) -> ToolCallRe
     // that case is an error (`local_apps_mcp.rs` answers `tool_error` for an
     // empty frame); falling through to the text path here agrees with it
     // instead of manufacturing a success.
-    if let Some((base64, media_type)) = result.content.as_array().and_then(|blocks| {
-        blocks
-            .iter()
-            .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
-            .find_map(|block| {
-                let data = block.get("data").and_then(Value::as_str)?;
-                if data.is_empty() {
-                    return None;
-                }
-                let media_type = block
-                    .get("mimeType")
-                    .and_then(Value::as_str)
-                    .unwrap_or("image/jpeg");
-                Some((data, media_type))
+    let image_blocks: Vec<(String, String)> = result
+        .content
+        .as_array()
+        .into_iter()
+        .flat_map(|blocks| blocks.iter())
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|block| {
+            let data = block.get("data").and_then(Value::as_str)?;
+            (!data.is_empty()).then(|| {
+                (
+                    data.to_string(),
+                    block
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .unwrap_or("image/jpeg")
+                        .to_string(),
+                )
             })
-    }) {
+        })
+        .collect();
+    if !image_blocks.is_empty() {
+        // Keep the established `{type:image,file:{base64,type}}` shape so the
+        // shared turn egress emits a real image content block. The generic
+        // media projection intentionally emits one primary frame; retain only
+        // a safe count for any additional frames rather than duplicating their
+        // base64 in metadata or model text.
+        let (base64, media_type) = &image_blocks[0];
+        let metadata =
+            safe_ephemeral_metadata(&result.structured_content.clone().unwrap_or(Value::Null));
+        let summary = ephemeral_image_summary(&metadata, image_blocks.len());
         let mut out = ToolCallResult::from_data(serde_json::json!({
             "type": "image",
             "file": { "base64": base64, "type": media_type },
-            "metadata": result.structured_content.clone().unwrap_or(Value::Null),
+            "image_count": image_blocks.len(),
+            "metadata": metadata,
             "_lingxi_ephemeral": true,
-            "summary": "Temporary local-app view capture; pixels are excluded from session persistence."
+            "summary": summary,
         }));
         // NOT `text`: for a capture envelope `content` is image-only, so `text`
         // is None and `tool_result_to_model_text` would fall through to a JSON
@@ -568,7 +680,7 @@ fn envelope_to_tool_result(result: platform_api::McpToolResultDto) -> ToolCallRe
         out.model_content = Some(
             serde_json::json!({
                 "_lingxi_ephemeral": true,
-                "summary": "Temporary local-app view capture attached; pixels are not persisted."
+                "summary": out.data["summary"].clone(),
             })
             .to_string(),
         );
@@ -640,6 +752,119 @@ mod tests {
         let parsed: Value =
             serde_json::from_str(model_content).expect("the sanitizer parses this as JSON");
         assert_eq!(parsed["_lingxi_ephemeral"], true);
+    }
+
+    /// QA metadata must survive the two projections that agents actually read:
+    /// the shared media projection used by the subagent runner and the
+    /// `model_content` string used by the main turn.  Checking only
+    /// `ToolCallResult.data["metadata"]` misses both regressions because the
+    /// runner deliberately replaces that object with the ephemeral summary.
+    #[test]
+    fn qa_image_projection_keeps_identity_dimensions_and_all_frame_count_without_pixels() {
+        const FRAME_A: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
+        const FRAME_B: &str = "iVBORw0KGgoAAAANSUhEUg==";
+        let out = envelope_to_tool_result(platform_api::McpToolResultDto {
+            content: serde_json::json!([
+                { "type": "image", "data": FRAME_A, "mimeType": "image/jpeg" },
+                { "type": "image", "data": FRAME_B, "mimeType": "image/png" }
+            ]),
+            is_error: false,
+            structured_content: Some(serde_json::json!({
+                "ok": true,
+                "qa_handle": "qa_0123456789abcdef0123456789abcdef",
+                "qa_evidence_ids": ["qa-evidence-1", "qa-evidence-2"],
+                "evidence": {
+                    "evidence_id": "qa-evidence-2",
+                    "scenario_id": "primary-action",
+                    "target_id": "iphone",
+                    "kind": "capture",
+                    "source": "host",
+                    "artifact": { "artifact_id": "artifact-2", "format": "png", "byte_len": 42 }
+                },
+                "image_width": 834,
+                "image_height": 1194,
+                // A producer bug must not be able to smuggle a second copy of
+                // pixels through the metadata side channel.
+                "data": FRAME_A,
+            })),
+            ..Default::default()
+        });
+
+        let projected = tool_api::tool_result_media::media_content_blocks(&out.data)
+            .expect("the actual subagent media projection must see the image");
+        assert_eq!(
+            projected.len(),
+            1,
+            "the established projection emits the primary frame once"
+        );
+        assert_eq!(projected[0]["source"]["data"], FRAME_A);
+        let summary = tool_api::tool_result_media::ephemeral_summary(&out.data)
+            .expect("the subagent runner must use the compact summary");
+        assert!(summary.contains("qa_0123456789abcdef0123456789abcdef"));
+        assert!(summary.contains("qa-evidence-1"));
+        assert!(summary.contains("qa-evidence-2"));
+        assert!(summary.contains("primary-action"));
+        assert!(summary.contains("image_width"));
+        assert!(summary.contains("image_height"));
+        assert!(summary.contains("image_count"));
+        assert!(!summary.contains(FRAME_A));
+        assert!(!summary.contains(FRAME_B));
+
+        // The main model receives the model_content string, not `data`.
+        let model_content = out.model_content.as_deref().expect("model-facing marker");
+        assert!(model_content.contains("qa-evidence-2"));
+        assert!(model_content.contains("primary-action"));
+        assert!(!model_content.contains(FRAME_A));
+        assert!(!model_content.contains(FRAME_B));
+        let marker: Value = serde_json::from_str(model_content).expect("sanitizer marker JSON");
+        assert_eq!(marker["_lingxi_ephemeral"], true);
+        assert!(marker["summary"]
+            .as_str()
+            .is_some_and(|text| text.contains("artifact-2")));
+
+        // The durable sanitizer uses the same marker and keeps only summary
+        // text.  This mirrors its behavior without importing the orchestrator
+        // crate into the mobile tool unit tests.
+        let persisted = marker["summary"].as_str().expect("summary text");
+        assert!(!persisted.contains(FRAME_A));
+        assert!(!persisted.contains(FRAME_B));
+        assert!(persisted.contains("qa-evidence-2"));
+    }
+
+    #[test]
+    fn qa_read_evidence_image_projection_retains_evidence_identity() {
+        const DATA: &str = "RkFLRS1GUkFNRQ==";
+        let out = envelope_to_tool_result(platform_api::McpToolResultDto {
+            content: serde_json::json!([
+                { "type": "image", "data": DATA, "mimeType": "image/webp" }
+            ]),
+            is_error: false,
+            structured_content: Some(serde_json::json!({
+                "evidence": {
+                    "evidence_id": "ev-capture-9",
+                    "scenario_id": "checkout",
+                    "target_id": "ipad",
+                    "kind": "capture",
+                    "source": "host",
+                    "event_id": "event-9",
+                    "artifact": { "artifact_id": "artifact-9", "format": "webp" }
+                },
+                "qa_handle": "qa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "qa_evidence_ids": ["ev-capture-9"]
+            })),
+            ..Default::default()
+        });
+        let projected = tool_api::tool_result_media::media_content_blocks(&out.data)
+            .expect("QaReadEvidence capture must remain an actual image");
+        assert_eq!(projected[0]["source"]["media_type"], "image/webp");
+        let summary = tool_api::tool_result_media::ephemeral_summary(&out.data).unwrap();
+        for identity in ["ev-capture-9", "checkout", "ipad", "event-9", "artifact-9"] {
+            assert!(
+                summary.contains(identity),
+                "metadata lost {identity}: {summary}"
+            );
+        }
+        assert!(!summary.contains(DATA));
     }
 
     /// An image block with no payload must NOT be dressed up as a success.
@@ -780,8 +1005,11 @@ mod tests {
     /// would notice.
     #[test]
     fn the_builder_produces_every_declared_tool() {
-        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        let built = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("apps/app-a/workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
+        let built = local_app_builtin_tools(&transport, Some("app-a".into()));
         assert_eq!(
             built.len(),
             LOCAL_APP_TOOLS.len(),
@@ -793,6 +1021,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn forged_project_suffix_stays_on_global_inventory() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let forged = root.path().join("ordinary-project/apps/app-a/workspace");
+        std::fs::create_dir_all(&forged).expect("forged workspace");
+        let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
+        // The composition root did not authenticate this as a Local App
+        // workspace. A path suffix alone must not grant app-scoped tools.
+        let built = local_app_builtin_tools(&transport, None);
+        let names: std::collections::BTreeSet<&str> = built.iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names,
+            ["LocalAppCreate", "LocalAppGet", "LocalAppList"]
+                .into_iter()
+                .collect()
+        );
+    }
+
     /// The catalog's own loading decision must survive the move. Dropping it
     /// made all 21 descriptions plus the very large `update_manifest` /
     /// `mutate_data` schemas ride in EVERY mobile conversation, and inverted
@@ -801,7 +1047,7 @@ mod tests {
     #[test]
     fn the_catalogs_loading_decision_survives_the_move() {
         let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        let built = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let built = local_app_builtin_tools(&transport, None);
         let list = built
             .iter()
             .find(|t| t.name() == "LocalAppList")
@@ -839,6 +1085,7 @@ mod tests {
                     | "LocalAppTemplateCatalog"
                     | "LocalAppResolveTemplateSelection"
                     | "LocalAppStageCreate"
+                    | "LocalAppContract"
                     | "LocalAppLogs"
                     | "LocalAppCheckpointList"
                     | "LocalAppBackgroundList"
@@ -985,7 +1232,7 @@ mod tests {
     #[test]
     fn the_tools_do_not_report_themselves_as_mcp() {
         let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        for tool in local_app_builtin_tools(&transport, std::path::Path::new("/tmp")) {
+        for tool in local_app_builtin_tools(&transport, None) {
             assert!(!tool.is_mcp(), "{} must not report as MCP", tool.name());
         }
     }
@@ -1003,10 +1250,9 @@ mod tests {
         let workspace = root.path().join("apps/app-a/workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
-        // Bind the way PRODUCTION does: from the engine cwd at construction.
-        // The main turn loop leaves `ToolUseContext::cwd` as `None`, so a test
-        // that hand-sets it would verify a path that never runs.
-        let tools = local_app_builtin_tools(&transport, &workspace);
+        // Bind the way production does: from the exact canonical app id the
+        // Host resolved at construction.
+        let tools = local_app_builtin_tools(&transport, Some("app-a".into()));
         let query = tools
             .iter()
             .find(|t| t.name() == "LocalAppQueryData")
@@ -1032,6 +1278,23 @@ mod tests {
             other => panic!("a sibling app must be refused, got {other:?}"),
         }
 
+        // An isolated-agent cwd is metadata, not a new authority source. A
+        // raw path that names app-b must not retarget tools Host-bound to
+        // app-a when the session was composed.
+        let mut hostile_ctx = tool_api::test_support::fresh_ctx();
+        hostile_ctx.cwd = Some(root.path().join("apps/app-b/workspace"));
+        let refused = query
+            .call(
+                serde_json::json!({"app_id": "app-b", "collection": "journal"}),
+                hostile_ctx,
+                tool_api::test_support::fresh_tx(),
+            )
+            .await;
+        assert!(
+            matches!(&refused, Err(ToolError::InvalidInput(message)) if message.contains("app-b") && message.contains("app-a")),
+            "call-time cwd must not replace the Host-resolved binding: {refused:?}"
+        );
+
         // Its OWN app is not refused by the binding (it fails later, on the
         // absent service — which proves the guard let it through).
         let own = query
@@ -1050,30 +1313,16 @@ mod tests {
     #[tokio::test]
     async fn a_global_session_must_confirm_app_targeted_auto_allowed_tools() {
         let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        let tools = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
-        let build = tools
-            .iter()
-            .find(|t| t.name() == "LocalAppBuild")
-            .expect("LocalAppBuild");
-        let decision = build
-            .check_permissions(
-                &serde_json::json!({"app_id": "app-a"}),
-                &tool_api::test_support::fresh_ctx(),
-            )
-            .await;
-        assert!(matches!(decision, PermissionResult::Ask { .. }));
+        let tools = local_app_builtin_tools(&transport, None);
+        assert!(tools.iter().all(|tool| tool.name() != "LocalAppBuild"));
     }
 
     #[tokio::test]
     async fn a_global_session_must_confirm_background_list_and_status() {
         let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        let tools = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let tools = local_app_builtin_tools(&transport, None);
         for name in ["LocalAppBackgroundList", "LocalAppBackgroundStatus"] {
-            let tool = tools.iter().find(|t| t.name() == name).expect("tool");
-            let decision = tool
-                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
-                .await;
-            assert!(matches!(decision, PermissionResult::Ask { .. }), "{name}");
+            assert!(tools.iter().all(|tool| tool.name() != name), "{name}");
         }
     }
 
@@ -1083,7 +1332,7 @@ mod tests {
         let workspace = root.path().join("apps/app-a/workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
-        let tools = local_app_builtin_tools(&transport, &workspace);
+        let tools = local_app_builtin_tools(&transport, Some("app-a".into()));
         for name in [
             "LocalAppGet",
             "LocalAppLogs",
@@ -1108,8 +1357,11 @@ mod tests {
     /// which the dispatcher uses to decide what may overlap.
     #[test]
     fn read_only_classification_reaches_the_tool() {
-        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        let built = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("apps/app-a/workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
+        let built = local_app_builtin_tools(&transport, Some("app-a".into()));
         let by_name: std::collections::BTreeMap<&str, &Arc<dyn Tool>> =
             built.iter().map(|t| (t.name(), t)).collect();
         let empty = serde_json::json!({});
@@ -1132,8 +1384,11 @@ mod tests {
                 .any(|&(name, operation, _)| name == "LocalAppScaffold" && operation == "scaffold"),
             "the builtin must map to the `scaffold` provider operation"
         );
-        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        let built = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("apps/app-a/workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
+        let built = local_app_builtin_tools(&transport, Some("app-a".into()));
         let scaffold = built
             .iter()
             .find(|tool| tool.name() == "LocalAppScaffold")
@@ -1158,27 +1413,8 @@ mod tests {
     #[tokio::test]
     async fn a_global_session_must_confirm_scaffold() {
         let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        let tools = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
-        let scaffold = tools
-            .iter()
-            .find(|tool| tool.name() == "LocalAppScaffold")
-            .expect("LocalAppScaffold");
-        let decision = scaffold
-            .check_permissions(
-                &serde_json::json!({
-                    "app_id": "app-a",
-                    "name": "N",
-                    "brief": "b",
-                    "workflow_run_id": "wf_scaffold_permission",
-                    "receipt_id": "mcp-create-receipt"
-                }),
-                &tool_api::test_support::fresh_ctx(),
-            )
-            .await;
-        assert!(
-            matches!(decision, PermissionResult::Ask { .. }),
-            "a global session must be asked, got {decision:?}"
-        );
+        let tools = local_app_builtin_tools(&transport, None);
+        assert!(tools.iter().all(|tool| tool.name() != "LocalAppScaffold"));
     }
 
     /// …and inside the shell's own workspace it must NOT prompt: the whole
@@ -1191,7 +1427,7 @@ mod tests {
         let workspace = root.path().join("apps/app-a/workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
-        let tools = local_app_builtin_tools(&transport, &workspace);
+        let tools = local_app_builtin_tools(&transport, Some("app-a".into()));
         let scaffold = tools
             .iter()
             .find(|tool| tool.name() == "LocalAppScaffold")
@@ -1214,8 +1450,11 @@ mod tests {
     /// schema-only assertion cannot see) still fails.
     #[tokio::test]
     async fn the_scaffold_tool_avoids_the_banned_vocabulary() {
-        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
-        let built = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("apps/app-a/workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
+        let built = local_app_builtin_tools(&transport, Some("app-a".into()));
         let scaffold = built
             .iter()
             .find(|tool| tool.name() == "LocalAppScaffold")

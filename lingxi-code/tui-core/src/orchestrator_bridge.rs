@@ -107,6 +107,8 @@ pub struct CommandCatalogEntry {
 /// agents arrive as full snapshots from the CLI's task-registry poller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningAgentStatus {
+    /// The teammate is waiting for its leader's plan decision.
+    pub awaiting_plan_approval: bool,
     /// Stable agent/task id (or the foreground tool-use id before launch).
     pub id: String,
     /// Claude task-registry type used by the compact footer summarizer.
@@ -130,6 +132,10 @@ pub struct RunningAgentStatus {
 /// live-streaming parity).
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
+    /// Bind the just-completed assistant response to its transcript identity.
+    MessageIdentity(protocol::MessageId),
+    /// Remove only the assistant response with this transcript identity.
+    MessageRetracted(protocol::MessageId),
     /// Streaming text chunk from the assistant.
     TextDelta(String),
     /// A completed assistant thinking block (M5 live streaming). The
@@ -198,6 +204,9 @@ pub enum TurnEvent {
     /// Fired SYNCHRONOUSLY before the orchestrator future is awaited so
     /// the UI shows the spinner immediately on Enter.
     TurnStarted,
+    /// A host-started turn (for example, a teammate message waking the leader)
+    /// carries its cancellation token because no composer submit created one.
+    TurnStartedWithCancel(platform_api::CancellationToken),
     /// Fired when the orchestrator returns. Carries the [`TurnOutcome`].
     TurnEnded(TurnOutcome),
     /// Updated session-cumulative cost, formatted as `$0.0000` (4-decimal
@@ -416,6 +425,14 @@ impl BridgeOutputStream {
 
 #[async_trait]
 impl OutputStream for BridgeOutputStream {
+    async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
+        let _ = self.tx.send(TurnEvent::MessageIdentity(*message_id));
+    }
+
+    async fn emit_message_retracted(&self, message_id: &protocol::MessageId) {
+        let _ = self.tx.send(TurnEvent::MessageRetracted(*message_id));
+    }
+
     async fn emit_turn_started(&self) {
         let _ = self.tx.send(TurnEvent::TurnStarted);
     }
@@ -686,6 +703,21 @@ impl OutputStream for BridgeOutputStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn assistant_identity_and_retraction_preserve_exact_id() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream = BridgeOutputStream::new(tx);
+        let id = protocol::MessageId::new();
+        stream.emit_assistant_message_identity(&id).await;
+        stream.emit_message_retracted(&id).await;
+        assert!(
+            matches!(rx.recv().await, Some(TurnEvent::MessageIdentity(actual)) if actual == id)
+        );
+        assert!(
+            matches!(rx.recv().await, Some(TurnEvent::MessageRetracted(actual)) if actual == id)
+        );
+    }
     use tokio::sync::mpsc;
 
     #[tokio::test]

@@ -161,6 +161,7 @@ pub struct ApiProposeQuery {
     thinking: bool,
     /// Handle used to drive the async call from the blocking thread.
     handle: tokio::runtime::Handle,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ApiProposeQuery {
@@ -181,6 +182,7 @@ impl ApiProposeQuery {
             profile,
             thinking,
             handle: tokio::runtime::Handle::current(),
+            cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
 }
@@ -201,7 +203,12 @@ impl permission::auto_mode_propose::ProposeQuery for ApiProposeQuery {
         let profile = self.profile.clone();
         let system = system.to_string();
 
+        let cancel = self.cancel.clone();
         self.handle.block_on(async move {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => QueryOutcome::Aborted,
+                result = async move {
             let stream = match service
                 .stream_json_schema(
                     &model,
@@ -221,6 +228,8 @@ impl permission::auto_mode_propose::ProposeQuery for ApiProposeQuery {
                 Err(e) => return QueryOutcome::Failed(e.to_string()),
             };
             collect_propose_reply(futures::StreamExt::collect::<Vec<_>>(stream).await)
+                } => result,
+            }
         })
     }
 }
@@ -453,9 +462,151 @@ mod tests {
             other => panic!("expected a user message, got {other:?}"),
         }
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_stop_cancels_a_scan_while_provider_stream_is_establishing() {
+        use llm_client::{
+            AuthStrategy, Capabilities, ClientConfig, CredentialConfig, DefaultLlmClient,
+            ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, Transport,
+        };
+        use permission::auto_mode_propose::ProposeQuery;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct Establishing {
+            entered: tokio::sync::Notify,
+            dropped: Arc<AtomicBool>,
+        }
+        struct InFlight(Arc<AtomicBool>);
+        impl Drop for InFlight {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        impl Transport for Establishing {
+            fn execute<'a>(
+                &'a self,
+                _: &'a llm_client::ProviderRequest,
+            ) -> llm_client::BoxFuture<'a, Result<llm_client::ProviderResponse, LlmError>>
+            {
+                unreachable!("scan must stream")
+            }
+            fn open_stream<'a>(
+                &'a self,
+                _: &'a llm_client::ProviderRequest,
+            ) -> llm_client::BoxFuture<'a, Result<llm_client::StreamingResponse, LlmError>>
+            {
+                Box::pin(async move {
+                    let _request = InFlight(self.dropped.clone());
+                    self.entered.notify_one();
+                    std::future::pending().await
+                })
+            }
+        }
+        let transport = Arc::new(Establishing {
+            entered: tokio::sync::Notify::new(),
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "scan-probe".into(),
+                    base_url: "https://api.anthropic.com".into(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::None,
+                    credential: CredentialConfig::None,
+                    models: vec![ModelProfile {
+                        display_model: "claude-sonnet-4-20250514".into(),
+                        request_model: "claude-sonnet-4-20250514".into(),
+                        billing_model: "claude-sonnet-4".into(),
+                        aliases: vec![],
+                        description: None,
+                        metadata: Default::default(),
+                        // `stream_json_schema` sets `response_format`, which the
+                        // client refuses with `unsupported capability:
+                        // structured_output` unless the profile declares it —
+                        // before ever calling the transport, so the fixture
+                        // below would never see its stream open.
+                        capabilities: Capabilities {
+                            streaming: true,
+                            structured_output: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
+                }],
+            })
+            .unwrap(),
+        );
+        let service = Arc::new(llm_client::ApiService::new(
+            client,
+            transport.clone(),
+            Default::default(),
+            llm_client::model::user_agent::UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        ));
+        let query = ApiProposeQuery::new(
+            service,
+            "claude-sonnet-4-20250514".into(),
+            Some("scan-probe".into()),
+            false,
+        );
+        let cancel = query.cancel.clone();
+        let run = tokio::task::spawn_blocking(move || {
+            query.query("Scan the environment", &[msg("user", "scan")])
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            transport.entered.notified(),
+        )
+        .await
+        .expect("provider connection must actually start");
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+            .await
+            .expect("scan cancellation must not await the provider")
+            .unwrap();
+        assert_eq!(result, QueryOutcome::Aborted);
+        assert!(
+            transport.dropped.load(Ordering::SeqCst),
+            "the actual establishing request must be dropped"
+        );
+    }
 }
 
 // ── the two `/auto-mode-setup` runners ───────────────────────────────────────
+
+/// Cancels model work when its command future disappears.
+struct ScanGuard {
+    registry: std::sync::Arc<tasks::registry::TaskRegistry>,
+    id: String,
+    cancel: tokio_util::sync::CancellationToken,
+    finished: bool,
+}
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancel.cancel();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let registry = self.registry.clone();
+                let id = self.id.clone();
+                runtime.spawn(async move {
+                    let _ = registry.set_status(&id, tasks::TaskStatus::Killed).await;
+                });
+            }
+        }
+    }
+}
 
 /// Drives `--propose` for the slash surface.
 ///
@@ -464,7 +615,9 @@ mod tests {
 /// session's turns use. Everything else (gather reach, prompt, repair
 /// round-trip, unsafe-allow reconciliation) is
 /// [`permission::auto_mode_propose::run_propose`].
+/// Model-backed proposal runner, with a visible cancellable scan task.
 pub struct DesktopProposeRunner {
+    task_registry: std::sync::Arc<tasks::registry::TaskRegistry>,
     service: std::sync::Arc<llm_client::ApiService>,
     model: String,
     profile: Option<String>,
@@ -488,8 +641,10 @@ impl DesktopProposeRunner {
         gather_root: std::path::PathBuf,
         user_config_dir: std::path::PathBuf,
         transcript_dir: std::path::PathBuf,
+        task_registry: std::sync::Arc<tasks::registry::TaskRegistry>,
     ) -> Self {
         Self {
+            task_registry,
             service,
             model,
             profile,
@@ -519,12 +674,30 @@ impl command_core::ProposeRunner for DesktopProposeRunner {
             // setting it never read.
             classify_all_shell: false,
         };
-        let query = ApiProposeQuery::new(
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task_id = match self
+            .task_registry
+            .register_auto_mode_scan(cancel.clone())
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                return serde_json::json!({"ok": false, "code": "recon_failed", "reason": error.to_string()})
+            }
+        };
+        let mut scan_guard = ScanGuard {
+            registry: self.task_registry.clone(),
+            id: task_id.clone(),
+            cancel: cancel.clone(),
+            finished: false,
+        };
+        let mut query = ApiProposeQuery::new(
             self.service.clone(),
             self.model.clone(),
             self.profile.clone(),
             self.thinking,
         );
+        query.cancel = cancel.clone();
         let outcome = run_propose_blocking(
             answers,
             self.plan.clone(),
@@ -536,6 +709,19 @@ impl command_core::ProposeRunner for DesktopProposeRunner {
             query,
         )
         .await;
+
+        let status = if cancel.is_cancelled() {
+            tasks::TaskStatus::Killed
+        } else if matches!(
+            outcome,
+            permission::auto_mode_propose::ProposeOutcome::Ok(_)
+        ) {
+            tasks::TaskStatus::Completed
+        } else {
+            tasks::TaskStatus::Failed
+        };
+        let _ = self.task_registry.set_status(&task_id, status).await;
+        scan_guard.finished = true;
 
         // The oracle records the run's code on both the failure and the
         // qualified-success paths, and stays silent on `aborted`.

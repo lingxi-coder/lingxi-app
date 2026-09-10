@@ -47,6 +47,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Prompt,
             model: frontmatter.model.clone(),
+            effort: frontmatter.effort.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: frontmatter.argument_names.clone(),
@@ -69,6 +70,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Prompt,
             model: frontmatter.model.clone(),
+            effort: frontmatter.effort.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: Vec::new(),
@@ -420,6 +422,129 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LOCAL_APP_PLUGIN: &str = "lingxi-local-app";
+
+    /// Baseline fixture generated with `measure_plugin_agent_guide_bytes` from
+    /// optimization baseline `21771b43`; these are guide bytes after the same
+    /// loader path, not source-file or frontmatter sizes.
+    const LOCAL_APP_GUIDE_BASELINE: &[(&str, usize)] = &[("builder", 40_520), ("designer", 60_095)];
+
+    fn local_app_plugin_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("plugins")
+            .join(LOCAL_APP_PLUGIN)
+    }
+
+    fn declared_agent_skills(source: &str) -> Vec<String> {
+        let frontmatter = source.split("---").nth(1).unwrap_or_default();
+        let mut skills = Vec::new();
+        let mut in_skills = false;
+        for line in frontmatter.lines() {
+            if line.trim() == "skills:" {
+                in_skills = true;
+                continue;
+            }
+            if in_skills {
+                if let Some(skill) = line.trim().strip_prefix("- ") {
+                    skills.push(skill.trim().to_owned());
+                } else if !line.trim().is_empty() {
+                    break;
+                }
+            }
+        }
+        skills
+    }
+
+    async fn loaded_local_app_skill_registry() -> MobileDiskSkillLoader {
+        let plugin_root = local_app_plugin_root();
+        let plugin_id = protocol::PluginId::new();
+        let mut commands = Vec::new();
+        let skills_root = plugin_root.join("skills");
+        let entries = std::fs::read_dir(&skills_root).expect("read Local App skills");
+        for entry in entries {
+            let root = entry.expect("read skill entry").path();
+            let skill_file = root.join("SKILL.md");
+            if !skill_file.is_file() {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&skill_file).expect("read skill");
+            let file = command_api::parse_skill_command_markdown(
+                &raw,
+                skill_file.clone(),
+                root.clone(),
+                CommandSource::Plugin,
+            );
+            let base = command_api::build_skill_command(&file, CommandSource::Plugin);
+            let (frontmatter, prompt_template) = match &base.kind {
+                SlashCommandKind::Markdown {
+                    frontmatter,
+                    prompt_template,
+                    ..
+                } => (frontmatter.clone(), prompt_template.clone()),
+                _ => unreachable!("skill parser must produce markdown command"),
+            };
+            commands.push(SlashCommand {
+                name: format!("{LOCAL_APP_PLUGIN}:{}", base.name),
+                source: CommandSource::Plugin,
+                kind: SlashCommandKind::Plugin {
+                    plugin_id,
+                    file_path: skill_file,
+                    frontmatter,
+                    prompt_template,
+                },
+                loaded_from: Some("plugin".to_owned()),
+                ..base
+            });
+        }
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        registry
+            .write()
+            .await
+            .register_plugin_commands(plugin_id, commands);
+        MobileDiskSkillLoader::new(registry)
+    }
+
+    async fn measure_plugin_agent_guide_bytes(agent: &str) -> usize {
+        let plugin_root = local_app_plugin_root();
+        let agent_source =
+            std::fs::read_to_string(plugin_root.join("agents").join(format!("{agent}.md")))
+                .expect("read Local App agent");
+        let agent_body = agent_source.split("---").nth(2).unwrap_or_default();
+        let loader = loaded_local_app_skill_registry().await;
+        let mut bytes = agent_body.len();
+        for skill in declared_agent_skills(&agent_source) {
+            let loaded = AgentSkillLoader::resolve_and_load(
+                &loader,
+                &skill,
+                &format!("{LOCAL_APP_PLUGIN}:{agent}"),
+            )
+            .await
+            .unwrap_or_else(|| panic!("preloaded skill {skill} must resolve for {agent}"));
+            bytes += loaded
+                .content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => text.len(),
+                    _ => 0,
+                })
+                .sum::<usize>();
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn local_app_agent_guide_measurement_uses_live_loader_and_preserves_reduction() {
+        for (agent, baseline) in LOCAL_APP_GUIDE_BASELINE {
+            let measured = measure_plugin_agent_guide_bytes(agent).await;
+            assert!(
+                measured <= baseline.saturating_mul(60) / 100,
+                "{agent} guide is not reduced by at least 40%: {measured} of baseline {baseline} bytes"
+            );
+            println!("LOCAL_APP_GUIDE_BYTES agent={agent} baseline={baseline} after={measured}");
+        }
+    }
 
     /// The deferred #14 test: a disk-authored `.lingxi/commands/*.md` under the
     /// app-private root resolves through the loader as a prompt skill (proving the

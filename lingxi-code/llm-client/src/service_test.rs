@@ -5044,6 +5044,348 @@ mod tests {
         assert_eq!(transport.seen_count(), 2);
     }
 
+    fn assistant_with_thinking() -> protocol::ConversationMessage {
+        protocol::ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![
+                protocol::ContentBlock::Thinking {
+                    thinking: "secret".into(),
+                    signature: Some("sig".into()),
+                },
+                protocol::ContentBlock::Text {
+                    text: "hello".into(),
+                },
+            ],
+            stop_reason: Some("end_turn".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_recovery_uses_captured_request_scope_after_stream_handoff() {
+        use crate::thinking_scope::{scope_thinking_recovery, ThinkingRecoveryScope};
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let old = assistant_with_thinking();
+        let owner = ThinkingRecoveryScope::default();
+        let other = ThinkingRecoveryScope::default();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let captured = recorded.clone();
+        owner.set_recorder(Arc::new(move |messages| {
+            let captured = captured.clone();
+            Box::pin(async move {
+                captured.lock().unwrap().push(messages);
+            })
+        }));
+        let mut req = scope_thinking_recovery(owner.clone(), async {
+            adapter
+                .build_request(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    vec![old.clone()],
+                    vec![],
+                    true,
+                    None,
+                )
+                .unwrap()
+        })
+        .await;
+        // Lazy streaming retries may be polled on another task, under another
+        // context, or after the caller's assembly scope has already ended.
+        scope_thinking_recovery(other.clone(), async {
+            assert!(adapter.handle_thinking_signature_strip(&mut req).await);
+            assert!(adapter.thinking_stripped_messages().is_empty());
+        })
+        .await;
+        assert_eq!(owner.messages().get(&old.id()), Some(&0));
+        assert_eq!(recorded.lock().unwrap()[0].get(&old.id()), Some(&0));
+        assert!(other.messages().is_empty());
+        assert!(adapter.thinking_stripped_messages().is_empty());
+        assert!(serde_json::to_value(&req)
+            .unwrap()
+            .get("thinking_recovery_scope")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn side_query_thinking_recovery_forks_parent_ranges_without_mutating_them() {
+        use crate::thinking_scope::{scope_thinking_recovery, ThinkingRecoveryScope};
+        let adapter = make_adapter(FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type":"error", "error":{"type":"invalid_request_error",
+                    "message":"Invalid signature in thinking block"}
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]));
+        let parent = ThinkingRecoveryScope::default();
+        let old = assistant_with_thinking();
+        scope_thinking_recovery(parent.clone(), async {
+            adapter
+                .messages_create_side_query(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    vec![old.clone()],
+                    vec![],
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    Some("summary"),
+                )
+                .await
+                .unwrap();
+            assert!(adapter.thinking_stripped_messages().is_empty());
+        })
+        .await;
+        assert!(parent.messages().is_empty());
+        assert!(adapter.thinking_stripped_messages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn thinking_signature_recovery_preserves_fresh_identical_thinking() {
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type":"error", "error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let adapter = make_adapter(transport);
+        let old = assistant_with_thinking();
+        adapter
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![old.clone()],
+                vec![],
+            )
+            .await
+            .unwrap();
+        let fresh = assistant_with_thinking();
+        let request = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![
+                    old,
+                    protocol::ConversationMessage::user(
+                        protocol::MessageId::new(),
+                        "continue".into(),
+                    ),
+                    fresh.clone(),
+                ],
+                vec![],
+                false,
+                None,
+            )
+            .unwrap();
+        let assistants: Vec<_> = request
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 2);
+        assert!(!assistants[0]
+            .content
+            .iter()
+            .any(|block| matches!(block, crate::ContentBlock::Reasoning { .. })));
+        assert!(assistants[1]
+            .content
+            .iter()
+            .any(|block| matches!(block, crate::ContentBlock::Reasoning { .. })));
+        assert!(!adapter
+            .thinking_stripped_messages()
+            .contains_key(&fresh.id()));
+        assert!(serde_json::to_value(&request)
+            .unwrap()
+            .get("thinking_source_message_ids")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn thinking_signature_400_strips_and_retries_on_anthropic() {
+        let err = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid signature in thinking block"
+            }
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(400, err)),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let adapter = make_adapter(transport.clone());
+        let result = adapter
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "Anthropic thinking-signature 400 must retry: {result:?}"
+        );
+        assert_eq!(transport.seen_count(), 2);
+        assert!(adapter.thinking_signature_stripped());
+    }
+
+    #[tokio::test]
+    async fn thinking_signature_400_strips_and_retries_on_openai_chat() {
+        let err = serde_json::json!({
+            "error": {
+                "message": "Invalid signature in thinking block",
+                "type": "invalid_request_error"
+            }
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(400, err)),
+            FakeResponse::Ok(ProviderResponse::json(
+                200,
+                serde_json::json!({
+                    "id": "chatcmpl_test",
+                    "model": "gpt-4o",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+                }),
+            )),
+        ]);
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAI,
+            "https://api.openai.com",
+            "openai",
+            "gpt-4o",
+            transport.clone(),
+        );
+        let result = adapter
+            .messages_create(
+                "gpt-4o",
+                Some("openai"),
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "OpenAI-compat thinking models must heal thinking-signature 400: {result:?}"
+        );
+        assert_eq!(transport.seen_count(), 2);
+        assert!(adapter.thinking_signature_stripped());
+    }
+
+    #[tokio::test]
+    async fn latched_thinking_strip_lets_gemini_encode_after_anthropic_thinking() {
+        let transport = FakeTransport::always(ProviderResponse::json(
+            200,
+            serde_json::json!({
+                "responseId": "resp_test",
+                "modelVersion": "gemini-2.5-flash",
+                "candidates": [{
+                    "content": {"role": "model", "parts": [{"text": "hello"}]},
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 5,
+                    "candidatesTokenCount": 2,
+                    "totalTokenCount": 7
+                }
+            }),
+        ));
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::GeminiGenerateContent,
+            ProviderId::Gemini,
+            "https://generativelanguage.googleapis.com/v1beta",
+            "gemini",
+            "gemini-2.5-flash",
+            transport.clone(),
+        );
+        adapter.set_thinking_signature_stripped(true);
+        let result = adapter
+            .messages_create(
+                "gemini-2.5-flash",
+                Some("gemini"),
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "latched strip must drop thinking before Gemini encode: {result:?}"
+        );
+        assert_eq!(transport.seen_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn latched_thinking_strip_preserves_deepseek_reasoning_round_trip() {
+        let transport = FakeTransport::always(ProviderResponse::json(
+            200,
+            serde_json::json!({
+                "id": "chatcmpl_test",
+                "model": "deepseek-reasoner",
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+            }),
+        ));
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "deepseek".into(),
+            },
+            "https://api.deepseek.com",
+            "deepseek",
+            "deepseek-reasoner",
+            transport.clone(),
+        );
+        adapter.set_thinking_signature_stripped(true);
+        let result = adapter
+            .messages_create(
+                "deepseek-reasoner",
+                Some("deepseek"),
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "DeepSeek later turn must still encode: {result:?}"
+        );
+        let body = transport.seen.lock().unwrap()[0].body_json.clone();
+        let messages = body["messages"].as_array().expect("messages");
+        let has_reasoning = messages.iter().any(|message| {
+            message
+                .get("reasoning_content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| !text.is_empty())
+        });
+        assert!(
+            has_reasoning,
+            "DeepSeek must keep reasoning_content under the latch: {body}"
+        );
+    }
+
     // ── 3c-T1: streaming 429 + retry-after header drives correct delay ────────
 
     struct RawBodyFrames(Option<Vec<u8>>);

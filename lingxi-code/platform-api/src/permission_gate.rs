@@ -18,6 +18,40 @@ use protocol::ContentBlock;
 use serde_json::Value;
 use std::path::Path;
 
+/// Receives only time spent waiting on a permission prompt transport.
+#[derive(Clone)]
+pub struct PermissionPauseObserver(std::sync::Arc<dyn Fn(u64) + Send + Sync>);
+
+impl PermissionPauseObserver {
+    pub fn new(callback: impl Fn(u64) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(callback))
+    }
+
+    pub fn begin(&self) -> PermissionPauseGuard {
+        PermissionPauseGuard { observer: self.clone(), started: std::time::Instant::now() }
+    }
+}
+impl std::fmt::Debug for PermissionPauseObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PermissionPauseObserver")
+    }
+}
+impl PartialEq for PermissionPauseObserver {
+    fn eq(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.0, &other.0) }
+}
+impl Eq for PermissionPauseObserver {}
+
+/// Drop records cancellation as well as allowed/denied prompts (oracle Ge finally).
+pub struct PermissionPauseGuard {
+    observer: PermissionPauseObserver,
+    started: std::time::Instant,
+}
+impl Drop for PermissionPauseGuard {
+    fn drop(&mut self) {
+        (self.observer.0)(self.started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+    }
+}
+
 /// Identity of the SUBAGENT / in-process-teammate worker a permission prompt is
 /// being raised on behalf of, so the prompt UI can ATTRIBUTE it.
 ///
@@ -88,6 +122,7 @@ pub enum NonInteractivePermissionDecision {
 /// [`PermissionGate::check_with_worker`] with no worker.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionCheckContext {
+    pub pause_observer: Option<PermissionPauseObserver>,
     /// Subagent/teammate worker attribution (as in [`PermissionGate::check_with_worker`]).
     pub worker: Option<PromptWorker>,
     /// The assistant message's `tool_use` block id this check is for — the REAL

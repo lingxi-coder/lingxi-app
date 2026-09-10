@@ -486,6 +486,117 @@ fn check_dangerous_removal_inner(
     None
 }
 
+/// PARITY 2.1.263 `Amo` — the two dangerous-removal shapes that the top-level
+/// `mtt` pass (`dangerous_rm_on_variable_path`) structurally cannot reach.
+///
+/// `Amo` walks the AST collecting every `command_substitution` /
+/// `process_substitution` body, then:
+///
+/// ```js
+/// if (o.length > 64) {
+///   if (/\brm(?:dir)?\b/.test(e.text))
+///     return HL("rm", `This command contains ${o.length} command substitutions — too many to analyze for catastrophic removals. This requires explicit approval.`,
+///                     `— too many command substitutions to analyze (${o.length})`);
+///   return null;
+/// }
+/// for (let _ of [e.text, ...o]) { … let D = mtt(I);
+///   if (D !== null) return HL(D.command, `Dangerous ${D.command} operation detected inside command substitution: '${D.target}'…`,
+///                                        `on possibly-empty variable path inside command substitution: ${D.target}`); … }
+/// ```
+///
+/// 🚨 The >64 bail RETURNS NULL when the text has no `rm`/`rmdir` word — it is
+/// not a blanket "too many substitutions" refusal, only a removal-specific one.
+///
+/// 🚨 This message is NOT the same as `mtt`'s at the outer level: it drops the
+/// `— e.g. \`rm -rf $UNSET/*\` becomes \`rm -rf /*\`` clause. Two sites, two
+/// strings; reusing the outer one would be a byte-level divergence.
+///
+/// The `h9` half of `Amo` — running the removal-target evaluation over each
+/// substitution body — is ALREADY covered by
+/// [`check_dangerous_removal_inner`], which recurses through
+/// [`active_command_substitutions`] to depth 8. Only these two shapes were
+/// missing.
+///
+/// DIVERGENCE: the oracle also collects `D9e` nodes (the mksh `${ |cmd }`
+/// substitution). The port's collector handles `` ` ` ``, `$( )`, `<( )` and
+/// `>( )`, which are the forms `active_command_substitutions` already parses;
+/// `${ |…}` is not recognised by the tree-sitter grammar this crate uses either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubstitutionRemoval {
+    /// `> 64` substitutions and the text mentions `rm`/`rmdir`.
+    TooManySubstitutions { count: usize },
+    /// A possibly-empty `$VAR` removal target found inside a substitution.
+    VariablePath { cmd: &'static str, target: String },
+}
+
+impl SubstitutionRemoval {
+    /// The byte-locked ask message (`HL`'s `t`).
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::TooManySubstitutions { count } => format!(
+                "This command contains {count} command substitutions \u{2014} too many to analyze for catastrophic removals. This requires explicit approval."
+            ),
+            Self::VariablePath { cmd, target } => format!(
+                "Dangerous {cmd} operation detected inside command substitution: '{target}'\n\nThis target is a shell variable expansion that points at the filesystem root (or a top-level directory) when the variable is unset or empty. This requires explicit approval and cannot be auto-allowed by permission rules."
+            ),
+        }
+    }
+
+    /// The decision reason (`HL` builds `Dangerous ${e} operation ${r}`).
+    #[must_use]
+    pub fn reason(&self) -> String {
+        match self {
+            Self::TooManySubstitutions { count } => format!(
+                "Dangerous rm operation \u{2014} too many command substitutions to analyze ({count})"
+            ),
+            Self::VariablePath { cmd, target } => format!(
+                "Dangerous {cmd} operation on possibly-empty variable path inside command substitution: {target}"
+            ),
+        }
+    }
+}
+
+/// The `Amo` scan. Call it only after [`dangerous_rm_on_variable_path`] has
+/// returned `None`, on the too-complex branch — that is where `xmo` runs it.
+#[must_use]
+pub fn dangerous_removal_in_substitutions(command: &str) -> Option<SubstitutionRemoval> {
+    let subs = all_command_substitutions(command);
+    if subs.len() > 64 {
+        if rm_word_re().is_match(command) {
+            return Some(SubstitutionRemoval::TooManySubstitutions { count: subs.len() });
+        }
+        return None;
+    }
+    // `[e.text, ...o]`. The outer text is included for faithfulness even though
+    // the caller has already run the same check over it and got `None`.
+    for span in std::iter::once(command).chain(subs.iter().map(String::as_str)) {
+        if let Some((cmd, target)) = dangerous_rm_on_variable_path(span) {
+            return Some(SubstitutionRemoval::VariablePath { cmd, target });
+        }
+    }
+    None
+}
+
+/// Every substitution body in `command`, NESTED ONES INCLUDED — `Amo` walks the
+/// whole AST, so a `$( $( … ) )` contributes two entries to the count that
+/// gates the >64 bail.
+fn all_command_substitutions(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut queue: Vec<String> = active_command_substitutions(command);
+    let mut depth = 0;
+    while !queue.is_empty() && depth <= 16 {
+        let mut next = Vec::new();
+        for s in queue {
+            next.extend(active_command_substitutions(&s));
+            out.push(s);
+        }
+        queue = next;
+        depth += 1;
+    }
+    out
+}
+
 fn active_command_substitutions(command: &str) -> Vec<String> {
     let chars: Vec<char> = command.chars().collect();
     let mut out = Vec::new();
@@ -1046,6 +1157,82 @@ mod tests {
 
     fn cwd() -> PathBuf {
         PathBuf::from("/proj/work")
+    }
+
+    // ── PARITY 2.1.263 `Amo`: the two substitution-only shapes ────────────
+
+    #[test]
+    fn too_many_substitutions_bails_only_for_removals() {
+        // 65 substitutions is over the threshold; with an `rm` word present the
+        // oracle refuses rather than analysing.
+        let many = "echo ".to_string() + &"$(a) ".repeat(65);
+        let with_rm = format!("{many} && rm -rf /tmp/x");
+        let found = dangerous_removal_in_substitutions(&with_rm).expect("must bail");
+        assert_eq!(
+            found,
+            SubstitutionRemoval::TooManySubstitutions { count: 65 }
+        );
+        assert_eq!(
+            found.message(),
+            "This command contains 65 command substitutions \u{2014} too many to analyze for catastrophic removals. This requires explicit approval."
+        );
+        assert_eq!(
+            found.reason(),
+            "Dangerous rm operation \u{2014} too many command substitutions to analyze (65)"
+        );
+
+        // 🚨 The same 65 substitutions with NO rm/rmdir word return None. The
+        // bail is removal-specific, not a blanket "too complex" refusal — an
+        // easy thing to port as an unconditional return.
+        assert_eq!(dangerous_removal_in_substitutions(&many), None);
+
+        // Exactly 64 is NOT over the threshold (`> 64`), so it falls through to
+        // the per-span scan instead of bailing.
+        let exactly_64 = "echo ".to_string() + &"$(a) ".repeat(64) + "&& rm -rf /tmp/x";
+        assert_eq!(dangerous_removal_in_substitutions(&exactly_64), None);
+    }
+
+    #[test]
+    fn nested_substitutions_count_toward_the_bail() {
+        // `Amo` walks the whole AST, so an inner `$( )` is its own node. 33
+        // nested pairs are 66 nodes — over the threshold — while the same text
+        // counted only at top level would be 33 and under it.
+        let nested = "echo ".to_string() + &"$(a $(b)) ".repeat(33) + "&& rm -rf /tmp/x";
+        assert_eq!(
+            dangerous_removal_in_substitutions(&nested),
+            Some(SubstitutionRemoval::TooManySubstitutions { count: 66 })
+        );
+    }
+
+    #[test]
+    fn possibly_empty_variable_inside_a_substitution_has_its_own_copy() {
+        let found = dangerous_removal_in_substitutions("echo $(rm -rf $UNSET/*)")
+            .expect("a possibly-empty variable target inside a substitution must be found");
+        let SubstitutionRemoval::VariablePath { cmd, target } = &found else {
+            panic!("expected the variable-path shape, got {found:?}");
+        };
+        assert_eq!(*cmd, "rm");
+        assert_eq!(target, "$UNSET/*");
+
+        // 🚨 This message is NOT the outer `mtt` one: it drops the
+        // "— e.g. `rm -rf $UNSET/*` becomes `rm -rf /*`" clause. Two oracle
+        // sites, two strings.
+        assert_eq!(
+            found.message(),
+            "Dangerous rm operation detected inside command substitution: '$UNSET/*'\n\nThis target is a shell variable expansion that points at the filesystem root (or a top-level directory) when the variable is unset or empty. This requires explicit approval and cannot be auto-allowed by permission rules."
+        );
+        assert!(
+            !found.message().contains("e.g."),
+            "the inner message must not carry the outer message's example clause"
+        );
+        assert_eq!(
+            found.reason(),
+            "Dangerous rm operation on possibly-empty variable path inside command substitution: $UNSET/*"
+        );
+
+        // A substitution with nothing dangerous in it stays quiet.
+        assert_eq!(dangerous_removal_in_substitutions("echo $(ls /tmp)"), None);
+        assert_eq!(dangerous_removal_in_substitutions("rm -rf /tmp/x"), None);
     }
 
     #[test]

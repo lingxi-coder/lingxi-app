@@ -149,7 +149,19 @@ async fn the_gate_is_off_by_default() {
 async fn with_the_gate_on_it_lists_the_undiscovered_tools_sorted() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("LINGXI_TOOL_SEARCH_REMINDER", "1");
-    let orch = orch(registry(true), 40).await;
+    let mode = Arc::new(ReminderCoordinatorMode(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    let orch = orch(registry(true), 40)
+        .await
+        .with_coordinator_mode(mode.clone())
+        .with_coordinator_simple_mode_for_test(false);
+    assert!(orch.tools.find_by_name("ToolSearch").is_some());
+    assert!(orch
+        .tool_search_usage_reminder_message(false)
+        .await
+        .is_none());
+    mode.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let msg = orch.tool_search_usage_reminder_message(false).await;
     std::env::remove_var("LINGXI_TOOL_SEARCH_REMINDER");
     let text = msg.expect("40 turns > everyNTurns=15").text_content();
@@ -185,4 +197,12 @@ async fn it_never_fires_alongside_a_todo_reminder_or_with_deferral_off() {
     assert!(a.is_none(), "task_reminder_same_turn");
     assert!(b.is_none(), "mode_not_tst");
     assert!(c.is_none(), "turnsSinceLastToolSearch < everyNTurns");
+}
+
+struct ReminderCoordinatorMode(std::sync::atomic::AtomicBool);
+
+impl platform_api::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
+    fn is_enabled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }

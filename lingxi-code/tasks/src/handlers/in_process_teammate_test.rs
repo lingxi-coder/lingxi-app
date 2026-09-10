@@ -200,6 +200,8 @@ fn text_response(text: &str) -> llm_client::LlmResponse {
 
 #[derive(Default)]
 struct RecordingSink {
+    idle_tasks: StdMutex<Vec<String>>,
+    awaiting_plan: StdMutex<Vec<bool>>,
     requires_activation: AtomicBool,
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
     /// Failure reasons received through the `set_failed` seam (cc 2.1.198:
@@ -208,6 +210,12 @@ struct RecordingSink {
 }
 #[async_trait]
 impl TaskStatusSink for RecordingSink {
+    async fn set_teammate_idle(&self, task_id: &str) {
+        self.idle_tasks.lock().unwrap().push(task_id.to_owned());
+    }
+    async fn set_awaiting_plan_approval(&self, _: &str, awaiting: bool) {
+        self.awaiting_plan.lock().unwrap().push(awaiting);
+    }
     fn requires_explicit_activation(&self) -> bool {
         self.requires_activation.load(Ordering::SeqCst)
     }
@@ -297,7 +305,7 @@ impl hooks::TeammateIdleFirer for GatedIdleFirer {
 // ---- Helpers ------------------------------------------------------------
 
 fn make_handler(
-    api: Arc<ScriptedApiClient>,
+    api: Arc<dyn SubagentApiClient>,
 ) -> (
     tempfile::TempDir,
     Arc<dyn FileSystem>,
@@ -567,7 +575,7 @@ async fn build_context_resolves_inherit_to_default_model() {
     // `TeammateContext.agentName` / `.teamName`).
     assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
     assert_eq!(ctx.team_name.as_deref(), Some("alpha"));
-    // The TeamCreate description becomes a team-lead teammate message.
+    // The initial Agent prompt becomes a team-lead teammate message.
     assert_eq!(ctx.prompt_messages.len(), 1);
     assert_eq!(
         ctx.prompt_messages[0].text_content(),
@@ -576,7 +584,7 @@ async fn build_context_resolves_inherit_to_default_model() {
 }
 
 // Full teammate parity (P1): the handler inherits a budget enforcer, seeds
-// the TeamCreate description as the first user message, and runs the shared
+// the initial Agent prompt as the first user message, and runs the shared
 // tool resolver when a registry is wired (advertising a real pool instead of
 // the prior chat-only empty set).
 #[tokio::test]
@@ -775,6 +783,7 @@ async fn non_teammate_input_is_rejected() {
             TaskSpawnInput::LocalBash {
                 command: "echo".into(),
                 timeout: None,
+                tool_use_id: None,
             },
             ctx(fs, rt),
         )
@@ -792,6 +801,8 @@ async fn explicit_activation_prevents_provider_and_status_work_before_commit() {
     let mut handle = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
@@ -826,12 +837,14 @@ async fn spawn_send_message_then_kill_lifecycle() {
     // `completed:` line per turn-set. kill then tears the slot down.
     let api = ScriptedApiClient::new(vec!["answer one", "answer two"]);
     let api_handle = api.clone();
-    let (dir, fs, rt, handler) = make_handler(api);
+    let (dir, fs, rt, handler, sink) = make_handler_with_sink(api);
     let c = ctx(fs.clone(), rt.clone());
 
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
@@ -865,6 +878,28 @@ async fn spawn_send_message_then_kill_lifecycle() {
     let body = await_spool(&fs, &spool_str, |b| b.contains("answer two")).await;
     assert!(body.contains("answer two"), "turn-set 2 text: {body:?}");
     assert_eq!(api_handle.call_count(), 2, "one round-trip per turn-set");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while sink.idle_tasks.lock().unwrap().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both completed turns publish idle");
+    assert_eq!(
+        sink.idle_tasks.lock().unwrap().as_slice(),
+        &[h.task_id.clone(), h.task_id.clone()]
+    );
+    assert_eq!(
+        sink.statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, status)| *status == TaskStatus::Running)
+            .count(),
+        2,
+        "initial turn and mailbox wake each publish running"
+    );
 
     // Kill tears it down; the entry is removed.
     handler.kill(&h.task_id, c.clone()).await.unwrap();
@@ -904,6 +939,8 @@ async fn failed_turn_set_spools_failed_and_reports_terminal() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
@@ -943,6 +980,8 @@ async fn failed_turn_set_reports_error_reason_through_set_failed() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
@@ -975,6 +1014,8 @@ async fn send_message_after_runner_terminated_is_not_found() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
@@ -1086,6 +1127,12 @@ async fn completed_turn_set_fires_teammate_idle_hook() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: Some(platform_api::subagent_spawn::SubagentSpawnRequest {
+                    origin_session_id: Some(protocol::SessionId::nil()),
+                    mode: Some("plan".into()),
+                    ..Default::default()
+                }),
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
@@ -1103,6 +1150,8 @@ async fn completed_turn_set_fires_teammate_idle_hook() {
     await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
     let fires = await_fires(&firer, 1).await;
     assert_eq!(fires.len(), 1, "one idle fire after turn-set 1: {fires:?}");
+    assert_eq!(fires[0].session_id, protocol::SessionId::nil());
+    assert_eq!(fires[0].permission_mode, "plan");
     assert_eq!(fires[0].teammate_name, "buddy", "carries the teammate name");
     assert_eq!(
         fires[0].team_name, "alpha",
@@ -1117,6 +1166,8 @@ async fn completed_turn_set_fires_teammate_idle_hook() {
     await_spool(&fs, &spool_str, |b| b.contains("answer two")).await;
     let fires = await_fires(&firer, 2).await;
     assert_eq!(fires.len(), 2, "a fire per completed turn-set: {fires:?}");
+    assert_eq!(fires[1].session_id, fires[0].session_id);
+    assert_eq!(fires[1].permission_mode, "plan");
 
     handler.kill(&h.task_id, c).await.unwrap();
 }
@@ -1134,6 +1185,8 @@ async fn no_idle_firer_is_a_noop() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
@@ -1184,6 +1237,8 @@ async fn blocking_idle_hook_feedback_drives_one_follow_up_turn() {
     let handle = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
@@ -1233,6 +1288,8 @@ async fn idle_hook_prevent_continuation_terminates_the_teammate() {
     let handle = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
@@ -1279,6 +1336,8 @@ async fn hook_follow_up_injection_failure_cleans_status_entry_and_pool_slot() {
     let handle = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id,
                 name: "buddy".into(),
                 team_name: String::new(),
@@ -1344,6 +1403,8 @@ async fn explicit_kill_during_idle_hook_is_not_overwritten_by_late_feedback() {
     let handle = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
@@ -1391,6 +1452,8 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
     let handle = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
@@ -1449,6 +1512,8 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
 #[test]
 fn idle_fire_payload_shape() {
     let fire = hooks::TeammateIdleFire {
+        session_id: protocol::SessionId::nil(),
+        permission_mode: "default".into(),
         teammate_name: "buddy".into(),
         team_name: "alpha".into(),
     };
@@ -1628,6 +1693,8 @@ async fn spawn_auto_claims_next_available_task() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
@@ -1681,6 +1748,8 @@ async fn pool_allocation_failure_rolls_back_startup_claim() {
     let mut handle = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
@@ -1724,6 +1793,8 @@ async fn spawn_auto_claims_next_available_task_from_injected_config_home() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
@@ -1768,6 +1839,8 @@ async fn idle_poll_claims_late_task_and_drives_next_turn_set() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
@@ -1829,6 +1902,8 @@ async fn killed_teammate_stops_claiming() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id: protocol::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
@@ -1857,4 +1932,375 @@ async fn killed_teammate_stops_claiming() {
     let t = store.get(&tid).await.unwrap();
     assert_eq!(t.owner, None, "killed teammate must not claim");
     assert_eq!(t.status, lingxi_core::TodoState::Pending);
+}
+
+#[tokio::test]
+async fn build_context_keeps_session_transcript_storage() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let directory = PathBuf::from("/session/subagents");
+    let handler = model_test_handler(None).with_transcript(fs.clone(), directory.clone());
+    let def = DefaultTeammateDefinition
+        .resolve(&protocol::AgentId::new(), "worker")
+        .await
+        .unwrap();
+    let context = handler
+        .build_context(
+            protocol::AgentId::new(),
+            "worker",
+            "session-12345678",
+            "work",
+            def,
+        )
+        .await
+        .unwrap();
+    assert_eq!(context.transcript_subdir, directory);
+    assert!(Arc::ptr_eq(context.transcript_fs.as_ref().unwrap(), &fs));
+}
+
+#[tokio::test]
+async fn assigned_teammate_color_reaches_actual_agent_context() {
+    let handler = model_test_handler(None);
+    let def = DefaultTeammateDefinition
+        .resolve(&protocol::AgentId::new(), "worker")
+        .await
+        .unwrap();
+    let mut context = handler
+        .build_context(
+            protocol::AgentId::new(),
+            "worker",
+            "session-12345678",
+            "work",
+            def,
+        )
+        .await
+        .unwrap();
+    apply_spawn_context(
+        &mut context,
+        platform_api::SubagentSpawnRequest {
+            teammate_color: Some("blue".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(context.display.color, AgentColor::Blue);
+}
+
+struct PlanReviewTransport {
+    requests: StdMutex<Vec<serde_json::Value>>,
+    modes: StdMutex<Vec<String>>,
+}
+#[async_trait]
+impl platform_api::ToolInvoker for PlanReviewTransport {
+    async fn invoke(
+        &self,
+        name: &str,
+        _input: serde_json::Value,
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        let mode = ctx.mode_override.unwrap_or_default();
+        self.modes.lock().unwrap().push(mode.clone());
+        assert_eq!(ctx.frozen_command_denies, vec!["Bash(rm)"]);
+        if name == "Write" && mode == "plan" {
+            return Err(platform_api::tool_invoker::ToolInvokerError::Abort(
+                "plan mode disallows mutation".into(),
+            ));
+        }
+        Ok(serde_json::json!({"ok":true}))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+#[async_trait]
+impl platform_api::mailbox::MailboxRouterHandle for PlanReviewTransport {
+    async fn route(
+        &self,
+        from: &str,
+        to: &str,
+        message: platform_api::mailbox::MailboxMessage,
+    ) -> Result<platform_api::mailbox::RouteAck, platform_api::mailbox::MailboxError> {
+        assert_eq!(from, "planner");
+        assert_eq!(to, "team-lead");
+        self.requests
+            .lock()
+            .unwrap()
+            .push(serde_json::from_str(&message.content).unwrap());
+        Ok(platform_api::mailbox::RouteAck {
+            claimed_at: std::time::SystemTime::now(),
+            claim_window_secs: 30,
+        })
+    }
+}
+fn plan_invocation() -> platform_api::tool_invoker::SubagentInvocationContext {
+    platform_api::tool_invoker::SubagentInvocationContext {
+        permission_pause_observer: None,
+        tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+        parent_agent_id: None,
+        origin_session_id: None,
+        agent_name: Some("planner".into()),
+        team_name: Some("team".into()),
+        is_async: false,
+        is_non_interactive_session: false,
+        can_show_permission_prompts: true,
+        cwd: None,
+        tool_use_id: None,
+        assistant_message_id: None,
+        depth: 1,
+        observer: None,
+        parent_model: None,
+        parent_model_profile: None,
+        mode_override: Some("plan".into()),
+        request_source: None,
+        frozen_command_denies: vec!["Bash(rm)".into()],
+    }
+}
+#[tokio::test]
+async fn lead_review_rejection_keeps_plan_then_approval_changes_next_tool_permission() {
+    use platform_api::{
+        teammate_plan::{PlanApprovalResponse, TeammatePlanRequester},
+        ToolInvoker,
+    };
+    let transport = Arc::new(PlanReviewTransport {
+        requests: StdMutex::new(vec![]),
+        modes: StdMutex::new(vec![]),
+    });
+    let sink = Arc::new(RecordingSink::default());
+    let control = crate::handlers::teammate_plan::PlanAwareInvoker::new(
+        transport.clone(),
+        transport.clone(),
+        Arc::new(InMemoryFs::new()),
+        "planner".into(),
+        "team".into(),
+        "/plans/planner.md".into(),
+    )
+    .with_status_sink(sink.clone(), "task-plan".into());
+    let submitted = control
+        .submit(serde_json::json!({"plan":"Test the change, then implement"}))
+        .await
+        .unwrap();
+    let id = submitted["requestId"].as_str().unwrap().to_owned();
+    assert!(control.awaiting());
+    assert!(control
+        .invoke("Write", serde_json::json!({}), plan_invocation())
+        .await
+        .is_err());
+    assert_eq!(
+        control
+            .apply(PlanApprovalResponse {
+                request_id: id,
+                approved: false,
+                feedback: Some("add rollback".into()),
+                permission_mode: None
+            })
+            .await
+            .unwrap(),
+        "[Plan Rejected] add rollback"
+    );
+    assert!(control
+        .invoke("Write", serde_json::json!({}), plan_invocation())
+        .await
+        .is_err());
+    let next = control
+        .submit(serde_json::json!({"plan":"Test, implement and preserve rollback"}))
+        .await
+        .unwrap();
+    let reply = PlanApprovalResponse {
+        request_id: next["requestId"].as_str().unwrap().into(),
+        approved: true,
+        feedback: None,
+        permission_mode: Some("default".into()),
+    };
+    assert_eq!(
+        control.apply(reply.clone()).await.unwrap(),
+        "[Plan Approved] You can now proceed with implementation"
+    );
+    assert!(
+        control.apply(reply).await.is_none(),
+        "duplicate response ignored"
+    );
+    assert!(control
+        .invoke("Write", serde_json::json!({}), plan_invocation())
+        .await
+        .is_ok());
+    assert_eq!(
+        *transport.modes.lock().unwrap(),
+        vec!["plan", "plan", "default"]
+    );
+    assert_eq!(
+        transport.requests.lock().unwrap()[0]["type"],
+        "plan_approval_request"
+    );
+    assert_eq!(
+        *sink.awaiting_plan.lock().unwrap(),
+        vec![true, false, true, false],
+        "duplicate replies do not add status changes"
+    );
+}
+#[tokio::test]
+async fn mismatched_plan_review_never_elevates_permission() {
+    use platform_api::{
+        teammate_plan::{PlanApprovalResponse, TeammatePlanRequester},
+        ToolInvoker,
+    };
+    let transport = Arc::new(PlanReviewTransport {
+        requests: StdMutex::new(vec![]),
+        modes: StdMutex::new(vec![]),
+    });
+    let control = crate::handlers::teammate_plan::PlanAwareInvoker::new(
+        transport.clone(),
+        transport,
+        Arc::new(InMemoryFs::new()),
+        "planner".into(),
+        "team".into(),
+        "/plans/planner.md".into(),
+    );
+    control
+        .submit(serde_json::json!({"plan":"proposal"}))
+        .await
+        .unwrap();
+    let text = control
+        .apply(PlanApprovalResponse {
+            request_id: "wrong".into(),
+            approved: true,
+            feedback: None,
+            permission_mode: Some("bypassPermissions".into()),
+        })
+        .await
+        .unwrap();
+    assert!(text.starts_with("[Plan Rejected]"));
+    assert!(control
+        .invoke("Write", serde_json::json!({}), plan_invocation())
+        .await
+        .is_err());
+}
+
+struct PlanModeAvailability(bool);
+#[async_trait]
+impl platform_api::PermissionGate for PlanModeAvailability {
+    async fn check(&self, _: &str, _: &serde_json::Value) -> platform_api::PermissionDecision {
+        platform_api::PermissionDecision::Allow
+    }
+    fn can_request_auto_mode(&self) -> bool {
+        self.0
+    }
+    fn can_request_bypass_permissions(&self) -> bool {
+        self.0
+    }
+}
+#[tokio::test]
+async fn approved_modes_use_live_host_availability() {
+    use platform_api::{
+        teammate_plan::{PlanApprovalResponse, TeammatePlanRequester},
+        ToolInvoker,
+    };
+    for (mode, available, expected) in [
+        ("auto", false, "default"),
+        ("auto", true, "auto"),
+        ("bypassPermissions", false, "default"),
+        ("bypassPermissions", true, "bypassPermissions"),
+        ("acceptEdits", false, "acceptEdits"),
+    ] {
+        let transport = Arc::new(PlanReviewTransport {
+            requests: StdMutex::new(vec![]),
+            modes: StdMutex::new(vec![]),
+        });
+        let control = crate::handlers::teammate_plan::PlanAwareInvoker::new(
+            transport.clone(),
+            transport.clone(),
+            Arc::new(InMemoryFs::new()),
+            "planner".into(),
+            "team".into(),
+            "/plans/planner.md".into(),
+        )
+        .with_permission_gate(Some(Arc::new(PlanModeAvailability(available))));
+        let result = control
+            .submit(serde_json::json!({"plan":"proposal"}))
+            .await
+            .unwrap();
+        control
+            .apply(PlanApprovalResponse {
+                request_id: result["requestId"].as_str().unwrap().into(),
+                approved: true,
+                feedback: None,
+                permission_mode: Some(mode.into()),
+            })
+            .await
+            .unwrap();
+        control
+            .invoke("Read", serde_json::json!({}), plan_invocation())
+            .await
+            .unwrap();
+        assert_eq!(transport.modes.lock().unwrap()[0], expected);
+    }
+}
+
+#[tokio::test]
+async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
+    let api = GatedApiClient::new();
+    let (dir, fs, rt, handler) = make_handler(api.clone());
+    let transport = Arc::new(PlanReviewTransport {
+        requests: StdMutex::new(vec![]),
+        modes: StdMutex::new(vec![]),
+    });
+    let sink = Arc::new(RecordingSink::default());
+    let handler = handler
+        .with_status_sink(sink.clone())
+        .with_tool_invoker(transport.clone())
+        .with_plan_approval_mailbox(transport);
+    let agent_id = protocol::AgentId::new();
+    let context = ctx(fs.clone(), rt);
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id,
+                name: "planner".into(),
+                team_name: "team".into(),
+                description: "make a plan".into(),
+                inheritance: None,
+                spawn_request: Some(platform_api::SubagentSpawnRequest {
+                    mode: Some("plan".into()),
+                    ..Default::default()
+                }),
+            },
+            context.clone(),
+        )
+        .await
+        .unwrap();
+    api.first_started.acquire().await.unwrap().forget();
+    let requester = platform_api::teammate_plan::requester(&agent_id).unwrap();
+    let submitted = requester
+        .submit(serde_json::json!({"plan":"Scoped proposal"}))
+        .await
+        .unwrap();
+    handler
+        .apply_plan_approval(
+            &handle.task_id,
+            platform_api::teammate_plan::PlanApprovalResponse {
+                request_id: submitted["requestId"].as_str().unwrap().into(),
+                approved: true,
+                feedback: None,
+                permission_mode: Some("default".into()),
+            },
+            context.clone(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(
+        api.calls.load(Ordering::SeqCst),
+        1,
+        "approval does not interrupt an active query"
+    );
+    api.release_first.add_permits(1);
+    let spool = dir.path().join(format!("{}.output", handle.task_id));
+    await_spool(&fs, spool.to_str().unwrap(), |body| body.contains("second")).await;
+    let histories = api.histories.lock().unwrap();
+    assert!(histories[1].iter().any(|message| message
+        .text_content()
+        .contains("[Plan Approved] You can now proceed with implementation")));
+    assert!(!histories[1]
+        .iter()
+        .any(|message| message.text_content().contains("plan_approval_response")));
+    drop(histories);
+    assert_eq!(*sink.awaiting_plan.lock().unwrap(), vec![true, false]);
+    handler.kill(&handle.task_id, context).await.unwrap();
 }

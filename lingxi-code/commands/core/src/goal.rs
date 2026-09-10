@@ -109,7 +109,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use platform_api::{ActiveGoalSnapshot, OrchestratorHandle};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 /// `wEt` — the max goal-condition length (v2.1.198).
 const MAX_CONDITION_CHARS: usize = 4000;
@@ -123,6 +123,12 @@ const CLEAR_TOKENS: &[&str] = &["clear", "stop", "off", "reset", "none", "cancel
 /// with nothing to clear" branch (binary: `o===null?"No goal set"`, and the
 /// status branch's `else` arm reaching the same text).
 const NO_GOAL_SET: &str = "No goal set";
+
+/// The empty-arg STATUS branch's no-goal line — 2.1.266 `src_185633862.js`:
+/// `if(!t)return{type:"text",value:"No goal set. Usage: \`/goal <condition>\`"}`.
+/// Distinct from [`NO_GOAL_SET`], which is only the clear branch's
+/// `o===null?"No goal set"` arm.
+const NO_GOAL_SET_USAGE: &str = "No goal set. Usage: `/goal <condition>`";
 
 /// `kEt`'s trust-gate failure message, verbatim from the locked output-string
 /// list. The value comes from the composition root's effective workspace
@@ -167,33 +173,6 @@ tell the user to run `/goal clear` after success; that's only for clearing a goa
     )
 }
 
-/// Compact human-readable elapsed-time rendering for the `Goal active: ...
-/// ({elapsed})` slot. NOT independently byte-verified against the binary (see
-/// the module doc's last bullet) — a faithful best-effort compact-duration
-/// formatter, not a confirmed port.
-fn format_elapsed(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86_400 {
-        let (h, m) = (secs / 3600, (secs % 3600) / 60);
-        if m == 0 {
-            format!("{h}h")
-        } else {
-            format!("{h}h {m}m")
-        }
-    } else {
-        let (days, h) = (secs / 86_400, (secs % 86_400) / 3600);
-        if h == 0 {
-            format!("{days}d")
-        } else {
-            format!("{days}d {h}h")
-        }
-    }
-}
-
 /// `/goal` handler — set, show, or clear a session-scoped stop-gating goal.
 #[derive(Clone)]
 pub struct GoalHandler {
@@ -207,27 +186,32 @@ impl GoalHandler {
         Self { handle }
     }
 
-    /// The empty-arg status branch (binary: `` `Goal active: ${o.condition}
-    /// (${s})${i}` `` / `"No goal set"`).
+    /// The empty-arg status branch — 2.1.266 `src_185633862.js`:
+    ///
+    /// ```js
+    /// let r=t.iterations===0?"not yet evaluated":`${t.iterations} ${x(t.iterations,"turn")}`,
+    ///     n=t.lastReason?`\nLast check: ${Hr(t.lastReason.trim())}`:"";
+    /// return{type:"text",value:`Goal active: ${t.condition} (${r})${n}`}
+    /// ```
+    ///
+    /// The parenthetical is the ITERATION COUNT, not elapsed time, there is no
+    /// `Evaluations:` line, and the last reason is truncated to its first line
+    /// by `Hr`. The earlier port guessed all three (its module doc flagged the
+    /// `lastReason` suffix as unverified); the executable settles them.
     async fn status(&self) -> String {
         match self.handle.get_active_goal().await {
-            None => NO_GOAL_SET.to_string(),
+            None => NO_GOAL_SET_USAGE.to_string(),
             Some(g) => {
-                let elapsed = format_elapsed(goal_elapsed(&g));
                 let evaluations = match g.iterations {
                     0 => "not yet evaluated".to_string(),
                     1 => "1 turn".to_string(),
                     count => format!("{count} turns"),
                 };
-                let mut output = format!(
-                    "Goal active: {} ({elapsed})\nEvaluations: {evaluations}",
-                    g.condition
-                );
-                if let Some(reason) = g.last_reason.as_deref() {
-                    output.push_str("\nLast check: ");
-                    output.push_str(reason);
-                }
-                output
+                let last_check = match g.last_reason.as_deref() {
+                    Some(reason) => format!("\nLast check: {}", first_line(reason.trim())),
+                    None => String::new(),
+                };
+                format!("Goal active: {} ({evaluations}){last_check}", g.condition)
             }
         }
     }
@@ -312,10 +296,13 @@ impl BuiltinCommandHandler for GoalHandler {
     }
 }
 
-fn goal_elapsed(goal: &ActiveGoalSnapshot) -> Duration {
-    SystemTime::now()
-        .duration_since(goal.set_at)
-        .unwrap_or_else(|_| Duration::from_secs(0))
+/// `Hr(t)` = `pt(t,"\n")` (2.1.266 `src_157781101.js`) — everything before the
+/// first newline, so a multi-line evaluator reason renders as ONE line.
+fn first_line(s: &str) -> &str {
+    match s.find('\n') {
+        Some(idx) => &s[..idx],
+        None => s,
+    }
 }
 
 #[cfg(test)]
@@ -343,14 +330,20 @@ mod tests {
 
     #[tokio::test]
     async fn empty_arg_with_no_goal_reports_no_goal_set() {
+        // The STATUS branch carries the usage hint; only the CLEAR branch is the
+        // bare "No goal set" (2.1.266 `src_185633862.js`).
         let h = handler();
         match h.handle(&args("")).await {
-            CommandResult::Done { display: Some(s) } => assert_eq!(s, "No goal set"),
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "No goal set. Usage: `/goal <condition>`");
+            }
             other => panic!("expected Done, got {other:?}"),
         }
         // Whitespace-only args trim to empty too.
         match h.handle(&args("   ")).await {
-            CommandResult::Done { display: Some(s) } => assert_eq!(s, "No goal set"),
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "No goal set. Usage: `/goal <condition>`");
+            }
             other => panic!("expected Done, got {other:?}"),
         }
     }
@@ -451,8 +444,7 @@ mod tests {
 
         match h.handle(&args("")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert!(s.starts_with("Goal active: finish the migration ("));
-                assert!(s.ends_with("\nEvaluations: not yet evaluated"));
+                assert_eq!(s, "Goal active: finish the migration (not yet evaluated)");
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -486,7 +478,7 @@ mod tests {
             tokens_at_start: 100,
         }));
         let one = h.status().await;
-        assert!(one.contains("\nEvaluations: 1 turn\nLast check: tests pending"));
+        assert_eq!(one, "Goal active: ship (1 turn)\nLast check: tests pending");
 
         handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
             condition: "ship".to_string(),
@@ -496,7 +488,23 @@ mod tests {
             tokens_at_start: 100,
         }));
         let many = h.status().await;
-        assert!(many.contains("\nEvaluations: 2 turns\nLast check: review pending"));
+        assert_eq!(
+            many,
+            "Goal active: ship (2 turns)\nLast check: review pending"
+        );
+
+        // `Hr(t)` keeps only the first line of a multi-line evaluator reason.
+        handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
+            condition: "ship".to_string(),
+            set_at: SystemTime::now(),
+            last_reason: Some("  first line\nsecond line\nthird  ".to_string()),
+            iterations: 3,
+            tokens_at_start: 100,
+        }));
+        assert_eq!(
+            h.status().await,
+            "Goal active: ship (3 turns)\nLast check: first line"
+        );
     }
 
     #[tokio::test]
@@ -507,14 +515,5 @@ mod tests {
             h.description(),
             "Set a goal — keep working until the condition is met"
         );
-    }
-
-    #[test]
-    fn format_elapsed_buckets() {
-        assert_eq!(format_elapsed(Duration::from_secs(5)), "5s");
-        assert_eq!(format_elapsed(Duration::from_secs(90)), "1m");
-        assert_eq!(format_elapsed(Duration::from_secs(3661)), "1h 1m");
-        assert_eq!(format_elapsed(Duration::from_secs(7200)), "2h");
-        assert_eq!(format_elapsed(Duration::from_secs(90_000)), "1d 1h");
     }
 }

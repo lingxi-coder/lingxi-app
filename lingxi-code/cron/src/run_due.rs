@@ -35,7 +35,7 @@ use platform_api::{Clock, FileSystem};
 use crate::schedule::parse_cron;
 use crate::scheduler::{
     finalize_fired_job, is_job_due, is_recurring_task_aged, next_fire_time,
-    tasks_file_with_last_fired, tasks_file_without, CronTaskDef, DEFAULT_RECURRING_MAX_AGE,
+    tasks_file_with_last_fired, tasks_file_without, CronTaskDef,
 };
 use crate::tasks_file::parse_tasks;
 
@@ -96,7 +96,7 @@ pub struct FiredJob {
 /// [`FiredJob`] per job that fired this call.
 ///
 /// `recurring_max_age` mirrors [`crate::scheduler::CronScheduler`]'s field
-/// (`Some(`[`DEFAULT_RECURRING_MAX_AGE`]`)` on both hosts; `None` disables
+/// (`None` on both hosts; an explicit value enables
 /// expiry). A missing / unparseable tasks file fires nothing. Unlike the desktop
 /// tick loop, firing takes no per-job lock; deterministic fire-time jitter is
 /// already included by the shared due predicate. Persistence mutations remain
@@ -120,6 +120,18 @@ pub async fn run_due_jobs(
     };
     let mut tasks: HashMap<String, CronTaskDef> = HashMap::new();
     for t in parse_tasks(&body).tasks {
+        if t.expires_at
+            .is_some_and(|expiry| expiry <= system_time_to_epoch_ms(now))
+        {
+            remove_task_from_file(
+                fs.as_ref(),
+                project_root,
+                &t.id,
+                Some(system_time_to_epoch_ms(now)),
+            )
+            .await;
+            continue;
+        }
         let schedule = match parse_cron(&t.cron) {
             Ok(s) => s,
             Err(e) => {
@@ -179,7 +191,7 @@ pub async fn run_due_jobs(
             tasks.remove(&id);
         }
         if remove_after_fire {
-            remove_task_from_file(fs.as_ref(), project_root, &id).await;
+            remove_task_from_file(fs.as_ref(), project_root, &id, None).await;
             if expires_after_fire {
                 tracing::info!(
                     event = "tengu_scheduled_task_expired",
@@ -234,7 +246,11 @@ pub async fn next_fire_epoch_ms(
             t.recurring.unwrap_or(false),
             now,
         ) {
-            earliest = Some(earliest.map_or(next, |e| e.min(next)));
+            if t.expires_at
+                .is_none_or(|expiry| expiry > system_time_to_epoch_ms(now) && next < expiry)
+            {
+                earliest = Some(earliest.map_or(next, |e| e.min(next)));
+            }
         }
     }
     earliest
@@ -296,12 +312,26 @@ fn system_time_to_epoch_ms(t: SystemTime) -> u64 {
 
 /// Remove `id` from the single tasks file (read-modify-write via `fs`). A missing
 /// file / id is a no-op. Mirrors `CronScheduler::remove_task_from_file`.
-async fn remove_task_from_file(fs: &dyn FileSystem, project_root: &Path, id: &str) {
+async fn remove_task_from_file(
+    fs: &dyn FileSystem,
+    project_root: &Path,
+    id: &str,
+    expired_at: Option<u64>,
+) {
     let _guard = CRON_FILE_LOCK.lock().await;
     let Ok(_file_guard) = crate::tasks_file::lock_scheduled_tasks(fs, project_root).await else {
         return;
     };
     if let Ok(body) = crate::tasks_file::read_tasks_body(fs, project_root).await {
+        if let Some(now) = expired_at {
+            if !parse_tasks(&body)
+                .tasks
+                .iter()
+                .any(|task| task.id == id && task.expires_at.is_some_and(|expiry| expiry <= now))
+            {
+                return;
+            }
+        }
         if let Some(updated) = tasks_file_without(&body, id) {
             let _ = crate::tasks_file::write_tasks_body(fs, project_root, &updated).await;
         }
@@ -328,10 +358,10 @@ async fn set_last_fired_in_file(
     }
 }
 
-/// Convenience: the desktop-equal recurring expiry age both hosts pass.
+/// Production hosts impose no global recurring age limit; tasks can set `expiresAt`.
 #[must_use]
-pub const fn default_recurring_max_age() -> Duration {
-    DEFAULT_RECURRING_MAX_AGE
+pub const fn default_recurring_max_age() -> Option<Duration> {
+    None
 }
 
 #[cfg(test)]
@@ -516,7 +546,7 @@ mod tests {
             fs.clone(),
             FixedClock::at_secs(NOW),
             &firer,
-            Some(default_recurring_max_age()),
+            Some(crate::scheduler::DEFAULT_RECURRING_MAX_AGE),
         )
         .await;
 
@@ -548,7 +578,7 @@ mod tests {
             fs.clone(),
             FixedClock::at_secs(NOW),
             &firer,
-            Some(default_recurring_max_age()),
+            Some(crate::scheduler::DEFAULT_RECURRING_MAX_AGE),
         )
         .await;
 
@@ -575,7 +605,7 @@ mod tests {
             fs.clone(),
             FixedClock::at_secs(NOW),
             &firer,
-            Some(default_recurring_max_age()),
+            Some(crate::scheduler::DEFAULT_RECURRING_MAX_AGE),
         )
         .await;
 
@@ -601,7 +631,7 @@ mod tests {
             fs.clone(),
             FixedClock::at_secs(NOW),
             &firer,
-            Some(default_recurring_max_age()),
+            Some(crate::scheduler::DEFAULT_RECURRING_MAX_AGE),
         )
         .await;
 
@@ -628,7 +658,7 @@ mod tests {
             fs.clone(),
             FixedClock::at_secs(NOW),
             &firer,
-            Some(default_recurring_max_age()),
+            Some(crate::scheduler::DEFAULT_RECURRING_MAX_AGE),
         )
         .await;
 
@@ -650,7 +680,7 @@ mod tests {
             fs,
             FixedClock::at_secs(NOW),
             &firer,
-            Some(default_recurring_max_age()),
+            Some(crate::scheduler::DEFAULT_RECURRING_MAX_AGE),
         )
         .await;
         assert!(fired.is_empty());
@@ -685,5 +715,30 @@ mod tests {
             next_fire_epoch_ms(Path::new(PATH), fs, FixedClock::at_secs(NOW)).await,
             None
         );
+    }
+    #[tokio::test]
+    async fn per_task_expiration_blocks_mobile_fire_and_absent_expiration_has_no_age_limit() {
+        for expired in [false, true] {
+            let created_ms = (NOW - 30 * 24 * 60 * 60) * 1000;
+            let expiry = if expired {
+                format!(",\"expiresAt\":{}", (NOW - 1) * 1000)
+            } else {
+                String::new()
+            };
+            let body = format!(
+                r#"{{"tasks":[{{"id":"dmobile01","cron":"* * * * *","prompt":"test","createdAt":{created_ms},"recurring":true{expiry}}}]}}"#
+            );
+            let fs = file_with(&body);
+            let firer = RecordingFirer::new("done");
+            let fired = run_due_jobs(
+                Path::new(PATH),
+                fs,
+                FixedClock::at_secs(NOW),
+                &firer,
+                default_recurring_max_age(),
+            )
+            .await;
+            assert_eq!(fired.len(), usize::from(!expired));
+        }
     }
 }

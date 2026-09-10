@@ -102,8 +102,8 @@ export const tokens = (dark: boolean): Tokens =>
         borderStrong: 'oklch(34% 0.020 270 / 0.8)',
         text: 'oklch(96% 0.005 270)',
         text2: 'oklch(74% 0.015 270)',
-        text3: 'oklch(54% 0.020 270)',
-        text4: 'oklch(40% 0.020 270)',
+        text3: 'oklch(68% 0.012 270)',
+        text4: 'oklch(60% 0.012 270)',
         accent: 'oklch(72% 0.18 268)',
         accentBg: 'oklch(72% 0.18 268 / 0.14)',
         accentBorder: 'oklch(72% 0.18 268 / 0.35)',
@@ -131,8 +131,8 @@ export const tokens = (dark: boolean): Tokens =>
         borderStrong: 'oklch(82% 0.015 270)',
         text: 'oklch(22% 0.018 270)',
         text2: 'oklch(50% 0.018 270)',
-        text3: 'oklch(60% 0.018 270)',
-        text4: 'oklch(70% 0.015 270)',
+        text3: 'oklch(52% 0.012 270)',
+        text4: 'oklch(56% 0.012 270)',
         accent: 'oklch(50% 0.22 268)',
         // Codex-style selection surfaces stay neutral; saturated accent is
         // reserved for actions and status so the transcript remains quiet.

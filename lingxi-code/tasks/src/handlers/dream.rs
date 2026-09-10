@@ -297,6 +297,7 @@ impl Task for DreamHandler {
         //    `context_paths` has no source on the variant, so an empty vec is
         //    passed.
         let request = SubagentSpawnRequest {
+            teammate_color: None,
             subagent_type: DREAM_SUBAGENT_TYPE.to_string(),
             prompt: build_consolidation_prompt(&prompt),
             observer: None,
@@ -661,8 +662,8 @@ mod tests {
                         response_char_count: 0,
                         last_request_id: None,
                         cumulative_usage: SubagentUsage::default(),
-                                        usage_complete: true,
-})
+                        usage_complete: true,
+                    })
                 }
                 Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
                     agent_id: protocol::AgentId::new(),

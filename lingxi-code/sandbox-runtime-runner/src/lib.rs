@@ -496,3 +496,92 @@ mod tests {
         );
     }
 }
+
+/// Reuse the sandbox's authenticated HTTP(S) CONNECT and NO_PROXY implementation
+/// for in-process Monitor WebSockets. Destination DNS is vetted by HttpTransport.
+pub struct MonitorProxyConnector;
+
+#[async_trait::async_trait]
+impl tool_api::MonitorWebSocketProxy for MonitorProxyConnector {
+    async fn connect_proxy(
+        &self,
+        host: &str,
+        port: u16,
+        secure: bool,
+    ) -> std::io::Result<Option<Box<dyn tool_api::MonitorSocketIo>>> {
+        let environment = std::env::vars().collect();
+        connect_monitor_proxy(host, port, secure, &environment).await
+    }
+}
+
+async fn connect_monitor_proxy(
+    host: &str,
+    port: u16,
+    secure: bool,
+    environment: &std::collections::HashMap<String, String>,
+) -> std::io::Result<Option<Box<dyn tool_api::MonitorSocketIo>>> {
+    use sandbox_runtime::parent_proxy::{
+        connect_via_parent_proxy, resolve_parent_proxy, select_parent_proxy_url,
+        should_bypass_parent_proxy,
+    };
+    let Some(proxy) = resolve_parent_proxy(None, environment) else {
+        return Ok(None);
+    };
+    if should_bypass_parent_proxy(&proxy, host) {
+        return Ok(None);
+    }
+    let Some(url) = select_parent_proxy_url(&proxy, secure) else {
+        return Ok(None);
+    };
+    let tunnel = connect_via_parent_proxy(url, host, port).await?;
+    Ok(Some(Box::new(tunnel)))
+}
+
+#[cfg(test)]
+mod monitor_proxy_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[tokio::test]
+    async fn monitor_proxy_tunnels_with_auth_and_honors_no_proxy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(socket.read_u8().await.unwrap());
+                assert!(header.len() < 16384);
+            }
+            let header = String::from_utf8(header).unwrap();
+            assert!(
+                header.starts_with("CONNECT events.example.com:443 HTTP/1.1\r\n"),
+                "{header}"
+            );
+            assert!(
+                header.contains("Proxy-Authorization: Basic dTpw"),
+                "{header}"
+            );
+            socket
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\nhello")
+                .await
+                .unwrap();
+        });
+        let mut env = std::collections::HashMap::from([(
+            "HTTPS_PROXY".into(),
+            format!("http://u:p@{address}"),
+        )]);
+        let mut tunnel = connect_monitor_proxy("events.example.com", 443, true, &env)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut payload = [0; 5];
+        tunnel.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"hello");
+        server.await.unwrap();
+        env.insert("NO_PROXY".into(), "example.com".into());
+        assert!(connect_monitor_proxy("events.example.com", 443, true, &env)
+            .await
+            .unwrap()
+            .is_none());
+    }
+}

@@ -49,6 +49,8 @@ use crate::RataTerminal;
 pub enum AppExit {
     /// The user quit (`/exit`, `/stop`, Ctrl-C twice): the embedder tears down.
     Quit,
+    /// Exit after a successful durable background handoff.
+    Backgrounded(String),
     /// The `/resume` picker resolved to this session uuid: the embedder must
     /// re-mount that session in-process (writer retargeted via the startup
     /// resume seam).
@@ -83,7 +85,7 @@ pub struct AppCallbacks<'cb> {
     pub on_submit: Box<dyn FnMut(String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
     /// Executed for a prompt entered while a turn is already active. The host
     /// queues it at the canonical `Next` priority.
-    pub on_queue_prompt: Box<dyn FnMut(String, Vec<std::path::PathBuf>) + 'cb>,
+    pub on_queue_prompt: Box<dyn FnMut(String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
     /// Executed on [`ChatOutcome::SwitchModel`] with the picked
     /// `(request_model, profile)` pair.
     pub on_switch_model: Box<dyn FnMut(String, Option<String>) + 'cb>,
@@ -165,7 +167,7 @@ pub struct AppCallbacks<'cb> {
     /// to `run_turn` (Ctrl-C then cancels the dispatched turn) and emits a
     /// `TurnEnded` for a non-turn result to clear the widget's running state.
     /// `None` (tests / no registry) is a no-op.
-    pub on_dispatch_slash: Box<dyn FnMut(String, CancellationToken) + 'cb>,
+    pub on_dispatch_slash: Box<dyn FnMut(String, crate::chat_widget::PendingSlashDispatch) + 'cb>,
     /// Executed on [`ChatOutcome::RewakePeer`]: the caller drives
     /// `OrchestratorHandle::run_async_hook_rewake` off the render thread so
     /// a just-delivered held peer message is injected without a synthetic
@@ -363,6 +365,9 @@ impl<'cb> RataApp<'cb> {
                 };
                 match outcome {
                     ChatOutcome::Quit => return Ok(AppExit::Quit),
+                    ChatOutcome::BackgroundedExit(receipt) => {
+                        return Ok(AppExit::Backgrounded(receipt))
+                    }
                     ChatOutcome::Detach => {
                         if let Ok(token) =
                             std::env::var(tui_core::background_detach::DETACH_TOKEN_ENV)
@@ -427,8 +432,8 @@ impl<'cb> RataApp<'cb> {
                         // message).
                         (self.callbacks.on_submit)(prompt, images, token);
                     }
-                    ChatOutcome::QueuePrompt(prompt, images) => {
-                        (self.callbacks.on_queue_prompt)(prompt, images);
+                    ChatOutcome::QueuePrompt(prompt, images, owner) => {
+                        (self.callbacks.on_queue_prompt)(prompt, images, owner);
                     }
                     ChatOutcome::PasteImage => {
                         // Clipboard image read + PNG encode can take hundreds
@@ -686,6 +691,10 @@ impl<'cb> RataApp<'cb> {
     ) -> io::Result<()> {
         terminal.begin_sync_update()?;
         let result = (|| {
+            if self.chat_widget.take_terminal_replay_required() {
+                terminal.reset_for_replay()?;
+                self.selection.clear();
+            }
             let size = terminal.size()?;
             self.chat_widget.set_terminal_rows(size.height);
             if self.fullscreen {
@@ -776,7 +785,7 @@ pub fn run_app(
         std::sync::Arc<dyn Fn() -> crate::bottom_pane::view::AgentsSnapshot + Send + Sync>,
     >,
     on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
-    on_queue_prompt: impl FnMut(String, Vec<std::path::PathBuf>),
+    on_queue_prompt: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
     on_connect_action: impl FnMut(ConnectAction),
@@ -791,7 +800,7 @@ pub fn run_app(
     on_set_permission_mode: impl FnMut(String),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
     on_task_action: impl FnMut(TaskAction),
-    on_dispatch_slash: impl FnMut(String, CancellationToken),
+    on_dispatch_slash: impl FnMut(String, crate::chat_widget::PendingSlashDispatch),
     on_rewake_peer: impl FnMut(),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
@@ -959,7 +968,9 @@ pub fn run_app(
             (app.callbacks.on_submit)(prompt, images, token);
         }
     }
-    app.run_with_session(&mut terminal, &mut session_guard)
+    let result = app.run_with_session(&mut terminal, &mut session_guard);
+    app.chat_widget.cancel_active_turn();
+    result
 }
 
 #[cfg(test)]
@@ -1003,7 +1014,7 @@ mod tests {
             computer_access_rx,
             AppCallbacks {
                 on_submit: Box::new(|_, _, _| {}),
-                on_queue_prompt: Box::new(|_, _| {}),
+                on_queue_prompt: Box::new(|_, _, _| {}),
                 on_switch_model: Box::new(|_, _| {}),
                 on_web_action: Box::new(|_| {}),
                 on_connect_action: Box::new(|_| {}),
@@ -1141,7 +1152,7 @@ mod tests {
 
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
-            ChatOutcome::QueuePrompt(ref prompt, ref images)
+            ChatOutcome::QueuePrompt(ref prompt, ref images, _)
                 if prompt == "pending" && images.is_empty()
         ));
         assert!(!active.is_cancelled());

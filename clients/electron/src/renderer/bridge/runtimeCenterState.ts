@@ -4,14 +4,19 @@ import type {
   ImageRefDto,
   MessageDto,
   PlanTaskDto,
+  PermissionRequest,
   SessionAgentSummaryDto,
   TaskRowDto,
 } from '@lingxi/bridge-client';
 import { fileMentionsFromPrompt } from './fileMentions';
+import { emptySubmittedPlanState, latestSubmittedPlan, reduceSubmittedPlanEvent, reduceSubmittedPlanPermission, type SubmittedPlan, type SubmittedPlanState } from './submittedPlan';
 
-export type RuntimeCenterSection = 'tasks' | 'agents' | 'resources' | 'plan';
+export type RuntimeCenterSection = 'tasks' | 'agents' | 'todos' | 'resources' | 'plan';
 
 export type RuntimeCenterItemRef =
+  | { kind: 'section'; id: 'agents' | 'todos' | 'resources' | 'plan' }
+  | { kind: 'todo'; id: string }
+  | { kind: 'plan-document'; id: string }
   | { kind: 'task'; id: string }
   | { kind: 'agent'; id: string }
   | { kind: 'resource'; id: string }
@@ -42,9 +47,13 @@ export interface AgentTranscriptState {
 
 export interface RuntimeCenterState {
   readonly agents: Readonly<Record<string, SessionAgentSummaryDto>>;
+  /** Live coordinator state is authoritative over transcript snapshots. */
+  readonly coordinatorWorkers: Readonly<Record<string, SessionAgentSummaryDto>>;
   readonly transcripts: Readonly<Record<string, AgentTranscriptState>>;
   readonly resources: readonly RuntimeResource[];
   readonly plan: readonly PlanTaskDto[];
+  readonly submittedPlan: SubmittedPlan | null;
+  readonly submittedPlanState: SubmittedPlanState;
   readonly sections: Readonly<Record<RuntimeCenterSection, boolean>>;
   readonly overviewOpen: boolean;
   readonly tabs: readonly RuntimeCenterItemRef[];
@@ -55,6 +64,7 @@ export interface RuntimeCenterState {
 export const RUNTIME_CENTER_SECTIONS: readonly RuntimeCenterSection[] = [
   'tasks',
   'agents',
+  'todos',
   'resources',
   'plan',
 ];
@@ -62,10 +72,13 @@ export const RUNTIME_CENTER_SECTIONS: readonly RuntimeCenterSection[] = [
 export function emptyRuntimeCenterState(): RuntimeCenterState {
   return {
     agents: {},
+    coordinatorWorkers: {},
     transcripts: {},
     resources: [],
     plan: [],
-    sections: { tasks: true, agents: true, resources: true, plan: true },
+    submittedPlan: null,
+    submittedPlanState: emptySubmittedPlanState(),
+    sections: { tasks: true, agents: true, todos: true, resources: true, plan: true },
     overviewOpen: false,
     tabs: [],
     activeItem: null,
@@ -130,7 +143,7 @@ export function closeRuntimeCenterItem(
     ...state,
     tabs,
     activeItem: fallback,
-    inspectorOpen: fallback !== null,
+    inspectorOpen: state.inspectorOpen,
   };
 }
 
@@ -387,18 +400,44 @@ export function resourcesFromRestoredMessages(
   return resources;
 }
 
+const terminalAgentStatuses = new Set(['completed', 'failed', 'killed', 'cancelled']);
+
+function mergeCoordinatorWorker(state: RuntimeCenterState, agent: SessionAgentSummaryDto): SessionAgentSummaryDto {
+  const worker = state.coordinatorWorkers[agent.agent_id];
+  return worker ? { ...agent, ...worker } : agent;
+}
+
 export function reduceRuntimeCenterEvent(
   state: RuntimeCenterState,
   event: ClientEvent,
   sessionId: string,
 ): RuntimeCenterState {
+  const submittedPlanState = reduceSubmittedPlanEvent(state.submittedPlanState, event, sessionId);
+  if (submittedPlanState !== state.submittedPlanState) {
+    state = { ...state, submittedPlanState, submittedPlan: latestSubmittedPlan(submittedPlanState) };
+  }
   switch (event.type) {
-    case 'session_agent_list':
+    case 'coordinator_worker': {
+      const worker = { ...event.worker, status: event.worker.status === 'working' ? 'running' : event.worker.status };
+      return {
+        ...state,
+        coordinatorWorkers: { ...state.coordinatorWorkers, [worker.agent_id]: worker },
+        agents: { ...state.agents, [worker.agent_id]: { ...state.agents[worker.agent_id], ...worker } },
+      };
+    }
+    case 'session_agent_list': {
       if (event.session_id !== sessionId) return state;
-      return { ...state, agents: Object.fromEntries(event.agents.map((agent) => [agent.agent_id, agent])) };
+      const agents = Object.fromEntries(event.agents.map((agent) => [agent.agent_id, mergeCoordinatorWorker(state, agent)]));
+      for (const worker of Object.values(state.coordinatorWorkers)) {
+        if (!agents[worker.agent_id] && !terminalAgentStatuses.has(worker.status)) {
+          agents[worker.agent_id] = { ...state.agents[worker.agent_id], ...worker };
+        }
+      }
+      return { ...state, agents };
+    }
     case 'session_agent_updated':
       if (event.session_id !== sessionId) return state;
-      return { ...state, agents: { ...state.agents, [event.agent.agent_id]: event.agent } };
+      return { ...state, agents: { ...state.agents, [event.agent.agent_id]: mergeCoordinatorWorker(state, event.agent) } };
     case 'session_agent_message': {
       if (event.session_id !== sessionId) return state;
       return {
@@ -427,6 +466,10 @@ export function reduceRuntimeCenterEvent(
       return addRuntimeResources(state, [resourceFromAttachment(event.attachment)]);
     case 'plan_updated':
       return { ...state, plan: event.tasks };
+    case 'session_resumed':
+      return event.session_id === sessionId
+        ? { ...state, agents: {}, coordinatorWorkers: {} }
+        : state;
     case 'session_started':
       return event.session_id === sessionId ? resetRuntimeCenterData(state) : state;
     case 'session_ended':
@@ -438,4 +481,34 @@ export function reduceRuntimeCenterEvent(
 
 export function tasksToRuntimeItems(tasks: readonly TaskRowDto[]): RuntimeCenterItemRef[] {
   return tasks.map((task) => ({ kind: 'task', id: task.task_id }));
+}
+
+export function reduceRuntimeCenterPermission(
+  state: RuntimeCenterState, request: PermissionRequest, sessionId: string,
+): RuntimeCenterState {
+  const submittedPlanState = reduceSubmittedPlanPermission(state.submittedPlanState, request, sessionId);
+  return submittedPlanState === state.submittedPlanState ? state : {
+    ...state, submittedPlanState, submittedPlan: latestSubmittedPlan(submittedPlanState),
+  };
+}
+
+/** A respawn replaces live workers and the permission gate; history remains inspectable. */
+export function resetRuntimeCenterConnection(state: RuntimeCenterState): RuntimeCenterState {
+  const submittedPlanState: SubmittedPlanState = {
+    ...emptySubmittedPlanState(),
+    calls: state.submittedPlanState.calls.map(({ requestId: _requestId, ...call }) => ({
+      ...call,
+      ...(!call.finished && (call.status === 'pending' || call.status === 'submitted')
+        ? { status: 'failed' as const, finished: true }
+        : {}),
+    })),
+  };
+  return {
+    ...state,
+    overviewOpen: false,
+    agents: {},
+    coordinatorWorkers: {},
+    submittedPlanState,
+    submittedPlan: latestSubmittedPlan(submittedPlanState),
+  };
 }

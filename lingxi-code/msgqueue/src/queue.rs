@@ -79,6 +79,16 @@ impl QueuedCommand {
 
     /// Whether this command is a task notification scoped to `agent`. Twin of
     /// the subagent drain gate (`mode === 'task-notification' && agentId === currentAgentId`).
+    ///
+    /// **Nothing in production constructs a
+    /// [`QueuedCommandContent::TaskNotification`] today**, so this predicate is
+    /// unreachable outside tests and the green test below is coverage of the
+    /// FILTER, not of any routing. The seam that actually decides who receives a
+    /// completion is `tasks::registry::TaskRegistry::take_pending_task_notifications`,
+    /// which derives notifications from task state (terminal AND not `notified`)
+    /// and hands every one of them to the main session — the gap `AGT-05` /
+    /// `TN-10` name. This half of the port is the shape a per-agent route would
+    /// take if the drain ever grew one; it is not that route.
     #[must_use]
     pub fn is_task_notification_for(&self, agent: &AgentId) -> bool {
         matches!(self.content, QueuedCommandContent::TaskNotification { .. })
@@ -127,6 +137,10 @@ pub enum QueuedCommandContent {
         parsed_json: serde_json::Value,
     },
     /// Notification from a background subagent or scheduled task.
+    ///
+    /// Declared, never produced: the only constructor in the workspace is in
+    /// this file's `mod tests`. See [`QueuedCommand::is_task_notification_for`]
+    /// for where completions are actually routed.
     TaskNotification {
         /// Notification payload (serialized).
         value: String,
@@ -173,6 +187,9 @@ pub enum QueuedCommandContent {
 }
 
 /// How a [`QueuedCommandContent::TaskNotification`] should be surfaced.
+///
+/// Reachable only through that variant, which nothing in production builds, so
+/// [`Self::Normal`] has never been constructed anywhere in the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NotificationMode {
     /// Normal notification.
@@ -728,8 +745,13 @@ mod tests {
         assert!(!cmd.is_slash_command());
     }
 
+    /// Covers the main-thread FILTER, and nothing beyond it: the notification
+    /// here is hand-built because no production code path constructs a
+    /// [`QueuedCommandContent::TaskNotification`]. Read this as "the filter
+    /// would scope correctly if something enqueued one", not as evidence that
+    /// subagent notifications are routed — they are not (`AGT-05` / `TN-10`).
     #[tokio::test]
-    async fn main_thread_filter_scopes_subagent_notifications() {
+    async fn main_thread_filter_scopes_a_hand_built_subagent_notification() {
         let q = MessageQueueManager::new();
         let agent = AgentId::new();
         let sub = QueuedCommand {

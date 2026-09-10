@@ -284,7 +284,9 @@ fn check_telemetry_schema() -> DoctorCheck {
     //   4. HERE
     // Re-count against `mcp::NAMES.len()` / `plugin::NAMES.len()`; never paste
     // the number a failing assertion printed.
-    let expected = 416;
+    // 2026-09-08 recount: tool::NAMES is 129 (not 135); all blocks
+    // sum to 410, matching the checked-in tengu_events.json fixture.
+    let expected = 410;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

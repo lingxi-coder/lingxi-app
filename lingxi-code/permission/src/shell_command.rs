@@ -187,10 +187,24 @@ fn strip_comment_lines(command: &str) -> String {
     }
 }
 
-/// claude-code `SAFE_ENV_VARS` (bashPermissions.ts:378-430) — env vars safe to
-/// strip before permission/exclusion matching. The ANT-only set (447-497) is
-/// intentionally NOT ported (internal-only).
-const SAFE_ENV_VARS: &[&str] = &[
+/// PARITY 2.1.263 `sle` — the canonical safe-env-var set, verified entry-for-entry
+/// and IN ORDER against the binary. It has three consumers in the oracle, so it
+/// lives here once rather than per-consumer:
+///
+///   * `EC()` / `stripSafeWrappers` — strip a leading `NAME=value` prefix before
+///     permission and exclusion matching (this file);
+///   * `KQt`'s prefix narrowing — an unsafe NAME pins the suggestion to the EXACT
+///     command so a `SECRET=… cmd` grant never widens to `cmd *`
+///     (`allow_suggestion.rs`, `sandbox_auto_allow.rs`);
+///   * `eO()` under the read block — an unsafe NAME makes the command
+///     unanalyzable (`command_path_containment.rs`).
+///
+/// 🚨 NOT to be confused with [`crate::bash_ast_security::SAFE_ENV_VARS`], which
+/// is a different table under the same oracle name: shell-CONTROLLED variables
+/// (`BASHPID`, …) whose value the parser can resolve. Same spelling, other layer.
+///
+/// The ANT-only set (`bashPermissions.ts:447-497`) is intentionally NOT ported.
+pub(crate) const SAFE_ENV_VARS: &[&str] = &[
     // Go
     "GOEXPERIMENT",
     "GOOS",
@@ -242,6 +256,14 @@ const SAFE_ENV_VARS: &[&str] = &[
     "DEBIAN_FRONTEND",
     "GIT_TERMINAL_PROMPT",
 ];
+
+/// PARITY 2.1.263 `eO(name)` — `return sle.has(name) || !1`. The `|| false` is a
+/// truthiness coercion on a `Set.has` that already returns a boolean, so this is
+/// a plain membership test.
+#[must_use]
+pub(crate) fn is_safe_env_var(name: &str) -> bool {
+    SAFE_ENV_VARS.contains(&name)
+}
 
 /// claude-code `stripSafeWrappers` (bashPermissions.ts:524-615). Two-phase
 /// fixed-point: Phase 1 strips leading SAFE_ENV_VARS assignments + comment

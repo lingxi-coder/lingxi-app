@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'topbar-summary-electron.mjs');
 
-test('real Electron topbar reveals saved summaries without persistent icon backgrounds', async () => {
+test('real Electron workspace keeps summary pinned with independent details and restored context access', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-topbar-summary-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-topbar-summary-electron-'));
   const vite = await createServer({
@@ -69,15 +69,11 @@ test('real Electron topbar reveals saved summaries without persistent icon backg
       });
     });
 
-    assert.deepEqual(result.initial, {
-      commandVisible: false,
-      engineVisible: false,
-      background: 'rgba(0, 0, 0, 0)',
-    });
-    assert.equal(result.firstItem.optionCount, 2);
-    assert.match(result.firstItem.selectedText, /Summary 1/);
-    assert.match(result.firstItem.detail, /Provider routing/);
-    assert.notEqual(result.activeBackground, 'rgba(0, 0, 0, 0)');
+    assert.equal(result.checks.length, 8);
+    assert.deepEqual(result.overview.sections, ['Subagents', 'Todos', 'Resources', 'Plan']);
+    assert.equal(result.overview.width, 300);
+    assert.deepEqual(result.heights, { chat: 56, detail: 56, panel: 390 });
+
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

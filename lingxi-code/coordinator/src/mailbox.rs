@@ -126,6 +126,7 @@ impl TeammateMailbox {
 
 /// Routes a [`TeammateMessage`] to the mailbox registered for an [`AgentId`].
 pub struct MailboxRouter {
+    colors: tokio::sync::RwLock<std::collections::HashMap<AgentId, String>>,
     mailboxes: tokio::sync::RwLock<std::collections::HashMap<AgentId, Arc<TeammateMailbox>>>,
     /// Display-name → [`AgentId`] index (keys lower-cased) so a message can be
     /// addressed by a teammate's NAME, not just its id. claude-code's mailbox is
@@ -135,6 +136,17 @@ pub struct MailboxRouter {
     /// `delete_worker`. Separate from `mailboxes` so the id-keyed delivery path
     /// stays unchanged.
     names: tokio::sync::RwLock<std::collections::HashMap<String, AgentId>>,
+    /// Additional address → [`AgentId`] index for identities the model is handed
+    /// but that are not display names — today the background agent's TASK id,
+    /// which is what a completion `<task-notification>` carries and what the
+    /// coordinator prompt tells the model to send to.
+    ///
+    /// Deliberately separate from [`Self::names`]: that index feeds
+    /// [`Self::named_recipients`], which drives `ListAgents` rows and `to:"*"`
+    /// broadcast, and neither dedupes by [`AgentId`]. Putting a second address
+    /// for the same agent in there would show a duplicate agent and deliver
+    /// every broadcast to it twice.
+    aliases: tokio::sync::RwLock<std::collections::HashMap<String, AgentId>>,
 }
 
 impl MailboxRouter {
@@ -142,9 +154,31 @@ impl MailboxRouter {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            colors: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             mailboxes: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             names: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            aliases: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Store a palette color against the resolved identity so aliases agree.
+    pub async fn set_color(&self, name: &str, color: &str) {
+        if let Some(id) = self
+            .resolve_name(name)
+            .await
+            .or(self.resolve_alias(name).await)
+        {
+            self.colors.write().await.insert(id, color.to_owned());
+        }
+    }
+
+    pub async fn teammate_color(&self, name: &str) -> Option<String> {
+        let id = self
+            .resolve_name(name)
+            .await
+            .or(self.resolve_alias(name).await)
+            .or_else(|| uuid::Uuid::parse_str(name).ok().map(AgentId::from_uuid))?;
+        self.colors.read().await.get(&id).cloned()
     }
 
     /// Register `mailbox` for `agent_id`. Existing entries are overwritten.
@@ -171,6 +205,31 @@ impl MailboxRouter {
             .read()
             .await
             .get(&name.to_ascii_lowercase())
+            .copied()
+    }
+
+    /// Index an additional `alias` → `agent_id` address (case-insensitively).
+    ///
+    /// Unlike [`Self::register_name`] this does NOT make the agent appear under
+    /// a second name in `ListAgents` or receive broadcasts twice; it only makes
+    /// the alias resolvable when a message names it directly. Empty aliases are
+    /// ignored.
+    pub async fn register_alias(&self, alias: &str, agent_id: AgentId) {
+        if alias.is_empty() {
+            return;
+        }
+        self.aliases
+            .write()
+            .await
+            .insert(alias.to_ascii_lowercase(), agent_id);
+    }
+
+    /// Resolve an additional address to its [`AgentId`], if one is registered.
+    pub async fn resolve_alias(&self, alias: &str) -> Option<AgentId> {
+        self.aliases
+            .read()
+            .await
+            .get(&alias.to_ascii_lowercase())
             .copied()
     }
 
@@ -207,7 +266,9 @@ impl MailboxRouter {
     /// it).
     pub async fn unregister(&self, agent: &AgentId) {
         self.mailboxes.write().await.remove(agent);
+        self.colors.write().await.remove(agent);
         self.names.write().await.retain(|_, id| id != agent);
+        self.aliases.write().await.retain(|_, id| id != agent);
     }
 }
 
@@ -220,6 +281,25 @@ impl Default for MailboxRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn palette_color_resolves_aliases_and_is_removed_with_identity() {
+        let router = MailboxRouter::new();
+        let id = AgentId::new();
+        router.register_name("Alice", id).await;
+        router.register_alias("Alice@session", id).await;
+        router.set_color("alice", "blue").await;
+        assert_eq!(
+            router.teammate_color("ALICE").await.as_deref(),
+            Some("blue")
+        );
+        assert_eq!(
+            router.teammate_color("Alice@session").await.as_deref(),
+            Some("blue")
+        );
+        router.unregister(&id).await;
+        assert_eq!(router.teammate_color(&id.as_uuid().to_string()).await, None);
+    }
 
     #[tokio::test]
     async fn get_returns_registered_mailbox() {
@@ -240,5 +320,38 @@ mod tests {
         // After unregister it is gone again.
         router.unregister(&agent).await;
         assert!(router.get(&agent).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_alias_routes_without_becoming_a_second_name() {
+        // The model is handed a background agent's TASK id in its completion
+        // notification and told to continue that agent by sending to it. That
+        // id is not a display name, so it must resolve for a direct send while
+        // staying out of the name index that drives ListAgents rows and `to:"*"`
+        // broadcast — otherwise the agent shows up twice and receives every
+        // broadcast twice.
+        let router = MailboxRouter::new();
+        let agent = AgentId::new();
+        router
+            .register(agent, Arc::new(TeammateMailbox::new(agent)))
+            .await;
+        router.register_name("reviewer", agent).await;
+        router.register_alias("a1b2c3d4e", agent).await;
+
+        assert_eq!(router.resolve_alias("a1b2c3d4e").await, Some(agent));
+        assert_eq!(router.resolve_alias("A1B2C3D4E").await, Some(agent));
+        // The alias is NOT a name, and the name is NOT an alias.
+        assert_eq!(router.resolve_name("a1b2c3d4e").await, None);
+        assert_eq!(router.resolve_alias("reviewer").await, None);
+        assert_eq!(
+            router.named_recipients().await,
+            vec![("reviewer".to_string(), agent)],
+            "an alias must not add a broadcast recipient or a ListAgents row",
+        );
+
+        // Unregistering the agent drops both indexes.
+        router.unregister(&agent).await;
+        assert_eq!(router.resolve_alias("a1b2c3d4e").await, None);
+        assert_eq!(router.resolve_name("reviewer").await, None);
     }
 }

@@ -1610,6 +1610,40 @@ fn json_to_yaml(v: &serde_json::Value) -> serde_yaml::Value {
     serde_yaml::to_value(v).unwrap_or(serde_yaml::Value::Null)
 }
 
+/// claude `SN(Jb(),".claude",e)` — the managed policy agent directory under the
+/// OS policy root (`getManagedFilePath`).
+///
+/// This is `Z$`'s TOP tier: `C=[built-in, plugin, userSettings, projectSettings,
+/// flagSettings, policySettings]` is applied later-wins, so an org-provisioned
+/// definition outranks every other source, `--agents` included. It is therefore
+/// merged AFTER the flag agents, not alongside the dir tiers.
+///
+/// `wQr` loads it with no `Fr(...)` / `ku("agents")` gate of its own — unlike
+/// the user and project tiers — because org policy is not user customization.
+/// The safe-mode / `--bare` arm still applies: `jto` returns built-ins only
+/// before any of this runs.
+#[must_use]
+pub fn policy_agent_dir(managed_dir: &Path) -> PathBuf {
+    managed_dir.join(branding::DOT_DIR).join("agents")
+}
+
+/// Fold `incoming` over `agents` with claude's later-wins tier semantics: a
+/// same-named definition REPLACES the one already there, a new name appends.
+///
+/// The in-place replace matters — appending instead would leave two entries for
+/// one `agent_type`, and every consumer downstream (`agent_listing_entries`,
+/// `lookup_definition`, `/agents`) picks by name, so which one they saw would
+/// depend on iteration order.
+pub fn merge_agents_later_wins(agents: &mut Vec<AgentDefinition>, incoming: Vec<AgentDefinition>) {
+    for def in incoming {
+        if let Some(slot) = agents.iter_mut().find(|e| e.agent_type == def.agent_type) {
+            *slot = def;
+        } else {
+            agents.push(def);
+        }
+    }
+}
+
 /// Load every `*.md` agent file under each path in `paths`, in order.
 ///
 /// Files with no frontmatter or invalid YAML are logged at `warn!` and
@@ -1619,19 +1653,117 @@ fn json_to_yaml(v: &serde_json::Value) -> serde_yaml::Value {
 ///
 /// The returned list is sorted alphabetically by `agent_type` for stable
 /// display order in `/agents`.
-pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<AgentDefinition> {
-    use std::collections::HashMap;
-    let mut by_name: HashMap<String, AgentDefinition> = HashMap::new();
-    for (dir, source) in paths {
-        // missing dir = empty contribution
-        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+/// claude `wie` — the per-file byte cap `vG` applies before parsing a markdown
+/// definition (1 MiB).
+const MARKDOWN_FILE_MAX_BYTES: u64 = 1_048_576;
+
+/// Every `*.md` file under `root`, RECURSIVELY.
+///
+/// claude's `vG(dir)` scans with
+/// `rg --files --hidden --follow --no-ignore --glob "*.md"`, whose fallback
+/// `TQr` is an explicit recursive walk that follows symlinks and keeps a
+/// `dev:ino` visited set so a symlink loop cannot hang it. The port read the
+/// TOP LEVEL only, so `<DOT_DIR>/agents/reviewers/api.md` — an ordinary way to
+/// group definitions — was invisible.
+///
+/// The visited key here is the canonical path rather than `dev:ino`: `TQr` uses
+/// `dev:ino` when the platform reports it and falls back to `realpath`
+/// otherwise, and the two are interchangeable for loop detection. Following
+/// symlinks is `--follow`, so entries are classified through
+/// `metadata` (which resolves them), not `symlink_metadata`.
+///
+/// Results are sorted. claude leaves this to ripgrep's traversal order; the
+/// port's caller inserts later-wins into a map, so an unsorted walk would make
+/// the winner between two files declaring the same `name` depend on filesystem
+/// order. Sorting pins it without changing WHICH definitions exist.
+async fn collect_markdown_files(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        // Canonicalize BEFORE the visited check so two paths reaching the same
+        // directory through different symlinks collapse to one entry.
+        let Ok(key) = tokio::fs::canonicalize(&dir).await else {
+            continue;
+        };
+        if !visited.insert(key) {
+            continue;
+        }
+        // missing dir = empty contribution (`O5`/`vG`'s ENOENT arm)
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
             continue;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("md") {
+            let path = entry.path();
+            // `--follow`: resolve through a symlink before classifying it.
+            let meta = match tokio::fs::metadata(&path).await {
+                Ok(m) => m,
+                Err(e) => {
+                    // `TQr`: `Failed to follow symlink ${C}: ${D}` — a dangling
+                    // link is reported, not fatal.
+                    tracing::warn!(error = %e, path = %path.display(), "failed to follow symlink");
+                    continue;
+                }
+            };
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() && path.extension().and_then(|s| s.to_str()) == Some("md") {
+                if meta.len() > MARKDOWN_FILE_MAX_BYTES {
+                    tracing::warn!(
+                        path = %path.display(),
+                        limit = MARKDOWN_FILE_MAX_BYTES,
+                        "loadMarkdownFilesFromDir: skipping: not a regular file or exceeds the byte limit"
+                    );
+                    continue;
+                }
+                let identity = file_identity(&meta, &path);
+                out.push((path, identity));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// claude `SQr(filePath)` — the identity `wQr` de-duplicates markdown files on,
+/// so one file reachable through a symlink or a hard link from two of the
+/// directories is loaded once.
+///
+/// `dev:ino` where the platform reports it, the path otherwise. `TQr` makes the
+/// same substitution for its directory visited set.
+#[cfg(unix)]
+fn file_identity(meta: &std::fs::Metadata, path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let _ = path;
+    format!("{}:{}", meta.dev(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn file_identity(_meta: &std::fs::Metadata, path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<AgentDefinition> {
+    use std::collections::HashMap;
+    let mut by_name: HashMap<String, AgentDefinition> = HashMap::new();
+    // `wQr` de-duplicates by inode across ALL tiers at once, keeping the FIRST
+    // occurrence and logging each skip. Same inode means the same bytes, so the
+    // choice only decides which `source`/`baseDir` gets recorded.
+    let mut by_identity: HashMap<String, AgentSource> = HashMap::new();
+    let mut deduplicated = 0usize;
+    for (dir, source) in paths {
+        for (p, identity) in collect_markdown_files(dir).await {
+            if let Some(already) = by_identity.get(&identity) {
+                tracing::debug!(
+                    path = %p.display(),
+                    source = ?source,
+                    already_loaded_from = ?already,
+                    "Skipping duplicate file (same inode already loaded)"
+                );
+                deduplicated += 1;
                 continue;
             }
+            by_identity.insert(identity, *source);
             let raw = match tokio::fs::read_to_string(&p).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -1665,16 +1797,134 @@ pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<Agen
             }
         }
     }
+    if deduplicated > 0 {
+        tracing::debug!(
+            count = deduplicated,
+            "Deduplicated agent files (same inode via symlinks or hard links)"
+        );
+    }
     let mut out: Vec<AgentDefinition> = by_name.into_values().collect();
     out.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
     out
 }
 
-/// Load agents from a caller-supplied additional directory.  This preserves
-/// the oracle's distinct `additionalDirectory` provenance instead of
-/// collapsing it into user/project settings.
-pub async fn load_agents_from_additional_directory(path: PathBuf) -> Vec<AgentDefinition> {
-    load_agents_from_dirs(&[(path, AgentSource::AdditionalDirectory)]).await
+/// claude `O5(kind, cwd)` (src_162329786.js @1338241) — every project-scoped
+/// agent directory between `cwd` and the enclosing project root:
+///
+/// ```js
+/// let r=i9e(yQr()).normalize("NFC"),o=kQr(n),d=i9e(n),p=[];
+/// while(!0){
+///   if(Pf(d)===Pf(r))break;            // the home dir is the ceiling, NOT collected
+///   p.push(SN(d,".claude",e));
+///   if(o&&Pf(d)===Pf(o))break;         // the project root IS collected, then stop
+///   let C=_Qr(d); if(C===d)break;      // filesystem root
+///   d=C}
+/// ```
+///
+/// The port used to read ONE project directory (`<cwd>/<DOT_DIR>/agents`), so
+/// in a monorepo an agent defined at `packages/foo/<DOT_DIR>/agents/` was
+/// invisible whenever the session's cwd was the repo root, and one defined at
+/// the repo root was invisible from inside a package. Both are ordinary
+/// layouts.
+///
+/// Returned DEEPEST first, matching `O5`. `project_root` is `kQr(cwd)` — the
+/// outermost enclosing project; `None` walks to the home ceiling (or the
+/// filesystem root, whichever comes first). Existence is NOT checked here:
+/// [`load_agents_from_dirs`] already treats an unreadable directory as an empty
+/// contribution, which is `O5`'s ENOENT arm.
+#[must_use]
+pub fn project_agent_dirs(cwd: &Path, home: &Path, project_root: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut dir = cwd;
+    loop {
+        if dir == home {
+            break;
+        }
+        out.push(dir.join(branding::DOT_DIR).join("agents"));
+        if project_root.is_some_and(|root| dir == root) {
+            break;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent,
+            _ => break,
+        }
+    }
+    out
+}
+
+/// The agent directories to hand [`load_agents_from_dirs`], LOWEST priority
+/// FIRST (that function is later-wins).
+///
+/// claude's tier map (`Z$`) is `[built-in, plugin, userSettings,
+/// projectSettings, flagSettings, policySettings]`, and WITHIN the
+/// projectSettings tier it sorts by `ITe` — the separator count of `baseDir`,
+/// ascending — so the DEEPEST project directory wins. Emitting the walk
+/// reversed (shallowest first) gives later-wins the same answer without a
+/// second sort.
+///
+/// `additional_dirs` are the `--add-dir` roots. For `kind === "agents"` ONLY,
+/// `wQr` gives each of them a second projectSettings source —
+/// `<dir>/.claude/agents`, tagged `fromAdditionalDirectory: true` — minus any
+/// the upward walk already covers, and `Z$` ranks those BELOW the ordinary
+/// project directories:
+///
+/// ```js
+/// let C=e==="agents"?K(await Promise.all(Rp().map(async(De)=>{
+///       let Le=SN(i9e(De),".claude",e); return await s9e(Le).catch(()=>Le)})))
+///     .filter((De)=>!E.has(Pf(De))):[];
+/// …
+/// let p=[...e.filter((D)=>D.source==="projectSettings"&&D.fromAdditionalDirectory),
+///        ...e.filter((D)=>D.source==="projectSettings"&&!D.fromAdditionalDirectory).sort(ITe)];
+/// ```
+///
+/// claude compares REALPATHS when excluding an add-dir the walk already
+/// covered; this compares the joined paths. The two differ only when the same
+/// directory is reached under two spellings, and then the port merely reads it
+/// twice — the ordinary project entry still comes later and still wins, which
+/// is the same answer claude reaches by dropping the duplicate.
+///
+/// ⛔ One of claude's sources is still missing: the managed policy directory
+/// (`SN(Jb(),".claude",e)`, the LOWEST tier). The port has no managed-settings
+/// DIRECTORY helper, only `managed-settings.json` content handling.
+#[must_use]
+pub fn agent_dir_precedence(
+    user_agents_dir: PathBuf,
+    cwd: &Path,
+    home: &Path,
+    project_root: Option<&Path>,
+    additional_dirs: &[PathBuf],
+) -> Vec<(PathBuf, AgentSource)> {
+    let mut project = project_agent_dirs(cwd, home, project_root);
+    project.reverse();
+
+    let mut dirs = vec![(user_agents_dir, AgentSource::UserDefined)];
+    let mut seen_additional: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for extra in additional_dirs {
+        let dir = extra.join(branding::DOT_DIR).join("agents");
+        if project.contains(&dir) || !seen_additional.insert(dir.clone()) {
+            continue;
+        }
+        dirs.push((dir, AgentSource::AdditionalDirectory));
+    }
+    dirs.extend(project.into_iter().map(|d| (d, AgentSource::Project)));
+    dirs
+}
+
+/// Recipient comparison used by implicit teammate name reservation.
+pub fn normalize_teammate_recipient(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    fn js_whitespace(c: char) -> bool {
+        matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
+    }
+    let normalized: String = name.nfkc().filter(|c| {
+        js_whitespace(*c) || (!c.is_control() && !matches!(*c, '\u{00ad}' | '\u{0600}'..='\u{0605}' | '\u{06dd}' | '\u{070f}' | '\u{0890}'..='\u{0891}' | '\u{08e2}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}'))
+    }).collect();
+    normalized
+        .split(js_whitespace)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_lowercase()
 }
 
 #[cfg(test)]
@@ -1682,6 +1932,17 @@ mod tests {
     use super::*;
     use crate::definition::AgentEffort;
     use tempfile::TempDir;
+
+    #[test]
+    fn recipient_normalizer_matches_javascript_nfkc_and_whitespace() {
+        assert_eq!(normalize_teammate_recipient(" ＭＡＩＮ "), "main");
+        assert_eq!(
+            normalize_teammate_recipient("team\u{feff}lead"),
+            "team-lead"
+        );
+        assert_eq!(normalize_teammate_recipient("ma\u{0085}in"), "main");
+        assert_eq!(normalize_teammate_recipient("ma\u{200b}in"), "main");
+    }
 
     fn parse_name(name: &str) -> Result<AgentDefinition, AgentLoadError> {
         let raw = format!("---\nname: \"{name}\"\ndescription: d\n---\nBody");
@@ -2032,6 +2293,314 @@ mod tests {
             def.allowed_tools,
             vec!["Read".to_string(), "Grep".to_string()]
         );
+    }
+
+    /// `vG` scans with `rg --files --glob "*.md"`, which RECURSES. Grouping
+    /// definitions into subdirectories is ordinary; the port used to read the
+    /// top level only, so those files were invisible with no diagnostic.
+    #[tokio::test]
+    async fn agent_files_are_found_in_subdirectories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("agents");
+        let nested = agents.join("reviewers").join("backend");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        tokio::fs::write(
+            agents.join("top.md"),
+            "---\nname: top\ndescription: t\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            nested.join("api.md"),
+            "---\nname: api\ndescription: a\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+        // A non-markdown neighbour and an oversized definition are both skipped.
+        tokio::fs::write(agents.join("notes.txt"), "not an agent")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            agents.join("huge.md"),
+            format!(
+                "---\nname: huge\ndescription: h\n---\n{}",
+                "x".repeat(MARKDOWN_FILE_MAX_BYTES as usize + 1)
+            ),
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Project)]).await;
+        let names: Vec<&str> = loaded.iter().map(|a| a.agent_type.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["api", "top"],
+            "the nested definition must load and the over-cap one must not",
+        );
+    }
+
+    /// `TQr` keeps a `dev:ino` visited set precisely so a symlink cycle cannot
+    /// hang the walk. Without one this test does not finish.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_cycle_does_not_hang_the_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("agents");
+        let sub = agents.join("sub");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+        tokio::fs::write(
+            agents.join("a.md"),
+            "---\nname: a\ndescription: d\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+        // sub/loop -> agents, i.e. agents/sub/loop/sub/loop/...
+        std::os::unix::fs::symlink(&agents, sub.join("loop")).unwrap();
+
+        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Project)]).await;
+        assert_eq!(loaded.len(), 1, "the cycle must not duplicate or hang");
+        assert_eq!(loaded[0].agent_type, "a");
+    }
+
+    /// `wQr` de-duplicates by inode across tiers, so one definition reachable
+    /// from two directories through a symlink is loaded once — not twice under
+    /// two different `source` labels.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_file_reachable_from_two_dirs_is_loaded_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user");
+        let project = tmp.path().join("project");
+        tokio::fs::create_dir_all(&user).await.unwrap();
+        tokio::fs::create_dir_all(&project).await.unwrap();
+        let real = user.join("shared.md");
+        tokio::fs::write(&real, "---\nname: shared\ndescription: d\n---\nbody\n")
+            .await
+            .unwrap();
+        // The project dir reaches the SAME inode through a symlink.
+        std::os::unix::fs::symlink(&real, project.join("shared.md")).unwrap();
+
+        let loaded = load_agents_from_dirs(&[
+            (user, AgentSource::UserDefined),
+            (project, AgentSource::Project),
+        ])
+        .await;
+        assert_eq!(loaded.len(), 1, "one inode, one definition: {loaded:?}");
+        assert_eq!(
+            loaded[0].source,
+            AgentSource::UserDefined,
+            "the FIRST occurrence is kept, matching `wQr`'s scan order",
+        );
+    }
+
+    /// The negative half: two SEPARATE files declaring the same name are not
+    /// inode duplicates, so both load and ordinary later-wins decides.
+    #[tokio::test]
+    async fn two_distinct_files_with_one_name_still_resolve_by_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user");
+        let project = tmp.path().join("project");
+        tokio::fs::create_dir_all(&user).await.unwrap();
+        tokio::fs::create_dir_all(&project).await.unwrap();
+        tokio::fs::write(
+            user.join("a.md"),
+            "---\nname: dup\ndescription: USER\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            project.join("b.md"),
+            "---\nname: dup\ndescription: PROJECT\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_agents_from_dirs(&[
+            (user, AgentSource::UserDefined),
+            (project, AgentSource::Project),
+        ])
+        .await;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].when_to_use, "PROJECT", "later tier wins");
+    }
+
+    /// `policy_agent_dir` is `Z$`'s TOP tier, so it must beat a `--agents`
+    /// definition of the same name — which is why the composition root merges
+    /// it AFTER the flag agents.
+    #[test]
+    fn merge_agents_later_wins_replaces_in_place() {
+        let named = |ty: &str, desc: &str, source: AgentSource| {
+            parse_agent_markdown(
+                &format!("---\nname: {ty}\ndescription: {desc}\n---\nbody\n"),
+                source,
+                PathBuf::from("/base"),
+                Path::new("x.md"),
+            )
+            .expect("fixture parses")
+        };
+        let mut agents = vec![
+            named("keeper", "FLAG", AgentSource::Flag),
+            named("other", "PROJECT", AgentSource::Project),
+        ];
+        merge_agents_later_wins(
+            &mut agents,
+            vec![
+                named("keeper", "POLICY", AgentSource::PolicySettings),
+                named("fresh", "POLICY", AgentSource::PolicySettings),
+            ],
+        );
+        assert_eq!(agents.len(), 3, "replace in place, then append: {agents:?}");
+        let keeper = agents.iter().find(|a| a.agent_type == "keeper").unwrap();
+        assert_eq!(keeper.when_to_use, "POLICY");
+        assert_eq!(keeper.source, AgentSource::PolicySettings);
+        assert_eq!(agents[1].agent_type, "other", "untouched entries keep order");
+    }
+
+    #[test]
+    fn policy_agent_dir_sits_under_the_managed_root() {
+        assert_eq!(
+            policy_agent_dir(Path::new("/Library/Application Support/LingXi")),
+            PathBuf::from("/Library/Application Support/LingXi")
+                .join(branding::DOT_DIR)
+                .join("agents")
+        );
+    }
+
+    /// `O5`'s three stop conditions, and the order it returns.
+    #[test]
+    fn project_agent_dirs_walks_up_to_the_project_root() {
+        let d = |p: &str| PathBuf::from(p);
+        let agents = |p: &str| d(p).join(branding::DOT_DIR).join("agents");
+
+        // cwd inside a package: every level from cwd to the project root,
+        // deepest first, root INCLUDED.
+        assert_eq!(
+            project_agent_dirs(
+                &d("/home/u/repo/packages/foo"),
+                &d("/home/u"),
+                Some(&d("/home/u/repo")),
+            ),
+            vec![
+                agents("/home/u/repo/packages/foo"),
+                agents("/home/u/repo/packages"),
+                agents("/home/u/repo"),
+            ]
+        );
+
+        // At the project root: just the one.
+        assert_eq!(
+            project_agent_dirs(&d("/home/u/repo"), &d("/home/u"), Some(&d("/home/u/repo"))),
+            vec![agents("/home/u/repo")]
+        );
+
+        // No project root: the HOME ceiling stops the walk, and home itself is
+        // never collected — `if(Pf(d)===Pf(r))break` runs before the push.
+        assert_eq!(
+            project_agent_dirs(&d("/home/u/scratch/x"), &d("/home/u"), None),
+            vec![agents("/home/u/scratch/x"), agents("/home/u/scratch")]
+        );
+
+        // cwd IS home: nothing at all.
+        assert!(project_agent_dirs(&d("/home/u"), &d("/home/u"), None).is_empty());
+
+        // Neither home nor root on the path: the filesystem root ends it.
+        assert_eq!(
+            project_agent_dirs(&d("/srv/a"), &d("/home/u"), None),
+            vec![agents("/srv/a"), agents("/srv"), agents("/")]
+        );
+    }
+
+    /// `load_agents_from_dirs` is later-wins, and `ITe` makes the DEEPEST
+    /// project directory win, so the walk must be handed over reversed.
+    #[test]
+    fn agent_dir_precedence_puts_the_deepest_project_dir_last() {
+        let d = |p: &str| PathBuf::from(p);
+        let got = agent_dir_precedence(
+            d("/home/u/.lingxi/agents"),
+            &d("/home/u/repo/packages/foo"),
+            &d("/home/u"),
+            Some(&d("/home/u/repo")),
+            &[],
+        );
+        let names: Vec<String> = got
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "/home/u/.lingxi/agents".to_string(),
+                format!("/home/u/repo/{}/agents", branding::DOT_DIR),
+                format!("/home/u/repo/packages/{}/agents", branding::DOT_DIR),
+                format!("/home/u/repo/packages/foo/{}/agents", branding::DOT_DIR),
+            ],
+            "user first (lowest), then project shallow -> deep",
+        );
+        assert_eq!(got[0].1, AgentSource::UserDefined);
+        assert!(got[1..].iter().all(|(_, s)| *s == AgentSource::Project));
+    }
+
+    /// `--add-dir` agents rank between the user tier and the ordinary project
+    /// tier, and a root the upward walk already covers is not added twice.
+    #[test]
+    fn agent_dir_precedence_places_add_dirs_below_the_project_tier() {
+        let d = |p: &str| PathBuf::from(p);
+        let agents = |p: &str| d(p).join(branding::DOT_DIR).join("agents");
+        let got = agent_dir_precedence(
+            d("/home/u/.lingxi/agents"),
+            &d("/home/u/repo"),
+            &d("/home/u"),
+            Some(&d("/home/u/repo")),
+            // `/other` is new; `/home/u/repo` is already the project walk's
+            // only entry and must not be repeated.
+            &[d("/other"), d("/home/u/repo"), d("/other")],
+        );
+        assert_eq!(
+            got,
+            vec![
+                (d("/home/u/.lingxi/agents"), AgentSource::UserDefined),
+                (agents("/other"), AgentSource::AdditionalDirectory),
+                (agents("/home/u/repo"), AgentSource::Project),
+            ],
+            "user < additionalDirectory < projectSettings, deduped",
+        );
+    }
+
+    /// The deepest definition of a name must be the one that survives — the
+    /// behaviour `ITe` + later-wins produce together, asserted end to end
+    /// through the real loader rather than on the ordering alone.
+    #[tokio::test]
+    async fn a_nested_project_agent_overrides_a_shallower_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let deep = root.join("packages").join("foo");
+        for (dir, body) in [(&root, "ROOT"), (&deep, "DEEP")] {
+            let agents = dir.join(branding::DOT_DIR).join("agents");
+            tokio::fs::create_dir_all(&agents).await.unwrap();
+            tokio::fs::write(
+                agents.join("reviewer.md"),
+                format!("---\nname: reviewer\ndescription: {body}\n---\nbody\n"),
+            )
+            .await
+            .unwrap();
+        }
+        let dirs = agent_dir_precedence(
+            tmp.path().join("no-such-user-dir"),
+            &deep,
+            tmp.path(),
+            Some(&root),
+            &[],
+        );
+        let loaded = load_agents_from_dirs(&dirs).await;
+        let reviewer = loaded
+            .iter()
+            .find(|a| a.agent_type == "reviewer")
+            .expect("the nested walk must find it at all");
+        assert_eq!(
+            reviewer.when_to_use, "DEEP",
+            "the definition closest to the cwd wins",
+        );
+        assert_eq!(loaded.len(), 1, "one name, one entry: {loaded:?}");
     }
 
     #[tokio::test]

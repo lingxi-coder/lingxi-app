@@ -20,6 +20,11 @@ fn mobile_tool_list_snapshot() {
     let mut names = reg.all_names();
     names.sort();
 
+    // Removed tools must be absent on every host, including mobile.
+    for removed in ["TeamCreate", "TeamDelete"] {
+        assert!(!names.iter().any(|name| name == removed));
+    }
+
     // Desktop-only + device-control tools must NOT be in the mobile set.
     for forbidden in [
         "Bash",
@@ -27,8 +32,6 @@ fn mobile_tool_list_snapshot() {
         "REPL",
         "MCP",
         "Agent",
-        "TeamCreate",
-        "TeamDelete",
         "EnterWorktree",
         "ExitWorktree",
         "computer",

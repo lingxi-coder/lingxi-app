@@ -14,8 +14,7 @@
     "multi_in_progress_template": "TodoWrite: at most one todo may be 'in_progress' (got {N})"
   },
   "plan_mode": {
-    "enter_marker": "[PLAN MODE]",
-    "exit_marker":  "[EXIT PLAN MODE]",
+    "_note": "2.1.266 has no plan-mode marker strings: EnterPlanMode returns {message} and ExitPlanMode returns {plan,isAgent,filePath,hasTaskTool,planWasEdited}. The former enter_marker/exit_marker entries were LingXi-invented and were removed together with the constants.",
     "enter_already_in_mode": "EnterPlanMode: session is already in plan mode",
     "exit_not_in_mode":      "ExitPlanMode: session is not in plan mode"
   },

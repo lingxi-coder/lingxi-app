@@ -1,0 +1,55 @@
+.scheduled-tasks {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--scheduled-bg);
+  color: var(--scheduled-text);
+}
+.scheduled-tasks-toolbar { display: flex; justify-content: flex-end; padding: 8px 14px; }
+.scheduled-create { position: relative; }
+.scheduled-create-button {
+  display: flex; align-items: center; gap: 8px; border: 0; border-radius: 11px;
+  padding: 8px 12px; background: var(--scheduled-text); color: var(--scheduled-bg);
+  font: inherit; font-size: 14px; cursor: pointer;
+}
+.scheduled-create-options {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 10; width: 220px;
+  padding: 5px; border: 1px solid var(--scheduled-border); border-radius: 12px;
+  background: var(--scheduled-bg); box-shadow: 0 6px 24px #0000001a;
+}
+.scheduled-create-options button {
+  display: flex; align-items: center; gap: 9px; width: 100%; border: 0; border-radius: 7px;
+  padding: 9px; text-align: left; font: inherit; color: inherit; background: transparent; cursor: pointer;
+}
+.scheduled-create-options button:hover, .scheduled-suggestion:hover { background: var(--scheduled-hover); }
+.scheduled-tasks-content { max-width: 1000px; margin: 24px auto 0; padding: 0 32px 40px; }
+.scheduled-tasks-content h1 { margin: 0 10px; font-size: 28px; line-height: 1.3; font-weight: 500; letter-spacing: -.6px; }
+.scheduled-tasks-subtitle { margin: 12px 10px 26px; color: var(--scheduled-secondary); font-size: 16px; line-height: 1.5; }
+.scheduled-search { display: flex; align-items: center; gap: 10px; padding: 0 13px; border: 1px solid var(--scheduled-border); border-radius: 24px; color: var(--scheduled-secondary); }
+.scheduled-search input { width: 100%; min-width: 0; height: 38px; border: 0; outline: none; background: transparent; color: var(--scheduled-text); font: inherit; font-size: 14px; }
+.scheduled-search input::placeholder { color: var(--scheduled-muted); }
+.scheduled-search:focus-within { outline: 2px solid var(--scheduled-accent); outline-offset: 2px; }
+.scheduled-suggestions-heading { margin: 30px 10px 13px; color: var(--scheduled-secondary); font-size: 16px; line-height: 1.5; font-weight: 400; }
+.scheduled-suggestions { display: flex; flex-direction: column; gap: 10px; }
+.scheduled-suggestion { display: flex; align-items: flex-start; gap: 12px; padding: 14px 12px; border: 0; border-radius: 12px; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.scheduled-suggestion-icon { flex-shrink: 0; padding-top: 1px; }
+.scheduled-suggestion-copy { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.scheduled-suggestion-heading { display: flex; flex-wrap: wrap; gap: 4px 9px; font-size: 14px; line-height: 1.5; }
+.scheduled-suggestion-schedule { color: var(--scheduled-muted); }
+.scheduled-suggestion-description { color: var(--scheduled-secondary); font-size: 14px; line-height: 1.5; }
+.scheduled-empty { margin: 14px 10px; color: var(--scheduled-secondary); line-height: 1.6; }
+.scheduled-tasks button:focus-visible { outline: 2px solid var(--scheduled-accent); outline-offset: 2px; }
+@media (max-width: 720px) {
+  .scheduled-tasks-content { margin-top: 20px; padding: 0 16px 24px; }
+  .scheduled-tasks-content h1 { font-size: 25px; }
+  .scheduled-tasks-subtitle { font-size: 14px; }
+}
+
+.scheduled-list-heading { display: flex; align-items: baseline; justify-content: space-between; }
+.scheduled-job-row { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--scheduled-border); }
+.scheduled-job-row > .scheduled-suggestion { flex: 1; min-width: 0; }
+.scheduled-job-row .scheduled-suggestion-copy { overflow-wrap: anywhere; }
+.scheduled-job-row > button:not(.scheduled-suggestion), .scheduled-job-actions button, .scheduled-list-heading > button { border: 1px solid var(--scheduled-border); background: transparent; color: inherit; padding: 7px 10px; border-radius: 8px; cursor: pointer; }
+.scheduled-job-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.scheduled-tasks button:disabled { opacity: .5; cursor: default; }

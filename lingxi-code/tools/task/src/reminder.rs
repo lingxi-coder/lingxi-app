@@ -4,8 +4,9 @@
 //! `Task*` (V2) tools "haven't been used recently". The reminder fires only
 //! when BOTH counters cross their thresholds (`TURNS_SINCE_WRITE` /
 //! `TURNS_BETWEEN_REMINDERS`, each `10`), is killswitched by
-//! `LINGXI_TODO_REMINDER_MODE === "off"`, and selects V1 vs V2 via `TE()`
-//! (`is_todo_v2_enabled`).
+//! `LINGXI_TODO_REMINDER_MODE === "off"`, is gated as a whole by the
+//! `OO()` todo-tools model gate, and selects V1 vs V2 via the tasks-v2 gate
+//! (`is_todo_v2_enabled`; 2.1.263 `X_()`, 2.1.183 `TE()`).
 //!
 //! ## Binary ground truth (`bin/claude.exe`, v2.1.183)
 //!
@@ -30,6 +31,34 @@
 //! DEFAULT and `false` (V1 todo_reminder) only when `LINGXI_ENABLE_TASKS`
 //! is explicitly disabled. The producer (`ytl`, offset ~203087213) is
 //! `()=>TE()?B4p(...):M4p(...)` — V2 when `TE()`, else V1.
+//!
+//! ## 2.1.263 delta
+//!
+//! The selector is renamed `X_` and now reads the PARSED env object rather
+//! than `process.env` directly (`src_160357157.js` @10464):
+//!
+//! ```js
+//! function X_(){if(a.CLAUDE_CODE_ENABLE_TASKS===!1)return!1;return!0}
+//! ```
+//!
+//! Behaviourally identical: `CLAUDE_CODE_ENABLE_TASKS` is declared
+//! `I.triBool()`, whose transform is `Ie(e)?true : po(e)?false : undefined`,
+//! and `po` is byte-for-byte the old `_l`
+//! (`["0","false","no","off"].includes(String(t).toLowerCase().trim())`,
+//! `src_156606933.js` @922). So `=== false` still means exactly "the value
+//! normalizes to 0/false/no/off".
+//!
+//! What DID change is that the whole producer sits behind the `OO()`
+//! todo-tools model gate (`src_160988549.js` @5064719):
+//!
+//! ```js
+//! ()=>OO()?X_()?xps(d,t):vps(d,t):Promise.resolve([])
+//! ```
+//!
+//! and each renderer re-checks it — `case"todo_reminder":{if(X_()||!OO())
+//! return[]` and `case"task_reminder":{if(!h3())return[]` where
+//! `h3(){return X_()&&OO()}`. Both guards are fused into [`select_mode`],
+//! because LingXi never persists attachments.
 //!
 //! Renderers (`messages.ts` `normalizeAttachmentForAPI`, offset ~206021028):
 //! the reminder body `r` is emitted RAW as `Ln({content:r,isMeta:!0})` — there
@@ -114,13 +143,39 @@ fn is_explicitly_disabled(val: Option<&str>) -> bool {
 /// `TE()` (`is_todo_v2_enabled`) → the active [`ReminderMode`]. Returns
 /// [`ReminderMode::V2Task`] by default, [`ReminderMode::V1Todo`] only when
 /// `LINGXI_ENABLE_TASKS` is explicitly disabled.
+///
+/// Ungated on purpose: the oracle's turn counters advance whether or not the
+/// reminder can render, so bookkeeping callers use this and only the renderer
+/// goes through [`select_mode`].
 #[must_use]
-pub fn select_mode() -> ReminderMode {
+pub fn select_mode_raw() -> ReminderMode {
     if is_explicitly_disabled(std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref()) {
         ReminderMode::V1Todo
     } else {
         ReminderMode::V2Task
     }
+}
+
+/// The renderable [`ReminderMode`], or `None` when the `OO()` model gate has
+/// withdrawn the todo/task tools.
+///
+/// This is the port of BOTH oracle reminder guards at once, because LingXi
+/// never persists attachments and so fuses the producer and the renderer into
+/// one function:
+///
+/// ```js
+/// case"todo_reminder":{if(X_()||!OO())return[];   // V1 renders iff !X_() && OO()
+/// case"task_reminder":{if(!h3())return[];         // V2 renders iff  X_() && OO()
+/// ```
+///
+/// `main_loop_model` must be the canonical session model — see
+/// [`tool_api::todo_tools_gate`].
+#[must_use]
+pub fn select_mode(main_loop_model: Option<&str>) -> Option<ReminderMode> {
+    if !tool_api::todo_tools_gate::todo_tools_enabled_for_model(main_loop_model) {
+        return None;
+    }
+    Some(select_mode_raw())
 }
 
 /// Render the V1 (`todo_reminder`) body. `items` = `(status, content)` pairs in
@@ -163,6 +218,23 @@ pub fn render_v2(items: &[(String, TodoState, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both oracle reminder guards at once: an at-threshold model withdraws the
+    /// tools, and a reminder that describes tools the model was never offered
+    /// must not render.
+    #[test]
+    fn the_model_gate_suppresses_both_reminder_variants() {
+        if !tool_api::todo_tools_gate::todo_tools_enabled_for_model(Some("claude-opus-4-8")) {
+            assert_eq!(select_mode(Some("claude-opus-4-8")), None);
+        }
+        // Below threshold and unknown-model both keep rendering, and pick the
+        // same variant the ungated selector would.
+        assert_eq!(
+            select_mode(Some("claude-sonnet-4-5")),
+            Some(select_mode_raw())
+        );
+        assert_eq!(select_mode(None), Some(select_mode_raw()));
+    }
 
     #[test]
     fn v1_base_is_byte_exact_with_no_items() {

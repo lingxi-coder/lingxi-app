@@ -78,13 +78,13 @@ pub fn is_bash_provider_shell(command: &str) -> bool {
 /// first use by [`super::runner`].
 #[must_use]
 pub(crate) fn task_output_dir() -> PathBuf {
-    std::env::temp_dir().join("lingxi-task-output")
+    platform_api::task_output::legacy_output_dir()
 }
 
 /// Stable path for one task output file.
 #[must_use]
 pub fn task_output_path(task_id: &str) -> PathBuf {
-    task_output_dir().join(format!("{task_id}.out"))
+    platform_api::task_output::legacy_output_path(task_id)
 }
 
 /// Wrap a user command for the bash-tool spawn so we can track cwd

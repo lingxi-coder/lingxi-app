@@ -1805,6 +1805,11 @@ impl Tool for FileReadTool {
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
+        let task_output_id = if let Some(registry) = self.ctx.task_registry.as_ref() {
+            registry.task_output_directory().await.and_then(|root| {
+                platform_api::task_output::output_id(Path::new(&root), Path::new(file_path)).map(str::to_owned)
+            })
+        } else { None };
         let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
@@ -1841,7 +1846,12 @@ impl Tool for FileReadTool {
         // One snapshot of trusted_dirs for both containment checks below (the
         // primary path and the macOS screenshot alt-path retry), so they
         // can't straddle a swap between the two calls.
-        let trusted_dirs = self.ctx.trusted_dirs();
+        let mut trusted_dirs = self.ctx.trusted_dirs();
+        if let Some(root) =
+            platform_api::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
+        {
+            trusted_dirs.push(root);
+        }
 
         let mut canon = match canonicalize_and_validate(&path, &trusted_dirs) {
             Ok(p) => p,
@@ -2207,13 +2217,14 @@ impl Tool for FileReadTool {
             } else {
                 add_line_numbers(&slice, offset)
             };
-            let file = json!({
+            let mut file = json!({
                 "filePath": canon.display().to_string(),
                 "content": std::mem::take(&mut slice),
                 "numLines": read_lines,
                 "startLine": line_range_start,
                 "totalLines": total_lines,
             });
+            if let Some(id) = &task_output_id { file["taskId"] = json!(id); }
             return Ok(ToolCallResult {
                 data: json!({ "type": "text", "file": file }),
                 model_content: Some(model_content),
@@ -2564,6 +2575,7 @@ impl Tool for FileReadTool {
             "startLine": line_range_start,
             "totalLines": total_lines,
         });
+        if let Some(id) = &task_output_id { file["taskId"] = json!(id); }
         if partial_note.is_some() {
             file["truncatedByTokenCap"] = json!(true);
         }

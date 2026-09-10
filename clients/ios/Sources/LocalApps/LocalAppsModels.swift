@@ -360,6 +360,12 @@ struct LocalAppVerificationSummary: Hashable, Sendable {
             String(localized: "local_apps_verification_summary_needs_revalidation")
         case "verification_unavailable":
             String(localized: "local_apps_verification_summary_verification_unavailable")
+        case "ui_verification_required":
+            String(localized: "local_apps_verification_summary_ui_verification_required")
+        case "ui_verification_passed":
+            String(localized: "local_apps_verification_summary_ui_verification_passed")
+        case "ui_verification_corrupt":
+            String(localized: "local_apps_verification_summary_ui_verification_corrupt")
         case nil where isHostSourced && status == .passed:
             String(localized: "local_apps_verification_summary_passed")
         default:

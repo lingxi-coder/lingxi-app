@@ -23,8 +23,8 @@ pub mod tengu;
 pub use bus::{AnalyticsBus, OverflowPolicy};
 pub use error::TelemetryError;
 pub use feature_flags::{
-    flag_bool, flag_string_list, test_clear_flag, test_clear_flag_list, test_set_flag,
-    test_set_flag_list, FeatureFlagsClient, FeatureFlagsFetcher, FeatureValue,
+    flag_bool, flag_string_list, push_notifications_enabled, test_clear_flag, test_clear_flag_list,
+    test_set_flag, test_set_flag_list, FeatureFlagsClient, FeatureFlagsFetcher, FeatureValue,
 };
 pub use killswitch::Killswitch;
 pub use pii::{strip_proto_fields, PiiTagged, Verified};
@@ -393,6 +393,19 @@ pub fn emit_push_notification_send(
     );
 }
 
+/// Emit `tengu_loop_dynamic_wakeup_aged_out`.
+///
+/// PARITY 2.1.263 `E(...)`: `i("tengu_loop_dynamic_wakeup_aged_out",
+/// {loop_age_ms:r-p, max_age_ms:f})` when a dynamic loop reaches
+/// `recurringMaxAgeMs` (7 days) since its first wakeup.
+pub fn emit_loop_dynamic_wakeup_aged_out(loop_age_ms: u64, max_age_ms: u64) {
+    tracing::info!(
+        event = crate::tengu::kairos::LOOP_DYNAMIC_WAKEUP_AGED_OUT,
+        loop_age_ms = loop_age_ms,
+        max_age_ms = max_age_ms,
+    );
+}
+
 /// Emit `tengu_loop_keepalive_fired`.
 ///
 /// PARITY: binary `cKi` keepalive branch —
@@ -429,6 +442,52 @@ pub fn emit_loop_dynamic_wakeup_scheduled(
         was_clamped = was_clamped,
         reason_length = reason_length,
         superseded_count = superseded_count,
+    );
+}
+
+/// Emit `tengu_loop_dynamic_wakeup_ends_turn`.
+///
+/// PARITY the turn-loop branch `i("tengu_loop_dynamic_wakeup_ends_turn",
+/// {queryChainId, queryDepth})` — a round whose ONLY tool call was
+/// `ScheduleWakeup`, and which actually armed a `/loop` wakeup, ends the turn
+/// instead of feeding the tool result back to the model.
+pub fn emit_loop_dynamic_wakeup_ends_turn(query_chain_id: &str, query_depth: u32) {
+    tracing::info!(
+        event = crate::tengu::kairos::LOOP_DYNAMIC_WAKEUP_ENDS_TURN,
+        query_chain_id = %query_chain_id,
+        query_depth = query_depth,
+    );
+}
+
+/// The `/loop` no-op fold counter. NOT a `tengu_*` analytics event: the oracle
+/// records it through its counter API (`y` / `g`), the same family as
+/// `cron_task_fire`, so the name has no prefix and is not in `tengu::*::NAMES`.
+const LOOP_NOOP_FOLD: &str = "loop_noop_fold";
+
+/// Emit the `loop_noop_fold` success counter for a folded (quiet) `/loop` tick.
+///
+/// PARITY the fold chunk's
+/// `y("loop_noop_fold",{streak, span_len, tool_uses, span_duration_s})`.
+/// LingXi's span is one turn, so `span_len` and `tool_uses` come from the
+/// orchestrator's per-turn tally (`orchestrator::turn_span`) rather than from
+/// walking a transcript.
+pub fn emit_loop_noop_fold(streak: u32, span_len: u32, tool_uses: u32, span_duration_s: u64) {
+    tracing::info!(
+        event = LOOP_NOOP_FOLD,
+        streak = streak,
+        span_len = span_len,
+        tool_uses = tool_uses,
+        span_duration_s = span_duration_s,
+    );
+}
+
+/// Emit the `loop_noop_fold` failure counter with the veto literal.
+///
+/// PARITY the fold chunk's `g("loop_noop_fold", e.reason)`.
+pub fn emit_loop_noop_fold_veto(reason: &str) {
+    tracing::info!(
+        event = LOOP_NOOP_FOLD,
+        outcome = %reason,
     );
 }
 

@@ -561,6 +561,12 @@ pub struct MobileRuntime {
     /// provider and also loads the app-private `settings.json` plus project
     /// `.mcp.json` entries using the shared MCP parser.
     pub mcp_registry: Arc<McpRegistry>,
+    /// The exact registry/context pair used to materialize MCP tools for the
+    /// main conversation. Initial Local App activation happens after the
+    /// profile service is attached, so the synchronous engine constructor
+    /// uses these handles to publish that one app before returning.
+    mcp_tool_registry: Arc<ToolRegistry>,
+    mcp_tool_context: tool_api::BuiltinToolContext,
     /// Shared mobile LSP registry used by plugin registration, file sync, and
     /// passive diagnostics.
     pub lsp_registry: Arc<lsp::LspRegistry>,
@@ -623,6 +629,11 @@ pub struct MobileRuntime {
     /// reads as the app's origin conversation. Updated by
     /// `retarget_session_writer` on every session change.
     pub(crate) active_session_uuid: Arc<std::sync::Mutex<String>>,
+    /// 2.1.266 `Zl`/`ay`: the session's plan-file identity, shared with the boot
+    /// permission policy. Re-published by `retarget_session_writer` on every
+    /// session change, so the carve-out and `ExitPlanMode` always name the
+    /// CURRENT session's plan file rather than the one this host booted on.
+    pub(crate) plan_files: Arc<permission::plan_files::PlanFileMatcher>,
     /// App-owned Agent factory. Each app session receives a separate
     /// ConversationOrchestrator and app-scoped MCP registry.
     pub(crate) app_agent_executor: Arc<dyn LocalAppsAgentExecutor>,
@@ -2498,6 +2509,7 @@ fn apply_mobile_profile_allowlist(
 fn mobile_skill_listing_provider(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
     session_mode: session::jsonl::SessionMode,
+    local_app_scope: bool,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
@@ -2519,6 +2531,21 @@ fn mobile_skill_listing_provider(
                     })
                     // TS `cmd.source !== 'builtin'`.
                     .filter(|c| c.source != CommandSource::Builtin)
+                    // Local App's full specialist/tooling skill set is only
+                    // useful inside an app workspace. Global/project
+                    // conversations keep the three entry routers visible;
+                    // every other plugin remains unaffected.
+                    .filter(|c| {
+                        local_app_scope
+                            || c.source != CommandSource::Plugin
+                            || !c.name.starts_with("lingxi-local-app:")
+                            || matches!(
+                                c.name.as_str(),
+                                "lingxi-local-app:create-local-app"
+                                    | "lingxi-local-app:local-app-use"
+                                    | "lingxi-local-app:expose-as-mcp"
+                            )
+                    })
                     .filter(|c| command_visible_in_session_mode(c, session_mode))
                     // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
                     //    hasUserSpecifiedDescription || whenToUse.
@@ -2541,6 +2568,45 @@ fn mobile_skill_listing_provider(
             }
         }),
     )
+}
+
+/// Return the exact Host-resolved app id when the session cwd is a Local App
+/// workspace root.
+///
+/// This is intentionally bounded to the host-owned layout
+/// (`apps/<id>/workspace`). Canonical spelling keeps the iOS `/var` vs
+/// `/private/var` alias from changing scope classification. It does not inspect
+/// the app store or plugin bundle, so disabled-plugin boot remains
+/// metadata/settings-only until an explicit enable request takes the normal
+/// materialization path.
+fn mobile_local_app_scope_id(cwd: &std::path::Path, data_root: &std::path::Path) -> Option<String> {
+    let canonical_cwd = std::path::PathBuf::from(canonical_cwd_string(cwd));
+    let canonical_root = std::path::PathBuf::from(canonical_cwd_string(data_root));
+    let relative = canonical_cwd.strip_prefix(&canonical_root).ok();
+    let Some(mut components) = relative.map(|path| path.components()) else {
+        return None;
+    };
+    let app_id = match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (
+            Some(std::path::Component::Normal(apps)),
+            Some(std::path::Component::Normal(app_id)),
+            Some(std::path::Component::Normal(workspace)),
+            None,
+        ) if apps == std::ffi::OsStr::new("apps")
+            && !app_id.is_empty()
+            && workspace == std::ffi::OsStr::new("workspace") =>
+        {
+            app_id.to_str()?
+        }
+        _ => return None,
+    };
+    local_apps::AppLayout::new(&canonical_root, app_id).ok()?;
+    Some(app_id.to_string())
 }
 
 async fn mobile_live_plugin_skill_count(
@@ -3041,6 +3107,25 @@ async fn build_mobile_inner_with_ask(
     // app's origin `conversation_id` from THIS cell — model input is never
     // trusted for it.
     let active_session_uuid = Arc::new(std::sync::Mutex::new(main_session_uuid.clone()));
+    // The plans directory derivation is shared with the orchestrator's plan-mode
+    // reminder rather than re-derived here, so the path the model is told to
+    // write, the path the permission carve-out allows, and the path
+    // `ExitPlanMode` reads back cannot diverge. Mobile sets no `plansDirectory`.
+    // 2.1.266 `getPlanSlug`: the plan file is named by a random three-word slug
+    // (`brave-quiet-otter.md`), re-rolled on collision, NOT by the session id.
+    // Upstream can seed it from the transcript (`planSlugSeed`); LingXi has no
+    // seed source, so it takes the unseeded form.
+    let plans_dir = orchestrator::ConversationOrchestrator::plans_dir(&cwd, None);
+    let plan_files = Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
+        permission::plan_files::PlanFileIdentity {
+            slug: platform_api::plan_slug::generate_slug(None, &|candidate| {
+                platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+            }),
+            plans_dir: plans_dir.clone(),
+            // `ZUe()` — LingXi ships no workshop skill.
+            workshop_enabled: false,
+        },
+    ));
     {
         let cell = active_session_uuid.clone();
         let _ = local_apps_mcp.attach_session_provider(Arc::new(move || {
@@ -3502,6 +3587,10 @@ async fn build_mobile_inner_with_ask(
     // `agentPushNotifEnabled` scalar override (user → project → local). The
     // feature flag is checked independently by the cron/tool consumers.
     let mut agent_push_notif_enabled = false;
+    // `taskOutputMaxChars` scalar override (user → project → local). Absent
+    // leaves `TASK_MAX_OUTPUT_LENGTH` in charge; `tool_task` applies the
+    // oracle's 4_000..=128_000 clamp when it reads this.
+    let mut task_output_max_chars: Option<u32> = None;
     // `workflowSizeGuideline` scalar override (user → project → local). Absent
     // stays at Claude Code's built-in medium default; an explicit "medium"
     // remains explicit (is_default = false).
@@ -3527,6 +3616,16 @@ async fn build_mobile_inner_with_ask(
     // value is reused by subagent/workflow composition and the tool context
     // so every surface reports the same effective mode.
     let mut resolved_permission_mode = PermissionMode::Auto;
+    // (2.1.263 `bs(Rn)`) Spawn-time bypass clamps for subagent definitions,
+    // published from the settings fold below like `resolved_permission_mode`.
+    // `restricted` is always false on mobile: there is no `--restricted` flag.
+    // `confined` is read ONCE here rather than inside the clamp — a gate that
+    // reads `CLAUDE_CODE_EVAL_CONFINED` itself makes a parallel suite flaky.
+    let mut subagent_bypass_gates = agent::permission_mode::SpawnBypassGates {
+        confined: platform_api::env::is_eval_confined_session(),
+        bypass_disabled: false,
+        restricted: false,
+    };
     let mut requested_permission_mode = PermissionMode::Auto.wire_str().to_string();
     let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
     // ONE derivation of the (host, guest) workspace pairing. `model_cwd` below
@@ -3632,7 +3731,9 @@ async fn build_mobile_inner_with_ask(
         // Audit fix (#12): `permissions.additionalDirectories`, unioned across
         // tiers, so an AcceptEdits write under a settings-declared extra dir
         // auto-allows (mirrors desktop's `.with_working_dirs`); empty ⇒ unchanged.
-        let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
+        let mut additional_working_dirs = permission::working_dirs::AdditionalWorkingDirs::new();
+        // Sticky OR of `permissions.blockReadsOutsideWorkingDirectories` across tiers.
+        let mut block_reads_outside_working_directories = false;
         let proj = cwd.join(branding::DOT_DIR).join("settings.json");
         let user = cfg.lingxi_home.join("settings.json");
         // Audit fix (#6): also read the LocalSettings tier (`settings.local.json`),
@@ -3711,6 +3812,13 @@ async fn build_mobile_inner_with_ask(
                     {
                         agent_push_notif_enabled = b;
                     }
+                    if let Some(chars) = v
+                        .get("taskOutputMaxChars")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|n| u32::try_from(n).ok())
+                    {
+                        task_output_max_chars = Some(chars);
+                    }
                     if let Some(size) = v
                         .get("workflowSizeGuideline")
                         .and_then(serde_json::Value::as_str)
@@ -3728,11 +3836,17 @@ async fn build_mobile_inner_with_ask(
                         workflow_session_enabled = b;
                     }
                 }
-                additional_working_dirs
-                    .extend(permission::additional_directories_from_settings_json(&raw));
+                additional_working_dirs.extend_from_source(
+                    permission::additional_directories_from_settings_json(&raw),
+                    source,
+                );
+                if permission::block_reads_outside_working_directories_from_settings_json(&raw) {
+                    block_reads_outside_working_directories = true; // any tier arming wins
+                }
             }
         }
         platform_api::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
+        platform_api::session_flags::set_task_output_max_chars(task_output_max_chars);
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
@@ -3763,9 +3877,12 @@ async fn build_mobile_inner_with_ask(
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
-            .with_workspace_leases(workspace_leases.clone());
+            .with_block_reads_outside_working_directories(block_reads_outside_working_directories)
+            .with_workspace_leases(workspace_leases.clone())
+            .with_plan_files(plan_files.clone());
         // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
         policy.bypass_killswitch_active = bypass_disabled;
+        subagent_bypass_gates.bypass_disabled = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
         // refuses `auto` when any tier set `disableAutoMode: "disable"`.
         policy.auto_mode_disabled = auto_mode_disabled;
@@ -4205,12 +4322,14 @@ async fn build_mobile_inner_with_ask(
         active_session_uuid.clone(),
     ));
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)
         .with_session_interactive(interactive_launch)
         .with_default_model(agent::model_resolution::resolve_user_specified_model(
             &orch_cfg.model,
         ))
         .with_permission_mode(resolved_permission_mode)
+        .with_spawn_bypass_gates(subagent_bypass_gates)
         .with_model_setting(orch_cfg.model.clone())
         .with_hook_context(
             subagent_hook_session_id,
@@ -4271,6 +4390,11 @@ async fn build_mobile_inner_with_ask(
     // forever and the client never sees its terminal state. The output-pool
     // cells are published after the orchestrator is built.
     let plugin_workflow_registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+    // Pre-create the shared command-registry slot before the tool registry and
+    // the orchestrator so the Skill tool, slash dispatcher, and per-turn skill
+    // listing all observe one live command set.
+    let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
+        Arc::new(RwLock::new(command_api::CommandRegistry::new()));
     let local_workflow_invoker = Arc::new(crate::workflow_support::DeferredToolInvoker::new());
     let local_workflow_status_sink =
         Arc::new(crate::workflow_support::MobileWorkflowStatusSink::new(
@@ -4304,7 +4428,25 @@ async fn build_mobile_inner_with_ask(
         tasks::TaskType::LocalWorkflow,
         local_workflow_handler.clone(),
     );
+    let local_agent_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    let agent_resume_gate = Arc::new(crate::agent_resume::MobileForkResumeGate {
+        spawner: subagent_spawner.clone(), commands: shared_command_registry.clone(),
+    });
+    task_registry_inner.register_handler(
+        tasks::TaskType::LocalAgent,
+        Arc::new(tasks::handlers::LocalAgentHandler::new(
+            subagent_spawner.clone(),
+            local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+            budget_enforcer.clone(), task_registry_inner.output_manager.clone(),
+        )
+            .with_streaming_spawner(subagent_spawner_arc.clone())
+            .with_status_sink(local_agent_status_sink.clone())
+            .with_worktree_manager(worktree.clone())
+            .with_fork_resume_gate(agent_resume_gate)),
+    );
     let task_registry = Arc::new(task_registry_inner);
+    subagent_spawner_arc.set_task_registry(task_registry.clone());
+    local_agent_status_sink.bind(task_registry.clone());
     let tool_ctx = BuiltinToolContext {
         // No session: this context never persists tool output.
         session_id: None,
@@ -4433,11 +4575,6 @@ async fn build_mobile_inner_with_ask(
         "mobile sets sandbox_available=false because it has no live SandboxRuntimeRunner; \
          enabling sandboxing requires injecting one (see the sandbox_runner coupling note)"
     );
-    // Pre-create the shared command-registry slot before the tool registry and
-    // the orchestrator so the Skill tool, slash dispatcher, and per-turn skill
-    // listing all observe one live command set.
-    let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
-        Arc::new(RwLock::new(command_api::CommandRegistry::new()));
     // P1.8 (§19.2): compose the mobile `PluginManager` — P1.6 registered the
     // one compiled-in plugin through `register_verified_builtin`, but nothing
     // called that composition from `build_mobile_inner` yet, and the manager
@@ -4514,8 +4651,18 @@ async fn build_mobile_inner_with_ask(
     // itself — so handing either surface a registry other than
     // `shared_command_registry` fails that test instead of silently emptying
     // the model's skill listing on device.
-    let wired_skill_listing_provider =
-        mobile_skill_listing_provider(shared_command_registry.clone(), cfg.session_mode);
+    // One Host-bounded scope decision drives both Local App model surfaces.
+    // `permission::local_app_id_for_root` intentionally also understands
+    // guest/legacy spellings for isolated runtimes, but using that broader
+    // detector directly at this main-session composition root would let an
+    // ordinary project whose path merely ends in `apps/<id>/workspace` inherit
+    // the full app authoring surface.
+    let local_app_scope_id = mobile_local_app_scope_id(&cwd, &mobile_apps_data_root(&cfg));
+    let wired_skill_listing_provider = mobile_skill_listing_provider(
+        shared_command_registry.clone(),
+        cfg.session_mode,
+        local_app_scope_id.is_some(),
+    );
     #[cfg(test)]
     let wired_skill_loader = skill_loader.clone();
     // (#3 shell-expansion) Build the shared prompt shell-expansion provider from
@@ -4604,11 +4751,15 @@ async fn build_mobile_inner_with_ask(
     // the registry is `Arc`-wrapped below. The DYNAMIC per-app tools stay on
     // the MCP transport (their namespace binds `app_id` host-side, and they
     // must be added at runtime, which only `register_mcp_tools(&self, …)` does).
-    for tool in crate::local_apps_tools::local_app_builtin_tools(&local_apps_mcp, &cwd) {
+    for tool in crate::local_apps_tools::local_app_builtin_tools(
+        &local_apps_mcp,
+        local_app_scope_id.clone(),
+    ) {
         tools.register_builtin(tool);
     }
     crate::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
     let live_mcp_tool_ctx = tool_ctx.clone();
+    let initial_mcp_tool_ctx = live_mcp_tool_ctx.clone();
     let app_agent_mcp_tool_context = live_mcp_tool_ctx.clone();
     if cfg.session_mode == session::jsonl::SessionMode::Code {
         for (connection_id, mcp_tools) in
@@ -4804,7 +4955,7 @@ async fn build_mobile_inner_with_ask(
         orch_cfg,
         api_client,
         streaming_api,
-        tools,
+        tools.clone(),
         hooks,
         perms,
         output,
@@ -5043,50 +5194,44 @@ async fn build_mobile_inner_with_ask(
         cwd.clone(),
     )));
     *shared_command_registry.write().await = reg;
-    // P1.10 (§19.2): materialize and register only after the base command
-    // registry has been installed. The plugin manager writes into this shared
-    // Arc; registering earlier would be overwritten by the composition-root
-    // assignment above and silently drop the plugin's skills/commands.
-    let builtin_plugin_bundle_root = cfg.lingxi_home.join("builtin-plugin-bundle");
-    match crate::register_mobile_builtin_plugins_materialized(
-        &plugin_manager,
-        &builtin_plugin_bundle_root,
-        None,
-    )
-    .await
-    {
-        Ok(_) => {
-            let settings_path = cfg.lingxi_home.join("settings.json");
-            let enabled = match mobile_builtin_plugin_enabled(
-                &settings_path,
-                crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
-            ) {
-                Ok(enabled) => enabled,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "invalid mobile builtin plugin setting; using manifest default"
-                    );
-                    crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED
-                }
-            };
-            if !enabled {
-                if let Err(error) = plugin_manager
-                    .disable(&crate::mobile_builtin_plugin_id())
-                    .await
-                {
-                    tracing::warn!(
-                        %error,
-                        "failed to apply disabled mobile builtin plugin setting"
-                    );
-                }
-            }
+    // P1.10 (§19.2): read the activation bit BEFORE materializing the
+    // compiled-in bundle. A disabled boot keeps its inventory/status available
+    // from compiled metadata but performs no bundle filesystem work; enabling
+    // later takes the existing verified materialization + registration path.
+    let settings_path = cfg.lingxi_home.join("settings.json");
+    let enabled = match mobile_builtin_plugin_enabled(
+        &settings_path,
+        crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
+    ) {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "invalid mobile builtin plugin setting; using manifest default"
+            );
+            crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED
         }
-        Err(error) => tracing::warn!(
-            %error,
-            "failed to materialize/register the compiled-in mobile plugin; any \
-             commands/skills/agents it would have contributed are unavailable this boot"
-        ),
+    };
+    if enabled {
+        // The plugin manager writes into this shared Arc; registering earlier
+        // would be overwritten by the composition-root assignment above and
+        // silently drop the plugin's skills/commands.
+        let builtin_plugin_bundle_root = cfg.lingxi_home.join("builtin-plugin-bundle");
+        if let Err(error) = crate::register_mobile_builtin_plugins_materialized(
+            &plugin_manager,
+            &builtin_plugin_bundle_root,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(
+                %error,
+                "failed to materialize/register the compiled-in mobile plugin; any \
+                 commands/skills/agents it would have contributed are unavailable this boot"
+            );
+        }
+    } else {
+        tracing::debug!("mobile builtin plugin disabled; deferring bundle materialization");
     }
     // r2-critic-1 (coverage half): the agent-facing `LocalAppCreate` MCP tool
     // is a SECOND live create entry point — it never enters
@@ -5223,6 +5368,8 @@ async fn build_mobile_inner_with_ask(
         credentials,
         mobile_linux,
         mcp_registry,
+        mcp_tool_registry: tools,
+        mcp_tool_context: initial_mcp_tool_ctx,
         lsp_registry: plugin_lsp_registry,
         typescript_lsp_runtime_available: mobile_lsp_ready,
         mcp_reload_generations,
@@ -5237,6 +5384,7 @@ async fn build_mobile_inner_with_ask(
         workflow_status_sink: local_workflow_status_sink,
         workflow_launcher,
         active_session_uuid,
+        plan_files,
         app_agent_executor,
     })
 }
@@ -5299,6 +5447,7 @@ pub enum MobileEngineError {
 /// commands and drives the turn on the owned runtime.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
+    task_notification_watcher: tokio::task::AbortHandle,
     /// The handle-owned multi-thread tokio runtime. Owned (not borrowed) so the
     /// engine outlives any single FFI call and F3-05's `submit(SendPrompt)` can
     /// `spawn` a streaming turn that returns promptly while results stream to the
@@ -5312,6 +5461,26 @@ pub struct MobileEngineHandle {
     /// (`TurnStarted` / `MessageComplete`) and push listing replies to the SAME
     /// outbound channel the streamed turn events ride.
     event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    /// The same outbound channel as [`Self::event_sink`], taken BEFORE the
+    /// [`TurnLifecycleListener`] wrap.
+    ///
+    /// `SystemNotice` is live-turn payload (`TurnLifecycleListener::
+    /// is_live_turn_payload`), so the turn gate drops one emitted while no turn
+    /// is in flight. That is right for stray turn output arriving after the
+    /// active-turn slot is cleared, and wrong for a connection-scoped
+    /// acknowledgement a command handler owes the user right now — the gate
+    /// cannot tell the two apart, because both ride the same variant.
+    ///
+    /// This is mobile's counterpart to bridge-server's private
+    /// `unscoped_event_sink` (`apps/bridge-server/src/server.rs`), which is why
+    /// the desktop host does not have this bug: `server.rs` already routes every
+    /// `ClientCommand` through the unscoped sink, so a command handler's reply
+    /// never meets the turn filter there.
+    ///
+    /// Use ONLY for events that belong to the connection rather than to a turn;
+    /// anything a turn produces must keep going through [`Self::event_sink`] so
+    /// it stays gated, sequenced and journaled.
+    connection_sink: Arc<dyn client_adapter::ClientEventSink>,
     /// The cancellation token for the IN-FLIGHT turn, armed by
     /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
     /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
@@ -5354,7 +5523,7 @@ pub struct MobileEngineHandle {
     /// session listing reads through the device's real backend.
     fs: Arc<dyn platform_api::FileSystem>,
     /// The deterministic build recipe, captured so the cron firing path
-    /// ([`Self::run_due_cron_now`]) can rebuild a FRESH, throwaway
+    /// (the per-task `run_cron_task_if_due`) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
     /// the user's live conversation). Also carries `cwd`, which resolves the
     /// `<cwd>/.lingxi/scheduled_tasks.json` the cron FFI reads/writes.
@@ -5391,6 +5560,7 @@ pub struct MobileEngineHandle {
 
 impl Drop for MobileEngineHandle {
     fn drop(&mut self) {
+        self.task_notification_watcher.abort();
         if let Some(profile) = &self.profile_apps {
             if let Some(subscription) = self.app_client_subscription.take() {
                 profile.client_events.unsubscribe(subscription);
@@ -6185,6 +6355,8 @@ impl TurnLifecycleListener {
                 | ClientEvent::ToolHeartbeat { .. }
                 | ClientEvent::ToolUseResult { .. }
                 | ClientEvent::MessageComplete { .. }
+                | ClientEvent::MessageIdentity { .. }
+                | ClientEvent::MessageRetracted { .. }
                 | ClientEvent::CostUpdate { .. }
                 | ClientEvent::CompactionCompleted { .. }
                 | ClientEvent::CoordinatorStatus { .. }
@@ -6580,6 +6752,19 @@ impl MobileEngineHandle {
         let session_uuid = session_id.as_uuid().to_string();
         if let Ok(mut guard) = self.inner.active_session_uuid.lock() {
             *guard = session_uuid.clone();
+            // Re-point the plan-file carve-out at the new session, with a fresh
+            // slug — a retarget is a new plan file, not a rename of the old one.
+            if let Some(identity) = self.inner.plan_files.identity() {
+                let plans_dir = identity.plans_dir.clone();
+                self.inner
+                    .plan_files
+                    .publish(permission::plan_files::PlanFileIdentity {
+                        slug: platform_api::plan_slug::generate_slug(None, &|candidate| {
+                            platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+                        }),
+                        ..identity
+                    });
+            }
             self.inner
                 .permission_gate
                 .set_session_id(Some(session_uuid.clone()));
@@ -6841,7 +7026,7 @@ impl MobileEngineHandle {
                         &self.inner.workflow_launcher.app_data_root,
                     )
                     .await;
-                let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
+                let messages = client_adapter::lowering::lower_transcript(&replayed.display_history);
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),
@@ -7040,6 +7225,14 @@ impl MobileEngineHandle {
         };
         let permission_count = cancelled_permissions.len();
         drop(cancelled_permissions);
+        if !platform_api::env::background_tasks_disabled() {
+            self.inner
+                .task_registry
+                .background_all_tasks_with_reason(
+                    platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                )
+                .await;
+        }
         turn.cancel.cancel();
         self.wait_for_turn_release(&turn, true).await;
         // AskUserQuestion's Block resolver observes the turn cancellation
@@ -7194,6 +7387,14 @@ impl MobileEngineHandle {
                 self.message_queue
                     .enqueue(mobile_prompt_command(text))
                     .await;
+                if !platform_api::env::background_tasks_disabled() {
+                    self.inner
+                        .task_registry
+                        .background_all_tasks_with_reason(
+                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                        )
+                        .await;
+                }
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -7325,38 +7526,56 @@ impl MobileEngineHandle {
         Ok(lower_mobile_linux_status(capability, status))
     }
 
+    /// Resolve the client-visible builtin-plugin state without requiring a
+    /// materialized bundle. On a disabled boot the PluginManager deliberately
+    /// has no loaded/disabled state entry (avoiding generic manager API and
+    /// bundle filesystem work), so the persisted activation bit is the
+    /// authoritative fallback. An enabled-but-unavailable bundle remains an
+    /// error rather than being misreported as Disabled.
+    async fn mobile_builtin_plugin_activation_state(
+        &self,
+    ) -> Result<PluginActivationStateDto, ClientError> {
+        match self
+            .inner
+            .plugin_manager
+            .plugin_state(&crate::mobile_builtin_plugin_id())
+            .await
+        {
+            Some(plugin::PluginState::Loaded { .. }) => Ok(PluginActivationStateDto::Loaded),
+            Some(plugin::PluginState::Disabled { .. }) => Ok(PluginActivationStateDto::Disabled),
+            Some(_) => Err(ClientError::Internal {
+                message: "mobile builtin plugin is not in a stable activation state".into(),
+            }),
+            None => {
+                let enabled = mobile_builtin_plugin_enabled(
+                    &self.lingxi_home.join("settings.json"),
+                    crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
+                )
+                .map_err(|error| ClientError::Internal { message: error })?;
+                if enabled {
+                    Err(ClientError::Internal {
+                        message: "mobile builtin plugin bundle is unavailable".into(),
+                    })
+                } else {
+                    Ok(PluginActivationStateDto::Disabled)
+                }
+            }
+        }
+    }
+
     async fn emit_builtin_plugin_status(&self, plugin_id: &str) -> Result<(), ClientError> {
         if plugin_id != crate::MOBILE_BUILTIN_PLUGIN_NAME {
             return Err(ClientError::NotFound {
                 message: format!("mobile plugin {plugin_id:?}"),
             });
         }
-        let state = self
-            .inner
-            .plugin_manager
-            .plugin_state(&crate::mobile_builtin_plugin_id())
-            .await
-            .ok_or_else(|| ClientError::Internal {
-                message: "mobile builtin plugin bundle is unavailable".to_string(),
-            })?;
+        let state = self.mobile_builtin_plugin_activation_state().await?;
         self.event_sink
             .emit(ClientEvent::AppEvent {
                 event: AppEventDto::PluginStatusChanged {
                     status: PluginStatusDto {
                         plugin_id: plugin_id.to_string(),
-                        state: match state {
-                            plugin::PluginState::Loaded { .. } => PluginActivationStateDto::Loaded,
-                            plugin::PluginState::Disabled { .. } => {
-                                PluginActivationStateDto::Disabled
-                            }
-                            _ => {
-                                return Err(ClientError::Internal {
-                                    message:
-                                        "mobile builtin plugin is not in a stable activation state"
-                                            .to_string(),
-                                });
-                            }
-                        },
+                        state,
                         manifest_default_enabled: crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
                     },
                 },
@@ -7371,23 +7590,7 @@ impl MobileEngineHandle {
                 message: format!("mobile plugin {plugin_id:?}"),
             });
         }
-        let state = self
-            .inner
-            .plugin_manager
-            .plugin_state(&crate::mobile_builtin_plugin_id())
-            .await
-            .ok_or_else(|| ClientError::Internal {
-                message: "mobile builtin plugin bundle is unavailable".to_string(),
-            })?;
-        let state = match state {
-            plugin::PluginState::Loaded { .. } => PluginActivationStateDto::Loaded,
-            plugin::PluginState::Disabled { .. } => PluginActivationStateDto::Disabled,
-            _ => {
-                return Err(ClientError::Internal {
-                    message: "mobile builtin plugin is not in a stable activation state".into(),
-                });
-            }
-        };
+        let state = self.mobile_builtin_plugin_activation_state().await?;
         let inventory = crate::builtin_bundle::COMPILED_PLUGIN_INVENTORY;
         let count = |prefix: &str, suffix: &str| {
             u32::try_from(
@@ -8317,6 +8520,10 @@ impl MobileEngineHandle {
     // and `engine_desktop::build`).
     #[allow(clippy::too_many_lines)]
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
+        if matches!(&command, ClientCommand::SendPrompt { .. } | ClientCommand::RunSlashCommand { .. } | ClientCommand::TaskMessage { .. }) {
+            let busy = self.active_cancel.lock().await.is_some();
+            self.inner.task_registry.update_shell_session_activity(true, busy, true);
+        }
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
             ClientCommand::SendPrompt {
@@ -8917,7 +9124,12 @@ impl MobileEngineHandle {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 match handle.force_compact().await {
                     Ok(summary) => {
-                        self.event_sink
+                        // Same gate as the task-message reply: `/compact` is
+                        // issued BETWEEN turns by construction, and
+                        // `CompactionCompleted` is live-turn payload, so the
+                        // turn-scoped sink drops the confirmation in exactly the
+                        // case the user asked for it.
+                        self.connection_sink
                             .emit(ClientEvent::CompactionCompleted {
                                 messages_before: summary.messages_before,
                                 messages_after: summary.messages_after,
@@ -9606,6 +9818,17 @@ impl MobileEngineHandle {
                         truncated,
                     })
                     .await;
+                Ok(())
+            }
+            ClientCommand::TaskMessage { task_id, message } => {
+                if !self.inner.orchestrator.workspace_trusted().await {
+                    return Err(ClientError::Rejected { message: "Trust this workspace before messaging a task".into() });
+                }
+                let registry: &dyn platform_api::task_registry::TaskRegistryHandle = &*self.inner.task_registry;
+                registry.send_human_task_message(&task_id, &message).await.map_err(|error| ClientError::Rejected { message: format!("task message failed: {error}") })?;
+                // Connection-scoped: the user sent this outside any turn, so the
+                // turn gate would drop it (see `connection_sink`).
+                self.connection_sink.emit(ClientEvent::SystemNotice { message: format!("Message accepted for task {task_id}"), is_error: false }).await;
                 Ok(())
             }
             ClientCommand::TaskStop { task_id } => {
@@ -11101,7 +11324,7 @@ pub struct CronTaskDto {
     pub next_fire_ms: Option<u64>,
     /// Human-readable schedule (e.g. "every day at 9:00am").
     pub human: String,
-    /// Whether Android may schedule this task. Recurring schedules must have a
+    /// Whether this device may schedule this task (iOS and Android). Recurring schedules must have a
     /// minimum interval of 15 minutes; one-shot schedules are exempt.
     pub mobile_supported: bool,
     /// Stable explanation when [`Self::mobile_supported`] is false.
@@ -11216,7 +11439,7 @@ fn task_next_fire_ms(
     now: std::time::SystemTime,
 ) -> Option<u64> {
     // Delegate to the SAME jittered scheduler computation the Android alarm arms
-    // from (`next_cron_fire_time` → `cron::next_fire_epoch_ms`), so the per-task
+    // from (`MobileCronStoreHandle::next_fire_time` → `cron::next_fire_epoch_ms`), so the per-task
     // next fire the management UI shows is the instant the job will ACTUALLY
     // fire. A raw `next_match_after` here omitted Claude Code's recurring jitter,
     // making the displayed time disagree with the armed alarm by up to 30 min.
@@ -11226,19 +11449,11 @@ fn task_next_fire_ms(
 const MOBILE_MIN_RECURRING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn cron_field_values(field: &cron::CronField, min: u32, max: u32) -> Option<Vec<u32>> {
-    let values = match field {
-        cron::CronField::Any => (min..=max).collect(),
-        cron::CronField::Exact(value) => vec![*value],
-        cron::CronField::Step(step) if *step > 0 => {
-            (min..=max).filter(|value| value % step == 0).collect()
-        }
-        cron::CronField::Step(_) => return None,
-        cron::CronField::Range(start, end) if start <= end => (*start..=*end).collect(),
-        cron::CronField::Range(_, _) => return None,
-        cron::CronField::List(values) if !values.is_empty() => values.clone(),
-        cron::CronField::List(_) => return None,
-    };
-    if values.iter().all(|value| (min..=max).contains(value)) {
+    // `cron::parse_cron` already expands and range-checks every field the way
+    // claude-code's `expandField` does; this only guards the domain it was
+    // handed against the one the caller expects.
+    let values = field.values().to_vec();
+    if !values.is_empty() && values.iter().all(|value| (min..=max).contains(value)) {
         Some(values)
     } else {
         None
@@ -11291,7 +11506,9 @@ fn mobile_cron_schedule_error(cron_expr: &str, recurring: bool) -> Option<String
             .min()
             .unwrap_or(24 * 60);
         if std::time::Duration::from_secs(u64::from(min_gap) * 60) < MOBILE_MIN_RECURRING_INTERVAL {
-            return Some("Android recurring tasks must be at least 15 minutes apart".to_string());
+            return Some(
+                "Recurring tasks on this device must be at least 15 minutes apart".to_string(),
+            );
         }
     }
     None
@@ -11410,7 +11627,22 @@ impl MobileCronStoreHandle {
             .map_err(|error| {
                 MobileEngineError::Internal(format!("lock scheduled_tasks.json: {error}"))
             })?;
-        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        // `create` is the one mutation that rewrites the file from whatever it
+        // read: `update`/`delete` bail when the id is absent, so an empty
+        // document makes them no-ops. Only a genuinely ABSENT file may start a
+        // fresh document here — any other read error (EIO, EACCES, the rooted-fs
+        // symlink rejection) is not evidence that there are no tasks, and
+        // starting from `default()` would write the new task over every
+        // existing one.
+        let mut document = match cron::read_tasks_body(self.fs.as_ref(), &self.cwd).await {
+            Ok(body) => cron::parse_tasks(&body),
+            Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
+            Err(error) => {
+                return Err(MobileEngineError::Internal(format!(
+                    "read scheduled_tasks.json: {error}"
+                )))
+            }
+        };
         let now = self.clock.now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -11424,6 +11656,8 @@ impl MobileCronStoreHandle {
             last_fired_at: None,
             recurring: Some(recurring),
             permanent: None,
+            expires_at: None,
+            session_id: None,
         };
         document.tasks.push(task.clone());
         cron::write_tasks_body(
@@ -11564,10 +11798,6 @@ impl MobileCronStoreHandle {
         .await
         .is_ok()
     }
-
-    pub fn validate_schedule(&self, cron_expr: String, recurring: bool) -> Option<String> {
-        mobile_cron_schedule_error(&cron_expr, recurring)
-    }
 }
 
 fn finalize_cron_occurrence(
@@ -11592,118 +11822,6 @@ fn finalize_cron_occurrence(
 // the cron methods read as one unit; UniFFI supports multiple exported blocks.
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileEngineHandle {
-    /// Evaluate the persisted cron tasks file ONCE and fire every due job — the
-    /// Android foreground-service entry. Reuses `cron::run_due_jobs` (desktop-1:1
-    /// due-detection + bookkeeping) with a [`MobileTurnFirer`]. Returns one row
-    /// per fired job for the service's result notifications.
-    pub async fn run_due_cron_now(&self) -> Vec<FiredCronJobDto> {
-        let path = cron::tasks_file::scheduled_tasks_path(&self.firer_cfg.cwd);
-        let fs = self.firer_platform.filesystem();
-        let clock = self.firer_platform.clock();
-        let firer = MobileTurnFirer {
-            cfg: self.firer_cfg.clone(),
-            platform: self.firer_platform.clone(),
-        };
-        cron::run_due_jobs(
-            &path,
-            fs,
-            clock,
-            &firer,
-            Some(cron::default_recurring_max_age()),
-        )
-        .await
-        .into_iter()
-        .map(|f| FiredCronJobDto {
-            id: f.id,
-            prompt: f.prompt,
-            result_text: f.result_text,
-            retryable: matches!(
-                &f.status,
-                cron::FireStatus::Failed(message) if cron_failure_is_retryable(message)
-            ),
-            status: match f.status {
-                cron::FireStatus::Ok => CronFireStatusDto::Ok,
-                cron::FireStatus::Failed(message) => CronFireStatusDto::Failed { message },
-            },
-        })
-        .collect()
-    }
-
-    /// Earliest next fire across all persisted enabled jobs, epoch milliseconds,
-    /// or `None` if there are no jobs / none ever fire again. The Android
-    /// scheduler arms its next exact alarm at this instant.
-    pub async fn next_cron_fire_time(&self) -> Option<u64> {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .next_fire_time()
-        .await
-    }
-
-    /// List the persisted cron jobs for the management UI (each with its computed
-    /// next fire + human schedule). A missing / unparseable file lists nothing.
-    pub async fn cron_list(&self) -> Vec<CronTaskDto> {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .list()
-        .await
-    }
-
-    /// Create a durable cron job from the UI: validate the expression, mint a
-    /// `d`+base36 id (the SAME format as the `CronCreate` tool, no on-disk drift),
-    /// and append it to `scheduled_tasks.json`. Returns the created row.
-    ///
-    /// # Errors
-    /// [`MobileEngineError::Internal`] on an invalid cron expression or a write
-    /// failure.
-    pub async fn cron_create(
-        &self,
-        cron_expr: String,
-        prompt: String,
-        recurring: bool,
-    ) -> Result<CronTaskDto, MobileEngineError> {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .create(cron_expr, prompt, recurring)
-        .await
-    }
-
-    /// Edit a task in place while preserving its stable id.
-    pub async fn cron_update(
-        &self,
-        id: String,
-        cron_expr: String,
-        prompt: String,
-        recurring: bool,
-    ) -> Result<CronTaskDto, MobileEngineError> {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .update(id, cron_expr, prompt, recurring)
-        .await
-    }
-
-    /// Delete a cron job by id. Returns `true` iff a job was removed.
-    pub async fn cron_delete(&self, id: String) -> bool {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .delete(id)
-        .await
-    }
-
     /// Run one scheduled occurrence exactly once across duplicate alarm/worker
     /// deliveries. A retryable transport failure intentionally leaves the
     /// occurrence unacknowledged so WorkManager can retry it.
@@ -12454,6 +12572,9 @@ pub fn build_mobile_engine_inner(
     // listener used by the eventual handle.
     let active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>> = Arc::new(Mutex::new(None));
     let durable_turns = Arc::new(DurableTurnStore::new(lingxi_home.join("mobile-turns")));
+    // Taken before the wrap: the gate below is what a connection-scoped notice
+    // has to get past, so it cannot be reached through the wrapped listener.
+    let connection_sink = ListenerSink::arc(listener.clone());
     let lifecycle_listener: Arc<dyn ClientEventListener> = Arc::new(
         TurnLifecycleListener::new_durable(listener, active_cancel.clone(), durable_turns.clone()),
     );
@@ -12480,7 +12601,7 @@ pub fn build_mobile_engine_inner(
             .as_uuid()
             .to_string()
     });
-    let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key);
+    let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key.clone());
 
     let skill_count = crate::mobile_skill_registry().len();
     let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
@@ -12591,6 +12712,17 @@ pub fn build_mobile_engine_inner(
     {
         tracing::warn!("local-apps MCP host was already attached");
     }
+    // Terminal Local App build/use-test outcomes are revalidated by the
+    // Host-owned QA boundary before the workflow sink publishes completion.
+    // Keep this as a weak, one-time composition attachment: the sink must not
+    // retain the profile broker or create a broker↔workflow ownership cycle.
+    if inner
+        .workflow_status_sink
+        .attach_local_apps_host(Arc::downgrade(&local_apps_host))
+        .is_err()
+    {
+        tracing::warn!("local-apps workflow status sink was already attached");
+    }
     if local_apps_host
         .attach_mcp_registry(Arc::downgrade(&inner.mcp_registry))
         .is_err()
@@ -12643,20 +12775,41 @@ pub fn build_mobile_engine_inner(
             {
                 tracing::warn!("local-apps MCP service was already attached");
             }
-            runtime.block_on(async {
-                for record in service.list_apps().await {
-                    if let Err(error) = local_apps_host
-                        .sync_managed_local_app_publication(&record.id)
-                        .await
-                    {
-                        tracing::warn!(
-                            app_id = %record.id,
-                            %error,
-                            "local-apps managed MCP publication sync deferred"
-                        );
+            // A freshly-built handle has not passed through
+            // `retarget_session_writer`, which is the normal New/Resume/Clear
+            // activation boundary. Restore the INITIAL app conversation here
+            // so an already-published MCP is usable immediately after a cold
+            // boot. This is deliberately bounded to the current Host-owned app
+            // cwd: global/project startup performs no all-app publication
+            // sweep, and the Local App authoring plugin's enabled bit does not
+            // suppress an independently enabled published app MCP.
+            let apps_data_root = mobile_apps_data_root(&firer_cfg);
+            if let Some(app_id) = mobile_local_app_scope_id(&firer_cfg.cwd, &apps_data_root) {
+                match runtime.block_on(local_apps_host.expose_managed_mcp_for_conversation(
+                    &initial_session_key,
+                    &app_id,
+                    false,
+                )) {
+                    Ok(true) => {
+                        // The registry listener is asynchronous. Rebuild the
+                        // already-connected partitions here as well so the
+                        // freshly returned engine cannot race its first turn
+                        // against delivery of the connect notification.
+                        let refreshed = runtime.block_on(tool_mcp::build_registered_mcp_tools(
+                            &inner.mcp_registry,
+                            inner.mcp_tool_context.clone(),
+                        ));
+                        inner.mcp_tool_registry.replace_mcp_tools(refreshed);
                     }
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        session_id = %initial_session_key,
+                        %app_id,
+                        %error,
+                        "failed to expose initial managed Local App MCP tools"
+                    ),
                 }
-            });
+            }
             // v3 Phase 4: repair init-session pins, drifted catalogs and
             // placeholder titles for every app. Runs as a background sweep on
             // the shared worker runtime (this builder is sync); see
@@ -12668,7 +12821,6 @@ pub fn build_mobile_engine_inner(
             // doc — this builder re-runs on every scope switch/reconnect
             // within the same process, and without the guard the sweep would
             // re-walk every app record on each one.
-            let apps_data_root = mobile_apps_data_root(&firer_cfg);
             if boot_backfill_sweep_should_run(&apps_data_root) {
                 crate::local_apps_profile::worker_runtime().spawn(run_app_boot_backfill_sweep(
                     firer_cfg.lingxi_home.clone(),
@@ -12689,10 +12841,112 @@ pub fn build_mobile_engine_inner(
     }
 
     let settings_write_lock = mobile_settings_write_lock(&lingxi_home.join("settings.json"));
+    // Use the native turn slot and permission owner, exactly like SendPrompt.
+    // Capture runtime components, never the handle itself: retaining/upgrading
+    // the FFI Arc on a runtime worker can make that worker drop its own Runtime.
+    let task_notification_watcher = {
+        let registry = inner.task_registry.clone();
+        let orch = inner.orchestrator.clone();
+        let permission_gate = inner.permission_gate.clone();
+        let session_uuid = inner.active_session_uuid.clone();
+        let message_output = inner.message_output.clone();
+        let sink = event_sink.clone();
+        let active_cancel = active_cancel.clone();
+        let message_queue = message_queue.clone();
+        let cancel_reason = cancel_reason.clone();
+        runtime
+            .spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let turn_busy = active_cancel.lock().await.is_some();
+                    if turn_busy
+                        && message_queue.has_main_thread_commands().await
+                        && !platform_api::env::background_tasks_disabled()
+                    {
+                        registry
+                            .background_all_tasks_with_reason(
+                                platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                            )
+                            .await;
+                        continue;
+                    }
+                    if !registry.has_pending_task_notifications_for(None).await {
+                        continue;
+                    }
+                    let mut active = active_cancel.lock().await;
+                    if active.is_some() {
+                        continue;
+                    }
+                    let session_id = session_uuid.lock().map(|id| id.clone()).unwrap_or_default();
+                    let permission_owner_id =
+                        permission_gate.begin_main_turn(Some(session_id.clone()), None);
+                    let turn =
+                        Arc::new(ActiveTurn::new_owned(None, session_id, permission_owner_id));
+                    *active = Some(turn.clone());
+                    drop(active);
+                    cancel_reason.reset();
+                    message_queue
+                        .register_active_turn(turn.cancel.clone())
+                        .await;
+                    message_output.reset_message_buffer().await;
+                    // The orchestrator's notification entry emits TurnStarted; no
+                    // empty prompt or synthetic durable user checkpoint is created.
+                    let (
+                        orch,
+                        registry,
+                        active_cancel,
+                        permission_gate,
+                        message_queue,
+                        message_output,
+                        sink,
+                        task_turn,
+                    ) = (
+                        orch.clone(),
+                        registry.clone(),
+                        active_cancel.clone(),
+                        permission_gate.clone(),
+                        message_queue.clone(),
+                        message_output.clone(),
+                        sink.clone(),
+                        turn.clone(),
+                    );
+                    let task = tokio::spawn(async move {
+                        if let Err(error) = orch
+                            .run_task_notification_rewake(
+                                registry.as_ref(),
+                                task_turn.cancel.clone(),
+                            )
+                            .await
+                        {
+                            message_output.reset_message_buffer().await;
+                            sink.emit(client_adapter::map_orchestrator_error(&error))
+                                .await;
+                        }
+                        let mut active = active_cancel.lock().await;
+                        if active
+                            .as_ref()
+                            .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
+                        {
+                            *active = None;
+                        }
+                        drop(active);
+                        if let Some(owner_id) = task_turn.permission_owner_id {
+                            permission_gate.end_main_turn(owner_id);
+                        }
+                        message_queue.clear_active_turn().await;
+                        task_turn.mark_completed();
+                    });
+                    turn.set_task_handle(task);
+                }
+            })
+            .abort_handle()
+    };
     let handle = Arc::new(MobileEngineHandle {
+        task_notification_watcher,
         runtime,
         inner,
         event_sink,
+        connection_sink,
         active_cancel,
         message_queue,
         cancel_reason,
@@ -12747,7 +13001,7 @@ mod tests {
         provider_models_endpoint, session_agent_conversation_is_visible,
         session_agent_transcript_event, session_agent_transcript_revision, McpConfigScope,
         McpRegistry, McpServerConfig, MobileConfig, MobileCronStoreHandle, MobileMcpReloadJob,
-        MobileSessionAgentObserver,
+        MobileRuntime, MobileSessionAgentObserver,
     };
 
     #[test]
@@ -13439,86 +13693,6 @@ mod tests {
         let _ = format!("{cfg:?}");
     }
 
-    /// Cron FFI (Android background-scheduler bridge): `cron_create` / `cron_list`
-    /// / `cron_delete` / `next_cron_fire_time` round-trip through a real handle and
-    /// the shared `scheduled_tasks.json` contract, and `run_due_cron_now` fires
-    /// NOTHING (so makes no network call) for a job that is not yet due. The firing
-    /// CORE (`cron::run_due_jobs` due-detection + bookkeeping) is unit-tested in the
-    /// `cron` crate; here we prove the handle wiring (captured `firer_cfg` /
-    /// `firer_platform`) reaches the on-disk file deterministically off-device.
-    #[test]
-    fn cron_ffi_create_list_delete_round_trips() {
-        use crate::test_support::{
-            new_engine_with_streaming, test_config, CollectingPermissionSink, FakeListener,
-            HostFakePlatform,
-        };
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(tmp.path().join(".lingxi")).expect("mk .lingxi");
-        let platform: Arc<dyn platform_api::Platform> =
-            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
-        let handle = new_engine_with_streaming(
-            test_config(tmp.path()),
-            platform,
-            Arc::new(FakeListener::default()),
-            Arc::new(CollectingPermissionSink::default()),
-            None,
-        )
-        .expect("build handle");
-
-        handle.runtime().block_on(async {
-            // Empty file → empty list, no next fire, nothing fires.
-            assert!(handle.cron_list().await.is_empty());
-            assert_eq!(handle.next_cron_fire_time().await, None);
-            assert!(handle.run_due_cron_now().await.is_empty());
-
-            // Create a far-future job (Jan 1 00:00) → present, with a computed next
-            // fire, and NOT due now (so `run_due_cron_now` fires nothing / no net).
-            let created = handle
-                .cron_create("0 0 1 1 *".to_string(), "happy new year".to_string(), true)
-                .await
-                .expect("create succeeds");
-            // claude-code cron id = `randomUUID().slice(0,8)` → 8 lowercase hex
-            // chars (NOT a `[bartwmdks]`-prefixed task id, and NOT deterministically
-            // 'd'-prefixed — the previous `starts_with('d')` assertion passed only
-            // ~1/16 of the time).
-            assert_eq!(created.id.len(), 8, "cron id is 8 chars: {}", created.id);
-            assert!(
-                created
-                    .id
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
-                "cron id is lowercase hex: {}",
-                created.id
-            );
-            assert!(created.recurring);
-            assert!(created.next_fire_ms.is_some());
-
-            let list = handle.cron_list().await;
-            assert_eq!(list.len(), 1);
-            assert_eq!(list[0].prompt, "happy new year");
-            assert_eq!(list[0].cron, "0 0 1 1 *");
-            // The list's per-task next fire matches the scheduler's earliest.
-            assert_eq!(handle.next_cron_fire_time().await, list[0].next_fire_ms);
-            assert!(
-                handle.run_due_cron_now().await.is_empty(),
-                "a far-future job is not due, so nothing fires"
-            );
-
-            // An invalid expression is rejected and does NOT persist.
-            assert!(handle
-                .cron_create("not a cron".to_string(), "x".to_string(), false)
-                .await
-                .is_err());
-            assert_eq!(handle.cron_list().await.len(), 1);
-
-            // Delete removes it; a second delete is a no-op `false`.
-            assert!(handle.cron_delete(created.id.clone()).await);
-            assert!(handle.cron_list().await.is_empty());
-            assert!(!handle.cron_delete(created.id).await);
-        });
-    }
-
     /// F3-03: `build_mobile` constructs a real `ConversationOrchestrator`
     /// off-device, from a `MobileConfig` + a host fake `Platform` alone — no
     /// `std::env`, no device. This is the mobile sibling of
@@ -13548,19 +13722,20 @@ mod tests {
             rt.orchestrator.has_skill_listing(),
             "mobile orchestrator must expose a skill-listing provider"
         );
-        let listed = mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode)
-            .skill_entries()
-            .await;
+        let listed =
+            mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, false)
+                .skill_entries()
+                .await;
         let listed_names: std::collections::BTreeSet<_> =
             listed.iter().map(|entry| entry.name.as_str()).collect();
-        let expected_names: Vec<String> = crate::mobile_plugin_skill_names()
+        let expected_names = ["create-local-app", "local-app-use", "expose-as-mcp"]
             .into_iter()
             .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
-            .collect();
+            .collect::<Vec<_>>();
         assert_eq!(
             expected_names.len(),
-            27,
-            "the Local App Plugin must ship exactly 27 skills"
+            3,
+            "a global Code listing must expose exactly the three Local App routers"
         );
         for name in &expected_names {
             assert!(
@@ -13568,6 +13743,33 @@ mod tests {
                 "mobile skill-listing provider must expose bundled skill {name:?}: {listed_names:?}"
             );
         }
+        let listed_local_app_names = listed_names
+            .iter()
+            .filter(|name| name.starts_with("lingxi-local-app:"))
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_local_app_names = expected_names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            listed_local_app_names, expected_local_app_names,
+            "a global Code cold boot must hide every app-only Local App skill"
+        );
+        let local_app_tool_names = rt
+            .orchestrator
+            .tool_names()
+            .into_iter()
+            .filter(|name| name.starts_with("LocalApp"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            local_app_tool_names,
+            ["LocalAppCreate", "LocalAppGet", "LocalAppList"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            "a global Code cold boot must register only the three Local App management tools"
+        );
         let registry = rt.slash_registry.read().await;
         for name in &expected_names {
             assert!(
@@ -13575,6 +13777,237 @@ mod tests {
                 "compiled-in mobile skill {name:?} must be present in the live slash registry"
             );
         }
+        let app_scoped =
+            mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, true)
+                .skill_entries()
+                .await;
+        let app_scoped_names: std::collections::BTreeSet<_> =
+            app_scoped.iter().map(|entry| entry.name.as_str()).collect();
+        for name in crate::mobile_plugin_skill_names()
+            .into_iter()
+            .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
+        {
+            assert!(
+                app_scoped_names.contains(name.as_str()),
+                "an app-scoped listing must expose the full Local App skill set: {name:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mobile_local_app_scope_id_uses_the_canonical_target_not_the_alias_spelling() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("app data root");
+        let app_two = root.path().join("apps/app-two/workspace");
+        std::fs::create_dir_all(&app_two).expect("canonical app workspace");
+        let alias_parent = root.path().join("apps/app-one");
+        std::fs::create_dir_all(&alias_parent).expect("alias parent");
+        let alias = alias_parent.join("workspace");
+        symlink(&app_two, &alias).expect("A-to-B workspace alias");
+
+        assert_eq!(
+            super::mobile_local_app_scope_id(&app_two, root.path()).as_deref(),
+            Some("app-two")
+        );
+        assert_eq!(
+            super::mobile_local_app_scope_id(&alias, root.path()).as_deref(),
+            Some("app-two"),
+            "the Host must carry the canonical target id, never the alias's app-one spelling"
+        );
+
+        let outside = tempfile::tempdir().expect("ordinary project");
+        let forged = outside.path().join("apps/app-two/workspace");
+        std::fs::create_dir_all(&forged).expect("forged suffix");
+        assert_eq!(
+            super::mobile_local_app_scope_id(&forged, root.path()),
+            None,
+            "an app-shaped suffix outside the Host data root must stay global"
+        );
+    }
+
+    #[tokio::test]
+    async fn mobile_local_app_exposure_is_host_cwd_bounded_and_chat_stays_isolated() {
+        async fn build_for_cwd(
+            data_root: &std::path::Path,
+            cwd: std::path::PathBuf,
+            session_mode: session::jsonl::SessionMode,
+        ) -> MobileRuntime {
+            std::fs::create_dir_all(&cwd).expect("session cwd");
+            let mut cfg = test_config(data_root);
+            cfg.cwd = cwd;
+            cfg.session_mode = session_mode;
+            let platform: Arc<dyn platform_api::Platform> =
+                Arc::new(HostFakePlatform::new(data_root.to_path_buf()));
+            let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+            let permission_sink: Arc<dyn PermissionRequestSink> =
+                Arc::new(RecordingPermissionSink::default());
+            build_mobile(cfg, platform, listener, permission_sink)
+                .await
+                .expect("build scoped mobile runtime")
+        }
+
+        fn local_app_tool_names(runtime: &MobileRuntime) -> std::collections::BTreeSet<String> {
+            runtime
+                .orchestrator
+                .tool_names()
+                .into_iter()
+                .filter(|name| name.starts_with("LocalApp"))
+                .collect()
+        }
+
+        async fn local_app_skill_names(
+            runtime: &MobileRuntime,
+        ) -> std::collections::BTreeSet<String> {
+            runtime
+                .wired_skill_listing_provider
+                .skill_entries()
+                .await
+                .into_iter()
+                .map(|entry| entry.name)
+                .filter(|name| name.starts_with("lingxi-local-app:"))
+                .collect()
+        }
+
+        let global_tools = ["LocalAppCreate", "LocalAppGet", "LocalAppList"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        let global_skills = ["create-local-app", "expose-as-mcp", "local-app-use"]
+            .into_iter()
+            .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        // A project is allowed to contain this directory shape. The Host must
+        // not infer Local App authority from the suffix alone.
+        let project_root = tempfile::tempdir().expect("project root");
+        let forged_project_cwd = project_root
+            .path()
+            .join("project")
+            .join("apps")
+            .join("not-a-local-app")
+            .join("workspace");
+        let forged = build_for_cwd(
+            project_root.path(),
+            forged_project_cwd,
+            session::jsonl::SessionMode::Code,
+        )
+        .await;
+        assert_eq!(
+            local_app_tool_names(&forged),
+            global_tools,
+            "a project with an app-shaped suffix must retain the global three-tool surface"
+        );
+        assert_eq!(
+            local_app_skill_names(&forged).await,
+            global_skills,
+            "a project with an app-shaped suffix must retain the global three-skill surface"
+        );
+
+        let app_root = tempfile::tempdir().expect("app root");
+        let app_cwd = app_root
+            .path()
+            .join("apps")
+            .join("app-one")
+            .join("workspace");
+        let app = build_for_cwd(
+            app_root.path(),
+            app_cwd.clone(),
+            session::jsonl::SessionMode::Code,
+        )
+        .await;
+        let expected_app_tools = crate::local_apps_tools::LOCAL_APP_TOOLS
+            .iter()
+            .map(|(name, _, _)| (*name).to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            local_app_tool_names(&app),
+            expected_app_tools,
+            "a Host-owned Local App workspace must receive the complete builtin surface"
+        );
+        let expected_app_skills = crate::mobile_plugin_skill_names()
+            .into_iter()
+            .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            local_app_skill_names(&app).await,
+            expected_app_skills,
+            "a Host-owned Local App workspace must receive the complete skill listing"
+        );
+
+        let chat = build_for_cwd(app_root.path(), app_cwd, session::jsonl::SessionMode::Chat).await;
+        assert!(
+            local_app_tool_names(&chat).is_empty(),
+            "Chat's existing tool allowlist must remain authoritative in an app workspace"
+        );
+        assert!(
+            local_app_skill_names(&chat).await.is_empty(),
+            "Chat must not gain Code-only Local App skills from app cwd classification"
+        );
+    }
+
+    #[tokio::test]
+    async fn mobile_local_app_listing_keeps_chat_visibility_and_other_plugins() {
+        let registry = Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
+        let mut chat_frontmatter = command_api::CommandFrontmatter::default();
+        chat_frontmatter.session_modes = Some(vec!["chat".to_string()]);
+        for name in [
+            "third-party:chat-router",
+            "lingxi-local-app:create-local-app",
+        ] {
+            let frontmatter = if name.starts_with("lingxi-local-app:") {
+                command_api::CommandFrontmatter::default()
+            } else {
+                chat_frontmatter.clone()
+            };
+            registry
+                .write()
+                .await
+                .register_command(command_api::SlashCommand {
+                    name: name.to_string(),
+                    description: "router".to_string(),
+                    source: command_api::CommandSource::Plugin,
+                    kind: command_api::SlashCommandKind::Markdown {
+                        file_path: std::path::PathBuf::from("/virtual/SKILL.md"),
+                        frontmatter,
+                        prompt_template: "route".to_string(),
+                    },
+                    loaded_from: Some("plugin".to_string()),
+                    has_user_specified_description: true,
+                    ..command_api::SlashCommand::default()
+                });
+        }
+
+        let chat = mobile_skill_listing_provider(
+            registry.clone(),
+            session::jsonl::SessionMode::Chat,
+            false,
+        )
+        .skill_entries()
+        .await;
+        assert!(
+            chat.iter()
+                .any(|entry| entry.name == "third-party:chat-router"),
+            "Chat's existing session-mode visibility must remain intact"
+        );
+        assert!(
+            !chat
+                .iter()
+                .any(|entry| entry.name == "lingxi-local-app:create-local-app"),
+            "the Local App router must not bypass Chat's existing frontmatter gate"
+        );
+
+        let code =
+            mobile_skill_listing_provider(registry, session::jsonl::SessionMode::Code, false)
+                .skill_entries()
+                .await;
+        assert!(code
+            .iter()
+            .any(|entry| entry.name == "third-party:chat-router"));
+        assert!(code
+            .iter()
+            .any(|entry| entry.name == "lingxi-local-app:create-local-app"));
     }
 
     fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
@@ -13636,14 +14069,14 @@ mod tests {
             listed.iter().map(|entry| entry.name.as_str()).collect();
         let mut expected = vec!["loop".to_string(), "foo".to_string()];
         expected.extend(
-            crate::mobile_plugin_skill_names()
+            ["create-local-app", "local-app-use", "expose-as-mcp"]
                 .into_iter()
                 .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME)),
         );
         assert_eq!(
             expected.len(),
-            29,
-            "loop + foo + 27 Plugin skills must be listed"
+            5,
+            "loop + foo + three global Local App routers must be listed"
         );
         for name in &expected {
             assert!(
@@ -14147,10 +14580,10 @@ mod tests {
         let namespaced_device_skill = format!("{}:device", crate::MOBILE_BUILTIN_PLUGIN_NAME);
         let listed = rt.wired_skill_listing_provider.skill_entries().await;
         assert!(
-            listed
+            !listed
                 .iter()
                 .any(|entry| entry.name == namespaced_device_skill),
-            "the plugin's `device` skill must appear in the live per-turn listing: {:?}",
+            "a global session must not list app-only Local App skills: {:?}",
             listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
         );
         let loaded_device_skill = rt
@@ -15358,17 +15791,22 @@ mod tests {
                 .await
                 .expect("load after re-enable")
                 .is_some());
-            assert!(handle
-                .inner
-                .wired_skill_listing_provider
-                .skill_entries()
-                .await
-                .iter()
-                .any(|entry| entry.name == namespaced_skill));
+            assert!(
+                !handle
+                    .inner
+                    .wired_skill_listing_provider
+                    .skill_entries()
+                    .await
+                    .iter()
+                    .any(|entry| entry.name == namespaced_skill),
+                "re-enabling must restore the complete live registry without leaking an \
+                 app-only skill into this global conversation's listing"
+            );
             assert_eq!(
                 super::mobile_live_plugin_skill_count(&handle.inner.slash_registry).await,
                 crate::mobile_plugin_skill_names().len(),
-                "live FFI count source must agree with re-enabled listing"
+                "re-enable must restore the complete live registry even though the \
+                 global listing exposes only its three routers"
             );
             let settings =
                 std::fs::read_to_string(tmp.path().join(branding::DOT_DIR).join("settings.json"))
@@ -15382,7 +15820,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_state_is_present_and_survives_restart() {
+    fn disabled_state_is_present_and_status_survives_restart() {
         let tmp = tempfile::tempdir().expect("tempdir");
         {
             let (handle, _) = build_submit_handle(tmp.path());
@@ -15414,14 +15852,16 @@ mod tests {
             "an explicitly disabled Plugin must report zero live skills after restart"
         );
         restarted.runtime().block_on(async {
-            assert!(matches!(
+            assert!(
                 restarted
                     .inner
                     .plugin_manager
                     .plugin_state(&crate::mobile_builtin_plugin_id())
-                    .await,
-                Some(plugin::PluginState::Disabled { .. })
-            ));
+                    .await
+                    .is_none(),
+                "a disabled boot must not materialize/register the plugin merely \
+                 to manufacture a generic PluginManager Disabled state"
+            );
             assert!(restarted
                 .inner
                 .wired_plugin_workflow_registry
@@ -15449,6 +15889,127 @@ mod tests {
                 )
             }));
         });
+    }
+
+    #[test]
+    fn disabled_boot_defers_bundle_materialization_until_enable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings_dir = tmp.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&settings_dir).expect("settings directory");
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            serde_json::json!({
+                "enabledPlugins": {
+                    "lingxi-local-app": false
+                }
+            })
+            .to_string(),
+        )
+        .expect("disabled settings");
+
+        // A pre-existing container makes the negative assertion meaningful:
+        // merely checking that an absent directory stays absent cannot catch a
+        // future sync path that reads/repairs an existing plugin root.
+        let bundle_root = settings_dir.join("builtin-plugin-bundle");
+        std::fs::create_dir_all(&bundle_root).expect("stale bundle container");
+        let sentinel = bundle_root.join("disabled-boot-sentinel");
+        std::fs::write(&sentinel, b"must remain the only entry").expect("bundle sentinel");
+        let bundle_entries = || {
+            std::fs::read_dir(&bundle_root)
+                .expect("bundle entries")
+                .map(|entry| {
+                    entry
+                        .expect("bundle entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        let (handle, listener) = build_submit_handle(tmp.path());
+        assert_eq!(
+            bundle_entries(),
+            ["disabled-boot-sentinel".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "disabled boot must not materialize or repair an existing compiled-plugin container"
+        );
+        handle.runtime().block_on(async {
+            assert!(
+                handle
+                    .inner
+                    .plugin_manager
+                    .plugin_state(&crate::mobile_builtin_plugin_id())
+                    .await
+                    .is_none(),
+                "disabled boot should retain no materialized PluginManager state"
+            );
+            for command in [
+                client_protocol::local_apps::PluginCommandDto::GetStatus {
+                    plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                },
+                client_protocol::local_apps::PluginCommandDto::GetInventory {
+                    plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                },
+            ] {
+                handle
+                    .submit(ClientCommand::PluginCommand { command })
+                    .await
+                    .expect("disabled metadata query");
+            }
+        });
+        assert_eq!(
+            bundle_entries(),
+            ["disabled-boot-sentinel".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "compiled status/inventory queries must not enter plugin filesystem materialization"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel after metadata queries"),
+            b"must remain the only entry"
+        );
+        let events = listener.received.blocking_lock().clone();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ev::AppEvent {
+                event: client_protocol::local_apps::AppEventDto::PluginStatusChanged { status }
+            } if matches!(
+                status.state,
+                client_protocol::local_apps::PluginActivationStateDto::Disabled
+            )
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ev::AppEvent {
+                event: client_protocol::local_apps::AppEventDto::PluginInventoryChanged {
+                    inventory
+                }
+            } if matches!(
+                inventory.state,
+                client_protocol::local_apps::PluginActivationStateDto::Disabled
+            ) && inventory.counts.skills > 0
+        )));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                        enabled: true,
+                    },
+                })
+                .await
+                .expect("enable should use the existing registration path");
+        });
+        assert!(
+            bundle_root
+                .join("materialized")
+                .join("active.manifest.json")
+                .is_file(),
+            "enabling must be the first operation that materializes and activates the bundle"
+        );
     }
 
     #[test]
@@ -16781,6 +17342,263 @@ mod tests {
     }
 
     #[test]
+    fn submit_task_message_reaches_registry_after_workspace_trust() {
+        for trusted in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut cfg = test_config(tmp.path());
+            cfg.workspace_trusted = trusted;
+            let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+            handle.runtime().block_on(async {
+                let error = handle
+                    .submit(ClientCommand::TaskMessage {
+                        task_id: "missing-task".into(),
+                        message: "continue".into(),
+                    })
+                    .await
+                    .unwrap_err();
+                if trusted {
+                    assert!(
+                        error.to_string().contains("task message failed:"),
+                        "trusted request must reach the task registry: {error}"
+                    );
+                } else {
+                    assert!(error.to_string().contains("Trust this workspace"));
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn submit_task_message_enters_the_real_human_inbox_without_using_model_send() {
+        struct ModelInbox;
+        #[async_trait::async_trait]
+        impl platform_api::task_registry::TaskMessageReceiver for ModelInbox {
+            async fn send(
+                &self,
+                _: String,
+            ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+                panic!("human command must use the dedicated human inbox");
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(tmp.path());
+        cfg.workspace_trusted = true;
+        let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
+        handle.runtime().block_on(async {
+            use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+            let registry = handle.inner.task_registry.as_ref();
+            let task = TaskRegistryHandle::create(registry, TaskCreateInput { task_type: "local_agent".into(), description: "active agent fixture".into() }).await.unwrap();
+            let agent_id = protocol::AgentId::new();
+            registry.bind_agent_id(&task.task_id, agent_id).await.unwrap();
+            registry.bind_agent_message_receiver(&task.task_id, Arc::new(ModelInbox)).await.unwrap();
+            handle.submit(ClientCommand::TaskMessage { task_id: task.task_id.clone(), message: "  continue with care\nnext line".into() }).await.unwrap();
+            assert_eq!(registry.take_human_task_messages_for(agent_id).await, vec!["  continue with care\nnext line"]);
+            assert!(listener.received.lock().await.iter().any(|event| matches!(event, Ev::SystemNotice { message, is_error: false } if message.contains(&task.task_id))));
+        });
+    }
+
+    #[test]
+    fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_history() {
+        use std::io::{Read, Write};
+        struct NoWork;
+        #[async_trait::async_trait]
+        impl platform_api::ToolInvoker for NoWork {
+            async fn invoke(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: platform_api::tool_invoker::SubagentInvocationContext,
+            ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError>
+            {
+                unreachable!("fixture model never calls tools")
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        #[async_trait::async_trait]
+        impl platform_api::BudgetEnforcerHandle for NoWork {
+            async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::BudgetError> {
+                Ok(())
+            }
+            async fn snapshot_total_nano_usd(&self) -> u64 {
+                0
+            }
+        }
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let server_thread = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut socket = loop {
+                match server.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("local provider was never called: {error}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+                if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&bytes[..header_end]);
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':')
+                        .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                        .map(|(_, value)| value.trim().parse().unwrap())
+                })
+                .expect("JSON request content length");
+            while bytes.len() < header_end + length {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+            let _ = captured_tx.send(body);
+            let events = [
+                serde_json::json!({"type":"message_start","message":{"id":"fixture-response","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":0}}}),
+                serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"continued"}}),
+                serde_json::json!({"type":"content_block_stop","index":0}),
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}),
+                serde_json::json!({"type":"message_stop"}),
+            ];
+            let body = events
+                .iter()
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().unwrap()
+                    )
+                })
+                .collect::<String>();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(tmp.path());
+        cfg.workspace_trusted = true;
+        cfg.api_base = base;
+        cfg.api_key = "test-fixture-key".into();
+        cfg.default_model = "claude-sonnet-4-5".into();
+        let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+        // Observe the resumed child itself; no unrelated main-loop wake request
+        // is needed to prove this targeted producer reaches a real model turn.
+        handle.task_notification_watcher.abort();
+        handle.runtime().block_on(async {
+            use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+            let registry = handle.inner.task_registry.as_ref();
+            let task = TaskRegistryHandle::create(
+                registry,
+                TaskCreateInput {
+                    task_type: "local_agent".into(),
+                    description: "stopped original agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let id = protocol::AgentId::new();
+            registry.bind_agent_id(&task.task_id, id).await.unwrap();
+            let session_id = handle.inner.orchestrator.current_session_id().await;
+            let dir = orchestrator::transcript_paths::subagents_dir(
+                &handle.lingxi_home,
+                &handle.session_cwd,
+                &session_id.as_uuid().to_string(),
+            );
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            let transcript = session::forked_skill::agent_transcript_path(&dir, &id.to_string());
+            let previous = protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "original review context".into(),
+            );
+            tokio::fs::write(
+                &transcript,
+                format!(
+                    "{}\n",
+                    serde_json::json!({"model":"claude-sonnet-4-5","message":previous})
+                ),
+            )
+            .await
+            .unwrap();
+            TaskRegistryHandle::register_agent_resume_recipe(
+                registry,
+                &task.task_id,
+                platform_api::SubagentSpawnRequest {
+                    subagent_type: "general-purpose".into(),
+                    prompt: "do not replay this initial prompt".into(),
+                    cwd: Some(tmp.path().display().to_string()),
+                    model: Some("claude-sonnet-4-5".into()),
+                    ..Default::default()
+                },
+                platform_api::SubagentInheritance {
+                    tool_invoker: Arc::new(NoWork),
+                    budget: Arc::new(NoWork),
+                },
+            )
+            .await
+            .unwrap();
+            handle
+                .submit(ClientCommand::TaskStop {
+                    task_id: task.task_id.clone(),
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                handle.submit(ClientCommand::TaskMessage {
+                    task_id: task.task_id.clone(),
+                    message: "  finish the review".into(),
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let body = tokio::time::timeout(std::time::Duration::from_secs(5), captured_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                body["stream"], true,
+                "restoration must reach an actual streaming model request"
+            );
+            let messages = body["messages"].to_string();
+            assert!(
+                messages.contains("original review context"),
+                "restored turn lost prior transcript: {messages}"
+            );
+            assert!(
+                messages.contains("finish the review"),
+                "human follow-up did not reach provider: {messages}"
+            );
+            assert!(!messages.contains("do not replay this initial prompt"));
+            let tasks::TaskState::LocalAgent(restored) = registry.get(&task.task_id).await.unwrap()
+            else {
+                panic!("restored task changed type")
+            };
+            assert_eq!(restored.agent_id, id);
+        });
+        server_thread.join().unwrap();
+    }
+
+    #[test]
     fn submit_task_stop_skips_second_workflow_status_event() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
@@ -17786,6 +18604,62 @@ mod tests {
                 TurnRecoveryStateDto::Cancelled
             );
         });
+    }
+
+    /// The gate [`MobileEngineHandle::connection_sink`] exists to get past.
+    ///
+    /// This is the NO-active-turn window, not the cancelled/quiescing one the
+    /// test below covers — two different mechanisms with the same observable
+    /// effect, so each needs an input only it can reach. Here every live-turn
+    /// payload is dropped, including the `SystemNotice` and
+    /// `CompactionCompleted` a command handler emits as its reply, while a
+    /// connection-scoped event still forwards. "Nothing arrived" would not have
+    /// distinguished the two.
+    #[tokio::test]
+    async fn lifecycle_listener_drops_turn_payload_when_no_turn_is_active() {
+        let inner = Arc::new(FakeListener::default());
+        let active = Arc::new(tokio::sync::Mutex::new(None));
+        let listener = super::TurnLifecycleListener::new(inner.clone(), active.clone());
+
+        listener
+            .on_event(Ev::SystemNotice {
+                message: "Message accepted for task a12345678".to_string(),
+                is_error: false,
+            })
+            .await;
+        listener
+            .on_event(Ev::CompactionCompleted {
+                messages_before: 2,
+                messages_after: 1,
+                bytes_saved: 10,
+                summary: "kept context".to_string(),
+            })
+            .await;
+        listener
+            .on_event(Ev::TaskLifecycle {
+                event_json: "{\"type\":\"system\"}".to_string(),
+            })
+            .await;
+
+        let seen = inner.received.lock().await;
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Ev::SystemNotice { .. })),
+            "a command reply on SystemNotice is dropped with no turn to own it"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Ev::CompactionCompleted { .. })),
+            "so is the ForceCompact confirmation"
+        );
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, Ev::TaskLifecycle { .. })),
+            "a connection-scoped event still forwards, so the drop above is the \
+             turn gate and not a dead listener"
+        );
     }
 
     #[tokio::test]
@@ -20532,7 +21406,6 @@ mod tests {
             let events = drain_events(&handle, &listener).await;
             let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
             let app_id = record.id;
-            let service = handle.local_apps().expect("local-apps service");
             app_id
         });
         // The store lives at the per-profile data root (`<root>/apps/…`) —
@@ -20572,6 +21445,138 @@ mod tests {
             !tmp.path().join("apps").join(&app_id).exists(),
             "DeleteApp must remove the app directory"
         );
+    }
+
+    #[test]
+    fn initial_app_cold_boot_exposes_only_its_enabled_managed_mcp() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let seed_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("seed runtime");
+        let (app_id, workspace) = seed_runtime.block_on(async {
+            let service = local_apps::AppService::load(
+                tmp.path().to_path_buf(),
+                Arc::new(platform_posix_minimal::PosixClock::new()),
+                Arc::new(local_apps::NoopAppEventObserver),
+            )
+            .await
+            .expect("seed app service");
+            let record = service
+                .create_app(Some("Published"), "cold-boot MCP", None)
+                .await
+                .expect("seed app");
+            let layout =
+                local_apps::AppLayout::new(tmp.path(), record.id.clone()).expect("seed app layout");
+            let definition = platform_api::McpToolDefinitionDto::new(
+                "read_value",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            );
+            let catalog = serde_json::json!({
+                "appId": record.id.clone(),
+                "buildId": "build-cold",
+                "tools": [{
+                    "definition": definition,
+                    "ceiling": "allow"
+                }],
+                "execution": []
+            });
+            let catalog_sha256 =
+                local_apps::hash_mcp_catalog(catalog.clone()).expect("catalog digest");
+            local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
+            let mut manifest = local_apps::load_manifest(&layout).expect("seed manifest");
+            manifest.revision = manifest.revision.max(1);
+            let profile_sha256 = "2".repeat(64);
+            manifest.surface = Some(local_apps::AppSurface::Dom);
+            manifest.runtime_profile = Some(local_apps::AppRuntimeProfileBinding {
+                family: local_apps::AppRuntimeProfile::ReactDom,
+                revision: 1,
+                contract_sha256: profile_sha256.clone(),
+            });
+            manifest.dependency_snapshot = Some(local_apps::AppDependencySnapshot {
+                requested_sha256: "3".repeat(64),
+                package_sha256: "4".repeat(64),
+                lockfile_sha256: "5".repeat(64),
+                dependency_tree_sha256: "6".repeat(64),
+                sbom_sha256: "7".repeat(64),
+                toolchain_key: "pnpm@test/node@test".into(),
+                verified_profile_contract_sha256: profile_sha256.clone(),
+            });
+            manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+                plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+                plugin_version: "builtin".into(),
+                template_id: "react-dom-r1".into(),
+                template_sha256: profile_sha256,
+            });
+            manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+                build_id: "build-cold".into(),
+                manifest_revision: manifest.revision,
+                authoring_revision: 1,
+                user_goal_sha256: "0".repeat(64),
+                proposal_sha256: "0".repeat(64),
+                approval_contract_sha256: "0".repeat(64),
+                tool_surface_sha256: "1".repeat(64),
+                catalog_sha256,
+                mcp_verification_sha256: "0".repeat(64),
+            });
+            local_apps::save_manifest(&layout, &manifest).expect("publish catalog pointer");
+            local_apps::save_mcp_settings(
+                &layout,
+                &local_apps::AppMcpSettings {
+                    enabled: true,
+                    enabled_tools: vec!["read_value".into()],
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("enable published MCP");
+            (record.id, tmp.path().join(layout.workspace_rel()))
+        });
+        drop(seed_runtime);
+
+        // The authoring plugin can be disabled independently of an app MCP
+        // the user already published and enabled.
+        let settings_dir = tmp.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&settings_dir).expect("settings directory");
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            serde_json::json!({
+                "enabledPlugins": { "lingxi-local-app": false }
+            })
+            .to_string(),
+        )
+        .expect("disabled authoring plugin setting");
+
+        let mut cfg = test_config(tmp.path());
+        cfg.cwd = workspace;
+        let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+        assert_eq!(
+            handle.skill_count(),
+            0,
+            "the authoring plugin must remain disabled on this cold boot"
+        );
+        let expected = format!("mcp__local_app_{app_id}__read_value");
+        handle.runtime().block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if handle.inner.orchestrator.tool_names().contains(&expected) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "initial Local App cold boot did not expose {expected:?}; tools={:?}",
+                    handle.inner.orchestrator.tool_names()
+                )
+            });
+        });
     }
 
     /// r1-engine-core-015 / r1-backlog-engine-create-06: an app's transcripts
@@ -20933,17 +21938,28 @@ mod tests {
             let contract =
                 std::fs::read_to_string(workspace.join("LINGXI.md")).expect("guided contract");
             assert!(
-                contract.contains("LocalAppScaffold"),
-                "the contract must name the one useful tool: {contract}"
+                contract.contains("lingxi-local-app:create-local-app")
+                    && contract.contains("Immediately use the `Skill` tool"),
+                "the thin shell must immediately enter the create coordinator: {contract}"
             );
             assert!(
-                contract.contains("will be deleted the moment the scaffold lands"),
+                contract.contains("Any source written before the scaffold lands will be deleted"),
                 "the contract must warn that pre-confirmation source is wiped: {contract}"
+            );
+            assert!(
+                contract.contains("do not call `LocalAppScaffold` directly"),
+                "the shell must preserve the direct-scaffold guard: {contract}"
+            );
+            assert!(
+                contract.contains("Do not run a separate questionnaire")
+                    && contract.contains("do not force a technical surface picker"),
+                "the Host shell must leave adaptive and technical choices to the coordinator: \
+                 {contract}"
             );
             assert!(
                 contract.contains(&record.id),
                 "the contract must bind the workspace to its app id so the agent \
-                 can call LocalAppScaffold without rediscovering it: {contract}"
+                 can enter the create flow without rediscovering it: {contract}"
             );
         });
     }

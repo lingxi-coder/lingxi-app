@@ -388,6 +388,17 @@ impl Tool for GlobTool {
             };
             let _ = ob.add(&neg);
         }
+        if let Some(registry) = self.ctx.task_registry.as_ref() {
+            if let Some(directory) = registry.task_output_directory().await {
+                // Keep session task outputs out of directory listings.
+                if !canon_base.is_file() {
+                    let exclusions = platform_api::task_output::search_exclusions(Path::new(&directory), &canon_base);
+                    for exclusion in exclusions {
+                        ob.add(&exclusion).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+                    }
+                }
+            }
+        }
         let overrides = match ob.build() {
             Ok(o) => o,
             Err(e) => {
@@ -628,6 +639,31 @@ mod tests {
             ),
             sink,
         )
+    }
+
+    #[tokio::test]
+    async fn task_output_directory_is_excluded_from_glob_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().join("temp[1]/project/session_current/tasks");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("b12345678.output"), "task output").unwrap();
+        std::fs::write(tmp.path().join("public.txt"), "public").unwrap();
+        let (mut context, _) = make_ctx(&tmp);
+        context.task_registry = Some(Arc::new(crate::shared::TaskOutputTestRegistry(
+            output.clone(),
+        )));
+        let tool = GlobTool::new(context);
+        let result = tool
+            .call(json!({"pattern":"**/*"}), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert!(result.data.to_string().contains("public.txt"));
+        assert!(!result.data.to_string().contains("b12345678.output"));
+        let result = tool
+            .call(json!({"pattern":"**/*", "path":output}), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert!(!result.data.to_string().contains("b12345678.output"));
     }
 
     #[tokio::test]

@@ -12,4 +12,5 @@ pub mod retry;
 pub mod stream_watchdog;
 pub mod telemetry;
 pub mod thinking;
+pub mod thinking_signature;
 pub mod user_agent;

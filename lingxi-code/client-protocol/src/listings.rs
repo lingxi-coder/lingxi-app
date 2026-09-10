@@ -677,7 +677,7 @@ pub struct DoctorSummaryDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct TaskRowDto {
-    /// 9-char `[bartwmdks][0-9a-z]{8}` task id.
+    /// 9-char `[bartwmdksfe][0-9a-z]{8}` task id.
     pub task_id: String,
     /// Task type wire string (one of the 7 byte-locked variants).
     pub task_type: String,
@@ -710,6 +710,27 @@ pub struct TaskRowDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub stage: Option<String>,
+    /// The teammate is awaiting the leader's plan decision, independent of lifecycle status.
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub awaiting_plan_approval: bool,
+    /// Additive shell specialization, e.g. a command event monitor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub kind: Option<String>,
+    /// Agent completion has not yet been delivered or consumed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub unread: bool,
+    /// Concrete model used by an agent task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub model: Option<String>,
+    /// String effort label; numeric budgets are omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub effort: Option<String>,
+
 }
 
 /// Task status — the lowered `tasks::TaskStatus` (`tasks/src/state.rs:11`), the

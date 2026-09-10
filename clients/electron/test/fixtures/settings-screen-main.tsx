@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useState } from 'react';
+import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import '../../src/renderer/global.css';
@@ -22,11 +22,17 @@ function Fixture() {
   const [hasProject, setHasProject] = useState(false);
   const [connected, setConnected] = useState(true);
   const [sessionLoading, setSessionLoading] = useState(false);
+  const [activeSessionId, setActiveSessionId] = useState('session-a');
   const [settingsSnapshotEvent, setSettingsSnapshotEvent] = useState<SettingsSnapshotEvent | null>(null);
   const [refreshCalls, setRefreshCalls] = useState(0);
   const [closeCalls, setCloseCalls] = useState(0);
   const [lastPermissionRuleCall, setLastPermissionRuleCall] = useState<unknown>(null);
   const [lastEngineSettingsPatch, setLastEngineSettingsPatch] = useState<unknown>(null);
+  const [providerCredentials, setProviderCredentials] = useState<Array<{ providerId: string; configured: boolean; encryptionAvailable: boolean; credentialPreview?: string }>>([]);
+  const [credentialWrites, setCredentialWrites] = useState<string[]>([]);
+  const failNextCredential = useRef(false);
+  const holdSettingsWrite = useRef(false);
+  const releaseSettingsWrite = useRef<(() => void) | null>(null);
 
   // `useCallback` with empty deps keeps these referentially stable across
   // Fixture re-renders — `SettingsScreen` depends on `bridge.refreshSettingsSnapshot`'s
@@ -45,11 +51,21 @@ function Fixture() {
   // is only visible by inspecting the patch's VALUE, not just that a write
   // happened.
   const updateEngineSettings = useCallback(async (destination: string, patch: Record<string, unknown>) => {
+    if (holdSettingsWrite.current) await new Promise<void>((resolve) => { releaseSettingsWrite.current = resolve; });
     setLastEngineSettingsPatch({ destination, patch });
+    setSettingsSnapshotEvent((previous) => {
+      const layers = JSON.parse(previous?.layers_json ?? '{}');
+      layers[destination] = { ...layers[destination], ...patch };
+      const effective = Object.assign({}, ...Object.values(layers));
+      return {
+        type: 'settings_snapshot', effective_json: JSON.stringify(effective),
+        provenance_json: '{}', active_json: JSON.stringify(effective), layers_json: JSON.stringify(layers),
+      } as SettingsSnapshotEvent;
+    });
   }, []);
 
   const bridge = {
-    activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
+    activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
     bootstrap: {
       // `settings`/`diagnostics`/`runtimes`/`versions` below only matter to
       // the Task 16 pages (General/Projects/Diagnostics/About), which the
@@ -57,6 +73,7 @@ function Fixture() {
       // now render for real instead of a placeholder — a bootstrap this
       // thin would otherwise throw reading `.settings.theme` etc.
       settings: { version: 1 as const, projects: [] as string[], pinnedSessions: [] as never[] },
+      providerCredentials,
       workspace: hasProject ? { path: '/test/project', trusted: true } : { trusted: false },
       runtimes: [] as never[],
       diagnostics: [] as never[],
@@ -191,6 +208,22 @@ function Fixture() {
     // click a save/add/remove button on them, but they are here so a future
     // scenario that does doesn't have to rediscover this same crash.
     updateEngineSettings,
+    updateProviderSettings: updateEngineSettings,
+    setProviderCredential: async (providerId: string, credential: string) => {
+      if (failNextCredential.current) {
+        failNextCredential.current = false;
+        throw new Error('Simulated credential storage failure');
+      }
+      setCredentialWrites((values) => [...values, providerId]);
+      setProviderCredentials((values) => [...values.filter((entry) => entry.providerId !== providerId), {
+        providerId, configured: true, encryptionAvailable: true, credentialPreview: `••••${credential.slice(-4)}`,
+      }]);
+    },
+    clearProviderCredential: async (providerId: string) => {
+      setProviderCredentials((values) => values.filter((entry) => entry.providerId !== providerId));
+    },
+    refreshProviderCredential: noopAsyncVoid,
+    setModelPickerVisibility: noopAsyncVoid,
     updatePermissionRules,
     setDefaultPermissionMode: noopAsyncVoid,
     updateWorkspaceDirectories: noopAsyncVoid,
@@ -212,6 +245,10 @@ function Fixture() {
       setHasProject,
       setConnected,
       setSessionLoading,
+      setActiveSession: (sessionId: string) => { setActiveSessionId(sessionId); setSettingsSnapshotEvent(null); },
+      failNextCredential: () => { failNextCredential.current = true; },
+      holdSettingsWrite: () => { holdSettingsWrite.current = true; },
+      releaseSettingsWrite: () => { holdSettingsWrite.current = false; releaseSettingsWrite.current?.(); },
       setSnapshot: (effective: Record<string, unknown>, active: Record<string, unknown>) => {
         setSettingsSnapshotEvent({
           type: 'settings_snapshot',
@@ -301,10 +338,12 @@ function Fixture() {
         closeCalls,
         lastPermissionRuleCall,
         lastEngineSettingsPatch,
+        credentialWrites,
+        providerCredentials,
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch]);
+  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, credentialWrites, providerCredentials]);
 
   return (
     <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
@@ -330,6 +369,10 @@ declare global {
       setHasProject(value: boolean): void;
       setConnected(value: boolean): void;
       setSessionLoading(value: boolean): void;
+      setActiveSession(sessionId: string): void;
+      failNextCredential(): void;
+      holdSettingsWrite(): void;
+      releaseSettingsWrite(): void;
       setSnapshot(effective: Record<string, unknown>, active: Record<string, unknown>): void;
       setLayeredSnapshot(layers: Record<string, Record<string, unknown>>): void;
       clickLayerTab(layer: string): void;
@@ -358,6 +401,8 @@ declare global {
         closeCalls: number;
         lastPermissionRuleCall: unknown;
         lastEngineSettingsPatch: unknown;
+        credentialWrites: string[];
+        providerCredentials: unknown[];
       };
     };
   }

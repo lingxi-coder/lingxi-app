@@ -151,6 +151,16 @@ impl FileSystem for GuestPathFileSystem {
         self.inner.append_file_no_follow(&path, content).await
     }
 
+    async fn append_file_rooted_staged(
+        &self, root: &Path, relative: &Path, content: &str,
+        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+    ) -> Result<(), platform_api::filesystem::FileAppendError> {
+        let root = self.resolve_root(root, true).map_err(|error| platform_api::filesystem::FileAppendError {
+            stage: platform_api::filesystem::FileAppendStage::Open, error,
+        })?;
+        self.inner.append_file_rooted_staged(&root, relative, content, expected).await
+    }
+
     async fn append_file_with_mode(
         &self,
         path: &str,

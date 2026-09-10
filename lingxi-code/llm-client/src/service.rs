@@ -32,6 +32,7 @@ use crate::{
 use futures::stream::BoxStream;
 use protocol::{is_nested_media_value, ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -427,6 +428,9 @@ pub struct ApiService {
     /// stream this reflects connect-phase retries only (the value the adapter
     /// knows when it returns the `BoxStream`). `0` until the first drive.
     last_retry_count: Mutex<u32>,
+    /// Recovery status and rejected historical identities. New message IDs
+    /// remain unaffected, even when their thinking bytes match an older turn.
+    thinking_recovery: crate::thinking_scope::ThinkingRecoveryScope,
     /// Most recently observed RAW per-window utilization snapshot.
     ///
     /// Task 2 (llm-client future-work batch 5): parsed via
@@ -915,6 +919,7 @@ impl ApiService {
             last_rate_limit: Mutex::new(None),
             last_request_id: Mutex::new(None),
             last_retry_count: Mutex::new(0),
+            thinking_recovery: crate::thinking_scope::ThinkingRecoveryScope::default(),
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
@@ -1238,6 +1243,34 @@ impl ApiService {
         // branch — emitting "[…tools no longer available]" rather than the
         // disabled branch's "[…tool search not enabled]". The request's `tools`
         // remain the availability set (`a`) below.
+        let mut msgs = msgs;
+        let thinking_source_message_ids: Vec<_> = msgs
+            .iter()
+            .filter_map(|message| {
+                if let ConversationMessage::Assistant { id, content, .. } = message {
+                    content
+                        .iter()
+                        .any(|block| {
+                            matches!(
+                                block,
+                                protocol::ContentBlock::Thinking { .. }
+                                    | protocol::ContentBlock::RedactedThinking { .. }
+                            )
+                        })
+                        .then_some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let thinking_recovery_scope = self.thinking_recovery_scope();
+        thinking_recovery_scope.capture(&thinking_source_message_ids);
+        if !crate::model::thinking_signature::thinking_must_round_trip(model, profile) {
+            crate::model::thinking_signature::strip_marked_conversation_thinking(
+                &mut msgs,
+                &thinking_recovery_scope.messages(),
+            );
+        }
         let tool_search_enabled = platform_api::session_flags::tool_search_enabled();
         let available_tool_names: std::collections::HashSet<String> = tools
             .iter()
@@ -1293,6 +1326,8 @@ impl ApiService {
                 crate::prompt_format::split_system_blocks_with(s, enable_caching, split_opts);
         }
         req.messages = messages;
+        req.thinking_source_message_ids = thinking_source_message_ids;
+        req.thinking_recovery_scope = Some(thinking_recovery_scope);
 
         // Exactly one message-level breakpoint, on the last cache-eligible content
         // block of the last message (claude.ts addCacheBreakpoints markerIndex =
@@ -2176,6 +2211,69 @@ impl ApiService {
         *self.last_retry_count.lock().unwrap()
     }
 
+    fn thinking_recovery_scope(&self) -> crate::thinking_scope::ThinkingRecoveryScope {
+        crate::thinking_scope::current().unwrap_or_else(|| self.thinking_recovery.clone())
+    }
+
+    /// Recovery status for the owning query (legacy direct callers use a private scope).
+    #[must_use]
+    pub fn thinking_signature_stripped(&self) -> bool {
+        self.thinking_recovery_scope().stripped()
+    }
+
+    /// Compatibility arm: capture only the next request's historical identities.
+    pub fn set_thinking_signature_stripped(&self, stripped: bool) {
+        self.thinking_recovery_scope().arm(stripped);
+    }
+
+    pub fn thinking_stripped_messages(
+        &self,
+    ) -> std::collections::HashMap<protocol::MessageId, usize> {
+        self.thinking_recovery_scope().messages()
+    }
+
+    pub fn set_thinking_stripped_messages(
+        &self,
+        messages: std::collections::HashMap<protocol::MessageId, usize>,
+    ) {
+        self.thinking_recovery_scope().merge(messages);
+    }
+
+    /// Strip thinking blocks after a thinking-signature 400 on any provider.
+    /// Returns `true` when the caller should retry immediately.
+    async fn handle_thinking_signature_strip(&self, req: &mut crate::LlmRequest) -> bool {
+        let (signed, unsigned) =
+            crate::model::thinking_signature::count_thinking_signature_blocks(&req.messages);
+        if !crate::model::thinking_signature::strip_thinking_blocks_for_signature_recovery(
+            &mut req.messages,
+        ) {
+            return false;
+        }
+        tracing::warn!(
+            "[thinking] server rejected a thinking block; stripping all thinking blocks and retrying."
+        );
+        telemetry::emit_thinking_signature_strip_retry(
+            &self.analytics,
+            req.query_source.as_deref(),
+            &req.model,
+            signed,
+            unsigned,
+        )
+        .await;
+        let scope = req
+            .thinking_recovery_scope
+            .clone()
+            .unwrap_or_else(|| self.thinking_recovery_scope());
+        scope.rejected(
+            req.thinking_source_message_ids
+                .iter()
+                .map(|id| (*id, 0))
+                .collect(),
+        );
+        scope.persist().await;
+        true
+    }
+
     /// The most recently observed RAW per-window utilization snapshot. Backs the
     /// `OrchestratorApiClient::last_raw_utilization` trait override. `None` until
     /// the first recorded response.
@@ -2674,6 +2772,8 @@ impl ApiService {
         let mut aws_auth_attempts: u32 = 0;
         let mut max_tokens_adjusted = false;
         loop {
+            // Strip rejected thinking before encode so Gemini / OpenAI-compat
+            // thinking models can prepare. DeepSeek / Kimi skip this.
             // prepare → inject headers → execute.
             let mut prepared = match self.client.prepare(&req).await {
                 Ok(p) => p,
@@ -2962,6 +3062,20 @@ impl ApiService {
                                     req.max_tokens = Some(new_max);
                                     continue;
                                 }
+                                DriveStep::StripThinkingSignature => {
+                                    if self.handle_thinking_signature_strip(&mut req).await {
+                                        continue;
+                                    }
+                                    telemetry::emit_failed(
+                                        &self.analytics,
+                                        &req.model,
+                                        &request_id,
+                                        Self::error_kind(&decode_err),
+                                        Self::status_of(&decode_err),
+                                    )
+                                    .await;
+                                    return Err(decode_err);
+                                }
                                 DriveStep::Fallback { fallback_model } => {
                                     if req.model_attempt.is_some() {
                                         return Err(decode_err);
@@ -3146,8 +3260,9 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<LlmRequest, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
+        let mut req = crate::thinking_scope::isolated(|| {
+            self.build_request(model, profile, system, messages, tools, false, max_tokens)
+        })?;
         req.effort = effort;
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
@@ -3225,8 +3340,9 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<LlmResponse, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
+        let mut req = crate::thinking_scope::isolated(|| {
+            self.build_request(model, profile, system, messages, tools, false, max_tokens)
+        })?;
 
         // `build_request` applies main-turn-only overrides. A forked summary
         // owns these fields independently, so restore its explicit values.
@@ -3310,8 +3426,9 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let mut req = crate::thinking_scope::isolated(|| {
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)
+        })?;
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
         req.temperature = temperature.map(f64::from);
@@ -3335,8 +3452,9 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let mut req = crate::thinking_scope::isolated(|| {
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)
+        })?;
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
         req.query_source = query_source.map(str::to_string);
@@ -3887,6 +4005,11 @@ impl ApiService {
                                 max_tokens_adjusted = true;
                                 req.max_tokens = Some(new_max);
                                 continue;
+                            }
+                            DriveStep::StripThinkingSignature => {
+                                if self.handle_thinking_signature_strip(&mut req).await {
+                                    continue;
+                                }
                             }
                             _ => {}
                         }

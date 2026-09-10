@@ -1637,6 +1637,11 @@ impl PluginManager {
 
             let registration = MonitorRegistration {
                 command: monitor_command_with_env(&monitor.command, install_dir, &self.project_dir),
+                // A PLUGIN monitor is never sandboxed — the oracle spawns it
+                // with `shouldUseSandbox: !1` (`src_180597926` @318044),
+                // unlike the model-issued Monitor tool, whose command goes
+                // through `jS({command})`.
+                spawn_command: None,
                 description: monitor.description.clone(),
                 timeout_ms: 0,
                 persistent: true,

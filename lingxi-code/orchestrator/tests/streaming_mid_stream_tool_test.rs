@@ -160,11 +160,18 @@ async fn tool_use_dispatched_before_message_stop() {
     // The §0.7 "light up thinking/usage" follow-up adds additive `Usage`
     // emits (from `message_start` / `message_delta`) that interleave but
     // are orthogonal to this text/tool ordering, so filter them (and
-    // `Thinking`) out before the strict-iterator walk.
+    // `Thinking` and message identity metadata) out before the strict-iterator walk.
     let events = output.snapshot().await;
     let lifecycle: Vec<&OutputEvent> = events
         .iter()
-        .filter(|e| !matches!(e, OutputEvent::Usage { .. } | OutputEvent::Thinking { .. }))
+        .filter(|e| {
+            !matches!(
+                e,
+                OutputEvent::Usage { .. }
+                    | OutputEvent::Thinking { .. }
+                    | OutputEvent::MessageIdentity { .. }
+            )
+        })
         .collect();
     let mut iter = lifecycle.into_iter();
     assert!(

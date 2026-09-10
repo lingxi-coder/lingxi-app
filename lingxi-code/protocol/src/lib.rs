@@ -14,6 +14,7 @@ pub mod effect_result;
 pub mod effects;
 pub mod ids;
 pub mod iso8601;
+pub mod js_utf16;
 pub mod mcp_name;
 pub mod message_size;
 pub mod messages;
@@ -33,10 +34,10 @@ pub use ids::{
 pub use mcp_name::normalize_name_for_mcp;
 pub use message_size::text_byte_size;
 pub use messages::{
-    is_nested_media_value, CompactActiveGoalState, CompactBoundaryMetadata, CompactTrigger,
-    ContentBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
+    is_nested_media_value, CompactActiveGoalState, CompactBoundaryMetadata, CompactGoalOrigin,
+    CompactTrigger, ContentBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
     MediaObservation, MemoryEntry, MemoryEntryTier, MessageRole, PreservedMessages,
-    PreservedSegment,
+    PreservedSegment, RefusalFallbackMetadata,
 };
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,

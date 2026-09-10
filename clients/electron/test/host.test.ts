@@ -801,6 +801,7 @@ test('project session catalogs are patched independently and preserved in bootst
     empty_session: false,
   });
   const settings = {
+    isSessionArchived: () => false,
     getWorkspace: () => projectA,
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
     getPublic: () => ({ version: 1, activeProject: projectA, projects: [projectA, projectB], pinnedSessions: [] }),
@@ -835,6 +836,7 @@ test('host catalog generations keep only the newest deferred response', async ()
     list: async () => (++calls === 1 ? first.promise : second.promise),
   };
   const settings = {
+    isSessionArchived: () => false,
     getWorkspace: () => projectPath,
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
     getPublic: () => ({ version: 1, activeProject: projectPath, projects: [projectPath], pinnedSessions: [] }),
@@ -940,6 +942,91 @@ test('provider credential IPC uses the broker path, hot-syncs cached sessions, a
   ]);
 });
 
+test('custom provider credentials use the current runtime configuration and remain isolated', async () => {
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  const settings = {
+    getWorkspace: () => '/workspace',
+    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
+    getPublic: () => ({ version: 1, activeSession: { sessionId: 'custom-session' }, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
+  };
+  const operations: string[] = [];
+  const runtime = { customProviderIds: ['my-provider'] };
+  const bridge = {
+    get: () => runtime,
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    turnActive: false,
+    hasActiveWork: () => false,
+    refreshCachedProviderCredential: async (providerId: string, credential: string) => {
+      assert.equal(credential, 'sk-replacement-secret');
+      operations.push(`runtime:set:${providerId}`);
+    },
+    clearCachedProviderCredential: async (providerId: string) => {
+      operations.push(`runtime:delete:${providerId}`);
+    },
+  };
+  const host = new HostController(
+    settings as any,
+    bridge as any,
+    new DiagnosticBuffer(),
+    undefined,
+    ipc as any,
+    undefined,
+    {
+      health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
+      listStatus: async () => [{ providerId: 'my-provider', configured: true }],
+      preview: async () => ({ providerId: 'my-provider', configured: true, maskedValue: '••••cret' }),
+      resolve: async () => 'sk-test-secret',
+      set: async (providerId: string) => {
+        operations.push(`broker:set:${providerId}`);
+        return { providerId, configured: true, maskedValue: '••••cret' };
+      },
+      delete: async (providerId: string) => { operations.push(`broker:delete:${providerId}`); },
+    },
+  );
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once: () => undefined, removeListener: () => undefined };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+
+  const credentials = handlers.get(CH_PROVIDER_CREDENTIALS_GET);
+  assert.ok(credentials);
+  const result = await credentials!({ sender, senderFrame: frame }, 'my-provider') as Array<Record<string, unknown>>;
+  const customProvider = result.find((entry) => entry['providerId'] === 'my-provider');
+
+  assert.deepEqual(customProvider, {
+    providerId: 'my-provider',
+    configured: true,
+    encryptionAvailable: true,
+    credentialPreview: '••••cret',
+  });
+  assert.equal(JSON.stringify(result).includes('sk-test-secret'), false);
+
+  const setCredential = handlers.get(CH_PROVIDER_CREDENTIAL_SET);
+  const clearCredential = handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR);
+  assert.ok(setCredential);
+  assert.ok(clearCredential);
+  const stored = await setCredential!({ sender, senderFrame: frame }, 'my-provider', 'sk-replacement-secret') as Record<string, unknown>;
+  assert.equal(JSON.stringify(stored).includes('sk-replacement-secret'), false);
+  assert.deepEqual(operations, ['broker:set:my-provider', 'runtime:set:my-provider']);
+
+  await assert.rejects(async () => setCredential!({ sender, senderFrame: frame }, 'unknown', 'secret'), /unsupported provider/);
+  runtime.customProviderIds = [];
+  await assert.rejects(async () => setCredential!({ sender, senderFrame: frame }, 'my-provider', 'secret'), /unsupported provider/);
+  runtime.customProviderIds = ['my-provider'];
+  await clearCredential!({ sender, senderFrame: frame }, 'my-provider');
+  assert.deepEqual(operations, [
+    'broker:set:my-provider',
+    'runtime:set:my-provider',
+    'runtime:delete:my-provider',
+    'broker:delete:my-provider',
+  ]);
+});
+
 test('broker-backed bootstrap ignores legacy runtime credential status', async () => {
   const settings = {
     getWorkspace: () => '/workspace',
@@ -982,7 +1069,7 @@ test('broker-backed bootstrap ignores legacy runtime credential status', async (
   });
 });
 
-test('settings model and voice patches persist without restarting a live session', async () => {
+test('settings model, voice and Thought patches persist without restarting a live session', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-settings-update-voice-'));
   const settings = new SettingsStore(userData);
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -1041,6 +1128,14 @@ test('settings model and voice patches persist without restarting a live session
     });
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
+
+    for (const value of [false, true]) {
+      const thoughtResult = await update!(event, { collapseThoughtsByDefault: value }) as { collapseThoughtsByDefault?: boolean };
+      assert.equal(thoughtResult.collapseThoughtsByDefault, value);
+      assert.equal(new SettingsStore(userData).getPublic().collapseThoughtsByDefault, value);
+      assert.equal(restartCalls, 0, 'Thought preference must not restart the session');
+    }
+    await assert.rejects(() => Promise.resolve(update!(event, { collapseThoughtsByDefault: 'false' })), /invalid collapseThoughtsByDefault/);
 
     // The allowlist genuinely rejects anything else — `voice` joining it
     // must not have accidentally opened the gate to arbitrary keys.

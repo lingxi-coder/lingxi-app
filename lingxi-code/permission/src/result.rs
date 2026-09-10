@@ -51,6 +51,26 @@ pub enum PermissionResult {
     },
 }
 
+/// claude-code `decisionReason.circuitBreaker` — the safety circuit that raised
+/// a `safetyCheck`. The complete 2.1.263 value set (grep of the binary for
+/// `circuitBreaker:"…"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SafetyCircuitBreaker {
+    /// `backgroundOperator` — the `&` background-operator allow→ask downgrade.
+    BackgroundOperator,
+    /// `dangerousRemoval` — `Dangerous ${cmd} operation …` (oracle `HL`).
+    DangerousRemoval,
+    /// `isolatePeerMachines`.
+    IsolatePeerMachines,
+    /// `outsideReadsBlocked` — `permissions.blockReadsOutsideWorkingDirectories`.
+    OutsideReadsBlocked,
+    /// `restrictedMode`.
+    RestrictedMode,
+    /// `suspiciousWindowsPath`.
+    SuspiciousWindowsPath,
+}
+
 /// Discriminated reason for a permission decision.
 ///
 /// Carries enough detail for audit logs and for the UI to explain the choice
@@ -124,6 +144,10 @@ pub enum PermissionDecisionReason {
         reason: String,
         /// Whether a classifier could still approve this call.
         classifier_approvable: bool,
+        /// claude-code `decisionReason.circuitBreaker` — which safety circuit
+        /// produced this check. `None` for a check the oracle emits without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        circuit_breaker: Option<SafetyCircuitBreaker>,
     },
     /// Anything not covered above.
     Other {

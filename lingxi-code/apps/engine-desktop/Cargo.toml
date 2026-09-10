@@ -136,7 +136,6 @@ tool-workflow = { path = "../../tools/workflow" }
 workflow = { path = "../../workflow" }
 tool-mcp = { path = "../../tools/mcp" }
 tool-lsp = { path = "../../tools/lsp" }
-tool-team = { path = "../../tools/team" }
 tool-worktree = { path = "../../tools/worktree" }
 tool-computer-use = { path = "../../tools/computer-use" }
 # The two audio tools (`voice` + `speech`). The crate is named for mobile, but

@@ -292,44 +292,225 @@ pub struct ActiveGoalSnapshot {
     pub tokens_at_start: u64,
 }
 
-/// Lifecycle carried by a `type:"goal_status"` transcript attachment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Why a goal was torn down — the `reason` field of `tengu_goal_cleared`.
+///
+/// Upstream 2.1.267 emits the event through one helper that takes the reason as
+/// an argument (`src_161508826.js`):
+///
+/// ```js
+/// function kB(e,t){i("tengu_goal_cleared",{reason:u(t),iterations:e.iterations,
+///   durationMs:Date.now()-e.setAt,origin:we(e.origin)})}
+/// ```
+///
+/// and its call sites pass six distinct values. This enum is that argument, so
+/// a teardown cannot silently report somebody else's reason:
+///
+/// | call site | reason |
+/// |---|---|
+/// | `/goal clear` (Stop hook removed) | `user_clear` |
+/// | a new `/goal` over a live one | `superseded` |
+/// | `kB(e,d==="context_limit"?…)` | `context_limit` / `api_error` |
+/// | session clear | `session_clear` |
+/// | resume replacing a restored goal | `resume_swap` |
+///
+/// ⚠️ This is the TELEMETRY reason and is independent of
+/// [`GoalStatusKind`], which is the transcript attachment's shape. A
+/// context-limit teardown still writes a `Cleared` attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalClearedReason {
+    /// The user asked for it — `/goal clear` and friends.
+    UserClear,
+    /// A new goal replaced a live one.
+    Superseded,
+    /// Torn down because the context window ran out.
+    ContextLimit,
+    /// Torn down by a non-transient provider error.
+    ApiError,
+    /// The whole session was cleared.
+    SessionClear,
+    /// A resume replaced a goal restored from the transcript.
+    ResumeSwap,
+}
+
+impl GoalClearedReason {
+    /// The exact wire string upstream passes as `kB`'s second argument.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserClear => "user_clear",
+            Self::Superseded => "superseded",
+            Self::ContextLimit => "context_limit",
+            Self::ApiError => "api_error",
+            Self::SessionClear => "session_clear",
+            Self::ResumeSwap => "resume_swap",
+        }
+    }
+}
+
+/// Which `goal_status` record to write.
+///
+/// NOT serialized any more: the 2.1.266 wire shape distinguishes the variants
+/// with the `met`/`failed`/`sentinel` booleans on [`GoalStatusAttachment`], so
+/// this enum is only the instruction to the builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStatusKind {
-    /// A goal was activated or replaced.
+    /// A goal was activated or replaced — `bKt(!1, condition)`.
     Set,
-    /// The user explicitly cleared the goal.
+    /// The user explicitly cleared the goal — `bKt(!0, condition)`.
     Cleared,
     /// The Stop evaluator accepted the goal.
     Achieved,
+    /// The Stop evaluator established that the goal is impossible.
+    Failed,
+    /// The condition did not hold this turn; the goal stays active.
+    NotMet,
 }
 
-/// Typed, resumable `/goal` transcript attachment.
+/// Typed, resumable `/goal` transcript attachment — the 2.1.266 shape.
+///
+/// Upstream emits four variants of `{type:"goal_status", …}` and they are told
+/// apart by booleans, not by a status enum (`src_160454523.js` `bKt`, and the
+/// evaluator @4211500 / @4212300):
+///
+/// | variant | fields |
+/// |---|---|
+/// | goal SET (sentinel) | `met:false, sentinel:true, condition` |
+/// | goal CLEARED (sentinel) | `met:true, sentinel:true, condition` |
+/// | achieved | `met:true, condition, reason, iterations, durationMs, tokens` |
+/// | impossible | `met:false, failed:true, condition, reason, iterations, durationMs, tokens` |
+/// | not met (this turn) | `met:false, condition, reason` |
+///
+/// `fRn` reads the transcript back for the "Goal achieved" panel by scanning for
+/// the last record with `met && !sentinel`, which is why the sentinels must be
+/// distinguishable from a real evaluation.
+///
+/// ## Divergence (reason)
+///
+/// [`Self::goal_state`] is a LingXi addition with no upstream counterpart: the
+/// port restores an active goal on resume by reading it back out of this
+/// attachment. It is `skip_serializing_if = "Option::is_none"`, so it never
+/// appears on the variants that carry no goal to restore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalStatusAttachment {
     /// Attachment discriminator.
     #[serde(rename = "type")]
     pub kind: String,
-    /// Goal lifecycle transition.
-    pub status: GoalStatusKind,
+    /// `met` — the condition held (achieved), or, on a sentinel, that the goal
+    /// is ENDING rather than starting.
+    pub met: bool,
+    /// `failed` — present and true only on the impossible-condition record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<bool>,
+    /// `sentinel` — present and true on the set/clear announcements, which carry
+    /// no evaluation of their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sentinel: Option<bool>,
     /// User-supplied condition.
     pub condition: String,
-    /// Number of Stop evaluations performed.
-    #[serde(default)]
-    pub iterations: u64,
-    /// Elapsed wall time since activation.
-    #[serde(default)]
-    pub duration_ms: u64,
-    /// Tokens consumed since activation.
-    #[serde(default)]
-    pub tokens: u64,
-    /// Most recent evaluator reason.
+    /// `reason` — the evaluator's stop reason. Absent on sentinels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_reason: Option<String>,
-    /// Full active state for lossless resume; absent on cleared/achieved.
+    pub reason: Option<String>,
+    /// Number of Stop evaluations performed. Absent on sentinels and on the
+    /// not-met record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<u64>,
+    /// Elapsed wall time since activation, on terminal records only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Tokens consumed since activation, on terminal records only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    /// LingXi-only: full active state for lossless resume. See the type docs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_state: Option<ActiveGoalSnapshot>,
+}
+
+impl GoalStatusAttachment {
+    fn new(condition: String, met: bool) -> Self {
+        Self {
+            kind: "goal_status".to_string(),
+            met,
+            failed: None,
+            sentinel: None,
+            condition,
+            reason: None,
+            iterations: None,
+            duration_ms: None,
+            tokens: None,
+            goal_state: None,
+        }
+    }
+
+    /// `bKt(!1, condition)` — the goal was just SET.
+    #[must_use]
+    pub fn sentinel_set(condition: String, goal_state: Option<ActiveGoalSnapshot>) -> Self {
+        Self {
+            sentinel: Some(true),
+            goal_state,
+            ..Self::new(condition, false)
+        }
+    }
+
+    /// `bKt(!0, condition)` — the goal was just CLEARED.
+    #[must_use]
+    pub fn sentinel_cleared(condition: String) -> Self {
+        Self {
+            sentinel: Some(true),
+            ..Self::new(condition, true)
+        }
+    }
+
+    /// The evaluator confirmed the condition.
+    #[must_use]
+    pub fn achieved(
+        condition: String,
+        reason: Option<String>,
+        iterations: u64,
+        duration_ms: u64,
+        tokens: u64,
+    ) -> Self {
+        Self {
+            reason,
+            iterations: Some(iterations),
+            duration_ms: Some(duration_ms),
+            tokens: Some(tokens),
+            ..Self::new(condition, true)
+        }
+    }
+
+    /// The evaluator declared the condition impossible.
+    #[must_use]
+    pub fn failed(
+        condition: String,
+        reason: Option<String>,
+        iterations: u64,
+        duration_ms: u64,
+        tokens: u64,
+    ) -> Self {
+        Self {
+            failed: Some(true),
+            reason,
+            iterations: Some(iterations),
+            duration_ms: Some(duration_ms),
+            tokens: Some(tokens),
+            ..Self::new(condition, false)
+        }
+    }
+
+    /// The condition did not hold this turn; the goal stays active.
+    #[must_use]
+    pub fn not_met(
+        condition: String,
+        reason: Option<String>,
+        goal_state: Option<ActiveGoalSnapshot>,
+    ) -> Self {
+        Self {
+            reason,
+            goal_state,
+            ..Self::new(condition, false)
+        }
+    }
 }
 
 /// One deferred hook tool that must be replayed after a session is resumed.
@@ -2418,6 +2599,16 @@ pub trait OrchestratorHandle: Send + Sync {
         ))
     }
 
+    /// Preserve queued-command provenance when driving a text-only follow-up.
+    async fn run_queued_turn_streaming(
+        &self,
+        prompt: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        _in_human_turn: bool,
+    ) -> Result<TurnOutcome, HandleError> {
+        self.run_turn_streaming_with_cancel(prompt, cancel).await
+    }
+
     /// Streaming turn carrying pasted image file paths (TUI paste→image). Each
     /// path is read + base64-encoded into a `ContentBlock::Image` on the
     /// outgoing user message.
@@ -2482,6 +2673,11 @@ pub trait OrchestratorHandle: Send + Sync {
     async fn fork_conversation(&self, directive: &str) -> Result<ForkOutcome, HandleError> {
         let _ = directive;
         Err(HandleError::Unimplemented("fork_conversation".into()))
+    }
+
+    /// Whether an exit handoff has a persistent backend and a genuine user seed.
+    async fn can_background_conversation_on_exit(&self) -> bool {
+        false
     }
 
     /// Copy the CURRENT conversation into a NEW BACKGROUND session and keep the
@@ -2694,6 +2890,16 @@ pub trait OrchestratorHandle: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum OutputEvent {
+    /// Correlate the current assistant response with its conversation identity.
+    MessageIdentity {
+        /// Stable conversation message identifier.
+        message_id: protocol::MessageId,
+    },
+    /// Retract a failed assistant attempt from the live transcript.
+    MessageRetracted {
+        /// The rejected assistant message identifier.
+        message_id: protocol::MessageId,
+    },
     /// Plain text from the assistant.
     Text {
         /// The text payload emitted.
@@ -2886,6 +3092,15 @@ pub struct ContextPressureBanner {
 /// for unit tests.
 #[async_trait]
 pub trait OutputStream: Send + Sync {
+    /// Emit a session-scoped SDK `system/task_started` or `task_updated` frame.
+    async fn emit_task_lifecycle(&self, _event: &serde_json::Value) {}
+
+    /// Identify the assistant response immediately before its completion boundary.
+    async fn emit_assistant_message_identity(&self, _message_id: &protocol::MessageId) {}
+
+    /// Retract an assistant attempt that is being retried.
+    async fn emit_message_retracted(&self, _message_id: &protocol::MessageId) {}
+
     /// Signal a model turn that did not originate from a direct UI submit,
     /// such as an `asyncRewake` hook completion.
     async fn emit_turn_started(&self) {}
@@ -3145,6 +3360,9 @@ pub trait OutputStream: Send + Sync {
     /// keep compiling unchanged. The client-adapter overrides this to surface
     /// a `ClientEvent::CoordinatorStatus`.
     async fn emit_coordinator_status(&self, _active_workers: u32, _team: Option<&str>) {}
+
+    /// Push a changed coordinator roster row, including independent plan-review state.
+    async fn emit_coordinator_worker(&self, _worker: &crate::team_registry::WorkerInfo) {}
 
     /// Emit the latest unified rate-limit header snapshot.
     ///

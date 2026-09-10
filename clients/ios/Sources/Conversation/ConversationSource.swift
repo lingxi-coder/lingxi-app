@@ -1877,6 +1877,10 @@ final class MockConversationSource: ConversationSource {
         /// rows; MessageComplete reconciles its structured payload back onto
         /// these stable identities instead of replacing only the last fragment.
         private var currentResponseMessageIDs: [UUID] = []
+        private var currentResponseReasoningIDs: Set<String> = []
+        private var pendingAssistantIdentity: String?
+        private var assistantRowsByIdentity: [String: Set<UUID>] = [:]
+        private var assistantReasoningByIdentity: [String: Set<String>] = [:]
         /// Process-unique monotonic correlator, also passed as the engine
         /// `turnId` so durable checkpoints cannot collide after a cold launch.
         /// `nil` between turns.
@@ -2455,10 +2459,14 @@ final class MockConversationSource: ConversationSource {
                     if case .reasoning = $0 { return true }
                     return false
                 }), index == run.activities.index(before: run.activities.endIndex),
-                   case let .reasoning(id, current) = run.activities[index] {
+                   case let .reasoning(id, current) = run.activities[index],
+                   currentResponseReasoningIDs.contains(id) {
                     run.activities[index] = .reasoning(id: id, text: current + text)
+                    currentResponseReasoningIDs.insert(id)
                 } else {
-                    run.activities.append(.reasoning(id: "reasoning-\(UUID().uuidString)", text: text))
+                    let id = "reasoning-\(UUID().uuidString)"
+                    run.activities.append(.reasoning(id: id, text: text))
+                    currentResponseReasoningIDs.insert(id)
                 }
                 run.reasoning += text
             }
@@ -4407,6 +4415,10 @@ final class MockConversationSource: ConversationSource {
             switch event {
             case .turnStarted:
                 guard acceptTurnEvent(event) else { return }
+                assistantRowsByIdentity = [:]
+                assistantReasoningByIdentity = [:]
+                currentResponseReasoningIDs = []
+                pendingAssistantIdentity = nil
                 if let currentTurnId {
                     executorOwnedTurnID = currentTurnId
                 }
@@ -4873,6 +4885,41 @@ final class MockConversationSource: ConversationSource {
                     }
                 }
 
+            case let .messageIdentity(messageId):
+                guard acceptTurnEvent(event) else { return }
+                pendingAssistantIdentity = messageId
+
+            case let .messageRetracted(messageId):
+                guard acceptTurnEvent(event) else { return }
+                let rows = assistantRowsByIdentity.removeValue(forKey: messageId) ?? []
+                let reasoning = assistantReasoningByIdentity.removeValue(forKey: messageId) ?? []
+                guard !rows.isEmpty || !reasoning.isEmpty else { return }
+                let liveID = streamingIndex.flatMap { model.messages.indices.contains($0) ? model.messages[$0].id : nil }
+                model.messages.removeAll { rows.contains($0.id) && $0.role == .ai }
+                model.items.removeAll {
+                    if case let .message(message) = $0 { return rows.contains(message.id) && message.role == .ai }
+                    return false
+                }
+                for id in rows { model.messageDetails.removeValue(forKey: id) }
+                for index in model.items.indices {
+                    guard case var .run(run) = model.items[index] else { continue }
+                    run.activities.removeAll {
+                        switch $0 {
+                        case let .textBoundary(_, messageID): return rows.contains(messageID)
+                        case let .reasoning(id, _): return reasoning.contains(id)
+                        default: return false
+                        }
+                    }
+                    run.reasoning = run.activities.compactMap {
+                        if case let .reasoning(_, text) = $0 { return text }
+                        return nil
+                    }.joined()
+                    model.items[index] = .run(run)
+                }
+                streamingIndex = liveID.flatMap { model.indexOfMessage(id: $0) }
+                streamingItemIndex = liveID.flatMap { model.indexOfMessageItem(id: $0) }
+                activeRunItemIndex = model.items.lastIndex { if case .run = $0 { return true }; return false }
+
             case let .messageComplete(_, message):
                 guard acceptTurnEvent(event) else { return }
                 if let message {
@@ -4892,6 +4939,7 @@ final class MockConversationSource: ConversationSource {
                                 )
                             } else {
                                 appendMessage(segment.message, detail: segment.detail)
+                                currentResponseMessageIDs.append(segment.message.id)
                                 appendTextBoundaryActivity(messageID: segment.message.id)
                             }
                         }
@@ -4900,6 +4948,12 @@ final class MockConversationSource: ConversationSource {
                 // One MessageComplete closes one assistant API response. Tool
                 // execution may continue the same user turn, but the next text
                 // belongs to a new narrative row after those tool activities.
+                if let identity = pendingAssistantIdentity {
+                    assistantRowsByIdentity[identity] = Set(currentResponseMessageIDs)
+                    assistantReasoningByIdentity[identity] = currentResponseReasoningIDs
+                }
+                pendingAssistantIdentity = nil
+                currentResponseReasoningIDs = []
                 streamingIndex = nil
                 streamingItemIndex = nil
                 currentResponseMessageIDs = []

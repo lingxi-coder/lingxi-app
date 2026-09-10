@@ -86,6 +86,29 @@ pub trait LocalAppsMcpHost: Send + Sync {
         let _ = input;
         Err("Local App create staging is unavailable in this host build".into())
     }
+    /// Read or stage the Host-owned authoring contract.  `operation=get` only
+    /// returns the committed contract; `operation=stage` validates and
+    /// journals a run-scoped candidate without changing the active contract.
+    async fn local_app_contract(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App authoring contract is unavailable in this host build".into())
+    }
+    /// Start Host-owned UI/data QA for one build and workflow run.
+    async fn qa_begin(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App QA is unavailable in this host build".into())
+    }
+    /// Read bounded, Host-recorded QA evidence.  Implementations must return
+    /// image blocks as content, never as base64 text in structured JSON.
+    async fn qa_read_evidence(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App QA evidence is unavailable in this host build".into())
+    }
+    /// Finalize a QA run after validating scenario judgements and Host evidence.
+    async fn qa_finalize(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App QA finalization is unavailable in this host build".into())
+    }
     /// Validate an agent-owned semantic MCP proposal, derive Host-owned
     /// execution metadata and persist a prepared candidate journal.
     async fn validate_mcp_proposal(&self, input: Value) -> Result<Value, String> {
@@ -326,6 +349,7 @@ const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
     "validate_template_selection",
     "resolve_template_selection",
     "stage_create",
+    "contract",
     "validate_mcp_proposal",
     "approve_mcp_proposal",
 ];
@@ -1131,6 +1155,9 @@ impl LocalAppsMcpTransport {
             "sort",
             "sort_key",
             "sort_direction",
+            "qa_handle",
+            "scenario_id",
+            "target_id",
         ];
         let object = input
             .as_object()
@@ -1231,6 +1258,97 @@ impl LocalAppsMcpTransport {
             content: json!([{ "type": "image", "data": data, "mimeType": mime_type }]),
             is_error: false,
             structured_content: Some(metadata),
+            ..Default::default()
+        }
+    }
+
+    /// Preserve Host-recorded QA evidence blocks as MCP content.  In
+    /// particular, screenshots must stay `type=image` blocks all the way to
+    /// the model; putting their base64 payload in a JSON/text field makes the
+    /// evidence unreadable and needlessly duplicates it in the transcript.
+    fn evidence_result(mut value: Value) -> McpToolResultDto {
+        let content = value
+            .as_object_mut()
+            .and_then(|object| object.remove("content"));
+        let Some(content) = content else {
+            return Self::tool_error(
+                "qa_read_evidence returned no content blocks; Host evidence is incomplete",
+            );
+        };
+        let mut content = if content.is_array() {
+            content
+        } else if content.as_object().is_some_and(|object| {
+            matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("image") | Some("text")
+            )
+        }) {
+            Value::Array(vec![content])
+        } else {
+            // Host JSON evidence is durable structured data, not an opaque
+            // base64/text claim. Keep it model-readable as one text content
+            // block while retaining the exact JSON in structured_content.
+            if let Some(object) = value.as_object_mut() {
+                object.insert("content".into(), content.clone());
+            }
+            Value::Array(vec![json!({
+                "type": "text",
+                "text": serde_json::to_string(&content).unwrap_or_else(|_| "null".into()),
+            })])
+        };
+        let Some(blocks) = content.as_array_mut() else {
+            return Self::tool_error("qa_read_evidence returned invalid content blocks");
+        };
+        for block in blocks.iter_mut() {
+            let Some(object) = block.as_object_mut() else {
+                return Self::tool_error("qa_read_evidence returned an invalid evidence block");
+            };
+            if object.get("mime_type").is_some() && object.get("mimeType").is_none() {
+                if let Some(mime) = object.remove("mime_type") {
+                    object.insert("mimeType".into(), mime);
+                }
+            }
+            match object.get("type").and_then(Value::as_str) {
+                Some("image") => {
+                    if object
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                    {
+                        return Self::tool_error(
+                            "qa_read_evidence returned an empty image evidence block",
+                        );
+                    }
+                    if object
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                    {
+                        return Self::tool_error(
+                            "qa_read_evidence returned an image without a mime type",
+                        );
+                    }
+                }
+                Some("text") => {
+                    if object.get("text").and_then(Value::as_str).is_none() {
+                        return Self::tool_error(
+                            "qa_read_evidence returned a text block without text",
+                        );
+                    }
+                }
+                Some(_) | None => {
+                    return Self::tool_error("qa_read_evidence returned an unsupported block type")
+                }
+            }
+        }
+        McpToolResultDto {
+            content,
+            is_error: false,
+            // Image/text payload bytes ride only in the real MCP content
+            // blocks above. Keeping them in structured_content as well would
+            // duplicate screenshots into the model transcript and turn the
+            // metadata side channel into a second base64 transport.
+            structured_content: Some(value),
             ..Default::default()
         }
     }
@@ -1466,11 +1584,24 @@ impl LocalAppsMcpTransport {
                     "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"The display name the user confirmed for this app."},
                     "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"One line describing what the app does, as the user confirmed it."},
                     "design_spec":{"type":"object","description":"Optional structured design evidence to bind into the staged create candidate and later native approval contract."},
-                    "mcp_intent":{"type":"object","description":"Outcome of asking the user, during the interview, whether to set up MCP for this app. Omit when the interview did not run. {\"status\":\"declined\"} records that it was asked and refused; {\"status\":\"requested\",\"services\":[...]} records the concrete services the user asked for, drawn from LocalAppTemplateCatalog's mcpSuggestions.","properties":{
+                    "mcp_intent":{"type":"object","description":"Outcome of asking the user, during the interview, whether to set up MCP for this app. Omit when the interview did not run. {\"status\":\"declined\"} records that it was asked and refused; {\"status\":\"requested\",\"capabilities\":[...]} records the concrete capabilities the user asked for, drawn from LocalAppTemplateCatalog's mcpSuggestions.","properties":{
                         "status":{"enum":["declined","requested"]},
-                        "services":{"type":"array","minItems":1,"maxItems":local_apps::service::MAX_MCP_INTENT_SERVICES,"items":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_MCP_INTENT_SERVICE_NAME_BYTES}}
-                    },"required":["status"],"additionalProperties":false}
+                        "capabilities":{"type":"array","minItems":1,"maxItems":local_apps::service::MAX_MCP_INTENT_CAPABILITIES,"items":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_MCP_INTENT_CAPABILITY_NAME_BYTES}}
+                    },"required":["status"],"additionalProperties":false},
+                    "contract_handle":{"type":"string","pattern":local_apps::ids::AUTHORING_HANDLE_PATTERN,"description":"Optional Host-issued authoring contract handle. When supplied, staging is bound to that exact contract revision."}
                 },"required":["app_id","workflow_run_id","validated_selection_handle","quality_level","name","brief"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "contract",
+                "Read the committed Local App authoring contract or stage a closed AppAuthoringSpec for one workflow run. `get` returns Host-authoritative identity and digest; `stage` returns an opaque contract_handle. Renderer/profile identity is Host-owned and cannot be supplied in the spec.",
+                json!({"type":"object","properties":{
+                    "operation":{"enum":["get","stage"]},
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "spec":{"type":"object","description":"Closed AppAuthoringSpec. The Host validates its product, targets, ui, design and acceptance_checks subtrees."},
+                    "base_contract_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                    "validated_selection_handle":{"type":"string","pattern":"^vsel_[A-Za-z0-9]{32}$"}
+                },"required":["operation","app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "validate_mcp_proposal",
@@ -1535,8 +1666,41 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "build",
-                "Build the app workspace with the offline toolchain (30-minute budget). On success the app is marked ready; start or restart the runtime afterwards to serve the new build. On failure the error summary names what to fix; build logs are under LocalAppLogs.",
-                json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
+                "Build the app workspace with the offline toolchain (30-minute budget). On success the app is marked ready; start or restart the runtime afterwards to serve the new build. A staged authoring contract_handle, when present, is checked against the successful build provenance. On failure the error summary names what to fix; build logs are under LocalAppLogs.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},"contract_handle":{"type":"string","pattern":local_apps::ids::AUTHORING_HANDLE_PATTERN}},"required":["app_id"],"allOf":[{"if":{"required":["contract_handle"]},"then":{"required":["workflow_run_id"]}}],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "qa_begin",
+                "Begin Host-owned Local App QA for a specific workflow run/build. The Host binds the QA handle to the current build, authoring contract, runtime generation and acceptance scenarios; caller-provided identities are never proof.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "verification_strategy":{"enum":["fast","balanced","thorough"],"description":"Requested QA policy for this workflow run. Terminal publication re-checks it against the authenticated task args."},
+                    "build_id":{"type":"string","minLength":1,"maxLength":128},
+                    "contract_handle":{"type":"string","pattern":local_apps::ids::AUTHORING_HANDLE_PATTERN},
+                    "scenario_ids":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string","minLength":1,"maxLength":128}}
+                },"required":["app_id","workflow_run_id","verification_strategy"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "qa_read_evidence",
+                "Read one Host-recorded QA evidence item for a QA handle. JSON evidence is returned as structured content and recorded screenshots are returned as actual image content blocks, not base64 text.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "qa_handle":{"type":"string","pattern":local_apps::ids::QA_HANDLE_PATTERN},
+                    "scenario_id":{"type":"string","minLength":1,"maxLength":128},
+                    "evidence_id":{"type":"string","minLength":1,"maxLength":128}
+                },"required":["app_id","qa_handle","evidence_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "qa_finalize",
+                "Finalize Host-owned Local App QA after independently checking the recorded evidence. The Host rejects stale/fake handles, missing scenario coverage and unresolved upstream failures, and returns a verified receipt only when the current build/use-test is proven.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "qa_handle":{"type":"string","pattern":local_apps::ids::QA_HANDLE_PATTERN},
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "scenario_judgements":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{"scenario_id":{"type":"string","minLength":1,"maxLength":128},"status":{"enum":["passed","failed","blocked"]},"summary":{"type":"string"},"findings":{"type":"array","items":{"type":"object"}},"evidence_ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":128}}},"required":["scenario_id","status"],"additionalProperties":false}},
+                    "findings":{"type":"array","maxItems":128,"items":{"type":"object"}}
+                },"required":["app_id","qa_handle","workflow_run_id","scenario_judgements"],"additionalProperties":false}),
             ),
             Self::tool(
                 "install_dependencies",
@@ -1620,7 +1784,10 @@ impl LocalAppsMcpTransport {
                                 }
                             ]
                         },
-                        "sort_direction":{"enum":["ascending","descending","asc","desc"]}
+                        "sort_direction":{"enum":["ascending","descending","asc","desc"]},
+                        "qa_handle":{"type":"string","pattern":local_apps::ids::QA_HANDLE_PATTERN},
+                        "scenario_id":{"type":"string","minLength":1,"maxLength":128},
+                        "target_id":{"type":"string","minLength":1,"maxLength":128}
                     },
                     "required":["app_id","collection"],
                     "additionalProperties":false
@@ -1629,12 +1796,12 @@ impl LocalAppsMcpTransport {
             Self::tool(
                 "mutate_data",
                 "Atomically upsert or delete records in one declared collection. Each operation is exactly `{kind:\"upsert\",recordId,document,expectedRevision?}` or `{kind:\"delete\",recordId,expectedRevision?}`; guessed `action`/`record` shapes are invalid. First conversation-agent mutation requires a user `data_mutation` capability grant.",
-                json!({"type":"object","properties":{"app_id":app_id.clone(),"collection":{"type":"string","minLength":1,"maxLength":100},"operations":{"type":"array","minItems":1,"maxItems":local_apps::MAX_MUTATION_BATCH_SIZE,"items":data_mutation}},"required":["app_id","collection","operations"],"additionalProperties":false}),
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"collection":{"type":"string","minLength":1,"maxLength":100},"operations":{"type":"array","minItems":1,"maxItems":local_apps::MAX_MUTATION_BATCH_SIZE,"items":data_mutation},"qa_handle":{"type":"string","pattern":local_apps::ids::QA_HANDLE_PATTERN},"scenario_id":{"type":"string","minLength":1,"maxLength":128},"target_id":{"type":"string","minLength":1,"maxLength":128}},"required":["app_id","collection","operations"],"additionalProperties":false}),
             ),
             Self::tool(
                 "inspect_ui",
                 "Inspect the structured a11y-tree/DOM snapshot of a running local app. Never executes JavaScript.",
-                json!({"type":"object","properties":{"app_id":app_id.clone(),"selector":{"type":"string","maxLength":500}},"required":["app_id"],"additionalProperties":false}),
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"selector":{"type":"string","maxLength":500},"qa_handle":{"type":"string","pattern":local_apps::ids::QA_HANDLE_PATTERN},"scenario_id":{"type":"string","minLength":1,"maxLength":128},"target_id":{"type":"string","minLength":1,"maxLength":128}},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "act_on_ui",
@@ -1644,6 +1811,9 @@ impl LocalAppsMcpTransport {
                     "properties":{
                         "app_id":app_id.clone(),
                         "action":{"enum":["click","fill","select","toggle","scroll","navigate","back","reload","pointer","key"]},
+                        "qa_handle":{"type":"string","pattern":local_apps::ids::QA_HANDLE_PATTERN},
+                        "scenario_id":{"type":"string","minLength":1,"maxLength":128},
+                        "target_id":{"type":"string","minLength":1,"maxLength":128},
                         "target":{
                             "oneOf":[
                                 {"type":"string","maxLength":500},
@@ -1669,6 +1839,9 @@ impl LocalAppsMcpTransport {
                 "Capture a still image of a running local app's own view and return it as an image. Use this when the DOM snapshot cannot describe what the app is showing — a canvas or WebGL surface renders no inspectable elements, so `LocalAppInspectUi` returns an empty list whether the app is drawing correctly, drawing nothing, or crashed.",
                 json!({"type":"object","properties":{
                     "app_id": app_id.clone(),
+                    "qa_handle":{"type":"string","pattern":local_apps::ids::QA_HANDLE_PATTERN},
+                    "scenario_id":{"type":"string","minLength":1,"maxLength":128},
+                    "target_id":{"type":"string","minLength":1,"maxLength":128},
                     "rect": {"type":"object","description":"Optional region to crop, in viewport CSS pixels. Omit for the whole view.",
                              "properties":{"x":{"type":"number"},"y":{"type":"number"},
                                            "width":{"type":"number"},"height":{"type":"number"}},
@@ -2180,7 +2353,10 @@ impl LocalAppsMcpTransport {
                         "filters": {"type": "array", "maxItems": local_apps::MAX_QUERY_FILTERS},
                         "sort": {"type": ["string", "object"]},
                         "sort_key": {"type": ["string", "object"]},
-                        "sort_direction": {"enum": ["ascending", "descending", "asc", "desc"]}
+                        "sort_direction": {"enum": ["ascending", "descending", "asc", "desc"]},
+                        "qa_handle": {"type": "string", "pattern": local_apps::ids::QA_HANDLE_PATTERN},
+                        "scenario_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "target_id": {"type": "string", "minLength": 1, "maxLength": 128}
                     },
                     "required": ["collection"],
                     "additionalProperties": false
@@ -2193,7 +2369,10 @@ impl LocalAppsMcpTransport {
                     "type": "object",
                     "properties": {
                         "collection": {"enum": collection_ids},
-                        "operations": {"type": "array", "minItems": 1, "maxItems": local_apps::MAX_MUTATION_BATCH_SIZE}
+                        "operations": {"type": "array", "minItems": 1, "maxItems": local_apps::MAX_MUTATION_BATCH_SIZE},
+                        "qa_handle": {"type": "string", "pattern": local_apps::ids::QA_HANDLE_PATTERN},
+                        "scenario_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "target_id": {"type": "string", "minLength": 1, "maxLength": 128}
                     },
                     "required": ["collection", "operations"],
                     "additionalProperties": false
@@ -2531,10 +2710,34 @@ impl LocalAppsMcpTransport {
                 let runtime_profile_status =
                     crate::local_apps_build::derive_runtime_profile_status(&self.root, &record)
                         .map(|status| status.as_str());
+                let layout = local_apps::AppLayout::new(&self.root, app_id)
+                    .map_err(|error| McpError::Internal(error.to_string()))?;
+                let authoring = match crate::local_apps_build::active_authoring_contract(&layout) {
+                    Ok(Some(contract)) => {
+                        let contract_sha256 = contract
+                            .sha256()
+                            .map_err(|error| McpError::Internal(error.to_string()))?;
+                        let acceptance_checks = contract.spec.acceptance_checks.clone();
+                        json!({
+                            "contract_sha256": contract_sha256,
+                            "revision": contract.revision,
+                            "identity": {
+                                "version": contract.version,
+                                "app_id": contract.app_id.clone(),
+                                "runtime_profile": contract.runtime_profile.clone(),
+                            },
+                            "acceptance_checks": acceptance_checks,
+                            "contract": contract,
+                        })
+                    }
+                    Ok(None) => Value::Null,
+                    Err(error) => return Ok(Self::app_error(error)),
+                };
                 Self::result(json!({
                     "app": record,
                     "runtime": runtime,
                     "runtime_profile_status": runtime_profile_status,
+                    "authoring": authoring,
                     "dependencies": dependencies,
                     "checkpoints": checkpoints
                 }))
@@ -2747,6 +2950,10 @@ impl LocalAppsMcpTransport {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
+            "contract" => match self.host()?.local_app_contract(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
             "validate_mcp_proposal" => match self.host()?.validate_mcp_proposal(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -2768,6 +2975,18 @@ impl LocalAppsMcpTransport {
                 Err(message) => Self::tool_error(message),
             },
             "build" => match self.host()?.build_app(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "qa_begin" => match self.host()?.qa_begin(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "qa_read_evidence" => match self.host()?.qa_read_evidence(input).await {
+                Ok(value) => Self::evidence_result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "qa_finalize" => match self.host()?.qa_finalize(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
@@ -3325,6 +3544,148 @@ mod tests {
     use sha2::Digest;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn qa_image_evidence_is_a_real_block_without_structured_base64_duplication() {
+        const DATA: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
+        let result = LocalAppsMcpTransport::evidence_result(json!({
+            "evidence": {"evidence_id": "ev_frame1", "kind": "image"},
+            "content": {"type": "image", "data": DATA, "mime_type": "image/jpeg"}
+        }));
+
+        assert!(!result.is_error);
+        assert_eq!(
+            result.content,
+            json!([{"type": "image", "data": DATA, "mimeType": "image/jpeg"}])
+        );
+        let structured = result.structured_content.expect("evidence metadata");
+        assert_eq!(structured["evidence"]["evidence_id"], "ev_frame1");
+        assert!(
+            structured.get("content").is_none(),
+            "image bytes must ride only in the actual MCP content block: {structured}"
+        );
+        assert!(!structured.to_string().contains(DATA));
+    }
+
+    #[test]
+    fn qa_json_evidence_remains_exact_structured_content() {
+        let evidence = json!({
+            "evidence": {"evidence_id": "ev_json1", "kind": "json"},
+            "content": {"state": "ready", "count": 2}
+        });
+        let result = LocalAppsMcpTransport::evidence_result(evidence.clone());
+
+        assert!(!result.is_error);
+        assert_eq!(result.structured_content, Some(evidence));
+        assert_eq!(
+            result.content[0]["text"],
+            serde_json::to_string(&json!({"state": "ready", "count": 2})).unwrap()
+        );
+    }
+
+    #[test]
+    fn qa_evidence_catalog_requires_the_host_lookup_identity() {
+        let catalog = LocalAppsMcpTransport::host_tool_catalog();
+        let tool = catalog
+            .iter()
+            .find(|tool| tool.tool_name == "qa_read_evidence")
+            .expect("qa_read_evidence catalog entry");
+        assert_eq!(
+            tool.input_schema["required"],
+            json!(["app_id", "qa_handle", "evidence_id"])
+        );
+        assert!(tool.input_schema["properties"].get("limit").is_none());
+
+        let begin = catalog
+            .iter()
+            .find(|tool| tool.tool_name == "qa_begin")
+            .expect("qa_begin catalog entry");
+        assert_eq!(
+            begin.input_schema["properties"]["verification_strategy"]["enum"],
+            json!(["fast", "balanced", "thorough"])
+        );
+        assert!(begin.input_schema["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&json!("verification_strategy"))));
+    }
+
+    #[test]
+    fn build_schema_binds_contract_handles_to_the_workflow_run() {
+        let catalog = LocalAppsMcpTransport::host_tool_catalog();
+        let build = catalog
+            .iter()
+            .find(|tool| tool.tool_name == "build")
+            .expect("build catalog entry");
+        let schema = &build.input_schema;
+
+        assert_eq!(
+            schema["properties"]["contract_handle"]["pattern"],
+            json!(local_apps::ids::AUTHORING_HANDLE_PATTERN)
+        );
+        assert_eq!(
+            schema["properties"]["workflow_run_id"]["pattern"],
+            json!("^[A-Za-z0-9_-]{1,128}$")
+        );
+        assert_eq!(schema["required"], json!(["app_id"]));
+        assert_eq!(
+            schema["allOf"][0]["if"]["required"],
+            json!(["contract_handle"])
+        );
+        assert_eq!(
+            schema["allOf"][0]["then"]["required"],
+            json!(["workflow_run_id"])
+        );
+
+        // Keep ordinary builds valid while checking a real Host-issued handle
+        // through the core validator. `value_matches_schema` is intentionally
+        // only a positive shape smoke-check here: it does not implement
+        // `pattern`, `if`/`then`, or `allOf`, so the conditional contract is
+        // pinned by the exact schema assertions above rather than a misleading
+        // negative validation claim.
+        assert!(local_apps::value_matches_schema(
+            &json!({"app_id": "abcd1234"}),
+            schema
+        ));
+        let handle = local_apps::ids::generate_authoring_handle();
+        assert!(local_apps::ids::is_valid_authoring_handle(&handle));
+        assert!(local_apps::value_matches_schema(
+            &json!({
+                "app_id": "abcd1234",
+                "contract_handle": handle,
+                "workflow_run_id": "run-1"
+            }),
+            schema
+        ));
+    }
+
+    #[test]
+    fn qa_schemas_track_real_host_issued_handle_generators() {
+        let catalog = LocalAppsMcpTransport::host_tool_catalog();
+        let begin = catalog
+            .iter()
+            .find(|tool| tool.tool_name == "qa_begin")
+            .expect("qa_begin catalog entry");
+        let read = catalog
+            .iter()
+            .find(|tool| tool.tool_name == "qa_read_evidence")
+            .expect("qa_read_evidence catalog entry");
+        let finalize = catalog
+            .iter()
+            .find(|tool| tool.tool_name == "qa_finalize")
+            .expect("qa_finalize catalog entry");
+        let handle = local_apps::ids::generate_qa_handle();
+        assert!(local_apps::ids::is_valid_qa_handle(&handle));
+        assert_eq!(
+            begin.input_schema["properties"]["contract_handle"]["pattern"],
+            json!(local_apps::ids::AUTHORING_HANDLE_PATTERN)
+        );
+        for schema in [&read.input_schema, &finalize.input_schema] {
+            assert_eq!(
+                schema["properties"]["qa_handle"]["pattern"],
+                json!(local_apps::ids::QA_HANDLE_PATTERN)
+            );
+        }
+    }
 
     #[test]
     fn app_agent_call_budget_enforces_mcp_and_bridge_limits() {
@@ -4082,54 +4443,25 @@ mod tests {
             "the create scaffold prompt must not tell the model to rediscover \
              name/brief from LocalAppGet's empty shell record: {source}"
         );
-        for (call_needle, fragment) in [
-            ("Call LocalAppStageCreate with app_id=", "stageNaming"),
-            ("Call LocalAppScaffold with app_id=", "scaffoldNaming"),
-        ] {
+        for call_needle in ["LocalAppStageCreate with", "Call LocalAppScaffold first"] {
             let call = source
                 .lines()
                 .find(|line| line.contains(call_needle))
                 .unwrap_or_else(|| panic!("local-app-build.js must prompt `{call_needle}`"));
             assert!(
-                call.contains(&format!("${{{fragment}}}")),
-                "the `{call_needle}` prompt must carry the `{fragment}` naming fragment \
-                 built from the launch-confirmed name/brief, got: {call}"
-            );
-            let declaration = source
-                .lines()
-                .find(|line| line.starts_with(&format!("const {fragment} =")))
-                .unwrap_or_else(|| panic!("local-app-build.js must declare `{fragment}`"));
-            assert!(
-                declaration.contains("JSON.stringify(confirmedName)")
-                    && declaration.contains("JSON.stringify(confirmedBrief)"),
-                "`{fragment}` must interpolate the launch-confirmed name/brief, \
-                 got: {declaration}"
-            );
-            // The empty-launch branch must NOT render an empty `name=`/`brief=`
-            // argument: the Host launch boundary only forwards the declared
-            // contract, and both receiving tools reject an empty name/brief
-            // outright, so a run without confirmed values has to fall back to
-            // prose rather than to `name=""`.
-            let fallback = declaration
-                .rsplit_once("` : ")
-                .unwrap_or_else(|| {
-                    panic!(
-                        "`{fragment}` must be a ternary whose empty-launch branch is prose, \
-                         got: {declaration}"
-                    )
-                })
-                .1;
-            assert!(
-                !fallback.contains("name=") && !fallback.contains("brief="),
-                "`{fragment}`'s empty-launch branch must not render a `name=`/`brief=` \
-                 argument at all, because both would be empty and both receiving tools \
-                 reject an empty value: {fallback}"
+                call.contains("name=${JSON.stringify(confirmedName)}")
+                    && call.contains("brief=${JSON.stringify(confirmedBrief)}"),
+                "the `{call_needle}` prompt must pass the launch-confirmed name and brief \
+                 to the Host operation whose schema requires them, got: {call}"
             );
         }
         assert!(
-            source.contains("const confirmedName = typeof input.name === 'string'")
-                && source.contains("const confirmedBrief = typeof input.brief === 'string'"),
-            "the confirmed name/brief must come from the workflow launch args"
+            source.contains("const confirmedName = input.name ||")
+                && source.contains("const confirmedBrief = input.brief ||")
+                && source.contains(
+                    "if (input.operation === 'create' && (!confirmedName || !confirmedBrief))"
+                ),
+            "create must derive name/brief from the workflow launch contract and fail closed when either is absent"
         );
     }
 
@@ -4155,7 +4487,7 @@ mod tests {
         );
         for launch in launches {
             assert!(
-                launch.contains(r#""name":"<"#) && launch.contains(r#""brief":"<"#),
+                launch.contains(r#""name":"#) && launch.contains(r#""brief":"#),
                 "every create launch in create-local-app/SKILL.md must pass the \
                  user-confirmed name and brief, or LocalAppStageCreate stages nothing \
                  and the confirmation sheet renders the `untitled` placeholder: {launch}"
@@ -4198,7 +4530,7 @@ mod tests {
         let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         let build_call = source
             .lines()
-            .find(|line| line.contains("Call LocalAppScaffold with app_id="))
+            .find(|line| line.contains("Call LocalAppScaffold first"))
             .expect("local-app-build.js must prompt the create-branch scaffold+build call");
         assert!(
             build_call.contains("LocalAppManifest"),
@@ -4206,11 +4538,14 @@ mod tests {
              collections through LocalAppManifest before writing source that depends on \
              them: {build_call}"
         );
+        let manifest = build_call
+            .find("LocalAppManifest")
+            .expect("builder prompt names LocalAppManifest");
+        let source_use = build_call
+            .find("source uses them")
+            .expect("builder prompt names the source-use boundary");
         assert!(
-            build_call.contains(
-                "Before writing any source that reads or writes a data \
-             collection"
-            ),
+            manifest < source_use,
             "the manifest declaration must be ordered BEFORE writing source, not left as an \
              unordered mention the model can defer past the write it is meant to gate: \
              {build_call}"
@@ -4219,7 +4554,7 @@ mod tests {
 
     /// WP8 item 6: every other create-branch stage prompt carries the
     /// user-confirmed specification (`template-selector`, `builder-stage`,
-    /// `builder-build` all interpolate `input.spec`); the DESIGNER stage — the
+    /// `builder-build` all interpolate the full Host-sanitized AuthoringSpec); the DESIGNER stage — the
     /// one that decides what the app actually looks like and produces the
     /// structured design spec every later stage consumes — did not, so the
     /// designer worked from the resolved template profile alone and never saw
@@ -4234,7 +4569,7 @@ mod tests {
             .find(|line| line.contains("agentType: 'designer'"))
             .expect("local-app-build.js must prompt the create-branch designer stage");
         assert!(
-            designer_call.contains("${input.spec"),
+            designer_call.contains("${JSON.stringify(confirmedSpec)}"),
             "the designer stage prompt must interpolate the confirmed specification the way \
              its sibling create-branch stages do, or the designer never sees what the user \
              asked for: {designer_call}"
@@ -4343,6 +4678,7 @@ mod tests {
                 "validate_template_selection",
                 "resolve_template_selection",
                 "stage_create",
+                "contract",
                 "validate_mcp_proposal",
                 "approve_mcp_proposal",
                 "qa_mcp_candidate",
@@ -4351,6 +4687,9 @@ mod tests {
                 "scaffold",
                 "manage_runtime",
                 "build",
+                "qa_begin",
+                "qa_read_evidence",
+                "qa_finalize",
                 "install_dependencies",
                 "confirm_dependency_change",
                 "update_dependencies",
@@ -5200,7 +5539,10 @@ mod tests {
             .expect("a domain refusal is a tool result, not a transport error");
         assert!(result.is_error, "got {result:?}");
         assert!(
-            result.content.to_string().contains(LOCAL_APP_PLUGIN_UNAVAILABLE),
+            result
+                .content
+                .to_string()
+                .contains(LOCAL_APP_PLUGIN_UNAVAILABLE),
             "got {:?}",
             result.content
         );
@@ -6155,21 +6497,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_exposes_the_host_derived_runtime_profile_status() {
+    async fn get_exposes_host_derived_runtime_and_active_authoring_contract() {
         let (_root, transport, _service, shell_id) = transport_with_app(AppFixture::Shell).await;
         let shell = transport
             .call("get", json!({"app_id": shell_id}))
             .await
             .expect("shell details");
         assert_eq!(structured(&shell)["runtime_profile_status"], Value::Null);
+        assert_eq!(
+            structured(&shell)["authoring"],
+            Value::Null,
+            "a genuine shell has no selected build contract"
+        );
 
         // A formed fixture carries the same persisted runtime facts as a real
         // scaffolded app, so the host-derived status should be the healthy one.
-        let (_root, transport, _service, formed_id) = transport_with_app(AppFixture::Formed).await;
+        let (root, transport, _service, formed_id) = transport_with_app(AppFixture::Formed).await;
         let formed = transport
-            .call("get", json!({"app_id": formed_id}))
+            .call("get", json!({"app_id": formed_id.clone()}))
             .await
             .expect("formed details");
         assert_eq!(structured(&formed)["runtime_profile_status"], "verified");
+        assert_eq!(
+            structured(&formed)["authoring"],
+            Value::Null,
+            "a legacy build receipt with no authoring selector stays a clean null"
+        );
+
+        let layout = AppLayout::new(root.path(), &formed_id).expect("layout");
+        let manifest = load_manifest(&layout).expect("manifest");
+        let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
+            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        ))
+        .expect("checked-in authoring fixture");
+        let contract = local_apps::AppAuthoringContract {
+            version: local_apps::AUTHORING_SCHEMA_VERSION,
+            revision: 7,
+            app_id: formed_id.clone(),
+            runtime_profile: manifest.runtime_profile.expect("formed profile"),
+            spec,
+        };
+        let contract_sha256 = local_apps::save_authoring_contract(&layout, &contract)
+            .expect("save immutable authoring contract");
+        let build_path = root.path().join(layout.build_rel(false)).join("build.json");
+        let mut build: Value =
+            serde_json::from_slice(&std::fs::read(&build_path).expect("build receipt"))
+                .expect("parse build receipt");
+        build["authoringContractSha256"] = Value::String(contract_sha256.clone());
+        std::fs::write(
+            &build_path,
+            serde_json::to_vec_pretty(&build).expect("serialize build receipt"),
+        )
+        .expect("select authoring contract from active build");
+
+        let contracted = transport
+            .call("get", json!({"app_id": formed_id.clone()}))
+            .await
+            .expect("contracted app details");
+        let authoring = &structured(&contracted)["authoring"];
+        assert_eq!(authoring["contract_sha256"], contract_sha256);
+        assert_eq!(authoring["revision"], 7);
+        assert_eq!(authoring["identity"]["app_id"], formed_id);
+        assert_eq!(
+            authoring["contract"]["spec"],
+            serde_json::to_value(&contract.spec).unwrap()
+        );
+        assert_eq!(
+            authoring["acceptance_checks"],
+            serde_json::to_value(&contract.spec.acceptance_checks).unwrap()
+        );
+
+        build["authoringContractSha256"] = Value::String("d".repeat(64));
+        std::fs::write(
+            &build_path,
+            serde_json::to_vec_pretty(&build).expect("serialize corrupt selector"),
+        )
+        .expect("select missing contract");
+        let corrupt = transport
+            .call("get", json!({"app_id": formed_id}))
+            .await
+            .expect("typed corrupt-contract result");
+        assert!(
+            corrupt.is_error,
+            "a selected-but-missing document must fail closed: {corrupt:?}"
+        );
     }
 }

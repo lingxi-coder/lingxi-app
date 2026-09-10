@@ -25,7 +25,11 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web"
   },
   "dependencies": {
-    "@lingxi/bridge-client": "file:../shared"
+    "@lingxi/bridge-client": "file:../shared",
+    "react-markdown": "^10.1.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.0"
   },
   "devDependencies": {
     "@electron/asar": "^3.4.1",

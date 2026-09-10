@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_sessions;
+pub mod authoring;
 pub mod background;
 pub mod checkpoints;
 pub mod data;
@@ -37,6 +38,7 @@ pub mod mcp_settings;
 pub mod packer;
 pub mod performance_thresholds;
 pub mod permissions;
+pub mod qa;
 pub mod runtime_migration;
 pub mod runtime_v2;
 pub mod service;
@@ -49,6 +51,15 @@ pub use agent_sessions::{
     load_agent_history, load_profile, load_sessions, save_agent_history, save_profile,
     save_sessions, upsert_session,
 };
+pub use authoring::{
+    authoring_contract_sha256, authoring_spec_sha256, canonical_json_bytes, canonical_sha256,
+    commit_staged_authoring, delete_authoring_candidate, load_authoring_candidate,
+    load_authoring_contract, save_authoring_contract, stage_authoring, AcceptanceCheck,
+    AcceptanceEvidence, AppAuthoringCandidate, AppAuthoringContract, AppAuthoringSpec,
+    AppAuthoringStage, AppCanvasDesign, AppDesignInputs, AppDesignSpec, AppDesignStates,
+    AppPresentationSpec, AppProductSpec, AppStyleSpec, AppTarget, AppThemeSpec,
+    AUTHORING_SCHEMA_VERSION, MAX_AUTHORING_BYTES,
+};
 pub use checkpoints::AppCheckpointStore;
 pub use data::{
     AppDataStore, DataFilter, DataFilterOperator, DataMigrationPreview, DataMigrationResult,
@@ -60,6 +71,10 @@ pub use error::{AppError, AppErrorCode};
 pub use events::{
     AppEvent, AppEventFanout, AppEventObserver, AppEventSubscription, NoopAppEventObserver,
     RecordingAppEventObserver,
+};
+pub use ids::{
+    generate_authoring_handle, generate_qa_handle, is_valid_authoring_handle, is_valid_qa_handle,
+    validate_authoring_handle, validate_qa_handle, AUTHORING_HANDLE_PATTERN, QA_HANDLE_PATTERN,
 };
 pub use manifest::{
     derive_publication_state, hash_mcp_catalog, load_manifest, load_mcp_catalog, save_manifest,
@@ -98,6 +113,16 @@ pub use permissions::{
     load_permissions, save_permissions, save_workspace_permission_settings, AppCapability,
     AppPermissions, PermissionDecision, SessionPermissions,
 };
+pub use qa::{
+    load_qa_publication_marker, load_qa_receipt, load_qa_result, load_qa_session, prune_qa_history,
+    publish_qa_result, qa_begin, qa_begin_with_requirements, qa_begin_with_scope, qa_cleanup_run,
+    qa_cleanup_session, qa_finalize, qa_read_evidence, qa_record_host_evidence, QaArtifactRef,
+    QaEvidence, QaEvidenceBlock, QaEvidenceKind, QaEvidenceSource, QaFinalizeOutput, QaFinding,
+    QaHostEvidenceContent, QaHostEvidenceInput, QaIdentity, QaImageFormat,
+    QaNativeTargetProvenance, QaPublicationMarker, QaReceipt, QaResult, QaResultStatus,
+    QaScenarioJudgement, QaScenarioRequirement, QaScenarioStatus, QaSession, QaUpstreamFailure,
+    QaVerificationScope, QaVerificationStrategy, MAX_QA_HISTORY_RESULTS, QA_SCHEMA_VERSION,
+};
 pub use runtime_migration::{
     delete_runtime_profile_migration_journal, load_runtime_profile_migration_journal,
     save_runtime_profile_migration_journal, RuntimeProfileMigrationEdge,
@@ -114,7 +139,10 @@ pub use runtime_v2::{
     MAX_AGENT_MAX_BRIDGE_CALLS, MAX_AGENT_MAX_MCP_CALLS, MAX_AGENT_MAX_TOKENS, MAX_AGENT_MAX_TURNS,
     MAX_AGENT_MAX_WALL_MS, RUNTIME_API_MAJOR, RUNTIME_API_VERSION, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
-pub use service::{AppService, CreateMode, PLACEHOLDER_APP_NAME};
+pub use service::{
+    AppService, CreateMode, MAX_MCP_INTENT_CAPABILITIES, MAX_MCP_INTENT_CAPABILITY_NAME_BYTES,
+    PLACEHOLDER_APP_NAME,
+};
 pub use state::{runtime_transition_allowed, AppState};
 pub use types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppMcpIntent,

@@ -1,6 +1,6 @@
 //! On-disk team-file helpers — 1:1 port of the path/IO surface of
 //! `claude-code/src/utils/swarm/teamHelpers.ts` used by the coordinator
-//! `TeamCreate` / `TeamDelete` tools.
+//! implicit session-team lifecycle.
 //!
 //! Layout (claude-code):
 //! - team dir:  `~/.lingxi/teams/{sanitize(name)}/`
@@ -17,9 +17,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// `TeamFile` — 1:1 with the TS `TeamFile` type (`teamHelpers.ts:64-90`),
-/// reduced to the fields the coordinator `TeamCreate` actually writes
-/// (`TeamCreateTool.ts:157-175`). Unknown fields are preserved on read via
-/// `serde(default)` tolerance — the coordinator only writes the lead member.
+/// typed projection used by readers. Mutations preserve unmodeled metadata
+/// by updating the JSON object directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamFile {
     /// Team name (the un-sanitized display name).
@@ -45,7 +44,7 @@ pub struct TeamFile {
 }
 
 /// A single team member — 1:1 with the TS member object the coordinator writes
-/// (`TeamCreateTool.ts:164-173`).
+/// in the implicit session-team configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamMember {
     /// Member agent id.
@@ -130,12 +129,62 @@ pub fn team_file_exists(home: &Path, name: &str) -> bool {
 /// # Errors
 /// Returns the underlying `std::io::Error` on a mkdir / write / serialize
 /// failure.
-pub fn write_team_file(home: &Path, name: &str, file: &TeamFile) -> std::io::Result<()> {
-    let dir = team_dir(home, name);
-    std::fs::create_dir_all(&dir)?;
-    let json = serde_json::to_string_pretty(file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(team_file_path(home, name), json)
+pub async fn write_team_file(home: &Path, name: &str, file: &TeamFile) -> std::io::Result<()> {
+    let value = serde_json::to_value(file).map_err(std::io::Error::other)?;
+    update_team_file(home, name, |current| {
+        *current = Some(value);
+        Ok(())
+    })
+    .await
+}
+
+/// Mutate a team's complete JSON under its cross-process lock. Missing files
+/// are `None`; malformed files fail instead of being silently overwritten.
+/// All lifecycle writers use this transaction so member additions, removals
+/// and metadata updates cannot lose each other's changes.
+pub async fn update_team_file<R>(
+    home: &Path,
+    name: &str,
+    mutate: impl FnOnce(&mut Option<serde_json::Value>) -> std::io::Result<R>,
+) -> std::io::Result<R> {
+    let path = team_file_path(home, name);
+    std::fs::create_dir_all(team_dir(home, name))?;
+    let _lock = task_store::proper_lockfile::lock(&path).await?;
+    let mut current = match std::fs::read(&path) {
+        Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(std::io::Error::other)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let original = current.clone();
+    let result = mutate(&mut current)?;
+    if current != original {
+        if let Some(value) = current {
+            atomic_write(&path, &value)?;
+        }
+    }
+    Ok(result)
+}
+
+fn atomic_write(path: &Path, value: &serde_json::Value) -> std::io::Result<()> {
+    use std::io::Write;
+    let temporary = path.with_file_name(format!(".config-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?)?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Read + parse a team's `config.json` (`readTeamFile`, `teamHelpers.ts`).
@@ -159,37 +208,28 @@ pub fn read_team_file(home: &Path, name: &str) -> std::io::Result<TeamFile> {
 ///
 /// # Errors
 /// Propagates read/parse/write failures from the underlying file IO.
-pub fn remove_team_member(
+pub async fn remove_team_member(
     home: &Path,
     team_name: &str,
     agent_id: &str,
     member_name: &str,
 ) -> std::io::Result<bool> {
-    let mut file = read_team_file(home, team_name)?;
-    let before = file.members.len();
-    file.members
-        .retain(|m| m.agent_id != agent_id && m.name != member_name);
-    if file.members.len() == before {
-        return Ok(false);
-    }
-    write_team_file(home, team_name, &file)?;
-    Ok(true)
-}
-
-/// `cleanupTeamDirectories` (`TeamDeleteTool.ts:101` → `teamHelpers.ts:641-683`),
-/// reduced to the directory removal the coordinator needs: remove the team dir
-/// (`~/.lingxi/teams/{name}/`) and the tasks dir (`~/.lingxi/tasks/{name}/`).
-/// Worktree teardown is out of scope (in-process teammates have no worktrees).
-/// Best-effort: a missing dir is not an error.
-pub fn cleanup_team_directories(home: &Path, name: &str) {
-    let team = team_dir(home, name);
-    if team.exists() {
-        let _ = std::fs::remove_dir_all(&team);
-    }
-    let tasks = task_dir(home, name);
-    if tasks.exists() {
-        let _ = std::fs::remove_dir_all(&tasks);
-    }
+    update_team_file(home, team_name, |current| {
+        let Some(members) = current
+            .as_mut()
+            .and_then(|value| value.get_mut("members"))
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return Ok(false);
+        };
+        let before = members.len();
+        members.retain(|member| {
+            member["agentId"].as_str() != Some(agent_id)
+                && member["name"].as_str() != Some(member_name)
+        });
+        Ok(members.len() != before)
+    })
+    .await
 }
 
 /// Unix-millisecond timestamp (TS `Date.now()`).
@@ -226,8 +266,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn write_then_exists_then_cleanup() {
+    #[tokio::test]
+    async fn write_persists_team_file() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".lingxi");
         assert!(!team_file_exists(&home, "alpha"));
@@ -249,7 +289,7 @@ mod tests {
                 subscriptions: vec![],
             }],
         };
-        write_team_file(&home, "alpha", &file).unwrap();
+        write_team_file(&home, "alpha", &file).await.unwrap();
         assert!(team_file_exists(&home, "alpha"));
 
         // The written JSON uses the TS field names + shape.
@@ -264,13 +304,125 @@ mod tests {
         assert_eq!(v["members"][0]["agentType"], "team-lead");
         assert_eq!(v["members"][0]["joinedAt"], 123);
         assert_eq!(v["members"][0]["subscriptions"], serde_json::json!([]));
+    }
+    #[tokio::test]
+    async fn removing_a_member_preserves_current_backend_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = team_file_path(tmp.path(), "session-12345678");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let value = serde_json::json!({"name":"session-12345678","members":[{"agentId":"team-lead@session-12345678","name":"team-lead","backendType":"in-process","color":"red"},{"agentId":"worker@session-12345678","name":"worker","backendType":"tmux"}]});
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(remove_team_member(
+            tmp.path(),
+            "session-12345678",
+            "worker@session-12345678",
+            "worker"
+        )
+        .await
+        .unwrap());
+        let remaining: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(remaining["members"].as_array().unwrap().len(), 1);
+        assert_eq!(remaining["members"][0]["backendType"], "in-process");
+        assert_eq!(remaining["members"][0]["color"], "red");
+    }
+    #[tokio::test]
+    async fn transaction_locks_before_reading_the_latest_config() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        update_team_file(&home, "team", |value| {
+            *value = Some(serde_json::json!({"members":[],"generation":1}));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let path = team_file_path(&home, "team");
+        let guard = task_store::proper_lockfile::lock(&path).await.unwrap();
+        let entered = Arc::new(AtomicBool::new(false));
+        let observed = entered.clone();
+        let worker_home = home.clone();
+        let writer = tokio::spawn(async move {
+            update_team_file(&worker_home, "team", |value| {
+                observed.store(true, Ordering::SeqCst);
+                value.as_mut().unwrap()["mutated"] = true.into();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!entered.load(Ordering::SeqCst));
+        // Simulate the current lock owner publishing a newer config.
+        atomic_write(&path, &serde_json::json!({"members":[],"generation":2})).unwrap();
+        drop(guard);
+        writer.await.unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["generation"], 2);
+        assert_eq!(value["mutated"], true);
+    }
 
-        // Cleanup removes the team dir (also create the tasks dir to prove that
-        // path is removed too).
-        std::fs::create_dir_all(task_dir(&home, "alpha")).unwrap();
-        cleanup_team_directories(&home, "alpha");
-        assert!(!team_file_exists(&home, "alpha"));
-        assert!(!team_dir(&home, "alpha").exists());
-        assert!(!task_dir(&home, "alpha").exists());
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_departures_and_spawns_preserve_every_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let mut members =
+            vec![serde_json::json!({"agentId":"lead","name":"lead","backendType":"in-process"})];
+        for index in 0..12 {
+            members.push(
+                serde_json::json!({"agentId":format!("old-{index}"),"name":format!("old-{index}")}),
+            );
+        }
+        update_team_file(&home, "team", |value| {
+            *value =
+                Some(serde_json::json!({"members":members,"futureMetadata":{"preserve":true}}));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut jobs = Vec::new();
+        for index in 0..12 {
+            let remove_home = home.clone();
+            jobs.push(tokio::spawn(async move {
+                let name = format!("old-{index}");
+                assert!(remove_team_member(&remove_home, "team", &name, &name)
+                    .await
+                    .unwrap());
+            }));
+            let spawn_home = home.clone();
+            jobs.push(tokio::spawn(async move {
+                update_team_file(&spawn_home, "team", |value| {
+                    value.as_mut().unwrap()["members"].as_array_mut().unwrap()
+                        .push(serde_json::json!({"agentId":format!("new-{index}"),"name":format!("new-{index}"),"backendType":"tmux"}));
+                    Ok(())
+                }).await.unwrap();
+            }));
+        }
+        for job in jobs {
+            job.await.unwrap();
+        }
+        let path = team_file_path(&home, "team");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let members = value["members"].as_array().unwrap();
+        assert_eq!(members.len(), 13);
+        assert_eq!(value["futureMetadata"]["preserve"], true);
+        for index in 0..12 {
+            assert!(members
+                .iter()
+                .any(|member| member["name"] == format!("new-{index}")));
+            assert!(!members
+                .iter()
+                .any(|member| member["name"] == format!("old-{index}")));
+        }
+        let files: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(files, vec![std::ffi::OsString::from("config.json")]);
     }
 }

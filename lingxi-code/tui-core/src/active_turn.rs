@@ -93,7 +93,7 @@ impl ActiveTurn {
     ///   app layer handles those out of band.
     pub fn apply(&mut self, event: TurnEvent, messages: &mut Vec<RenderedMessage>) {
         match event {
-            TurnEvent::TurnStarted => {
+            TurnEvent::TurnStarted | TurnEvent::TurnStartedWithCancel(_) => {
                 self.streaming = true;
                 self.text_idx = None;
                 self.running_tools.clear();

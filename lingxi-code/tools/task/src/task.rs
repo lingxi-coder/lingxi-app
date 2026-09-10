@@ -13,10 +13,15 @@
 //!   `lingxi_core::TodoState` = `pending`/`in_progress`/`completed`). They do NOT use
 //!   `validate_task_id`, `TASK_TYPES`, or `TASK_STATUSES`.
 //! - **Product-B (background-registry):** `TaskStop` / `TaskOutput` dispatch the
-//!   M1 background `TaskRegistry` (9-char `[bartwmdksf][0-9a-z]{8}` ids). The
-//!   `validate_task_id` / `TASK_TYPES` / `TASK_STATUSES` symbols below back ONLY
-//!   these two tools now — they are retained Product-B-only (also for the locked
-//!   `parity_agent_task_tools` / `parity_registry` fixtures).
+//!   M1 background `TaskRegistry` (9-char `[bartwmdksfe][0-9a-z]{8}` ids).
+//!
+//! `validate_task_id` / `TASK_TYPES` / `TASK_STATUSES` are Product-B SHAPES,
+//! not Product-B code paths: neither `TaskStop` nor `TaskOutput` calls them.
+//! Both resolve an id by asking the registry and report `not found` when it
+//! does not answer — which is what the oracle does too (`RZn` reads through
+//! `EK` rather than shape-checking first). The symbols exist for the locked
+//! `parity_agent_task_tools` fixture, which pins the id grammar; saying they
+//! "back these two tools" claimed a call site that has never existed.
 //!
 //! All six tool-name constants stay reachable at `tool_task::task::*`.
 
@@ -47,8 +52,7 @@ use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
-};
+    ToolStaticContext, CoercedInput, ValidationError,};
 use tool_api::BuiltinToolContext;
 
 /// Tool name `'TaskCreate'` (claude-code `TASK_CREATE_TOOL_NAME`).
@@ -64,10 +68,12 @@ pub const TASK_STOP_TOOL_NAME: &str = "TaskStop";
 /// Tool name `'TaskOutput'` (claude-code `TASK_OUTPUT_TOOL_NAME`).
 pub const TASK_OUTPUT_TOOL_NAME: &str = "TaskOutput";
 
-/// The 9 background task-type wire strings. Byte-aligned with `tasks::TaskType`
-/// variants (snake_case).
+/// The 10 background task-type wire strings — the nine claude-code variants
+/// plus LingXi's `local_fusion`. Byte-aligned with `tasks::TaskType` variants
+/// (snake_case). The array has held ten entries since `local_fusion` landed;
+/// the count in this sentence had not been updated.
 ///
-// Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
+// Product-B SHAPE — no production caller; see the module header.
 pub const TASK_TYPES: &[&str] = &[
     "local_bash",
     "local_agent",
@@ -78,38 +84,42 @@ pub const TASK_TYPES: &[&str] = &[
     "monitor_ws",
     "mcp_task",
     "dream",
+    "auto_mode_scan",
     "local_fusion",
 ];
 
 /// The 5 background task-status wire strings.
 ///
-// Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
+// Product-B SHAPE — no production caller; see the module header.
 pub const TASK_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "killed"];
 
-/// Validate the task-id format `[bartwmdksf][0-9a-z]{8}` (9 chars total).
+/// Validate the task-id format `[bartwmdksfe][0-9a-z]{8}` (9 chars total) —
+/// nine claude-code type prefixes plus LingXi's `f` (`local_fusion`).
 ///
-// Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
-/// V2 (Product-A) task ids are decimal strings and MUST NOT route through this.
+/// NO production caller: this pins the id grammar for the locked
+/// `parity_agent_task_tools` fixture. `TaskStop`/`TaskOutput` resolve ids
+/// through the registry instead. V2 (Product-A) task ids are decimal strings
+/// and MUST NOT route through this.
 ///
 /// # Errors
 /// Returns a locked human-readable error string on mismatch.
 pub fn validate_task_id(s: &str) -> Result<(), String> {
     if s.chars().count() != 9 {
         return Err(format!(
-            "Task: malformed task_id '{s}' (expected 9-char [bartwmdksf][0-9a-z]{{8}})"
+            "Task: malformed task_id '{s}' (expected 9-char [bartwmdksfe][0-9a-z]{{8}})"
         ));
     }
     let mut chars = s.chars();
     let prefix = chars.next().expect("len==9");
-    if !"bartwmdksf".contains(prefix) {
+    if !"bartwmdksfe".contains(prefix) {
         return Err(format!(
-            "Task: malformed task_id '{s}' (expected 9-char [bartwmdksf][0-9a-z]{{8}})"
+            "Task: malformed task_id '{s}' (expected 9-char [bartwmdksfe][0-9a-z]{{8}})"
         ));
     }
     for c in chars {
         if !(c.is_ascii_digit() || (c.is_ascii_lowercase() && c.is_ascii_alphabetic())) {
             return Err(format!(
-                "Task: malformed task_id '{s}' (expected 9-char [bartwmdksf][0-9a-z]{{8}})"
+                "Task: malformed task_id '{s}' (expected 9-char [bartwmdksfe][0-9a-z]{{8}})"
             ));
         }
     }
@@ -117,7 +127,7 @@ pub fn validate_task_id(s: &str) -> Result<(), String> {
 }
 
 /// Generate a fresh task-id matching the task-registry format
-/// (`[bartwmdksf][0-9a-z]{8}`).
+/// (`[bartwmdksfe][0-9a-z]{8}`).
 ///
 /// Mirrors `tasks::id::generate_task_id` without taking the
 /// cyclic dep on `lingxi-tasks`. Retained for test fixtures + parity
@@ -179,11 +189,20 @@ fn env_truthy(key: &str) -> bool {
     platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
-/// Pure core of [`is_todo_v2_enabled`] — 1:1 with the v2.1.183 binary `TE()`:
-/// `function TE(){if(_l(process.env.LINGXI_ENABLE_TASKS))return!1;return!0}`.
+/// Pure core of [`is_todo_v2_enabled`] — 1:1 with the binary's tasks-v2 gate,
+/// spelled `TE()` in v2.1.183 and `X_()` in 2.1.263
+/// (`src_160357157.js` @10464):
+/// `function X_(){if(a.CLAUDE_CODE_ENABLE_TASKS===!1)return!1;return!0}`,
+/// previously `function TE(){if(_l(process.env.LINGXI_ENABLE_TASKS))return!1;return!0}`.
 /// i.e. V2-Task-tools-enabled = NOT (the env normalizes to `0`/`false`/`no`/`off`).
 /// `_l` = [`platform_api::env::is_env_defined_falsy`] (byte-exact: `e===void 0`⇒false,
 /// boolean⇒`!e`, else lowercased+trimmed ∈ {`0`,`false`,`no`,`off`}).
+///
+/// The 2.1.263 rename is NOT a behaviour change: `CLAUDE_CODE_ENABLE_TASKS` is
+/// declared `I.triBool()`, whose transform is `Ie(e)?!0:po(e)?!1:void 0`, and
+/// `po` is the old `_l` verbatim
+/// (`["0","false","no","off"].includes(String(t).toLowerCase().trim())`,
+/// `src_156606933.js` @922).
 ///
 /// There is NO non-interactive term in the binary — the prior
 /// `enable_tasks_env || !non_interactive` formula was stale (wrong/opposite
@@ -192,20 +211,184 @@ fn todo_v2_enabled_inner(enable_tasks_env_defined_falsy: bool) -> bool {
     !enable_tasks_env_defined_falsy
 }
 
+/// claude-code `sut(e,t)` (`src_160988549.js` @3386470):
+///
+/// ```js
+/// function sut(e,t){if(e===void 0)return!0;return e===t}
+/// ```
+///
+/// `e` is the CALLER's agent id and `t` the task's owner. An absent caller is
+/// the main session, which may stop anything; otherwise the two must match.
+/// Note what this does NOT do: it never walks a parent chain, so an agent
+/// cannot stop its own child's background task — only the child itself or the
+/// main session can.
+fn caller_may_stop(caller: Option<&str>, owner: Option<&str>) -> bool {
+    match caller {
+        None => true,
+        Some(caller) => Some(caller) == owner,
+    }
+}
+
+/// claude-code `iue(e){return e??"main session"}` (@3386524) — how an ownerless
+/// task is named in the refusal.
+const NO_OWNER_DISPLAY: &str = "main session";
+
+/// The rosters a "no task found" message names, gathered once.
+///
+/// Ports the data half of claude-code `Mut` (@3595720) and `JFe` (@3594626).
+/// `named_agents` is the agent-name registry's KEYS (the names, which is what
+/// `wzo` reports), while its VALUES are passed to the registry so the
+/// background-agent roster can exclude them — a named agent is reported once,
+/// under its name.
+async fn not_found_rosters(
+    ctx: &tool_api::BuiltinToolContext,
+    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    caller_agent_id: Option<&str>,
+) -> (
+    Vec<String>,
+    platform_api::task_registry::TaskNotFoundRosters,
+) {
+    // `wzo`: a registry name counts only while its agent is actually running.
+    let mut named_agents = Vec::new();
+    let mut named_ids = Vec::new();
+    if let Some(names) = ctx.agent_name_registry.as_ref() {
+        for (name, agent_id) in names.list().await {
+            let id = agent_id.to_string();
+            match registry.get(&id).await {
+                Ok(Some(record)) => {
+                    if record.task_type == "local_agent" && (record.status == "running" || record.is_parked) {
+                        named_agents.push(name);
+                    }
+                    named_ids.push(record.task_id);
+                }
+                _ => named_ids.push(id),
+            }
+        }
+    }
+    named_agents.sort();
+    let rosters = registry
+        .not_found_rosters(caller_agent_id, &named_ids)
+        .await;
+    (named_agents, rosters)
+}
+
+/// claude-code `Mut` (@3595720) — TaskStop's "no task found" message.
+///
+/// Four independent appends in a fixed order; each clause is its own `if`, not
+/// an else-if, so a message can carry all of them. The `. Did you mean: X?`
+/// clause comes from the registry's `XFe`/`Szo` name resolver.
+async fn task_stop_not_found_message(
+    ctx: &tool_api::BuiltinToolContext,
+    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    requested: &str,
+    suggestion: Option<&str>,
+    caller_agent_id: Option<&str>,
+) -> String {
+    use platform_api::display::sanitize_display;
+    let (named_agents, rosters) = not_found_rosters(ctx, registry, caller_agent_id).await;
+    let mut message = format!("No task found with ID: {}", sanitize_display(requested));
+    if let Some(suggestion) = suggestion {
+        message.push_str(&format!(
+            ". Did you mean: {}?",
+            sanitize_display(suggestion)
+        ));
+    }
+    if !rosters.running_teammates.is_empty() {
+        message.push_str(&format!(
+            ". Running teammates: {}",
+            join_sanitized(&rosters.running_teammates)
+        ));
+    }
+    if !named_agents.is_empty() {
+        message.push_str(&format!(
+            ". Running named agents: {}",
+            join_sanitized(&named_agents)
+        ));
+    }
+    message.push_str(&background_agents_clause(&rosters));
+    message
+}
+
+/// claude-code `SWn` (@3695814) — TaskOutput's "no task found" message.
+///
+/// Deliberately NOT the same builder as TaskStop's. `SWn` interpolates the
+/// requested id RAW (`${e}`, not `w1(e)`) and appends ONLY the background-agent
+/// clause. Folding the two together would diverge on both axes at once.
+async fn task_output_not_found_message(
+    ctx: &tool_api::BuiltinToolContext,
+    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    requested: &str,
+    caller_agent_id: Option<&str>,
+) -> String {
+    let (_named, rosters) = not_found_rosters(ctx, registry, caller_agent_id).await;
+    format!(
+        "No task found with ID: {requested}{}",
+        background_agents_clause(&rosters)
+    )
+}
+
+/// `JFe`'s tail: the clause, or an empty string when the roster is empty.
+fn background_agents_clause(rosters: &platform_api::task_registry::TaskNotFoundRosters) -> String {
+    if rosters.background_agents.is_empty() {
+        return String::new();
+    }
+    // Entries are pre-rendered `{id} ({description})` by the registry, whose
+    // description already went through the sanitizer; joining them raw here
+    // matches `d.join(", ")`.
+    format!(
+        ". Running background agents: {}",
+        rosters.background_agents.join(", ")
+    )
+}
+
+fn join_sanitized(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| platform_api::display::sanitize_display(value))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Whether the Product-A V2 Task tools are advertised (and `TodoWrite` hidden).
 ///
-/// Port of `isTodoV2Enabled()` (binary `TE()`): enabled UNLESS
+/// Port of `isTodoV2Enabled()` (binary `TE()`, 2.1.263 `X_()`): enabled UNLESS
 /// `LINGXI_ENABLE_TASKS` is a *defined falsy* value (`0`/`false`/`no`/`off`,
 /// case-insensitive, trimmed). Unset, empty, or any other value ⇒ enabled.
 ///
+/// This is only HALF the advertise decision: the four tasks-dir Task tools are
+/// gated on `h3(){return X_()&&OO()}` and `TodoWrite` on `!X_()&&OO()`, so the
+/// `OO()` model gate is applied as a separate conjunct at each call site — see
+/// [`task_tools_enabled`] / [`todo_write_enabled`].
+///
 /// The `ctx` parameter is retained for the `Tool::is_enabled` signature but is
-/// unused — the binary's `TE()` reads only `process.env`, no session/interactive
-/// signal.
+/// unused — the binary's gate reads only the environment, no
+/// session/interactive signal.
 #[must_use]
 pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
     todo_v2_enabled_inner(platform_api::env::is_env_defined_falsy(
         std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
     ))
+}
+
+/// claude-code `h3(){return X_()&&OO()}` — whether the four tasks-dir Task
+/// tools are advertised.
+///
+/// `OO()` (`tool_api::todo_tools_gate`) is a SEPARATE conjunct, not something
+/// folded into [`is_todo_v2_enabled`]: the oracle spells TodoWrite
+/// `isEnabled(){return!X_()&&OO()}`, so `OO()` multiplies BOTH polarities of the
+/// V1/V2 mutex. Folding it into `X_()` would hide the four Task tools and
+/// resurrect TodoWrite in the same move — the exact opposite of the CHANGELOG's
+/// "no longer available … TodoWrite".
+#[must_use]
+pub fn task_tools_enabled(ctx: &ToolStaticContext) -> bool {
+    is_todo_v2_enabled(ctx) && tool_api::todo_tools_enabled(ctx)
+}
+
+/// claude-code TodoWrite `isEnabled(){return!X_()&&OO()}` — the V1 side of the
+/// mutex, gated by the same `OO()` term as [`task_tools_enabled`].
+#[must_use]
+pub fn todo_write_enabled(ctx: &ToolStaticContext) -> bool {
+    !is_todo_v2_enabled(ctx) && tool_api::todo_tools_enabled(ctx)
 }
 
 /// Whether the agent-swarms/teammate surface is live at call time
@@ -271,8 +454,8 @@ enum StatusInput {
 ///    leader's task list.
 /// 3. `LINGXI_TEAM_NAME` env (TS `getTeamName()`, set when running as a
 ///    process-based teammate).
-/// 4. Leader team name ([`platform_api::team_registry::leader_team_name`], TS
-///    `leaderTeamName` set by `TeamCreate`).
+/// 4. Leader team name ([`platform_api::team_registry::leader_team_name_for_session`], TS
+///    `leaderTeamName` set by implicit team initialization).
 /// 5. Session id (fallback for standalone sessions).
 ///
 /// The leader and its in-process teammates resolve to the SAME on-disk task dir.
@@ -293,15 +476,20 @@ async fn resolve_task_list_id(ctx: &ToolUseContext) -> String {
             return team.to_string_lossy().into_owned();
         }
     }
-    // 4. Leader team name (set by TeamCreate via setLeaderTeamName).
-    if let Some(team) = platform_api::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
-        return team;
-    }
-    // 5. Session id fallback.
-    match &ctx.session {
-        Some(session) => session.lock().await.session_id.to_string(),
-        None => "default".to_string(),
-    }
+    // Subagent invocations carry immutable origin identity instead of the
+    // mutable main-session handle; both resolve the same host task namespace.
+    let session_id = match &ctx.session {
+        Some(session) => Some(session.lock().await.session_id.to_string()),
+        None => ctx.origin_session_id.map(|id| id.to_string()),
+    };
+    session_id.map_or_else(
+        || "default".to_string(),
+        |id| {
+            platform_api::team_registry::leader_team_name_for_session(&id)
+                .filter(|team| !team.is_empty())
+                .unwrap_or(id)
+        },
+    )
 }
 
 fn todo_store(config_home: Option<&std::path::Path>, list_id: &str) -> TodoStore {
@@ -706,6 +894,228 @@ static TASK_CREATE_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+// ── Input coercion (claude-code `POe` / `Cce`) and steering (`yDn`) ──────
+//
+// The model reliably reaches for TaskCreate with the shapes it uses for
+// neighbouring tools — a `tasks` array, a `task` wrapper object, Agent-tool
+// `prompt`/`subagent_type`, or `title`/`content` instead of
+// `subject`/`description`. Upstream repairs what it can and STEERS what it
+// cannot, so a near-miss becomes a working call or a sentence telling the model
+// what to do instead. Without them the call just fails the schema.
+//
+// `shape_class` is the diagnostic label upstream attaches to a repaired call;
+// its tags are emitted in the order the repairs were applied. This workspace
+// builds `serde_json` with `preserve_order`, so key iteration matches the JS
+// object order the strip pass walks.
+
+/// `OR(e)` — a string with non-whitespace content.
+fn is_filled_string(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
+}
+
+/// `AOe(e)` — carries a batch parameter TaskCreate does not have.
+fn has_batch_key(map: &serde_json::Map<String, Value>) -> bool {
+    map.contains_key("tasks") || map.contains_key("todos")
+}
+
+/// `ROe(e)` — carries Agent-tool parameters.
+fn has_agent_keys(map: &serde_json::Map<String, Value>) -> bool {
+    map.contains_key("prompt") || map.contains_key("subagent_type")
+}
+
+/// `TOo(e)` — derive a subject from a description: trim, cap at 80 CHARACTERS
+/// (`Array.from`, i.e. code points), and prefer to cut on the last space when
+/// that space is past the halfway point.
+fn subject_from_description(description: &str) -> String {
+    let trimmed = description.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= 80 {
+        return trimmed.to_string();
+    }
+    let head: String = chars[..80].iter().collect();
+    match head.rfind(' ') {
+        // `d>40` is a BYTE index upstream, but the comparison is against a
+        // fixed 40 and the cut is the same character boundary either way for
+        // any input where a space exists in the first 80 characters.
+        Some(idx) if idx > 40 => head[..idx].trim().to_string(),
+        _ => head.trim().to_string(),
+    }
+}
+
+/// Aliases upstream accepts for each canonical field.
+const SUBJECT_ALIASES: [&str; 2] = ["title", "name"];
+const DESCRIPTION_ALIASES: [&str; 1] = ["content"];
+const ACTIVE_FORM_ALIASES: [&str; 1] = ["active_form"];
+/// `bOo` — the only keys a repaired TaskCreate call may keep.
+const TASK_CREATE_KEEP: [&str; 4] = ["subject", "description", "activeForm", "metadata"];
+/// `EOo` — keys named individually in the strip tag; anything else is `other`.
+const TASK_CREATE_KNOWN_STRIP: [&str; 12] = [
+    "status",
+    "state",
+    "priority",
+    "prompt",
+    "subagent_type",
+    "id",
+    "type",
+    "owner",
+    "blocks",
+    "blockedBy",
+    "addBlocks",
+    "addBlockedBy",
+];
+
+/// Move `alias` onto `target` when the target is absent and the alias holds a
+/// filled string. Returns the tag to record.
+fn apply_alias(
+    map: &mut serde_json::Map<String, Value>,
+    aliases: &[&str],
+    target: &str,
+    tags: &mut Vec<String>,
+) {
+    for alias in aliases {
+        if map.contains_key(*alias)
+            && !map.contains_key(target)
+            && is_filled_string(map.get(*alias))
+        {
+            if let Some(value) = map.remove(*alias) {
+                map.insert(target.to_string(), value);
+                tags.push(format!("alias_{alias}"));
+            }
+        }
+    }
+}
+
+/// `POe` — repair a near-miss TaskCreate call, or `None` when there is nothing
+/// to repair (or the shape is one `yDn` steers instead).
+fn coerce_task_create_input(input: &Value) -> Option<CoercedInput> {
+    let map = input.as_object()?;
+    if has_batch_key(map) {
+        // Not repairable — `yDn` explains it instead.
+        return None;
+    }
+    let mut out = map.clone();
+    let mut tags: Vec<String> = Vec::new();
+    if has_agent_keys(&out)
+        && !(is_filled_string(out.get("subject")) && is_filled_string(out.get("description")))
+    {
+        return None;
+    }
+    // A `task` wrapper: either the description as a bare string, or the real
+    // arguments one level down.
+    if !out.contains_key("subject") && !out.contains_key("description") && out.contains_key("task")
+    {
+        let wrapped = out.get("task").cloned()?;
+        if is_filled_string(Some(&wrapped)) {
+            out.remove("task");
+            out.insert("description".into(), wrapped);
+            tags.push("task_wrapper_string".into());
+        } else if let Some(inner) = wrapped.as_object() {
+            if has_batch_key(inner) {
+                return None;
+            }
+            if has_agent_keys(inner)
+                && !(is_filled_string(inner.get("subject"))
+                    && is_filled_string(inner.get("description")))
+            {
+                return None;
+            }
+            out.remove("task");
+            for (key, value) in inner.clone() {
+                out.insert(key, value);
+            }
+            tags.push("task_wrapper_object".into());
+        } else {
+            return None;
+        }
+    }
+    apply_alias(&mut out, &SUBJECT_ALIASES, "subject", &mut tags);
+    apply_alias(&mut out, &DESCRIPTION_ALIASES, "description", &mut tags);
+    apply_alias(&mut out, &ACTIVE_FORM_ALIASES, "activeForm", &mut tags);
+
+    if is_filled_string(out.get("subject")) && !out.contains_key("description") {
+        let subject = out.get("subject").cloned().unwrap_or(Value::Null);
+        out.insert("description".into(), subject);
+        tags.push("backfill_description".into());
+    } else if is_filled_string(out.get("description")) && !out.contains_key("subject") {
+        let derived = out
+            .get("description")
+            .and_then(Value::as_str)
+            .map(subject_from_description)
+            .unwrap_or_default();
+        out.insert("subject".into(), Value::String(derived));
+        tags.push("backfill_subject".into());
+    }
+
+    // Only once both required fields are present is it safe to drop the rest.
+    if is_filled_string(out.get("subject")) && is_filled_string(out.get("description")) {
+        let strip: Vec<String> = out
+            .keys()
+            .filter(|key| !TASK_CREATE_KEEP.contains(&key.as_str()))
+            .cloned()
+            .collect();
+        for key in strip {
+            out.remove(&key);
+            let label = if TASK_CREATE_KNOWN_STRIP.contains(&key.as_str()) {
+                key
+            } else {
+                "other".to_string()
+            };
+            tags.push(format!("strip_{label}"));
+        }
+        if out.get("activeForm").is_some_and(|v| !v.is_string()) {
+            out.remove("activeForm");
+            tags.push("drop_invalid_activeForm".into());
+        }
+        if out.get("metadata").is_some_and(|v| !v.is_object()) {
+            out.remove("metadata");
+            tags.push("drop_invalid_metadata".into());
+        }
+    }
+    if tags.is_empty() {
+        return None;
+    }
+    Some(CoercedInput {
+        input: Value::Object(out),
+        shape_class: tags.join("+"),
+    })
+}
+
+/// `yDn` — the sentence shown instead of a bare schema rejection.
+fn task_create_steer(input: &Value) -> Option<&'static str> {
+    let map = input.as_object()?;
+    let inner = map.get("task").and_then(Value::as_object);
+    if has_batch_key(map) || inner.is_some_and(has_batch_key) {
+        return Some(
+            "TaskCreate creates ONE task per call and has no `tasks` or `todos` parameter. Call TaskCreate once per task, passing `subject` (a brief title) and `description` (what needs to be done) as top-level string parameters.",
+        );
+    }
+    if (has_agent_keys(map) || inner.is_some_and(has_agent_keys))
+        && !(is_filled_string(map.get("subject")) && is_filled_string(map.get("description")))
+    {
+        return Some(
+            "This call used Agent-tool parameters (`prompt`/`subagent_type`). TaskCreate adds an item to the task list and takes `subject` and `description` string parameters. To delegate work to a subagent, use the Agent tool instead.",
+        );
+    }
+    None
+}
+
+/// `Cce` — TaskUpdate accepts `id`/`task_id` for `taskId` and `active_form`
+/// for `activeForm`.
+fn coerce_task_update_input(input: &Value) -> Option<CoercedInput> {
+    let map = input.as_object()?;
+    let mut out = map.clone();
+    let mut tags: Vec<String> = Vec::new();
+    apply_alias(&mut out, &["id", "task_id"], "taskId", &mut tags);
+    apply_alias(&mut out, &ACTIVE_FORM_ALIASES, "activeForm", &mut tags);
+    if tags.is_empty() {
+        return None;
+    }
+    Some(CoercedInput {
+        input: Value::Object(out),
+        shape_class: tags.join("+"),
+    })
+}
+
 /// Product-A V2 `TaskCreate` — appends a task to the todo store.
 pub struct TaskCreateTool {
     ctx: BuiltinToolContext,
@@ -742,7 +1152,27 @@ impl Tool for TaskCreateTool {
         &TASK_CREATE_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        is_todo_v2_enabled(ctx)
+        task_tools_enabled(ctx)
+    }
+    /// claude-code `coerceInput: POe` — repair a near-miss call rather than
+    /// bouncing it off the schema.
+    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
+        coerce_task_create_input(input)
+    }
+    /// claude-code `validationErrorSteer: yDn` — the shapes coercion cannot
+    /// repair get a sentence saying what to call instead. Both are shapes this
+    /// tool's schema rejects anyway (it is `additionalProperties: false`, the
+    /// port of upstream's strict object), so this replaces an opaque rejection
+    /// rather than adding one.
+    async fn validate_input(
+        &self,
+        input: &Value,
+        _ctx: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        match task_create_steer(input) {
+            Some(steer) => Err(ValidationError(steer.to_string())),
+            None => Ok(()),
+        }
     }
     fn should_defer(&self) -> bool {
         true
@@ -986,7 +1416,7 @@ impl Tool for TaskGetTool {
         &TASK_GET_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        is_todo_v2_enabled(ctx)
+        task_tools_enabled(ctx)
     }
     fn should_defer(&self) -> bool {
         true
@@ -1134,7 +1564,7 @@ impl Tool for TaskListTool {
         &TASK_LIST_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        is_todo_v2_enabled(ctx)
+        task_tools_enabled(ctx)
     }
     fn should_defer(&self) -> bool {
         true
@@ -1336,7 +1766,12 @@ impl Tool for TaskUpdateTool {
         &TASK_UPDATE_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        is_todo_v2_enabled(ctx)
+        task_tools_enabled(ctx)
+    }
+    /// claude-code `coerceInput: Cce` — TaskUpdate accepts `id`/`task_id` for
+    /// `taskId` and `active_form` for `activeForm`.
+    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
+        coerce_task_update_input(input)
     }
     fn should_defer(&self) -> bool {
         true
@@ -1597,16 +2032,26 @@ impl Tool for TaskUpdateTool {
                                 &[],
                             )
                             .await;
+                            // claude-code wraps a blocking hook's reason with
+                            // the hook's own name before it reaches the model
+                            // (`Fvt("TaskCompleted", …)` over
+                            // `S5t = " hook feedback:\n"`, 2.1.263
+                            // `src_158021603.js` @5706), and the SAME wrapped
+                            // text lands in both the `error` field and the
+                            // tool_result. The sibling hooks already spell it
+                            // this way (`TaskCreated` above, `Stop` and
+                            // `TeammateIdle` in the orchestrator).
+                            let feedback = format!("TaskCompleted hook feedback:\n{reason}");
                             return Ok(ToolCallResult {
                                 data: json!({
                                     "success": false,
                                     "taskId": task_id,
                                     "updatedFields": Vec::<String>::new(),
-                                    "error": reason,
+                                    "error": feedback,
                                 }),
                                 model_content: Some(render_task_update_fail(
                                     &task_id,
-                                    Some(&reason),
+                                    Some(&feedback),
                                 )),
                                 new_messages: vec![],
                                 context_modifier: None,
@@ -1901,12 +2346,16 @@ impl Tool for TaskStopTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
+        // claude-code `qne(t)` — the calling agent, excluded from the
+        // background-agent roster so a not-found message never suggests the
+        // caller to itself.
+        let caller_agent_id = ctx.agent_id.map(|id| id.to_string());
 
         // Resolve id: `task_id ?? shell_id`, then `if (!id)` (`TaskStopTool.ts:111-115`).
         // `??` (`Option::or`) only falls back for an absent `task_id`; a present
@@ -1950,37 +2399,57 @@ impl Tool for TaskStopTool {
             }
         };
 
-        // Pre-validation against the pre-kill record (`stopTask.ts:44-55`):
-        // missing → "No task found with ID: {id}"; non-running →
-        // "Task {id} is not running (status: {status})".
-        let record = match registry.get(&task_id).await {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                emit_failed(
-                    &bus,
-                    TASK_STOP_FAILED,
-                    &invocation_id,
-                    "not_found",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "No task found with ID: {task_id}"
-                )));
-            }
-            Err(e) => {
-                emit_failed(
-                    &bus,
-                    TASK_STOP_FAILED,
-                    &invocation_id,
-                    "registry_error",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(registry_err_to_tool_err("TaskStop", e));
-            }
+        let named_agents = match self.ctx.agent_name_registry.as_ref() {
+            Some(names) => names.list().await.into_iter().map(|(name, id)| (name, id.to_string())).collect(),
+            None => Vec::new(),
         };
-        if record.status != "running" {
+        let record = match registry.resolve_stop_target(&task_id, &named_agents).await {
+            Ok(platform_api::task_registry::TaskStopResolution::Found(record)) => record,
+            Ok(platform_api::task_registry::TaskStopResolution::Ambiguous(message)) => {
+                return Err(ToolError::InvalidInput(message));
+            }
+            Ok(platform_api::task_registry::TaskStopResolution::NotFound { suggestion }) => {
+                emit_failed(&bus, TASK_STOP_FAILED, &invocation_id, "not_found", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::InvalidInput(task_stop_not_found_message(
+                    &self.ctx, &registry, &task_id, suggestion.as_deref(), caller_agent_id.as_deref(),
+                ).await));
+            }
+            Err(error) => return Err(registry_err_to_tool_err("TaskStop", error)),
+        };
+        let display_id = if record.task_id == task_id { task_id.clone() } else {
+            format!("{} ({})", platform_api::display::sanitize_display(&task_id), record.task_id)
+        };
+        let task_id = record.task_id.clone();
+        let may_stop = caller_may_stop(caller_agent_id.as_deref(), record.owner_agent_id.as_deref());
+        let owner_refusal = || ToolError::InvalidInput(format!(
+            "Task {display_id} is owned by {}; agent {} cannot stop it.",
+            platform_api::display::sanitize_display(record.owner_agent_id.as_deref().unwrap_or(NO_OWNER_DISPLAY)),
+            platform_api::display::sanitize_display(caller_agent_id.as_deref().unwrap_or_default()),
+        ));
+        // `td` observers check self-stop and ownership BEFORE status. An
+        // observer cannot shut off its own observation loop through TaskStop.
+        if record.is_observer {
+            if caller_agent_id.is_some() && caller_agent_id == record.owner_agent_id {
+                return Err(ToolError::InvalidInput(format!("Observer {display_id} cannot stop itself; use the task UI or a main-session TaskStop.")));
+            }
+            if !may_stop { return Err(owner_refusal()); }
+        }
+        // ORDER IS THE ORACLE'S: not-running first, ownership second
+        // (`src_160988549.js` @3597258 —
+        // `if(I.status!=="running"&&…)throw not_running; if(!td(I)&&!sut(p,I.agentId))throw not_owner`).
+        // Swapping them would tell a non-owner that a finished task is theirs to
+        // stop, or refuse on ownership a task that was never running.
+        let ended_with_live_loop = !record.is_parked
+            && matches!(record.status.as_str(), "completed" | "failed" | "killed")
+            && matches!(record.task_type.as_str(), "local_agent" | "local_workflow")
+            && registry.has_live_task_loop(&task_id).await;
+        if record.status != "running"
+            && !record.is_observer
+            && !ended_with_live_loop
+            && !record.is_parked
+            && !(record.task_type == "in_process_teammate"
+                && registry.has_pending_teammate_departure(&task_id).await)
+        {
             emit_failed(
                 &bus,
                 TASK_STOP_FAILED,
@@ -1990,9 +2459,18 @@ impl Tool for TaskStopTool {
             )
             .await;
             return Err(ToolError::InvalidInput(format!(
-                "Task {task_id} is not running (status: {})",
+                "Task {display_id} is not running (status: {})",
                 record.status
             )));
+        }
+
+        // TO-04: a background task may only be stopped by the agent that owns it,
+        // or by the main session. Without this, ANY subagent could stop ANY
+        // other agent's background work — the `_ctx` that carries the caller's
+        // identity was resolved and then ignored.
+        if !record.is_observer && !may_stop {
+            emit_failed(&bus, TASK_STOP_FAILED, &invocation_id, "not_owner", started.elapsed().as_millis() as u64).await;
+            return Err(owner_refusal());
         }
 
         // Capture command + type from the pre-kill record. claude-code
@@ -2011,7 +2489,17 @@ impl Tool for TaskStopTool {
         // `killedBy:"parent"` (2.1.220, byte-visible) — a PARENT AGENT stopping
         // one of its background children, so a killed `local_agent` notification
         // reads "was stopped by Claude" rather than the bare "was stopped".
-        if let Err(e) = registry.kill_with_reason(&task_id, "parent").await {
+        let stopped_process_groups = if ended_with_live_loop {
+            let owners = registry.process_owners_for_task(&task_id).await;
+            let mut groups = HashSet::new();
+            for owner in owners {
+                groups.extend(self.ctx.process.kill_owner_processes(&owner).await);
+            }
+            groups.len()
+        } else { 0 };
+        let already_idle_observer = record.is_observer && record.status != "running" && !record.is_parked && !ended_with_live_loop;
+        let stopped = if already_idle_observer { Ok(record.clone()) } else { registry.kill_with_reason(&task_id, "parent").await };
+        if let Err(e) = stopped {
             emit_failed(
                 &bus,
                 TASK_STOP_FAILED,
@@ -2020,7 +2508,19 @@ impl Tool for TaskStopTool {
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(registry_err_to_tool_err("TaskStop", e));
+            // claude-code `rY`'s default arm: a task whose type has no stop
+            // handler reports the TYPE, not a generic registry failure. Kept
+            // local to TaskStop — `registry_err_to_tool_err` is shared with
+            // TaskCreate / TaskOutput / TeamSpawn and with the spawn path,
+            // where a `TaskStop:`-prefixed message would be wrong.
+            return Err(match &e {
+                platform_api::task_registry::TaskRegistryError::InvalidInput(reason)
+                    if reason == "unknown task type" =>
+                {
+                    ToolError::InvalidInput(format!("Unsupported task type: {task_type}"))
+                }
+                _ => registry_err_to_tool_err("TaskStop", e),
+            });
         }
         emit_completed(
             &bus,
@@ -2031,15 +2531,16 @@ impl Tool for TaskStopTool {
         )
         .await;
 
-        // No `content` key → the orchestrator JSON-stringifies the whole data
-        // (matches TS `mapToolResultToToolResultBlockParam` → `jsonStringify`).
+        // No `content` key → the orchestrator JSON-stringifies the whole data.
+        let mut data = json!({
+            "message": format!("Successfully stopped task: {task_id} ({command})"),
+            "task_id": task_id, "task_type": task_type, "command": command,
+        });
+        if ended_with_live_loop {
+            data["note"] = json!(format!("had already ended ({}) but its loop had not exited; re-signalled it and killed {stopped_process_groups} process group(s). The record remains listed while the loop is still live.", record.status));
+        }
         Ok(ToolCallResult {
-            data: json!({
-                "message": format!("Successfully stopped task: {task_id} ({command})"),
-                "task_id": task_id,
-                "task_type": task_type,
-                "command": command,
-            }),
+            data,
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
@@ -2107,6 +2608,15 @@ const TASK_MAX_OUTPUT_DEFAULT: usize = 32_000;
 /// (`outputFormatting.ts:4` `TASK_MAX_OUTPUT_UPPER_LIMIT = 160_000`).
 const TASK_MAX_OUTPUT_UPPER_LIMIT: usize = 160_000;
 
+/// claude-code `Pir` / `hge` — the bounds `see()` clamps
+/// `settings.taskOutputMaxChars` into (`src_158021603.js`: `Pir=4000,hge=128000`).
+const TASK_OUTPUT_SETTING_MIN: usize = 4_000;
+const TASK_OUTPUT_SETTING_MAX: usize = 128_000;
+
+/// claude-code `bWn = u1 - c5e` = `50_000 - 32_000` — the headroom the
+/// `TaskOutput` tool adds on top of the output cap to get its result budget.
+const TASK_OUTPUT_RESULT_HEADROOM: usize = 18_000;
+
 /// Boolean that also accepts the string literals `"true"`/`"false"` — a port of
 /// the TS `semanticBoolean()` (`utils/semanticBoolean.ts:22-29`) preprocess
 /// step: `"true"`→`true`, `"false"`→`false`; anything else passes through to the
@@ -2170,11 +2680,40 @@ fn parse_int_radix10(s: &str) -> Option<i128> {
     Some(buf.parse::<i128>().unwrap_or(i128::MAX))
 }
 
-/// Port of `getMaxTaskOutputLength()` (`outputFormatting.ts:7-15`) over
-/// `validateBoundedIntEnvVar` (`envValidation.ts:9-38`): `TASK_MAX_OUTPUT_LENGTH`
-/// overrides the 32_000 default; an empty / non-positive / unparseable value
-/// falls back to the default; anything above 160_000 is clamped down to it.
+/// claude-code `see()` — the settings clamp: `Math.min(Math.max(e, 4000), 128000)`
+/// applied to `Ge().taskOutputMaxChars`, or `None` when the setting is absent.
+///
+/// A value outside the range is PULLED to the nearest bound, not rejected;
+/// that is what makes the setting safe to honour ahead of the env var.
+fn settings_task_output_cap() -> Option<usize> {
+    platform_api::session_flags::task_output_max_chars()
+        .map(|v| (v as usize).clamp(TASK_OUTPUT_SETTING_MIN, TASK_OUTPUT_SETTING_MAX))
+}
+
+/// claude-code `zut()` — `see(Ge().taskOutputMaxChars) ?? 32_000`. The SOFT cap
+/// the tool's result budget is derived from; unlike
+/// [`max_task_output_length`] it ignores `TASK_MAX_OUTPUT_LENGTH`.
+fn task_output_soft_cap() -> usize {
+    settings_task_output_cap().unwrap_or(TASK_MAX_OUTPUT_DEFAULT)
+}
+
+/// Port of `getMaxTaskOutputLength()` — 2.1.263 `jqo()`:
+///
+/// ```js
+/// function jqo(){let e=see(Ge().taskOutputMaxChars);if(e!==void 0)return e;
+///   return Hte("TASK_MAX_OUTPUT_LENGTH",process.env.TASK_MAX_OUTPUT_LENGTH,c5e,tgn).effective}
+/// ```
+///
+/// The SETTING wins outright when present (already clamped to 4_000..=128_000);
+/// only when it is absent does `TASK_MAX_OUTPUT_LENGTH` apply over the 32_000
+/// default, with an empty / non-positive / unparseable value falling back to
+/// that default and anything above 160_000 clamped down to it. The port used to
+/// read the env var alone, so a project that had set `taskOutputMaxChars` was
+/// silently ignored.
 fn max_task_output_length() -> usize {
+    if let Some(from_settings) = settings_task_output_cap() {
+        return from_settings;
+    }
     let raw = match std::env::var("TASK_MAX_OUTPUT_LENGTH") {
         Ok(v) if !v.is_empty() => v,
         _ => return TASK_MAX_OUTPUT_DEFAULT,
@@ -2202,7 +2741,7 @@ fn max_task_output_length() -> usize {
 fn task_output_path(task_id: &str, output_path: Option<&str>) -> String {
     match output_path {
         Some(p) if !p.is_empty() => p.to_string(),
-        _ => format!("{task_id}.output"),
+        _ => platform_api::task_output::output_filename(task_id),
     }
 }
 
@@ -2215,11 +2754,32 @@ fn task_output_path(task_id: &str, output_path: Option<&str>) -> String {
 /// TS measures `String.length`/`slice` in UTF-16 code units; this port measures
 /// Unicode scalar values (`chars()`), which differ only for astral-plane chars.
 /// For the ASCII/BMP output that task spools carry this is identical.
-fn format_task_output(output: &str, task_id: &str, output_path: Option<&str>) -> String {
+fn format_task_output(
+    output: &str,
+    task_id: &str,
+    output_path: Option<&str>,
+    omit_path: bool,
+) -> String {
     let max_len = max_task_output_length();
     let char_count = output.chars().count();
     if char_count <= max_len {
         return output.to_string();
+    }
+    if omit_path {
+        // claude-code `yWn`'s `omitPath` arm — there is no file to point at, so
+        // the header says how much survived instead:
+        //
+        // ```js
+        // let _=Qu(e,Math.max(0,o-hWn(o).length));
+        // return{content:hWn(_.length)+_,wasTruncated:!0}
+        // ```
+        //
+        // The budget is computed from `hWn(o)` (the CAP's digits) but the header
+        // finally emitted is `hWn(_.length)` (the KEPT length) — two different
+        // numbers, and the difference is what keeps the result inside the cap.
+        let available = max_len.saturating_sub(truncated_tail_header(max_len).chars().count());
+        let tail: String = output.chars().skip(char_count - available).collect();
+        return format!("{}{tail}", truncated_tail_header(tail.chars().count()));
     }
     let header = format!(
         "[Truncated. Full output: {}]\n\n",
@@ -2231,9 +2791,17 @@ fn format_task_output(output: &str, task_id: &str, output_path: Option<&str>) ->
     format!("{header}{tail}")
 }
 
+/// claude-code `hWn(e)` — the `omitPath` truncation header.
+fn truncated_tail_header(kept_chars: usize) -> String {
+    format!(
+        "[Truncated to the last {kept_chars} characters; the earlier part of the report is not retrievable.]\n\n"
+    )
+}
+
 /// 1:1 port of `TaskOutputTool.tsx`'s `mapToolResultToToolResultBlockParam`
 /// (lines 283-308): the XML render of a `retrieval_status` + optional `task`,
-/// joined by a single newline (`n.join("\n")`). Fed to the model verbatim via
+/// joined by a BLANK line (`n.join("\n\n")`, 2.1.263 `src_160988549.js`
+/// @3695691). Fed to the model verbatim via
 /// the `content` key.
 fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -2251,9 +2819,42 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
         // `<output>` only when the RAW trimmed output is non-blank (TS
         // `output?.trim()`), then truncate-and-format and `.trimEnd()` the
         // result (TS: `formatTaskOutput(output, task_id)` → `content.trimEnd()`).
+        //
+        // A `local_bash` spool goes through verbatim; EVERY other task type is
+        // untrusted model-adjacent text and runs through the subagent-output
+        // guard first (2.1.263 `src_160988549.js` @3695156):
+        //
+        // ```js
+        // d = e.task.task_type==="local_bash" ? o.trimEnd()
+        //   : uH(o.trimEnd(),{prependMarker:!e.task.isRawTranscript}).sanitized
+        // ```
+        //
+        // Without it an agent whose report contained `<system-reminder>` or an
+        // `antml:` tag had that text handed to the model with its control
+        // syntax intact — the very hole `Task`'s own result path closes.
         if !t.output.trim().is_empty() {
-            let formatted = format_task_output(&t.output, &t.task_id, t.output_path.as_deref());
-            parts.push(format!("<output>\n{}\n</output>", formatted.trim_end()));
+            let formatted = format_task_output(
+                &t.output,
+                &t.task_id,
+                t.output_path.as_deref(),
+                t.omit_output_path,
+            );
+            let trimmed = formatted.trim_end();
+            let body = if t.task_type == "local_bash" {
+                trimmed.to_string()
+            } else {
+                platform_api::subagent_output_guard::sanitize_text(
+                    trimmed,
+                    // `prependMarker: !isRawTranscript` — a raw transcript was
+                    // never a report addressed to the model, so it is
+                    // neutralized silently.
+                    !t.is_raw_transcript,
+                )
+                .sanitized
+            };
+            let head = t.harness_head.as_deref().filter(|s| !s.is_empty())
+                .map(|s| format!("{}\n\n", s.trim_end())).unwrap_or_default();
+            parts.push(format!("<output>\n{head}{body}\n</output>"));
         }
         // `<error>` AFTER `<output>` (TS `mapToolResultToToolResultBlockParam`
         // lines 299-301: `if (data.task.error) parts.push(\`<error>…</error>\`)`).
@@ -2263,7 +2864,81 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
             parts.push(format!("<error>{error}</error>"));
         }
     }
-    parts.join("\n")
+    // claude-code joins the parts with a BLANK line, not a single newline
+    // (2.1.263 `src_160988549.js` @3695691: `content: r.join("\n\n")`).
+    parts.join("\n\n")
+}
+
+/// claude-code `rg()` — normalise a server-supplied status line before it goes
+/// in front of the model: collapse every run of whitespace (newlines included)
+/// to a single space, trim, drop an empty result, and truncate a long one.
+///
+/// ```js
+/// function v(e){if(e===void 0)return;
+///   let s=e.replace(re," ").replace(/ {2,}/g," ").trim();
+///   if(s==="")return;
+///   return s.length>B?`${oe(s,B)}\u2026 [truncated]`:s}
+/// ```
+fn normalize_mcp_status_message(raw: Option<&str>) -> Option<String> {
+    let collapsed = raw?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() > MCP_STATUS_MESSAGE_MAX {
+        let head: String = collapsed.chars().take(MCP_STATUS_MESSAGE_MAX).collect();
+        return Some(format!("{head}\u{2026} [truncated]"));
+    }
+    Some(collapsed)
+}
+
+/// Cap for [`normalize_mcp_status_message`] (claude-code `B`).
+const MCP_STATUS_MESSAGE_MAX: usize = 200;
+
+/// The synthetic `mcp_task` output block — claude-code's `getTaskOutputData`
+/// `mcp_task` branch (`src_160988549.js` @3690698), which returns METADATA
+/// instead of the spool and sets `omitOutputPath`.
+///
+/// Two of the oracle's lines have no input here and are therefore omitted, not
+/// invented — exactly as the oracle omits them when its own values are
+/// undefined:
+///
+/// * `server task id: …` rides only when the SERVER's task id differs from the
+///   registry id (`e.mcpTaskId!==e.id`). The port mints one id and stores no
+///   separate server id, so there is nothing that could differ.
+/// * `poll interval: …` rides only when `pollIntervalMs` is set; the port's
+///   `McpTaskState` does not carry one.
+/// * the `sep2663` protocol sentence needs a protocol field the port has not
+///   modelled.
+fn render_mcp_task_output(
+    meta: &platform_api::task_registry::McpTaskOutputMeta,
+    status: &str,
+) -> String {
+    let mut lines = vec![
+        format!("server: {}", meta.server_name),
+        format!("tool: {}", meta.tool_name),
+    ];
+    // Underscores render as spaces (`e.mcpStatus.replace("_"," ")`) — note the
+    // oracle's non-global replace, which only touches the FIRST underscore.
+    let mcp_status = meta.mcp_status.replacen('_', " ", 1);
+    lines.push(if status == "killed" {
+        format!("server status when stopped: {mcp_status}")
+    } else {
+        format!("status: {mcp_status}")
+    });
+    if let Some(message) = normalize_mcp_status_message(meta.status_message.as_deref()) {
+        lines.push(format!("status message: {message}"));
+    }
+    lines.push(format!(
+        "elapsed: {}",
+        platform_api::shell_support::format_duration_ms(meta.elapsed_ms)
+    ));
+    if meta.mcp_status == "input_required" && status == "running" {
+        lines.push("waiting on the user: an elicitation dialog is open".to_string());
+    }
+    lines.join("\n")
 }
 
 /// The `task` payload surfaced by `TaskOutputTool` — the subset of the TS
@@ -2283,6 +2958,16 @@ struct TaskOutputView {
     /// so the `[Truncated. Full output: <path>]` header shows the real path
     /// (claude-code `getTaskOutputPath(taskId)`). `None` ⟶ bare-filename fallback.
     output_path: Option<String>,
+    /// claude `TaskOutput.isRawTranscript` — the body is the agent's raw
+    /// transcript rather than a report it addressed to the caller. Suppresses
+    /// the subagent-guard marker (`prependMarker: !isRawTranscript`);
+    /// neutralisation still runs. `false` for every non-agent type.
+    is_raw_transcript: bool,
+    harness_head: Option<String>,
+    /// claude `TaskOutput.omitOutputPath` — the body is synthetic (the
+    /// `mcp_task` metadata block), so there is no spool path worth naming in a
+    /// truncation header. `false` for every other type.
+    omit_output_path: bool,
 }
 
 /// Byte-faithful port of `TaskOutputTool.tsx`'s `retrieval_status` decision.
@@ -2294,9 +2979,7 @@ struct TaskOutputView {
 ///   `success`, otherwise (still running/pending) → `timeout`.
 ///
 /// `done` is the chunk's terminal flag (`status` ∈ {completed, failed, killed});
-/// the Rust registry `output()` is a single read (the `block`/`timeout` poll
-/// loop is Batch 3), so the blocking branch resolves against the chunk's
-/// current `done` rather than re-polling.
+/// the blocking call supplies the latest chunk observed by its poll loop.
 fn task_output_retrieval_status(done: bool, block: bool) -> &'static str {
     if done {
         "success"
@@ -2307,7 +2990,24 @@ fn task_output_retrieval_status(done: bool, block: bool) -> &'static str {
     }
 }
 
-/// Reads a task's spool file (surface stub).
+/// A task can disappear after the initial existence check, including before
+/// the first output read. Both races have the same zqo timeout/null shape.
+fn missing_waited_task_output() -> ToolCallResult {
+    ToolCallResult {
+        data: json!({
+            "retrieval_status": "timeout",
+            "task": null,
+            "content": render_task_output("timeout", None),
+        }),
+        model_content: None,
+        new_messages: vec![],
+        context_modifier: None,
+        is_error: false,
+        mcp_meta: None,
+    }
+}
+
+/// Reads a task's report or spool, optionally waiting for completion.
 pub struct TaskOutputTool {
     ctx: BuiltinToolContext,
 }
@@ -2351,9 +3051,22 @@ impl Tool for TaskOutputTool {
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }
+    /// claude-code `get maxResultSizeChars(){return zut()+bWn}` — the SOFT
+    /// output cap plus 18_000 of headroom, i.e. 50_000 by default and up to
+    /// 146_000 when `taskOutputMaxChars` is raised. The port's flat 100_000 was
+    /// neither: it over-budgeted a default session and under-budgeted a
+    /// configured one.
     fn max_result_size_chars(&self) -> usize {
-        100_000
+        task_output_soft_cap() + TASK_OUTPUT_RESULT_HEADROOM
     }
+
+    /// claude-code `persistenceThresholdCeiling: hge+bWn` = 146_000 — the cap
+    /// the persistence threshold is measured against, independent of the
+    /// session's own setting.
+    fn persistence_threshold_ceiling(&self) -> Option<usize> {
+        Some(TASK_OUTPUT_SETTING_MAX + TASK_OUTPUT_RESULT_HEADROOM)
+    }
+
     /// `shouldDefer: true` (`TaskOutputTool.tsx:148`).
     fn should_defer(&self) -> bool {
         true
@@ -2393,11 +3106,13 @@ impl Tool for TaskOutputTool {
         &self,
         input: Value,
         ctx: ToolUseContext,
-        _progress: ToolProgressSender,
+        progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
+        // `qne(t)` — same caller exclusion as TaskStop.
+        let caller_agent_id = ctx.agent_id.map(|id| id.to_string());
 
         // `task_id` is required by the schema; guard mirrors `validateInput`
         // (`TaskOutputTool.tsx:188-193`): `if (!task_id)` → "Task ID is required".
@@ -2457,9 +3172,15 @@ impl Tool for TaskOutputTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "No task found with ID: {task_id}"
-                )));
+                return Err(ToolError::InvalidInput(
+                    task_output_not_found_message(
+                        &self.ctx,
+                        &registry,
+                        &task_id,
+                        caller_agent_id.as_deref(),
+                    )
+                    .await,
+                ));
             }
             Err(e) => {
                 emit_failed(
@@ -2474,9 +3195,30 @@ impl Tool for TaskOutputTool {
             }
         };
 
+        if block {
+            let _ = progress
+                .send(tool_api::ToolProgress {
+                    tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
+                    data: json!({
+                        "type": "waiting_for_task",
+                        "taskDescription": record.description,
+                        "taskType": record.task_type,
+                    }),
+                })
+                .await;
+        }
+
+        // zqo checks abort before observing even an already completed task.
+        if block && timeout_ms > 0 && ctx.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            return Err(ToolError::Aborted);
+        }
+
         // First (and, for `block==false`, only) read.
         let mut chunk = match registry.output(&task_id, None).await {
             Ok(c) => c,
+            Err(TaskRegistryError::NotFound(_)) if block => {
+                return Ok(missing_waited_task_output());
+            }
             Err(e) => {
                 emit_failed(
                     &bus,
@@ -2499,18 +3241,34 @@ impl Tool for TaskOutputTool {
                 if (wait_started.elapsed().as_millis() as u64) >= timeout_ms {
                     break;
                 }
-                // Honour user cancellation mid-wait (TS `waitForTaskCompletion`
-                // checks `abortController?.signal.aborted` at the top of each
-                // poll iteration). The per-call `cancel` token fires when the
-                // user interrupts (or a sibling tool errors); on cancellation we
-                // stop polling and return the current (still-`timeout`) state
-                // rather than blocking out the full timeout.
-                if ctx.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
-                    break;
+                // 2.1.263 `zqo`: abort is an error, never a timeout result.
+                // Race the poll delay too, so cancellation cannot trigger one
+                // more output read (or mark a newly completed task notified).
+                if let Some(cancel) = ctx.cancel.as_ref() {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return Err(ToolError::Aborted),
+                        () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    }
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 chunk = match registry.output(&task_id, None).await {
                     Ok(c) => c,
+                    // The initial existence check still errors. Only a task
+                    // disappearing after the blocking wait began maps to null
+                    // (`zqo` → `kWn.call` in 2.1.263).
+                    Err(TaskRegistryError::NotFound(_)) => {
+                        emit_completed(
+                            &bus,
+                            TASK_OUTPUT_COMPLETED,
+                            &invocation_id,
+                            started.elapsed().as_millis() as u64,
+                            &[],
+                        )
+                        .await;
+                        return Ok(missing_waited_task_output());
+                    }
                     Err(e) => {
                         emit_failed(
                             &bus,
@@ -2555,10 +3313,31 @@ impl Tool for TaskOutputTool {
         // `getTaskOutputData` `local_agent`: `output: cleanResult || output`).
         // `result` is `None` for non-agent tasks / empty extractions, leaving
         // the raw spool content in place.
-        let output = chunk
-            .result
-            .clone()
-            .filter(|r| !r.is_empty())
+        // TO-06: an `mcp_task` returns a SYNTHETIC metadata block, never the
+        // spool. Built here (the tool renders) from what the registry resolved
+        // (it owns the timestamps).
+        let mcp_block = chunk.mcp.as_ref().map(|meta| {
+            render_mcp_task_output(
+                meta,
+                chunk
+                    .status
+                    .as_deref()
+                    .unwrap_or_else(|| record.status.as_str()),
+            )
+        });
+        let clean_result = chunk.result.clone().filter(|r| !r.is_empty()).or_else(|| {
+            chunk.harness_head.as_ref().filter(|head| !head.is_empty())
+                .map(|_| "[The agent produced no report text.]".to_string())
+        });
+        // claude `isRawTranscript: !ue` — true exactly when the clean report was
+        // empty and the body fell back to the transcript. Set ONLY in the
+        // oracle's `local_agent` branch; every other type leaves it undefined,
+        // so `prependMarker: !isRawTranscript` is `true` for them.
+        let is_raw_transcript =
+            record.task_type == "local_agent" && clean_result.is_none();
+        let omit_output_path = mcp_block.is_some();
+        let output = mcp_block
+            .or(clean_result)
             .unwrap_or_else(|| chunk.content.clone());
         let view = TaskOutputView {
             task_id: chunk.task_id.clone(),
@@ -2576,6 +3355,9 @@ impl Tool for TaskOutputTool {
             // Absolute spool path threaded from the registry (T11/T16) for the
             // `[Truncated. Full output: <path>]` header.
             output_path: chunk.output_path.clone(),
+            is_raw_transcript,
+            harness_head: chunk.harness_head.clone(),
+            omit_output_path,
         };
         let content = render_task_output(retrieval_status, Some(&view));
 
@@ -2589,14 +3371,18 @@ impl Tool for TaskOutputTool {
         task_obj.insert("status".into(), json!(view.status));
         task_obj.insert("description".into(), json!(view.description));
         task_obj.insert("output".into(), json!(view.output));
+        if let Some(head) = &view.harness_head {
+            task_obj.insert("harnessHead".into(), json!(head));
+        }
         if let Some(code) = view.exit_code {
             task_obj.insert("exit_code".into(), json!(code));
         }
         if let Some(prompt) = &chunk.prompt {
             task_obj.insert("prompt".into(), json!(prompt));
         }
-        if let Some(result) = chunk.result.as_deref().filter(|r| !r.is_empty()) {
-            task_obj.insert("result".into(), json!(result));
+        if view.task_type == "local_agent" {
+            task_obj.insert("result".into(), json!(view.output));
+            task_obj.insert("isRawTranscript".into(), json!(view.is_raw_transcript));
         }
         if let Some(error) = view.error.as_deref().filter(|e| !e.is_empty()) {
             task_obj.insert("error".into(), json!(error));

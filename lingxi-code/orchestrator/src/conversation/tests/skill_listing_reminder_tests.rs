@@ -150,7 +150,7 @@ async fn no_reminder_when_provider_absent() {
     assert!(orch.skill_listing_reminder_message().await.is_none());
 }
 
-// ── PLANMODE (plan_mode_reminder_message) ──────────────────────────────
+// ── PLANMODE (plan_mode_turn_messages) ────────────────────────────────
 
 #[tokio::test]
 async fn plan_mode_reminder_none_when_plan_mode_off() {
@@ -158,7 +158,7 @@ async fn plan_mode_reminder_none_when_plan_mode_off() {
     // byte-identical).
     let orch = orch_with(ToolRegistry::new(), None);
     assert!(orch.session().lock().await.plan_mode == false);
-    assert!(orch.plan_mode_reminder_message().await.is_none());
+    assert!(orch.plan_mode_turn_messages().await.is_empty());
 }
 
 #[tokio::test]
@@ -175,8 +175,9 @@ async fn plan_mode_reminder_full_then_sparse() {
     // First plan-mode turn ⇒ FULL (206 `LU_`): the aIp banner + the 5-phase
     // workflow scaffold.
     let m0 = orch
-        .plan_mode_reminder_message()
+        .plan_mode_turn_messages()
         .await
+        .pop()
         .expect("plan-mode full reminder");
     // 2.1.238 `Zy`/`NT` envelope + `isMeta:!0` (@296675470 / @296673554).
     assert!(m0.is_meta(), "plan_mode reminder must be isMeta");
@@ -208,20 +209,21 @@ async fn plan_mode_reminder_full_then_sparse() {
     // 2.1.238 `X4T` cadence: the NEXT model call in the same turn (and the
     // next four user turns) get NOTHING — `if(_ && y < 5) return []`.
     assert!(
-        orch.plan_mode_reminder_message().await.is_none(),
+        orch.plan_mode_turn_messages().await.is_empty(),
         "no second attachment before 5 real user turns have passed"
     );
     push_real_user_turns(&orch, 4).await;
     assert!(
-        orch.plan_mode_reminder_message().await.is_none(),
+        orch.plan_mode_turn_messages().await.is_empty(),
         "4 turns is still under TURNS_BETWEEN_ATTACHMENTS"
     );
 
     // The 5th real user turn releases attachment #2 ⇒ SPARSE (`L5T`).
     push_real_user_turns(&orch, 1).await;
     let t1 = orch
-        .plan_mode_reminder_message()
+        .plan_mode_turn_messages()
         .await
+        .pop()
         .expect("plan-mode sparse reminder")
         .text_content();
     assert!(
@@ -264,8 +266,9 @@ async fn plan_mode_reminder_returns_to_full_every_fifth_attachment() {
     let mut forms = Vec::new();
     for _ in 0..6 {
         let t = orch
-            .plan_mode_reminder_message()
+            .plan_mode_turn_messages()
             .await
+            .pop()
             .expect("attachment")
             .text_content();
         forms.push(if t.starts_with(full_prefix) {
@@ -293,7 +296,7 @@ async fn tool_result_continuations_do_not_advance_the_plan_cadence() {
         s.plan_mode = true;
         s.plan_reminder_shown = false;
     }
-    orch.plan_mode_reminder_message().await.expect("first");
+    assert!(!orch.plan_mode_turn_messages().await.is_empty(), "first");
     {
         let sess = orch.session();
         let mut s = sess.lock().await;
@@ -314,7 +317,7 @@ async fn tool_result_continuations_do_not_advance_the_plan_cadence() {
         }
     }
     assert!(
-        orch.plan_mode_reminder_message().await.is_none(),
+        orch.plan_mode_turn_messages().await.is_empty(),
         "ten tool-result continuations are still zero real user turns"
     );
 }
@@ -324,22 +327,64 @@ async fn plan_mode_reminder_reset_replays_full() {
     // After a sparse turn, re-entering plan mode (reset flag) replays FULL.
     let orch = orch_with(ToolRegistry::new(), None);
     orch.session().lock().await.plan_mode = true;
-    let _full = orch.plan_mode_reminder_message().await.expect("full");
+    let _full = orch.plan_mode_turn_messages().await.pop().expect("full");
     push_real_user_turns(&orch, 5).await;
-    let _sparse = orch.plan_mode_reminder_message().await.expect("sparse");
+    let _sparse = orch.plan_mode_turn_messages().await.pop().expect("sparse");
     // Simulate EnterPlanMode / set_plan_mode(true) re-arming the tracker.
     // Re-entry also resets the `X4T` cadence (the `plan_mode_exit` boundary
     // `Y4T` stops counting at), so the very next call emits again.
     orch.session().lock().await.plan_reminder_shown = false;
     let again = orch
-        .plan_mode_reminder_message()
+        .plan_mode_turn_messages()
         .await
+        .pop()
         .expect("full again after reset")
         .text_content();
     assert!(
         again.starts_with("<system-reminder>\nPlan mode is active. The user indicated"),
         "got: {again}"
     );
+}
+
+/// ONE derivation: the plan path the reminder names, the path the permission
+/// carve-out allows and the path `ExitPlanMode` reads back all come from the
+/// same published identity. Three separate derivations is precisely how the
+/// carve-out silently stops covering the file the model was told to write.
+#[tokio::test]
+async fn the_plan_path_comes_from_the_shared_identity() {
+    let mut orch = orch_with(ToolRegistry::new(), None);
+    let sid = orch.session().lock().await.session_id;
+
+    // No identity published ⇒ the pre-slug, session-id derivation.
+    assert!(orch
+        .session_plan_file_path(&sid)
+        .ends_with(&format!("{}.md", sid.as_uuid())));
+
+    let matcher = Arc::new(platform_api::plan_files::PlanFileMatcher::with_identity(
+        platform_api::plan_files::PlanFileIdentity {
+            plans_dir: std::path::PathBuf::from("/tmp/lingxi-plans"),
+            slug: "brave-baking-otter".into(),
+            workshop_enabled: false,
+        },
+    ));
+    orch.config.plan_files = Some(matcher.clone());
+
+    let from_identity = matcher
+        .plan_file(None)
+        .expect("identity")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(orch.session_plan_file_path(&sid), from_identity);
+
+    // …and the reminder the model actually receives names that same path.
+    orch.session().lock().await.plan_mode = true;
+    let body = orch
+        .plan_mode_turn_messages()
+        .await
+        .pop()
+        .expect("plan-mode reminder")
+        .text_content();
+    assert!(body.contains(&from_identity), "{body}");
 }
 
 #[tokio::test]
@@ -350,8 +395,9 @@ async fn plan_mode_reminder_uses_custom_instructions() {
     orch.config.plan_mode_instructions = Some("MY BODY".to_string());
     orch.session().lock().await.plan_mode = true;
     let full = orch
-        .plan_mode_reminder_message()
+        .plan_mode_turn_messages()
         .await
+        .pop()
         .expect("plan-mode custom reminder")
         .text_content();
     assert!(
@@ -514,6 +560,7 @@ async fn populate_stop_hook_snapshot_stamps_both_arrays_when_wired() {
     let reg = ToolRegistry::new();
     let orch = orch_with(reg, None).with_stop_hook_snapshot(Arc::new(FixtureStopSnapshot {
         tasks: vec![HookBackgroundTask {
+            is_idle: false,
             id: "b1".into(),
             r#type: "shell".into(),
             status: "running".into(),
@@ -607,9 +654,10 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
     )));
     // Turn 0: the terminal task is folded in as a byte-faithful
     // `<task-notification>` inside one `<system-reminder>`.
-    let t0 = orch
-        .task_notification_reminder_message()
-        .await
+    let mut t0_messages = orch.task_notification_reminder_messages().await;
+    assert_eq!(t0_messages.len(), 1, "one completion ⇒ one message");
+    let t0 = t0_messages
+        .pop()
         .expect("turn-0 task notification")
         .text_content();
     // 2.1.238 `b_a` (@285068292): the provenance header sits INSIDE the
@@ -629,8 +677,107 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
     );
     // Turn 1: consume-once — the notified+evicted task must NOT re-appear.
     assert!(
-        orch.task_notification_reminder_message().await.is_none(),
+        orch.task_notification_reminder_messages().await.is_empty(),
         "a delivered task notification must be drained, not repeated"
+    );
+}
+
+/// TN-04 middle link: two completions drained in one turn must reach the
+/// drivers as TWO messages. The renderer producing two enveloped blocks is
+/// useless if the producer hands the drivers only the first.
+#[tokio::test]
+async fn two_completions_in_one_turn_are_two_messages() {
+    let reg = ToolRegistry::new();
+    let bash = platform_api::task_registry::TaskNotification {
+        task_id: "b11111111".into(),
+        task_type: "local_bash".into(),
+        status: "completed".into(),
+        description: "run tests".into(),
+        output_path: Some("/tmp/tasks/b11111111.output".into()),
+        exit_code: Some(0),
+        ..Default::default()
+    };
+    let agent = platform_api::task_registry::TaskNotification {
+        task_id: "a22222222".into(),
+        task_type: "local_agent".into(),
+        status: "completed".into(),
+        description: "research".into(),
+        output_path: Some("/tmp/tasks/a22222222.output".into()),
+        ..Default::default()
+    };
+    let orch = orch_with(reg, None).with_task_notifications(Arc::new(OnceTaskNotifications(
+        std::sync::Mutex::new(vec![bash, agent]),
+    )));
+
+    let messages = orch.task_notification_reminder_messages().await;
+    assert_eq!(messages.len(), 2, "two completions ⇒ two messages");
+    let texts: Vec<String> = messages.iter().map(|m| m.text_content()).collect();
+    assert!(texts[0].contains("b11111111"), "got: {:?}", texts[0]);
+    assert!(texts[1].contains("a22222222"), "got: {:?}", texts[1]);
+    // Each message carries its own envelope and its own provenance header.
+    for text in &texts {
+        assert_eq!(text.matches("<system-reminder>").count(), 1, "got: {text}");
+        assert_eq!(
+            text.matches(crate::prompt::task_notification::NON_USER_INPUT_HEADER)
+                .count(),
+            1,
+            "got: {text}"
+        );
+    }
+}
+
+/// A completion notification is a durable conversation event: the drivers push
+/// it into history and the JSONL rather than returning it as a transient
+/// reminder. Keeping it out of the reminder vector is what stops a retry -- which
+/// rebuilds the request from history and re-appends the reminders -- from
+/// sending the same completion twice.
+#[tokio::test]
+async fn task_notification_is_durable_and_not_a_transient_reminder() {
+    let reg = ToolRegistry::new();
+    let bash = platform_api::task_registry::TaskNotification {
+        task_id: "b87654321".into(),
+        task_type: "local_bash".into(),
+        status: "completed".into(),
+        description: "run tests".into(),
+        tool_use_id: None,
+        output_path: Some("/tmp/tasks/b87654321.output".into()),
+        exit_code: Some(0),
+        ..Default::default()
+    };
+    let orch = orch_with(reg, None).with_task_notifications(Arc::new(OnceTaskNotifications(
+        std::sync::Mutex::new(vec![bash]),
+    )));
+
+    let before = orch.session.lock().await.history.len();
+    let mut messages = orch.task_notification_reminder_messages().await;
+    assert_eq!(messages.len(), 1, "one terminal task ⇒ one message");
+    let message = messages.pop().expect("a terminal task produces a message");
+
+    // The drivers are what persist it, so mirror exactly what they do and then
+    // assert the message survives the turn instead of vanishing with it.
+    {
+        let mut session = orch.session.lock().await;
+        session.history.push(message.clone());
+    }
+    orch.persist_message_to_jsonl(&message).await;
+
+    let history = orch.session.lock().await.history.clone();
+    assert_eq!(
+        history.len(),
+        before + 1,
+        "the completion must survive the turn as a history entry",
+    );
+    let rendered = format!("{:?}", history.last().expect("the appended message"));
+    assert!(
+        rendered.contains("b87654321"),
+        "the appended entry must be the completion, got: {rendered}",
+    );
+
+    // Consume-once still holds: a second drain has nothing left, so the
+    // completion cannot be appended twice.
+    assert!(
+        orch.task_notification_reminder_messages().await.is_empty(),
+        "a drained completion must not surface again",
     );
 }
 
@@ -639,7 +786,34 @@ async fn task_notification_reminder_none_without_provider() {
     let reg = ToolRegistry::new();
     let orch = orch_with(reg, None);
     assert!(
-        orch.task_notification_reminder_message().await.is_none(),
+        orch.task_notification_reminder_messages().await.is_empty(),
         "no provider wired ⇒ strict no-op"
     );
+}
+
+struct ReminderCoordinatorMode(std::sync::atomic::AtomicBool);
+
+impl platform_api::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
+    fn is_enabled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn hidden_skill_does_not_emit_or_consume_listing() {
+    let mut reg = ToolRegistry::new();
+    reg.register_builtin(Arc::new(NamedTool("Skill")));
+    reg.set_session_tool_allowlist(&[]);
+    let mode = Arc::new(ReminderCoordinatorMode(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    let mut orch = orch_with(reg, Some(fixture()))
+        .with_coordinator_mode(mode)
+        .with_coordinator_simple_mode_for_test(false);
+    assert!(orch.tools.find_registered("Skill").is_some());
+    assert!(orch.skill_listing_reminder_message().await.is_none());
+    Arc::get_mut(&mut orch.tools)
+        .expect("fixture exclusively owns registry")
+        .set_session_tool_allowlist(&["Skill".to_string()]);
+    assert!(orch.skill_listing_reminder_message().await.is_some());
 }

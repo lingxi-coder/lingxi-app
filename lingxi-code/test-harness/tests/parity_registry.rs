@@ -1,7 +1,7 @@
-//! Registry parity driver — locks the Claude Code 2.1.238 base builtin surface.
+//! Registry parity driver — locks the Claude Code 2.1.263 base builtin surface.
 //!
-//! Asserts that the fixture `registry_42_tools.json` declares exactly 42
-//! tools across 9 categories AND that each declared name is a known
+//! Asserts that the fixture `registry_42_tools.json` declares exactly 40
+//! tools across 8 categories AND that each declared name is a known
 //! `*_TOOL_NAME` constant in production (`tools::builtin`).
 //!
 //! This is a byte-lock parity driver in the M4-01..08 style: it does NOT
@@ -29,16 +29,16 @@ fn fx() -> Fixture {
 }
 
 #[test]
-fn registry_42_tools_fixture_totals_to_42() {
+fn registry_42_tools_fixture_totals_to_40() {
     let f = fx();
-    assert_eq!(f.total, 42, "fixture declares total=42");
+    assert_eq!(f.total, 40, "fixture declares total=40");
     let summed: usize = f.by_category.values().map(Vec::len).sum();
     assert_eq!(
-        summed, 42,
-        "sum of by_category lengths is 42 (got {summed})"
+        summed, 40,
+        "sum of by_category lengths is 40 (got {summed})"
     );
     let unique: BTreeSet<&String> = f.by_category.values().flat_map(|v| v.iter()).collect();
-    assert_eq!(unique.len(), 42, "by_category names are unique");
+    assert_eq!(unique.len(), 40, "by_category names are unique");
 }
 
 #[test]
@@ -46,11 +46,11 @@ fn registry_42_tools_fixture_categories_locked() {
     let f = fx();
     let cats: BTreeSet<&str> = f.by_category.keys().map(String::as_str).collect();
     let expected: BTreeSet<&str> = [
-        "file", "search", "shell", "web", "workflow", "agent", "team", "mcp_lsp", "system",
+        "file", "search", "shell", "web", "workflow", "agent", "mcp_lsp", "system",
     ]
     .into_iter()
     .collect();
-    assert_eq!(cats, expected, "9-category lock");
+    assert_eq!(cats, expected, "8-category lock");
 
     let lens: BTreeMap<&str, usize> = f
         .by_category
@@ -64,12 +64,11 @@ fn registry_42_tools_fixture_categories_locked() {
     assert_eq!(lens["workflow"], 5);
     // 9 since 2.1.232 (56760bb1a): ListAgents joins the SendMessage it discovers.
     assert_eq!(lens["agent"], 9);
-    assert_eq!(lens["team"], 2);
     assert_eq!(lens["mcp_lsp"], 3);
     assert_eq!(lens["system"], 11);
 }
 
-/// Cross-check the fixture's 42 names against the production
+/// Cross-check the fixture's 40 names against the production
 /// `*_TOOL_NAME` constants (when an explicit named constant exists) and
 /// the in-module `TOOL_NAME` constants (single-tool modules).
 #[test]
@@ -116,9 +115,6 @@ fn fixture_names_match_production_constants() {
         ("TaskOutput", tool_task::task::TASK_OUTPUT_TOOL_NAME),
         ("SendMessage", tool_ui::send_message::SEND_MESSAGE_TOOL_NAME),
         ("ListAgents", tool_ui::list_agents::LIST_AGENTS_TOOL_NAME),
-        // Team (2)
-        ("TeamCreate", tool_team::team::TEAM_CREATE_TOOL_NAME),
-        ("TeamDelete", tool_team::team::TEAM_DELETE_TOOL_NAME),
         // MCP + LSP (3). The generic dispatcher remains an internal
         // compatibility constructor, not a production builtin. Resource tools
         // are capability-driven, not base builtins.
@@ -157,7 +153,7 @@ fn fixture_names_match_production_constants() {
         ),
     ];
 
-    assert_eq!(pairs.len(), 42, "production-constant lock covers 42 tools");
+    assert_eq!(pairs.len(), 40, "production-constant lock covers 40 tools");
 
     for (fixture_name, production_const) in pairs {
         assert_eq!(
@@ -173,4 +169,12 @@ fn fixture_names_match_production_constants() {
     // Final sanity: the paired names exactly match the fixture set.
     let paired: BTreeSet<String> = pairs.iter().map(|(n, _)| (*n).to_string()).collect();
     assert_eq!(paired, names, "fixture and production-constant sets agree");
+}
+
+#[test]
+fn explicit_team_management_tools_are_absent() {
+    let f = fx();
+    for name in f.by_category.values().flatten() {
+        assert!(!matches!(name.as_str(), "TeamCreate" | "TeamDelete"));
+    }
 }

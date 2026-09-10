@@ -11,7 +11,7 @@
 //! `tengu_tool_grep_*` / `tengu_tool_glob_*` telemetry, so the port emits
 //! none and these tools have zero registered events.
 //!
-//! Cardinality note: `NAMES.len()` is 134. The extra entries beyond the
+//! Cardinality note: the tool-prefixed registry contains 125 names. The extra entries beyond the
 //! per-tool triads are M3-06 baseline events (`tengu_tool_started`/
 //! `completed`/`failed`/`cancelled`, 4 permission events, plus a handful of
 //! tool events that pre-shipped in M3-06: `web_fetch_*`, `mcp_completed`/
@@ -67,9 +67,6 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
     ("TaskStop", "task_stop"),
     ("TaskOutput", "task_output"),
     ("SendMessage", "send_message"),
-    // Team (2)
-    ("TeamCreate", "team_create"),
-    ("TeamDelete", "team_delete"),
     // MCP + LSP (5)
     ("MCP", "mcp"),
     ("McpAuth", "mcp_auth"),
@@ -90,21 +87,21 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn snake_table_covers_39_tools() {
+fn snake_table_covers_37_tools() {
     // Grep and Glob are intentionally absent: claude-code v2.1.183 emits NO
     // tengu_tool_grep_* / tengu_tool_glob_* telemetry, so the port emits none
     // and the coverage table drops those 2 rows (42 → 40). Strict-parity
-    // (2.1.195) then drops TodoWrite (D1, no tengu_tool_todo_write_*): 40 → 39.
+    // (2.1.195) then drops TodoWrite (D1, no tengu_tool_todo_write_*): 40 → 39. Removing explicit team tools in 2.1.263 leaves 37.
     assert_eq!(
         TOOL_SNAKE.len(),
-        39,
-        "telemetry snake table must cover 39 tools (got {})",
+        37,
+        "telemetry snake table must cover 37 tools (got {})",
         TOOL_SNAKE.len()
     );
     let unique: BTreeSet<&str> = TOOL_SNAKE.iter().map(|(n, _)| *n).collect();
-    assert_eq!(unique.len(), 39, "tool display-names unique");
+    assert_eq!(unique.len(), 37, "tool display-names unique");
     let unique_snakes: BTreeSet<&str> = TOOL_SNAKE.iter().map(|(_, s)| *s).collect();
-    assert_eq!(unique_snakes.len(), 39, "snake suffixes unique");
+    assert_eq!(unique_snakes.len(), 37, "snake suffixes unique");
 }
 
 #[test]
@@ -134,8 +131,8 @@ fn names_cardinality_locked() {
     // then drops the 3 tengu_tool_todo_write_* events (D1): 134 - 3 = 131.
     let count = tool_event_names().len();
     assert_eq!(
-        count, 131,
-        "tengu_tool_* events in ALL_EVENT_NAMES locked at 131 entries (Grep/Glob/TodoWrite emit no telemetry, matching claude-code 2.1.195)"
+        count, 125,
+        "tengu_tool_* events in ALL_EVENT_NAMES locked at 125 entries (Grep/Glob/TodoWrite emit no telemetry; explicit team tools removed in 2.1.263)"
     );
 }
 

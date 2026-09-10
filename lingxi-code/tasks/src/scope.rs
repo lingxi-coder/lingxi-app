@@ -48,9 +48,9 @@
 //!    [`LocalAppWorkflowTaskScope::for_mcp_authoring`]. There is no
 //!    `Default`, no `From`/`FromStr`/`TryFrom`, no `Deserialize` (see below),
 //!    no public field and no `&mut` accessor, and both fields are private --
-//!    so no other module, in this crate or in any dependent crate, can mint a
-//!    scope or edit one after the fact. The purpose is therefore always the
-//!    one the Host chose, never one recovered from a string.
+//!    so callers must choose a purpose explicitly at a constructor call and
+//!    cannot edit it after the fact. This type does not prove that the Host
+//!    made that choice; provenance remains the Host integration's obligation.
 //! 2. **`app_id` is well formed.** Every constructor is fallible and rejects
 //!    an `app_id` that does not match `^[a-z0-9][a-z0-9-]{0,53}$` -- the same
 //!    grammar `local_apps::ids::is_valid_app_id` enforces before an id is
@@ -78,12 +78,12 @@
 //! names a real, fully scaffolded app whose materialized manifest and binding
 //! authorize exactly the workflow that is about to run, and that the script
 //! is that workflow rather than something wearing its name. `engine-mobile`'s
-//! `apply_materialized_local_app_collections_with_identity` is the seam that
-//! does this (`workflow_support.rs:1551` and `:1627`); its comment at the
-//! constructor call enumerates the checks that stand between `args` and this
-//! type. It is NOT the only production mint — `resolve_adopted_local_app_build_scope`
-//! (`:1765`) and `launch` (`:1997`) mint too, and the same "resolved, not
-//! told" duty binds them.
+//! `apply_materialized_local_app_collections_with_identity` is one seam that
+//! does this; its constructor call documents the checks that stand between
+//! `args` and this type. Live launch enrichment and
+//! `resolve_adopted_local_app_scope` mint Build/UseTest scopes only after
+//! verifying the plugin script and Host-owned app state. MCP authoring follows
+//! the same "resolved, not told" duty at its launch mint.
 //!
 //! It also does not guarantee the id names an app that exists, or that the
 //! app is in a state where the purpose makes sense. Those are lookups, and
@@ -204,9 +204,9 @@ impl MalformedAppId {
 /// workflow run is allowed to touch it.
 ///
 /// Read the module docs before using this: it guarantees that the *purpose*
-/// came from the Host and that the *app id* is well formed, and it
-/// deliberately guarantees nothing about whether the Host was entitled to
-/// that app id.
+/// was chosen through an explicit constructor and that the *app id* is well
+/// formed. It deliberately guarantees neither that the Host minted it nor
+/// that the caller was entitled to that app id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct LocalAppWorkflowTaskScope {
     app_id: String,
@@ -278,19 +278,15 @@ impl LocalAppWorkflowTaskScope {
     /// Reachability, so nobody has to grep for it — re-derived at HEAD, because
     /// the previous version of this note was stale in BOTH directions:
     ///
-    /// * [`Self::for_build`] — three production mints
-    ///   (`engine-mobile/src/workflow_support.rs:1551`, `:1627`, `:1765`).
+    /// * [`Self::for_build`] — Host-verified launch and restart-adoption
+    ///   mints in `engine-mobile/src/workflow_support.rs`.
     /// * [`Self::for_mcp_authoring`] — ONE production mint, `launch`
-    ///   (`workflow_support.rs:1997`). The old note said "tests only".
-    /// * [`Self::for_use_test`] — still ZERO production mints. But the old
-    ///   REASON ("the workflow does not exist yet") is also wrong: the use-test
-    ///   workflow script ships in the plugin's `workflows/` directory alongside
-    ///   the build one. It exists and nothing mints its scope, which is a live
-    ///   named-computed-never-wired gap rather than a phase that has not
-    ///   arrived.
+    ///   (`workflow_support.rs`).
+    /// * [`Self::for_use_test`] — Host-verified plugin launches and
+    ///   restart-adoption both mint this purpose, never custom workflows.
     ///
-    /// So "every purpose blocks delete" is enforced for all three and
-    /// exercised in production by two; `registry.rs`'s
+    /// So "every purpose blocks delete" is enforced and exercised for all
+    /// three purposes; `registry.rs`'s
     /// `find_nonterminal_local_app_workflows` carries the same note, and
     /// `registry_test.rs` pins each purpose at that guard.
     pub fn blocks_delete(&self) -> bool {
@@ -384,18 +380,17 @@ mod tests {
         assert_eq!(json, r#"{"app_id":"app-1","purpose":"Build"}"#);
     }
 
-    /// The property the whole type exists for: a scope's authority comes
-    /// only from which typed constructor the Host calls, never from a
+    /// A purpose comes only from the explicit typed constructor, never from a
     /// string that could collide with a real workflow's `meta.name`.
     ///
     /// A hostile caller can still supply a string that *looks* like it could
     /// be a workflow basename. Feed such a string into the only public string
     /// input this type accepts (`app_id`) via a *non*-Build constructor, and
-    /// purpose must stay whatever the Host asked for -- the string never gets
-    /// reinterpreted as workflow authority. Well-formedness is not the
-    /// defence here; the absence of a name-taking constructor is.
+    /// purpose must stay whatever the caller selected explicitly -- the
+    /// string never gets reinterpreted as workflow authority. Well-formedness
+    /// is not the defence here; the absence of a name-taking constructor is.
     #[test]
-    fn scope_is_constructed_by_the_host_not_derived_from_meta_name() {
+    fn scope_purpose_is_explicit_not_derived_from_meta_name() {
         let workflow_looking_id = "plugin-build-name";
 
         let scope = LocalAppWorkflowTaskScope::for_use_test(workflow_looking_id)

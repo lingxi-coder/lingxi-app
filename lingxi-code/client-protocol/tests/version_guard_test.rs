@@ -249,6 +249,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::Error.kind", "ErrorKindDto");
     put("ClientEvent::Error.message", "String");
 
+    put("ClientEvent::MessageIdentity", "message_identity");
+    put("ClientEvent::MessageIdentity.message_id", "String");
+    put("ClientEvent::MessageRetracted", "message_retracted");
+    put("ClientEvent::MessageRetracted.message_id", "String");
     put("ClientEvent::SystemNotice", "system_notice");
     put("ClientEvent::SystemNotice.message", "String");
     put("ClientEvent::SystemNotice.is_error", "bool");
@@ -837,6 +841,9 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::TaskStop", "task_stop");
     put("ClientCommand::TaskStop.task_id", "String");
+    put("ClientCommand::TaskMessage", "task_message");
+    put("ClientCommand::TaskMessage.task_id", "String");
+    put("ClientCommand::TaskMessage.message", "String");
 
     put("ClientCommand::ListApps", "list_apps");
 
@@ -1546,6 +1553,7 @@ fn current_contract_index() -> ContractIndex {
     put("TaskRowDto.started_at_ms", "Option<u64>");
     put("TaskRowDto.error", "Option<String>");
     put("TaskRowDto.stage", "Option<String>");
+    put("TaskRowDto.awaiting_plan_approval", "bool");
 
     put("TaskStatusDto::Pending", "pending");
     put("TaskStatusDto::Running", "running");
@@ -3163,6 +3171,9 @@ fn contract_index_covers_every_dto() {
             },
         },
         TaskRowDto {
+            unread: false, model: None, effort: None,
+        kind: None,
+            awaiting_plan_approval: false,
             task_id: String::new(),
             task_type: String::new(),
             status: TaskStatusDto::Pending,

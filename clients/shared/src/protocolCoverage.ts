@@ -42,6 +42,7 @@ import type {
 } from './protocol.js';
 
 export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
+  cron_manage: true,
   send_prompt: true,
   cancel: true,
   attach_turn: true,
@@ -79,6 +80,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   task_list: true,
   task_output: true,
   task_stop: true,
+  task_message: true,
   resume_workflow: true,
   list_apps: true,
   get_app_details: true,
@@ -113,8 +115,12 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
+  cron_result: true,
   error: true,
+  message_identity: true,
+  message_retracted: true,
   system_notice: true,
+  loop_wakeup: true,
   ask_user_question: true,
   ask_user_question_resolved: true,
   permission_request_resolved: true,
@@ -166,6 +172,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   auth_state: true,
   doctor_report: true,
   task_row: true,
+  task_lifecycle: true,
   task_output_chunk: true,
   task_status_changed: true,
   workflow_resumed: true,
@@ -243,6 +250,7 @@ export const ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES: Record<ManagedLocalAppMcpSt
  * missing"; a literal key `TaskRowDto` doesn't have fails on the excess key.
  */
 export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
+  awaiting_plan_approval: true,
   task_id: true,
   task_type: true,
   status: true,
@@ -251,6 +259,10 @@ export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
   started_at_ms: true,
   error: true,
   stage: true,
+  kind: true,
+  unread: true,
+  model: true,
+  effort: true,
 };
 
 export const ALL_LOCAL_APP_PLUGIN_ERROR_CODES: Record<LocalAppPluginErrorCodeDto, true> = {

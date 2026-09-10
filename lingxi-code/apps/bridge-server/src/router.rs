@@ -124,6 +124,49 @@ pub struct SessionStoreContext {
 }
 
 impl SessionStoreContext {
+    /// Retain a zero-message conversation that owns a durable scheduled task.
+    async fn ensure_scheduled_chat(&self, session_id: &str) -> Result<(), String> {
+        let session_uuid = protocol::SessionId::parse_prefixed(session_id)
+            .ok_or("Invalid scheduled task chat identity")?
+            .as_uuid()
+            .to_string();
+        let session_id = session_uuid.as_str();
+        let path = orchestrator::transcript_paths::main_transcript_path(
+            &self.lingxi_home,
+            &self.session_cwd,
+            session_id,
+        );
+        let reader = session::jsonl::reader::JsonlReader::new(path.clone(), self.fs.clone());
+        let mut title = "Scheduled task".to_string();
+        match reader.read_routed().await {
+            Ok(loaded) => {
+                if !loaded.messages_in_order.is_empty()
+                    || loaded.mobile_empty_sessions.contains(session_id)
+                {
+                    return Ok(());
+                }
+                if loaded.malformed_line_count > 0 {
+                    return Err("Cannot attach a scheduled task to an unreadable chat".into());
+                }
+                if let Some(existing) = loaded.custom_titles.get(session_id) {
+                    title.clone_from(existing);
+                }
+            }
+            Err(session::jsonl::reader::ReaderError::Fs(platform_api::FsError::NotFound(_))) => {}
+            Err(error) => {
+                // The desktop filesystem may wrap ENOENT as FsError::Io.
+                // Verify absence without treating permission/corruption errors as empty.
+                if !matches!(tokio::fs::try_exists(&path).await, Ok(false)) {
+                    return Err(format!("Cannot read the scheduled task's chat: {error}"));
+                }
+            }
+        }
+        session::jsonl::writer::JsonlWriter::new(path, self.fs.clone())
+            .append_mobile_empty_session(session_id, &title)
+            .await
+            .map_err(|error| format!("Cannot retain the scheduled task's chat: {error}"))
+    }
+
     /// Build a session-store context rooted at the desktop config directory and
     /// the connection's project cwd.
     #[must_use]
@@ -2605,7 +2648,7 @@ impl EngineCommandRouter {
                         }
                     };
                     (
-                        client_adapter::lowering::lower_transcript(&replayed.state.history),
+                        client_adapter::lowering::lower_transcript(&replayed.display_history),
                         engine_desktop::session_agents::transcript_revision(&raw),
                     )
                 }
@@ -2666,6 +2709,19 @@ impl EngineCommandRouter {
                     }
                 }
                 None => {
+                    // A persistent runner can be visible in the live roster
+                    // before its first JSONL append reaches disk. Treat that
+                    // narrow startup window as a quiet retry; surfacing a
+                    // rejected command here makes the renderer's poll loop
+                    // append the same "not found" row every tick. Historical
+                    // ids still take the explicit error path below.
+                    if self.has_live_session_agent_task(&agent_id).await {
+                        tracing::debug!(
+                            %agent_id,
+                            "session agent transcript is not on disk yet; retrying"
+                        );
+                        return;
+                    }
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
                         message: "session agent transcript was not found".to_string(),
@@ -2704,6 +2760,28 @@ impl EngineCommandRouter {
             revision,
         })
         .await;
+    }
+
+    /// Whether a missing transcript belongs to a currently live background
+    /// agent. The task registry is the authoritative bridge-side view during
+    /// the short allocation→first-write window; a parked agent remains
+    /// resumable even though its task status is terminal.
+    async fn has_live_session_agent_task(&self, agent_id: &str) -> bool {
+        self.tasks
+            .list(TaskListFilter::default())
+            .await
+            .ok()
+            .is_some_and(|rows| {
+                rows.into_iter().any(|row| {
+                    row.task_type == "local_agent"
+                        && row.owner_agent_id.as_deref() == Some(agent_id)
+                        && (row.is_parked
+                            || matches!(
+                                row.status.as_str(),
+                                "pending" | "running" | "paused"
+                            ))
+                })
+            })
     }
 
     /// Snapshot the live slash-command catalog from the shared registry, adding
@@ -3027,6 +3105,60 @@ impl CommandRouter for EngineCommandRouter {
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
+            ClientCommand::CronManage {
+                request_id,
+                request,
+            } => {
+                if request.action != "list" && !self.handle.workspace_trusted().await {
+                    sink.emit(ClientEvent::CronResult {
+                        request_id,
+                        jobs: Vec::new(),
+                        error: Some("Trust this workspace before changing scheduled tasks".into()),
+                    })
+                    .await;
+                    return;
+                }
+                let status = self.handle.get_status_snapshot().await;
+                let owner_id = status
+                    .session_id
+                    .strip_prefix("sess:")
+                    .unwrap_or(&status.session_id);
+                if request.action == "create" {
+                    let anchor = match self.session_store.as_ref() {
+                        Some(store) => store.ensure_scheduled_chat(owner_id).await,
+                        None => Err("Scheduled task chat storage is unavailable".into()),
+                    };
+                    if let Err(error) = anchor {
+                        sink.emit(ClientEvent::CronResult {
+                            request_id,
+                            jobs: Vec::new(),
+                            error: Some(error),
+                        })
+                        .await;
+                        return;
+                    }
+                }
+                let cwd = status.cwd;
+                let fs = platform_posix::PosixFileSystem::new(cwd.clone());
+                let result = engine_desktop::cron_management::manage(
+                    &fs,
+                    &cwd,
+                    request,
+                    &self.tasks,
+                    owner_id,
+                )
+                .await;
+                let (jobs, error) = match result {
+                    Ok(jobs) => (jobs, None),
+                    Err(error) => (Vec::new(), Some(error)),
+                };
+                sink.emit(ClientEvent::CronResult {
+                    request_id,
+                    jobs,
+                    error,
+                })
+                .await;
+            }
             // ── Provider credentials ────────────────────────────────────────
             ClientCommand::ListProviderCredentials {
                 operation_id,
@@ -3222,14 +3354,6 @@ impl CommandRouter for EngineCommandRouter {
 
             // ── Permission mode ────────────────────────────────────────────
             ClientCommand::SetPermissionMode { mode } => {
-                if self.is_turn_active() {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Rejected,
-                        message: "cannot change permission mode while a turn is active".to_string(),
-                    })
-                    .await;
-                    return;
-                }
                 match self.handle.set_permission_mode(&mode).await {
                     Ok(()) => {
                         let active = self.handle.permission_mode().await.unwrap_or(mode);
@@ -3297,15 +3421,6 @@ impl CommandRouter for EngineCommandRouter {
                 self.emit_controls_snapshot(&*sink).await;
             }
             ClientCommand::SetReasoningSelection { selection } => {
-                if self.is_turn_active() {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Rejected,
-                        message: "cannot change reasoning selection while a turn is active"
-                            .to_string(),
-                    })
-                    .await;
-                    return;
-                }
                 if let Err(error) = self
                     .handle
                     .set_reasoning_selection(decode_reasoning_selection(selection))
@@ -3321,14 +3436,6 @@ impl CommandRouter for EngineCommandRouter {
                 self.emit_controls_snapshot(&*sink).await;
             }
             ClientCommand::SetFastMode { enabled } => {
-                if self.is_turn_active() {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Rejected,
-                        message: "cannot change fast mode while a turn is active".to_string(),
-                    })
-                    .await;
-                    return;
-                }
                 if let Err(error) = self.handle.set_fast_mode(enabled).await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
@@ -3341,6 +3448,7 @@ impl CommandRouter for EngineCommandRouter {
                     enabled: self.handle.fast_mode().await,
                 })
                 .await;
+                self.emit_controls_snapshot(&*sink).await;
             }
 
             // ── Slash commands ──────────────────────────────────────────────
@@ -3665,7 +3773,12 @@ impl CommandRouter for EngineCommandRouter {
                     }
                 };
 
-                let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
+                // The engine resumes from the compacted history below, while
+                // the renderer receives the complete main-thread transcript so
+                // pre-compaction messages remain visible without re-entering
+                // the LLM context.
+                let messages =
+                    client_adapter::lowering::lower_transcript(&replayed.display_history);
                 let resume_plan_mode = replayed.state.plan_mode;
                 let previous_session_id = self.handle.current_session_id().await;
                 let previous_permission_mode = self
@@ -3802,6 +3915,16 @@ impl CommandRouter for EngineCommandRouter {
             // UI/control-channel `stopTask` passes `source:"user"` and inherits
             // the stop helper's `killedBy = "user"` default, so the killed
             // notification reads "was stopped by user".
+            ClientCommand::TaskMessage { task_id, message } => {
+                if !self.handle.workspace_trusted().await {
+                    sink.emit(ClientEvent::Error { kind: ErrorKindDto::Rejected, message: "Trust this workspace before messaging a task".into() }).await;
+                } else {
+                    match self.tasks.send_human_task_message(&task_id, &message).await {
+                        Ok(()) => sink.emit(ClientEvent::SystemNotice { message: format!("Message accepted for task {task_id}"), is_error: false }).await,
+                        Err(error) => sink.emit(ClientEvent::Error { kind: ErrorKindDto::Rejected, message: format!("task message failed: {error}") }).await,
+                    }
+                }
+            }
             ClientCommand::TaskStop { task_id } => {
                 match self.tasks.kill_with_reason(&task_id, "user").await {
                     Ok(rec) => {
@@ -4141,9 +4264,14 @@ mod fusion_catalog_refresh_tests {
         }
     }
 
-    struct MockTaskRegistry;
+    #[derive(Default)]
+    struct MockTaskRegistry { human_messages: std::sync::Mutex<Vec<(String, String)>> }
     #[async_trait::async_trait]
     impl TaskRegistryHandle for MockTaskRegistry {
+        async fn send_human_task_message(&self, task_id: &str, message: &str) -> Result<(), TaskRegistryError> {
+            self.human_messages.lock().unwrap().push((task_id.into(), message.into()));
+            Ok(())
+        }
         async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
@@ -4182,6 +4310,28 @@ mod fusion_catalog_refresh_tests {
         }
     }
 
+    #[derive(Default)]
+    struct TaskMessageSink(std::sync::Mutex<Vec<ClientEvent>>);
+    #[async_trait::async_trait]
+    impl ClientEventSink for TaskMessageSink {
+        async fn emit(&self, event: ClientEvent) { self.0.lock().unwrap().push(event); }
+    }
+
+    #[tokio::test]
+    async fn task_message_uses_trusted_registry_route_and_preserves_workspace_gate() {
+        let handle = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let registry = Arc::new(MockTaskRegistry::default());
+        let router = EngineCommandRouter::new(handle.clone(), Arc::new(MockAuth), registry.clone(), None, None);
+        let sink = Arc::new(TaskMessageSink::default());
+        router.route(ClientCommand::TaskMessage { task_id: "a123".into(), message: "  continue\nnext".into() }, sink.clone()).await;
+        assert_eq!(*registry.human_messages.lock().unwrap(), vec![("a123".into(), "  continue\nnext".into())]);
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(event, ClientEvent::SystemNotice { is_error: false, .. })));
+        handle.set_workspace_trusted(false);
+        router.route(ClientCommand::TaskMessage { task_id: "a123".into(), message: "denied".into() }, sink.clone()).await;
+        assert_eq!(registry.human_messages.lock().unwrap().len(), 1);
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(event, ClientEvent::Error { kind: client_protocol::events::ErrorKindDto::Rejected, .. })));
+    }
+
     async fn router_with_credentials(
         credentials: Arc<secret::CredentialManager>,
         ephemeral: bool,
@@ -4190,7 +4340,7 @@ mod fusion_catalog_refresh_tests {
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::new())
                 as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
             Arc::new(MockAuth) as Arc<dyn AuthHandle>,
-            Arc::new(MockTaskRegistry) as Arc<dyn TaskRegistryHandle>,
+            Arc::new(MockTaskRegistry::default()) as Arc<dyn TaskRegistryHandle>,
             None,
             None,
         )
@@ -4454,5 +4604,54 @@ openrouter and burn a panel slot on LlmError::Authentication: {published:?}"
 too — its key never touched the keychain, so only the delete-side \
 notification can lower the entry: {published:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod scheduled_chat_anchor_tests {
+    use super::SessionStoreContext;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn scheduled_chat_anchor_is_listed_without_messages_and_is_idempotent() {
+        for metadata_only in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let cwd = temp.path().join("project");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let home = temp.path().join("home");
+            let fs: Arc<dyn platform_api::FileSystem> =
+                Arc::new(platform_posix::PosixFileSystem::new(temp.path().into()));
+            let store = SessionStoreContext::new(
+                home.clone(),
+                cwd.to_string_lossy().into_owned(),
+                fs.clone(),
+            );
+            let id = "11111111-2222-3333-4444-555555555555";
+            let path =
+                orchestrator::transcript_paths::main_transcript_path(&home, &store.session_cwd, id);
+            if metadata_only {
+                session::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone())
+                    .append_permission_mode("default")
+                    .await
+                    .unwrap();
+            }
+            store
+                .ensure_scheduled_chat(&format!("sess:{id}"))
+                .await
+                .unwrap();
+            let before = std::fs::read_to_string(&path).unwrap();
+            store.ensure_scheduled_chat(id).await.unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+            let catalog = session::jsonl::list_recent_sessions_with_diagnostics(
+                &home,
+                &store.session_cwd,
+                10,
+                fs,
+            )
+            .await
+            .unwrap();
+            assert_eq!(catalog.sessions.len(), 1);
+            assert_eq!(catalog.sessions[0].message_count, 0);
+        }
     }
 }

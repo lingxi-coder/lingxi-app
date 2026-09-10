@@ -1418,6 +1418,7 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             error: Some("max_output_tokens"),
             api_error_status: None,
             inner_stop_reason: None,
+            truncated_after_output: false,
         }),
     );
     assert_eq!(
@@ -1445,6 +1446,7 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             error: Some("invalid_request"),
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
+            truncated_after_output: false,
         }),
     );
     assert_eq!(
@@ -1473,11 +1475,40 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             error: Some("rate_limit"),
             api_error_status: Some(429),
             inner_stop_reason: None,
+            truncated_after_output: false,
         }),
     );
     assert_eq!(
         with_status.extra.get("apiErrorStatus"),
         Some(&serde_json::Value::Number(429.into()))
+    );
+    assert!(
+        !with_status.extra.contains_key("truncatedAfterOutput"),
+        "truncatedAfterOutput is omitted when false"
+    );
+
+    // 4b. Has-output incomplete-response notice stamps truncatedAfterOutput.
+    let truncated = orch.to_jsonl_message_with_inner_id(
+        &msg,
+        "sess",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&ApiErrorEnvelope {
+            error: Some("server_error"),
+            api_error_status: None,
+            inner_stop_reason: None,
+            truncated_after_output: true,
+        }),
+    );
+    assert_eq!(
+        truncated.extra.get("truncatedAfterOutput"),
+        Some(&serde_json::Value::Bool(true))
     );
 
     // 5. A normal (non-api-error) assistant line stamps NOTHING.

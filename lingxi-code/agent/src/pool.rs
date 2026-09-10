@@ -13,7 +13,7 @@ use crate::context::SubagentContext;
 use crate::runner::SubagentEvent;
 use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use protocol::AgentId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 #[cfg(test)]
@@ -33,6 +33,17 @@ pub struct StateMachineSlot {
     pub event_tx: mpsc::Sender<lingxi_core::Event>,
     /// Capacity permit held for the entire lifetime of this slot.
     _capacity_permit: Arc<TrackedPoolPermit>,
+    _identity_reservation: Arc<IdentityReservation>,
+}
+
+/// Keeps one pool identity exclusive through construction, execution and cleanup.
+pub(crate) struct IdentityReservation {
+    identities: Arc<std::sync::Mutex<HashSet<AgentId>>>,
+    agent_id: AgentId,
+    claimed: std::sync::atomic::AtomicBool,
+}
+impl Drop for IdentityReservation {
+    fn drop(&mut self) { self.identities.lock().unwrap().remove(&self.agent_id); }
 }
 
 /// Fixed-capacity table of active subagent slots.
@@ -41,6 +52,7 @@ pub struct StateMachineSlot {
 /// hands the caller back an [`mpsc::Receiver`] of [`SubagentEvent`]s the
 /// runner emits as it processes the conversation.
 pub struct StateMachinePool {
+    identities: Arc<std::sync::Mutex<HashSet<AgentId>>>,
     slots: Arc<RwLock<HashMap<AgentId, StateMachineSlot>>>,
     capacity: Arc<CapacityCore>,
     runtime: Arc<dyn RuntimeSpawner>,
@@ -92,6 +104,7 @@ impl StateMachinePool {
     #[must_use]
     pub fn new(runtime: Arc<dyn RuntimeSpawner>, max_concurrent: usize) -> Self {
         Self {
+            identities: Arc::new(std::sync::Mutex::new(HashSet::new())),
             slots: Arc::new(RwLock::new(HashMap::new())),
             capacity: CapacityCore::new(max_concurrent)
                 .expect("pool capacity exceeds semaphore maximum"),
@@ -134,11 +147,40 @@ impl StateMachinePool {
         ctx: SubagentContext,
         allocation_receipt: Option<Arc<dyn Fn(AgentId) + Send + Sync>>,
     ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
+        self.allocate_with_startup(ctx, allocation_receipt, None).await
+    }
+
+    /// Reserve an identity before constructing any identity-scoped resources.
+    pub(crate) fn reserve_identity(&self, agent_id: AgentId) -> Result<Arc<IdentityReservation>, PoolError> {
+        if !self.identities.lock().unwrap().insert(agent_id) { return Err(PoolError::AgentAlreadyExists); }
+        Ok(Arc::new(IdentityReservation { identities: self.identities.clone(), agent_id, claimed: std::sync::atomic::AtomicBool::new(false) }))
+    }
+
+    /// Reserve a real slot while its runner waits for startup registration.
+    pub async fn allocate_with_startup(
+        &self,
+        ctx: SubagentContext,
+        allocation_receipt: Option<Arc<dyn Fn(AgentId) + Send + Sync>>,
+        startup: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
+        self.allocate_with_reserved_identity(ctx, allocation_receipt, startup, None).await
+    }
+
+    /// Consume an optional pre-construction reservation exactly once.
+    pub(crate) async fn allocate_with_reserved_identity(
+        &self, ctx: SubagentContext,
+        allocation_receipt: Option<Arc<dyn Fn(AgentId) + Send + Sync>>,
+        startup: Option<tokio::sync::oneshot::Receiver<()>>,
+        reserved: Option<Arc<IdentityReservation>>,
+    ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
+        // Reserve capacity atomically before spawning the runner. A len/read
+        // check can race when multiple parallel Agent tool calls allocate at
+        // once and let all of them pass the same stale count.
         let permit = self
             .capacity
             .acquire_ordinary()
             .map_err(|_| PoolError::TooManyAgents)?;
-        self.allocate_admitted_with_receipt(ctx, allocation_receipt, permit)
+        self.allocate_admitted(ctx, allocation_receipt, permit, startup, reserved)
             .await
     }
 
@@ -184,17 +226,41 @@ impl StateMachinePool {
         Ok(permit)
     }
 
+    /// Consume a permit this pool already granted, for a caller that was
+    /// admitted as part of a whole panel group rather than one at a time.
     pub(crate) async fn allocate_admitted_with_receipt(
         &self,
         ctx: SubagentContext,
         allocation_receipt: Option<Arc<dyn Fn(AgentId) + Send + Sync>>,
         permit: TrackedPoolPermit,
+        startup: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
+        self.allocate_admitted(ctx, allocation_receipt, permit, startup, None)
+            .await
+    }
+
+    /// The one allocation body. Capacity is already held by the time it runs;
+    /// the identity reservation and the startup gate are the caller's choice.
+    async fn allocate_admitted(
+        &self,
+        ctx: SubagentContext,
+        allocation_receipt: Option<Arc<dyn Fn(AgentId) + Send + Sync>>,
+        permit: TrackedPoolPermit,
+        startup: Option<tokio::sync::oneshot::Receiver<()>>,
+        reserved: Option<Arc<IdentityReservation>>,
     ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
         if !self.capacity.owns(&permit) {
             return Err(PoolError::WrongPool);
         }
         let capacity_permit = Arc::new(permit);
         let agent_id = ctx.agent_id;
+        let identity_reservation = match reserved {
+            Some(reservation) if reservation.agent_id == agent_id && Arc::ptr_eq(&reservation.identities, &self.identities) => reservation,
+            Some(_) => return Err(PoolError::AgentAlreadyExists),
+            None => self.reserve_identity(agent_id)?,
+        };
+        if identity_reservation.claimed.swap(true, std::sync::atomic::Ordering::SeqCst) { return Err(PoolError::AgentAlreadyExists); }
+        let runner_identity_reservation = identity_reservation.clone();
         let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(100);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(100);
 
@@ -208,6 +274,12 @@ impl StateMachinePool {
                 "subagent-state-machine",
                 Box::pin(async move {
                     let _capacity = runner_capacity;
+                    // Keep the ID reserved even when allocation is cancelled
+                    // before the slot is published and cancel runs asynchronously.
+                    let _identity_reservation = runner_identity_reservation;
+                    if let Some(startup) = startup {
+                        if startup.await.is_err() { return; }
+                    }
                     crate::runner::run_subagent(ctx, event_rx, out_tx).await;
                 }),
             )
@@ -234,6 +306,7 @@ impl StateMachinePool {
                 task,
                 event_tx,
                 _capacity_permit: capacity_permit,
+                _identity_reservation: identity_reservation,
             },
         );
         cancel_guard.disarm();
@@ -302,6 +375,9 @@ pub enum PoolError {
     /// A transferred capacity owner did not originate in this pool.
     #[error("panel permit belongs to a different pool")]
     WrongPool,
+    /// A live or currently allocating runner already owns this stable identity.
+    #[error("agent identity is already allocated")]
+    AgentAlreadyExists,
     /// All `max_concurrent` slots are in use.
     #[error("too many agents — pool full")]
     TooManyAgents,
@@ -333,6 +409,7 @@ mod tests {
     /// allocated slot runs the legacy reducer-driven stub (no API calls).
     fn make_ctx() -> SubagentContext {
         SubagentContext {
+        task_registry: None,
             agent_id: AgentId::new(),
             parent_agent_id: None,
             agent_name: None,
@@ -410,7 +487,65 @@ mod tests {
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            refusal_fallback_chain: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn reserved_identity_cannot_be_retargeted_or_claimed_twice() {
+        let pool = StateMachinePool::new(Arc::new(MockRuntimeSpawner::default()), 3);
+        let id = AgentId::new();
+        let reservation = pool.reserve_identity(id).unwrap();
+        assert!(matches!(pool.allocate_with_reserved_identity(make_ctx(), None, None, Some(reservation.clone())).await, Err(PoolError::AgentAlreadyExists)));
+        assert_eq!(pool.slot_count().await, 0);
+        let mut context = make_ctx();
+        context.agent_id = id;
+        let (release, startup) = tokio::sync::oneshot::channel();
+        pool.allocate_with_reserved_identity(context, None, Some(startup), Some(reservation.clone())).await.unwrap();
+        let mut duplicate = make_ctx();
+        duplicate.agent_id = id;
+        assert!(matches!(pool.allocate_with_reserved_identity(duplicate, None, None, Some(reservation)).await, Err(PoolError::AgentAlreadyExists)));
+        assert_eq!(pool.slot_count().await, 1);
+        drop(release);
+        pool.deallocate(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stable_identity_collision_cannot_replace_a_live_or_prepared_runner() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = StateMachinePool::new(runtime, 2);
+        let context = make_ctx();
+        let id = context.agent_id;
+        let (release, startup) = tokio::sync::oneshot::channel();
+        let (first_id, _events) = pool.allocate_with_startup(context, None, Some(startup)).await.unwrap();
+        let mut duplicate = make_ctx();
+        duplicate.agent_id = id;
+        assert!(matches!(pool.allocate(duplicate).await, Err(PoolError::AgentAlreadyExists)));
+        assert_eq!(first_id, id);
+        assert_eq!(pool.slot_count().await, 1);
+        assert!(!pool.agent_runner_finished(&id).await);
+        drop(release);
+        pool.deallocate(&id).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while pool.identities.lock().unwrap().contains(&id) { tokio::task::yield_now().await; }
+        }).await.expect("cancelled runner releases its identity once it has actually stopped");
+        let mut retry = make_ctx();
+        retry.agent_id = id;
+        assert!(pool.allocate(retry).await.is_ok(), "deallocation releases the identity reservation");
+        pool.deallocate(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn allocated_runner_waits_for_acknowledged_startup_gate() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = StateMachinePool::new(runtime, 1);
+        let (release, startup) = tokio::sync::oneshot::channel();
+        let (id, mut events) = pool.allocate_with_startup(make_ctx(), None, Some(startup)).await.unwrap();
+        pool.send_event(&id, lingxi_core::Event::UserExit).await.unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), events.recv()).await.is_err(), "runner must not execute before its owner registration completes");
+        release.send(()).unwrap();
+        assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap(), Some(SubagentEvent::Killed {..})));
+        pool.deallocate(&id).await.unwrap();
     }
 
     #[tokio::test]
@@ -449,7 +584,7 @@ mod tests {
         for permit in lease.into_permits() {
             let permit = pool.take_panel_permit(permit).unwrap();
             let (id, _events) = pool
-                .allocate_admitted_with_receipt(make_ctx(), None, permit)
+                .allocate_admitted_with_receipt(make_ctx(), None, permit, None)
                 .await
                 .unwrap();
             ids.push(id);
@@ -504,7 +639,7 @@ mod tests {
             .pop()
             .unwrap();
         let permit = pool.take_panel_permit(permit).unwrap();
-        drop(pool.allocate_admitted_with_receipt(make_ctx(), None, permit));
+        drop(pool.allocate_admitted_with_receipt(make_ctx(), None, permit, None));
         assert_eq!(pool.capacity.available_permits(), 1);
         assert_eq!(pool.slot_count().await, 0);
     }
@@ -670,7 +805,7 @@ mod tests {
         let drain = drain.expect("production group carries a producer drain");
         let permit = pool.take_panel_permit(permits.pop().unwrap()).unwrap();
         let (id, _events) = pool
-            .allocate_admitted_with_receipt(make_ctx(), None, permit)
+            .allocate_admitted_with_receipt(make_ctx(), None, permit, None)
             .await
             .unwrap();
         pool.deallocate(&id).await.unwrap();

@@ -21,6 +21,7 @@ import {
   displayedSession,
   isLatestOperation,
   isLatestProjectCatalogRequest,
+  isPermissionRequestGone,
   isRuntimeRemovedState,
   nextOperationId,
   pendingCountAfterResponse,
@@ -222,6 +223,34 @@ test('interaction response patches win over an old pending summary until it catc
   assert.equal(reconcilePendingCount(0, 1), 0);
   assert.equal(reconcilePendingCount(0, 0), undefined);
   assert.equal(reconcilePendingCount(1, 0), undefined);
+});
+
+test('stale permission responses are treated as an already-resolved interaction', () => {
+  assert.equal(
+    isPermissionRequestGone(new Error('Error invoking remote method: permission request is not pending')),
+    true,
+  );
+  assert.equal(isPermissionRequestGone(new Error('bridge client not connected')), false);
+});
+
+test('permission resolution is the renderer queue terminal state', () => {
+  const source = useBridgeSource();
+  const resolutionBody = sliceBetweenMarkers(
+    source,
+    "if (event.type === 'permission_request_resolved') {",
+    "if (event.type === 'turn_ended' || event.type === 'session_ended') {",
+    'permission resolution handling',
+  );
+  assert.match(resolutionBody, /permissionQueue: state\.permissionQueue\.filter/);
+  assert.match(resolutionBody, /resolvedPermissionIds/);
+
+  const requestBody = sliceBetweenMarkers(
+    source,
+    'const offPermission = host.onPermission',
+    'const offComputerAccess = host.onComputerAccess',
+    'permission request ingestion',
+  );
+  assert.match(requestBody, /resolvedPermissionIds\.has/);
 });
 
 test('a display-only slash command releases the turn it pre-claimed', () => {

@@ -4,6 +4,20 @@ use super::*;
 use crate::streaming_loop::ExecutorPump;
 use protocol::ContentBlock;
 
+/// Drop runs on success, error, and cancellation of the driving future.
+struct MainLoopActivityGuard {
+    provider: Option<Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>>,
+    interactive: bool,
+}
+
+impl Drop for MainLoopActivityGuard {
+    fn drop(&mut self) {
+        if let Some(provider) = &self.provider {
+            provider.update_shell_session_activity(self.interactive, false, false);
+        }
+    }
+}
+
 /// Mutable state shared by the phases of one streaming turn.
 ///
 /// Keeping these counters together makes their session/turn lifetime explicit
@@ -19,10 +33,21 @@ struct StreamingTurnState {
     malformed_tool_use_retried: bool,
     thinking_only_nudged: bool,
     last_message_id: MessageId,
+    /// The turn's user-cancel token, so the stop-hook firings reached through
+    /// `&ConversationOrchestrator` (which does not own one) can still report
+    /// `parentAborted` on `tengu_goal_evaluated`.
+    user_cancel: Option<CancellationToken>,
 }
 
 impl StreamingTurnState {
-    fn new(orch: &ConversationOrchestrator, last_message_id: MessageId) -> Self {
+    fn new(
+        orch: &ConversationOrchestrator,
+        last_message_id: MessageId,
+        user_cancel: Option<CancellationToken>,
+    ) -> Self {
+        // claude-code `D = Date.now()` at the top of the query generator: the
+        // duration base for the analytics that fire from its `finally`.
+        *orch.compaction_runtime.query_started_at.lock().unwrap() = std::time::Instant::now();
         orch.compaction_runtime.turn_start_output_baseline.store(
             orch.compaction_runtime
                 .output_token_pool
@@ -39,6 +64,7 @@ impl StreamingTurnState {
             malformed_tool_use_retried: false,
             thinking_only_nudged: false,
             last_message_id,
+            user_cancel,
         }
     }
 }
@@ -53,6 +79,15 @@ enum StreamingIterationDisposition {
     Return(ConversationOutcome),
 }
 
+/// `p.abortController.signal.aborted` — whether the USER cancelled this turn.
+///
+/// Read at each stop-hook firing so `tengu_goal_evaluated` can report
+/// `parentAborted`, and so a goal evaluation that produced no verdict is
+/// classified `cancelled` rather than `absent`.
+fn token_aborted(token: &Option<CancellationToken>) -> bool {
+    token.as_ref().is_some_and(CancellationToken::is_cancelled)
+}
+
 struct StreamingTurnDriver<'a> {
     orch: &'a ConversationOrchestrator,
     prompt: &'a str,
@@ -60,6 +95,7 @@ struct StreamingTurnDriver<'a> {
     user_cancel: Option<CancellationToken>,
     message_id: Option<MessageId>,
     transient_rewake: bool,
+    in_human_turn: bool,
 }
 
 struct PreparedStreamingIteration {
@@ -178,7 +214,18 @@ impl StreamingTurnDriver<'_> {
         }))
     }
 
-    async fn collect_turn_reminders(orch: &ConversationOrchestrator) -> Vec<ConversationMessage> {
+    /// Collect this step's transient reminders, plus (separately) the durable
+    /// task-completion message.
+    ///
+    /// The second value is NOT a reminder: it has already been appended to
+    /// history and the JSONL, so it must be added to the outgoing snapshot
+    /// exactly once. Returning it in the reminder vector would double it on
+    /// every retry, because a retry rebuilds the request from history and
+    /// re-appends the reminders on top.
+    async fn collect_turn_reminders(
+        orch: &ConversationOrchestrator,
+        in_human_turn: bool,
+    ) -> (Vec<ConversationMessage>, Vec<ConversationMessage>) {
         let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
 
         // `/brief` (2.1.252): consume the one-shot model-facing reminder
@@ -211,8 +258,10 @@ impl StreamingTurnDriver<'_> {
         // LingXi twins must inject this reminder. Appended to THIS turn's
         // OUTGOING snapshot only (never `session.history` / JSONL) and BEFORE
         // the blocking-limit estimate below so its tokens are counted in the
-        // prompt size. See [`Self::plan_mode_reminder_message`].
-        if let Some(reminder) = orch.plan_mode_reminder_message().await {
+        // prompt size. See [`Self::plan_mode_turn_messages`].
+        turn_reminders.extend(orch.plan_mode_turn_messages().await);
+        // `$f("plan_mode_exit", …)` runs right after the plan-mode provider.
+        if let Some(reminder) = orch.plan_mode_exit_message().await {
             turn_reminders.push(reminder);
         }
 
@@ -339,11 +388,25 @@ impl StreamingTurnDriver<'_> {
         // T35: fold the terminal background tasks finished since the last
         // turn into THIS turn's OUTGOING snapshot only (never
         // `session.history` / JSONL), drained consume-once so each completion
-        // surfaces exactly one `<task-notification>`. `None` when no registry
-        // is wired / nothing finished. See
-        // [`Self::task_notification_reminder_message`].
-        if let Some(reminder) = orch.task_notification_reminder_message().await {
-            turn_reminders.push(reminder);
+        // surfaces exactly one `<task-notification>` — in its OWN enveloped
+        // message, matching the oracle's per-notification enqueue. Empty when
+        // no registry is wired / nothing finished. See
+        // [`Self::task_notification_reminder_messages`].
+        // A completion notification is a real conversation event, not a
+        // transient reminder (claude-code enqueues it and it becomes a durable
+        // user message). Persist it here, and add it to this call's snapshot
+        // below once that snapshot exists -- NOT to `turn_reminders`, which the
+        // retry path re-appends on top of a request rebuilt from history and
+        // would therefore send it twice.
+        let task_notifications = orch
+            .task_notification_reminder_messages_in_turn(in_human_turn)
+            .await;
+        for reminder in &task_notifications {
+            {
+                let mut session = orch.session.lock().await;
+                session.history.push(reminder.clone());
+            }
+            orch.persist_message_to_jsonl(reminder).await;
         }
 
         // REM-14 `memory_update` (streaming twin): one meta reminder per
@@ -413,7 +476,7 @@ impl StreamingTurnDriver<'_> {
         // ADVANCES the announced-set tracking, so compute it ONCE per model
         // step here and reuse this value on every retry/fallback re-snapshot
         // below (each of which rebuilds the SAME step's request).
-        turn_reminders
+        (turn_reminders, task_notifications)
     }
 
     async fn prepare_iteration(
@@ -421,6 +484,7 @@ impl StreamingTurnDriver<'_> {
         system_prompt: &Option<String>,
         user_cancel: &Option<CancellationToken>,
         loop_state: &mut StreamingTurnState,
+        in_human_turn: bool,
     ) -> Result<PrepareStreamingOutcome, OrchestratorError> {
         // P0.1 (streaming twin): arm the memory-selector prefetch CONCURRENTLY
         // with this turn (claude-code `wAo`). Fired here at turn start so the
@@ -500,7 +564,13 @@ impl StreamingTurnDriver<'_> {
         // would be silently lost for the rest of the session. Computed
         // ONCE, re-appended on every re-snapshot — the same discipline
         // `deferred_reminder` and `date_change_reminder` already follow.
-        let turn_reminders = Self::collect_turn_reminders(orch).await;
+        let (turn_reminders, task_notifications) =
+            Self::collect_turn_reminders(orch, in_human_turn).await;
+        // The durable completion messages go in first: they now live in
+        // history, so they belong after the last real entry and before the
+        // transient reminders. The snapshot was taken before they were
+        // appended.
+        snapshot.extend(task_notifications);
         snapshot.extend(turn_reminders.iter().cloned());
 
         let wire_tools = orch.build_wire_tools().await;
@@ -568,6 +638,7 @@ impl StreamingTurnDriver<'_> {
                     &mut loop_state.stop_hook_blocking_count,
                     loop_state.turn_count,
                     id,
+                    token_aborted(user_cancel),
                 )
                 .await;
             let cost = orch.snapshot_cost_real().await;
@@ -687,6 +758,7 @@ impl StreamingTurnDriver<'_> {
         let api_success_message_tokens = compaction::grouping::estimate_tokens_for_range(&snapshot);
         let did_fall_back_to_non_streaming = false;
 
+        orch.sync_thinking_signature_strip_flag_to_api().await;
         if let Some(scope) = cost_scope.as_ref() {
             scope.preflight().await.map_err(|error| {
                 OrchestratorError::Internal(format!("cost durability preflight failed: {error}"))
@@ -694,10 +766,9 @@ impl StreamingTurnDriver<'_> {
         }
         let mut cost_receipt = None;
         let output_observation = orch.capture_main_output().await?;
-
         // Either an open stream to pump, or a turn already RECOVERED from a
         // connect-phase prompt-too-long (#1, see the ContextOverflow arm).
-        let opened = match orch
+        let stream_result = orch
             .streaming_api
             .stream(
                 &model,
@@ -706,9 +777,12 @@ impl StreamingTurnDriver<'_> {
                 snapshot,
                 wire_tools.clone(),
             )
-            .await
-        {
-            Ok(s) => OpenedModelStream::Stream(super::output_accounting_impl::account_stream(s, output_observation)),
+            .await;
+        orch.persist_thinking_signature_strip_latch().await;
+        let opened = match stream_result {
+            Ok(s) => OpenedModelStream::Stream(
+                super::output_accounting_impl::account_stream(s, output_observation),
+            ),
             // #1 (main-loop parity): a connect-phase 413 / prompt-too-long
             // surfaces HERE as `LlmError::ContextOverflow` — the adapter's
             // `drive_stream` returns `Err` on connect status >= 400, so it
@@ -824,6 +898,7 @@ impl StreamingTurnDriver<'_> {
                                 &mut loop_state.stop_hook_blocking_count,
                                 loop_state.turn_count,
                                 id,
+                                token_aborted(user_cancel),
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
@@ -843,6 +918,7 @@ impl StreamingTurnDriver<'_> {
                                 &mut loop_state.stop_hook_blocking_count,
                                 loop_state.turn_count,
                                 id,
+                                token_aborted(user_cancel),
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
@@ -862,6 +938,7 @@ impl StreamingTurnDriver<'_> {
                                 &mut loop_state.stop_hook_blocking_count,
                                 loop_state.turn_count,
                                 id,
+                                token_aborted(user_cancel),
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
@@ -1243,7 +1320,7 @@ impl StreamingTurnDriver<'_> {
                                 })?;
                             }
                             let output_observation = orch.capture_main_output().await?;
-                            match orch
+                            let retry_stream = orch
                                 .streaming_api
                                 .stream(
                                     &re_model,
@@ -1252,8 +1329,9 @@ impl StreamingTurnDriver<'_> {
                                     re_snapshot,
                                     wire_tools.clone(),
                                 )
-                                .await
-                            {
+                                .await;
+                            orch.persist_thinking_signature_strip_latch().await;
+                            match retry_stream {
                                 Ok(s) => {
                                     cur_stream = super::output_accounting_impl::account_stream(s, output_observation);
                                     continue;
@@ -1674,6 +1752,9 @@ impl StreamingTurnDriver<'_> {
         // stream-json P1: signal the message boundary to the output sink so
         // `StreamJsonStream` can flush its accumulated assistant frame.
         orch.output
+            .emit_assistant_message_identity(&assistant_id)
+            .await;
+        orch.output
             .emit_message_boundary(pumped.stop_reason.as_deref(), request_id.as_deref())
             .await;
         let tool_use_parent_uuids = orch
@@ -1700,6 +1781,7 @@ impl StreamingTurnDriver<'_> {
                 error: Some("server_error"),
                 api_error_status: None,
                 inner_stop_reason: None,
+                truncated_after_output: true,
             };
             partial_finalize_notice_id = Some(
                 crate::turn_loop::surface_api_error_notice(orch, cause.incomplete_notice(), env)
@@ -1752,6 +1834,7 @@ impl StreamingTurnDriver<'_> {
             user_cancel,
             message_id,
             transient_rewake,
+            in_human_turn,
         } = self;
 
         // Startup Responses WebSocket prewarm is strictly opportunistic. A real
@@ -1811,8 +1894,11 @@ impl StreamingTurnDriver<'_> {
         }
 
         orch.begin_output_turn(user_msg.id()).await?;
-        let mut loop_state =
-            StreamingTurnState::new(orch, prior_message_id.unwrap_or_else(|| user_msg.id()));
+        let mut loop_state = StreamingTurnState::new(
+            orch,
+            prior_message_id.unwrap_or_else(|| user_msg.id()),
+            user_cancel.clone(),
+        );
         let final_message_id;
         loop {
             // MID-TURN DRAIN (claude-code query.ts ~1570-1580): drain BEFORE
@@ -1871,16 +1957,21 @@ impl StreamingTurnDriver<'_> {
                 break;
             }
 
-            let prepared =
-                match Self::prepare_iteration(orch, &system_prompt, &user_cancel, &mut loop_state)
-                    .await?
-                {
-                    PrepareStreamingOutcome::Ready(iteration) => iteration,
-                    PrepareStreamingOutcome::Complete(message_id) => {
-                        final_message_id = message_id;
-                        break;
-                    }
-                };
+            let prepared = match Self::prepare_iteration(
+                orch,
+                &system_prompt,
+                &user_cancel,
+                &mut loop_state,
+                in_human_turn,
+            )
+            .await?
+            {
+                PrepareStreamingOutcome::Ready(iteration) => iteration,
+                PrepareStreamingOutcome::Complete(message_id) => {
+                    final_message_id = message_id;
+                    break;
+                }
+            };
 
             let pumped = Self::pump_iteration(
                 orch,
@@ -2002,6 +2093,28 @@ impl StreamingTurnDriver<'_> {
             // stop_reason still rides on the persisted partial assistant line
             // (patched above) for resume fidelity.
             if partial_finalize.is_some() {
+                if crate::turn_loop::truncated_response_recovery_eligible(
+                    &orch.config.query_source,
+                    orch.prompt_is_interactive(),
+                ) && loop_state.recovery.max_output_tokens_recovery_count
+                    < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+                {
+                    let is_subagent = crate::turn_loop::truncated_response_recovery_is_subagent(
+                        &orch.config.query_source,
+                    );
+                    let nudge = if is_subagent {
+                        crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT
+                    } else {
+                        crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN
+                    };
+                    orch.inject_meta_user_message(nudge).await;
+                    loop_state.recovery.max_output_tokens_recovery_count = loop_state
+                        .recovery
+                        .max_output_tokens_recovery_count
+                        .saturating_add(1);
+                    loop_state.recovery.max_output_tokens_override = None;
+                    continue;
+                }
                 // A finalized partial is terminal before normal tool-result
                 // disposition. Do not leave an end marker from a completed
                 // result live in the session-scoped side table.
@@ -2313,16 +2426,14 @@ impl ConversationOrchestrator {
     /// - [`orch_events::CONVERSATION_FAILED`] on error
     pub async fn run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
+        let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
         let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
-            platform_api::session_flags::scope_non_interactive_session(
-                !self.prompt_is_interactive(),
-                self.try_run_turn(prompt),
-            )
-            .await
+            self.scope_api_session(!self.prompt_is_interactive(), self.try_run_turn(prompt))
+                .await
         })
         .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
@@ -2360,6 +2471,14 @@ impl ConversationOrchestrator {
         self.discard_stale_prefetches().await;
 
         // 1. Append the user prompt to session history.
+        // 2.1.266 `vSt`: a user message re-opens the idle-check-in budget that
+        // `RUe`'s cap closed ("idle check-ins paused until your next message").
+        // Only the deferral's idle counter is reset; the stretch itself lives on.
+        self.lifecycle_runtime
+            .goal_checkin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_idle_checkins();
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
         {
             let mut s = self.session.lock().await;
@@ -2396,6 +2515,9 @@ impl ConversationOrchestrator {
         // cumulative pool as this turn begins, so a workflow launched this turn
         // reads `budget.spent()` = `pool - baseline` (output spent THIS turn).
         self.begin_output_turn(MessageId::new()).await?;
+        // claude-code `D = Date.now()` at the top of the query generator: the
+        // duration base for the analytics that fire from its `finally`.
+        *self.compaction_runtime.query_started_at.lock().unwrap() = std::time::Instant::now();
         self.compaction_runtime.turn_start_output_baseline.store(
             self.compaction_runtime
                 .output_token_pool
@@ -2442,8 +2564,14 @@ impl ConversationOrchestrator {
                     // (order: recovery → stop-hooks → token-budget, TS
                     // `query.ts:1262-1308`).
                     if tool_requested_end {
-                        self.fire_tool_result_end_stop_hooks(&stop_reason, stop_hook_active)
-                            .await;
+                        self.fire_tool_result_end_stop_hooks(
+                            &stop_reason,
+                            stop_hook_active,
+                            // Non-cancelable path: this turn has no user-cancel
+                            // token, so `parentAborted` can never be true here.
+                            false,
+                        )
+                        .await;
                     } else {
                         match self
                             .handle_stop_at_end(
@@ -2452,6 +2580,9 @@ impl ConversationOrchestrator {
                                 &mut stop_hook_blocking_count,
                                 turn_count,
                                 id,
+                                // Non-cancelable path: this turn has no user-cancel
+                                // token, so `parentAborted` can never be true here.
+                                false,
                             )
                             .await
                         {
@@ -2521,6 +2652,7 @@ impl ConversationOrchestrator {
         prompt: &str,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
+        let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
@@ -2528,9 +2660,9 @@ impl ConversationOrchestrator {
         // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
         // user-interrupt token → `None` (behaviour byte-identical to before).
         let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
-            platform_api::session_flags::scope_non_interactive_session(
+            self.scope_api_session(
                 !self.prompt_is_interactive(),
-                Box::pin(self.try_run_turn_streaming(prompt, Vec::new(), None, None, false)),
+                Box::pin(self.try_run_turn_streaming(prompt, Vec::new(), None, None, false, true)),
             )
             .await
         })
@@ -2565,18 +2697,80 @@ impl ConversationOrchestrator {
     /// user boundary while the transcript remains faithful.
     pub async fn run_async_hook_rewake(&self) -> Result<TurnOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
+        self.run_meta_rewake_under_gate().await
+    }
+
+    /// Host-owned idle turn: callers install their normal cancellation and
+    /// permission lifecycle before entering here. Recheck under the turn gate.
+    pub async fn run_task_notification_rewake(
+        &self,
+        registry: &dyn platform_api::task_registry::TaskRegistryHandle,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        let _turn_guard = self.turn_gate.lock().await;
+        if cancel.is_cancelled() || !registry.has_pending_task_notifications_for(None).await {
+            // The host already reserved its UI/permission lifecycle. Close it
+            // even when a preceding turn consumed this completion at the gate.
+            let cost = self.snapshot_cost_real().await;
+            self.output.emit_end_turn("end_turn", &cost).await;
+            return Ok(if cancel.is_cancelled() {
+                TurnOutcome::Cancelled
+            } else {
+                TurnOutcome::EndTurn
+            });
+        }
+        self.run_meta_rewake_under_gate_with_cancel(Some(cancel))
+            .await
+    }
+
+    fn main_loop_activity(&self, user_interaction: bool) -> MainLoopActivityGuard {
+        let provider = self.prompt_runtime.task_notifications.clone();
+        let interactive = self.prompt_is_interactive();
+        if let Some(provider) = &provider {
+            provider.update_shell_session_activity(interactive, true, user_interaction);
+        }
+        MainLoopActivityGuard {
+            provider,
+            interactive,
+        }
+    }
+
+    async fn run_meta_rewake_under_gate(&self) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_meta_rewake_under_gate_with_cancel(None).await
+    }
+
+    async fn run_meta_rewake_under_gate_with_cancel(
+        &self,
+        cancel: Option<CancellationToken>,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        let _activity_guard = self.main_loop_activity(false);
+        let cancel_probe = cancel.clone();
         self.output.emit_turn_started().await;
-        let result = platform_api::session_flags::scope_non_interactive_session(
-            !self.prompt_is_interactive(),
-            Box::pin(self.try_run_turn_streaming("", Vec::new(), None, None, true)),
-        )
-        .await;
+        let result = self
+            .scope_api_session(
+                !self.prompt_is_interactive(),
+                Box::pin(self.try_run_turn_streaming("", Vec::new(), cancel, None, true, false)),
+            )
+            .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         match result {
             Ok(
                 ConversationOutcome::EndTurn { .. } | ConversationOutcome::StopHookPrevented { .. },
-            ) => Ok(TurnOutcome::EndTurn),
-            Err(OrchestratorError::MaxTurnsReached { .. }) => Ok(TurnOutcome::MaxTurns),
+            ) => Ok(
+                if cancel_probe
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    TurnOutcome::Cancelled
+                } else {
+                    TurnOutcome::EndTurn
+                },
+            ),
+            Err(OrchestratorError::MaxTurnsReached { .. }) => {
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn("max_tokens", &cost).await;
+                Ok(TurnOutcome::MaxTurns)
+            },
             Err(error) => {
                 let error = self.enrich_api_error(error);
                 self.output
@@ -2812,6 +3006,7 @@ impl ConversationOrchestrator {
                 &mut loop_state.stop_hook_blocking_count,
                 loop_state.turn_count,
                 assistant_id,
+                token_aborted(&loop_state.user_cancel),
             )
             .await
         {
@@ -2858,8 +3053,12 @@ impl ConversationOrchestrator {
         loop_state: &mut StreamingTurnState,
         assistant_id: MessageId,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
-        self.fire_tool_result_end_stop_hooks("end_turn", loop_state.stop_hook_active)
-            .await;
+        self.fire_tool_result_end_stop_hooks(
+            "end_turn",
+            loop_state.stop_hook_active,
+            token_aborted(&loop_state.user_cancel),
+        )
+        .await;
         let cost = self.snapshot_cost_real().await;
         self.output.emit_end_turn("end_turn", &cost).await;
         Ok(StreamingIterationDisposition::ForcedComplete(assistant_id))
@@ -2883,6 +3082,18 @@ impl ConversationOrchestrator {
             let s = self.session.lock().await;
             crate::turn_loop::prior_assistant_used_structured_output(&s.history)
         };
+
+        // `/loop` fold span (streaming twin of the count in `turn_loop`): this
+        // response's tool calls, and the messages it adds. Counted here because
+        // this is the one point every streamed response passes through.
+        self.turn_span
+            .note_assistant_response(pumped.tool_uses.len());
+
+        // The oracle guard checks the immediately preceding transition,
+        // rather than whether any earlier attempt in this turn was malformed.
+        if pumped.stop_reason.as_deref() != Some("tool_use") || !pumped.tool_uses.is_empty() {
+            loop_state.malformed_tool_use_retried = false;
+        }
 
         // 6. Decide loop disposition.
         match pumped.stop_reason.as_deref() {
@@ -2970,6 +3181,24 @@ impl ConversationOrchestrator {
                         },
                     ));
                 }
+                // LONE `ScheduleWakeup` ENDS THE TURN (streaming twin). Same
+                // arm, same order, and the same shared flag as `turn_loop`'s —
+                // the streaming loop is the one the desktop bridge actually
+                // takes, which is where `/loop` runs at all.
+                if crate::turn_loop::take_lone_wakeup_turn_end(
+                    self,
+                    pumped
+                        .tool_uses
+                        .iter()
+                        .map(|tool_use| tool_use.name.as_str()),
+                )
+                .await
+                {
+                    crate::turn_loop::emit_loop_dynamic_wakeup_ends_turn_telemetry(self).await;
+                    let cost = self.snapshot_cost_real().await;
+                    self.output.emit_end_turn("end_turn", &cost).await;
+                    return Ok(StreamingIterationDisposition::Complete(assistant_id));
+                }
                 return Ok(StreamingIterationDisposition::Continue);
             }
             Some("end_turn") => {
@@ -2989,6 +3218,7 @@ impl ConversationOrchestrator {
                     && !pumped_has_visible_text(&pumped.assistant_blocks)
                     && !prior_structured_output
                 {
+                    self.discard_retry_attempt(assistant_id).await;
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue);
@@ -3007,9 +3237,8 @@ impl ConversationOrchestrator {
             // loop. On the SECOND (`malformed_tool_use_retried` already set),
             // surface the non-meta terminal message and end the turn. The
             // `!isApiErrorMessage` guard holds (API errors are caught
-            // upstream as `Err(..)`). Default build keeps the clean-retry
-            // feature flag (`PZa()`) OFF, so we do NOT tombstone the leaked
-            // assistant blocks and use the non-clean-retry nudge string.
+            // upstream as `Err(..)`). cc 2.1.263 unconditionally removes
+            // the malformed attempt and injects the clean-retry nudge (`ZZe`).
             Some("tool_use") => {
                 if loop_state.malformed_tool_use_retried {
                     // Second failure → terminal NON-meta message, complete.
@@ -3031,11 +3260,16 @@ impl ConversationOrchestrator {
                         let mut s = self.session.lock().await;
                         s.history.push(failed_msg.clone());
                     }
-                    self.persist_message_to_jsonl(&failed_msg).await;
+                    self.persist_api_error_message_to_jsonl(
+                        &failed_msg,
+                        ApiErrorEnvelope::default(),
+                    )
+                    .await;
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("end_turn", &cost).await;
                     return Ok(StreamingIterationDisposition::Complete(failed_msg.id()));
                 }
+                self.discard_retry_attempt(assistant_id).await;
                 self.inject_meta_user_message(MALFORMED_TOOL_USE_RETRY_NUDGE)
                     .await;
                 // TS resets the recovery counters on the retry transition so
@@ -3083,6 +3317,7 @@ impl ConversationOrchestrator {
                     && !pumped_has_visible_text(&pumped.assistant_blocks)
                     && !prior_structured_output =>
             {
+                self.discard_retry_attempt(assistant_id).await;
                 self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                 loop_state.thinking_only_nudged = true;
                 return Ok(StreamingIterationDisposition::Continue);
@@ -3134,7 +3369,20 @@ impl ConversationOrchestrator {
                         stop_reason: Some(other.to_string()),
                     };
                     self.session.lock().await.history.push(err_msg.clone());
-                    self.persist_message_to_jsonl(&err_msg).await;
+                    let envelope = match other {
+                        "max_tokens" | "model_context_window_exceeded" => ApiErrorEnvelope {
+                            error: Some("max_output_tokens"),
+                            ..ApiErrorEnvelope::default()
+                        },
+                        "refusal" => ApiErrorEnvelope {
+                            error: Some("invalid_request"),
+                            inner_stop_reason: Some("refusal"),
+                            ..ApiErrorEnvelope::default()
+                        },
+                        _ => ApiErrorEnvelope::default(),
+                    };
+                    self.persist_api_error_message_to_jsonl(&err_msg, envelope)
+                        .await;
                     self.output.emit_text(&text).await;
                     Some(err_msg.id())
                 } else {
@@ -3158,6 +3406,7 @@ impl ConversationOrchestrator {
                     && !pumped_has_visible_text(&pumped.assistant_blocks)
                     && !prior_structured_output
                 {
+                    self.discard_retry_attempt(assistant_id).await;
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue);
@@ -3179,6 +3428,7 @@ impl ConversationOrchestrator {
         user_cancel: Option<CancellationToken>,
         message_id: Option<MessageId>,
         transient_rewake: bool,
+        in_human_turn: bool,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         StreamingTurnDriver {
             orch: self,
@@ -3187,6 +3437,7 @@ impl ConversationOrchestrator {
             user_cancel,
             message_id,
             transient_rewake,
+            in_human_turn,
         }
         .run()
         .await
@@ -3211,13 +3462,14 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
+        let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
         let result =
             telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
-                platform_api::session_flags::scope_non_interactive_session(
+                self.scope_api_session(
                     !self.prompt_is_interactive(),
                     self.try_run_turn_cancelable(prompt, cancel),
                 )
@@ -3244,6 +3496,14 @@ impl ConversationOrchestrator {
         self.discard_stale_prefetches().await;
 
         // 1. Append the user prompt to session history.
+        // 2.1.266 `vSt`: a user message re-opens the idle-check-in budget that
+        // `RUe`'s cap closed ("idle check-ins paused until your next message").
+        // Only the deferral's idle counter is reset; the stretch itself lives on.
+        self.lifecycle_runtime
+            .goal_checkin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_idle_checkins();
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
         {
             let mut s = self.session.lock().await;
@@ -3280,6 +3540,9 @@ impl ConversationOrchestrator {
         // the cumulative pool as this turn begins, so a workflow launched this
         // turn reads `budget.spent()` = output spent THIS turn.
         self.begin_output_turn(MessageId::new()).await?;
+        // claude-code `D = Date.now()` at the top of the query generator: the
+        // duration base for the analytics that fire from its `finally`.
+        *self.compaction_runtime.query_started_at.lock().unwrap() = std::time::Instant::now();
         self.compaction_runtime.turn_start_output_baseline.store(
             self.compaction_runtime
                 .output_token_pool
@@ -3353,8 +3616,12 @@ impl ConversationOrchestrator {
                     // working) loops. `handle_stop_at_end` already emits the
                     // end-turn on Terminate, so we don't re-emit there.
                     if tool_requested_end {
-                        self.fire_tool_result_end_stop_hooks(&stop_reason, stop_hook_active)
-                            .await;
+                        self.fire_tool_result_end_stop_hooks(
+                            &stop_reason,
+                            stop_hook_active,
+                            cancel.is_cancelled(),
+                        )
+                        .await;
                     } else {
                         match self
                             .handle_stop_at_end(
@@ -3363,6 +3630,7 @@ impl ConversationOrchestrator {
                                 &mut stop_hook_blocking_count,
                                 turn_count,
                                 id,
+                                cancel.is_cancelled(),
                             )
                             .await
                         {
@@ -3503,7 +3771,21 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
         message_id: Option<MessageId>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_turn_streaming_with_origin(prompt, images, cancel, message_id, true)
+            .await
+    }
+
+    /// Queue adapters preserve whether a prompt batch contains genuine user input.
+    pub async fn run_turn_streaming_with_origin(
+        &self,
+        prompt: &str,
+        images: Vec<protocol::ImageSource>,
+        cancel: CancellationToken,
+        message_id: Option<MessageId>,
+        in_human_turn: bool,
+    ) -> Result<TurnOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
+        let _activity_guard = self.main_loop_activity(in_human_turn);
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
@@ -3535,7 +3817,7 @@ impl ConversationOrchestrator {
         let r = telemetry::otel::with_turn_span(
             "lingxi.orchestrator.turn.streaming.cancelable",
             async {
-                platform_api::session_flags::scope_non_interactive_session(
+                self.scope_api_session(
                     !self.prompt_is_interactive(),
                     Box::pin(self.try_run_turn_streaming(
                         prompt,
@@ -3543,6 +3825,7 @@ impl ConversationOrchestrator {
                         Some(cancel.clone()),
                         message_id,
                         false,
+                        in_human_turn,
                     )),
                 )
                 .await

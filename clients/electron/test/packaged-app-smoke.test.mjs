@@ -6,6 +6,7 @@ import { afterEach, test } from 'node:test';
 
 import {
   APP_USER_DATA_SUBPATH,
+  assertCustomProviderTurn,
   createPackagedSettings,
   isExpectedBootstrapPromptPlaceholder,
   isSafeProviderCredentialSnapshot,
@@ -16,6 +17,16 @@ import {
 import { workspaceFingerprint as hostWorkspaceFingerprint } from '../src/main/host-utils.ts';
 
 const temporaryDirectories = [];
+
+test('custom provider smoke requires a successful answer, not merely any terminal event', () => {
+  const answer = { type: 'text_delta', text: 'Custom provider verified.' };
+  const ended = { type: 'turn_ended', outcome: { type: 'end_turn' } };
+  assert.doesNotThrow(() => assertCustomProviderTurn([answer, ended]));
+  assert.throws(() => assertCustomProviderTurn([ended]));
+  assert.throws(() => assertCustomProviderTurn([answer, { ...ended, outcome: { type: 'cancelled' } }]));
+  assert.throws(() => assertCustomProviderTurn([answer, ended, { type: 'error', message: 'request failed' }]));
+  assert.throws(() => assertCustomProviderTurn([answer, ended, { type: 'system_notice', is_error: true }]));
+});
 
 function temporaryDirectory() {
   const path = mkdtempSync(join(tmpdir(), 'lingxi-packaged-smoke-test-'));

@@ -48,6 +48,38 @@ import SwiftUI
             return root.path
         }
 
+        func testRetractionUsesExactIdentityAndPreservesLaterResponseAndNotice() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 901, sessionId: "retraction")
+            source.applyForTesting(.turnStarted(turnId: 901))
+            source.applyForTesting(.thinkingDelta(thinking: "failed reasoning", signature: nil))
+            source.applyForTesting(.textDelta(text: "failed"))
+            source.applyForTesting(.messageIdentity(messageId: "failed-id"))
+            source.applyForTesting(.messageComplete(stopReason: "max_tokens", message: MessageDto(
+                role: "assistant", blocks: [.text(text: "failed")]
+            )))
+            source.applyForTesting(.systemNotice(message: "unrelated notice", isError: false))
+            source.applyForTesting(.thinkingDelta(thinking: "retained reasoning", signature: nil))
+            source.applyForTesting(.textDelta(text: "retained"))
+            source.applyForTesting(.messageIdentity(messageId: "retained-id"))
+            source.applyForTesting(.messageComplete(stopReason: "end_turn", message: MessageDto(
+                role: "assistant", blocks: [.text(text: "retained")]
+            )))
+            source.applyForTesting(.messageRetracted(messageId: "unknown"))
+            XCTAssertTrue(source.model.messages.contains { $0.text == "failed" })
+            source.applyForTesting(.messageRetracted(messageId: "failed-id"))
+            XCTAssertFalse(source.model.messages.contains { $0.text == "failed" })
+            XCTAssertTrue(source.model.messages.contains { $0.text == "retained" })
+            let runs = source.model.items.compactMap { item -> ConversationExecutionRun? in
+                if case let .run(run) = item { return run }
+                return nil
+            }
+            XCTAssertEqual(runs.map(\.reasoning).joined(), "retained reasoning")
+            XCTAssertTrue(runs.flatMap(\.notices).contains { $0.text == "unrelated notice" })
+            source.applyForTesting(.messageRetracted(messageId: "failed-id"))
+            XCTAssertTrue(source.model.messages.contains { $0.text == "retained" })
+        }
+
         func testBypassPermissionsIsSelectableBeforeRiskConfirmation() {
             let source = makeSource()
             let bypass = source.model.permissionOptions.first { $0.id == "bypassPermissions" }

@@ -251,15 +251,20 @@ mod session_end_batch_deadline_tests {
     ///   is a ceiling, not a forced wait).
     #[tokio::test]
     async fn batch_deadline_cuts_off_slow_hook_but_not_fast_hook() {
-        let prev = std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok();
+        // The deadline is set PER EXECUTOR rather than through
+        // `SESSION_END_HOOKS_TIMEOUT_ENV`. That variable is a process global and
+        // Rust runs a binary's tests on parallel threads in one process, so the
+        // old `set_var` windows made every neighbouring SessionEnd dispatch run
+        // under this test's deadline — a 50ms ceiling briefly imposed on the
+        // whole binary.
 
         // --- Half 1: tiny deadline (50ms), hook sleeps 5s → cut off. ---
-        std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, "50");
         let slow_ran = Arc::new(AtomicBool::new(false));
         let mut registry = HookRegistry::new();
         registry.register(session_end_builtin_hook("slow"));
         let reg = Arc::new(RwLock::new(registry));
-        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
+            .with_session_end_timeout_ms("50");
         exec.register_builtin(Arc::new(SleepingHandler {
             id: "slow".into(),
             delay: Duration::from_secs(5),
@@ -272,12 +277,12 @@ mod session_end_batch_deadline_tests {
         let elapsed = start.elapsed();
 
         // --- Half 2: generous deadline (5000ms), hook sleeps 10ms → completes. ---
-        std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, "5000");
         let fast_ran = Arc::new(AtomicBool::new(false));
         let mut registry = HookRegistry::new();
         registry.register(session_end_builtin_hook("fast"));
         let reg = Arc::new(RwLock::new(registry));
-        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
+            .with_session_end_timeout_ms("5000");
         exec.register_builtin(Arc::new(SleepingHandler {
             id: "fast".into(),
             delay: Duration::from_millis(10),
@@ -287,16 +292,16 @@ mod session_end_batch_deadline_tests {
             .execute_session_end(session_end_event(), HookContext::default())
             .await;
 
-        // Restore env before asserting so a panic doesn't leak it.
-        match prev {
-            Some(v) => std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, v),
-            None => std::env::remove_var(SESSION_END_HOOKS_TIMEOUT_ENV),
-        }
-
-        // Half 1 assertions: cut off well before the 5s sleep.
+        // Half 1 assertions: cut off at the CONFIGURED 50ms, not merely somewhere
+        // before the 5s sleep. The default deadline is the 1500ms floor
+        // (`SESSION_END_HOOK_TIMEOUT_FLOOR_MS`, and this fixture declares no
+        // per-hook timeout), so a bound of 2s would pass whether or not the 50ms
+        // was honoured at all — it did, which is how the override could have
+        // silently stopped being read.
         assert!(
-            elapsed < Duration::from_secs(2),
-            "batch deadline must abort fast, took {elapsed:?}"
+            elapsed < Duration::from_millis(500),
+            "the configured 50ms deadline must be the one that applies (the default \
+             floor is {SESSION_END_HOOK_TIMEOUT_FLOOR_MS}ms), took {elapsed:?}"
         );
         assert!(
             !slow_ran.load(Ordering::SeqCst),
@@ -645,6 +650,107 @@ mod command_arm_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
 
         assert_eq!(agg.decision, Some(HookDecision::Approve));
+    }
+
+    /// PARITY 2.1.263 `H_n` — under `CLAUDE_CODE_EVAL_CONFINED=true` a hook's
+    /// ALLOW is dropped before it reaches the aggregate: a confined eval run
+    /// takes permission grants only from its command line. Block and ask are
+    /// untouched, which is the point of running hooks in a confined harness at
+    /// all.
+    /// The confined fold, exercised WITHOUT touching the process environment.
+    ///
+    /// This used to `set_var("CLAUDE_CODE_EVAL_CONFINED", …)` around each arm.
+    /// Rust runs a binary's tests on parallel threads in ONE process, so during
+    /// those windows every other test that built a hook decision was silently
+    /// confined too — and several of them assert `Approve` / `Allow`. The flag
+    /// is now per-executor, so the arms below are hermetic.
+    #[tokio::test]
+    async fn confined_session_drops_a_hook_permission_allow() {
+        let allow_json =
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
+
+        // Baseline: unconfined, the allow lands.
+        let exec =
+            executor_with(MockRunner::ok(output(allow_json, "", 0))).with_eval_confined(false);
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(
+            agg.decision,
+            Some(HookDecision::Approve),
+            "unconfined, a hook allow must still approve"
+        );
+
+        // Confined: the same output yields no decision at all.
+        let exec =
+            executor_with(MockRunner::ok(output(allow_json, "", 0))).with_eval_confined(true);
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(
+            agg.decision, None,
+            "a confined session must not take an allow from a hook"
+        );
+
+        // …but a BLOCK still binds.
+        let exec = executor_with(MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"nope"}}"#,
+            "",
+            0,
+        )))
+        .with_eval_confined(true);
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(
+            agg.decision,
+            Some(HookDecision::Block),
+            "a confined session must still honour a hook block"
+        );
+    }
+
+    /// A neighbour that must stay green while the confined test runs beside it.
+    ///
+    /// Before the flag was per-executor this could not exist honestly: an
+    /// executor built during the other test's `set_var` window dropped its
+    /// allow. Its value is as a canary — if the gate ever goes back to reading
+    /// the environment, this is what starts flaking.
+    #[tokio::test]
+    async fn a_default_executor_is_not_confined_while_a_confined_one_runs() {
+        let allow_json =
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
+        let confined =
+            executor_with(MockRunner::ok(output(allow_json, "", 0))).with_eval_confined(true);
+        let plain = executor_with(MockRunner::ok(output(allow_json, "", 0)));
+
+        let (confined_agg, plain_agg) = tokio::join!(
+            confined.execute(pre_event(), HookContext::default()),
+            plain.execute(pre_event(), HookContext::default()),
+        );
+
+        assert_eq!(
+            confined_agg.decision, None,
+            "the confined executor drops it"
+        );
+        assert_eq!(
+            plain_agg.decision,
+            Some(HookDecision::Approve),
+            "a concurrent default executor keeps its allow"
+        );
+    }
+
+    /// The binary compares against the literal `true`; the usual truthy
+    /// spellings do NOT arm it.
+    ///
+    /// Pinned against the pure comparison rather than the process environment:
+    /// a `set_var` here would be visible to every other test running in
+    /// parallel in this same binary, several of which assert that a hook allow
+    /// survives.
+    #[test]
+    fn eval_confined_matches_only_the_literal_true() {
+        use platform_api::env::is_eval_confined_value;
+        assert!(!is_eval_confined_value(None));
+        for spelling in ["1", "yes", "on", "TRUE", ""] {
+            assert!(
+                !is_eval_confined_value(Some(spelling)),
+                "{spelling:?} must not arm the confined gate"
+            );
+        }
+        assert!(is_eval_confined_value(Some("true")));
     }
 
     #[tokio::test]
@@ -2317,6 +2423,7 @@ mod command_arm_tests {
         use crate::hook_payload::{HookBackgroundTask, HookSessionCron};
         let ctx = HookContext {
             background_tasks: Some(vec![HookBackgroundTask {
+                is_idle: false,
                 id: "b1".into(),
                 r#type: "shell".into(),
                 status: "running".into(),
@@ -4463,8 +4570,8 @@ mod http_agent_dispatch_tests {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-                        usage_complete: true,
-}))),
+                usage_complete: true,
+            }))),
         });
         let mut registry = HookRegistry::new();
         registry.register(agent_hook());
@@ -4629,6 +4736,65 @@ mod prompt_dispatch_tests {
             async_timeout: None,
             rewake_message: None,
         }
+    }
+
+    #[tokio::test]
+    async fn parent_subagent_stop_consumes_only_matching_child_live_history() {
+        let runner = Arc::new(RecordingRunner {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(Ok(r#"{"ok":true,"reason":"child complete"}"#.into()))),
+        });
+        let mut registry = HookRegistry::new();
+        let mut hook = prompt_hook();
+        hook.events = vec![HookEventType::SubagentStop];
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_prompt_runner(runner.clone());
+        let session = protocol::SessionId::new();
+        let child = protocol::AgentId::new();
+        let other = protocol::AgentId::new();
+        let snapshot = |text: &str| crate::PromptHookTranscript {
+            messages: vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                text.into(),
+            )],
+            last_usage_tokens: 321,
+            ..Default::default()
+        };
+        let child_snapshot = snapshot("child-only unpersisted evidence");
+        exec.publish_agent_prompt_transcript(session, child, child_snapshot.clone());
+        exec.publish_agent_prompt_transcript(session, other, snapshot("other child"));
+        exec.execute_excluding_agent(
+            HookEvent::SubagentStop {
+                agent_id: child,
+                status: "completed".into(),
+                agent_type: "worker".into(),
+            },
+            HookContext {
+                session_id: session,
+                prompt_transcript: Some(snapshot("parent must not leak")),
+                ..Default::default()
+            },
+            child,
+        )
+        .await;
+        let calls = runner.recorded.lock().unwrap();
+        assert_eq!(
+            calls[0].transcript.as_ref().unwrap().messages,
+            child_snapshot.messages
+        );
+        assert_eq!(calls[0].transcript.as_ref().unwrap().last_usage_tokens, 321);
+        drop(calls);
+        assert!(exec.take_agent_prompt_transcript(session, child).is_none());
+        assert!(exec
+            .take_agent_prompt_transcript(protocol::SessionId::new(), other)
+            .is_none());
+        exec.clear_session_hooks(session).await;
+        assert!(exec.take_agent_prompt_transcript(session, other).is_none());
     }
 
     #[tokio::test]
@@ -5063,4 +5229,33 @@ mod sh01_classifier_context_tests {
         assert_eq!(PairedRewrite::Suppressed.as_str(), "suppressed");
         assert_eq!(PairedRewrite::None.as_str(), "none");
     }
+}
+
+#[test]
+fn teammate_idle_uses_bare_session_uuid_and_omits_tool_context_only_fields() {
+    let ctx = HookContext {
+        session_id: protocol::SessionId::nil(),
+        transcript_path: "/workspace/session.jsonl".into(),
+        cwd: "/workspace".into(),
+        permission_mode: Some("plan".into()),
+        agent_id: Some(protocol::AgentId::new()),
+        effort: Some(crate::hook_payload::EffortLevel {
+            level: "high".into(),
+        }),
+        ..Default::default()
+    };
+    let (_, body) = build_envelope_body(
+        &HookEvent::TeammateIdle {
+            teammate_name: "scout".into(),
+            team_name: "session-team".into(),
+        },
+        &ctx,
+    )
+    .unwrap();
+    // Executed 2.1.263 Sa + E_n, as documented by the independent harness
+    // fixture: E_n has no fourth Sa argument even when its caller has a ctx.
+    assert_eq!(
+        body,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000000","transcript_path":"/workspace/session.jsonl","cwd":"/workspace","permission_mode":"plan","hook_event_name":"TeammateIdle","teammate_name":"scout","team_name":"session-team"}"#
+    );
 }

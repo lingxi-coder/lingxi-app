@@ -22,6 +22,7 @@ fn orch() -> ConversationOrchestrator {
 
 fn task(id: &str, kind: &str, agent_type: Option<&str>) -> hooks::HookBackgroundTask {
     hooks::HookBackgroundTask {
+        is_idle: false,
         id: id.into(),
         r#type: kind.into(),
         status: "running".into(),
@@ -42,6 +43,7 @@ async fn set_goal(orch: &ConversationOrchestrator, condition: &str) {
         last_reason: None,
         iterations: 0,
         tokens_at_start: 0,
+        origin: lingxi_core::session::GoalOrigin::User,
     });
 }
 
@@ -204,7 +206,11 @@ async fn deferral_arms_the_idle_timer_and_clear_cancels_it() {
         .is_none());
 }
 
-#[tokio::test]
+/// 2.1.266 `HZ` floors the idle re-arm at `qmt` (60 s), so this test can no
+/// longer observe the loop by waiting in real time — it runs on the paused
+/// clock, which auto-advances to each sleep's deadline while the runtime is
+/// idle.
+#[tokio::test(start_paused = true)]
 async fn idle_loop_exit_allows_a_new_deferral_stretch_to_rearm() {
     let mut orch = orch().with_stop_hook_snapshot(Arc::new(EmptyGoalStopSnapshot));
     set_goal(&orch, "ship it").await;
@@ -222,7 +228,8 @@ async fn idle_loop_exit_allows_a_new_deferral_stretch_to_rearm() {
         .goal_checkin_idle_generation
         .load(Ordering::SeqCst);
     orch.sync_goal_checkin_idle_task().await;
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    // Virtual seconds: the loop's first sleep is a full 60 s re-arm floor.
+    tokio::time::timeout(std::time::Duration::from_secs(600), async {
         while orch
             .lifecycle_runtime
             .goal_checkin_idle_running
@@ -273,4 +280,15 @@ async fn idle_loop_exit_allows_a_new_deferral_stretch_to_rearm() {
             > second_generation,
         "a new stretch should arm a fresh idle loop"
     );
+}
+
+#[tokio::test]
+async fn an_idle_teammate_does_not_defer_but_a_working_teammate_does() {
+    let orch = orch();
+    set_goal(&orch, "ship it").await;
+    let mut teammate = task("t1", "teammate", None);
+    teammate.is_idle = true;
+    assert!(!orch.goal_checkin_pass(&[teammate.clone()]).await);
+    teammate.is_idle = false;
+    assert!(orch.goal_checkin_pass(&[teammate]).await);
 }

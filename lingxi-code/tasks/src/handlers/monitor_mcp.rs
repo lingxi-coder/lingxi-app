@@ -1,13 +1,34 @@
 //! `MonitorMcp` task handler — follows an MCP server's resource catalog and
 //! emits a spool line on every detected change.
 //!
-//! # Why polling (not push)
+//! # Relationship to claude-code's `monitor_mcp` (MON-12)
 //!
-//! claude-code's MCP monitor is purely *notification-driven*: inside the
-//! `useManageMCPConnections` hook it registers a
-//! `ResourceListChangedNotificationSchema` handler on each connected client
-//! and re-fetches the resource list whenever the server pushes a
-//! `resources/list_changed` notification (no polling at all).
+//! Read this before treating anything here as parity work: the two are NOT
+//! the same thing, and an earlier version of this header conflated them.
+//!
+//! 2.1.263 has a `monitor_mcp` TASK TYPE — prefix `m` in the id table
+//! (`src_160932144.js` @1343), labelled `"monitor"`
+//! (`src_160988549.js` @2022918), counted as live work by the monitor
+//! predicates (`r2t`, `JLe`), and projected to hooks as
+//! `{server, tool}` (`src_160988549.js` @5136526, the same pair `mcp_task`
+//! carries). What it does NOT have is a producer: nothing in 2.1.263 creates
+//! one, and there is no kill module for it. The type is dormant there.
+//!
+//! It is dormant HERE too — no call site spawns a `MonitorMcp` task; this
+//! handler is registered and never invoked in production.
+//!
+//! The notification-driven refresh the old header cited is real but belongs to
+//! MCP CONNECTION management, not to this task type: `onMcpResourceListChanged`
+//! (`src_180597926.js` @1451792) re-fetches a server's resources, templates and
+//! commands when it pushes `notifications/resources/list_changed`. It creates
+//! no task and writes no spool.
+//!
+//! So the resource-catalog watcher below is a LingXi shape with no oracle twin.
+//! It is kept — a dormant handler costs nothing and the wiring is the hard part
+//! — but its behaviour is not evidence about claude-code, and the oracle's
+//! `{server, tool}` projection is what a real producer would have to fill.
+//!
+//! # Why the design is push-with-poll-fallback
 //!
 //! The registry/client expose a per-connection notification stream. This
 //! handler performs one initial reconciliation, then waits for
@@ -30,9 +51,10 @@ use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 
-/// Default poll cadence. claude-code is event-driven (no interval), so any
-/// sane default is parity-neutral; 5s keeps catalog drift visible without
-/// hammering the server.
+/// Default poll cadence. There is nothing to be faithful to — 2.1.263 has no
+/// producer for this task type at all (see the module header) — so any sane
+/// default is parity-neutral; 5s keeps catalog drift visible without hammering
+/// the server.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 const RESOURCE_LIST_CHANGED_METHOD: &str = "notifications/resources/list_changed";
@@ -777,6 +799,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "echo".into(),
                     timeout: None,
+                    tool_use_id: None,
                 },
                 ctx(fs, runtime),
             )

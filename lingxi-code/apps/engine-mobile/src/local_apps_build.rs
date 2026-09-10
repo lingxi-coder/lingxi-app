@@ -40,6 +40,17 @@ const LSP_DIAGNOSTIC_SETTLE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Vite's default deployment directory, relative to the isolated project root.
 pub(crate) const VITE_OUTPUT_DIR: &str = "dist";
 
+/// Immutable Host identity captured when a staged authoring candidate is
+/// selected for a build. The candidate itself remains on disk until the
+/// successful build consumes this exact identity under the app/build lock.
+#[derive(Debug, Clone)]
+pub(crate) struct AuthoringCandidateIdentity {
+    pub(crate) handle: String,
+    pub(crate) workflow_run_id: String,
+    pub(crate) contract_sha256: String,
+    pub(crate) base_contract_sha256: Option<String>,
+}
+
 /// Host-derived health of a scaffolded Local App runtime profile.
 ///
 /// This is deliberately a state classification rather than an error string.
@@ -92,6 +103,17 @@ struct BuildProvenance {
     dependency_snapshot_sha256: String,
     #[serde(rename = "outputSha256")]
     output_sha256: String,
+    /// Digest of the immutable Host authoring contract used for this build.
+    ///
+    /// Optional for v3 receipts written before authoring contracts existed.
+    /// A missing value is distinct from a value of all zeroes: direct builds
+    /// without a staged contract retain the previous (missing) identity.
+    #[serde(
+        rename = "authoringContractSha256",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    authoring_contract_sha256: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalAppBuildTarget {
@@ -203,6 +225,31 @@ fn source_files(target: LocalAppBuildTarget) -> &'static [(&'static str, &'stati
     }
 }
 
+fn preserve_committed_build_result(
+    build_result: Result<(), AppError>,
+    cleanup_result: Result<bool, AppError>,
+    app_id: &str,
+    handle: &str,
+) -> Result<(), AppError> {
+    if build_result.is_ok() {
+        match cleanup_result {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                %app_id,
+                %handle,
+                "authoring candidate was not consumed after a committed build; it remains available for retry"
+            ),
+            Err(error) => tracing::warn!(
+                %app_id,
+                %handle,
+                %error,
+                "authoring candidate cleanup failed after a committed build; preserving build success"
+            ),
+        }
+    }
+    build_result
+}
+
 fn is_app_managed_javascript_file(relative: &str) -> bool {
     let path = Path::new(relative);
     if path.is_absolute()
@@ -246,6 +293,13 @@ fn bounded_lsp_diagnostic_message(message: &str) -> String {
 
 fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn locked_files(target: LocalAppBuildTarget) -> Vec<(&'static str, &'static [u8])> {
@@ -603,11 +657,24 @@ pub(crate) fn restore_host_managed_files(
         let expected =
             authoritative_locked_file_bytes(workspace, manifest.as_ref(), relative, bytes)?;
         let path = ensure_safe_file_parent(workspace, relative)?;
-        let is_matching_regular_file = std::fs::symlink_metadata(&path)
-            .ok()
-            .filter(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-            .and_then(|_| std::fs::read(&path).ok())
-            .is_some_and(|current| current == expected);
+        let is_matching_regular_file = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                std::fs::read(&path).map_err(|error| {
+                    AppError::Io(format!(
+                        "read host-managed workspace file {}: {error}",
+                        path.display()
+                    ))
+                })? == expected
+            }
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(AppError::Io(format!(
+                    "inspect host-managed workspace file {}: {error}",
+                    path.display()
+                )))
+            }
+        };
         if is_matching_regular_file {
             continue;
         }
@@ -1273,7 +1340,47 @@ impl LocalAppBuilder<'_> {
         // directory renames.
         let _process_build_guard =
             local_apps::storage::lock_app_build(layout.root(), layout.app_id())?;
-        self.build_workspace_locked(layout, &dependency).await
+        self.build_workspace_locked_with_authoring(layout, &dependency, None)
+            .await
+    }
+
+    /// Build with a staged Host authoring candidate. Its complete identity is
+    /// revalidated while the build locks are held and consumed only after
+    /// successful promotion, so a failed build leaves the candidate and the
+    /// previous build receipt authoritative.
+    pub(crate) async fn build_workspace_with_authoring(
+        &self,
+        layout: &AppLayout,
+        authoring_candidate: Option<AuthoringCandidateIdentity>,
+    ) -> Result<(), AppError> {
+        self.assert_build_runtime_available()?;
+        let dependency = match self
+            .host
+            .ensure_dependency_install(layout.app_id(), true)
+            .await
+        {
+            Ok(dependency) if dependency.state == local_apps::AppDependencyState::Ready => {
+                dependency
+            }
+            Ok(dependency) => {
+                return Err(AppError::NotYetAvailable(
+                    dependency.last_error.unwrap_or_else(|| {
+                        format!("workspace dependencies are {}", dependency.state)
+                    }),
+                ));
+            }
+            Err(error) => return Err(AppError::NotYetAvailable(error)),
+        };
+        let build_lock = self.host.build_lock();
+        let _build_guard = build_lock.lock().await;
+        let _process_build_guard =
+            local_apps::storage::lock_app_build(layout.root(), layout.app_id())?;
+        self.build_workspace_locked_with_authoring(
+            layout,
+            &dependency,
+            authoring_candidate.as_ref(),
+        )
+        .await
     }
 
     /// Build while the caller already owns both the broker-wide build mutex
@@ -1288,6 +1395,17 @@ impl LocalAppBuilder<'_> {
         layout: &AppLayout,
         dependency: &local_apps::AppDependencyRecord,
     ) -> Result<(), AppError> {
+        self.build_workspace_locked_with_authoring(layout, dependency, None)
+            .await
+    }
+
+    async fn build_workspace_locked_with_authoring(
+        &self,
+        layout: &AppLayout,
+        dependency: &local_apps::AppDependencyRecord,
+        authoring_candidate: Option<&AuthoringCandidateIdentity>,
+    ) -> Result<(), AppError> {
+        let _perf = crate::local_apps_host::LocalAppPerfDiagnosticTimer::start("build_total");
         self.assert_build_runtime_available()?;
         if dependency.state != local_apps::AppDependencyState::Ready {
             return Err(AppError::NotYetAvailable(
@@ -1300,6 +1418,11 @@ impl LocalAppBuilder<'_> {
         let workspace = layout.root().join(layout.workspace_rel());
         let target = detect_build_target(layout)?;
         validate_dependency_snapshot_files(layout, &workspace)?;
+        if let Some(candidate) = authoring_candidate {
+            self.host
+                .verify_authoring_candidate_identity(layout, candidate)
+                .map_err(AppError::InvalidRequest)?;
+        }
         // Re-pin the host-managed files from the compiled-in templates on
         // EVERY build before Vite touches the workspace.
         restore_host_managed_files(&workspace, target)?;
@@ -1309,18 +1432,32 @@ impl LocalAppBuilder<'_> {
         let runtime_contract_sha256 = manifest.runtime_contract_hash()?;
         let dependency_snapshot_sha256 = manifest.dependency_snapshot_hash()?;
         let build_key = workspace_build_key(layout, &workspace)?;
-        if build_cache_hit(
+        let effective_authoring_contract_sha256 = match authoring_candidate {
+            Some(candidate) => Some(candidate.contract_sha256.clone()),
+            None => active_build_authoring_contract_sha256(layout)?,
+        };
+        if build_cache_hit_with_authoring(
             &build_root,
             &build_key,
             &runtime_contract_sha256,
             &dependency_snapshot_sha256,
+            effective_authoring_contract_sha256.as_deref(),
         )? {
+            if let Some(candidate) = authoring_candidate {
+                let _ = local_apps::authoring::consume_authoring_candidate_if_matches(
+                    layout,
+                    &candidate.handle,
+                    &candidate.workflow_run_id,
+                    &candidate.contract_sha256,
+                    candidate.base_contract_sha256.as_deref(),
+                )?;
+            }
             return Ok(());
         }
         self.gate_lsp_diagnostics_before_build(&workspace).await?;
         let artifact_root = workspace_build_artifact_root(&workspace);
         let artifact_output_rel = workspace_build_output_rel();
-        let build_result = async {
+        let mut build_result = async {
             let prepare_artifact_root = artifact_root.clone();
             tokio::task::spawn_blocking(move || remove_path_if_exists(&prepare_artifact_root))
                 .await
@@ -1329,22 +1466,34 @@ impl LocalAppBuilder<'_> {
                 })??;
             self.run_vite_build(layout, &workspace, &artifact_output_rel)
                 .await?;
+            if let Some(candidate) = authoring_candidate {
+                self.host
+                    .verify_authoring_candidate_identity(layout, candidate)
+                    .map_err(AppError::InvalidRequest)?;
+            }
             let validate_artifact_root = artifact_root.clone();
             let validate_build_root = build_root.clone();
             let build_key_for_publish = build_key.clone();
             let runtime_contract_for_publish = runtime_contract_sha256.clone();
             let dependency_snapshot_for_publish = dependency_snapshot_sha256.clone();
+            let authoring_contract_sha256 = effective_authoring_contract_sha256.clone();
             tokio::task::spawn_blocking(move || {
                 let output_sha256 = validate_build_output(&validate_artifact_root)?;
-                prune_staging_root_for_publish(&validate_artifact_root)?;
-                promote_build_root(&validate_artifact_root, &validate_build_root)?;
-                write_build_provenance(
-                    &validate_build_root,
+                // The receipt is part of the validated staging tree.  Write
+                // it before the directory swap so any serialization or I/O
+                // failure leaves the last-good promoted build and its
+                // authoring identity untouched.
+                write_build_provenance_with_authoring(
+                    &validate_artifact_root,
                     &build_key_for_publish,
                     &runtime_contract_for_publish,
                     &dependency_snapshot_for_publish,
                     &output_sha256,
-                )
+                    authoring_contract_sha256.as_deref(),
+                )?;
+                prune_staging_root_for_publish(&validate_artifact_root)?;
+                promote_build_root(&validate_artifact_root, &validate_build_root)?;
+                Ok(())
             })
             .await
             .map_err(|error| AppError::Io(format!("build promotion worker failed: {error}")))?
@@ -1352,6 +1501,23 @@ impl LocalAppBuilder<'_> {
         .await;
         if build_result.is_err() {
             let _ = std::fs::remove_dir_all(&artifact_root);
+        }
+        if build_result.is_ok() {
+            if let Some(candidate) = authoring_candidate {
+                let cleanup_result = local_apps::authoring::consume_authoring_candidate_if_matches(
+                    layout,
+                    &candidate.handle,
+                    &candidate.workflow_run_id,
+                    &candidate.contract_sha256,
+                    candidate.base_contract_sha256.as_deref(),
+                );
+                build_result = preserve_committed_build_result(
+                    build_result,
+                    cleanup_result,
+                    layout.app_id(),
+                    &candidate.handle,
+                );
+            }
         }
         build_result
     }
@@ -1633,6 +1799,22 @@ fn build_cache_hit(
     runtime_contract_sha256: &str,
     dependency_snapshot_sha256: &str,
 ) -> Result<bool, AppError> {
+    build_cache_hit_with_authoring(
+        build_root,
+        build_key,
+        runtime_contract_sha256,
+        dependency_snapshot_sha256,
+        None,
+    )
+}
+
+fn build_cache_hit_with_authoring(
+    build_root: &Path,
+    build_key: &str,
+    runtime_contract_sha256: &str,
+    dependency_snapshot_sha256: &str,
+    authoring_contract_sha256: Option<&str>,
+) -> Result<bool, AppError> {
     let index = build_root.join(VITE_OUTPUT_DIR).join("index.html");
     let index_metadata = match std::fs::symlink_metadata(&index) {
         Ok(metadata) => metadata,
@@ -1658,6 +1840,7 @@ fn build_cache_hit(
         || provenance.build_key != build_key
         || provenance.runtime_contract_sha256 != runtime_contract_sha256
         || provenance.dependency_snapshot_sha256 != dependency_snapshot_sha256
+        || provenance.authoring_contract_sha256.as_deref() != authoring_contract_sha256
     {
         return Ok(false);
     }
@@ -1675,6 +1858,24 @@ fn write_build_provenance(
     dependency_snapshot_sha256: &str,
     output_sha256: &str,
 ) -> Result<(), AppError> {
+    write_build_provenance_with_authoring(
+        build_root,
+        build_key,
+        runtime_contract_sha256,
+        dependency_snapshot_sha256,
+        output_sha256,
+        None,
+    )
+}
+
+fn write_build_provenance_with_authoring(
+    build_root: &Path,
+    build_key: &str,
+    runtime_contract_sha256: &str,
+    dependency_snapshot_sha256: &str,
+    output_sha256: &str,
+    authoring_contract_sha256: Option<&str>,
+) -> Result<(), AppError> {
     let path = build_provenance_path(build_root);
     let parent = path
         .parent()
@@ -1689,6 +1890,7 @@ fn write_build_provenance(
         runtime_contract_sha256: runtime_contract_sha256.to_string(),
         dependency_snapshot_sha256: dependency_snapshot_sha256.to_string(),
         output_sha256: output_sha256.to_string(),
+        authoring_contract_sha256: authoring_contract_sha256.map(ToOwned::to_owned),
     })
     .map_err(|error| AppError::Io(format!("serialize build provenance: {error}")))?;
     std::fs::write(&temp, body)
@@ -1697,6 +1899,30 @@ fn write_build_provenance(
         let _ = std::fs::remove_file(&temp);
         AppError::Io(format!("publish build provenance: {error}"))
     })
+}
+
+fn validate_active_build_provenance(provenance: &BuildProvenance) -> Result<(), AppError> {
+    if provenance.version != BUILD_PROVENANCE_VERSION {
+        return Err(AppError::StorageCorrupt(format!(
+            "runtime_contract_corrupt: build receipt version {} is not supported",
+            provenance.version
+        )));
+    }
+    if provenance.build_id.is_empty()
+        || provenance.build_key.is_empty()
+        || provenance.runtime_contract_sha256.is_empty()
+        || provenance.dependency_snapshot_sha256.is_empty()
+        || provenance.output_sha256.is_empty()
+        || provenance
+            .authoring_contract_sha256
+            .as_deref()
+            .is_some_and(|digest| !valid_sha256(digest))
+    {
+        return Err(AppError::StorageCorrupt(
+            "runtime_contract_corrupt: build receipt identity is invalid".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn active_build_id(layout: &AppLayout) -> Result<Option<String>, AppError> {
@@ -1714,10 +1940,50 @@ pub(crate) fn active_build_id(layout: &AppLayout) -> Result<Option<String>, AppE
             "runtime_contract_corrupt: invalid build receipt: {error}"
         ))
     })?;
-    if provenance.version != BUILD_PROVENANCE_VERSION {
-        return Ok(None);
-    }
+    validate_active_build_provenance(&provenance)?;
     Ok(Some(provenance.build_id))
+}
+
+/// Return the authoring-contract identity selected by the active build
+/// provenance.  The build receipt is the selector; Host contract files are
+/// immutable content-addressed documents and are never selected by scanning
+/// the workspace.
+pub(crate) fn active_build_authoring_contract_sha256(
+    layout: &AppLayout,
+) -> Result<Option<String>, AppError> {
+    let build_root = layout.root().join(layout.build_rel(false));
+    let provenance_path = build_provenance_path(&build_root);
+    let body = match std::fs::read_to_string(&provenance_path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::Io(format!("read build receipt: {error}"))),
+    };
+    let provenance: BuildProvenance = serde_json::from_str(&body).map_err(|error| {
+        AppError::StorageCorrupt(format!(
+            "runtime_contract_corrupt: invalid build receipt: {error}"
+        ))
+    })?;
+    validate_active_build_provenance(&provenance)?;
+    Ok(provenance.authoring_contract_sha256)
+}
+
+/// Resolve the effective immutable authoring contract selected by the active
+/// build receipt.  The receipt digest is the selector; Host never scans
+/// candidate files or picks the newest document.
+pub(crate) fn active_authoring_contract(
+    layout: &AppLayout,
+) -> Result<Option<local_apps::authoring::AppAuthoringContract>, AppError> {
+    let Some(digest) = active_build_authoring_contract_sha256(layout)? else {
+        return Ok(None);
+    };
+    local_apps::authoring::load_authoring_contract(layout, &digest)
+        .map(Some)
+        .map_err(|error| match error {
+            AppError::NotFound(_) => AppError::StorageCorrupt(
+                "build provenance selects a missing authoring contract".into(),
+            ),
+            other => other,
+        })
 }
 
 /// Validate only the immutable launch identity and promoted output. This gate
@@ -1750,12 +2016,7 @@ pub(crate) fn validate_build_for_launch(layout: &AppLayout) -> Result<(), AppErr
             "runtime_contract_corrupt: invalid build receipt: {error}"
         ))
     })?;
-    if provenance.version != BUILD_PROVENANCE_VERSION {
-        return Err(AppError::NotYetAvailable(format!(
-            "rebuild_required: build receipt version {} is not supported",
-            provenance.version
-        )));
-    }
+    validate_active_build_provenance(&provenance)?;
     if provenance.runtime_contract_sha256 != expected_runtime {
         return Err(AppError::NotYetAvailable(
             "rebuild_required: build receipt runtime contract does not match the app manifest"
@@ -2595,7 +2856,7 @@ fn prune_staging_root_for_publish(staging_root: &Path) -> Result<(), AppError> {
     {
         let entry =
             entry.map_err(|error| AppError::Io(format!("read staged build entry: {error}")))?;
-        if entry.file_name() == VITE_OUTPUT_DIR {
+        if entry.file_name() == VITE_OUTPUT_DIR || entry.file_name() == BUILD_PROVENANCE_FILE {
             continue;
         }
         let path = entry.path();
@@ -3554,6 +3815,17 @@ mod tests {
     }
 
     #[test]
+    fn committed_build_success_survives_candidate_cleanup_failure() {
+        let result = preserve_committed_build_result(
+            Ok(()),
+            Err(AppError::Io("candidate cleanup failed".into())),
+            "aaaa1111",
+            "contract_test",
+        );
+        assert!(result.is_ok(), "post-commit cleanup cannot undo promotion");
+    }
+
+    #[test]
     fn build_key_ignores_managed_files_and_invalidates_changed_source() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = layout_with(root.path(), true, Some(local_apps::AppSurface::Dom));
@@ -3728,13 +4000,95 @@ mod tests {
         fs::create_dir_all(staging.join("node_modules/vite")).expect("deps");
         fs::create_dir_all(staging.join("app")).expect("app");
         fs::write(staging.join("dist/index.html"), "<html/>").expect("index");
+        fs::write(staging.join(BUILD_PROVENANCE_FILE), "receipt").expect("receipt");
         fs::write(staging.join("app/main.jsx"), "export default null;").expect("source");
 
         prune_staging_root_for_publish(&staging).expect("prune staging");
 
         assert!(staging.join("dist/index.html").is_file());
+        assert_eq!(
+            fs::read_to_string(staging.join(BUILD_PROVENANCE_FILE)).unwrap(),
+            "receipt"
+        );
         assert!(!staging.join("node_modules").exists());
         assert!(!staging.join("app").exists());
+    }
+
+    #[test]
+    fn provenance_write_failure_before_promotion_preserves_last_good_build() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let build_root = root.path().join("store");
+        let staging = root.path().join("staging");
+        fs::create_dir_all(build_root.join(VITE_OUTPUT_DIR)).expect("old dist");
+        fs::write(build_root.join(VITE_OUTPUT_DIR).join("index.html"), "old").expect("old output");
+        let old_contract = "e".repeat(64);
+        write_build_provenance_with_authoring(
+            &build_root,
+            &"1".repeat(64),
+            &"2".repeat(64),
+            &"3".repeat(64),
+            &"4".repeat(64),
+            Some(&old_contract),
+        )
+        .expect("old receipt");
+        fs::create_dir_all(staging.join(VITE_OUTPUT_DIR)).expect("new dist");
+        fs::write(staging.join(VITE_OUTPUT_DIR).join("index.html"), "new").expect("new output");
+        // A directory at the receipt path makes the pre-promotion receipt
+        // write fail after staging only; promotion must not be attempted.
+        fs::create_dir_all(staging.join(BUILD_PROVENANCE_FILE)).expect("receipt failure");
+
+        let error = write_build_provenance_with_authoring(
+            &staging,
+            "build-key",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &"c".repeat(64),
+            Some(&"d".repeat(64)),
+        )
+        .expect_err("receipt write must fail");
+        assert!(
+            error.to_string().contains("publish build provenance"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(build_root.join(VITE_OUTPUT_DIR).join("index.html")).unwrap(),
+            "old"
+        );
+        // Read the retained receipt directly: this focused promotion fixture
+        // uses root/store rather than a full AppLayout.
+        let retained: BuildProvenance = serde_json::from_slice(
+            &fs::read(build_root.join(BUILD_PROVENANCE_FILE)).expect("retained old receipt"),
+        )
+        .expect("parse retained receipt");
+        assert_eq!(
+            retained.authoring_contract_sha256.as_deref(),
+            Some(old_contract.as_str())
+        );
+        assert!(staging.join(VITE_OUTPUT_DIR).join("index.html").is_file());
+    }
+
+    #[test]
+    fn active_build_contract_digest_missing_document_fails_closed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        let build_root = layout.root().join(layout.build_rel(false));
+        let digest = "d".repeat(64);
+        write_build_provenance_with_authoring(
+            &build_root,
+            "build-key",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &"c".repeat(64),
+            Some(&digest),
+        )
+        .expect("receipt");
+
+        let error = active_authoring_contract(&layout)
+            .expect_err("missing selected contract must not be treated as no contract");
+        assert!(
+            matches!(error, AppError::StorageCorrupt(ref message) if message.contains("missing authoring contract")),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -4353,8 +4707,8 @@ mod tests {
     /// the dead `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies`
     /// suggestion, would stay green under every other test in this file.
     #[tokio::test]
-    async fn build_workspace_locked_refuses_a_tampered_workspace_package_json_without_naming_a_dead_tool()
-    {
+    async fn build_workspace_locked_refuses_a_tampered_workspace_package_json_without_naming_a_dead_tool(
+    ) {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
         scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");

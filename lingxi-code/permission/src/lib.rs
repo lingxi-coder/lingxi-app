@@ -49,12 +49,26 @@ pub mod mode;
 pub mod mode_policy;
 mod model_path;
 pub mod path_constraints;
+pub mod plan_files {
+    //! The session's plan files — see [`platform_api::plan_files`].
+    //!
+    //! The type lives in `platform-api` because BOTH the permission policy
+    //! (for the carve-out) and the orchestrator (for the plan-mode reminder and
+    //! `ExitPlanMode`'s read-back) must name the SAME plan file; two
+    //! derivations of one path is exactly how the carve-out silently stops
+    //! covering the file the model was told to write.
+    pub use platform_api::plan_files::{
+        PlanFileIdentity, PlanFileMatcher, PLAN_FILE_READ_ALLOW_REASON,
+        PLAN_FILE_WRITE_ALLOW_REASON,
+    };
+}
 pub mod persist;
 pub mod policy;
 pub mod policy_gate;
 pub mod powershell_containment;
 pub mod powershell_parse;
 pub mod prompting_gate;
+pub mod read_block;
 pub mod read_deny_globs;
 pub mod read_only_command;
 pub mod result;
@@ -68,6 +82,7 @@ pub mod shadow;
 pub mod shell_command;
 pub mod shell_rule_matching;
 pub mod update;
+pub mod working_dirs;
 pub mod workspace_lease;
 
 pub use allow_suggestion::{allow_suggestion, call_matches_rule};
@@ -89,8 +104,9 @@ pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
 pub use bypass_guard::{enforce_bypass_safety, BypassEnv};
 pub use classifier::is_classifier_permissions_enabled;
 pub use cli_mode::{
-    initial_permission_mode_from_cli, initial_permission_mode_from_cli_with_ide,
-    permission_mode_from_cli_string, CliModeSettings, IdeSessionInputs, IDE_BYPASS_UNCONSENTED_MSG,
+    boot_agent_may_adopt_bypass, initial_permission_mode_from_cli,
+    initial_permission_mode_from_cli_with_ide, permission_mode_from_cli_string, CliModeSettings,
+    IdeSessionInputs, IDE_BYPASS_UNCONSENTED_MSG,
 };
 pub use command_path_containment::check_command_path_containment;
 pub use dangerous_patterns::{
@@ -118,8 +134,10 @@ pub use layers::{
 pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json, auto_mode_disabled_from_settings_json,
+    block_reads_outside_working_directories_from_settings_json,
     bypass_permissions_disabled_from_settings_json, classify_all_shell_from_settings_json,
-    default_mode_from_settings_json, permission_rule_file_warning, permission_rule_startup_warning,
+    default_mode_from_settings_json, fold_block_reads_outside_working_directories,
+    permission_rule_file_warning, permission_rule_startup_warning,
     permission_rules_from_settings_json,
 };
 pub use mcp_policy::{
@@ -143,7 +161,7 @@ pub use read_deny_globs::read_deny_exclude_globs;
 pub use read_only_command::command_is_read_only;
 pub use result::{
     ClassifierKind, PermissionDecisionReason, PermissionResult, PermissionUpdateDestination,
-    SandboxOverrideReason,
+    SafetyCircuitBreaker, SandboxOverrideReason,
 };
 pub use rule::{
     normalize_legacy_tool_name, PermissionBehavior, PermissionRule, PermissionRuleSource,

@@ -234,8 +234,8 @@ test('short messages render no disclosure affordance', () => {
 test('user messages use a neutral rounded Codex-style bubble', () => {
   const html = renderStage({ type: 'narration', id: 'i1', role: 'user', text: 'A user message.' });
   assert.match(html, /class="user-message-bubble"/);
-  assert.match(html, /padding:11px 16px/);
-  assert.match(html, /border-radius:22px/);
+  assert.match(html, /padding:10px 16px/);
+  assert.match(html, /border-radius:18px/);
   assert.match(html, /border:0/);
   assert.doesNotMatch(html, /accentBg/);
 });
@@ -301,7 +301,7 @@ test('tool rows use compact adjacency hooks and a Codex-like transcript type sca
   assert.match(narration, /font-size:14px/);
   assert.match(narration, /line-height:1\.65/);
 
-  assert.match(css, /--font-sans-default:\s*-apple-system-body,\s*ui-sans-serif/);
+  assert.match(css, /--font-sans-default:\s*-apple-system,\s*BlinkMacSystemFont/);
   assert.match(css, /--font-openai-sans:\s*"OpenAI Sans",\s*var\(--font-sans-default\)/);
 });
 
@@ -396,8 +396,8 @@ test('Stage omits transcript cost footer and left gutter markers', () => {
 
 test('Stage uses compact responsive message gutters', () => {
   const html = renderStage({ type: 'narration', id: 'n1', role: 'assistant', text: 'Compact gutter.' });
-  assert.match(html, /max-width:1040px/);
-  assert.match(html, /padding:24px clamp\(18px, 2\.2vw, 24px\) 12px/);
+  assert.match(html, /max-width:var\(--conversation-width, 860px\)/);
+  assert.match(html, /padding-inline:var\(--conversation-gutter, 24px\)/);
 });
 
 // ── Tool defaults and icon vocabulary ────────────────────────────────────────
@@ -740,4 +740,27 @@ test('a multi-key permission payload is labelled, redacted, and never dropped', 
   assert.match(html, /confirm: true/);
   assert.doesNotMatch(html, /sk-ant-abcdefghijklmnop/, 'redaction still applies to every key');
   assert.match(html, /\[REDACTED\]/);
+});
+
+
+test('Thought bodies default to collapsed for live and historical blocks', () => {
+  for (const streamed of [true, undefined]) {
+    for (const done of [true, false]) {
+      const html = render(React.createElement(Stage, { liveItems: [{ type: 'thinking', id: 'thought-default', text: 'Reasoning body', streamed, done }] }));
+      assert.match(html, /aria-expanded="false"/);
+      assert.doesNotMatch(html, /Reasoning body/);
+      assert.match(html, done ? /Thought/ : /Thinking/);
+    }
+  }
+});
+
+test('disabling default Thought collapse expands live and historical content', () => {
+  for (const streamed of [true, undefined]) {
+    const html = render(React.createElement(Stage, {
+      collapseThoughtsByDefault: false,
+      liveItems: [{ type: 'thinking', id: 'thought-expanded', text: 'Reasoning body', streamed, done: true }],
+    }));
+    assert.match(html, /aria-expanded="true"/);
+    assert.match(html, /Reasoning body/);
+  }
 });

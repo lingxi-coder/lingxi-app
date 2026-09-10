@@ -89,6 +89,12 @@ const HANDLER_NAME: &str = "local_bash";
 /// the handler usable standalone (and in unit tests).
 #[async_trait]
 pub trait TaskStatusSink: Send + Sync {
+    async fn set_agent_display(&self, _id: &str, _model: String, _effort: Option<String>) {}
+
+    /// Bind a prepared task to the real pool identity before its first model call.
+    async fn bind_agent_id(&self, _task_id: &str, _agent_id: protocol::AgentId) -> Result<(), String> { Ok(()) }
+    /// Shared registry for recipient-scoped child notifications.
+    fn task_registry(&self) -> Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>> { None }
     /// Whether handler workers must remain prepared-but-paused until their
     /// returned [`TaskHandle`](crate::task_trait::TaskHandle) is activated by
     /// the owning registry. Registry-backed sinks opt in; standalone/test sinks
@@ -100,6 +106,12 @@ pub trait TaskStatusSink: Send + Sync {
     /// Record the task's final status. Called exactly once per task on
     /// completion, failure, timeout, or kill.
     async fn set_status(&self, task_id: &str, status: TaskStatus);
+
+    /// A persistent teammate finished a turn and remains available for messages.
+    async fn set_teammate_idle(&self, _task_id: &str) {}
+
+    /// Teammate plan-review wait, independent of running/idle lifecycle state.
+    async fn set_awaiting_plan_approval(&self, _task_id: &str, _awaiting: bool) {}
 
     /// Record a FAILED terminal status together with the failure reason.
     ///
@@ -121,6 +133,11 @@ pub trait TaskStatusSink: Send + Sync {
     /// Record the child's exit code (the value from
     /// [`ProcessOutput::exit_code`]). Called once on natural completion.
     async fn set_exit_code(&self, _task_id: &str, _exit_code: i32) {}
+
+    /// Report how many bytes a MONITOR's script wrote to stdout over its life
+    /// (claude-code `taskOutput.pipedStdoutBytes`). Defaulted so every existing
+    /// sink compiles unchanged; only the monitor worker calls it.
+    async fn set_monitor_stdout_bytes(&self, _task_id: &str, _bytes: u64) {}
 
     /// Record the child's OS pid once known. Retained for sink-implementer
     /// compatibility; the single-child `run()` path does not surface a pid
@@ -253,7 +270,10 @@ pub trait TaskStatusSink: Send + Sync {
 
     /// Queue a live stdout event from a `monitor_ws` task. Default no-op keeps
     /// standalone handlers and existing test sinks source-compatible.
-    async fn notify_monitor_event(&self, _task_id: &str, _event: &str) {}
+    ///
+    /// `housekeeping` marks a harness line ABOUT the monitor rather than script
+    /// output (claude-code `GM`'s `isHousekeeping`).
+    async fn notify_monitor_event(&self, _task_id: &str, _event: &str, _housekeeping: bool) {}
 
     /// Whether the owning registry has inserted the task row. Handler-backed
     /// tasks receive their generated id before [`crate::registry::TaskRegistry`]
@@ -264,8 +284,8 @@ pub trait TaskStatusSink: Send + Sync {
         true
     }
 
-    /// Report whether `task_id` has ALREADY reached a terminal status
-    /// (Completed / Failed / Killed). Backs the `drain_pending_kills` guard: a
+    /// Report whether `task_id` has ALREADY terminated (a completed persistent
+    /// park is still alive). Backs the `drain_pending_kills` guard: a
     /// worker that finished on its own must not be retroactively flipped to
     /// `Killed` by a raced pending-kill record (which would clobber the real
     /// terminal status). Default `false` (no lifecycle info ⇒ flip as before,
@@ -432,7 +452,7 @@ impl Task for LocalBashHandler {
         ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
         // 1. Only the LocalBash variant is accepted; reject the other six.
-        let TaskSpawnInput::LocalBash { command, timeout } = input else {
+        let TaskSpawnInput::LocalBash { command, timeout, .. } = input else {
             return Err(TaskError::Internal(
                 "local_bash handler received a non-LocalBash spawn input".into(),
             ));
@@ -941,6 +961,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "echo hello".into(),
                     timeout: None,
+                    tool_use_id: None,
                 },
                 make_ctx(fs),
             )
@@ -986,6 +1007,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "do stuff".into(),
                     timeout: None,
+                    tool_use_id: None,
                 },
                 make_ctx(fs),
             )
@@ -1020,6 +1042,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "false".into(),
                     timeout: None,
+                    tool_use_id: None,
                 },
                 make_ctx(fs),
             )
@@ -1044,6 +1067,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "sleep 100".into(),
                     timeout: Some(std::time::Duration::from_millis(1)),
+                    tool_use_id: None,
                 },
                 make_ctx(fs),
             )
@@ -1087,6 +1111,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "sleep 100000".into(),
                     timeout: None,
+                    tool_use_id: None,
                 },
                 ctx.clone(),
             )
@@ -1229,6 +1254,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "long".into(),
                     timeout: None,
+                    tool_use_id: None,
                 },
                 ctx,
             )
@@ -1288,6 +1314,7 @@ mod tests {
                 TaskSpawnInput::LocalBash {
                     command: "long".into(),
                     timeout: None,
+                    tool_use_id: None,
                 },
                 ctx,
             )

@@ -951,6 +951,17 @@ pub enum ClientCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential_override: Option<ProviderCredentialSecretDto>,
     },
+    /// Manage durable scheduled tasks in the active workspace.
+    CronManage {
+        request_id: String,
+        request: CronRequestDto,
+    },
+    // Trusted human-client message to an existing task. Appended to preserve
+    // every existing UniFFI ordinal; model tools never select this origin.
+    TaskMessage {
+        task_id: String,
+        message: String,
+    },
 }
 
 /// A writable MCP server-definition scope, as named on the wire. Deliberately
@@ -1226,4 +1237,25 @@ pub enum AudioResultDto {
         /// Human-readable detail for logs/UI.
         message: String,
     },
+}
+
+/// Structured management request for the existing local cron scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CronRequestDto {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurring: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_expiry: Option<bool>,
 }

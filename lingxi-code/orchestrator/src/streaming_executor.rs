@@ -8,6 +8,7 @@
 use crate::conversation::ConversationOrchestrator;
 use futures::{stream::FuturesUnordered, StreamExt};
 use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use tool_api::tool_trait::ToolStaticContext;
 use tool_api::ContextModifier;
 
 /// claude-code `REJECT_MESSAGE` (utils/messages.ts:212). The user-interrupted
@@ -308,9 +309,10 @@ impl<'a> StreamingToolExecutor<'a> {
         provider_id: Option<String>,
         assistant_id: MessageId,
     ) {
-        match self.orch.tools.find_by_name(&name) {
+        match self.orch.find_dispatchable_tool(&name) {
             None => {
-                let block = synthetic_unknown_tool(id.clone(), &name, provider_id.clone());
+                let suffix = unknown_tool_suffix_for(&name, self.orch);
+                let block = synthetic_unknown_tool(id.clone(), &name, provider_id.clone(), &suffix);
                 let post_tool_batch_calls =
                     vec![post_tool_batch_call_for_result(&id, &name, &input, &block)];
                 self.tools.push(TrackedTool {
@@ -329,11 +331,8 @@ impl<'a> StreamingToolExecutor<'a> {
                 });
             }
             Some(tool) => {
-                let safe = crate::schema_validation::validate_tool_input_schema(
-                    tool.input_schema(),
-                    &input,
-                )
-                .is_ok()
+                let safe = crate::schema_validation::validate_tool_schema(tool.as_ref(), &input)
+                    .is_ok()
                     && tool.is_concurrency_safe(&input);
                 self.tools.push(TrackedTool {
                     id,
@@ -865,14 +864,203 @@ pub(crate) fn synthetic_unknown_tool(
     id: ToolUseId,
     name: &str,
     provider_id: Option<String>,
+    suffix: &str,
 ) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_use_id: id,
-        content: format!("<tool_use_error>Error: No such tool available: {name}</tool_use_error>"),
+        content: format!(
+            "<tool_use_error>Error: No such tool available: {name}{suffix}</tool_use_error>"
+        ),
         is_error: true,
         provider_tool_use_id: provider_id,
         content_blocks: None,
     }
+}
+
+/// Claude Code 2.1.263 `Ldt` suffix after `No such tool available: ${name}`.
+/// Genuinely-unknown tools stay empty. Mapped arms that have substrate here:
+/// subagent-restricted `d1e`/`ct("external")`, coordinator `Y7e`, catalog
+/// disabled, Glob/Grep-via-shell (`Nte` + `qe`), pending-MCP `l5o`, MCP
+/// disconnected (`a5o` `disconnected`).
+///
+/// WebFetch→Artifact is a carve-out. The WebFetch→`web-fetch` agent redirect
+/// needs the live roster (`pq`); that agent is gated off by default (`xgi()`),
+/// so a catalog-hidden WebFetch falls through to the disabled arm.
+///
+/// `d1e` names resolved from 2.1.263 `src_160256736.js` `ct("external")`.
+/// `ltr` (spread into `ct`) is not fully named here; the listed tools are
+/// the resolved scalars. LingXi is the external user type, so `Workflow`
+/// is included.
+const SUBAGENT_RESTRICTED_TOOLS: &[&str] = &[
+    "TaskOutput",
+    "ExitPlanMode",
+    "EnterPlanMode",
+    "AskUserQuestion",
+    "Poll",
+    "ConnectGitHub",
+    "propose_skills",
+    "WaitForMcpServers",
+    "RefreshMcpTools",
+    "Workflow",
+    "ScheduleWakeup",
+    "ReadNotifications",
+    "ProposeGoal",
+    "EndConversation",
+];
+
+/// 2.1.263 `qbt`: base coordinator tools AND worker-redirect exclusions.
+const COORDINATOR_REDIRECT_EXCLUSIONS: &[&str] = &[
+    "Agent",
+    "TaskStop",
+    "SendMessage",
+    "StructuredOutput",
+    "Skill",
+    "ReadNotifications",
+    "ListAgents",
+    "Workflow",
+];
+
+#[must_use]
+pub(crate) fn is_coordinator_redirect_excluded(name: &str) -> bool {
+    COORDINATOR_REDIRECT_EXCLUSIONS.contains(&name)
+}
+
+#[must_use]
+pub(crate) fn unknown_tool_suffix_for(name: &str, orch: &ConversationOrchestrator) -> String {
+    let src = crate::config::sanitize_query_source(&orch.config.query_source);
+    let is_subagent = src.starts_with("agent") || src == "subagent";
+    let may_redirect = orch.is_coordinator_session()
+        && orch.find_dispatchable_tool("Agent").is_some()
+        && orch
+            .tools
+            .find_registered(name)
+            .is_some_and(|tool| !orch.is_tool_pool_denied(tool.as_ref()));
+    unknown_tool_suffix(name, &orch.tools, is_subagent, may_redirect)
+}
+
+#[must_use]
+pub(crate) fn unknown_tool_suffix(
+    name: &str,
+    tools: &tool_api::registry::ToolRegistry,
+    is_subagent: bool,
+    is_coordinator: bool,
+) -> String {
+    let registered = tools.find_registered(name);
+    let canonical = registered.as_ref().map(|tool| tool.name()).unwrap_or(name);
+    if is_subagent && SUBAGENT_RESTRICTED_TOOLS.contains(&canonical) {
+        return format!(
+            ". {name} is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
+        );
+    }
+    if registered.is_some() && canonical == "SendUserMessage" {
+        return format!(". {name} is not enabled in this session \u{2014} write your message as normal assistant text instead.");
+    }
+    let in_catalog = registered.is_some();
+    // 2.1.263 `dt("external")` / Y7e. A catalog entry is not necessarily
+    // available to a worker (notably AskUserQuestion and ExitPlanMode).
+    const WORKER_TOOLS: &[&str] = &[
+        "Read",
+        "WebSearch",
+        "TodoWrite",
+        "Grep",
+        "WebFetch",
+        "Glob",
+        "Bash",
+        "PowerShell",
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "Skill",
+        "StructuredOutput",
+        "ToolSearch",
+        "EnterWorktree",
+        "ExitWorktree",
+        "REPL",
+        "Monitor",
+        "TaskStop",
+        "GetTask",
+        "SendMessage",
+        "Artifact",
+        "SearchPlugins",
+        "SearchSkills",
+        "ListPlugins",
+        "ListSkills",
+    ];
+    let worker_available = tools.find_by_name(name).is_some_and(|tool| {
+        tool.is_enabled(&tool_api::tool_trait::ToolStaticContext {
+            main_loop_model: tools.main_loop_model(),
+            ..Default::default()
+        }) && std::iter::once(tool.name())
+            .chain(tool.underlying_v1_tool_name())
+            .chain(tool.family_parent_tool_name())
+            .any(|name| WORKER_TOOLS.contains(&name))
+    });
+    if is_coordinator
+        && !is_subagent
+        && in_catalog
+        && tools.find_by_name("Agent").is_some()
+        && !is_coordinator_redirect_excluded(canonical)
+        && worker_available
+    {
+        return format!(
+            ". {name} is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead."
+        );
+    }
+    if in_catalog {
+        return format!(". {name} is disabled for this session, in subagents as well as here.");
+    }
+    let shell = if tools.find_by_name("Bash").is_some() {
+        "Bash"
+    } else if tools.find_by_name("Shell").is_some() {
+        "Shell"
+    } else {
+        ""
+    };
+    if name.eq_ignore_ascii_case("Glob") || name.eq_ignore_ascii_case("Grep") {
+        if shell.is_empty() {
+            return format!(". {name} is disabled for this session.");
+        }
+        return if name.eq_ignore_ascii_case("Glob") {
+            format!(
+                ". {name} is not available in this session \u{2014} find files with `find` via the {shell} tool instead."
+            )
+        } else {
+            format!(
+                ". {name} is not available in this session \u{2014} search file contents with `grep` via the {shell} tool instead."
+            )
+        };
+    }
+    if let Some(server) = mcp_server_from_tool_name(name) {
+        // `l5o` (non-subagent): WaitForMcpServers is advertised only while an
+        // MCP client is `pending`. `is_enabled` is that same pending mirror.
+        if !is_subagent
+            && tools
+                .find_by_name("WaitForMcpServers")
+                .is_some_and(|t| t.is_enabled(&ToolStaticContext::default()))
+        {
+            return format!(
+                ". The MCP server '{server}' is still connecting. Call WaitForMcpServers to wait for it, then try again."
+            );
+        }
+        // `a5o` `disconnected`. Subagent copy is "not available in this
+        // context" (reconnecting uses "not connected").
+        return if is_subagent {
+            format!(
+                ". Its MCP server '{server}' is not available in this context. Continue without this tool."
+            )
+        } else {
+            format!(
+                ". Its MCP server '{server}' has disconnected. Continue without this tool; it becomes callable again only if the server reconnects."
+            )
+        };
+    }
+    String::new()
+}
+
+fn mcp_server_from_tool_name(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("mcp__")?;
+    let server = rest.split("__").next()?;
+    (!server.is_empty()).then_some(server)
 }
 
 #[cfg(test)]

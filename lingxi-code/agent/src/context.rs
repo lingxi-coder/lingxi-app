@@ -25,6 +25,8 @@ use tool_api::content_replacement::ContentReplacementState;
 pub struct SubagentContext {
     /// Stable identifier for this spawn — every event carries this id.
     pub agent_id: AgentId,
+    /// Shared registry used for recipient-scoped notification folding.
+    pub task_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
     /// Parent agent id, when this agent was dispatched by another agent.
     pub parent_agent_id: Option<AgentId>,
     /// DISPLAY NAME of this agent when it is an in-process teammate in a swarm
@@ -152,6 +154,13 @@ pub struct SubagentContext {
     /// Model API seam used by the multi-turn [`crate::runner::run_subagent`]
     /// loop. `None` keeps the legacy stub behavior (no real API calls) for
     /// back-compat with callers that haven't wired an API client yet.
+    /// The refusal-fallback CHAIN this run may walk when the model refuses.
+    ///
+    /// claude-code runs subagents through the same query generator as the main
+    /// thread, so they inherit its cascade; here the two loops are separate, so
+    /// the chain is handed down explicitly. Empty (the default) means a refusal
+    /// ends the run, which is what this port did for every subagent before.
+    pub refusal_fallback_chain: Vec<String>,
     pub api_client: Option<Arc<dyn crate::api::SubagentApiClient>>,
     /// Tool dispatch seam inherited from the parent via
     /// [`platform_api::subagent_spawn::SubagentInheritance`]. `None` means the agent

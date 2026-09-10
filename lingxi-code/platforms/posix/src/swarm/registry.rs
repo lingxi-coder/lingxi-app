@@ -9,7 +9,9 @@ use std::sync::OnceLock;
 
 use platform_api::SwarmBackend;
 
-use super::detection::{detect_terminal_env, pick_backend, BackendChoice, TerminalEnv};
+use super::detection::{
+    detect_terminal_env, pick_backend, select_backend, BackendChoice, TeammateMode, TerminalEnv,
+};
 use super::inprocess::InProcessSwarmBackend;
 use super::iterm::ITermSwarmBackend;
 use super::tmux::TmuxBackend;
@@ -38,6 +40,16 @@ impl SwarmRegistry {
         Self::construct(choice)
     }
 
+    /// Resolve a caller's session settings without using the default-mode cache.
+    pub fn construct_for_mode(
+        env: &TerminalEnv,
+        mode: TeammateMode,
+        interactive: bool,
+        prefer_tmux: bool,
+    ) -> Result<Box<dyn SwarmBackend>, &'static str> {
+        select_backend(env, mode, interactive, prefer_tmux).map(Self::construct)
+    }
+
     fn construct(choice: BackendChoice) -> Box<dyn SwarmBackend> {
         match choice {
             BackendChoice::Tmux => Box::new(TmuxBackend::new()),
@@ -57,7 +69,7 @@ mod tests {
             inside_tmux: false,
             iterm_app: false,
             tmux_available: false,
-            osascript_available: false,
+            it2_available: false,
         };
         let backend = SwarmRegistry::detect_and_construct_with(&env);
         assert!(backend.is_available()); // InProcess is always available

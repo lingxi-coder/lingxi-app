@@ -152,10 +152,18 @@ impl Tool for CronDeleteTool {
         &SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+        // PARITY 2.1.263 `EC()`: `!CLAUDE_CODE_DISABLE_CRON && gate(tengu_kairos_cron, true)`
+        // — the env kill switch hides the tool from the model.
+        crate::cron_tools_enabled()
     }
     fn max_result_size_chars(&self) -> usize {
         100_000
+    }
+    fn should_defer(&self) -> bool {
+        true
+    }
+    fn get_path(&self, _: &Value) -> Option<std::path::PathBuf> {
+        Some(cron::scheduled_tasks_path(&self.ctx.cwd()))
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -191,7 +199,8 @@ impl Tool for CronDeleteTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "CronDelete: cancel a previously scheduled cron job by its id.".into()
+        // PARITY 2.1.263 `mbn(true)`; `.claude/` → `.lingxi/`.
+        "Cancel a cron job previously scheduled with CronCreate. Removes it from .lingxi/scheduled_tasks.json (durable jobs) or the in-memory session store (session-only jobs).".into()
     }
 
     async fn validate_input(
@@ -388,8 +397,11 @@ mod tests {
                     last_fired_at: None,
                     recurring: Some(true),
                     permanent: None,
+                    expires_at: None,
+                    session_id: None,
                 })
                 .collect(),
+            ..Default::default()
         };
         tokio::fs::write(&path, cron::tasks_file::serialize_tasks(&doc))
             .await

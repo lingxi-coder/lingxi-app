@@ -21,12 +21,33 @@ use platform_api::{
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 
 /// Tracks running tasks and dispatches lifecycle operations to handlers.
+#[path = "observer.rs"]
+mod observer;
+#[path = "shell_adoption.rs"]
+mod shell_adoption;
+
+#[path = "human_messages.rs"]
+mod human_messages;
+
 pub struct TaskRegistry {
-    tasks: Arc<RwLock<HashMap<String, TaskState>>>,
+    /// Weak self-reference installed once the composition root wraps the
+    /// registry in `Arc`.  Cancellation-sensitive task transactions use it to
+    /// outlive the caller's future without creating a reference cycle.
+    self_ref: std::sync::OnceLock<std::sync::Weak<TaskRegistry>>,
+    human_messages: std::sync::Mutex<HashMap<String, human_messages::HumanInbox>>,
+    shell_adoption_gate: Arc<tokio::sync::Mutex<()>>,
+    shell_transfer_mutation: tokio::sync::Mutex<()>,
+    /// Allocated shells may exit before their background row is published.
+    pending_bash_registration: std::sync::Mutex<HashMap<String, Option<(Option<i32>, bool)>>>,
+    shell_transfer_fences: Arc<std::sync::Mutex<HashSet<String>>>,
+    shell_adoption_runtime: Option<(Arc<dyn ProcessRunner>, Arc<dyn crate::handlers::TaskStatusSink>)>,
+    observer_activity_lock: tokio::sync::Mutex<()>,
+    tasks: Arc<crate::lifecycle_store::TaskRows>,
+    shell_session_activity: std::sync::Mutex<ShellSessionActivity>,
     workflow_launch_reservations: Arc<std::sync::Mutex<HashSet<String>>>,
     workflow_session_filter: Arc<std::sync::RwLock<Option<String>>>,
     /// Alternate addresses accepted by task tools (`agent_id`, named async
@@ -40,12 +61,22 @@ pub struct TaskRegistry {
     /// through tool registries; retaining them forever would otherwise pin the
     /// old session's cost and persistence authority across a remount.
     handlers: RwLock<HashMap<TaskType, Arc<dyn Task>>>,
+    agent_message_receivers: tokio::sync::Mutex<
+        HashMap<String, Arc<dyn platform_api::task_registry::TaskMessageReceiver>>,
+    >,
     handles: Arc<tokio::sync::Mutex<HashMap<String, BackgroundTaskHandle>>>,
     /// Handler-returned cleanup hooks keyed by task id. Handler-spawned tasks
     /// often own runtime work internally; preserving this hook lets the registry
     /// participate in the same teardown path instead of dropping the only
     /// synchronous cleanup handle.
     cleanups: Arc<tokio::sync::Mutex<HashMap<String, TaskCleanup>>>,
+    /// Per-task handles that move a still-running FOREGROUND command to the
+    /// background (claude-code `I_t`'s `t.background(e)`). Separate from
+    /// `cleanups` because backgrounding is not teardown: the child keeps
+    /// running, it just stops being awaited.
+    backgrounders: Arc<
+        tokio::sync::Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskBackgrounder>>>,
+    >,
     /// Handler-spawned task ids → their [`TaskType`], so [`Self::kill`] can
     /// dispatch teardown to the owning handler ([`Task::kill`]). Distinct from
     /// `handles`, which tracks the [`create`](Self::create) /
@@ -54,6 +85,14 @@ pub struct TaskRegistry {
     /// and must be torn down through the handler, not by cancelling a
     /// `BackgroundTaskHandle` the registry never holds.
     spawned: Arc<RwLock<HashMap<String, TaskType>>>,
+    /// Session-owned approved departure cleanup, weakly held to avoid cycles.
+    teammate_departure_cleanup:
+        RwLock<Option<std::sync::Weak<dyn platform_api::team_spawn::TeammateDepartureCleanup>>>,
+    /// External pane tasks must confirm process teardown before task tools
+    /// publish a terminal status. Weak ownership avoids a registry/controller cycle.
+    external_teammate_controller: RwLock<Option<std::sync::Weak<dyn TeamSpawnSeam>>>,
+    external_teammate_tasks: RwLock<HashSet<String>>,
+    in_process_stop_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     runtime: Arc<dyn RuntimeSpawner>,
     fs: Arc<dyn FileSystem>,
     /// Owner of task spool files.
@@ -76,12 +115,12 @@ pub struct TaskRegistry {
     /// WITHOUT eviction (the still-alive agent re-arms on its next rest). Kept
     /// out of [`TaskStateBase`] to avoid a workspace-wide exhaustive-initializer
     /// churn for a field only this path reads.
+    notification_revision: tokio::sync::watch::Sender<u64>,
+    stopping_shells: Arc<std::sync::Mutex<HashMap<String, usize>>>,
     pending_rest: Arc<RwLock<std::collections::HashMap<String, RestPayload>>>,
     /// Bounded live `monitor_ws` stdout events waiting for the next turn.
     pending_monitor_events: Arc<
-        tokio::sync::Mutex<
-            std::collections::VecDeque<platform_api::task_registry::TaskNotification>,
-        >,
+        std::sync::Mutex<std::collections::VecDeque<platform_api::task_registry::TaskNotification>>,
     >,
     /// Per-session running total of subagents spawned through the `Agent` tool
     /// (claude 2.1.212 `taskRegistry` `getTotalAgentSpawns` /
@@ -102,6 +141,38 @@ pub struct TaskRegistry {
     /// admission, then snapshots every published owner without a race window.
     lifecycle_gate: Arc<RwLock<()>>,
     accepting_tasks: AtomicBool,
+}
+
+#[derive(Default)]
+struct ShellSessionActivity {
+    interactive: bool,
+    busy: bool,
+    last_interaction: Option<std::time::Instant>,
+}
+
+/// A stop's handler may publish Killed before the registry can stamp notified.
+/// Keep that short window out of model drains; cancellation/error drops the
+/// guard too, so no completion can remain suppressed after a failed stop.
+struct ShellStopGuard {
+    stopping: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    task_id: String,
+    revision: tokio::sync::watch::Sender<u64>,
+}
+impl Drop for ShellStopGuard {
+    fn drop(&mut self) {
+        let mut stopping = self
+            .stopping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = stopping.get_mut(&self.task_id) {
+            *count -= 1;
+            if *count == 0 {
+                stopping.remove(&self.task_id);
+            }
+        }
+        self.revision
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
 }
 
 /// The optional `<result>` / `<usage>` payload an agent carries when it comes to
@@ -135,7 +206,7 @@ type TaskCleanup = Arc<dyn Fn() + Send + Sync>;
 /// runtime because `Drop` itself cannot await their locks.
 struct SpawnPublicationGuard {
     task_id: String,
-    tasks: Arc<RwLock<HashMap<String, TaskState>>>,
+    tasks: Arc<crate::lifecycle_store::TaskRows>,
     spawned: Arc<RwLock<HashMap<String, TaskType>>>,
     cleanups: Arc<tokio::sync::Mutex<HashMap<String, TaskCleanup>>>,
     aliases: Arc<RwLock<HashMap<String, String>>>,
@@ -258,6 +329,36 @@ impl Drop for WorkflowRunReservation {
 }
 
 impl TaskRegistry {
+    /// Install the weak self-reference used by cancellation-safe transactions.
+    /// This is deliberately set-once, matching the deferred status sink.
+    pub(crate) fn bind_self(&self, registry: &Arc<TaskRegistry>) {
+        let _ = self.self_ref.set(Arc::downgrade(registry));
+    }
+
+    fn owned_self(&self) -> Option<Arc<TaskRegistry>> {
+        self.self_ref.get().and_then(std::sync::Weak::upgrade)
+    }
+
+    pub(crate) fn record_permission_pause(&self, agent_id: protocol::AgentId, milliseconds: u64) {
+        if milliseconds == 0 { return; }
+        let tasks = self.tasks.clone();
+        // The prompt guard may run during future cancellation, so it cannot
+        // await here. Retain the store until its serialized SDK write lands.
+        tokio::spawn(async move {
+            let mut rows = tasks.write().await;
+            if let Some(state) = rows.values_mut().find(|state| matches!(state,
+                TaskState::InProcessTeammate(agent) if agent.agent_id == agent_id)) {
+                let base = state.base_mut();
+                base.total_paused_ms = base.total_paused_ms.saturating_add(milliseconds);
+            }
+        });
+    }
+
+    /// Look up one handler through the interior-mutable table.
+    pub(crate) async fn handler_for(&self, task_type: TaskType) -> Option<Arc<dyn Task>> {
+        self.handlers.read().await.get(&task_type).cloned()
+    }
+
     /// Construct an empty registry with no handlers yet registered.
     #[must_use]
     pub fn new(
@@ -266,21 +367,38 @@ impl TaskRegistry {
         output_manager: Arc<TaskOutputManager>,
     ) -> Self {
         Self {
-            tasks: Arc::new(RwLock::new(HashMap::new())),
+            self_ref: std::sync::OnceLock::new(),
+            shell_adoption_gate: Arc::new(tokio::sync::Mutex::new(())),
+            shell_transfer_mutation: tokio::sync::Mutex::new(()),
+            shell_transfer_fences: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            human_messages: std::sync::Mutex::new(HashMap::new()),
+            shell_adoption_runtime: None,
+            observer_activity_lock: tokio::sync::Mutex::new(()),
+            pending_bash_registration: std::sync::Mutex::new(HashMap::new()),
+            tasks: Arc::new(crate::lifecycle_store::TaskRows::default()),
+            shell_session_activity: std::sync::Mutex::new(ShellSessionActivity::default()),
             workflow_launch_reservations: Arc::new(std::sync::Mutex::new(HashSet::new())),
             workflow_session_filter: Arc::new(std::sync::RwLock::new(None)),
             aliases: Arc::new(RwLock::new(HashMap::new())),
             handlers: RwLock::new(HashMap::new()),
+            agent_message_receivers: tokio::sync::Mutex::new(HashMap::new()),
             handles: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            backgrounders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawned: Arc::new(RwLock::new(HashMap::new())),
+            external_teammate_controller: RwLock::new(None),
+            teammate_departure_cleanup: RwLock::new(None),
+            external_teammate_tasks: RwLock::new(HashSet::new()),
+            in_process_stop_locks: tokio::sync::Mutex::new(HashMap::new()),
             runtime,
             fs,
             output_manager,
             task_completed_firer: std::sync::Mutex::new(None),
             task_created_firer: std::sync::Mutex::new(None),
+            notification_revision: tokio::sync::watch::channel(0).0,
+            stopping_shells: Arc::new(std::sync::Mutex::new(HashMap::new())),
             pending_rest: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            pending_monitor_events: Arc::new(tokio::sync::Mutex::new(
+            pending_monitor_events: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
             total_agent_spawns: AtomicU64::new(0),
@@ -288,6 +406,50 @@ impl TaskRegistry {
             lifecycle_gate: Arc::new(RwLock::new(())),
             accepting_tasks: AtomicBool::new(true),
         }
+    }
+
+    /// Bind the session's departure cleanup owner without retaining the session.
+    pub async fn set_teammate_departure_cleanup(
+        &self,
+        owner: std::sync::Weak<dyn platform_api::team_spawn::TeammateDepartureCleanup>,
+    ) {
+        *self.teammate_departure_cleanup.write().await = Some(owner);
+    }
+
+    /// Whether this task still has approved departure work available for retry.
+    pub async fn has_pending_teammate_departure(&self, task_id: &str) -> bool {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let owner = self
+            .teammate_departure_cleanup
+            .read()
+            .await
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        match owner {
+            Some(owner) => owner.has_pending_departure(&task_id).await,
+            None => false,
+        }
+    }
+
+    /// Bind the host's external teammate teardown owner without retaining it.
+    pub async fn set_external_teammate_controller(
+        &self,
+        controller: std::sync::Weak<dyn TeamSpawnSeam>,
+    ) {
+        *self.external_teammate_controller.write().await = Some(controller);
+    }
+
+    /// Mark a published pane task before making it visible as running.
+    pub async fn register_external_teammate_task(&self, task_id: &str) {
+        self.external_teammate_tasks
+            .write()
+            .await
+            .insert(task_id.into());
+    }
+
+    /// Forget external routing only after the backend confirms termination.
+    pub async fn unregister_external_teammate_task(&self, task_id: &str) {
+        self.external_teammate_tasks.write().await.remove(task_id);
     }
 
     /// Session running total of `Agent`-tool subagent spawns (claude 2.1.212
@@ -437,7 +599,7 @@ impl TaskRegistry {
     pub async fn create(
         &self,
         task_type: TaskType,
-        _input: TaskSpawnInput,
+        input: TaskSpawnInput,
         description: String,
     ) -> Result<String, TaskError> {
         let _admission = self.lifecycle_gate.read().await;
@@ -463,6 +625,7 @@ impl TaskRegistry {
             end_time: None,
             total_paused_ms: 0,
             output_file: path,
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -473,11 +636,56 @@ impl TaskRegistry {
         #[allow(clippy::match_same_arms)]
         let state = match task_type {
             TaskType::LocalBash => TaskState::LocalBash(crate::state::LocalBashTaskState {
+                is_adopted: false,
+                caller: None,
                 base,
                 command: String::new(),
                 pid: None,
                 exit_code: None,
+                cwd: None,
+                is_backgrounded: None,
             }),
+            // A `local_agent` row must carry the agent-shaped state, not the
+            // `_` fallback's `LocalBash`: `bind_agent_id` and every other
+            // agent-only registry operation match on the variant, so a row
+            // created through this path would otherwise report `local_agent`
+            // on the wire (`state_to_record` reads `base.task_type`) while
+            // refusing every agent operation with `Unsupported`.
+            TaskType::LocalAgent => {
+                let (agent_id, subagent_type, prompt, is_backgrounded) = match &input {
+                    TaskSpawnInput::LocalAgent {
+                        agent_id,
+                        subagent_type,
+                        prompt,
+                        is_backgrounded,
+                        ..
+                    } => (
+                        *agent_id,
+                        subagent_type.clone(),
+                        prompt.clone(),
+                        *is_backgrounded,
+                    ),
+                    _ => (protocol::AgentId::nil(), String::new(), String::new(), false),
+                };
+                TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+                    is_parked: false,
+                    is_observer: false,
+                    observed_agent_id: None,
+                    forked_skill_name: None,
+                    base,
+                    agent_id,
+                    subagent_type,
+                    prompt,
+                    error: None,
+                    messages: vec![],
+                    pending_messages: vec![],
+                    is_backgrounded,
+                    outcome: Default::default(),
+                })
+            }
+            TaskType::AutoModeScan => {
+                TaskState::AutoModeScan(crate::state::AutoModeScanTaskState { base })
+            }
             TaskType::Dream => TaskState::Dream(crate::state::DreamTaskState {
                 base,
                 iteration_count: 0,
@@ -487,15 +695,48 @@ impl TaskRegistry {
                 base,
                 command: String::new(),
                 exit_code: None,
+                stdout_bytes: None,
             }),
+            TaskType::InProcessTeammate => {
+                let TaskSpawnInput::InProcessTeammate {
+                    agent_id,
+                    name,
+                    team_name,
+                    ..
+                } = &input
+                else {
+                    return Err(TaskError::Internal(
+                        "teammate row requires teammate identity".into(),
+                    ));
+                };
+                let mut base = base;
+                base.creator_teammate_name = Some(name.clone());
+                base.creator_team_name = Some(team_name.clone());
+                TaskState::InProcessTeammate(crate::state::InProcessTeammateTaskState {
+                    is_idle: false,
+                    awaiting_plan_approval: false,
+                    base,
+                    agent_id: *agent_id,
+                    pending_messages: vec![],
+                })
+            }
             _ => TaskState::LocalBash(crate::state::LocalBashTaskState {
+                is_adopted: false,
+                caller: None,
                 base,
                 command: String::new(),
                 pid: None,
                 exit_code: None,
+                cwd: None,
+                is_backgrounded: None,
             }),
         };
         self.tasks.write().await.insert(id.clone(), state);
+        if task_type == TaskType::InProcessTeammate {
+            for alias in aliases_for_spawn(&input) {
+                self.aliases.write().await.insert(alias, id.clone());
+            }
+        }
         // Best-effort `TaskCreated` fire (claude-code `executeTaskCreatedHooks`,
         // fired from `TaskCreateTool`). No-op when no firer is registered.
         self.fire_task_created(&id, task_type, &description_for_hook)
@@ -541,6 +782,44 @@ impl TaskRegistry {
                 })
                 .await;
         }
+    }
+
+    /// Register /auto-mode-setup reconnaissance with a TaskStop cancellation hook.
+    pub async fn register_auto_mode_scan(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, TaskError> {
+        let id = generate_task_id(TaskType::AutoModeScan);
+        let output_file = self
+            .output_manager
+            .allocate(&id)
+            .await
+            .map_err(|error| TaskError::Io(error.to_string()))?;
+        let state = TaskState::AutoModeScan(crate::state::AutoModeScanTaskState {
+            base: TaskStateBase {
+                id: id.clone(),
+                task_type: TaskType::AutoModeScan,
+                status: TaskStatus::Running,
+                description: "scanning for auto-mode setup".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file,
+                evict_after: None,
+                output_offset: 0,
+                // Oracle skipTranscript + ambient: this scan has no chat notification.
+                notified: true,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+        });
+        let cleanup: TaskCleanup = Arc::new(move || cancel.cancel());
+        // Install cancellation before publishing the row to /tasks.
+        self.cleanups.lock().await.insert(id.clone(), cleanup);
+        self.tasks.write().await.insert(id.clone(), state);
+        Ok(id)
     }
 
     /// Register a backgrounded MCP tool call (claude-code 2.1.212
@@ -605,6 +884,7 @@ impl TaskRegistry {
             end_time: None,
             total_paused_ms: 0,
             output_file: path,
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name,
@@ -612,12 +892,15 @@ impl TaskRegistry {
             creator_agent_id,
         };
         let state = TaskState::McpTask(crate::state::McpTaskState {
+            saved_hint: None,
             base,
             server_name,
             tool_name,
             // `NZu` seeds `mcpStatus:"working"`.
             mcp_status: "working".to_string(),
             status_message: None,
+            // A running call has produced nothing yet.
+            result_text: None,
         });
         self.tasks.write().await.insert(id.clone(), state);
         // Cancel-on-kill hook: `kill` runs this cleanup (no handler / no
@@ -646,12 +929,1001 @@ impl TaskRegistry {
     /// (`if (O.notified) return O`). Callers use this to gate the
     /// `mcp_auto_background` outcome counter — a killed / already-settled task
     /// must never re-emit it.
+    /// Register a shell command the caller is about to background, minting the
+    /// id and creating the output file the process runner will append to.
+    ///
+    /// This is the port of claude-code `Xne` (2.1.263 `src_160988549.js`
+    /// @4281167): the shell's own task identity becomes a `local_bash` record
+    /// with `status: "running"`, so the `backgroundTaskId` handed to the model
+    /// resolves in `TaskOutput` / `TaskStop` / `TaskList`, and the terminal
+    /// transition produces the completion `<task-notification>`.
+    ///
+    /// The registry owns the id space and the output directory, so the caller
+    /// must take both from here rather than minting its own — a second id space
+    /// is exactly the defect this closes.
+    ///
+    /// # Errors
+    /// Returns [`TaskError::Io`] when the output file cannot be allocated.
+    pub async fn allocate_bash_output(&self) -> Result<(String, std::path::PathBuf), TaskError> {
+        let id = generate_task_id(TaskType::LocalBash);
+        let path = self
+            .output_manager
+            .allocate(&id)
+            .await
+            .map_err(|e| TaskError::Io(e.to_string()))?;
+        self.pending_bash_registration.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.clone(), None);
+        Ok((id, path))
+    }
+
+    /// Delete an allocated shell output file that was never needed, because the
+    /// command finished in the foreground and its output was returned inline
+    /// (claude-code `deleteOutputFile` under `outputFileRedundant`).
+    pub async fn discard_bash_output(&self, task_id: &str) {
+        let Ok(path) = self.output_manager.path_for(task_id) else {
+            return;
+        };
+        if self.tasks.read().await.contains_key(task_id) {
+            // A record was registered against this identity after all; its file
+            // is live output, not a redundant allocation.
+            return;
+        }
+        self.pending_bash_registration.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(task_id);
+        let _ = self.output_manager.discard(&path).await;
+    }
+
+    /// Register a `local_bash` record for an identity already minted by
+    /// [`Self::allocate_bash_output`].
+    ///
+    /// # Errors
+    /// Returns [`TaskError::Io`] when the output path cannot be derived.
+    pub async fn register_background_bash(
+        &self,
+        id: String,
+        command: String,
+        description: String,
+        tool_use_id: Option<String>,
+        cwd: Option<String>,
+        creator_agent_id: Option<protocol::AgentId>,
+    ) -> Result<(String, std::path::PathBuf), TaskError> {
+        self.register_bash_row(
+            id,
+            command,
+            description,
+            tool_use_id,
+            cwd,
+            creator_agent_id,
+            true,
+        )
+        .await
+    }
+
+    /// Shared row builder for the two `local_bash` registration entry points.
+    /// `backgrounded` is claude-code's `isBackgrounded`: `true` for `Xne` (an
+    /// explicit background spawn or a timed-out command), `false` for `U6t`
+    /// (the 2 s foreground arming).
+    #[allow(clippy::too_many_arguments)]
+    async fn register_bash_row(
+        &self,
+        id: String,
+        command: String,
+        description: String,
+        tool_use_id: Option<String>,
+        cwd: Option<String>,
+        creator_agent_id: Option<protocol::AgentId>,
+        backgrounded: bool,
+    ) -> Result<(String, std::path::PathBuf), TaskError> {
+        let path = self
+            .output_manager
+            .path_for(&id)
+            .map_err(|e| TaskError::Io(e.to_string()))?;
+        let description_for_hook = description.clone();
+        let base = TaskStateBase {
+            id: id.clone(),
+            task_type: TaskType::LocalBash,
+            status: TaskStatus::Running,
+            description,
+            tool_use_id,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: path.clone(),
+            evict_after: None,
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id,
+        };
+        let caller = (!backgrounded).then(|| {
+            if base.creator_agent_id.is_some() { "agent" } else { "turn" }.to_string()
+        });
+        let state = TaskState::LocalBash(crate::state::LocalBashTaskState {
+            is_adopted: false,
+            caller,
+            base,
+            command,
+            pid: None,
+            exit_code: None,
+            cwd,
+            // This entry point only fires for a shell that is actually being
+            // backgrounded (claude-code `Xne` registers `isBackgrounded: true`).
+            // The 2 s foreground arming registers `false` through
+            // [`Self::register_foreground_bash`].
+            is_backgrounded: Some(backgrounded),
+        });
+        let (created, early_terminal, supervised) = {
+            let mut rows = self.tasks.write().await;
+            // Acquire every awaited lock before consuming the receipt or
+            // mutating state: cancellation cannot strand a half-publication.
+            let mut cleanups = self.cleanups.lock().await;
+            // The producer marks supervision before acquiring this same task
+            // lock to cache its receipt. Read the flag before consuming it.
+            let supervised = self.output_manager.shell_terminal_is_supervised(&path).await;
+            let created = match rows.get_mut(&id) {
+                Some(TaskState::LocalBash(existing)) => {
+                    let TaskState::LocalBash(incoming) = &state else { unreachable!() };
+                    if existing.command != incoming.command
+                        || existing.base.creator_agent_id != incoming.base.creator_agent_id
+                        || matches!((&existing.base.tool_use_id, &incoming.base.tool_use_id), (Some(old), Some(new)) if old != new) {
+                        return Err(TaskError::Internal("conflicting shell registration".into()));
+                    }
+                    // U6t arming and later Xne backgrounding name one process.
+                    // Preserve its terminal result, PID, caller and clocks.
+                    existing.is_backgrounded = Some(existing.is_backgrounded == Some(true) || backgrounded);
+                    if existing.base.tool_use_id.is_none() { existing.base.tool_use_id = incoming.base.tool_use_id.clone(); }
+                    if incoming.cwd.is_some() { existing.cwd = incoming.cwd.clone(); }
+                    false
+                }
+                Some(_) => return Err(TaskError::Internal("shell identity belongs to another task type".into())),
+                None => { rows.insert(id.clone(), state); true }
+            };
+            let early_exit = self.pending_bash_registration.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id).flatten();
+            if created && early_exit.is_some() { rows.checkpoint(); }
+            let early_terminal = early_exit.and_then(|(code, killed)| {
+                let entry = rows.get_mut(&id).expect("just registered shell");
+                if entry.base().status.is_terminal() { return None; }
+                let TaskState::LocalBash(shell) = entry else { unreachable!() };
+                if let Some(code) = code { shell.exit_code = Some(code); }
+                shell.base.status = if killed { TaskStatus::Killed } else if code == Some(0) { TaskStatus::Completed } else { TaskStatus::Failed };
+                stamp_terminal_clock(entry, false);
+                cleanups.remove(&id);
+                Some((entry.clone(), code, killed))
+            });
+            (created, early_terminal, supervised)
+        };
+        if let Some((terminal, code, killed)) = early_terminal {
+            self.bump_notification_revision();
+            let created_firer = created
+                .then(|| {
+                    self.task_created_firer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                })
+                .flatten();
+            let completed_firer = self
+                .task_completed_firer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let output = self.output_manager.clone();
+            let output_path = path.clone();
+            let task_id = id.clone();
+            let base = terminal.base().clone();
+            // Scheduling is synchronous. Dropping this registration future at
+            // a hook/marker await detaches the lifecycle job, not its receipt.
+            let job = tokio::spawn(async move {
+                let marker = async {
+                    if !supervised {
+                        let trailer = if killed { "\n[killed]\n".to_string() } else { format!("\n[exited with code {}]\n", code.map_or_else(|| "unknown".into(), |code| code.to_string())) };
+                        output.append_shell_terminal(&output_path, &trailer).await;
+                    }
+                    output.evict_writer(&output_path).await;
+                };
+                let created = async {
+                    if let Some(firer) = created_firer {
+                        firer.fire(hooks::TaskCreatedFire { task_id: task_id.clone(), task_subject: "LocalBash".into(), task_description: Some(description_for_hook), teammate_name: base.creator_teammate_name.clone(), team_name: base.creator_team_name.clone() }).await;
+                    }
+                };
+                tokio::join!(marker, created);
+                if let Some(firer) = completed_firer {
+                    let status = match base.status { TaskStatus::Completed => Some("completed"), TaskStatus::Failed => Some("failed"), _ => None };
+                    if let Some(status) = status {
+                        firer.fire(hooks::TaskCompletedFire { task_id, status: status.into(), task_subject: base.description.clone(), task_description: Some(base.description), teammate_name: base.creator_teammate_name, team_name: base.creator_team_name }).await;
+                    }
+                }
+            });
+            job.await.map_err(|error| TaskError::Internal(format!("shell registration lifecycle task: {error}")))?;
+        } else if created {
+            self.fire_task_created(&id, TaskType::LocalBash, &description_for_hook).await;
+        }
+        Ok((id, path))
+    }
+
+    /// Record the OS pid of an already-registered background shell and install
+    /// the cleanup that kills it, so `TaskStop` reaches a child this registry
+    /// did not spawn itself.
+    ///
+    /// # Errors
+    /// Returns [`TaskError::NotFound`] when the id is unknown.
+    pub async fn bind_background_bash_process(
+        &self,
+        task_id: &str,
+        pid: Option<u32>,
+        killer: Arc<dyn platform_api::task_registry::TaskKiller>,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let cleanup: TaskCleanup = Arc::new(move || {
+            let killer = killer.clone();
+            tokio::spawn(async move { killer.kill().await });
+        });
+        // Match terminal publication's tasks -> cleanups lock order. A child
+        // completing during binding must never leave a stale PID killer behind.
+        let mut map = self.tasks.write().await;
+        let entry = map.get_mut(&task_id).ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+        let TaskState::LocalBash(bash) = entry else { return Err(TaskError::Unsupported); };
+        if bash.base.status.is_terminal() { return Ok(()); }
+        let mut cleanups = self.cleanups.lock().await;
+        bash.pid = pid;
+        cleanups.insert(task_id, cleanup);
+        Ok(())
+    }
+
+    /// Register a still-running FOREGROUND shell (claude-code `U6t`, fired by
+    /// the Bash poll loop once the command has run for `cnr` = 2000 ms).
+    ///
+    /// The row is `running` with `is_backgrounded = Some(false)`: visible to
+    /// `/tasks` and addressable by Ctrl+B / background-all, but not a background
+    /// task. [`Self::unregister_foreground_bash`] withdraws it again when the
+    /// command finishes in the foreground.
+    ///
+    /// # Errors
+    /// Returns [`TaskError`] if the record cannot be published.
+    pub async fn register_foreground_bash(
+        &self,
+        task_id: &str,
+        registration: platform_api::task_registry::BackgroundBashRegistration,
+        auto_background_armed: bool,
+    ) -> Result<(), TaskError> {
+        // `autoBackgroundArmed` rides on the record in claude-code purely so the
+        // UI can say whether the deadline will background or kill. Nothing in
+        // this engine reads it yet, so it is not stored — recording a field no
+        // consumer reads would be the "named, computed, never wired" shape.
+        let _ = auto_background_armed;
+        self.register_bash_row(
+            task_id.to_string(),
+            registration.command,
+            registration.description,
+            registration.tool_use_id,
+            registration.cwd,
+            registration.creator_agent_id,
+            false,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn bind_agent_message_receiver(
+        &self,
+        task_id: &str,
+        receiver: Arc<dyn platform_api::task_registry::TaskMessageReceiver>,
+    ) -> Result<(), TaskError> {
+        let id = self.canonical_or_raw(task_id).await;
+        if !self.tasks.read().await.contains_key(&id) {
+            return Err(TaskError::NotFound(id));
+        }
+        self.agent_message_receivers
+            .lock()
+            .await
+            .insert(id, receiver);
+        Ok(())
+    }
+
+    /// `fln`: expose an allocated foreground agent to task controls.
+    pub async fn register_foreground_agent(
+        &self,
+        registration: platform_api::task_registry::ForegroundAgentRegistration,
+    ) -> Result<TaskState, TaskError> {
+        let id = generate_task_id(TaskType::LocalAgent);
+        let path = self
+            .output_manager
+            .path_for(&id)
+            .map_err(|e| TaskError::Io(e.to_string()))?;
+        let base = TaskStateBase {
+            id: id.clone(),
+            task_type: TaskType::LocalAgent,
+            status: TaskStatus::Running,
+            description: registration.description,
+            tool_use_id: registration.tool_use_id,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: path,
+            evict_after: None,
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: registration.creator_teammate_name,
+            creator_team_name: registration.creator_team_name,
+            creator_agent_id: registration.creator_agent_id,
+        };
+        let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            base,
+            agent_id: registration.agent_id,
+            subagent_type: registration.agent_type,
+            prompt: registration.prompt,
+            error: None,
+            messages: Vec::new(),
+            pending_messages: Vec::new(),
+            is_backgrounded: false,
+            is_parked: false,
+            is_observer: false,
+            observed_agent_id: None,
+            forked_skill_name: None,
+            outcome: Default::default(),
+        });
+        self.tasks.write().await.insert(id.clone(), state.clone());
+        {
+            let mut aliases = self.aliases.write().await;
+            aliases.insert(registration.agent_id.to_string(), id.clone());
+            aliases.insert(registration.agent_id.as_uuid().to_string(), id.clone());
+        }
+        self.fire_task_created(&id, TaskType::LocalAgent, &state.base().description)
+            .await;
+        self.bump_notification_revision();
+        Ok(state)
+    }
+
+    /// Preserve the actual one-shot pool runner when a foreground call becomes
+    /// background work, or its own background tasks have not been consumed.
+    pub async fn park_foreground_agent(
+        &self,
+        agent_id: protocol::AgentId,
+        outcome: platform_api::task_registry::AgentTerminalOutcome,
+    ) -> bool {
+        let Some((id, backgrounded)) = ({
+            let map = self.tasks.read().await;
+            map.values().find_map(|state| match state {
+                TaskState::LocalAgent(agent)
+                    if agent.agent_id == agent_id
+                        && !state.is_terminated()
+                        && (agent.is_backgrounded
+                            || self.has_live_background_children_locked(
+                                &map,
+                                Some(agent_id),
+                                None,
+                                None,
+                            )) =>
+                {
+                    Some((agent.base.id.clone(), agent.is_backgrounded))
+                }
+                _ => None,
+            })
+        }) else {
+            return false;
+        };
+        if !backgrounded {
+            // Controls are installed by the foreground startup gate. If a
+            // standalone host omits them, retaining the caller is still safer
+            // than deallocating an owner with live children.
+            self.background_task(&id).await;
+        }
+        let result = outcome.result.clone();
+        let usage = outcome.usage.clone();
+        self.set_agent_outcome(&id, outcome).await;
+        self.mark_task_rested(&id, result, usage, Some(agent_id), None, None)
+            .await;
+        self.get(&id).await.is_some_and(|state| state.is_parked())
+    }
+
+    /// `mln`: a foreground completion is consumed directly by the caller.
+    pub async fn unregister_foreground_agent(&self, task_id: &str) {
+        let id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if matches!(map.get(&id), Some(TaskState::LocalAgent(agent)) if agent.outcome.killed_by.as_deref() == Some("user")) {
+            // A user-addressable stopped task keeps its original ID/recipe.
+            drop(map);
+            self.agent_message_receivers.lock().await.remove(&id);
+            self.backgrounders.lock().await.remove(&id);
+            return;
+        }
+        if !matches!(map.get(&id), Some(TaskState::LocalAgent(agent)) if !agent.is_backgrounded) {
+            return;
+        }
+        let output = map
+            .remove(&id)
+            .map(|state| state.base().output_file.clone());
+        drop(map);
+        if let Some(output) = output {
+            if let Some(handler) = self.handler_for(TaskType::LocalAgent).await {
+                handler.forget_resume_recipe(&id);
+            }
+            self.output_manager.release_output_state(&output).await;
+        }
+        self.backgrounders.lock().await.remove(&id);
+        self.agent_message_receivers.lock().await.remove(&id);
+        self.cleanups.lock().await.remove(&id);
+        self.aliases.write().await.retain(|_, target| target != &id);
+        self.bump_notification_revision();
+    }
+
+    /// Withdraw an armed foreground row because the command finished in the
+    /// foreground.
+    ///
+    /// claude-code `W6t`: `if(!bp(o)||o.isBackgrounded||o.notified) return;
+    /// r.remove(e)`. A row that was backgrounded in the meantime is left alone —
+    /// it owns a real child now and will produce its own completion
+    /// notification.
+    pub async fn unregister_foreground_bash(&self, task_id: &str) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        self.pending_bash_registration.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&task_id);
+        let Some(TaskState::LocalBash(bash)) = map.get(&task_id) else {
+            return;
+        };
+        if bash.is_backgrounded == Some(true) || bash.base.notified {
+            return;
+        }
+        let output = map
+            .remove(&task_id)
+            .map(|state| state.base().output_file.clone());
+        drop(map);
+        if let Some(output) = output {
+            self.output_manager.release_output_state(&output).await;
+        }
+    }
+
+    /// Attach the handle that moves an armed foreground shell to the background
+    /// on demand (claude-code holds the live `shellCommand` on the record and
+    /// calls `t.background(e)`).
+    ///
+    /// # Errors
+    /// Returns [`TaskError::NotFound`] when the id is unknown.
+    pub async fn bind_background_requester(
+        &self,
+        task_id: &str,
+        requester: Arc<dyn platform_api::task_registry::TaskBackgrounder>,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        if !self.tasks.read().await.contains_key(&task_id) {
+            return Err(TaskError::NotFound(task_id));
+        }
+        self.backgrounders.lock().await.insert(task_id, requester);
+        Ok(())
+    }
+
+    /// claude-code `Upt` — is this task backgroundable right now?
+    ///
+    /// For a shell: not already backgrounded, and there is a live command behind
+    /// it (`Boolean(e.shellCommand)`; here, a bound requester). A terminal row
+    /// has nothing to background.
+    fn task_is_backgroundable(state: &TaskState) -> bool {
+        match state {
+            TaskState::LocalBash(bash) => {
+                bash.is_backgrounded != Some(true) && !bash.base.status.is_terminal()
+            }
+            TaskState::LocalAgent(agent) => !agent.is_backgrounded && !state.is_terminated(),
+            _ => false,
+        }
+    }
+
+    /// claude-code `H_t` — whether anything can be backgrounded, i.e. whether
+    /// the Ctrl+B affordance should be offered at all.
+    pub async fn has_backgroundable_tasks(&self) -> bool {
+        if platform_api::env::background_tasks_disabled() {
+            return false;
+        }
+        let map = self.tasks.read().await;
+        let requesters = self.backgrounders.lock().await;
+        map.iter()
+            .any(|(id, state)| Self::task_is_backgroundable(state) && requesters.contains_key(id))
+    }
+
+    /// claude-code `Wer` → `I_t` — move one still-running foreground shell to
+    /// the background. Returns whether it moved.
+    ///
+    /// Order matters and is the oracle's: ask the command to detach FIRST
+    /// (`if(!t.background(e)) return!1`), and only then flip `isBackgrounded`.
+    /// Flipping first would leave a row claiming to be a background task if the
+    /// request could not be delivered.
+    pub async fn background_task(&self, task_id: &str) -> bool {
+        self.background_task_with_reason(
+            task_id,
+            platform_api::task_registry::TaskBackgroundReason::User,
+        )
+        .await
+    }
+
+    async fn background_task_with_reason(
+        &self,
+        task_id: &str,
+        reason: platform_api::task_registry::TaskBackgroundReason,
+    ) -> bool {
+        if platform_api::env::background_tasks_disabled() {
+            return false;
+        }
+        let task_id = self.canonical_or_raw(task_id).await;
+        {
+            let map = self.tasks.read().await;
+            match map.get(&task_id) {
+                Some(state) if Self::task_is_backgroundable(state) => {}
+                _ => return false,
+            }
+        }
+        let Some(requester) = self.backgrounders.lock().await.get(&task_id).cloned() else {
+            return false;
+        };
+        {
+            let mut map = self.tasks.write().await;
+            match map.get_mut(&task_id) {
+                Some(TaskState::LocalBash(_)) => {}
+                // `s9` publishes the agent's background state before waking
+                // its waiting tool call; that call may finish immediately.
+                Some(TaskState::LocalAgent(agent)) => agent.is_backgrounded = true,
+                _ => return false,
+            }
+        }
+        requester.background_with_reason(reason).await;
+        if let Some(TaskState::LocalBash(bash)) = self.tasks.write().await.get_mut(&task_id) {
+            bash.is_backgrounded = Some(true);
+        }
+        self.bump_notification_revision();
+        true
+    }
+
+    /// claude-code `bjn` + `JFe` — the two rosters a "no task found" message
+    /// names.
+    ///
+    /// `bjn` lists a teammate by `identity.agentId`, which upstream is the
+    /// `name@team` string. Here that form lives in the alias map (built at
+    /// spawn by `aliases_for_spawn`), so the roster reverse-looks-it-up and
+    /// falls back to the raw agent id when a teammate has no team.
+    pub async fn not_found_rosters(
+        &self,
+        caller_agent_id: Option<&str>,
+        named_agent_ids: &[String],
+    ) -> platform_api::task_registry::TaskNotFoundRosters {
+        let map = self.tasks.read().await;
+        let aliases = self.aliases.read().await;
+        // task id → its most addressable alias (`name@team` beats a bare name
+        // beats the raw id), matching what the model is told to pass back.
+        let mut addressable: HashMap<&str, &str> = HashMap::new();
+        for (alias, task_id) in aliases.iter() {
+            let better = addressable
+                .get(task_id.as_str())
+                .is_none_or(|current| !current.contains('@') && alias.contains('@'));
+            if better {
+                addressable.insert(task_id.as_str(), alias.as_str());
+            }
+        }
+
+        let mut running_teammates = Vec::new();
+        let mut background_agents = Vec::new();
+        for (id, state) in map.iter() {
+            match state {
+                TaskState::InProcessTeammate(teammate)
+                    if teammate.base.status == TaskStatus::Running =>
+                {
+                    running_teammates.push(
+                        addressable
+                            .get(id.as_str())
+                            .map_or_else(|| teammate.agent_id.to_string(), ToString::to_string),
+                    );
+                }
+                TaskState::LocalAgent(agent)
+                    if (agent.base.status == TaskStatus::Running || agent.is_parked)
+                        && agent.is_backgrounded
+                        && Some(id.as_str()) != caller_agent_id
+                        && Some(agent.agent_id.to_string().as_str()) != caller_agent_id
+                        && Some(agent.agent_id.as_uuid().to_string().as_str())
+                            != caller_agent_id
+                        && agent.subagent_type != "main-session"
+                        && !agent.is_observer
+                        && !named_agent_ids.iter().any(|named| named == id) =>
+                {
+                    // `p.description ? `${p.id} (${Vn(p.description)})` : p.id`.
+                    background_agents.push(if agent.base.description.is_empty() {
+                        id.clone()
+                    } else {
+                        format!(
+                            "{id} ({})",
+                            platform_api::display::sanitize_display(&agent.base.description)
+                        )
+                    });
+                }
+                _ => {}
+            }
+        }
+        running_teammates.sort();
+        background_agents.sort();
+        platform_api::task_registry::TaskNotFoundRosters {
+            running_teammates,
+            background_agents,
+        }
+    }
+
+    /// claude-code `Ode` — move the task that owns `tool_use_id` to the
+    /// background. Returns whether it moved.
+    ///
+    /// The oracle scans for the FIRST row with that `toolUseId` and returns
+    /// early from the scan whether or not it could be backgrounded, so a
+    /// terminal row does not fall through to some other task that happens to
+    /// share the id.
+    pub async fn background_task_for_tool_use(&self, tool_use_id: &str) -> bool {
+        let target = {
+            let map = self.tasks.read().await;
+            map.iter()
+                .find(|(_, state)| state.base().tool_use_id.as_deref() == Some(tool_use_id))
+                .map(|(id, state)| (id.clone(), Self::task_is_backgroundable(state)))
+        };
+        match target {
+            Some((id, true)) => self.background_task(&id).await,
+            _ => false,
+        }
+    }
+
+    /// claude-code `zM` — move everything backgroundable to the background and
+    /// report how many moved.
+    ///
+    /// The oracle runs two passes over one snapshot: shells first, agents second.
+    pub async fn background_all_tasks(&self) -> usize {
+        self.background_all_tasks_with_reason(
+            platform_api::task_registry::TaskBackgroundReason::User,
+        )
+        .await
+    }
+
+    /// Background-all preserves its originating trigger for tool results.
+    pub async fn background_all_tasks_with_reason(
+        &self,
+        reason: platform_api::task_registry::TaskBackgroundReason,
+    ) -> usize {
+        let mut targets = {
+            let map = self.tasks.read().await;
+            map.iter()
+                .filter(|(_, state)| Self::task_is_backgroundable(state))
+                .map(|(id, state)| (id.clone(), !matches!(state, TaskState::LocalBash(_))))
+                .collect::<Vec<_>>()
+        };
+        targets.sort_by_key(|(_, is_agent)| *is_agent);
+        let mut moved = 0;
+        for (id, _) in targets {
+            if self.background_task_with_reason(&id, reason).await {
+                moved += 1;
+            }
+        }
+        self.tasks.feature("task_local_shell_background_all", None);
+        moved
+    }
+
+    /// Kill the background shells a finishing agent started, and report how
+    /// many were still running.
+    ///
+    /// claude-code sweeps these in its agent-run cleanup (`nHn`), which is what
+    /// makes the Bash tool's promise true: a synchronous subagent is told its
+    /// backgrounded command "is terminated when you give your final response".
+    /// Only shells owned by THIS agent are touched, so the main session's and
+    /// other agents' commands are untouched.
+    ///
+    /// The sweep is silent. `nHn` (`src_160988549.js` @3376778) is two halves —
+    /// kill the running rows, then `dG((r)=>r.agentId===e)`, where `dG` is
+    /// `pendingNotificationQueue.dequeueAllMatching`. Note the two halves range
+    /// over DIFFERENT populations: the kill loop is gated on
+    /// `status==="running"`, but the dequeue drops every pending notification
+    /// addressed to the exiting agent, whatever produced it.
+    ///
+    /// This engine has no per-agent notification queue — it derives
+    /// notifications from state (terminal AND not `notified`) — so the
+    /// equivalent is to stamp `notified` on both populations: the rows this
+    /// sweep kills, and the agent's shells that had already finished on their
+    /// own with their completion still undrained. Without the first, tidying up
+    /// after a subagent spits a `<task-notification> … was stopped` into the
+    /// MAIN session for every shell it left running; without the second it does
+    /// the same for every command the subagent finished but never read.
+    ///
+    /// Note this is the opposite of a user-initiated `TaskStop`, where the stop
+    /// notification is the point; the oracle drops these because nothing is
+    /// left to read them.
+    pub async fn kill_background_shells_for_agent(&self, agent_id: protocol::AgentId) -> usize {
+        // Two lists, because `nHn` is two halves over two different
+        // populations. The kill loop is gated on `status==="running"`, but
+        // `dG((r)=>r.agentId===e)` afterwards drops EVERY pending notification
+        // addressed to the exiting agent — including one from a shell that had
+        // already finished on its own and whose completion nobody has read yet.
+        let (live, already_terminal): (Vec<String>, Vec<String>) = {
+            let map = self.tasks.read().await;
+            let mut live = Vec::new();
+            let mut already_terminal = Vec::new();
+            for state in map.values() {
+                let base = state.base();
+                if state.base().task_type != TaskType::LocalBash
+                    || base.creator_agent_id != Some(agent_id)
+                {
+                    continue;
+                }
+                if !platform_api::task_activity::is_live_shell_task(
+                    &crate::handle::state_to_record(state),
+                ) {
+                    // Only rows that still owe a notification; a drained one has
+                    // nothing left to suppress.
+                    if !base.notified {
+                        already_terminal.push(base.id.clone());
+                    }
+                } else {
+                    live.push(base.id.clone());
+                }
+            }
+            (live, already_terminal)
+        };
+        let mut killed = 0;
+        for id in live {
+            if self.kill(&id).await.is_ok() {
+                killed += 1;
+                // Belt and braces for the race `kill` deliberately excludes: it
+                // stamps only a row THIS kill ended (`was_live`), so a shell
+                // that settled between the snapshot above and the kill would
+                // otherwise keep its notification. `dG` drops that one too.
+                let _ = self.mark_notified(&id).await;
+            }
+        }
+        // The rest of `dG`'s reach: finished-on-their-own shells the kill loop
+        // never touches. Without this the sweep still leaked a
+        // `<task-notification>` into the MAIN session for every command the
+        // subagent happened to complete but not read.
+        //
+        // The explicit queue now carries recipients, so mirror dG's queue-wide
+        // removal as well (monitor events and shell advisories included).
+        self.pending_monitor_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|notification| notification.recipient_agent_id != Some(agent_id));
+        for id in already_terminal {
+            let _ = self.mark_notified(&id).await;
+        }
+        killed
+    }
+
+    /// THn quiet: claim once, transition terminal, publish only the SDK event.
+    pub async fn publish_task_stopped(&self, task_id: &str) {
+        let id = self.canonical_or_raw(task_id).await;
+        let event = {
+            let mut map = self.tasks.write().await;
+            let Some(state) = map.get_mut(&id) else {
+                return;
+            };
+            let Some(event) = shell_stopped_sdk_event(state) else {
+                return;
+            };
+            state.base_mut().notified = true;
+            event
+        };
+        let _ = self.set_status(&id, TaskStatus::Killed).await;
+        self.tasks.emit(event);
+    }
+
+    pub fn subscribe_task_lifecycle(
+        &self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<serde_json::Value> {
+        self.tasks.subscribe()
+    }
+
+    /// Main-host interaction state for `jer`. Unwired hosts cannot reap.
+    pub fn update_shell_session_activity(
+        &self,
+        interactive: bool,
+        busy: bool,
+        user_interaction: bool,
+    ) {
+        let mut state = self
+            .shell_session_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.interactive = interactive;
+        state.busy = busy;
+        if user_interaction {
+            state.last_interaction = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Advisory prompt-stall event: the shell remains running and completion
+    /// remains unclaimed. The process watchdog guarantees once per command.
+    pub async fn notify_bash_stall(&self, task_id: &str, tail: &str) {
+        {
+            let map = self.tasks.read().await;
+            let Some(TaskState::LocalBash(shell)) = map.get(task_id) else {
+                return;
+            };
+            if shell.base.status != TaskStatus::Running || shell.is_backgrounded == Some(false) {
+                return;
+            }
+            let notification = platform_api::task_registry::TaskNotification {
+                task_id: task_id.to_string(),
+                task_type: "local_bash".into(),
+                recipient_agent_id: shell.base.creator_agent_id,
+                status: "running".into(),
+                description: shell.base.description.clone(),
+                tool_use_id: shell.base.tool_use_id.clone(),
+                output_path: Some(shell.base.output_file.to_string_lossy().into_owned()),
+                result: Some(tail.to_string()),
+                ..Default::default()
+            };
+            self.pending_monitor_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(notification);
+        }
+        self.bump_notification_revision();
+        self.tasks.feature("task_local_shell_stall_detected", None);
+    }
+
+    /// Claim a shell stop on OS memory pressure. Session activity and every
+    /// task are checked together before publishing a single stop notification.
+    pub async fn claim_bash_memory_pressure_stop(&self, task_id: &str) -> bool {
+        if std::env::var("LINGXI_CODE_DISABLE_BG_SHELL_PRESSURE_REAP")
+            .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        {
+            return false;
+        }
+        let (notification, cleanup) = {
+            let mut map = self.tasks.write().await;
+            let mut cleanups = self.cleanups.lock().await;
+            let policy = self
+                .shell_session_activity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !policy.interactive
+                || policy.busy
+                || !policy
+                    .last_interaction
+                    .is_some_and(|at| at.elapsed() >= Duration::from_secs(1800))
+            {
+                return false;
+            }
+            if map.values().any(|state| {
+                platform_api::task_activity::is_active_delegated_task(
+                    &crate::handle::state_to_record(state),
+                )
+            }) {
+                return false;
+            }
+            let Some(TaskState::LocalBash(shell)) = map.get_mut(task_id) else {
+                return false;
+            };
+            if shell.base.status != TaskStatus::Running
+                || shell.base.notified
+                || shell.is_backgrounded == Some(false)
+            {
+                return false;
+            }
+            // A row can be visible before its native killer is bound. Do not
+            // publish a stop until someone can actually take responsibility.
+            let Some(cleanup) = cleanups.remove(task_id) else {
+                return false;
+            };
+            shell.base.status = TaskStatus::Killed;
+            shell.base.notified = true;
+            shell.base.end_time = Some(SystemTime::now());
+            shell.base.evict_after = Some(SystemTime::now() + Duration::from_secs(30));
+            let notification = platform_api::task_registry::TaskNotification {
+                task_id: task_id.to_string(),
+                task_type: "local_bash".into(),
+                recipient_agent_id: shell.base.creator_agent_id,
+                status: "killed".into(),
+                description: shell.base.description.clone(),
+                tool_use_id: shell.base.tool_use_id.clone(),
+                output_path: Some(shell.base.output_file.to_string_lossy().into_owned()),
+                killed_by: Some("memory_pressure".into()),
+                ..Default::default()
+            };
+            self.pending_monitor_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(notification.clone());
+            (notification, cleanup)
+        };
+        // Transfer the actual kill before any cancellable output I/O. This
+        // callback owns its spawned kill even if the polling caller disappears.
+        cleanup();
+        self.bump_notification_revision();
+        self.tasks.feature("task_local_shell_pressure_reap", None);
+        if let Some(path) = notification.output_path {
+            let output_manager = self.output_manager.clone();
+            let finish = tokio::spawn(async move {
+                let path = std::path::Path::new(&path);
+                let _ = output_manager
+                    .append_shell_terminal(path, "\n[killed]\n")
+                    .await;
+                output_manager.evict_writer(path).await;
+            });
+            // Dropping this join handle detaches the finalizer, not its work.
+            let _ = finish.await;
+        }
+        true
+    }
+
+    /// Assign shell terminal output to the independent native writer.
+    pub async fn mark_shell_supervised(&self, id: &str) {
+        let id = self.canonical_or_raw(id).await;
+        if let Ok(output) = self.output_manager.path_for(&id) {
+            self.output_manager.mark_supervised_terminal(&output).await;
+        }
+    }
+
+    /// Settle a background shell task once its child has been reaped.
+    ///
+    /// Terminal status follows claude-code `Fpt`: an interrupted/killed child is
+    /// `killed`, exit code `0` is `completed`, anything else (including an
+    /// unknown code) is `failed`. The exit code is written first so the drained
+    /// `<task-notification>` can render `(exit code N)`.
+    ///
+    /// # Errors
+    /// Returns [`TaskError::NotFound`] when the id is unknown.
+    pub async fn settle_background_bash(
+        &self,
+        task_id: &str,
+        exit_code: Option<i32>,
+        killed: bool,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        {
+            let rows = self.tasks.write().await;
+            if !rows.contains_key(&task_id) {
+                if let Some(pending) = self.pending_bash_registration.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&task_id) {
+                    // Only a live allocation can retain a pre-registration receipt.
+                    pending.get_or_insert((exit_code, killed));
+                }
+                return Ok(());
+            }
+        }
+        if let Some(code) = exit_code {
+            let _ = self.set_bash_exit_code(&task_id, code).await;
+        }
+        let status = if killed {
+            TaskStatus::Killed
+        } else if exit_code == Some(0) {
+            TaskStatus::Completed
+        } else {
+            TaskStatus::Failed
+        };
+        let output_file = {
+            let mut map = self.tasks.write().await;
+            match map.get_mut(&task_id) {
+                Some(entry) if entry.base().status.is_terminal() => return Ok(()),
+                Some(entry) => {
+                    entry.base_mut().end_time = Some(SystemTime::now());
+                    Some(entry.base().output_file.clone())
+                }
+                // No record: the identity was allocated for a command that was
+                // never backgrounded, so there is nothing to settle.
+                None => return Ok(()),
+            }
+        };
+        // claude-code closes a background shell's output file with a status
+        // trailer so a later `Read` shows how it ended (`Bpt`:
+        // `s1e(e, "\n[" + (killed ? "killed" : "exited with code " + (code ?? "unknown")) + "]\n")`,
+        // 2.1.263 `src_160988549.js` @4279785).
+        if let Some(output_file) = output_file {
+            let trailer = if killed {
+                "\n[killed]\n".to_string()
+            } else {
+                let code = exit_code.map_or_else(|| "unknown".to_string(), |c| c.to_string());
+                format!("\n[exited with code {code}]\n")
+            };
+            self.output_manager.append_shell_terminal(&output_file, &trailer).await;
+        }
+        self.set_status(&task_id, status).await?;
+        Ok(())
+    }
+
     pub async fn settle_mcp_task(
         &self,
         task_id: &str,
         result_text: &str,
         failed: bool,
     ) -> Result<bool, TaskError> {
+        self.settle_mcp_task_with_hint(task_id, result_text, failed, None).await
+    }
+
+    pub async fn settle_mcp_task_with_hint(&self, task_id: &str, result_text: &str, failed: bool, saved_hint: Option<&str>) -> Result<bool, TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         // Guard + recover the spool path under a read lock.
         let output_file = {
@@ -662,8 +1934,10 @@ impl TaskRegistry {
                 None => return Err(TaskError::NotFound(task_id)),
             }
         };
-        // Persist the real result so the notification's `output-file` carries it
-        // (the port surfaces the result via the spool, not an inline value).
+        // Persist the real result so the notification's `output-file` carries
+        // it AND `TaskOutput` can serve it later. The inline `<result>` in the
+        // notification is stamped separately, below, from the state — claude's
+        // `F` is handed `resultText` directly and a renderer cannot read a file.
         let _ = self.output_manager.append(&output_file, result_text).await;
         // The call has settled, so it is no longer cancellable — drop the
         // cancel hook before the atomic terminal transition below (this also
@@ -703,6 +1977,15 @@ impl TaskRegistry {
                 } else {
                     "completed".to_string()
                 };
+                // Only a COMPLETED call carries a result body upstream
+                // (`F`'s `status==="completed" ? resultText ?? "" : …`); a
+                // failure renders from `statusMessage` instead, so storing the
+                // text here would put it somewhere nothing reads and leave a
+                // failed row looking like it had an answer.
+                if !failed {
+                    m.result_text = Some(result_text.to_string());
+                    m.saved_hint = saved_hint.map(str::to_string);
+                }
             }
             state.base_mut().status = status;
             state.base().clone()
@@ -743,7 +2026,7 @@ impl TaskRegistry {
     /// for `task_type`, runs [`Task::spawn`], and tracks the resulting task
     /// under the **handler-generated** `task_id` (e.g.
     /// `InProcessTeammateHandler` mints `t…` ids internally), which it returns.
-    /// This is the load-bearing dispatch the coordinator's `TeamCreate` relies
+    /// This is the load-bearing dispatch the implicit teammate service relies
     /// on to start a real worker.
     ///
     /// The typed [`TaskState`] is built from the real `input` fields (not the
@@ -761,6 +2044,15 @@ impl TaskRegistry {
         task_type: TaskType,
         input: TaskSpawnInput,
         description: String,
+    ) -> Result<String, TaskError> {
+        self.spawn_with_aliases(task_type, input, description, &[]).await
+    }
+
+    /// Publish restored task aliases in the same transaction as the row,
+    /// before opening the handler's startup gate.
+    pub async fn spawn_with_aliases(
+        &self, task_type: TaskType, input: TaskSpawnInput, description: String,
+        restored_aliases: &[String],
     ) -> Result<String, TaskError> {
         let _admission = self.lifecycle_gate.read().await;
         if !self.accepting_tasks.load(Ordering::Acquire) {
@@ -817,6 +2109,7 @@ impl TaskRegistry {
             end_time: None,
             total_paused_ms: 0,
             output_file: path,
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -824,6 +2117,28 @@ impl TaskRegistry {
             creator_agent_id: None,
         };
         let mut state = state_for_spawn(base, &input);
+        if let TaskState::LocalAgent(agent) = &mut state {
+            if agent.is_observer {
+                let marker_path = agent.base.output_file.with_extension("observer.json");
+                let marker_path = marker_path.to_string_lossy();
+                let marker =
+                    serde_json::json!({"agentType": agent.subagent_type, "isObserver": true})
+                        .to_string();
+                self.fs
+                    .write_file(&marker_path, &marker)
+                    .await
+                    .map_err(|e| TaskError::Io(e.to_string()))?;
+                let saved = self
+                    .fs
+                    .read_file(&marker_path, None, None)
+                    .await
+                    .map_err(|e| TaskError::Io(e.to_string()))?;
+                if saved.content != marker {
+                    return Err(TaskError::Io("observer marker read-back failed".into()));
+                }
+                agent.base.notified = true;
+            }
+        }
         // Fusion handlers resolve their live settings before returning the
         // prepared handle. Publish that captured summary with the state before
         // activation so print-mode waiters cannot observe a task without its
@@ -841,12 +2156,18 @@ impl TaskRegistry {
         //    from observing a row before its handler route and cleanup exist.
         //    All guards are acquired before the first insert, so cancellation
         //    while waiting for a guard leaves no partial registry artifacts.
-        let spawn_aliases = aliases_for_spawn(&input);
+        let restoring_agent = matches!(&input, TaskSpawnInput::LocalAgent { spawn_request: Some(request), .. } if request.resumed_history.is_some());
+        let mut spawn_aliases = aliases_for_spawn(&input);
+        spawn_aliases.extend(restored_aliases.iter().cloned());
         {
             let mut tasks = self.tasks.write().await;
             let mut spawned = self.spawned.write().await;
             let mut cleanups = self.cleanups.lock().await;
             let mut aliases = self.aliases.write().await;
+            if restored_aliases.iter().any(|alias| alias.is_empty() || tasks.contains_key(alias) || aliases.contains_key(alias))
+                || (restoring_agent && spawn_aliases.iter().any(|alias| tasks.contains_key(alias) || aliases.contains_key(alias))) {
+                return Err(TaskError::Internal("restored task or agent alias is already in use".into()));
+            }
 
             tasks.insert(id.clone(), state);
             spawned.insert(id.clone(), task_type);
@@ -1220,6 +2541,7 @@ impl TaskRegistry {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file,
+                evict_after: None,
                 output_offset: 0,
                 notified: true,
                 creator_teammate_name: None,
@@ -1273,6 +2595,27 @@ impl TaskRegistry {
     /// projects it as `exit_code`/`done`. Non-bash variants are a benign
     /// no-op (only bash and monitor children carry an OS exit code). `NotFound` for an
     /// unknown id — the sink swallows it (racing teardown tolerance).
+    /// Record a monitor's total stdout byte count (claude-code
+    /// `pipedStdoutBytes`), which selects its completion summary.
+    ///
+    /// # Errors
+    /// Returns [`TaskError::NotFound`] when the id is unknown.
+    pub async fn set_monitor_stdout_bytes(
+        &self,
+        task_id: &str,
+        bytes: u64,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        let entry = map
+            .get_mut(&task_id)
+            .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+        if let TaskState::Monitor(m) = entry {
+            m.stdout_bytes = Some(bytes);
+        }
+        Ok(())
+    }
+
     pub async fn set_bash_exit_code(&self, task_id: &str, exit_code: i32) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -1292,11 +2635,16 @@ impl TaskRegistry {
     /// producer must not grow session memory without limit while the model is
     /// busy. The monitor handler performs its own token-bucket suppression;
     /// this final cap protects the registry boundary as well.
-    pub async fn enqueue_monitor_event(&self, task_id: &str, event: &str) -> Result<(), TaskError> {
+    pub async fn enqueue_monitor_event(
+        &self,
+        task_id: &str,
+        event: &str,
+        housekeeping: bool,
+    ) -> Result<(), TaskError> {
         const MAX_PENDING_MONITOR_EVENTS: usize = 1_024;
 
         let task_id = self.canonical_or_raw(task_id).await;
-        let notification = {
+        {
             let tasks = self.tasks.read().await;
             let state = tasks
                 .get(&task_id)
@@ -1307,22 +2655,31 @@ impl TaskRegistry {
             if monitor.base.status.is_terminal() {
                 return Ok(());
             }
-            platform_api::task_registry::TaskNotification {
+            let notification = platform_api::task_registry::TaskNotification {
                 task_id: monitor.base.id.clone(),
+                recipient_agent_id: monitor.base.creator_agent_id,
                 task_type: "monitor_ws".to_string(),
                 status: "running".to_string(),
                 description: monitor.base.description.clone(),
                 tool_use_id: monitor.base.tool_use_id.clone(),
                 output_path: Some(monitor.base.output_file.to_string_lossy().into_owned()),
                 result: Some(event.to_string()),
+                // `GM(…,{isHousekeeping})` — a harness line about the monitor,
+                // not script output. The renderer suppresses the per-event
+                // push hint for these.
+                monitor_housekeeping: housekeeping,
                 ..Default::default()
+            };
+            let mut queue = self
+                .pending_monitor_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if queue.len() >= MAX_PENDING_MONITOR_EVENTS {
+                queue.pop_front();
             }
-        };
-        let mut queue = self.pending_monitor_events.lock().await;
-        if queue.len() >= MAX_PENDING_MONITOR_EVENTS {
-            queue.pop_front();
+            queue.push_back(notification);
         }
-        queue.push_back(notification);
+        self.bump_notification_revision();
         Ok(())
     }
 
@@ -1352,6 +2709,15 @@ impl TaskRegistry {
     /// `local_agent` clean-result branch) without spinning up the variant's
     /// real handler.
     #[cfg(test)]
+    /// Seed an alias → task-id mapping the way `aliases_for_spawn` would.
+    #[cfg(test)]
+    pub(crate) async fn register_alias_for_test(&self, alias: &str, task_id: &str) {
+        self.aliases
+            .write()
+            .await
+            .insert(alias.to_string(), task_id.to_string());
+    }
+
     pub(crate) async fn insert_state_for_test(&self, state: TaskState) {
         let id = state.base().id.clone();
         self.tasks.write().await.insert(id, state);
@@ -1390,6 +2756,81 @@ impl TaskRegistry {
         }
     }
 
+    /// Publish the actual pool identity before the prepared agent is activated.
+    pub async fn set_agent_display(&self, id: &str, model: String, effort: Option<String>) {
+        let id = self.canonical_or_raw(id).await;
+        if let Some(TaskState::LocalAgent(agent)) = self.tasks.write().await.get_mut(&id) {
+            agent.outcome.model = (!model.is_empty()).then_some(model);
+            agent.outcome.effort = effort;
+        }
+    }
+    pub async fn completed_agent_visible(&self, id: &str) -> bool {
+        let map = self.tasks.read().await;
+        let Some(TaskState::LocalAgent(agent)) = map.get(id) else { return false; };
+        agent.base.status == TaskStatus::Completed && agent.is_backgrounded && !agent.is_observer
+            && agent.subagent_type != "main-session" && agent.base.evict_after != Some(SystemTime::UNIX_EPOCH)
+            && !self.has_live_background_children_locked(&map, Some(agent.agent_id), None, None)
+    }
+
+    pub async fn bind_agent_id(
+        &self,
+        task_id: &str,
+        agent_id: protocol::AgentId,
+    ) -> Result<(), TaskError> {
+        let canonical = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        let state = map
+            .get_mut(&canonical)
+            .ok_or_else(|| TaskError::NotFound(canonical.clone()))?;
+        if state.is_terminated() {
+            return Err(TaskError::TerminatedTask);
+        }
+        let TaskState::LocalAgent(agent) = state else {
+            return Err(TaskError::Unsupported);
+        };
+        agent.agent_id = agent_id;
+        let mut aliases = self.aliases.write().await;
+        aliases.insert(agent_id.to_string(), canonical.clone());
+        aliases.insert(agent_id.as_uuid().to_string(), canonical);
+        drop(aliases);
+        drop(map);
+        self.bump_notification_revision();
+        Ok(())
+    }
+
+    /// Record an authoritative idle event without ending the persistent task.
+    pub async fn set_teammate_idle(&self, task_id: &str) -> Result<(), TaskError> {
+        let id = self.canonical_or_raw(task_id).await;
+        let mut tasks = self.tasks.write().await;
+        let state = tasks
+            .get_mut(&id)
+            .ok_or_else(|| TaskError::NotFound(id.clone()))?;
+        if let TaskState::InProcessTeammate(teammate) = state {
+            if !teammate.base.status.is_terminal() {
+                teammate.is_idle = true;
+            }
+        }
+        drop(tasks);
+        self.bump_notification_revision();
+        Ok(())
+    }
+
+    pub async fn set_awaiting_plan_approval(
+        &self,
+        task_id: &str,
+        awaiting: bool,
+    ) -> Result<(), TaskError> {
+        let id = self.canonical_or_raw(task_id).await;
+        let mut tasks = self.tasks.write().await;
+        let state = tasks
+            .get_mut(&id)
+            .ok_or_else(|| TaskError::NotFound(id.clone()))?;
+        if let TaskState::InProcessTeammate(teammate) = state {
+            teammate.awaiting_plan_approval = awaiting && !teammate.base.status.is_terminal();
+        }
+        Ok(())
+    }
+
     /// Force `task_id`'s status to `status`. Returns
     /// [`TaskError::NotFound`] if the id is unknown. Only Bash and Agent
     /// variants currently carry a writable `status` field in the M1 surface;
@@ -1403,33 +2844,85 @@ impl TaskRegistry {
         let task_id = self.canonical_or_raw(task_id).await;
         let updated = {
             let mut map = self.tasks.write().await;
+            // Answered BEFORE the mutable borrow below: the keepalive question
+            // is about the WHOLE map (does any live row name this agent as its
+            // creator?), which cannot be asked while one entry is borrowed
+            // mutably.
+            let holds_children = match (status.is_terminal(), map.get(&task_id)) {
+                (true, Some(TaskState::LocalAgent(agent))) => {
+                    self.has_live_background_children_locked(&map, Some(agent.agent_id), None, None)
+                }
+                _ => false,
+            };
             let entry = map
                 .get_mut(&task_id)
                 .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
             // Task lifecycle is absorbing at the first terminal transition.
             // In particular, a late handler failure must not overwrite an
             // explicit kill (or fire TaskCompleted after Killed already won).
-            if entry.base().status.is_terminal() {
+            if entry.is_terminated() {
                 return Ok(entry.clone());
             }
             match entry {
-                TaskState::LocalBash(b) => b.base.status = status,
-                TaskState::LocalAgent(a) => a.base.status = status,
+                TaskState::LocalBash(b) => {
+                    if status.is_terminal() {
+                        let mut cleanups = self.cleanups.lock().await;
+                        b.base.status = status;
+                        cleanups.remove(&task_id);
+                    } else {
+                        b.base.status = status;
+                    }
+                }
+                TaskState::LocalAgent(a) => {
+                    a.is_parked = false;
+                    a.base.status = status;
+                    if !status.is_terminal() {
+                        a.base.end_time = None;
+                        a.base.evict_after = None;
+                        a.base.notified = false;
+                    }
+                    if status == TaskStatus::Running {
+                        // Turn-local diagnostics must not survive a resumed run.
+                        // Retain the last answer/usage and worktree coordinates.
+                        a.outcome.max_turns_reached = None;
+                        a.error = None;
+                    }
+                }
                 TaskState::RemoteAgent(r) => r.base.status = status,
-                TaskState::InProcessTeammate(t) => t.base.status = status,
+                TaskState::InProcessTeammate(t) => {
+                    t.base.status = status;
+                    t.is_idle = false;
+                    if status.is_terminal() {
+                        t.awaiting_plan_approval = false;
+                    }
+                }
                 TaskState::LocalWorkflow(w) => w.base.status = status,
                 TaskState::MonitorMcp(m) => m.base.status = status,
                 TaskState::Monitor(m) => m.base.status = status,
                 TaskState::McpTask(m) => m.base.status = status,
+                TaskState::AutoModeScan(s) => s.base.status = status,
                 TaskState::Dream(d) => d.base.status = status,
                 TaskState::LocalFusion(f) => f.base.status = status,
             }
-            entry.clone()
+            if status.is_terminal() {
+                stamp_terminal_clock(entry, holds_children);
+            }
+            let updated = entry.clone();
+            if matches!(updated, TaskState::LocalAgent(_)) {
+                self.pending_rest.write().await.remove(&task_id);
+            }
+            updated
             // `map` write-guard drops here — the best-effort hook fire below
             // runs WITHOUT holding the registry lock so a slow/blocking hook
             // never stalls other task operations.
         };
 
+        self.bump_notification_revision();
+        if updated.is_terminated() {
+            self.output_manager
+                .evict_writer(&updated.base().output_file)
+                .await;
+        }
         self.fire_task_completed_hook(&task_id, status, &updated)
             .await;
 
@@ -1453,7 +2946,11 @@ impl TaskRegistry {
         let entry = map
             .get_mut(&task_id)
             .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+        if self.shell_transfer_fences.lock().unwrap().contains(&task_id) { return Ok(()); }
         entry.base_mut().notified = true;
+        if entry.is_parked() {
+            self.pending_rest.write().await.remove(&task_id);
+        }
         Ok(())
     }
 
@@ -1463,12 +2960,9 @@ impl TaskRegistry {
         Vec::new()
     }
 
-    /// Arm a one-shot "came to rest" notification for a PERSISTENT, still-alive
-    /// task (the `LocalAgentHandler` calls this via the status sink each time its
-    /// backgrounded agent rests). The next [`take_pending_task_notifications`]
-    /// surfaces it WITHOUT evicting; a fresh rest re-arms it. A no-op for an
-    /// unknown or already-terminal task (the ordinary terminal-notification path
-    /// owns those).
+    /// Publish a completed turn and its persistent park atomically with the
+    /// pending rest payload. A parked runner remains resumable after notification
+    /// and eviction passes. Truly terminated tasks cannot be re-armed.
     pub async fn mark_task_rested(
         &self,
         task_id: &str,
@@ -1481,12 +2975,37 @@ impl TaskRegistry {
         let Some(task_id) = self.resolve_task_id(task_id).await else {
             return;
         };
-        {
-            let map = self.tasks.read().await;
-            match map.get(&task_id) {
-                Some(s) if !s.base().status.is_terminal() => {}
-                _ => return,
+        let mut map = self.tasks.write().await;
+        let Some(state) = map.get_mut(&task_id) else {
+            return;
+        };
+        if state.is_terminated() {
+            return;
+        }
+        let TaskState::LocalAgent(agent) = state else {
+            return;
+        };
+        agent.is_parked = true;
+        agent.base.status = TaskStatus::Completed;
+        agent.base.end_time = Some(SystemTime::now());
+        agent.base.evict_after = None;
+        agent.base.notified = false;
+        if agent.is_observer {
+            agent.base.notified = true;
+            let digest = (!agent.pending_messages.is_empty())
+                .then(|| std::mem::take(&mut agent.pending_messages).join("\n\n"));
+            if digest.is_some() {
+                agent.is_parked = false;
+                agent.base.status = TaskStatus::Running;
             }
+            drop(map);
+            self.bump_notification_revision();
+            if let Some(digest) = digest {
+                if let Err(error) = self.deliver_observer_digest(&task_id, digest).await {
+                    tracing::warn!(task_id, %error, "observer activity delivery failed");
+                }
+            }
+            return;
         }
         self.pending_rest.write().await.insert(
             task_id,
@@ -1498,18 +3017,64 @@ impl TaskRegistry {
                 team_name,
             },
         );
+        drop(map);
+        self.bump_notification_revision();
     }
 
     fn has_live_background_children_locked(
+        &self,
         map: &HashMap<String, TaskState>,
         rested_agent_id: Option<protocol::AgentId>,
         agent_name: Option<&str>,
         team_name: Option<&str>,
     ) -> bool {
+        fn holds_work(
+            map: &HashMap<String, TaskState>,
+            queued: &HashSet<protocol::AgentId>,
+            state: &TaskState,
+            visited: &mut HashSet<protocol::AgentId>,
+        ) -> bool {
+            if matches!(state, TaskState::LocalAgent(agent) if agent.is_observer)
+                || matches!(state, TaskState::AutoModeScan(_))
+            {
+                return false;
+            }
+            if !state.base().status.is_terminal() {
+                return true;
+            }
+            // Completion keeps its owner alive until the recipient has folded
+            // the notification, even though the child model has already ended.
+            if !state.base().notified {
+                return true;
+            }
+            let TaskState::LocalAgent(agent) = state else {
+                return false;
+            };
+            if !agent.is_parked || !visited.insert(agent.agent_id) {
+                return false;
+            }
+            queued.contains(&agent.agent_id)
+                || map.values().any(|child| {
+                    child.base().creator_agent_id == Some(agent.agent_id)
+                        && holds_work(map, queued, child, visited)
+                })
+        }
+        let queued: HashSet<_> = self
+            .pending_monitor_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|note| note.recipient_agent_id)
+            .collect();
+        let mut visited = HashSet::new();
         if let Some(rested_agent_id) = rested_agent_id {
+            if queued.contains(&rested_agent_id) {
+                return true;
+            }
             return map.values().any(|state| {
                 let base = state.base();
-                !base.status.is_terminal() && base.creator_agent_id == Some(rested_agent_id)
+                base.creator_agent_id == Some(rested_agent_id)
+                    && holds_work(map, &queued, state, &mut visited)
             });
         }
 
@@ -1518,9 +3083,9 @@ impl TaskRegistry {
         };
         map.values().any(|state| {
             let base = state.base();
-            !base.status.is_terminal()
-                && base.creator_teammate_name.as_deref() == Some(agent_name)
+            base.creator_teammate_name.as_deref() == Some(agent_name)
                 && base.creator_team_name.as_deref() == team_name
+                && holds_work(map, &queued, state, &mut visited)
         })
     }
 
@@ -1715,38 +3280,561 @@ impl TaskRegistry {
         Ok(updated)
     }
 
+    /// Atomically commit a Host-validated Local App Build/UseTest success.
+    ///
+    /// This is intentionally not a generic workflow terminal primitive.  It
+    /// accepts only a [`TaskState::LocalWorkflow`] row carrying an authenticated
+    /// Build or UseTest scope, and it exists because those two workflows have
+    /// two local publications that must linearize with the absorbing task
+    /// state: the canonical result projection and the Host's already-prepared
+    /// active QA receipt pointer.
+    ///
+    /// Expensive QA/evidence validation must happen before this method.  While
+    /// the registry write lock is held, this method writes a bounded unverified
+    /// spool placeholder, runs `publish_prepared`, makes canonical success
+    /// authoritative only after publication, then assigns the exact resulting
+    /// outcome/status. A competing kill therefore wins before these
+    /// publications (and the closure is not called), or observes the committed
+    /// terminal state afterward. `publish_prepared` must not call back into
+    /// this registry, perform UI/network work, scan QA artifacts, or do large
+    /// cleanup; those operations would introduce lock inversion or make the
+    /// critical section unbounded. The returned boolean is true only when
+    /// this call committed the prepared publication; an already-terminal row
+    /// is returned with false so callers cannot emit a success summary for a
+    /// publication closure that never ran.
+    pub async fn commit_local_app_workflow_terminal<F, Fut>(
+        &self,
+        task_id: &str,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        publish_prepared: F,
+    ) -> Result<(TaskState, bool), TaskError>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(), String>> + Send,
+    {
+        let canonical_result = outcome.result.clone().ok_or_else(|| {
+            TaskError::Internal(
+                "Local App terminal commit requires a canonical result payload".into(),
+            )
+        })?;
+        let task_id = self.canonical_or_raw(task_id).await;
+        let (updated, publication_committed) = {
+            let mut map = self.tasks.write().await;
+            let entry = map
+                .get_mut(&task_id)
+                .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+            let TaskState::LocalWorkflow(workflow) = entry else {
+                return Err(TaskError::Unsupported);
+            };
+            let eligible = workflow.scope.as_ref().is_some_and(|scope| {
+                matches!(
+                    scope.purpose(),
+                    crate::scope::LocalAppWorkflowPurpose::Build
+                        | crate::scope::LocalAppWorkflowPurpose::UseTest
+                )
+            });
+            if !eligible {
+                return Err(TaskError::Unsupported);
+            }
+            if workflow.base.status.is_terminal() {
+                return Ok((entry.clone(), false));
+            }
+
+            let output_file = workflow.base.output_file.clone();
+            let canonical_result_error = self
+                .output_manager
+                .validate_terminal_result(&output_file, &canonical_result)
+                .err()
+                .map(|error| {
+                    format!(
+                        "local_app_completion_unverified: terminal spool replacement failed: {error}"
+                    )
+                });
+            let publication_pending = serde_json::json!({
+                "ok": false,
+                "error": "local_app_completion_unverified: QA publication pending",
+                "verified": false,
+            })
+            .to_string();
+            let mut publication_committed = false;
+            let commit_error = match canonical_result_error {
+                Some(error) => Some(error),
+                None => match self
+                    .output_manager
+                    .replace_terminal_result(&output_file, &publication_pending)
+                    .await
+                {
+                    Ok(()) => match publish_prepared().await {
+                        Ok(()) => {
+                            publication_committed = true;
+                            if let Err(error) = self
+                                .output_manager
+                                .replace_terminal_result_authoritative(
+                                    &output_file,
+                                    &canonical_result,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    %error,
+                                    "canonical Local App result is authoritative in memory; physical spool persistence failed after Host publication"
+                                );
+                            }
+                            None
+                        }
+                        Err(error) => Some(format!(
+                            "local_app_completion_unverified: QA publication failed: {error}"
+                        )),
+                    },
+                    Err(error) => Some(format!(
+                        "local_app_completion_unverified: terminal spool replacement failed: {error}"
+                    )),
+                },
+            };
+
+            if let Some(mut reason) = commit_error {
+                let failure_payload = serde_json::json!({
+                    "ok": false,
+                    "error": reason,
+                    "verified": false,
+                })
+                .to_string();
+                // Make the failed projection authoritative before retrying
+                // the filesystem rewrite. The physical spool still contains
+                // only an unverified placeholder if this retry also fails.
+                if let Err(error) = self
+                    .output_manager
+                    .replace_terminal_result_fail_closed(&output_file, &failure_payload)
+                    .await
+                {
+                    reason.push_str(&format!(
+                        "; terminal failure spool replacement failed: {error}"
+                    ));
+                }
+                workflow.outcome = platform_api::task_registry::WorkflowTerminalOutcome {
+                    result: None,
+                    error: Some(reason),
+                    ..outcome
+                };
+                workflow.base.status = TaskStatus::Failed;
+            } else {
+                workflow.outcome = outcome;
+                workflow.base.status = TaskStatus::Completed;
+            }
+            (entry.clone(), publication_committed)
+        };
+
+        let status = updated.base().status;
+        self.bump_notification_revision();
+        if updated.is_terminated() {
+            self.output_manager
+                .evict_writer(&updated.base().output_file)
+                .await;
+        }
+        self.fire_task_completed_hook(&task_id, status, &updated)
+            .await;
+        Ok((updated, publication_committed))
+    }
+
     /// [`Self::kill`] with the stop initiator recorded (`"parent"` / `"user"`).
     ///
     /// The reason is stamped BEFORE the kill dispatch so a handler that flips
     /// the task to `Killed` synchronously cannot let the drain observe a
     /// terminal task whose `killed_by` has not landed yet.
-    pub async fn kill_with_reason(&self, task_id: &str, killed_by: &str) -> Result<(), TaskError> {
+    /// Worker liveness is independent of the retained task's terminal status.
+    pub async fn has_live_task_loop(&self, task_id: &str) -> bool {
         let canonical = self.canonical_or_raw(task_id).await;
+        let task_type = self.spawned.read().await.get(&canonical).copied();
+        let handler = match task_type {
+            Some(kind) => self.handler_for(kind).await,
+            None => None,
+        };
+        match handler {
+            Some(handler) => handler.has_live_worker(&canonical).await,
+            None => false,
+        }
+    }
+
+    /// Process ownership is captured from actual pool allocation receipts.
+    pub async fn process_owner_ids(&self, task_id: &str) -> Vec<protocol::AgentId> {
+        let canonical = self.canonical_or_raw(task_id).await;
+        if let Some(TaskState::LocalAgent(agent)) = self.get(&canonical).await {
+            return vec![agent.agent_id];
+        }
+        let task_type = self.spawned.read().await.get(&canonical).copied();
+        let handler = match task_type {
+            Some(kind) => self.handler_for(kind).await,
+            None => None,
+        };
+        match handler {
+            Some(handler) => handler.process_owner_ids(&canonical).await,
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn kill_with_reason(&self, task_id: &str, killed_by: &str) -> Result<(), TaskError> {
+        // Stop is the other half of the human-resume transaction. Keep the
+        // teardown alive if the UI/turn caller is cancelled while worktree or
+        // handler cleanup is awaiting.
+        if let Some(registry) = self.owned_self() {
+            let task_id = task_id.to_owned();
+            let killed_by = killed_by.to_owned();
+            return tokio::spawn(async move {
+                registry.kill_with_reason_inner(&task_id, &killed_by).await
+            })
+            .await
+            .map_err(|error| TaskError::Internal(format!("task stop transaction joined: {error}")))?;
+        }
+        self.kill_with_reason_inner(task_id, killed_by).await
+    }
+
+    async fn kill_with_reason_inner(&self, task_id: &str, killed_by: &str) -> Result<(), TaskError> {
+        let canonical = self.canonical_or_raw(task_id).await;
+        let _human_resume = if killed_by == "user" {
+            // Cancel before waiting: an in-progress human prepare must release
+            // this same gate, then old teardown completes before a new epoch runs.
+            Some(self.invalidate_human_messages(&canonical).lock_owned().await)
+        } else { None };
         if let Some(TaskState::LocalAgent(agent)) = self.tasks.write().await.get_mut(&canonical) {
             // Same reverse-race guard `kill` applies to the status: a task that
             // already finished on its own is not "stopped by" anyone, and
             // stamping one would leave a completed task carrying a stop
             // initiator.
-            if !agent.base.status.is_terminal() {
+            if !agent.base.status.is_terminal() || agent.is_parked {
                 agent.outcome.killed_by = Some(killed_by.to_string());
             }
         }
-        self.kill(task_id).await
+        // claude-code captures `ue = GS(I)` BEFORE the kill, because the kill
+        // clears the keepalive reasons the gate reads. Same here: resolve the
+        // cascade target while the task is still resting.
+        let cascade_from = self.resting_agent_holding_children(&canonical).await;
+        let result = self.kill(task_id).await;
+        if let Some(agent_id) = cascade_from {
+            self.cascade_stop_descendants(agent_id, killed_by).await;
+        }
+        if killed_by == "user" {
+            self.tasks.feature(
+                "task_stop_user",
+                result.as_ref().err().map(|error| match error {
+                    TaskError::NotFound(_) => "not_found",
+                    _ => "unexpected",
+                }),
+            );
+        }
+        result
+    }
+
+    /// claude-code `GS(e)` — `type==="local_agent" && status==="completed" &&
+    /// keepaliveReasons.size > 0`: an agent that already came to rest but is
+    /// held open by live background children. Returns its agent id.
+    ///
+    /// The park is independent of the once-only pending notification. The
+    /// child keepalive reasons are derived from the registry's ownership edges.
+    ///
+    /// Both halves are load-bearing. Cascading on live children ALONE would kill
+    /// the children of an agent that is still actively working, which the oracle
+    /// does not do; cascading on rest alone would fire for an agent with nothing
+    /// left to hold open.
+    async fn resting_agent_holding_children(&self, canonical: &str) -> Option<protocol::AgentId> {
+        // Lock order is tasks → pending_rest everywhere else in this file; keep
+        // it.
+        let map = self.tasks.read().await;
+        let TaskState::LocalAgent(agent) = map.get(canonical)? else {
+            return None;
+        };
+        if !agent.is_parked {
+            return None;
+        }
+        let agent_id = agent.agent_id;
+        self.has_live_background_children_locked(&map, Some(agent_id), None, None)
+            .then_some(agent_id)
+    }
+
+    /// claude-code's cascade block (`rY` @3598005): every still-live
+    /// `local_agent` DESCENDANT of the stopped agent is stopped with it.
+    ///
+    /// Without this, stopping a resting parent leaves its children running with
+    /// nothing left to report to — the parent that would have collected them is
+    /// gone.
+    ///
+    /// Two things the oracle gets for free that this has to build:
+    ///
+    /// 1. **A parent index.** The oracle walks `r[p]` because a `local_agent`'s
+    ///    task id IS its agent id. Here they are independent (`generate_task_id`
+    ///    vs `LocalAgentTaskState::agent_id`), so the walk needs an explicit
+    ///    `agent_id → task_id` map or it silently stops after one level and
+    ///    grandchildren survive.
+    /// 2. **Silence.** `CI(Me.id,r)` stamps `notified` before each child kill,
+    ///    so the oracle emits nothing per cascaded child. This engine derives
+    ///    notifications from `terminal && !notified`, so without the same stamp
+    ///    a cascade would push one `Agent "…" was stopped by Claude` into the
+    ///    parent's session per descendant — the hazard already documented on
+    ///    [`Self::kill_background_shells_for_agent`].
+    ///
+    /// Children are stopped serially and their errors ignored, as the oracle
+    /// does: one dead child must not abort the rest of the cascade.
+    async fn cascade_stop_descendants(&self, stopped_agent_id: protocol::AgentId, killed_by: &str) {
+        let victims: Vec<String> = {
+            let map = self.tasks.read().await;
+            let by_agent: HashMap<protocol::AgentId, &TaskState> = map
+                .values()
+                .filter_map(|state| match state {
+                    TaskState::LocalAgent(agent) => Some((agent.agent_id, state)),
+                    _ => None,
+                })
+                .collect();
+            map.values()
+                .filter_map(|state| {
+                    let TaskState::LocalAgent(agent) = state else {
+                        return None;
+                    };
+                    if agent.agent_id == stopped_agent_id || state.is_terminated() {
+                        return None;
+                    }
+                    // `hVe`: walk UP the parent chain, with the oracle's
+                    // visited-set cycle guard.
+                    let mut seen = std::collections::HashSet::new();
+                    let mut parent = agent.base.creator_agent_id;
+                    while let Some(pid) = parent {
+                        if pid == stopped_agent_id {
+                            return Some(agent.base.id.clone());
+                        }
+                        if !seen.insert(pid) {
+                            break;
+                        }
+                        parent = by_agent.get(&pid).and_then(|s| s.base().creator_agent_id);
+                    }
+                    None
+                })
+                .collect()
+        };
+        for id in victims {
+            // `CI` before the kill, exactly as the oracle orders it.
+            let _ = self.mark_notified(&id).await;
+            let _ = Box::pin(self.kill_with_reason_inner(&id, killed_by)).await;
+        }
+    }
+
+    async fn activate_notification_recipient_locked(
+        &self,
+        map: &mut HashMap<String, TaskState>,
+        recipient: Option<protocol::AgentId>,
+        has_notifications: bool,
+    ) -> bool {
+        let mut activated = false;
+        if has_notifications {
+            if let Some(recipient) = recipient {
+                let mut resumed_ids = Vec::new();
+                for state in map.values_mut() {
+                    match state {
+                        TaskState::LocalAgent(agent)
+                            if agent.agent_id == recipient && agent.is_parked =>
+                        {
+                            agent.is_parked = false;
+                            agent.base.status = TaskStatus::Running;
+                            agent.base.end_time = None;
+                            agent.base.evict_after = None;
+                            agent.base.notified = false;
+                            agent.outcome.max_turns_reached = None;
+                            agent.error = None;
+                            resumed_ids.push(agent.base.id.clone());
+                            activated = true;
+                        }
+                        TaskState::InProcessTeammate(agent)
+                            if agent.agent_id == recipient && agent.is_idle =>
+                        {
+                            agent.is_idle = false;
+                            activated = true;
+                        }
+                        _ => {}
+                    }
+                }
+                let mut rest = self.pending_rest.write().await;
+                for id in resumed_ids {
+                    rest.remove(&id);
+                }
+            }
+        }
+        activated
+    }
+
+    fn notification_recipient(
+        state: &TaskState,
+        map: &HashMap<String, TaskState>,
+    ) -> Option<protocol::AgentId> {
+        let owner = state.base().creator_agent_id?;
+        // lLe/IRe: an agent/workflow whose owner no longer has a live runner
+        // reports to the main session instead of stranding the completion.
+        if matches!(
+            state,
+            TaskState::LocalAgent(_) | TaskState::LocalWorkflow(_)
+        ) {
+            let live_owner = map.values().any(|candidate| match candidate {
+                TaskState::LocalAgent(agent) => {
+                    agent.agent_id == owner
+                        && (agent.base.status == TaskStatus::Running || agent.is_parked)
+                }
+                TaskState::InProcessTeammate(agent) => {
+                    agent.agent_id == owner && !agent.base.status.is_terminal()
+                }
+                _ => false,
+            });
+            if !live_owner {
+                return None;
+            }
+        }
+        Some(owner)
+    }
+
+    pub(crate) fn bump_notification_revision(&self) {
+        self.notification_revision
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    /// Subscribe before checking pending work to avoid a check/wait race.
+    pub fn subscribe_task_notifications(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.notification_revision.subscribe()
+    }
+
+    /// Test readiness without consuming any recipient’s notifications.
+    pub async fn has_pending_task_notifications_for(
+        &self,
+        recipient: Option<protocol::AgentId>,
+    ) -> bool {
+        if self
+            .pending_monitor_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|n| n.recipient_agent_id == recipient && !self.shell_transfer_fences.lock().unwrap().contains(&n.task_id))
+        {
+            return true;
+        }
+        let map = self.tasks.read().await;
+        if map.iter().any(|(id, state)| matches!(state, TaskState::LocalAgent(agent) if Some(agent.agent_id) == recipient && !state.is_terminated()) && self.has_human_messages(id)) { return true; }
+
+        if map.values().any(|s| {
+            Self::notification_recipient(s, &map) == recipient
+                && s.base().status.is_terminal()
+                && !s.base().notified
+                && !self.shell_transfer_fences.lock().unwrap().contains(&s.base().id)
+                && !self
+                    .stopping_shells
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains_key(&s.base().id)
+                && !matches!(s, TaskState::LocalAgent(a) if a.is_parked || a.is_observer)
+        }) {
+            return true;
+        }
+        self.pending_rest.read().await.iter().any(|(id, payload)| {
+            map.get(id).is_some_and(|s| {
+                Self::notification_recipient(s, &map) == recipient
+                    && !self.has_live_background_children_locked(
+                        &map,
+                        payload.agent_id,
+                        payload.agent_name.as_deref(),
+                        payload.team_name.as_deref(),
+                    )
+            })
+        })
+    }
+
+    /// Drain main-session notifications only.
+    /// `Kan`/`Dlo`: consume byte deltas for running output watermarks without
+    /// attaching their text. Completion rendering reads the full output later.
+    async fn refresh_output_offsets(&self, recipient: Option<protocol::AgentId>) {
+        if recipient.is_some() {
+            return;
+        }
+        let running: Vec<_> = self
+            .tasks
+            .read()
+            .await
+            .values()
+            .filter(|state| state.base().status == TaskStatus::Running)
+            .map(|state| {
+                (
+                    state.base().id.clone(),
+                    state.base().output_file.clone(),
+                    state.base().output_offset,
+                )
+            })
+            .collect();
+        for (id, file, offset) in running {
+            if let Ok((content, next)) = self.output_manager.read_delta(&file, offset).await {
+                if content.is_empty() {
+                    continue;
+                }
+                if let Some(state) = self.tasks.write().await.get_mut(&id) {
+                    if state.base().status == TaskStatus::Running
+                        && state.base().output_offset == offset
+                    {
+                        state.base_mut().output_offset = next;
+                    }
+                }
+            }
+        }
     }
 
     pub async fn take_pending_task_notifications(
         &self,
     ) -> Vec<platform_api::task_registry::TaskNotification> {
+        self.take_pending_task_notifications_for(None).await
+    }
+
+    /// Atomically select and consume notifications belonging to this recipient.
+    pub async fn take_pending_task_notifications_for(
+        &self,
+        recipient: Option<protocol::AgentId>,
+    ) -> Vec<platform_api::task_registry::TaskNotification> {
+        self.refresh_output_offsets(recipient).await;
         use crate::handle::{status_to_wire, task_type_to_wire};
-        let mut out: Vec<_> = self.pending_monitor_events.lock().await.drain(..).collect();
         let mut map = self.tasks.write().await;
+        let mut out = Vec::new();
+        self.pending_monitor_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|n| {
+                if n.recipient_agent_id == recipient && !self.shell_transfer_fences.lock().unwrap().contains(&n.task_id) {
+                    out.push(n.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        let mut activated = self
+            .activate_notification_recipient_locked(&mut map, recipient, !out.is_empty())
+            .await;
+        // TID-04: evict the rows a PREVIOUS pass already notified, BEFORE this
+        // one marks any new ones.
+        //
+        // Order is the whole point. claude-code runs the sweep (`Kan`/`Dlo`) on
+        // the attachment pass, where every candidate was notified by an earlier
+        // pass; evicting after the drain below would delete a row in the same
+        // breath as telling the model about it, and `/tasks` would never show a
+        // finished task at all. Running it first reproduces the oracle's
+        // one-pass grace without needing a timestamp to express it.
+        let agent_handler = self.handler_for(TaskType::LocalAgent).await;
+        let evicted_outputs =
+            self.evict_notified_terminal_rows(&mut map, agent_handler.as_ref());
         // Collect ids first (terminal + not-notified) so the per-id remove below
         // doesn't fight the iteration borrow.
         let drain_ids: Vec<String> = map
             .iter()
             .filter(|(_, s)| {
                 let b = s.base();
-                b.status.is_terminal() && !b.notified
+                b.status.is_terminal()
+                    && !b.notified
+                    && !self.shell_transfer_fences.lock().unwrap().contains(&b.id)
+                    && Self::notification_recipient(s, &map) == recipient
+                    && !self
+                        .stopping_shells
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains_key(&b.id)
+                    && !matches!(s, TaskState::LocalAgent(a) if a.is_parked || a.is_observer)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -1760,6 +3848,7 @@ impl TaskRegistry {
             let exit_code = match state {
                 TaskState::LocalBash(bash) => bash.exit_code,
                 TaskState::Monitor(monitor) => monitor.exit_code,
+                // (the stdout byte count is monitor-only; see below)
                 _ => None,
             };
             let error = match state {
@@ -1804,14 +3893,24 @@ impl TaskRegistry {
                 _ => None,
             };
             let fusion_final_text = fusion_state.as_ref().and_then(|f| f.final_text.clone());
+            let output_path = self
+                .output_manager
+                .physical_output_is_authoritative(&b.output_file)
+                .await
+                .then(|| b.output_file.to_string_lossy().into_owned());
             out.push(platform_api::task_registry::TaskNotification {
                 task_id: b.id.clone(),
+                recipient_agent_id: Self::notification_recipient(state, &map),
                 task_type: task_type_to_wire(b.task_type).to_string(),
                 status: status_to_wire(b.status).to_string(),
                 description: b.description.clone(),
                 tool_use_id: b.tool_use_id.clone(),
-                output_path: Some(b.output_file.to_string_lossy().into_owned()),
+                output_path,
                 exit_code,
+                stdout_bytes: match state {
+                    TaskState::Monitor(monitor) => monitor.stdout_bytes,
+                    _ => None,
+                },
                 error,
                 // `local_agent` `<result>` / `<usage>`: the terminating run's
                 // final text and usage rollup, reported through
@@ -1830,11 +3929,37 @@ impl TaskRegistry {
                 killed_by: agent_outcome.killed_by,
                 worktree_path: agent_outcome.worktree_path,
                 worktree_branch: agent_outcome.worktree_branch,
+                // Set only when the run ended by exhausting its turn budget;
+                // selects the turn-limit variant of the `completed` summary.
+                max_turns_reached: agent_outcome.max_turns_reached,
+                // Terminal notifications are never monitor events.
+                monitor_housekeeping: false,
+                // `mcp_task` only — what claude-code's `F` needs beyond the
+                // registry id. `mcpStatus` (not the registry status) drives
+                // both the summary's trailing word and the `<status>` tag.
+                mcp: match state {
+                    TaskState::McpTask(m) => {
+                        Some(platform_api::task_registry::McpTaskNotificationMeta {
+                            server_name: m.server_name.clone(),
+                            tool_name: m.tool_name.clone(),
+                            mcp_status: m.mcp_status.clone(),
+                            status_message: m.status_message.clone(),
+                            saved_hint: m.saved_hint.clone(),
+                        })
+                    }
+                    _ => None,
+                },
                 result: workflow_outcome
                     .as_ref()
                     .and_then(|outcome| outcome.result.clone())
                     .or(agent_outcome.result)
-                    .or(fusion_final_text),
+                    .or(fusion_final_text)
+                    .or_else(|| match state {
+                        // The settled call's text, stamped by
+                        // `settle_mcp_task`. Only a completed call has one.
+                        TaskState::McpTask(m) => m.result_text.clone(),
+                        _ => None,
+                    }),
                 workflow_failures: workflow_outcome
                     .as_ref()
                     .map(|outcome| outcome.failures.clone())
@@ -1896,24 +4021,38 @@ impl TaskRegistry {
             }
         }
 
-        // Rest notifications: a PERSISTENT agent that came to rest (non-terminal,
-        // still alive) surfaces ONCE per rest WITHOUT eviction — claude-code's
+        // A persistent completed+keepalive agent surfaces once per rest without
+        // losing its live runner — claude-code's
         // "fires each time this agent comes to rest … the same task-id may notify
         // more than once." Drain + clear the armed set; the agent re-arms on its
         // next rest. A task that raced to terminal is skipped here (the terminal
         // drain above already owns it).
         let rest_payloads: Vec<(String, RestPayload)> = {
             let mut armed = self.pending_rest.write().await;
-            armed.drain().collect::<Vec<_>>()
+            let ids: Vec<_> = armed
+                .keys()
+                .filter(|id| {
+                    map.get(*id)
+                        .is_some_and(|state| Self::notification_recipient(state, &map) == recipient)
+                })
+                .cloned()
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| armed.remove(&id).map(|payload| (id, payload)))
+                .collect::<Vec<_>>()
         };
         let mut deferred_rest = Vec::new();
         for (id, payload) in rest_payloads {
             let Some(state) = map.get(&id) else { continue };
             let b = state.base();
-            if b.status.is_terminal() {
+            if Self::notification_recipient(state, &map) != recipient {
+                deferred_rest.push((id, payload));
                 continue;
             }
-            if Self::has_live_background_children_locked(
+            if b.status.is_terminal() && !matches!(state, TaskState::LocalAgent(a) if a.is_parked) {
+                continue;
+            }
+            if self.has_live_background_children_locked(
                 &map,
                 payload.agent_id,
                 payload.agent_name.as_deref(),
@@ -1924,15 +4063,10 @@ impl TaskRegistry {
             }
             out.push(platform_api::task_registry::TaskNotification {
                 task_id: b.id.clone(),
+                recipient_agent_id: Self::notification_recipient(state, &map),
                 task_type: task_type_to_wire(b.task_type).to_string(),
-                // DISPLAY status "completed" — the notification renderer
-                // (`prompt::task_notification`, the v2.1.185 `enqueueAgentNotification`)
-                // maps `completed → "Agent … came to rest"` and any other status
-                // to a wrong summary ("running" would hit the killed/`_` branch →
-                // "(stopped by user)"). A normal rest IS "came to rest", so the
-                // notification carries "completed". This is DISPLAY-ONLY and does
-                // NOT touch the registry — the task itself stays `Running` (alive,
-                // resumable); only this surfaced reminder reads `completed`.
+                // A resting persistent agent completed this turn-set while its
+                // keepalive retains the runner for future notifications/messages.
                 status: status_to_wire(TaskStatus::Completed).to_string(),
                 description: b.description.clone(),
                 tool_use_id: b.tool_use_id.clone(),
@@ -1940,6 +4074,8 @@ impl TaskRegistry {
                 // reads it (it was told it can Read/Bash-tail the output file).
                 output_path: Some(b.output_file.to_string_lossy().into_owned()),
                 exit_code: None,
+                // A resting AGENT has no stdout stream to have measured.
+                stdout_bytes: None,
                 error: None,
                 // The agent's final-text response + run usage, captured at rest
                 // time. The binary `enqueueAgentNotification` always emits these
@@ -1952,6 +4088,21 @@ impl TaskRegistry {
                 killed_by: None,
                 worktree_path: None,
                 worktree_branch: None,
+                // A persistent agent can come to rest by exhausting its turn
+                // budget just as a one-shot can end that way, and the oracle
+                // passes `maxTurnsReached` on every `enqueueAgentNotification`
+                // — rest included. The budget does not ride on `RestPayload`
+                // (that carries only what `notify_rest` is handed); the handler
+                // reports it through `set_agent_outcome` before it arms the
+                // rest, so it is read back off the stored outcome here.
+                max_turns_reached: match state {
+                    TaskState::LocalAgent(agent) => agent.outcome.max_turns_reached,
+                    _ => None,
+                },
+                // A rest notification is never a monitor event.
+                monitor_housekeeping: false,
+                // A rest notification only ever fires for a `local_agent`.
+                mcp: None,
                 workflow_failures: Vec::new(),
                 workflow_agent_count: None,
                 workflow_total_tokens: None,
@@ -1969,8 +4120,24 @@ impl TaskRegistry {
                 // which has no egress-profile concept.
                 egress_profiles: Vec::new(),
             });
+            if let Some(state) = map.get_mut(&id) {
+                state.base_mut().notified = true;
+            }
         }
+        // Consuming an owner's message and reactivating that owner are one
+        // transaction. Otherwise a grandparent can observe an idle owner with
+        // all children notified and release its keepalive before the runner
+        // gets to its separate activation await.
+        activated |= self
+            .activate_notification_recipient_locked(&mut map, recipient, !out.is_empty())
+            .await;
         drop(map);
+        if activated {
+            self.bump_notification_revision();
+        }
+        for output in evicted_outputs {
+            self.output_manager.release_output_state(&output).await;
+        }
         self.requeue_deferred_rest(deferred_rest).await;
         out
     }
@@ -2079,8 +4246,102 @@ impl TaskRegistry {
     /// Note: only Bash and Agent states currently carry a writable `status`
     /// field in the M1 surface; other variants are no-ops on cancel.
     pub async fn kill(&self, task_id: &str) -> Result<(), TaskError> {
+        let canonical = self.canonical_or_raw(task_id).await;
+        // A source handoff and explicit shell teardown are exclusive ownership
+        // decisions. Native completion may still win under the task-row lock.
+        let is_shell = self.tasks.read().await.get(&canonical).is_some_and(|state| matches!(state, TaskState::LocalBash(_)));
+        let _transfer_mutation = if is_shell { Some(self.shell_transfer_mutation.lock().await) } else { None };
+        if is_shell && !self.tasks.read().await.contains_key(&canonical) {
+            return Err(TaskError::NotFound(canonical));
+        }
+        let _stop_guard = if self
+            .tasks
+            .read()
+            .await
+            .get(&canonical)
+            .is_some_and(|state| matches!(state, TaskState::LocalBash(_) | TaskState::Monitor(_)))
+        {
+            *self
+                .stopping_shells
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(canonical.clone())
+                .or_default() += 1;
+            Some(ShellStopGuard {
+                stopping: self.stopping_shells.clone(),
+                task_id: canonical.clone(),
+                revision: self.notification_revision.clone(),
+            })
+        } else {
+            None
+        };
+        let stopped_agent = self.get(&canonical).await.and_then(|state| match state {
+            TaskState::LocalAgent(agent) => Some(agent.agent_id),
+            _ => None,
+        });
+        self.kill_backing_task(&canonical).await?;
+        if let Some(agent_id) = stopped_agent {
+            // nHn is runner-exit cleanup, including background/persistent exits.
+            // Box the recursive shell-stop route; children here are shell tasks,
+            // so this cannot recursively sweep another agent tree.
+            Box::pin(self.kill_background_shells_for_agent(agent_id)).await;
+        }
+        let owner = self
+            .teammate_departure_cleanup
+            .read()
+            .await
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(owner) = owner {
+            if owner.has_pending_departure(&canonical).await {
+                owner
+                    .complete_departure(&canonical)
+                    .await
+                    .map_err(TaskError::Internal)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn kill_backing_task(&self, task_id: &str) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let task_id_ref = task_id.as_str();
+        // Read liveness BEFORE any kill dispatch. A handler's status sink flips
+        // the row to `Killed` INSIDE `handler.kill(..)`, so by the time
+        // `mark_killed` runs it can no longer tell "this kill is what ended it"
+        // (stamp: the stop is redundant with the tool result) from "it had
+        // already settled on its own" (do NOT stamp: a shell that hit its own
+        // timeout also settles as `Killed`, `handlers/local_bash.rs:422`, and
+        // still owes the model the notification it has not drained yet).
+        let was_live = !self
+            .tasks
+            .read()
+            .await
+            .get(task_id_ref)
+            .is_some_and(TaskState::is_terminated);
+        if self
+            .external_teammate_tasks
+            .read()
+            .await
+            .contains(task_id_ref)
+        {
+            let controller = self
+                .external_teammate_controller
+                .read()
+                .await
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or_else(|| {
+                    TaskError::Internal("External teammate teardown owner is unavailable".into())
+                })?;
+            controller
+                .kill(task_id_ref)
+                .await
+                .map_err(|error| TaskError::Internal(error.to_string()))?;
+            self.unregister_external_teammate_task(task_id_ref).await;
+            self.mark_killed(task_id_ref, was_live).await;
+            return Ok(());
+        }
         // Preserve the handler's explicit kill path as the primary cancellation
         // mechanism. The cleanup hook is a fallback/drop-owner hook; running it
         // first can remove the handler's worker record before `Task::kill` gets a
@@ -2089,6 +4350,28 @@ impl TaskRegistry {
         // Read the routing entry without consuming it. A failed handler kill is
         // retryable; removing the route/cleanup before the awaited call would
         // strand a still-running task with no way to stop it.
+        // The in-process handler consumes its worker entry before awaiting
+        // exit/deallocation. Keep concurrent callers outside that window; the
+        // routing entry is re-read only after the first stop has finished.
+        // External pane controllers are deliberately outside this lock because
+        // their fallback may re-enter the registry.
+        let stop_lock =
+            if self.spawned.read().await.get(task_id_ref) == Some(&TaskType::InProcessTeammate) {
+                Some(
+                    self.in_process_stop_locks
+                        .lock()
+                        .await
+                        .entry(task_id_ref.to_owned())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone(),
+                )
+            } else {
+                None
+            };
+        let mut stop_guard = match stop_lock {
+            Some(lock) => Some(lock.lock_owned().await),
+            None => None,
+        };
         let spawned_type = self.spawned.read().await.get(task_id_ref).copied();
         if let Some(task_type) = spawned_type {
             let handler = self
@@ -2102,7 +4385,25 @@ impl TaskRegistry {
                 fs: self.fs.clone(),
                 runtime: self.runtime.clone(),
             };
-            handler.kill(task_id_ref, ctx).await?;
+            if task_type == TaskType::InProcessTeammate {
+                let guard = stop_guard
+                    .take()
+                    .expect("in-process stop owns its task lock");
+                let handler = handler.clone();
+                let task_id = task_id_ref.to_owned();
+                // Keep both exit/deallocation and exclusion alive if the caller
+                // drops its Stop future after the handler consumes its worker.
+                let (result, guard) = tokio::spawn(async move {
+                    let result = handler.kill(&task_id, ctx).await;
+                    (result, guard)
+                })
+                .await
+                .map_err(|error| TaskError::Internal(error.to_string()))?;
+                stop_guard = Some(guard);
+                result?;
+            } else {
+                handler.kill(task_id_ref, ctx).await?;
+            }
             // Commit the routing teardown only after the owner confirms the
             // process is stopped. A concurrent terminal transition is harmless:
             // removals are idempotent and the status guard below preserves it.
@@ -2115,25 +4416,11 @@ impl TaskRegistry {
             // must NOT be demoted to `Killed` — that would leave the task
             // `Killed` after `TaskCompleted` already fired. Skip the status
             // flip once terminal (mirrors `settle_mcp_task`'s re-check).
-            if let Some(s) = self.tasks.write().await.get_mut(task_id_ref) {
-                if !s.base().status.is_terminal() {
-                    match s {
-                        TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
-                        TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
-                        TaskState::Monitor(m) => m.base.status = TaskStatus::Killed,
-                        // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
-                        // (the poll loop's `status==="killed"` → `cancelTask` branch).
-                        TaskState::McpTask(m) => {
-                            m.base.status = TaskStatus::Killed;
-                            m.mcp_status = "cancelled".to_string();
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            self.mark_killed(task_id_ref, was_live).await;
             if let Some(cleanup) = cleanup {
                 cleanup();
             }
+            drop(stop_guard);
             return Ok(());
         }
 
@@ -2145,35 +4432,318 @@ impl TaskRegistry {
                 .await
                 .map_err(|e| TaskError::Internal(e.to_string()))?;
         }
-        if let Some(s) = self.tasks.write().await.get_mut(task_id_ref) {
-            // Mark killed for the variants whose status is exposed here.
-            // Reverse-race guard: never demote an already-terminal task (e.g. a
-            // settle that won the race and fired `TaskCompleted`) to `Killed`.
-            if !s.base().status.is_terminal() {
-                match s {
-                    TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
-                    TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
-                    TaskState::Monitor(m) => m.base.status = TaskStatus::Killed,
-                    // A backgrounded MCP call: the stored cancel cleanup aborts the
-                    // in-flight call; reflect the kill + `mcpStatus:"cancelled"`.
-                    TaskState::McpTask(m) => {
-                        m.base.status = TaskStatus::Killed;
-                        m.mcp_status = "cancelled".to_string();
-                    }
-                    // Other variants intentionally fall through in M1.
-                    _ => {}
-                }
-            }
-        }
+        self.mark_killed(task_id_ref, was_live).await;
         if let Some(cleanup) = cleanup {
             cleanup();
         }
         Ok(())
     }
+
+    /// Flip a task to `Killed`, but only when THIS call performs the
+    /// non-terminal transition. Returns the output file of a `local_bash` task
+    /// that was actually killed here, so the caller can close its file.
+    ///
+    /// Reverse-race guard: a task that already reached a terminal status (e.g.
+    /// an MCP settle that won the race and fired `TaskCompleted`) must NOT be
+    /// demoted to `Killed`.
+    /// `was_live` is the row's liveness as of BEFORE the kill dispatch — see
+    /// [`Self::kill_backing_task`]. It is what separates a handler that flipped
+    /// the row terminal during THIS kill from a task that had already settled.
+    async fn mark_killed(&self, task_id: &str, was_live: bool) {
+        let mut map = self.tasks.write().await;
+        let Some(state) = map.get_mut(task_id) else {
+            return;
+        };
+        // claude-code stamps `notified:!0` in EVERY per-type kill handler
+        // (`JF` for local_bash, `THn` for monitors, and the remote-agent /
+        // teammate / dream handlers) with ONE exception: `local_agent`, whose
+        // kill uses `notified: D.notified || Yf(D)` and therefore lets its stop
+        // notification through. [`stamp_kill_notified`] is that policy, in one
+        // place so it cannot drift per variant.
+        //
+        // The stamp is what suppresses the redundant second telling. A model
+        // that called TaskStop already has `Successfully stopped task: X` in
+        // hand; without this it ALSO got a `<task-notification>` saying the
+        // same command "was stopped", because this engine derives notifications
+        // from `terminal && !notified`.
+        if state.is_terminated() {
+            // The status flip is skipped (the reverse-race guard above), but the
+            // STAMP still has to land here: `kill_backing_task` awaits
+            // `handler.kill(..)` BEFORE calling this, and every handler with a
+            // bound `RegistryStatusSink` (Monitor, LocalBash, the desktop's
+            // InProcessTeammate, Dream, LocalWorkflow, LocalFusion) flips the row
+            // to `Killed` inside that call. Without this the stamp below is dead
+            // code for every handler-spawned type and they keep double-telling.
+            //
+            // Only a row THIS kill ended is stamped. One that had already
+            // settled on its own — a completion, a failure, or a shell that hit
+            // its own timeout (also `Killed`) — still owes the model the
+            // notification it has not drained yet.
+            let stopped_event = if was_live && state.base().status == TaskStatus::Killed {
+                let event = shell_stopped_sdk_event(state);
+                stamp_terminal_clock(state, false);
+                stamp_kill_notified(state);
+                event
+            } else {
+                None
+            };
+            let stopped_note = stopped_event
+                .as_ref()
+                .and_then(|_| monitor_stopped_note(state));
+            let output = stopped_event
+                .as_ref()
+                .filter(|_| state.base().task_type == TaskType::LocalBash)
+                .map(|_| state.base().output_file.clone());
+            if let Some(note) = stopped_note {
+                self.pending_monitor_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_back(note);
+            }
+            drop(map);
+            self.append_killed_trailer(output.clone()).await;
+            if let Some(output) = output {
+                self.output_manager.evict_writer(&output).await;
+            }
+            if let Some(event) = stopped_event {
+                self.tasks.emit(event);
+            }
+            return;
+        }
+        let mut killed_bash_output = None;
+        state.base_mut().status = TaskStatus::Killed;
+        state.base_mut().end_time = Some(SystemTime::now());
+        if let TaskState::LocalAgent(agent) = state {
+            agent.is_parked = false;
+        }
+        stamp_terminal_clock(state, false);
+        self.bump_notification_revision();
+        let stopped_event = shell_stopped_sdk_event(state);
+        let stopped_note = stopped_event
+            .as_ref()
+            .and_then(|_| monitor_stopped_note(state));
+        stamp_kill_notified(state);
+        match state {
+            TaskState::LocalBash(bash) => {
+                killed_bash_output = Some(bash.base.output_file.clone());
+            }
+            // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
+            // (the poll loop's `status==="killed"` → `cancelTask` branch).
+            TaskState::McpTask(mcp) => mcp.mcp_status = "cancelled".to_string(),
+            _ => {}
+        }
+        if let Some(note) = stopped_note {
+            self.pending_monitor_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(note);
+        }
+        drop(map);
+        self.append_killed_trailer(killed_bash_output.clone()).await;
+        if let Some(output) = killed_bash_output {
+            self.output_manager.evict_writer(&output).await;
+        }
+        if let Some(event) = stopped_event {
+            self.tasks.emit(event);
+        }
+    }
+
+    /// Close a killed shell's output file with the trailer claude-code appends
+    /// (`JF`: `s1e(e, "\n[killed]\n")`, 2.1.263 `src_160988549.js` @2039181),
+    /// so a later `Read` of that file shows how the command ended.
+    async fn append_killed_trailer(&self, output_file: Option<std::path::PathBuf>) {
+        if let Some(output_file) = output_file {
+            let _ = self
+                .output_manager
+                .append_shell_terminal(&output_file, "\n[killed]\n")
+                .await;
+        }
+    }
+}
+
+/// THn's non-quiet WebSocket stop is a housekeeping monitor event, not the
+/// shell completion reminder. Command monitors use JF and never take this arm.
+fn monitor_stopped_note(
+    state: &TaskState,
+) -> Option<platform_api::task_registry::TaskNotification> {
+    if !matches!(state, TaskState::Monitor(_)) || state.base().task_type != TaskType::Monitor {
+        return None;
+    }
+    let base = state.base();
+    Some(platform_api::task_registry::TaskNotification {
+        task_id: base.id.clone(),
+        recipient_agent_id: base.creator_agent_id,
+        task_type: "monitor_ws".into(),
+        status: "running".into(),
+        description: base.description.clone(),
+        result: Some("[Monitor stopped]".into()),
+        monitor_housekeeping: true,
+        ..Default::default()
+    })
+}
+
+/// `JF` calls `pi`, not `ha`: this is an SDK system event, never a model
+/// message (2.1.263 src_158095655.js, `pi` → `ju`). Claim before stamping
+/// notified, so two stop calls cannot publish the same terminal event twice.
+fn shell_stopped_sdk_event(state: &TaskState) -> Option<serde_json::Value> {
+    if state.base().notified || !matches!(state, TaskState::LocalBash(_) | TaskState::Monitor(_)) {
+        return None;
+    }
+    let base = state.base();
+    let output_file = if base.task_type == TaskType::LocalBash {
+        base.output_file.to_string_lossy().into_owned()
+    } else {
+        String::new()
+    };
+    let mut event = serde_json::json!({
+        "type": "system", "subtype": "task_notification", "task_id": base.id,
+        "status": "stopped", "output_file": output_file, "summary": base.description,
+    });
+    if let Some(tool_use_id) = &base.tool_use_id {
+        event["tool_use_id"] = serde_json::json!(tool_use_id);
+    }
+    Some(event)
+}
+
+/// The `notified` half of a kill — claude-code's `notified:!0`, stamped by every
+/// per-type kill handler with ONE exception.
+///
+/// `local_agent` is that exception: its kill uses `notified: D.notified || Yf(D)`,
+/// so `Agent "X" was stopped by Claude` still reaches the model. That is the one
+/// stop the model is NOT otherwise told about, which is why this is a policy
+/// function rather than an unconditional write in [`TaskState::base_mut`].
+fn stamp_kill_notified(state: &mut TaskState) {
+    if !matches!(state, TaskState::LocalAgent(_)) {
+        state.base_mut().notified = true;
+    }
+}
+
+impl TaskRegistry {
+    /// claude-code `Dlo`'s eviction half (`src_160988549.js` @2029385) — drop
+    /// the terminal rows the model has already been told about.
+    ///
+    /// Without this the registry grows for the life of the session: every
+    /// finished shell, agent and monitor stays in the map forever, so `/tasks`
+    /// accumulates and every drain re-scans them.
+    ///
+    /// A candidate must be terminal AND notified. Four guards then hold a row
+    /// back, transcribed from the oracle in its own order:
+    ///
+    /// ```js
+    /// if("retain"in D&&(D.evictAfter??1/0)>Date.now())continue;
+    /// if("retain"in D&&(D.keepaliveReasons?.size??0)>0)continue;
+    /// if(D.type==="local_workflow"&&((D.evictAfter??0)>Date.now()||!eh(I)))continue;
+    /// if(D.type==="mcp_task"&&(D.endTime??0)+fT>Date.now())continue;
+    /// ```
+    ///
+    /// `"retain" in D` is a `local_agent` type test — `retain` is a field only
+    /// that variant carries — so the first two guards are the agent's 30 s
+    /// deadline and its live-children hold. Note the two default directions are
+    /// OPPOSITE and both are load-bearing: an agent with no deadline (`?? 1/0`)
+    /// is kept forever, a workflow with no deadline (`?? 0`) is evicted at once.
+    ///
+    /// ONE guard has no substrate here: `!eh(I)` keeps a `local_workflow` while
+    /// a live `/loop` is keyed on its task id (`eh(e)=!Gb().loopsByTaskId.has(e)`).
+    /// This port has no task-id-keyed loop registry — loops are cron-driven —
+    /// so there is nothing to consult, and the workflow's own deadline is the
+    /// only thing holding it. That is a KNOWN narrowing, not an oversight.
+    fn evict_notified_terminal_rows(
+        &self,
+        map: &mut HashMap<String, TaskState>,
+        // Resolved by the caller: the handler table is behind an async lock
+        // and this body is synchronous.
+        agent_handler: Option<&Arc<dyn Task>>,
+    ) -> Vec<std::path::PathBuf> {
+        let now = SystemTime::now();
+        // `?? 1/0` — an agent with no deadline never expires.
+        let agent_deadline_passed = |at: Option<SystemTime>| at.is_some_and(|at| at <= now);
+        // `?? 0` — a workflow with no deadline is already expired.
+        let workflow_deadline_passed = |at: Option<SystemTime>| at.is_none_or(|at| at <= now);
+        let snapshot = &*map;
+        let doomed: Vec<String> = snapshot
+            .iter()
+            .filter(|(_, state)| {
+                let base = state.base();
+                if !base.status.is_terminal() || !base.notified || self.has_human_messages(&base.id) || self.shell_transfer_fences.lock().unwrap().contains(&base.id) {
+                    return false;
+                }
+                match state {
+                    TaskState::LocalAgent(agent) => {
+                        !agent.is_parked
+                            && agent_deadline_passed(base.evict_after)
+                            && !self.has_live_background_children_locked(
+                                snapshot,
+                                Some(agent.agent_id),
+                                None,
+                                None,
+                            )
+                    }
+                    TaskState::LocalWorkflow(_) => workflow_deadline_passed(base.evict_after),
+                    // The `mcp_task` guard is the only one keyed on `endTime`
+                    // rather than `evictAfter`; same 30 s, different clock.
+                    TaskState::McpTask(_) => {
+                        base.end_time.is_none_or(|end| end + EVICT_AFTER <= now)
+                    }
+                    _ => true,
+                }
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        doomed
+            .into_iter()
+            .filter_map(|id| {
+                if let Some(handler) = agent_handler { handler.forget_resume_recipe(&id); }
+                self.human_messages.lock().unwrap().remove(&id);
+                map.remove(&id)
+                    .map(|state| state.base().output_file.clone())
+            })
+            .collect()
+    }
+}
+
+/// claude-code `fT = 30000` — how long a terminal row lingers before the
+/// attachment pass may evict it (`src_160988549.js` @2024365).
+const EVICT_AFTER: Duration = Duration::from_secs(30);
+
+/// The two clocks claude-code stamps on EVERY terminal transition, in one place
+/// so no variant can be added without them.
+///
+/// * `endTime: Date.now()` — the oracle writes it on the killed
+///   (@2047553), completed (@2050039) and failed (@2050942) transitions alike.
+///   The port declared `end_time` and never wrote it outside the `mcp_task`
+///   settle, so `elapsed` on an `mcp_task` and the 30 s `mcp_task` eviction
+///   guard both read a `None` that could only mean "still running".
+/// * `evictAfter` — claude-code `ret(e,t)`:
+///
+///   ```js
+///   function ret(e,t){if(e.retain)return;
+///     if(t.park&&(e.keepaliveReasons?.size??0)>0)return;
+///     return Date.now()+fT}
+///   ```
+///
+///   `retain` is a `local_agent` field, so the guard only ever applies to that
+///   type; the park-with-keepalive arm is the resting agent that still owns live
+///   children, which must not be evicted out from under them. The port has no
+///   `retain` (nothing sets it) and spells "has keepalive reasons" as
+///   [`TaskRegistry::has_live_background_children_locked`], which the caller
+///   evaluates — so this function takes the answer rather than computing it.
+fn stamp_terminal_clock(state: &mut TaskState, holds_live_children: bool) {
+    let now = SystemTime::now();
+    let base = state.base_mut();
+    if base.end_time.is_none() {
+        base.end_time = Some(now);
+    }
+    // Only a `local_agent` carries the oracle's `retain`/`keepaliveReasons`
+    // pair; every other type is evicted on the pass after it is notified, with
+    // no per-row deadline at all.
+    let deferred = matches!(state, TaskState::LocalAgent(_)) && holds_live_children;
+    if !deferred && state.base().evict_after.is_none() {
+        state.base_mut().evict_after = Some(now + EVICT_AFTER);
+    }
 }
 
 /// `TeamSpawnSeam` impl — the typed spawn/kill seam the coordinator's
-/// `TeamCreate` / `TeamDelete` tools use to start and stop a real
+/// implicit teammate service use to start and stop a real
 /// `InProcessTeammate` task WITHOUT a `coordinator` → `lingxi-tasks` dependency
 /// cycle (the abstract trait lives in `traits`; this concrete impl lives here).
 ///
@@ -2195,10 +4765,12 @@ impl TeamSpawnSeam for TaskRegistry {
         self.spawn(
             TaskType::InProcessTeammate,
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id,
                 name,
                 team_name,
-                // The TeamCreate description IS the teammate's initial task
+                // The Agent prompt IS the teammate's initial task
                 // (seeded as its first user message); also reused as the task
                 // subject below.
                 description: description.clone(),
@@ -2207,6 +4779,64 @@ impl TeamSpawnSeam for TaskRegistry {
         )
         .await
         .map_err(task_err_to_team_spawn_err)
+    }
+
+    async fn spawn_teammate_request(
+        &self,
+        agent_id: protocol::AgentId,
+        name: String,
+        team_name: String,
+        request: platform_api::subagent_spawn::SubagentSpawnRequest,
+        inherit: platform_api::subagent_spawn::SubagentInheritance,
+    ) -> Result<String, TeamSpawnError> {
+        let description = request.description.clone().unwrap_or_default();
+        self.spawn(
+            TaskType::InProcessTeammate,
+            TaskSpawnInput::InProcessTeammate {
+                agent_id,
+                name,
+                team_name,
+                description: request.prompt.clone(),
+                spawn_request: Some(request),
+                inheritance: Some(inherit),
+            },
+            description,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "in-process teammate startup failed");
+            TeamSpawnError::Internal("Failed to spawn in-process teammate".into())
+        })
+    }
+
+    async fn apply_plan_approval(
+        &self,
+        task_id: &str,
+        response: platform_api::teammate_plan::PlanApprovalResponse,
+    ) -> Result<(), TeamSpawnError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let kind = self
+            .spawned
+            .read()
+            .await
+            .get(&task_id)
+            .copied()
+            .ok_or(TeamSpawnError::Terminated)?;
+        let handler = self
+            .handler_for(kind)
+            .await
+            .ok_or_else(|| TeamSpawnError::Unsupported(format!("{kind:?}")))?;
+        handler
+            .apply_plan_approval(
+                &task_id,
+                response,
+                TaskContext {
+                    fs: self.fs.clone(),
+                    runtime: self.runtime.clone(),
+                },
+            )
+            .await
+            .map_err(task_err_to_team_spawn_err)
     }
 
     async fn kill(&self, task_id: &str) -> Result<(), TeamSpawnError> {
@@ -2235,6 +4865,45 @@ impl TeamSpawnSeam for TaskRegistry {
     /// the pump's "stop" signal. A handler that does not support messages maps
     /// to [`TeamSpawnError::Unsupported`]; anything else is `Internal`.
     async fn send_message(&self, task_id: &str, message: String) -> Result<(), TeamSpawnError> {
+        // Addressing parity with the other task surfaces: an agent is
+        // registered under its task id AND its aliases (the agent id, its name,
+        // and `name@team`), and `get` / `kill` / `output` all resolve those
+        // aliases first. This one did not, so an id the model was handed — the
+        // `<task-id>` of a completion notification, or a name from `TaskList` —
+        // resolved for `TaskStop` and `TaskOutput` but came back `Terminated`
+        // here, which reads to the model as "that agent is gone".
+        let task_id = &self.canonical_or_raw(task_id).await;
+        // AGT-07. BEFORE the `spawned` lookup, and the order is load-bearing:
+        // `kill` REMOVES the spawned entry, so a user-stopped agent no longer
+        // has one — a gate placed after the lookup would compile, pass a test
+        // that stubs the registry, and be unreachable in production for exactly
+        // the case it exists to catch.
+        //
+        // A user stop means the work was deliberately cancelled. Falling through
+        // to `Terminated` here told the model nothing at all (the pump logs that
+        // at debug and stops), so it could relaunch what the user had just
+        // stopped.
+        if matches!(
+            self.tasks.read().await.get(task_id),
+            Some(TaskState::LocalAgent(agent))
+                if agent.outcome.killed_by.as_deref() == Some("user")
+        ) {
+            return Err(TeamSpawnError::StoppedByUser(
+                platform_api::task_registry::stopped_by_user_message(task_id),
+            ));
+        }
+        let external = self
+            .agent_message_receivers
+            .lock()
+            .await
+            .get(task_id)
+            .cloned();
+        if let Some(receiver) = external {
+            return receiver
+                .send(message)
+                .await
+                .map_err(|error| TeamSpawnError::Internal(error.to_string()));
+        }
         // Resolve the owning handler via the spawned-id index (mirrors `kill`'s
         // dispatch). An unknown id ⇒ the teammate is gone ⇒ `Terminated`.
         let task_type = self
@@ -2275,11 +4944,11 @@ impl TeamSpawnSeam for TaskRegistry {
     /// "gone" even though the retained task remains inspectable — the
     /// mailbox→runner pump uses this on its park timeout to stop pumping a dead
     /// teammate (so its mailbox can be unregistered) even if no message ever
-    /// arrived to surface `Terminated`. A resting PERSISTENT agent keeps a
-    /// non-terminal (Running) status, so it correctly reads as alive.
+    /// arrived to surface `Terminated`. A completed persistent park still reads
+    /// as alive because the runner can accept another message.
     async fn is_alive(&self, task_id: &str) -> bool {
         match self.get(task_id).await {
-            Some(state) => !state.base().status.is_terminal(),
+            Some(state) => !state.is_terminated(),
             None => false,
         }
     }
@@ -2303,6 +4972,14 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
     // Stamp the originating `tool_use_id` onto the task so a background task's
     // `<task-notification>` carries the `<tool-use-id>` line (claude-code parity).
     match input {
+        TaskSpawnInput::MonitorWs(source) => {
+            let reg = &source.registration.task;
+            base.tool_use_id.clone_from(&reg.tool_use_id);
+            base.creator_teammate_name
+                .clone_from(&reg.creator_teammate_name);
+            base.creator_team_name.clone_from(&reg.creator_team_name);
+            base.creator_agent_id = reg.creator_agent_id;
+        }
         TaskSpawnInput::LocalAgent {
             tool_use_id,
             creator_teammate_name,
@@ -2357,15 +5034,24 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 base.creator_agent_id = *creator_agent_id;
             }
         }
+        TaskSpawnInput::LocalBash { tool_use_id, .. } => {
+            if base.tool_use_id.is_none() {
+                base.tool_use_id.clone_from(tool_use_id);
+            }
+        }
         _ => {}
     }
     match input {
         TaskSpawnInput::LocalBash { command, .. } => {
             TaskState::LocalBash(crate::state::LocalBashTaskState {
+                is_adopted: false,
+                caller: None,
                 base,
                 command: command.clone(),
                 pid: None,
                 exit_code: None,
+                cwd: None,
+                is_backgrounded: None,
             })
         }
         TaskSpawnInput::LocalAgent {
@@ -2376,6 +5062,19 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             spawn_request,
             ..
         } => TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            is_parked: false,
+            is_observer: spawn_request.as_ref().is_some_and(|r| {
+                r.query_source_label.as_deref()
+                    == Some(platform_api::subagent_spawn::OBSERVER_QUERY_SOURCE)
+            }),
+            observed_agent_id: if spawn_request.as_ref().is_some_and(|r| {
+                r.query_source_label.as_deref()
+                    == Some(platform_api::subagent_spawn::OBSERVER_QUERY_SOURCE)
+            }) {
+                base.creator_agent_id.take()
+            } else {
+                None
+            },
             // The fork identity rides the full spawn request, not the compact
             // task-index fields — a forked skill is dispatched through the same
             // `SubagentSpawnRequest` as any background agent.
@@ -2399,8 +5098,17 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 remote_endpoint: endpoint.clone(),
             })
         }
-        TaskSpawnInput::InProcessTeammate { agent_id, .. } => {
+        TaskSpawnInput::InProcessTeammate {
+            agent_id,
+            name,
+            team_name,
+            ..
+        } => {
+            base.creator_teammate_name = Some(name.clone());
+            base.creator_team_name = Some(team_name.clone());
             TaskState::InProcessTeammate(crate::state::InProcessTeammateTaskState {
+                is_idle: false,
+                awaiting_plan_approval: false,
                 base,
                 agent_id: *agent_id,
                 pending_messages: vec![],
@@ -2453,8 +5161,15 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 watch_resources: watch.clone(),
             })
         }
+        TaskSpawnInput::MonitorWs(source) => TaskState::Monitor(crate::state::MonitorTaskState {
+            base,
+            command: source.registration.url.clone(),
+            exit_code: None,
+            stdout_bytes: None,
+        }),
         TaskSpawnInput::Monitor {
             command,
+            spawn_command: _,
             timeout: _,
             cwd: _,
             tool_use_id,
@@ -2465,10 +5180,14 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             if base.tool_use_id.is_none() {
                 base.tool_use_id = tool_use_id.clone();
             }
+            // Command monitoring is a shell task on the public wire. The
+            // spawned-handler map separately retains Monitor for cancellation.
+            base.task_type = TaskType::LocalBash;
             TaskState::Monitor(crate::state::MonitorTaskState {
                 base,
                 command: command.clone(),
                 exit_code: None,
+                stdout_bytes: None,
             })
         }
         TaskSpawnInput::McpTask {
@@ -2483,13 +5202,19 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 base.tool_use_id = tool_use_id.clone();
             }
             TaskState::McpTask(crate::state::McpTaskState {
+            saved_hint: None,
                 base,
                 server_name: server_name.clone(),
                 tool_name: tool_name.clone(),
                 // `NZu` seeds `mcpStatus:"working"`.
                 mcp_status: "working".to_string(),
                 status_message: None,
+                // A running call has produced nothing yet.
+                result_text: None,
             })
+        }
+        TaskSpawnInput::AutoModeScan => {
+            TaskState::AutoModeScan(crate::state::AutoModeScanTaskState { base })
         }
         TaskSpawnInput::Dream { max_iterations, .. } => {
             TaskState::Dream(crate::state::DreamTaskState {
@@ -2533,6 +5258,9 @@ fn aliases_for_spawn(input: &TaskSpawnInput) -> Vec<String> {
             spawn_request,
             ..
         } => {
+            // Agent publishes the bare UUID; typed host callers also address
+            // this task through AgentId's prefixed Display form.
+            aliases.push(agent_id.as_uuid().to_string());
             aliases.push(agent_id.to_string());
             if let Some(request) = spawn_request {
                 if let Some(name) = request.name.as_deref().filter(|s| !s.is_empty()) {
@@ -2549,6 +5277,9 @@ fn aliases_for_spawn(input: &TaskSpawnInput) -> Vec<String> {
             team_name,
             ..
         } => {
+            // Agent publishes the bare UUID; typed host callers also address
+            // this task through AgentId's prefixed Display form.
+            aliases.push(agent_id.as_uuid().to_string());
             aliases.push(agent_id.to_string());
             if !name.is_empty() {
                 aliases.push(name.clone());
@@ -2594,6 +5325,7 @@ pub fn register_self_contained_handlers(
     mcp: Arc<mcp::McpRegistry>,
     bash_status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
 ) {
+    reg.shell_adoption_runtime = Some((process.clone(), bash_status_sink.clone()));
     let output_manager = reg.output_manager.clone();
     reg.register_handler(
         TaskType::LocalBash,
@@ -2816,11 +5548,17 @@ mod adopted_workflow_scope_test {
     // ---- Minimal in-memory FileSystem, just enough for `output_manager` ----
     struct InMemoryFs {
         files: tokio::sync::Mutex<HashMap<String, String>>,
+        fail_writes: std::sync::atomic::AtomicBool,
+        write_count: std::sync::atomic::AtomicUsize,
+        fail_write_at: std::sync::atomic::AtomicUsize,
     }
     impl InMemoryFs {
         fn new() -> Self {
             Self {
                 files: tokio::sync::Mutex::new(HashMap::new()),
+                fail_writes: std::sync::atomic::AtomicBool::new(false),
+                write_count: std::sync::atomic::AtomicUsize::new(0),
+                fail_write_at: std::sync::atomic::AtomicUsize::new(0),
             }
         }
     }
@@ -2842,6 +5580,15 @@ mod adopted_workflow_scope_test {
             })
         }
         async fn write_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            let write_number = self
+                .write_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if self.fail_writes.load(std::sync::atomic::Ordering::SeqCst)
+                || self.fail_write_at.load(std::sync::atomic::Ordering::SeqCst) == write_number
+            {
+                return Err(FsError::Io("injected write failure".into()));
+            }
             self.files
                 .lock()
                 .await
@@ -2892,15 +5639,400 @@ mod adopted_workflow_scope_test {
         }
     }
 
-    fn make_registry() -> (tempfile::TempDir, TaskRegistry) {
+    fn make_registry() -> (tempfile::TempDir, Arc<InMemoryFs>, TaskRegistry) {
         let dir = tempfile::tempdir().unwrap();
-        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let in_memory_fs = Arc::new(InMemoryFs::new());
+        let fs: Arc<dyn FileSystem> = in_memory_fs.clone();
         let runtime = Arc::new(test_harness::mocks::MockRuntimeSpawner::default());
         let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
             std::path::PathBuf::from(dir.path()),
             fs.clone(),
         ));
-        (dir, TaskRegistry::new(runtime, fs, out_mgr))
+        (dir, in_memory_fs, TaskRegistry::new(runtime, fs, out_mgr))
+    }
+
+    #[tokio::test]
+    async fn completed_agent_dialog_visibility_requires_background_nonobserver_without_children() {
+        let (_dir, _fs, registry) = make_registry();
+        let owner = protocol::AgentId::new();
+        let state = registry.register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
+            agent_id: owner, agent_type: "general-purpose".into(), description: "ui".into(), prompt: "".into(), tool_use_id: None,
+            creator_agent_id: None, creator_teammate_name: None, creator_team_name: None,
+        }).await.unwrap();
+        let id = state.base().id.clone();
+        registry.set_agent_display(&id, "real-model".into(), Some("high".into())).await;
+        {
+            let mut rows = registry.tasks.write().await;
+            let TaskState::LocalAgent(agent) = rows.get_mut(&id).unwrap() else { unreachable!() };
+            agent.base.status = TaskStatus::Completed; agent.is_parked = true;
+        }
+        assert!(!registry.completed_agent_visible(&id).await, "foreground rows stay hidden");
+        {
+            let mut rows = registry.tasks.write().await;
+            let TaskState::LocalAgent(agent) = rows.get_mut(&id).unwrap() else { unreachable!() };
+            agent.is_backgrounded = true;
+        }
+        assert!(registry.completed_agent_visible(&id).await);
+        let record = <TaskRegistry as platform_api::task_registry::TaskRegistryHandle>::list(&registry, Default::default()).await.unwrap().remove(0);
+        assert!(record.completed_agent_visible); assert_eq!(record.model.as_deref(), Some("real-model"));
+        registry.register_background_bash("bchild001".into(), "sleep 1".into(), "child".into(), None, None, Some(owner)).await.unwrap();
+        assert!(!registry.completed_agent_visible(&id).await, "live dependency holds hide the completed parent");
+        {
+            let mut rows = registry.tasks.write().await;
+            let TaskState::LocalAgent(agent) = rows.get_mut(&id).unwrap() else { unreachable!() };
+            agent.is_observer = true;
+        }
+        assert!(!registry.completed_agent_visible(&id).await);
+    }
+
+    #[tokio::test]
+    async fn foreground_agent_controls_register_background_and_preserve_completed_row() {
+        struct BackgroundSignal(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl platform_api::task_registry::TaskBackgrounder for BackgroundSignal {
+            async fn background(&self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let (_dir, _fs, registry) = make_registry();
+        let agent_id = protocol::AgentId::new();
+        let registration = platform_api::task_registry::ForegroundAgentRegistration {
+            agent_id,
+            agent_type: "general-purpose".into(),
+            description: "foreground".into(),
+            prompt: "work".into(),
+            tool_use_id: Some("agent-tool-use".into()),
+            creator_agent_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+        };
+        let state = registry
+            .register_foreground_agent(registration.clone())
+            .await
+            .unwrap();
+        let id = state.base().id.clone();
+        assert_eq!(
+            registry.get(&agent_id.to_string()).await.unwrap().base().id,
+            id
+        );
+        let signal = Arc::new(BackgroundSignal(std::sync::atomic::AtomicUsize::new(0)));
+        registry
+            .bind_background_requester(&id, signal.clone())
+            .await
+            .unwrap();
+        assert!(registry.has_backgroundable_tasks().await);
+        assert!(
+            registry
+                .background_task_for_tool_use("agent-tool-use")
+                .await
+        );
+        assert_eq!(signal.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!registry.background_task(&id).await);
+        registry
+            .set_status(&id, TaskStatus::Completed)
+            .await
+            .unwrap();
+        registry.unregister_foreground_agent(&id).await;
+        assert!(
+            matches!(registry.get(&id).await, Some(TaskState::LocalAgent(agent)) if agent.is_backgrounded)
+        );
+        let temporary = registry
+            .register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
+                agent_id: protocol::AgentId::new(),
+                ..registration
+            })
+            .await
+            .unwrap();
+        registry
+            .unregister_foreground_agent(&temporary.base().id)
+            .await;
+        assert!(registry.get(&temporary.base().id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sdk_lifecycle_covers_direct_writes_and_suppresses_noop_projection() {
+        let (_dir, _fs, registry) = make_registry();
+        let mut events = registry.subscribe_task_lifecycle();
+        registry
+            .register_background_bash(
+                "bevent001".into(),
+                "sleep 1".into(),
+                "job".into(),
+                Some("tool1".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let started = events.try_recv().unwrap();
+        assert_eq!(started["subtype"], "task_started");
+        assert_eq!(started["task_type"], "local_bash");
+        assert_eq!(started["tool_use_id"], "tool1");
+        assert_eq!(started["is_backgrounded"], true);
+        assert!(started.get("command").is_none());
+        {
+            let mut rows = registry.tasks.write().await;
+            let base = rows.get_mut("bevent001").unwrap().base_mut();
+            base.description = "renamed".into();
+            base.total_paused_ms = 12;
+        }
+        let update = events.try_recv().unwrap();
+        assert_eq!(update["subtype"], "task_updated");
+        assert_eq!(
+            update["patch"],
+            serde_json::json!({"description":"renamed", "total_paused_ms":12})
+        );
+        registry.mark_notified("bevent001").await.unwrap();
+        assert!(
+            events.try_recv().is_err(),
+            "notification bookkeeping is not SDK progress"
+        );
+        registry
+            .set_status("bevent001", TaskStatus::Completed)
+            .await
+            .unwrap();
+        assert_eq!(events.try_recv().unwrap()["patch"]["status"], "completed");
+        let receipt = events.try_recv().unwrap();
+        assert_eq!(receipt["subtype"], "task_notification");
+        assert_eq!(receipt["status"], "completed");
+        assert_eq!(receipt["summary"], "renamed");
+        assert_eq!(receipt["tool_use_id"], "tool1");
+        assert_eq!(
+            events.try_recv().unwrap(),
+            serde_json::json!({"type":"task_feature", "feature_name":"task_local_shell", "error_code":null})
+        );
+    }
+
+    #[tokio::test]
+    async fn sdk_lifecycle_is_registry_scoped_and_hides_observers() {
+        let (_dir, _fs, registry) = make_registry();
+        let (_other_dir, _other_fs, other) = make_registry();
+        let mut events = registry.subscribe_task_lifecycle();
+        let mut other_events = other.subscribe_task_lifecycle();
+        registry
+            .register_background_bash(
+                "bevent002".into(),
+                "sleep 1".into(),
+                "job".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let shell = registry.get("bevent002").await.unwrap();
+        events.try_recv().unwrap();
+        let mut value = serde_json::to_value(shell.base()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("id".into(), serde_json::json!("aobserver"));
+        object.insert("task_type".into(), serde_json::json!("LocalAgent"));
+        object.insert(
+            "agent_id".into(),
+            serde_json::json!(protocol::AgentId::new()),
+        );
+        object.insert("is_observer".into(), serde_json::json!(true));
+        object.insert(
+            "prompt".into(),
+            serde_json::json!("private observer prompt"),
+        );
+        object.insert("messages".into(), serde_json::json!([]));
+        object.insert("pending_messages".into(), serde_json::json!([]));
+        object.insert("is_backgrounded".into(), serde_json::json!(true));
+        let observer: crate::state::LocalAgentTaskState = serde_json::from_value(value).unwrap();
+        registry
+            .tasks
+            .write()
+            .await
+            .insert("aobserver".into(), TaskState::LocalAgent(observer));
+        registry
+            .set_status("aobserver", TaskStatus::Completed)
+            .await
+            .unwrap();
+        assert!(events.try_recv().is_err());
+        assert!(other_events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn shell_health_stall_is_advisory_and_completion_still_delivers() {
+        let (_dir, _fs, registry) = make_registry();
+        let id = "bhealth01";
+        registry
+            .register_background_bash(
+                id.into(),
+                "read answer".into(),
+                "prompt".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        registry.notify_bash_stall(id, "Continue?").await;
+        let notices = registry.take_pending_task_notifications().await;
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].status, "running");
+        assert_eq!(notices[0].result.as_deref(), Some("Continue?"));
+        let row = registry.get(id).await.unwrap();
+        assert_eq!(row.base().status, TaskStatus::Running);
+        assert!(!row.base().notified);
+        registry
+            .settle_background_bash(id, Some(0), false)
+            .await
+            .unwrap();
+        let notices = registry.take_pending_task_notifications().await;
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].status, "completed");
+    }
+
+    #[tokio::test]
+    async fn shell_health_pressure_requires_idle_session_and_claims_once() {
+        let (_dir, fs, registry) = make_registry();
+        let id = "bhealth02";
+        let (_, path) = registry
+            .register_background_bash(
+                id.into(),
+                "sleep 100".into(),
+                "sleep".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !registry.claim_bash_memory_pressure_stop(id).await,
+            "unwired session"
+        );
+        registry.update_shell_session_activity(true, false, true);
+        assert!(
+            !registry.claim_bash_memory_pressure_stop(id).await,
+            "recent interaction"
+        );
+        registry
+            .shell_session_activity
+            .lock()
+            .unwrap()
+            .last_interaction = Some(std::time::Instant::now() - Duration::from_secs(1801));
+        registry.update_shell_session_activity(true, true, false);
+        assert!(
+            !registry.claim_bash_memory_pressure_stop(id).await,
+            "busy model request"
+        );
+        registry.update_shell_session_activity(false, false, false);
+        assert!(
+            !registry.claim_bash_memory_pressure_stop(id).await,
+            "print/SDK session"
+        );
+        registry.update_shell_session_activity(true, false, false);
+        let mut agent_base = registry.get(id).await.unwrap().base().clone();
+        agent_base.id = "rhealth01".into();
+        agent_base.task_type = TaskType::RemoteAgent;
+        registry.tasks.write().await.insert(
+            agent_base.id.clone(),
+            TaskState::RemoteAgent(crate::state::RemoteAgentTaskState {
+                base: agent_base,
+                remote_session_id: "remote".into(),
+                remote_endpoint: "test".into(),
+            }),
+        );
+        assert!(
+            !registry.claim_bash_memory_pressure_stop(id).await,
+            "active delegated task"
+        );
+        registry.tasks.write().await.remove("rhealth01");
+        assert!(!registry.claim_bash_memory_pressure_stop(id).await, "killer not bound yet");
+        registry.cleanups.lock().await.insert(id.into(), Arc::new(|| {}));
+        assert!(registry.claim_bash_memory_pressure_stop(id).await);
+        assert!(!registry.claim_bash_memory_pressure_stop(id).await);
+        registry
+            .settle_background_bash(id, None, false)
+            .await
+            .unwrap();
+        let notices = registry.take_pending_task_notifications().await;
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].status, "killed");
+        assert_eq!(notices[0].killed_by.as_deref(), Some("memory_pressure"));
+        assert!(registry.take_pending_task_notifications().await.is_empty());
+        assert!(fs
+            .files
+            .lock()
+            .await
+            .get(path.to_str().unwrap())
+            .unwrap()
+            .ends_with("\n[killed]\n"));
+    }
+
+    #[tokio::test]
+    async fn pressure_stop_survives_cancellation_during_output_io() {
+        struct Killer(Arc<tokio::sync::Notify>);
+        #[async_trait]
+        impl platform_api::task_registry::TaskKiller for Killer {
+            async fn kill(&self) {
+                self.0.notify_one();
+            }
+        }
+        let (_dir, fs, registry) = make_registry();
+        let registry = Arc::new(registry);
+        let id = "bhealth03";
+        let (_, path) = registry
+            .register_background_bash(
+                id.into(),
+                "sleep 100".into(),
+                "sleep".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let killed = Arc::new(tokio::sync::Notify::new());
+        registry
+            .bind_background_bash_process(id, Some(123), Arc::new(Killer(killed.clone())))
+            .await
+            .unwrap();
+        registry.update_shell_session_activity(true, false, true);
+        registry
+            .shell_session_activity
+            .lock()
+            .unwrap()
+            .last_interaction = Some(std::time::Instant::now() - Duration::from_secs(1801));
+        // Hold the actual output backend while the registry publishes its stop.
+        let files = fs.files.lock().await;
+        let claimant = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.claim_bash_memory_pressure_stop(id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while registry.get(id).await.unwrap().base().status != TaskStatus::Killed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        claimant.abort();
+        assert!(claimant.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), killed.notified())
+            .await
+            .expect("cancelling output must not discard the native kill");
+        drop(files);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if fs
+                    .files
+                    .lock()
+                    .await
+                    .get(path.to_str().unwrap())
+                    .is_some_and(|text| text.ends_with("\n[killed]\n"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal output finalization survives its caller");
+        assert!(!registry.claim_bash_memory_pressure_stop(id).await);
+        assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
     }
 
     fn adopted(task_id: &str, run_id: &str, args_app_id: &str) -> AdoptedWorkflow {
@@ -2930,7 +6062,7 @@ mod adopted_workflow_scope_test {
     /// it -- independent of how that scope was derived.
     #[tokio::test]
     async fn an_adopted_in_flight_build_still_blocks_its_apps_delete_at_the_registry_api() {
-        let (_dir, registry) = make_registry();
+        let (_dir, _fs, registry) = make_registry();
         let scope = crate::scope::LocalAppWorkflowTaskScope::for_build("resumed-app")
             .expect("well-formed app id");
 
@@ -2967,7 +6099,7 @@ mod adopted_workflow_scope_test {
     /// re-validation logic end to end.
     #[tokio::test]
     async fn an_adopted_forged_workflow_still_gets_no_scope_at_the_registry_api() {
-        let (_dir, registry) = make_registry();
+        let (_dir, _fs, registry) = make_registry();
 
         registry
             .register_adopted_workflow(adopted("wforged12", "wf_forged1", "victim-app"))
@@ -2985,7 +6117,490 @@ mod adopted_workflow_scope_test {
                 .await
                 .is_empty(),
             "a forged workflow_id/args.app_id pair must never block another \
-             app's delete just because it was adopted"
+            app's delete just because it was adopted"
+        );
+    }
+
+    async fn running_scoped_workflow(
+        registry: &TaskRegistry,
+        task_id: &str,
+        purpose: crate::scope::LocalAppWorkflowPurpose,
+    ) {
+        let scope = match purpose {
+            crate::scope::LocalAppWorkflowPurpose::Build => {
+                crate::scope::LocalAppWorkflowTaskScope::for_build("qa-app")
+            }
+            crate::scope::LocalAppWorkflowPurpose::UseTest => {
+                crate::scope::LocalAppWorkflowTaskScope::for_use_test("qa-app")
+            }
+            crate::scope::LocalAppWorkflowPurpose::McpAuthoring => {
+                crate::scope::LocalAppWorkflowTaskScope::for_mcp_authoring("qa-app")
+            }
+        }
+        .expect("well-formed app id");
+        registry
+            .register_adopted_workflow_with_scope(
+                adopted(task_id, "wf_terminal1", "qa-app"),
+                Some(scope),
+            )
+            .await
+            .expect("register workflow");
+        registry
+            .set_status(task_id, TaskStatus::Running)
+            .await
+            .expect("activate workflow");
+    }
+
+    fn checked_outcome() -> platform_api::task_registry::WorkflowTerminalOutcome {
+        platform_api::task_registry::WorkflowTerminalOutcome {
+            result: Some(r#"{"ok":true,"host_checked":true}"#.into()),
+            agent_count: 3,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn local_app_terminal_commit_publishes_spool_metadata_and_state_together() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit01",
+            crate::scope::LocalAppWorkflowPurpose::UseTest,
+        )
+        .await;
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit01",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("commit success");
+
+        assert_eq!(actual.base().status, TaskStatus::Completed);
+        assert!(committed);
+        assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+        let output = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for("wcommit01").unwrap(),
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .expect("canonical spool");
+        assert_eq!(output.content, r#"{"ok":true,"host_checked":true}"#);
+    }
+
+    #[tokio::test]
+    async fn published_local_app_stays_completed_when_final_spool_write_fails() {
+        let (_dir, fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit08",
+            crate::scope::LocalAppWorkflowPurpose::UseTest,
+        )
+        .await;
+        registry
+            .tasks
+            .write()
+            .await
+            .get_mut("wcommit08")
+            .expect("registered workflow")
+            .base_mut()
+            .notified = false;
+
+        // The pending placeholder succeeds, Host publication succeeds, and
+        // only the subsequent canonical spool write fails.
+        let placeholder_write = fs.write_count.load(std::sync::atomic::Ordering::SeqCst) + 1;
+        fs.fail_write_at
+            .store(placeholder_write + 1, std::sync::atomic::Ordering::SeqCst);
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit08",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("Host publication is the commit point");
+
+        assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(committed);
+        assert_eq!(actual.base().status, TaskStatus::Completed);
+        let TaskState::LocalWorkflow(workflow) = actual else {
+            panic!("expected workflow")
+        };
+        assert_eq!(workflow.outcome, checked_outcome());
+
+        let handle: &dyn platform_api::task_registry::TaskRegistryHandle = &registry;
+        let chunk = handle
+            .output("wcommit08", None)
+            .await
+            .expect("public TaskOutput projection");
+        assert_eq!(chunk.status.as_deref(), Some("completed"));
+        assert!(chunk.done);
+        assert_eq!(chunk.content, r#"{"ok":true,"host_checked":true}"#);
+        assert_eq!(
+            chunk.output_path, None,
+            "the stale pending spool is not an authoritative output path"
+        );
+
+        let notifications = registry.take_pending_task_notifications().await;
+        let notification = notifications
+            .iter()
+            .find(|notification| notification.task_id == "wcommit08")
+            .expect("completed terminal notification");
+        assert_eq!(notification.status, "completed");
+        assert_eq!(
+            notification.result.as_deref(),
+            Some(r#"{"ok":true,"host_checked":true}"#)
+        );
+        assert!(notification.error.is_none());
+        assert_eq!(
+            notification.output_path, None,
+            "the notification must not advertise stale physical bytes"
+        );
+
+        let physical_path = registry.output_manager.path_for("wcommit08").unwrap();
+        let physical = fs
+            .files
+            .lock()
+            .await
+            .get(physical_path.to_str().unwrap())
+            .cloned()
+            .expect("pending spool remains on disk");
+        let physical: serde_json::Value = serde_json::from_str(&physical).unwrap();
+        assert_eq!(physical["verified"], false);
+        assert!(physical["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("publication pending")));
+    }
+
+    #[tokio::test]
+    async fn killed_local_app_never_runs_the_prepared_publication_commit() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit02",
+            crate::scope::LocalAppWorkflowPurpose::Build,
+        )
+        .await;
+        registry
+            .set_status("wcommit02", TaskStatus::Killed)
+            .await
+            .expect("kill wins");
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit02",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("return authoritative terminal row");
+
+        assert_eq!(actual.base().status, TaskStatus::Killed);
+        assert!(!committed);
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn prior_completed_local_app_does_not_claim_a_skipped_publication_commit() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit06",
+            crate::scope::LocalAppWorkflowPurpose::Build,
+        )
+        .await;
+        registry
+            .finish_workflow_terminal("wcommit06", checked_outcome(), TaskStatus::Completed)
+            .await
+            .expect("competing completion wins");
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit06",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("return authoritative completed row");
+
+        assert_eq!(actual.base().status, TaskStatus::Completed);
+        assert!(!committed);
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn local_app_publication_failure_is_one_canonical_failed_terminal() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit03",
+            crate::scope::LocalAppWorkflowPurpose::Build,
+        )
+        .await;
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal("wcommit03", checked_outcome(), || async {
+                Err("injected pointer commit failure".into())
+            })
+            .await
+            .expect("commit returns failed row");
+
+        assert_eq!(actual.base().status, TaskStatus::Failed);
+        assert!(!committed);
+        let TaskState::LocalWorkflow(workflow) = actual else {
+            panic!("expected workflow")
+        };
+        assert!(workflow.outcome.result.is_none());
+        assert!(workflow
+            .outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+        let output = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for("wcommit03").unwrap(),
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .expect("failure spool");
+        let payload: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["verified"], false);
+        assert!(payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+    }
+
+    #[tokio::test]
+    async fn local_app_publication_failure_fails_closed_when_failure_spool_rewrite_fails() {
+        let (_dir, fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit07",
+            crate::scope::LocalAppWorkflowPurpose::Build,
+        )
+        .await;
+        registry
+            .tasks
+            .write()
+            .await
+            .get_mut("wcommit07")
+            .expect("registered workflow")
+            .base_mut()
+            .notified = false;
+
+        // The unverified publication placeholder is the next write. The
+        // following failure-payload rewrite fails, leaving the placeholder on
+        // disk while the drained notification suppresses that stale path.
+        let placeholder_write = fs.write_count.load(std::sync::atomic::Ordering::SeqCst) + 1;
+        fs.fail_write_at
+            .store(placeholder_write + 1, std::sync::atomic::Ordering::SeqCst);
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal("wcommit07", checked_outcome(), || async {
+                Err("injected pointer commit failure".into())
+            })
+            .await
+            .expect("commit returns failed row");
+
+        assert_eq!(actual.base().status, TaskStatus::Failed);
+        assert!(!committed);
+        let TaskState::LocalWorkflow(workflow) = actual else {
+            panic!("expected workflow")
+        };
+        assert!(workflow.outcome.result.is_none());
+        assert!(workflow
+            .outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+
+        let notifications = registry.take_pending_task_notifications().await;
+        let notification = notifications
+            .iter()
+            .find(|notification| notification.task_id == "wcommit07")
+            .expect("failed terminal notification");
+        assert_eq!(notification.status, "failed");
+        assert!(notification
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+        assert!(notification.result.is_none());
+        assert_eq!(
+            notification.output_path, None,
+            "the failed rewrite leaves no authoritative physical spool"
+        );
+        let physical_path = registry.output_manager.path_for("wcommit07").unwrap();
+        let physical = fs
+            .files
+            .lock()
+            .await
+            .get(physical_path.to_str().unwrap())
+            .cloned()
+            .expect("pending physical spool must still exist");
+        let physical_payload: serde_json::Value = serde_json::from_str(&physical).unwrap();
+        assert_eq!(physical_payload["ok"], false);
+        assert_eq!(physical_payload["verified"], false);
+        assert!(physical_payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("publication")));
+
+        let output = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for("wcommit07").unwrap(),
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .expect("fail-closed failure spool");
+        let payload: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["verified"], false);
+        assert!(payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+
+        let path = registry.output_manager.path_for("wcommit07").unwrap();
+        registry
+            .output_manager
+            .append(&path, "late raw handler output")
+            .await
+            .expect("late terminal appends are absorbed");
+        let offset = registry
+            .output_manager
+            .read(
+                &path,
+                crate::output_manager::OutputOptions {
+                    offset: Some(1),
+                    limit: None,
+                },
+            )
+            .await
+            .expect("post-failure offset read");
+        assert!(offset.content.is_empty());
+        assert_eq!(offset.total_lines, 1);
+
+        // Exercise the public TaskOutput projection as well as the backing
+        // manager: the failed registry row and the fail-closed payload must
+        // agree even when the rewrite itself was rejected.
+        let handle: &dyn platform_api::task_registry::TaskRegistryHandle = &registry;
+        let chunk = handle
+            .output("wcommit07", None)
+            .await
+            .expect("TaskOutput projection");
+        assert_eq!(chunk.status.as_deref(), Some("failed"));
+        assert!(chunk.done);
+        assert_eq!(chunk.output_path, None);
+        let chunk_payload: serde_json::Value = serde_json::from_str(&chunk.content).unwrap();
+        assert_eq!(chunk_payload["ok"], false);
+        assert_eq!(chunk_payload["verified"], false);
+    }
+
+    #[tokio::test]
+    async fn local_app_spool_failure_never_publishes_or_completes() {
+        let (_dir, fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit04",
+            crate::scope::LocalAppWorkflowPurpose::UseTest,
+        )
+        .await;
+        fs.fail_writes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit04",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("spool failure becomes task failure");
+
+        assert_eq!(actual.base().status, TaskStatus::Failed);
+        assert!(!committed);
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+        let TaskState::LocalWorkflow(workflow) = actual else {
+            panic!("expected workflow")
+        };
+        assert!(workflow
+            .outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("terminal spool replacement failed")));
+        let output = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for("wcommit04").unwrap(),
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .expect("fail-closed initial spool failure");
+        let payload: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["verified"], false);
+    }
+
+    #[tokio::test]
+    async fn mcp_authoring_scope_cannot_use_the_qa_terminal_commit() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit05",
+            crate::scope::LocalAppWorkflowPurpose::McpAuthoring,
+        )
+        .await;
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let error = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit05",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect_err("only Build/UseTest may commit QA publication");
+
+        assert!(matches!(error, TaskError::Unsupported));
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            registry.get("wcommit05").await.unwrap().base().status,
+            TaskStatus::Running
         );
     }
 }

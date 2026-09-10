@@ -175,6 +175,26 @@ where
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
         (
+            "event/message_identity.json",
+            ClientEvent::MessageIdentity {
+                message_id: "assistant-attempt-1".into(),
+            },
+        ),
+        (
+            "event/message_retracted.json",
+            ClientEvent::MessageRetracted {
+                message_id: "assistant-attempt-1".into(),
+            },
+        ),
+        (
+            "event/cron_result.json",
+            ClientEvent::CronResult {
+                request_id: "cron-1".into(),
+                jobs: Vec::new(),
+                error: None,
+            },
+        ),
+        (
             "event/error.json",
             ClientEvent::Error {
                 kind: ErrorKindDto::Transport,
@@ -186,6 +206,33 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SystemNotice {
                 message: "Conversation changes could not be saved.".to_string(),
                 is_error: true,
+            },
+        ),
+        (
+            "event/task_lifecycle.json",
+            ClientEvent::TaskLifecycle {
+                event_json: r#"{"type":"system","subtype":"task_started","task_id":"b12345678","description":"background job","task_type":"local_bash"}"#.to_string(),
+            },
+        ),
+        (
+            "event/loop_wakeup.json",
+            ClientEvent::LoopWakeup {
+                message: "Claude resuming /loop wakeup (Sep 7 3:04pm) \u{b7} 3 no-op ticks since Sep 7 2:14pm".to_string(),
+                companion: Some(
+                    "[3 prior /loop wakeups found nothing actionable; loop is healthy.]"
+                        .to_string(),
+                ),
+                streak: 3,
+                since_ms: 1_788_790_449_000,
+            },
+        ),
+        (
+            "event/loop_wakeup_plain.json",
+            ClientEvent::LoopWakeup {
+                message: "Claude resuming /loop wakeup (Sep 7 3:04pm)".to_string(),
+                companion: None,
+                streak: 0,
+                since_ms: 0,
             },
         ),
         (
@@ -1290,6 +1337,14 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        ("command/task_message.json", ClientCommand::TaskMessage { task_id: "a12345678".into(), message: "Please continue the review.".into() }),
+        ("command/cron_manage.json", ClientCommand::CronManage {
+            request_id: "cron-1".into(),
+            request: client_protocol::commands::CronRequestDto {
+                action: "list".into(), id: None, cron: None, prompt: None,
+                recurring: None, durable: None, expires_at: None, no_expiry: None,
+            },
+        }),
         (
             "command/send_prompt.json",
             ClientCommand::SendPrompt {
@@ -2300,6 +2355,9 @@ fn canonical_doctor() -> DoctorReportDto {
 
 fn canonical_task_row() -> TaskRowDto {
     TaskRowDto {
+            unread: false, model: None, effort: None,
+        kind: None,
+        awaiting_plan_approval: false,
         task_id: "b12345678".to_string(),
         task_type: "bash".to_string(),
         status: TaskStatusDto::Running,

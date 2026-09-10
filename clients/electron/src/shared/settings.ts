@@ -56,9 +56,13 @@ export type ModelPickerVisibilitySettings = Record<string, ProviderModelPickerVi
  * Everything in `PersistedSettings` that is NOT here (today:
  * `trustedWorkspaces`) is deliberately withheld.
  */
+export interface ArchivedSessionRecord extends SessionRef { title?: string; archivedAt?: string }
+
 export interface PublicSettings {
+  archivedSessions?: ArchivedSessionRecord[];
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';
+  collapseThoughtsByDefault?: boolean;
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;

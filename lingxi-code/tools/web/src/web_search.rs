@@ -464,12 +464,12 @@ pub fn count_searches(content: &[Value]) -> u64 {
 fn stream_partial_notice(err: &HttpError) -> &'static str {
     match err {
         HttpError::Timeout(_) => {
-            "API Error: Response stalled mid-stream. The response above may be incomplete."
+            "API Error: The response stopped arriving. The response above may be incomplete."
         }
         HttpError::Status { .. } | HttpError::InvalidResponse(_) => {
             "API Error: Server error mid-response. The response above may be incomplete."
         }
-        _ => "API Error: Connection closed mid-response. The response above may be incomplete.",
+        _ => "API Error: Connection lost mid-response. The response above may be incomplete.",
     }
 }
 
@@ -2757,7 +2757,7 @@ mod tests {
         let mc = res.model_content.as_deref().expect("model_content");
         assert!(
             mc.contains(
-                "API Error: Connection closed mid-response. The response above may be incomplete."
+                "API Error: Connection lost mid-response. The response above may be incomplete."
             ),
             "the incomplete-response notice must be present: {mc}"
         );
@@ -2835,7 +2835,7 @@ mod tests {
         let mc = res.model_content.as_deref().expect("model_content");
         assert!(
             mc.contains(
-                "API Error: Connection closed mid-response. The response above may be incomplete."
+                "API Error: Connection lost mid-response. The response above may be incomplete."
             ),
             "EOF without message_stop must append incomplete notice: {mc}"
         );

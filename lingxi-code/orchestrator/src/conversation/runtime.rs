@@ -4,6 +4,9 @@ use super::*;
 
 /// Transcript persistence and the side tables consumed while serializing a turn.
 pub(crate) struct TranscriptStore {
+    /// Per-session provider recovery ownership, replaced when switching sessions.
+    pub(crate) thinking_recovery:
+        std::sync::RwLock<llm_client::thinking_scope::ThinkingRecoveryScope>,
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
     /// tests; `Some` when the CLI binary wires `~/.lingxi/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
@@ -113,6 +116,7 @@ pub(crate) struct TranscriptStore {
 impl TranscriptStore {
     pub(crate) fn new() -> Self {
         Self {
+            thinking_recovery: std::sync::RwLock::new(Default::default()),
             jsonl_writer: None,
             last_jsonl_uuid: Arc::new(Mutex::new(None)),
             tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
@@ -128,6 +132,10 @@ impl TranscriptStore {
     }
 
     pub(crate) async fn reset_session_scoped(&self) {
+        *self
+            .thinking_recovery
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Default::default();
         self.tool_denial_kinds.lock().await.clear();
         *self.tool_frames.lock().await = None;
         self.tool_use_results.lock().await.clear();
@@ -185,7 +193,7 @@ pub(crate) struct PromptRuntime {
     /// if(t.length===0)return[]; e.setAppState(…clear…)`), drained
     /// consume-once by [`Self::memory_update_reminder_messages`].
     ///
-    /// Filled by [`Self::task_notification_reminder_message`] when it drains a
+    /// Filled by [`Self::task_notification_reminder_messages`] when it drains a
     /// TERMINAL `dream` (background memory consolidation) task — the port's
     /// dream handler is a forked subagent whose completion only surfaces through
     /// the task registry, so that drain is the one place the signal exists.
@@ -259,9 +267,10 @@ pub(crate) struct PromptRuntime {
     /// `local_agent` / MCP `monitor` …) finished since the last turn, folded back
     /// into the next turn as a `<task-notification>` reminder so the model learns
     /// its async task completed (claude-code's per-task-type `enqueue*Notification`).
-    /// `None` ⇒ [`Self::task_notification_reminder_message`] is a strict no-op (the
+    /// `None` ⇒ [`Self::task_notification_reminder_messages`] is a strict no-op (the
     /// default — keeps fixtures byte-identical). Wired at the desktop composition
     /// root from the `TaskRegistry`.
+    pub(crate) task_lifecycle_relay: Option<tokio_util::task::AbortOnDropHandle<()>>,
     pub(crate) task_notifications:
         Option<Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>>,
     /// Finding #73: source of the V2 task list for the per-turn `task_reminder`
@@ -426,6 +435,7 @@ impl PromptRuntime {
             skill_listing: None,
             async_hook_responses: None,
             task_notifications: None,
+            task_lifecycle_relay: None,
             todo_reminder_tasks: None,
             conditional_rules_cache: Arc::new(std::sync::Mutex::new(None)),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
@@ -667,6 +677,14 @@ pub(crate) struct CompactionRuntime {
     /// turns' output is excluded. Updated by each turn driver as its per-turn
     /// token counter resets to 0.
     pub(crate) turn_start_output_baseline: Arc<std::sync::atomic::AtomicU64>,
+    /// claude-code `D = Date.now()` — stamped at the top of the query generator
+    /// (`Nfr`, `src_163219561.js` @163219699) and read by the analytics events
+    /// that fire from its `finally`: `tengu_stop_hook_error`'s `duration` and
+    /// `tengu_goal_evaluated`'s `durationMs` are both `Date.now() - D`, i.e. the
+    /// elapsed time of the WHOLE query up to that point — not of the stop-hook
+    /// dispatch or the goal evaluation. Stamped at the same three query entry
+    /// points as [`Self::turn_start_output_baseline`].
+    pub(crate) query_started_at: Arc<std::sync::Mutex<std::time::Instant>>,
     /// P1 session-memory standalone trigger (§6.5). `None` = inert (no caller
     /// wires it). When wired (via [`Self::with_session_memory`]) AND the
     /// extractor's threshold is crossed, [`Self::maybe_extract_session_memory`]
@@ -688,6 +706,7 @@ impl CompactionRuntime {
             ),
             output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_start_output_baseline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            query_started_at: Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
             session_memory: None,
         }
     }
@@ -1055,20 +1074,8 @@ pub(crate) struct ModelRuntime {
     /// keeps today's terminal behavior (no re-swap), so the fallback fires at
     /// most ONCE per session — matching the binary, where the latch makes the
     /// `mainLoopModel` override sticky.
-    pub(crate) refusal_fallback_latched: std::sync::atomic::AtomicBool,
-    /// Models already routed to this session's refusal cascade. Consumed by
-    /// the stage resolver so a chain never loops back onto a model that has
-    /// already refused — the bound that lets a multi-hop chain terminate
-    /// without relying on the once-per-session latch.
-    pub(crate) refusal_tried_models: Mutex<Vec<String>>,
-    /// The refusal episode's accumulating notice: hops fold into one notice
-    /// describing where the session ended up, rather than each hop announcing a
-    /// model the cascade may already have left.
-    pub(crate) refusal_episode: Mutex<crate::refusal_notice::RefusalEpisode>,
-    /// The collapse queue in front of the notice stream. Holds a provisional
-    /// notice and drops it when a later one supersedes it, counting the
-    /// collapse for `tengu_refusal_fallback_notice_collapsed`.
-    pub(crate) refusal_notice_queue: Mutex<crate::refusal_notice::NoticeQueue>,
+    pub(crate) refusal_cascade: Mutex<platform_api::refusal_driver::RefusalCascadeState>,
+
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
     /// zero-shaped stub. The CLI binary (M6-06 init.rs) always populates
@@ -1153,10 +1160,9 @@ impl ModelRuntime {
             current_effort: std::sync::RwLock::new(current_effort),
             current_reasoning_selection: std::sync::RwLock::new(current_reasoning_selection),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
-            refusal_fallback_latched: std::sync::atomic::AtomicBool::new(false),
-            refusal_tried_models: Mutex::new(Vec::new()),
-            refusal_episode: Mutex::new(crate::refusal_notice::RefusalEpisode::default()),
-            refusal_notice_queue: Mutex::new(crate::refusal_notice::NoticeQueue::new()),
+            refusal_cascade: Mutex::new(
+                platform_api::refusal_driver::RefusalCascadeState::default(),
+            ),
             cost_tracker: None,
             output_scopes: None,
             output_turn: std::sync::Mutex::new(None),
@@ -1227,11 +1233,9 @@ impl ModelRuntime {
 
     /// Reset refusal routing after compaction token accounting is cleared.
     pub(crate) fn reset_refusal_fallback(&self) {
-        self.refusal_fallback_latched
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.refusal_tried_models
+        self.refusal_cascade
             .try_lock()
-            .map(|mut v| v.clear())
+            .map(|mut c| c.reset_routing())
             .ok();
     }
 }

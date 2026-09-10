@@ -61,6 +61,31 @@ const FOCUS_VIEW_FULLSCREEN_REQUIRED_NOTICE: &str = "Focus view needs the fullsc
 const FOCUS_VIEW_SETTINGS_ENFORCED_NOTICE: &str = "Focus view is enabled by settings (viewMode: focus). Focus view needs the fullscreen renderer.";
 const AGENTS_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 
+/// Independent lifetime for an off-loop command; completion is not cancellation.
+#[derive(Clone, Debug)]
+pub struct PendingSlashDispatch {
+    pub cancellation: CancellationToken,
+    pub completed: CancellationToken,
+}
+
+impl PendingSlashDispatch {
+    fn new() -> Self {
+        Self {
+            cancellation: CancellationToken::new(),
+            completed: CancellationToken::new(),
+        }
+    }
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+    fn is_pending(&self) -> bool {
+        !self.is_cancelled() && !self.completed.is_cancelled()
+    }
+}
+
 /// What one routed key press or paste means to the owning event loop.
 pub enum ChatOutcome {
     /// Keep looping.
@@ -74,6 +99,8 @@ pub enum ChatOutcome {
     Detach,
     /// Exit the app.
     Quit,
+    /// A durable background session was created; print its receipt after unmount.
+    BackgroundedExit(String),
     /// The user submitted `prompt`; the caller should drive a turn for it,
     /// honoring the paired [`CancellationToken`] (the widget cancels it on
     /// Ctrl-C). Carries the image files queued for this turn (pasted paths,
@@ -83,7 +110,7 @@ pub enum ChatOutcome {
     /// A prompt submitted while the current turn is active. The embedding host
     /// places it in Rust's canonical `Next` queue instead of starting another
     /// turn or replacing the current cancellation owner.
-    QueuePrompt(String, Vec<std::path::PathBuf>),
+    QueuePrompt(String, Vec<std::path::PathBuf>, CancellationToken),
     /// Ctrl+V/Alt+V: read an IMAGE from the system clipboard. The read + PNG
     /// encode can take hundreds of ms, so the caller runs it OFF the render
     /// thread and feeds the result back via
@@ -211,12 +238,10 @@ pub enum ChatOutcome {
     /// neither of which may run on the render thread. Mirrors the `-p` one-shot
     /// path's `run_slash_command`, so a typed `/loop …` actually schedules.
     ///
-    /// The [`CancellationToken`] is the widget's active-turn token (also stored
-    /// as `current_turn`), so Ctrl-C cancels a dispatched `RunAsTurn` turn just
-    /// like a normal submit. The caller passes it to `run_turn` for a prompt
-    /// command and emits `TurnEnded` for a non-turn result so the widget clears
-    /// its running state.
-    DispatchSlash(String, CancellationToken),
+    /// The caller installs the token with `TurnStartedWithCancel` once a
+    /// dispatched model prompt owns the turn. Local results only emit a notice
+    /// and leave any active model turn untouched.
+    DispatchSlash(String, PendingSlashDispatch),
     /// A held cross-session message was delivered. The caller should drive
     /// `OrchestratorHandle::run_async_hook_rewake` so the released body is
     /// injected without appending a synthetic user prompt.
@@ -275,6 +300,8 @@ fn is_live_turn_event(event: &TurnEvent) -> bool {
     matches!(
         event,
         TurnEvent::TextDelta(_)
+            | TurnEvent::MessageIdentity(_)
+            | TurnEvent::MessageRetracted(_)
             | TurnEvent::ThinkingDelta(_)
             | TurnEvent::ToolUseStart { .. }
             | TurnEvent::ToolHeartbeat { .. }
@@ -305,8 +332,11 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::SystemNotice { .. }
         | TurnEvent::BashOutput { .. }
         | TurnEvent::CompactionCompleted { .. }
+        | TurnEvent::MessageIdentity(_)
+        | TurnEvent::MessageRetracted(_)
         | TurnEvent::TurnEnded(_) => FocusRefreshKind::Full,
         TurnEvent::TurnStarted
+        | TurnEvent::TurnStartedWithCancel(_)
         | TurnEvent::ThinkingDelta(_)
         | TurnEvent::ToolUseStart { .. }
         | TurnEvent::ToolUseResult { .. } => FocusRefreshKind::ResetAssistantTail,
@@ -359,6 +389,8 @@ pub struct ChatWidget {
     theme_name: ThemeName,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
+    pending_slash_dispatches: Vec<PendingSlashDispatch>,
+    queued_prompt_owners: Vec<CancellationToken>,
     /// Whether turn-scoped bridge events still have a live owner. This remains
     /// true while cancellation is waiting for Block tools, and flips only at
     /// the terminal event so late tool events cannot resurrect idle UI state.
@@ -630,6 +662,8 @@ impl ChatWidget {
             theme_setting: ThemeSetting::Named(ThemeName::Dark),
             theme_name: ThemeName::Dark,
             current_turn: None,
+            pending_slash_dispatches: Vec::new(),
+            queued_prompt_owners: Vec::new(),
             accepts_turn_events: false,
             has_seen_turn: false,
             current_compaction: None,
@@ -926,6 +960,11 @@ impl ChatWidget {
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
+        if key.kind == crossterm::event::KeyEventKind::Press {
+            if let Some(registry) = &self.task_registry {
+                registry.update_shell_session_activity(true, self.current_turn.is_some(), true);
+            }
+        }
         self.bottom_pane.set_task_running(self.pane_status());
         // Ctrl-L is the conventional terminal redraw chord. The background
         // attach server injects this once after acquiring the controller lease
@@ -945,9 +984,33 @@ impl ChatWidget {
         if key.kind == crossterm::event::KeyEventKind::Press
             && key.modifiers == crossterm::event::KeyModifiers::CONTROL
             && matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C'))
-            && (self.current_turn.is_some() || self.current_compaction.is_some())
+            && (self.current_turn.is_some()
+                || self.current_compaction.is_some()
+                || self
+                    .pending_slash_dispatches
+                    .iter()
+                    .any(PendingSlashDispatch::is_pending))
         {
             return self.on_pane_outcome(BottomPaneOutcome::Interrupt);
+        }
+        // Ctrl+B — claude-code's `task:background` chord (`mie`): move every
+        // backgroundable task to the background (`zM`).
+        //
+        // Two gates, both the oracle's. `Dl()` (background tasks disabled) skips
+        // the chord entirely, and `H_t()` — is anything backgroundable at all —
+        // decides whether the chord is consumed. With nothing to background it
+        // falls through to ordinary input rather than swallowing a keystroke.
+        // The oracle shows no text here; its `rko` only flips the persisted
+        // `hasUsedBackgroundTask` flag that governs the hint's visibility
+        // elsewhere, so nothing is printed.
+        if !self.bottom_pane.has_active_view()
+            && key.kind == crossterm::event::KeyEventKind::Press
+            && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+            && matches!(key.code, crossterm::event::KeyCode::Char('b' | 'B'))
+            && !platform_api::env::background_tasks_disabled()
+            && self.background_all_tasks()
+        {
+            return ChatOutcome::Continue;
         }
         // Ctrl+V / Alt+V: paste an IMAGE from the system clipboard (codex
         // `chatwidget/interaction.rs`). Bracketed paste only carries text —
@@ -1003,6 +1066,10 @@ impl ChatWidget {
     /// intact and is emitted again on the next render tick.
     pub(crate) fn reset_terminal_commit(&mut self) {
         self.transcript.reset_terminal_commit();
+    }
+
+    pub(crate) fn take_terminal_replay_required(&mut self) -> bool {
+        self.transcript.take_terminal_replay_required()
     }
 
     /// Tick hook: flush a DUE non-bracketed paste burst (held first char or
@@ -1169,6 +1236,9 @@ impl ChatWidget {
     /// escape, `SystemNotice`/`BashOutput` push system/bash-output rows — every
     /// bridge-emitted variant is handled (no wildcard drop).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
+        if let TurnEvent::TurnStartedWithCancel(cancel) = &event {
+            self.current_turn = Some(cancel.clone());
+        }
         let focus_refresh = focus_refresh_for_turn_event(&event);
         let belongs_to_manual_compaction = self.current_compaction.is_some()
             && matches!(
@@ -1188,7 +1258,7 @@ impl ChatWidget {
             return;
         }
         match event {
-            TurnEvent::TurnStarted => {
+            TurnEvent::TurnStarted | TurnEvent::TurnStartedWithCancel(_) => {
                 self.accepts_turn_events = true;
                 self.has_seen_turn = true;
                 self.finalize_collapse_group();
@@ -1212,8 +1282,17 @@ impl ChatWidget {
                 // discarded if it's the empty placeholder) before the new
                 // streaming reply opens.
                 self.flush_or_discard_active();
+                self.transcript.start_assistant_response();
                 self.transcript
                     .set_active(Box::new(AssistantTextCell::new(String::new())));
+            }
+            TurnEvent::MessageIdentity(id) => {
+                self.flush_or_discard_active();
+                self.transcript.identify_assistant_response(id);
+            }
+            TurnEvent::MessageRetracted(id) => {
+                self.transcript.retract_assistant_response(id);
+                self.partial_assistant_text = self.transcript.current_turn_assistant_text();
             }
             TurnEvent::TextDelta(delta) => {
                 self.finalize_collapse_group();
@@ -2026,6 +2105,12 @@ impl ChatWidget {
     /// the `[Request interrupted by user]` row — the outgoing session is being
     /// torn down, not returned to.
     pub fn cancel_active_turn(&mut self) {
+        for owner in self.queued_prompt_owners.drain(..) {
+            owner.cancel();
+        }
+        for token in self.pending_slash_dispatches.drain(..) {
+            token.cancel();
+        }
         if let Some(token) = self.current_turn.take() {
             token.cancel();
         }
@@ -2282,11 +2367,12 @@ impl ChatWidget {
             body: input.to_string(),
             timestamp: 0,
         });
-        // A fresh per-turn token stored as `current_turn` so Ctrl-C cancels a
-        // dispatched prompt turn (the caller passes it to `run_turn`).
-        let token = CancellationToken::new();
-        self.current_turn = Some(token.clone());
-        self.accepts_turn_events = true;
+        // Dispatch may resolve to a local control while another turn runs.
+        // Only the host's eventual start event may install this pending token.
+        self.pending_slash_dispatches
+            .retain(PendingSlashDispatch::is_pending);
+        let token = PendingSlashDispatch::new();
+        self.pending_slash_dispatches.push(token.clone());
         ChatOutcome::DispatchSlash(input.to_string(), token)
     }
 
@@ -3434,18 +3520,48 @@ impl ChatWidget {
     /// throwaway current-thread runtime (the sync render loop is off the async
     /// runtime, and `TaskRegistryHandle::list` is a pure in-memory read — the
     /// same proven-safe `block_on` idiom as `run_core_command`). An empty list
-    /// or a missing handle renders a system line instead of an empty picker.
+    /// stays inside the dialog; only a missing handle renders an error line.
     /// Stopping a task goes off-loop via [`ChatOutcome::TaskAction`].
-    pub(crate) fn cmd_tasks(&mut self, _args: &str) -> ChatOutcome {
+    pub(crate) fn cmd_tasks(&mut self, args: &str) -> ChatOutcome {
+        if let Some(parsed) = platform_api::human_task_message::parse(args) {
+            return match parsed {
+                Ok((task_id, message)) => ChatOutcome::TaskAction(TaskAction::Message { task_id: task_id.into(), message: message.into() }),
+                Err(error) => self.show_system_text(error, true),
+            };
+        }
         let rows = match self.task_snapshot() {
             Ok(rows) => rows,
             Err(message) => return self.show_system_text(&message, true),
         };
-        if rows.is_empty() {
-            return self.show_system_text("No tasks currently running", false);
+        if let Some(registry) = self.task_registry.clone() {
+            self.bottom_pane.show_live_tasks(rows, registry);
+        } else {
+            self.bottom_pane.show_tasks(rows);
         }
-        self.bottom_pane.show_tasks(rows);
         ChatOutcome::Continue
+    }
+
+    /// claude-code `H_t` then `zM`: move everything backgroundable to the
+    /// background, and report whether the chord did anything.
+    ///
+    /// `false` (nothing to background, or no engine handle) leaves the key
+    /// unconsumed.
+    fn background_all_tasks(&self) -> bool {
+        let Some(registry) = self.task_registry.clone() else {
+            return false;
+        };
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return false;
+        };
+        runtime.block_on(async move {
+            if !registry.has_backgroundable_tasks().await {
+                return false;
+            }
+            registry.background_all_tasks().await > 0
+        })
     }
 
     /// A live snapshot of the background-task registry, or the system-line text
@@ -4517,8 +4633,50 @@ impl ChatWidget {
     /// in its teardown after `run_app` returns. Behaves identically whether or
     /// not a handle is wired (the quit is handle-independent).
     pub(crate) fn cmd_stop(&mut self, _args: &str) -> ChatOutcome {
-        self.show_system_text("Session stopped.", false);
-        ChatOutcome::Quit
+        let outcome = self.request_quit();
+        if matches!(outcome, ChatOutcome::Quit) {
+            self.show_system_text("Session stopped.", false);
+        }
+        outcome
+    }
+
+    fn request_quit(&mut self) -> ChatOutcome {
+        let items = self
+            .task_registry
+            .as_ref()
+            .and_then(|registry| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                runtime
+                    .block_on(registry.list(platform_api::task_registry::TaskListFilter::default()))
+                    .ok()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|task| matches!(task.status.as_str(), "running" | "pending" | "paused" | "queued") || task.is_parked)
+            .map(|task| task.description)
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            return ChatOutcome::Quit;
+        }
+        let can_background = self.orchestrator.as_ref().is_some_and(|handle| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()
+                .is_some_and(|runtime| {
+                    runtime.block_on(handle.can_background_conversation_on_exit())
+                })
+        });
+        self.bottom_pane.show_view(Box::new(
+            crate::bottom_pane::exit_background_view::ExitBackgroundView::new(
+                items,
+                can_background,
+            ),
+        ));
+        ChatOutcome::Continue
     }
 
     /// `/sandbox [exclude "<pattern>"]`: toggle sandbox mode for bash commands.
@@ -5047,8 +5205,18 @@ impl ChatWidget {
             // holds.
             BottomPaneOutcome::OpenAgentsView => self.request_open_agents(),
             BottomPaneOutcome::Detach => ChatOutcome::Detach,
-            BottomPaneOutcome::Quit => ChatOutcome::Quit,
+            BottomPaneOutcome::Quit => self.request_quit(),
             BottomPaneOutcome::Interrupt => {
+                let turn_was_cancelled = self
+                    .current_turn
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled());
+                for owner in self.queued_prompt_owners.drain(..) {
+                    owner.cancel();
+                }
+                for token in self.pending_slash_dispatches.drain(..) {
+                    token.cancel();
+                }
                 if let Some(token) = self.current_compaction.as_ref() {
                     // Cancel the compact task and hide the progress bar, but
                     // KEEP `current_compaction` (the submit block + re-/compact
@@ -5065,8 +5233,20 @@ impl ChatWidget {
                     return ChatOutcome::Continue;
                 }
                 if let Some(token) = self.current_turn.as_ref() {
-                    if token.is_cancelled() {
+                    if turn_was_cancelled {
                         return ChatOutcome::Continue;
+                    }
+                    if !platform_api::env::background_tasks_disabled() {
+                        if let Some(registry) = &self.task_registry {
+                            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                            {
+                                runtime.block_on(registry.background_all_tasks_with_reason(
+                                    platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                                ));
+                            }
+                        }
                     }
                     token.cancel();
                 }
@@ -5227,8 +5407,21 @@ impl ChatWidget {
             timestamp: 0,
         });
         self.sync_focus_projection();
-        if self.current_turn.is_some() {
-            return ChatOutcome::QueuePrompt(text, self.take_pending_images());
+        self.pending_slash_dispatches
+            .retain(PendingSlashDispatch::is_pending);
+        if self.current_turn.is_some() || !self.pending_slash_dispatches.is_empty() {
+            let owner = self
+                .pending_slash_dispatches
+                .last()
+                .map(|pending| pending.cancellation.clone())
+                .or_else(|| self.current_turn.clone())
+                .expect("queued prompt has an owner");
+            // Retain the owner across dequeue -> host start delivery. Session
+            // switching must still cancel a followup whose start is in transit.
+            self.queued_prompt_owners
+                .retain(|owner| !owner.is_cancelled());
+            self.queued_prompt_owners.push(owner.clone());
+            return ChatOutcome::QueuePrompt(text, self.take_pending_images(), owner);
         }
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
@@ -5246,6 +5439,26 @@ impl ChatWidget {
             }
             CommandAction::OpenConnectPicker => self.cmd_connect(""),
             CommandAction::Quit => ChatOutcome::Quit,
+            CommandAction::BackgroundAndExit => {
+                let Some(handle) = self.orchestrator.clone() else {
+                    return ChatOutcome::Continue;
+                };
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return ChatOutcome::Continue;
+                };
+                match runtime
+                    .block_on(handle.background_conversation(self.backgrounding_snapshot()))
+                {
+                    Ok(display) => ChatOutcome::BackgroundedExit(format!(
+                        "{display}\nLocal tasks that could not be moved will be stopped."
+                    )),
+                    Err(error) => self
+                        .show_system_text(&format!("Could not move to background: {error}"), true),
+                }
+            }
             CommandAction::SetTheme(setting) => {
                 // Applied live here; the caller persists it (best-effort).
                 self.set_theme(setting);
@@ -5485,6 +5698,7 @@ fn agent_status_from_tool_start(
     input: &serde_json::Value,
 ) -> RunningAgentStatus {
     RunningAgentStatus {
+        awaiting_plan_approval: false,
         id: id.to_string(),
         task_type: "local_agent".to_string(),
         agent_type: input
@@ -5802,6 +6016,215 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// A registry whose only interesting behaviour is whether anything is
+    /// backgroundable, so the Ctrl+B chord can be tested on both sides of
+    /// claude-code's `H_t` gate.
+    struct BackgroundStubRegistry {
+        backgroundable: bool,
+        background_all_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::task_registry::TaskRegistryHandle for BackgroundStubRegistry {
+        async fn create(
+            &self,
+            _i: platform_api::task_registry::TaskCreateInput,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _id: &str,
+        ) -> Result<
+            Option<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _f: platform_api::task_registry::TaskListFilter,
+        ) -> Result<
+            Vec<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            Ok(if self.backgroundable {
+                vec![platform_api::task_registry::TaskRecord {
+                    task_id: "b1".into(),
+                    task_type: "local_bash".into(),
+                    status: "running".into(),
+                    description: "live build".into(),
+                    ..Default::default()
+                }]
+            } else {
+                Vec::new()
+            })
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: platform_api::task_registry::TaskUpdatePatch,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn kill(
+            &self,
+            _id: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<
+            platform_api::task_registry::TaskOutputChunk,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn has_backgroundable_tasks(&self) -> bool {
+            self.backgroundable
+        }
+        async fn background_all_tasks(&self) -> usize {
+            self.background_all_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            usize::from(self.backgroundable)
+        }
+    }
+
+    #[test]
+    fn typed_tasks_message_emits_a_human_task_action_with_original_payload() {
+        match widget().cmd_tasks("message a123  preserve indent") {
+            ChatOutcome::TaskAction(TaskAction::Message { task_id, message }) => {
+                assert_eq!(task_id, "a123");
+                assert_eq!(message, " preserve indent");
+            }
+            _ => panic!("expected human message task action"),
+        }
+        let mut view = widget();
+        assert!(matches!(view.cmd_tasks("message a123"), ChatOutcome::Continue));
+        assert!(!cells(&view).is_empty(), "invalid input surfaces usage rather than sending an empty message");
+    }
+
+    #[test]
+    fn assistant_text_that_looks_like_task_message_does_not_become_user_input() {
+        let mut view = widget();
+        view.apply_turn_event(TurnEvent::TurnStarted);
+        view.apply_turn_event(TurnEvent::TextDelta("/tasks message a123 resume stopped work".into()));
+        view.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        assert!(view.bottom_pane.composer().text().is_empty());
+        assert!(matches!(view.handle_key(press(KeyCode::Enter)), ChatOutcome::Continue));
+        assert!(view.bottom_pane.view_stack().active().is_none());
+    }
+
+    #[test]
+    fn tasks_empty_registry_opens_dialog_without_transcript_noise() {
+        let registry = std::sync::Arc::new(BackgroundStubRegistry {
+            backgroundable: false,
+            background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut w = widget();
+        w.set_task_registry(registry);
+        w.cmd_tasks("");
+        assert!(cells(&w).is_empty());
+        assert!(w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .unwrap()
+            .as_any()
+            .is::<crate::bottom_pane::tasks_view::TasksView>());
+    }
+
+    /// claude-code `mie`: Ctrl+B runs `zM` only when `H_t` says there is
+    /// something to background; otherwise the chord is NOT consumed, so it
+    /// still reaches the composer.
+    #[test]
+    fn quitting_with_live_tasks_requires_an_explicit_exit_choice() {
+        let registry = std::sync::Arc::new(BackgroundStubRegistry {
+            backgroundable: true,
+            background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut w = widget();
+        w.set_task_registry(registry);
+        assert!(matches!(w.cmd_stop(""), ChatOutcome::Continue));
+        assert!(w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .unwrap()
+            .as_any()
+            .is::<crate::bottom_pane::exit_background_view::ExitBackgroundView>());
+        assert!(matches!(
+            w.handle_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(cells(&w).is_empty());
+    }
+
+    #[test]
+    fn ctrl_b_backgrounds_running_work_and_is_otherwise_not_consumed() {
+        for backgroundable in [true, false] {
+            let registry = std::sync::Arc::new(BackgroundStubRegistry {
+                backgroundable,
+                background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut w = widget();
+            w.set_task_registry(registry.clone());
+            let outcome = w.handle_key(ctrl(KeyCode::Char('b')));
+
+            if backgroundable {
+                assert!(
+                    matches!(outcome, ChatOutcome::Continue),
+                    "the chord must be consumed when work moved",
+                );
+                assert_eq!(
+                    registry
+                        .background_all_calls
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "and it must actually run `zM`",
+                );
+            } else {
+                assert_eq!(
+                    registry
+                        .background_all_calls
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "`H_t` gates the call: nothing running means nothing to do",
+                );
+            }
+        }
+    }
+
+    /// With no engine handle the chord must not be swallowed either.
+    #[test]
+    fn ctrl_b_without_a_registry_falls_through() {
+        let mut w = widget();
+        assert!(!w.background_all_tasks());
+        let _ = w.handle_key(ctrl(KeyCode::Char('b')));
     }
 
     fn widget() -> ChatWidget {
@@ -7607,6 +8030,22 @@ mod tests {
         (widget, mock)
     }
 
+    #[test]
+    fn background_exit_returns_the_durable_receipt_to_the_host() {
+        let (mut view, _mock) = widget_with_orchestrator();
+        match view.run_command(CommandAction::BackgroundAndExit) {
+            ChatOutcome::BackgroundedExit(receipt) => {
+                assert!(receipt.contains("mock-bg-abcd"));
+                assert!(receipt.contains("could not be moved"));
+            }
+            _ => panic!("successful handoff must exit with its receipt"),
+        }
+        assert!(matches!(
+            widget().run_command(CommandAction::BackgroundAndExit),
+            ChatOutcome::Continue
+        ));
+    }
+
     /// (a) With a live handle wired, the interactive read-only commands open
     /// their screen views (not transcript cells): `/context` → the context
     /// grid, `/usage` → the Usage/Stats dialog.
@@ -8192,14 +8631,100 @@ mod tests {
             panic!("a registry-backed command must route to DispatchSlash");
         };
         assert_eq!(input, "/loop 5m go");
-        // The token is registered as the active turn so Ctrl-C can cancel it.
-        assert!(widget.turn_running());
+        // Dispatch alone does not start a model turn.
+        assert!(!widget.turn_running());
         // The raw invocation is echoed as the user's turn message.
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/loop 5m go");
 
         // An unregistered slash command still falls through as a normal prompt.
         assert!(widget.handle_slash("/totally-unknown").is_none());
+    }
+
+    #[test]
+    fn dispatch_local_stop_preserves_active_teammate_token() {
+        let mut widget = widget();
+        let active = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/stop") else {
+            panic!("local command must be dispatched");
+        };
+        widget.apply_turn_event(TurnEvent::SystemNotice {
+            body: "Stopped".into(),
+            is_error: false,
+        });
+        assert!(widget.turn_running());
+        assert!(widget.accepts_turn_events);
+        widget.current_turn.as_ref().unwrap().cancel();
+        assert!(active.is_cancelled());
+        assert!(!pending.is_cancelled());
+    }
+
+    #[test]
+    fn pending_slash_queues_followup_and_session_switch_cancels_dispatch() {
+        let mut widget = widget();
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow-skill")
+        else {
+            panic!("dispatch")
+        };
+        assert!(matches!(
+            widget.submit_prompt("followup".into()),
+            ChatOutcome::QueuePrompt(..)
+        ));
+        assert!(widget.current_turn.is_none());
+        widget.cancel_active_turn();
+        assert!(pending.is_cancelled());
+        assert!(widget.pending_slash_dispatches.is_empty());
+    }
+
+    #[test]
+    fn interrupt_cancels_pending_slash_without_losing_active_teammate_owner() {
+        let mut widget = widget();
+        let active = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow-skill")
+        else {
+            panic!("dispatch")
+        };
+        widget.on_pane_outcome(BottomPaneOutcome::Interrupt);
+        assert!(active.is_cancelled());
+        assert!(pending.is_cancelled());
+        assert!(
+            widget.current_turn.is_some(),
+            "active turn owns its end event"
+        );
+    }
+
+    #[test]
+    fn cancelling_pending_slash_does_not_cancel_later_new_input() {
+        let mut widget = widget();
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow") else {
+            panic!("dispatch")
+        };
+        let ChatOutcome::QueuePrompt(_, _, old_owner) = widget.submit_prompt("old".into()) else {
+            panic!("queue")
+        };
+        widget.on_pane_outcome(BottomPaneOutcome::Interrupt);
+        assert!(pending.is_cancelled());
+        assert!(old_owner.is_cancelled());
+        let ChatOutcome::Submit(_, _, new_owner) = widget.submit_prompt("new".into()) else {
+            panic!("new turn")
+        };
+        assert!(!new_owner.is_cancelled());
+    }
+
+    #[test]
+    fn completed_local_dispatch_does_not_leave_followup_queued() {
+        let mut widget = widget();
+        let ChatOutcome::DispatchSlash(_, completed) = widget.dispatch_registry_slash("/local")
+        else {
+            panic!("dispatch")
+        };
+        completed.completed.cancel(); // host completion guard
+        assert!(matches!(
+            widget.submit_prompt("next".into()),
+            ChatOutcome::Submit(..)
+        ));
     }
 
     /// The static `/worktree` palette row must still execute through the live
@@ -8214,7 +8739,7 @@ mod tests {
             panic!("/worktree must route to DispatchSlash");
         };
         assert_eq!(input, "/worktree remove --discard");
-        assert!(widget.turn_running());
+        assert!(!widget.turn_running());
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/worktree remove --discard");
     }
@@ -8231,7 +8756,7 @@ mod tests {
             panic!("/fusion must route to DispatchSlash");
         };
         assert_eq!(input, "/fusion --fast review locking");
-        assert!(widget.turn_running());
+        assert!(!widget.turn_running());
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/fusion --fast review locking");
     }
@@ -8410,8 +8935,8 @@ mod tests {
     /// included — and `true` only for an in-process teammate. A test that
     /// hand-sets `worker: Some(..)` here would pin a shape no Fusion panel
     /// ever produces.
-    fn background_owned_tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>)
-    {
+    fn background_owned_tool_exchange(
+    ) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (resp_tx, resp_rx) = oneshot::channel();
         let request = PermissionRequest::ToolUseConfirm {
             tool_name: "WebFetch".to_string(),
@@ -9222,6 +9747,28 @@ mod tests {
     }
 
     #[test]
+    fn teammate_woken_turn_can_be_cancelled_without_a_composer_submit() {
+        let mut widget = widget();
+        assert!(widget.current_turn.is_none());
+        let cancel = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(cancel.clone()));
+        assert!(widget.current_turn.is_some());
+        assert!(widget.accepts_turn_events);
+        assert!(widget.turn_started_at.is_some());
+        widget.apply_turn_event(TurnEvent::TextDelta("Responding to teammate".into()));
+
+        widget.handle_key(ctrl(KeyCode::Char('c')));
+        assert!(
+            cancel.is_cancelled(),
+            "Ctrl-C must cancel the actual host-started turn"
+        );
+        assert!(widget
+            .current_turn
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled));
+    }
+
+    #[test]
     fn cancellation_drops_open_queued_and_late_interactive_prompts() {
         let mut widget = widget();
         typ(&mut widget, "x");
@@ -9397,7 +9944,10 @@ mod tests {
         widget.open_permission(unowned);
         assert!(widget.has_open_permission(), "background ask must open");
         widget.handle_key(press(KeyCode::Esc));
-        assert_eq!(unowned_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
+        assert_eq!(
+            unowned_rx.blocking_recv().unwrap(),
+            PermissionResponse::Deny
+        );
         assert!(cells(&widget).is_empty());
 
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -9494,7 +10044,10 @@ mod tests {
 
         let (late, late_rx) = tool_exchange();
         widget.open_permission(late);
-        assert!(!widget.has_open_permission(), "mid-cancel ask must not open");
+        assert!(
+            !widget.has_open_permission(),
+            "mid-cancel ask must not open"
+        );
         assert!(late_rx.blocking_recv().is_err());
     }
 
@@ -10944,6 +11497,7 @@ mod tests {
 
         widget.apply_turn_event(TurnEvent::AgentStatusSnapshot {
             agents: vec![RunningAgentStatus {
+                awaiting_plan_approval: false,
                 id: "a12345678".into(),
                 task_type: "local_agent".into(),
                 agent_type: "Explore".into(),
@@ -10957,6 +11511,7 @@ mod tests {
         widget.apply_turn_event(TurnEvent::AgentStatusSnapshot {
             agents: vec![
                 RunningAgentStatus {
+                    awaiting_plan_approval: false,
                     id: "a12345678".into(),
                     task_type: "local_agent".into(),
                     agent_type: "Explore".into(),
@@ -10965,6 +11520,7 @@ mod tests {
                     custom_content: None,
                 },
                 RunningAgentStatus {
+                    awaiting_plan_approval: false,
                     id: "a87654321".into(),
                     task_type: "local_agent".into(),
                     agent_type: "Explore".into(),

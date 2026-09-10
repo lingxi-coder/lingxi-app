@@ -1681,10 +1681,9 @@ mod tests {
         LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
         LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
         LocalAppPluginComponentCountsDto, LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto,
-        LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
-        LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
-        ManagedLocalAppMcpStatusDto, McpAppWidgetDto, PluginActivationStateDto, PluginCommandDto,
-        PluginStatusDto,
+        LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto,
+        LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto,
+        McpAppWidgetDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
     };
 
     fn canonical_profile_option() -> AppRuntimeProfileOptionDto {

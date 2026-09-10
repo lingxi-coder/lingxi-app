@@ -108,6 +108,12 @@ function createWindow(): BrowserWindow {
 
   secureSession(mainWindow.webContents.session);
   host?.registerWindow(mainWindow.webContents, target.url);
+  mainWindow.webContents.on('did-finish-load', () => {
+    // Permission requests travel on their own IPC channel and are not part of
+    // the sequenced event replay. Re-deliver any still-pending request after a
+    // renderer reload so a parked engine turn never loses its only UI owner.
+    host?.replayPendingInteractions(mainWindow.webContents);
+  });
   const releaseAudio = (): void => {
     void nativeAudio?.suspend('window hidden').catch(() => undefined);
   };

@@ -1,6 +1,6 @@
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
-use lingxi_core::session::ActiveGoalState;
+use lingxi_core::session::{ActiveGoalState, GoalOrigin};
 use orchestrator::{
     replay_session_state, runtime_metadata_from_messages, state_from_messages, ResumeError,
 };
@@ -67,6 +67,99 @@ async fn setup_two_turn_jsonl() -> (
         .unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
     (temp, lingxi_home, cwd, sid, m2, fs)
+}
+
+#[tokio::test]
+async fn cold_resume_consumes_physical_retry_removal_without_breaking_chain() {
+    let (_temp, home, cwd, sid, discarded, fs) = setup_two_turn_jsonl().await;
+    let path = home
+        .join("projects")
+        .join(project_dir_name(&cwd))
+        .join(format!("{sid}.jsonl"));
+    let writer = session::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone());
+    let parent = writer
+        .remove_retry_attempt(&discarded.to_string())
+        .await
+        .unwrap();
+    let clean = Uuid::new_v4();
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .await
+        .unwrap();
+    for row in [json!({
+        "type":"assistant","uuid":clean.to_string(),"parentUuid":parent,
+        "sessionId":sid.to_string(),"timestamp":"2026-05-25T12:00:02.000Z",
+        "cwd":cwd,"version":"0.6.0","isSidechain":false,
+        "message":{"role":"assistant","content":"clean retry"}
+    })] {
+        file.write_all(format!("{row}\n").as_bytes()).await.unwrap();
+    }
+    drop(file);
+    let replayed = replay_session_state(&home, &cwd, sid, fs).await.unwrap();
+    assert_eq!(replayed.last_message_uuid, Some(clean));
+    let visible: Vec<_> = replayed
+        .state
+        .history
+        .iter()
+        .filter(|message| {
+            !replayed
+                .state
+                .model_context_excluded_messages
+                .contains(&message.id())
+        })
+        .collect();
+    assert_eq!(visible.len(), 2);
+    assert_eq!(visible[0].text_content(), "hi");
+    assert_eq!(visible[1].text_content(), "clean retry");
+    assert!(!replayed
+        .state
+        .history
+        .iter()
+        .any(|message| message.id() == protocol::MessageId::from_uuid(discarded)));
+}
+
+#[tokio::test]
+async fn cold_resume_restores_trailing_thinking_marker_scope() {
+    let (_temp, home, cwd, sid, previous, fs) = setup_two_turn_jsonl().await;
+    let path = home
+        .join("projects")
+        .join(project_dir_name(&cwd))
+        .join(format!("{sid}.jsonl"));
+    let thinking_id = Uuid::new_v4();
+    let marker_id = Uuid::new_v4();
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .await
+        .unwrap();
+    for row in [
+        json!({
+            "type":"assistant","uuid":thinking_id.to_string(),"parentUuid":previous.to_string(),
+            "sessionId":sid.to_string(),"timestamp":"2026-05-25T12:00:02.000Z",
+            "cwd":cwd,"version":"0.6.0","isSidechain":false,
+            "message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret","signature":"sig"}]}
+        }),
+        json!({
+            "type":"attachment","uuid":marker_id.to_string(),"parentUuid":thinking_id.to_string(),
+            "sessionId":sid.to_string(),"timestamp":"2026-05-25T12:00:03.000Z",
+            "cwd":cwd,"version":"0.6.0","isSidechain":false,
+            "attachment":{"type":"thinking_stripped","scope":"all"}
+        }),
+    ] {
+        file.write_all(format!("{row}\n").as_bytes()).await.unwrap();
+    }
+    drop(file);
+    let replayed = replay_session_state(&home, &cwd, sid, fs).await.unwrap();
+    assert_eq!(replayed.last_message_uuid, Some(marker_id));
+    assert_eq!(
+        replayed
+            .state
+            .thinking_stripped_messages
+            .get(&protocol::MessageId::from_uuid(thinking_id)),
+        Some(&0)
+    );
+    assert_eq!(replayed.state.history.len(), 3);
 }
 
 #[tokio::test]
@@ -352,6 +445,10 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
         last_reason: Some("initial".to_string()),
         iterations: 1,
         tokens_at_start: 10,
+        // `origin` is `serde(skip)`, so this never reaches the transcript — the
+        // fold re-derives it. Left as the default so the assertion below can
+        // only pass if the fold actually stamped it.
+        origin: GoalOrigin::User,
     };
     let updated_goal = ActiveGoalState {
         condition: "ship it".to_string(),
@@ -359,6 +456,7 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
         last_reason: Some("still working".to_string()),
         iterations: 2,
         tokens_at_start: 10,
+        origin: GoalOrigin::User,
     };
     let messages = vec![
         line(json!({
@@ -387,6 +485,12 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
     let restored = state.active_goal.expect("goal restored");
     assert_eq!(restored.condition, "ship it");
     assert_eq!(restored.last_reason.as_deref(), Some("still working"));
+    assert_eq!(
+        restored.origin,
+        GoalOrigin::Restored,
+        "`mon` stamps `origin:\"restored\"` on whatever it recovers, so the \
+         `tengu_goal_*` metrics do not report a resumed goal as freshly set"
+    );
 }
 
 #[test]
@@ -400,15 +504,32 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
         iterations: 2,
         tokens_at_start: 500,
     };
-    let attachment = |status, goal_state| platform_api::GoalStatusAttachment {
-        kind: "goal_status".to_string(),
-        status,
-        condition: "ship it".to_string(),
-        iterations: 2,
-        duration_ms: 1000,
-        tokens: 200,
-        last_reason: Some("tests pending".to_string()),
-        goal_state,
+    let attachment = |status, goal_state: Option<platform_api::ActiveGoalSnapshot>| match status {
+        platform_api::GoalStatusKind::Set => {
+            platform_api::GoalStatusAttachment::sentinel_set("ship it".to_string(), goal_state)
+        }
+        platform_api::GoalStatusKind::Cleared => {
+            platform_api::GoalStatusAttachment::sentinel_cleared("ship it".to_string())
+        }
+        platform_api::GoalStatusKind::Achieved => platform_api::GoalStatusAttachment::achieved(
+            "ship it".to_string(),
+            Some("tests pending".to_string()),
+            2,
+            1000,
+            200,
+        ),
+        platform_api::GoalStatusKind::Failed => platform_api::GoalStatusAttachment::failed(
+            "ship it".to_string(),
+            Some("tests pending".to_string()),
+            2,
+            1000,
+            200,
+        ),
+        platform_api::GoalStatusKind::NotMet => platform_api::GoalStatusAttachment::not_met(
+            "ship it".to_string(),
+            Some("tests pending".to_string()),
+            goal_state,
+        ),
     };
     let line = |payload: platform_api::GoalStatusAttachment| {
         serde_json::from_value(json!({
@@ -429,9 +550,27 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
         .expect("typed set attachment restores goal");
     assert_eq!(goal.iterations, 2);
     assert_eq!(goal.tokens_at_start, 500);
+    assert_eq!(goal.origin, GoalOrigin::Restored);
 
-    let achieved = line(attachment(platform_api::GoalStatusKind::Achieved, None));
-    assert!(state_from_messages(sid, &[achieved]).active_goal.is_none());
+    for status in [
+        platform_api::GoalStatusKind::Achieved,
+        platform_api::GoalStatusKind::Failed,
+        platform_api::GoalStatusKind::Cleared,
+    ] {
+        let terminal = line(attachment(status, None));
+        assert!(state_from_messages(sid, &[terminal]).active_goal.is_none());
+    }
+
+    // A not-met turn is NOT terminal: the goal keeps running, refreshed from the
+    // snapshot the record carries.
+    let not_met = line(attachment(
+        platform_api::GoalStatusKind::NotMet,
+        Some(snapshot.clone()),
+    ));
+    let still_running = state_from_messages(sid, &[not_met])
+        .active_goal
+        .expect("a not-met record leaves the goal active");
+    assert_eq!(still_running.iterations, 2);
 }
 
 #[test]
@@ -461,6 +600,289 @@ fn resume_normalizes_stopped_hook_attachment_into_one_meta_message() {
         "<system-reminder>\nPostToolUseFailure:Write hook stopped continuation: STOP-NOW\n</system-reminder>"
     );
     assert_eq!(state.history[0].id().as_uuid(), message_uuid);
+}
+
+#[test]
+fn resume_normalizes_hook_additional_context_into_one_meta_message() {
+    let sid = Uuid::new_v4();
+    let message_uuid = Uuid::new_v4();
+    let attachment = serde_json::from_value(json!({
+        "type":"attachment",
+        "attachment":{
+            "type":"hook_additional_context",
+            "content":["line-a","line-b"],
+            "hookName":"PostToolUse:Write",
+            "toolUseID":"tool-1",
+            "hookEvent":"PostToolUse"
+        },
+        "uuid":message_uuid.to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+    }))
+    .unwrap();
+
+    let state = state_from_messages(sid, &[attachment]);
+    assert_eq!(state.history.len(), 1);
+    assert!(state.history[0].is_meta());
+    assert_eq!(
+        state.history[0].text_content(),
+        "<system-reminder>\nPostToolUse:Write hook additional context: line-a\nline-b\n</system-reminder>"
+    );
+    assert_eq!(state.history[0].id().as_uuid(), message_uuid);
+}
+
+#[test]
+fn resume_rejects_malformed_hook_context_without_partial_replay() {
+    let sid = Uuid::new_v4();
+    for content in [
+        json!(["valid", null]),
+        json!([42]),
+        json!([{}]),
+        json!("text"),
+    ] {
+        let attachment = serde_json::from_value(json!({
+            "type":"attachment",
+            "attachment":{
+                "type":"hook_additional_context",
+                "content":content,
+                "hookName":"PostToolUse:Write"
+            },
+            "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-09-08T00:00:00.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+        }))
+        .unwrap();
+        assert!(state_from_messages(sid, &[attachment]).history.is_empty());
+    }
+}
+
+#[test]
+fn resume_drops_malformed_text_blocks_without_losing_valid_siblings() {
+    let sid = Uuid::new_v4();
+    for role in ["user", "assistant"] {
+        let message = serde_json::from_value(json!({
+            "type":role,
+            "message":{
+                "role":role,
+                "content":[
+                    {"type":"text","text":"before"},
+                    {"type":"text","text":null},
+                    {"type":"text"},
+                    {"type":"text","text":123},
+                    {"type":"text","text":"after"}
+                ]
+            },
+            "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-09-08T00:00:00.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+        }))
+        .unwrap();
+        let state = state_from_messages(sid, &[message]);
+        assert_eq!(state.history.len(), 1);
+        let content = match &state.history[0] {
+            ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } => content,
+            other => panic!("unexpected message: {other:?}"),
+        };
+        assert_eq!(
+            content,
+            &vec![
+                protocol::ContentBlock::Text {
+                    text: "before".into()
+                },
+                protocol::ContentBlock::Text {
+                    text: "after".into()
+                },
+            ]
+        );
+    }
+}
+
+#[test]
+fn resume_skips_empty_hook_additional_context() {
+    let sid = Uuid::new_v4();
+    let attachment = serde_json::from_value(json!({
+        "type":"attachment",
+        "attachment":{
+            "type":"hook_additional_context",
+            "content":[],
+            "hookName":"PostToolUse:Write",
+            "toolUseID":"tool-1",
+            "hookEvent":"PostToolUse"
+        },
+        "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+    }))
+    .unwrap();
+
+    let state = state_from_messages(sid, &[attachment]);
+    assert!(
+        state.history.is_empty(),
+        "empty hook_additional_context must not enter the resumed request"
+    );
+}
+
+#[test]
+fn resume_interleaves_hook_additional_context_with_parallel_tool_results() {
+    let sid = Uuid::new_v4();
+    let assistant_uuid = Uuid::new_v4();
+    let result_a = Uuid::new_v4();
+    let hook_uuid = Uuid::new_v4();
+    let result_b = Uuid::new_v4();
+    let messages = vec![
+        serde_json::from_value(json!({
+            "type":"assistant", "uuid":assistant_uuid.to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:01.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"a","name":"Echo","input":{}},
+                {"type":"tool_use","id":"b","name":"Echo","input":{}}
+            ]}
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"user", "uuid":result_a.to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:02.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"a","content":"A","is_error":false}
+            ]}
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"attachment",
+            "attachment":{
+                "type":"hook_additional_context",
+                "content":["HOOK-CTX"],
+                "hookName":"PostToolUse:Echo",
+                "toolUseID":"a",
+                "hookEvent":"PostToolUse"
+            },
+            "uuid":hook_uuid.to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:02.100Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"user", "uuid":result_b.to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:03.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"b","content":"B","is_error":false}
+            ]}
+        }))
+        .unwrap(),
+    ];
+
+    let state = state_from_messages(sid, &messages);
+    assert_eq!(
+        state.history.len(),
+        4,
+        "assistant + result A + hook ctx + result B"
+    );
+    assert!(matches!(
+        state.history[0],
+        ConversationMessage::Assistant { .. }
+    ));
+    assert_eq!(state.history[1].id().as_uuid(), result_a);
+    assert!(state.history[2].is_meta());
+    assert_eq!(
+        state.history[2].text_content(),
+        "<system-reminder>\nPostToolUse:Echo hook additional context: HOOK-CTX\n</system-reminder>"
+    );
+    assert_eq!(state.history[3].id().as_uuid(), result_b);
+}
+
+#[test]
+fn resume_thinking_markers_are_scoped_to_preceding_history() {
+    let sid = Uuid::new_v4();
+    let old = Uuid::new_v4();
+    let fresh = Uuid::new_v4();
+    let row = |kind: &str, message: serde_json::Value, attachment: serde_json::Value| {
+        serde_json::from_value(json!({
+            "type":kind, "message":message, "attachment":attachment,
+            "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-09-08T00:00:00.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+        }))
+        .unwrap()
+    };
+    let thinking = json!({"type":"thinking","thinking":"same","signature":"sig"});
+    for (scope, from, expected) in [
+        ("all", json!(null), 0),
+        (
+            "partial",
+            json!({"messageId":old.to_string(),"thinkingIndex":1}),
+            1,
+        ),
+        (
+            "partial",
+            json!({"messageId":"missing","thinkingIndex":0}),
+            0,
+        ),
+    ] {
+        let messages = vec![
+            row(
+                "assistant",
+                json!({"id":old.to_string(),"role":"assistant","content":[thinking.clone()]}),
+                json!(null),
+            ),
+            row(
+                "assistant",
+                json!({"id":old.to_string(),"role":"assistant","content":[thinking.clone()]}),
+                json!(null),
+            ),
+            row(
+                "attachment",
+                json!(null),
+                json!({"type":"thinking_stripped","scope":scope,"from":from}),
+            ),
+            row(
+                "assistant",
+                json!({"id":fresh.to_string(),"role":"assistant","content":[thinking.clone()]}),
+                json!(null),
+            ),
+        ];
+        let state = state_from_messages(sid, &messages);
+        assert_eq!(
+            state
+                .thinking_stripped_messages
+                .get(&protocol::MessageId::from_uuid(old)),
+            Some(&expected)
+        );
+        assert!(!state
+            .thinking_stripped_messages
+            .contains_key(&protocol::MessageId::from_uuid(fresh)));
+        assert_eq!(
+            state.history.len(),
+            2,
+            "markers must not enter model history"
+        );
+    }
+}
+
+#[test]
+fn resume_restores_thinking_stripped_latch_from_attachment() {
+    let sid = Uuid::new_v4();
+    let attachment = serde_json::from_value(json!({
+        "type":"attachment",
+        "attachment":{"type":"thinking_stripped","scope":"all"},
+        "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+    }))
+    .unwrap();
+
+    let state = state_from_messages(sid, &[attachment]);
+    assert!(
+        state.thinking_signature_stripped,
+        "thinking_stripped attachment must restore the session latch"
+    );
+    assert!(
+        state.history.is_empty(),
+        "thinking_stripped is a latch marker, not a model-facing message"
+    );
 }
 
 #[test]

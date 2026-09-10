@@ -39,7 +39,7 @@ fn orch(
 /// - **Before any content**, because P1-04 (cc 2.1.199) owns the other half:
 ///   once a real content block has completed — or a transport close leaves
 ///   visible text whose stop frame was lost — the partial is finalized in place
-///   and the byte-exact "API Error: Connection closed mid-response…" notice is
+///   and the byte-exact "API Error: Connection lost mid-response…" notice is
 ///   surfaced INSTEAD of the raw error. That case belongs to
 ///   `streaming_partial_finalize_test::transport_after_completed_block_finalizes_partial`.
 ///   This test kept a `Transport`-after-text fixture until 2026-08-20, so the two

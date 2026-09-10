@@ -85,6 +85,8 @@ export const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
 export const CH_PROJECT_SESSIONS_LIST = 'lingxi:project-sessions:list';
 export const CH_SESSION_NEW = 'lingxi:session:new';
 export const CH_SESSION_OPEN = 'lingxi:session:open';
+export const CH_SESSION_ARCHIVE = 'lingxi:session:archive';
+export const CH_SESSION_ARCHIVE_PREFLIGHT = 'lingxi:session:archive-preflight';
 export const CH_SESSION_CLEAR = 'lingxi:session:clear';
 export const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
@@ -337,6 +339,11 @@ export class HostController {
     webContents.once('destroyed', () => this.targets.delete(webContents));
   }
 
+  /** Re-deliver pending interaction prompts after the renderer document reloads. */
+  replayPendingInteractions(webContents: WebContents): void {
+    this.bridge.replayPendingInteractions(webContents);
+  }
+
   registerIpc(): void {
     if (this.registered) return;
     this.registered = true;
@@ -358,7 +365,7 @@ export class HostController {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'modelPickerVisibility')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'modelPickerVisibility')) throw new Error('unsupported setting');
       const restartsBridge = 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
       // `model` is applied to a live session through `set_model`, then mirrored
@@ -370,6 +377,7 @@ export class HostController {
       // the construction of an already-running provider client.
       const result = this.settings.update(patch as {
         theme?: 'dark' | 'light' | 'system';
+        collapseThoughtsByDefault?: boolean;
         model?: string | null;
         apiBaseUrl?: string | null;
         voice?: unknown;
@@ -420,6 +428,19 @@ export class HostController {
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
         return this.openSessionAndActivateInternal(ref);
       });
+    });
+    this.ipc.handle(CH_SESSION_ARCHIVE_PREFLIGHT, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+      this.assertSender(event);
+      const ref = this.archiveRef(projectPath, sessionId);
+      const row = await this.assertSessionBelongsToProject(ref);
+      return this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
+        const jobs = await runtime.manageCron({ action: 'list' });
+        return jobs.filter((job) => job.session_id === ref.sessionId || job.session_id === `sess:${ref.sessionId}`);
+      });
+    });
+    this.ipc.handle(CH_SESSION_ARCHIVE, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+      this.assertSender(event);
+      return this.enqueueNavigation(() => this.archiveSessionInternal(this.archiveRef(projectPath, sessionId)));
     });
     this.ipc.handle(CH_SESSION_CLEAR, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
@@ -480,10 +501,10 @@ export class HostController {
       this.assertSender(event);
       if (this.credentialBroker) {
         await this.refreshCredentialBrokerStatus(
-          providerId !== undefined ? this.requireProvider(providerId).id : undefined,
+          providerId !== undefined ? (await this.requireCredentialProvider(providerId)).id : undefined,
         );
       } else if (providerId !== undefined) {
-        const provider = this.requireProvider(providerId);
+        const provider = await this.requireCredentialProvider(providerId);
         const runtime = this.currentRuntime();
         if (runtime?.connectionState.status === 'connected') {
           await runtime.listProviderCredentials([provider.id], [provider.id]);
@@ -493,7 +514,7 @@ export class HostController {
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
       this.assertSender(event);
-      const provider = this.requireProvider(providerId);
+      const provider = await this.requireCredentialProvider(providerId);
       if (typeof credential !== 'string') throw new Error('invalid credential');
       this.assertNoActiveTurn();
       const credentialMetadata = this.credentialBroker
@@ -503,7 +524,7 @@ export class HostController {
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
-      const provider = this.requireProvider(providerId);
+      const provider = await this.requireCredentialProvider(providerId);
       this.assertNoActiveTurn();
       if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
       else {
@@ -830,7 +851,7 @@ export class HostController {
     const credentialPreviews = this.credentialBroker
       ? Object.fromEntries(this.brokerCredentialPreviews)
       : runtime?.providerCredentialPreviews ?? legacy.providerCredentialPreviews ?? {};
-    return PROVIDER_IDS.map((providerId) => {
+    return this.credentialProviderIds().map((providerId) => {
       if (persistedProviders.has(providerId)) {
         return {
           providerId,
@@ -869,14 +890,14 @@ export class HostController {
   private async refreshCredentialBrokerStatus(previewProviderId?: string): Promise<void> {
     if (!this.credentialBroker) return;
     const nextConfigured = new Set(
-      (await this.credentialBroker.listStatus(PROVIDER_IDS))
+      (await this.credentialBroker.listStatus(this.credentialProviderIds()))
         .filter((entry: CredentialBrokerStatus) => entry.configured)
         .map((entry: CredentialBrokerStatus) => entry.providerId),
     );
     this.brokerStorageError = undefined;
     this.brokerConfiguredProviders.clear();
     for (const providerId of nextConfigured) this.brokerConfiguredProviders.add(providerId);
-    for (const providerId of PROVIDER_IDS) {
+    for (const providerId of this.credentialProviderIds()) {
       if (!nextConfigured.has(providerId)) this.brokerCredentialPreviews.delete(providerId);
     }
     if (!previewProviderId) return;
@@ -929,6 +950,24 @@ export class HostController {
     this.brokerConfiguredProviders.delete(providerId);
     this.brokerCredentialPreviews.delete(providerId);
     this.brokerStorageError = undefined;
+  }
+
+  private credentialProviderIds(): string[] {
+    return [...new Set([...PROVIDER_IDS, ...(this.currentRuntime()?.customProviderIds ?? [])])];
+  }
+
+  private async requireCredentialProvider(providerId: unknown): Promise<{ id: string }> {
+    if (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(providerId)) {
+      throw new Error('invalid provider id');
+    }
+    if (providerById(providerId)) return this.requireProvider(providerId);
+    const runtime = this.currentRuntime();
+    if (!runtime?.customProviderIds?.includes(providerId)) {
+      if (!runtime?.ensureCustomProviderConfigured) throw new Error('unsupported provider');
+      await runtime.ensureCustomProviderConfigured(providerId);
+      if (runtime !== this.currentRuntime() || !runtime.customProviderIds.includes(providerId)) throw new Error('unsupported provider');
+    }
+    return { id: providerId };
   }
 
   private requireProvider(providerId: unknown) {
@@ -1013,7 +1052,7 @@ export class HostController {
     try {
       const result = await this.sessionCatalog.list(projectPath);
       const state = {
-        sessions: result.sessions.map(({
+        sessions: result.sessions.filter((session) => !this.settings.isSessionArchived({ projectPath, sessionId: session.uuid })).map(({
           empty_session: _emptySession,
           resume_model: _resumeModel,
           ...session
@@ -1067,8 +1106,43 @@ export class HostController {
     // session_resumed event. A failed/corrupt resume leaves the visible session
     // and selected Project unchanged.
     this.settings.activateProject(project);
+    const wasArchived = this.settings.isSessionArchived(canonical);
+    if (wasArchived) this.settings.setSessionArchived(canonical, false);
     this.settings.setActiveSession(canonical);
+    if (wasArchived) await this.loadProjectSessions(project);
     return this.bootstrap();
+  }
+
+  private archiveRef(projectPath: unknown, sessionId: unknown): SessionRef {
+    const project = this.requireProject(projectPath);
+    if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    return { projectPath: project, sessionId };
+  }
+
+  private async archiveSessionInternal(ref: SessionRef): Promise<BootstrapState> {
+    const row = await this.assertSessionBelongsToProject(ref);
+    return this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
+      const release = runtime.beginArchive();
+      let removed = 0;
+      try {
+        const jobs = (await runtime.manageCron({ action: 'list' })).filter((job) => job.session_id === ref.sessionId || job.session_id === `sess:${ref.sessionId}`);
+        if (jobs.some((job) => job.permanent)) throw new Error('This chat has a system task that cannot be removed.');
+        for (const job of jobs) { await runtime.manageCron({ action: 'delete', id: job.id }); removed++; }
+        const active = this.settings.getPublic().activeSession?.sessionId === ref.sessionId;
+        const title = row?.title ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
+        this.settings.setSessionArchived(ref, true, title);
+        await this.bridge.closeSession(ref);
+        await this.loadProjectSessions(ref.projectPath);
+        if (active) {
+          const replacement = await this.bridge.newSession(ref.projectPath);
+          this.settings.setActiveSessionDraft(replacement);
+        }
+        return this.bootstrap();
+      } catch (error) {
+        if (!this.settings.isSessionArchived(ref)) throw new Error(`Chat was not archived. ${removed ? `${removed} scheduled task(s) were already removed. ` : ''}${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Chat was archived, but opening the next chat failed: ${error instanceof Error ? error.message : String(error)}`);
+      } finally { release(); }
+    });
   }
 
   private async removeProjectInternal(project: string): Promise<BootstrapState> {
@@ -1102,6 +1176,7 @@ export class HostController {
       return activeSession;
     }
     const catalog = await this.sessionCatalog.list(project);
+    catalog.sessions = catalog.sessions.filter((session) => !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid }));
     this.catalogs.set(project, {
       sessions: catalog.sessions.map(({
         empty_session: _emptySession,
@@ -1144,7 +1219,7 @@ export class HostController {
     for (const channel of [
       CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
-      CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR,
+      CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_WORKSPACE_FILES_SEARCH,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_PROVIDER_CONNECTION_TEST,

@@ -38,6 +38,7 @@ pub mod resume_picker_view;
 pub mod rewind_picker_view;
 pub mod screen_view;
 pub mod tasks_view;
+pub mod exit_background_view;
 pub mod theme_picker_view;
 pub mod view;
 pub mod web_config_view;
@@ -893,6 +894,17 @@ impl BottomPane {
     pub fn show_tasks(&mut self, rows: Vec<tui_core::multiagent::TaskRow>) {
         self.view_stack
             .push(Box::new(tasks_view::TasksView::new(rows, self.theme)));
+    }
+
+    /// Mount the task dialog with its live registry source.
+    pub fn show_live_tasks(
+        &mut self,
+        rows: Vec<tui_core::multiagent::TaskRow>,
+        registry: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    ) {
+        self.view_stack.push(Box::new(
+            tasks_view::TasksView::new(rows, self.theme).with_registry(registry),
+        ));
     }
 
     /// Open the `/workflows` picker over its initial workflow rows. Pushed
@@ -3131,6 +3143,7 @@ mod tests {
             },
         ]);
         pane.set_running_agents(vec![RunningAgentStatus {
+            awaiting_plan_approval: false,
             id: "a123".into(),
             task_type: "local_agent".into(),
             agent_type: "Explore".into(),

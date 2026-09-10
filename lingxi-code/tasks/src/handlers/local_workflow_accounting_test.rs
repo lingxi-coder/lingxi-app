@@ -25,6 +25,7 @@ impl SubagentSpawner for BatchProbe {
         vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "probe".into(),
             when_to_use: String::new(),
+            when_to_use_lean: None,
             tools_description: String::new(),
         }]
     }

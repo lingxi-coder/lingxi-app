@@ -96,6 +96,19 @@
 # model to `Unknown skill: create-local-app`.
 apps/engine-mobile/src/local_apps_host.rs:lingxi-local-app:create-local-app:2
 
+# host.rs — the ONE place the three plugin-owned entry routers are kept visible
+# in a global/project conversation. Every other `lingxi-local-app:` skill is
+# hidden outside an app workspace, so this filter needs the names of exactly
+# the skills that stay: it is a membership test on `c.name`, i.e. the literal
+# IS the datum, and there is no registry to ask (the plugin inventory carries
+# no "is an entry router" flag). Same qualified-form reason as the entries
+# below: `CommandRegistry` keys plugin skills as `<plugin>:<skill>` with no
+# bare-name fallback, so a bare literal here would match nothing and silently
+# hide all three routers instead of showing them.
+apps/engine-mobile/src/host.rs:lingxi-local-app:create-local-app:1
+apps/engine-mobile/src/host.rs:lingxi-local-app:expose-as-mcp:1
+apps/engine-mobile/src/host.rs:lingxi-local-app:local-app-use:1
+
 # local_app_plugin_binding.rs — the one place a build target maps to the
 # plugin-owned build workflow id. The Host never reads these literals itself:
 # it asks LocalAppPluginBinding::resolve/enforce, which is the composition
@@ -146,7 +159,33 @@ apps/engine-mobile/src/local_apps_build.rs:lingxi-local-app:create-local-app:1
 
 # --- tools/workflow/src ----------------------------------------------------
 
-# No entries here any more. Phase 9 moved Local App workflows out of the
-# built-in workflow registry and into the verified plugin bundle; the remaining
-# built-in workflow surface is generic and must not carry Local App component
-# names.
+# builtins.rs and the workflow scripts — no entries. Phase 9 moved Local App
+# workflows out of the built-in workflow registry and into the verified plugin
+# bundle; the remaining built-in workflow surface is generic and must not carry
+# Local App component names.
+
+# workflow_description_divergences.json — the register of named divergences
+# from the byte-locked oracle Workflow description. This is exactly the arrival
+# this file's own header (see "if a later phase moves workflow-selection prose
+# out of an allowlisted `.js` script and into the description text") said would
+# show up here as a LEAK rather than going unnoticed, so it is listed rather
+# than reworded.
+#
+# Two of the three occurrences are in the `text` of the `local-app-create-handoff`
+# divergence and in the `reason` that justifies it. `text` is the sixth opt-in
+# clause composed into the description the model actually reads: the oracle's
+# five clauses are exhaustive and closed with "For any other task ... do NOT
+# call this tool", so without a clause naming the flow, every create is a call
+# the model is told not to make. The clause has to name the skill the Host
+# contract hands off to, and it has to name the PLUGIN-QUALIFIED form for the
+# same reason as the `apps/engine-mobile/src` entries above.
+#
+# The third is the bare basename inside the repository PATH
+# `skills/create-local-app/SKILL.md`, cited in that same `reason`. `reason` is
+# never composed into the shipped description — only `anchor` and `text` are
+# (`compose_description` in tools/workflow/src/lib.rs) — so this occurrence is
+# not model-facing at all; it is a pointer to the file a reader has to open to
+# check the claim. There is no rewording that keeps a real path and drops the
+# basename, so it is listed here instead of being paraphrased away.
+tools/workflow/src/workflow_description_divergences.json:create-local-app:1
+tools/workflow/src/workflow_description_divergences.json:lingxi-local-app:create-local-app:2

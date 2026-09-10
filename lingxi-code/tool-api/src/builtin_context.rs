@@ -1012,3 +1012,12 @@ mod tests {
         assert!(dir.ends_with("tool-results"), "{dir:?}");
     }
 }
+
+/// Forward low-level shell-discovery diagnostics through the host's tracing sink.
+/// Both Bash and standalone Monitor construct through this shared boundary.
+pub fn install_shell_discovery_logging() {
+    platform_api::shell_support::set_shell_discovery_logger(|warning, message| {
+        if warning { tracing::warn!("{message}"); }
+        else { tracing::info!("{message}"); }
+    });
+}

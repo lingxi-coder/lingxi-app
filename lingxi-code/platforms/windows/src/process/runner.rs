@@ -2,8 +2,8 @@
 //!
 //! Mirrors the POSIX runner's spawn-env contract (`LINGXI=1`,
 //! `GIT_EDITOR=true`, `SHELL=<inner.command>`) and the 30-minute default
-//! timeout. `spawn_background` writes per-task file-mode stdio to
-//! `<temp>/lingxi-task-output/<task_id>.out` and `kill` delegates to
+//! timeout. Foreground and background Bash share one piped child and the
+//! caller's task identity, output writer and exit sink. `kill` delegates to
 //! [`super::kill_tree::kill_tree_windows`], which shells out to
 //! `taskkill /T /F /PID <pid>`.
 
@@ -17,7 +17,7 @@ use tokio::process::Command;
 
 /// 30-minute default timeout matches the POSIX runner and claude-code's
 /// `DEFAULT_TIMEOUT` (`Shell.ts:44`).
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 const ENV_LINGXI_MARKER: (&str, &str) = ("LINGXI", "1");
 const ENV_GIT_EDITOR: (&str, &str) = ("GIT_EDITOR", "true");
@@ -29,7 +29,7 @@ const ENV_LINGXI_SESSION_ID: &str = "LINGXI_SESSION_ID";
 /// the direct shell. The explicit completion/timeout paths use the async helper,
 /// while this drop-only fallback invokes `taskkill /T /F` synchronously because
 /// `Drop` cannot await.
-struct StreamingProcessTreeGuard(Option<u32>);
+pub(super) struct StreamingProcessTreeGuard(pub(super) Option<u32>);
 
 impl Drop for StreamingProcessTreeGuard {
     fn drop(&mut self) {
@@ -52,7 +52,7 @@ impl WindowsProcess {
         Self
     }
 
-    fn build_command(cmd: &SandboxedCommand) -> Command {
+    pub(super) fn build_command(cmd: &SandboxedCommand) -> Command {
         let inner = cmd.inner();
         let mut tcmd = Command::new(&inner.command);
         tcmd.args(&inner.args);
@@ -75,6 +75,18 @@ impl WindowsProcess {
 
 #[async_trait]
 impl ProcessRunner for WindowsProcess {
+    async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+        let owned = platform_api::agent_processes::snapshot_entries(owner);
+        for entry in &owned {
+            if platform_api::shell_supervisor::kill_owned_registration(owner, *entry).await.is_none()
+                && platform_api::agent_processes::is_current(owner, *entry)
+            {
+                let _ = super::kill_tree::kill_tree_windows(entry.pid).await;
+            }
+        }
+        owned.into_iter().map(|entry| entry.pid).collect()
+    }
+
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
@@ -83,6 +95,7 @@ impl ProcessRunner for WindowsProcess {
             .stderr(Stdio::piped());
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let _agent_registration = platform_api::agent_processes::register(cmd.process_owner(), child.id());
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
@@ -119,6 +132,7 @@ impl ProcessRunner for WindowsProcess {
             .kill_on_drop(true);
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let _agent_registration = platform_api::agent_processes::register(cmd.process_owner(), child.id());
         let pid = child
             .id()
             .ok_or_else(|| ProcessError::Io("streaming child has no pid".into()))?;
@@ -218,55 +232,43 @@ impl ProcessRunner for WindowsProcess {
         }
     }
 
-    async fn spawn_background(
-        &self,
-        cmd: &SandboxedCommand,
-    ) -> Result<ProcessHandle, ProcessError> {
-        // Minimal Windows implementation: spawn with file-mode stdio.
-        // Unlike POSIX we do not call setsid — Windows tree-kill works off
-        // the PID via taskkill's `/T` flag, which walks the parent-child
-        // table regardless of session/group membership. The cli-demo only
-        // exercises foreground today; this path is for symmetry with posix
-        // so callers can use the same engine-side handle plumbing.
-        let task_id = generate_task_id();
-        let out_path = std::env::temp_dir()
-            .join("lingxi-task-output")
-            .join(format!("{task_id}.out"));
-        if let Some(parent) = out_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ProcessError::Io(format!("mkdir task-output: {e}")))?;
+    fn supports_foreground_backgrounding(&self) -> bool { true }
+
+    async fn run_foreground(&self, cmd: &SandboxedCommand) -> Result<platform_api::ForegroundOutcome, ProcessError> {
+        Ok(self.run_foreground_with_output_limit(cmd, None).await?.outcome)
+    }
+    async fn run_foreground_with_output_limit(&self, cmd: &SandboxedCommand, limit: Option<usize>) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+        #[cfg(windows)]
+        if super::supervisor::enabled(cmd) { return super::supervisor::execute(cmd, limit, false).await; }
+        super::background::run(cmd, limit, false).await
+    }
+    async fn spawn_background(&self, cmd: &SandboxedCommand) -> Result<ProcessHandle, ProcessError> {
+        #[cfg(windows)]
+        if super::supervisor::enabled(cmd) {
+            return match super::supervisor::execute(cmd, None, true).await?.outcome {
+                platform_api::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
+                _ => Err(ProcessError::Io("supervisor did not detach shell".into())),
+            };
         }
-        // `.append(true)` already implies write access — clippy flags a
-        // redundant `.write(true)` with `ineffective_open_options`.
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&out_path)
-            .map_err(|e| ProcessError::Io(format!("open {out_path:?}: {e}")))?;
-        let stderr_file = file
-            .try_clone()
-            .map_err(|e| ProcessError::Io(format!("clone fd: {e}")))?;
-
-        let mut tcmd = Self::build_command(cmd);
-        tcmd.stdin(Stdio::null())
-            .stdout(Stdio::from(file))
-            .stderr(Stdio::from(stderr_file));
-
-        let child = tcmd
-            .spawn()
-            .map_err(|e| ProcessError::Io(format!("spawn_background: {e}")))?;
-        let pid = child
-            .id()
-            .ok_or_else(|| ProcessError::Io("spawn_background: child has no pid".into()))?;
-        tokio::spawn(async move {
-            let mut child = child;
-            let _ = child.wait().await;
-        });
-        Ok(ProcessHandle { task_id, pid })
+        match super::background::run(cmd, Some(8192), true).await?.outcome {
+            platform_api::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
+            platform_api::ForegroundOutcome::Completed(_) => unreachable!("explicit background path always hands off its spawned child"),
+        }
     }
 
+    #[cfg(windows)]
+    async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> { platform_api::shell_supervisor::acknowledge(handle).await }
+    #[cfg(windows)]
+    async fn export_shell(&self, handle: &ProcessHandle) -> Result<platform_api::process::ShellProcessHandoff, ProcessError> { self.acknowledge_shell(handle).await?; super::supervisor::export(handle) }
+    #[cfg(windows)]
+    async fn validate_shell(&self, handoff: &platform_api::process::ShellProcessHandoff) -> Result<(), ProcessError> { super::supervisor::validate(handoff).await }
+    #[cfg(windows)]
+    async fn adopt_shell(&self, handoff: &platform_api::process::ShellProcessHandoff, sink: std::sync::Arc<dyn platform_api::BackgroundExitSink>) -> Result<ProcessHandle, ProcessError> { super::supervisor::adopt(handoff,sink).await }
+    #[cfg(windows)]
+    async fn release_shell(&self, handoff: &platform_api::process::ShellProcessHandoff) -> Result<(), ProcessError> { super::supervisor::release(handoff).await }
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+        #[cfg(windows)]
+        if let Some(result) = super::supervisor::kill(handle).await { return result; }
         super::kill_tree::kill_tree_windows(handle.pid).await
     }
 
@@ -278,7 +280,7 @@ impl ProcessRunner for WindowsProcess {
 /// Generate a unique task id of the form `local_bash_<nanos-hex>` —
 /// matches the POSIX runner's scheme so engine-side log inspection looks
 /// the same on either host.
-fn generate_task_id() -> String {
+pub(super) fn generate_task_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

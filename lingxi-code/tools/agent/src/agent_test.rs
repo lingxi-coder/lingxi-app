@@ -377,6 +377,135 @@ mod tests {
     // Claude Code 2.1.217 concurrent + nested subagent caps.
     // =====================================================================
 
+    /// 2.1.266 `a0` (`src_163219561.js` @3592282): a kill is cooperative before
+    /// it is forced — `SpawnDeallocGuard`'s drop sends `UserInterrupt` and then
+    /// polls for up to `SPAWN_CANCEL_GRACE` (2s) before deallocating, and the
+    /// runner only races that at a model round-trip. A runner part-way through
+    /// one turn's `tool_use` blocks keeps dispatching them, so without this gate
+    /// a dying agent still spawns children that outlive it.
+    #[tokio::test]
+    async fn a_stopping_agent_cannot_launch_another_agent() {
+        let spawner = arc_mock_spawner();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let agent_id = protocol::AgentId::new();
+        ctx.agent_id = Some(agent_id);
+        let _stopping = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "work that would outlive me",
+                    "subagent_type": "general-purpose",
+                    "prompt": "hi"
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect_err("an agent whose stop is still completing must not spawn");
+        match err {
+            ToolError::InvalidInput(message) => assert_eq!(
+                message,
+                "This agent has been stopped and its stop is still completing; \
+                 it cannot launch new agents."
+            ),
+            other => panic!("expected InvalidInput, got {other}"),
+        }
+        assert!(
+            spawner.invocations().is_empty(),
+            "the refusal must happen BEFORE the spawner is reached"
+        );
+    }
+
+    /// The control. Without it the test above would still pass if the gate
+    /// refused every spawn, or if `call` were failing for an unrelated reason.
+    #[tokio::test]
+    async fn an_agent_that_is_not_stopping_still_launches() {
+        let spawner = arc_mock_spawner();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.agent_id = Some(protocol::AgentId::new());
+
+        tool.call(
+            serde_json::json!({
+                "description": "ordinary work",
+                "subagent_type": "general-purpose",
+                "prompt": "hi"
+            }),
+            ctx,
+            fresh_tx(),
+        )
+        .await
+        .expect("an agent with no stop pending spawns normally");
+        assert_eq!(spawner.invocations().len(), 1);
+    }
+
+    /// `tengu_agent_tool_terminated` — the metric that counts runs which were
+    /// STOPPED rather than finished. It had an emitter and no caller, so it
+    /// never fired: a killed subagent was invisible to it.
+    #[tokio::test]
+    async fn a_killed_subagent_reports_itself_as_terminated() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let spawner = arc_mock_spawner();
+        spawner.script_killed();
+        let bctx = wired_ctx_with_bus(spawner, bus).await;
+        let tool = AgentTool::new(bctx);
+
+        let outcome = tool
+            .call(
+                serde_json::json!({
+                    "description": "work",
+                    "subagent_type": "general-purpose",
+                    "prompt": "hi",
+                    "run_in_background": false
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await;
+        assert!(
+            matches!(outcome, Err(ToolError::Internal(ref m)) if m.contains("was killed")),
+            "precondition: the SYNC kill arm is the one reached, got {outcome:?}"
+        );
+
+        let events = sink.events().await;
+        let terminated = events
+            .iter()
+            .find(|e| e.name == "tengu_agent_tool_terminated")
+            .unwrap_or_else(|| {
+                panic!(
+                    "a killed run must report itself terminated; saw {:?}",
+                    events.iter().map(|e| &e.name).collect::<Vec<_>>()
+                )
+            });
+        assert!(matches!(
+            terminated.metadata.get("reason"),
+            Some(AnalyticsValue::String(r)) if r == "user_cancel_sync"
+        ));
+        assert!(matches!(
+            terminated.metadata.get("is_async"),
+            Some(AnalyticsValue::Bool(false))
+        ));
+        assert!(
+            terminated.metadata.contains_key("agent_depth"),
+            "upstream carries the depth: {:?}",
+            terminated.metadata
+        );
+    }
+
     #[tokio::test]
     async fn nested_spawn_rejects_at_configured_depth_with_exact_message() {
         use platform_api::task_registry::TaskRegistryHandle;
@@ -3452,6 +3581,49 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             AGENT_INPUT_SCHEMA["properties"]["run_in_background"]["description"],
             json!("Agents run in the background by default; you will be notified when one completes. Set to false only when your very next action depends on this agent's result and nothing else could usefully happen while it runs — otherwise leave it in the background so the user can hand you other work.")
         );
+        // 2.1.266 `G4o()` @3573156 — the sentence pair names the configured
+        // default subagent model. 2.1.238's text ("or inherits from the
+        // parent") described a precedence the resolver no longer has.
+        assert_eq!(
+            AGENT_INPUT_SCHEMA["properties"]["model"]["description"],
+            json!("Optional model override for this agent. Takes precedence over the agent definition's model frontmatter and the configured default subagent model. If omitted, uses the agent definition's model, else the default (inherits from the parent unless a default subagent model is configured). Ignored for subagent_type: \"fork\" — forks always inherit the parent model.")
+        );
+    }
+
+    /// `gSn()`'s tail projections over the advertised schema (@3575600):
+    /// `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` drops `model` entirely, and a
+    /// coordinator session appends one of two suffixes to its description.
+    /// Exercised through the pure projector so no process-global session state
+    /// is needed for the coordinator arm.
+    #[test]
+    fn agent_schema_projection_covers_coordinator_and_model_force() {
+        // Non-coordinator, no force: the base description, unchanged.
+        let plain = project_agent_input_schema(&AGENT_INPUT_SCHEMA_MODEL, false);
+        assert_eq!(
+            plain["properties"]["model"]["description"],
+            json!(AGENT_MODEL_PARAM_DESCRIPTION)
+        );
+        // Coordinator (env unset ⇒ not forced): the steering suffix, appended
+        // with no separator because the binary concatenates with `+`.
+        let coord = project_agent_input_schema(&AGENT_INPUT_SCHEMA_MODEL, true);
+        let desc = coord["properties"]["model"]["description"]
+            .as_str()
+            .expect("model description is a string");
+        assert!(
+            desc.starts_with(AGENT_MODEL_PARAM_DESCRIPTION),
+            "the suffix is appended to the base sentence, got: {desc}"
+        );
+        assert!(
+            desc.ends_with(" Set this only when EXPLICITLY asked by the user for a specific model, never because the task seems small, simple, or cheap; otherwise omit it so the worker uses the default (the session model, unless a default subagent model is configured)."),
+            "coordinator suffix missing, got: {desc}"
+        );
+        // Both projections keep every other property.
+        for schema in [&plain, &coord] {
+            let props = schema["properties"].as_object().expect("properties");
+            assert!(props.contains_key("description"));
+            assert!(props.contains_key("prompt"));
+            assert!(!props.contains_key("cwd"), "cwd is never advertised");
+        }
     }
 
     // The `name` property carries the zod `.regex(uZc)` body as a wire JSON
@@ -3891,6 +4063,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 "NoopTool",
                 serde_json::json!({}),
                 platform_api::tool_invoker::SubagentInvocationContext {
+                    permission_pause_observer: None,
                     parent_agent_id: None,
                     origin_session_id: None,
                     tool_execution_policy:
@@ -3991,6 +4164,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // The agentId is dynamic; reconstruct the exact expected model_content
         // around it, pinning both changed strings byte-for-byte.
         let agent_id = result.data["agentId"].as_str().expect("agentId string");
+        assert!(
+            !agent_id.contains(':'),
+            "model-facing ID must be directly routable without a compatibility prefix"
+        );
+        assert!(protocol::AgentId::parse_prefixed(agent_id).is_some());
         // 2.1.223 @251729190 (`n` prefix) + @251730184 (else-arm `o` tail):
         // the prefix gained the don't-fabricate sentence, the tail gained the
         // still-running sentence, both new vs the old 2.1.207 lock.
@@ -4855,6 +5033,180 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
+    #[tokio::test]
+    async fn implicit_teammate_dispatch_ignores_legacy_inputs_and_returns_oracle_text() {
+        let spawner = arc_mock_spawner();
+        spawner.enable_teammates();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let result = tool
+            .call(
+                json!({"description":"scout", "prompt":"inspect", "name":"scout",
+            "team_name":"ignored", "mode":"plan"}),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["status"], "teammate_spawned");
+        assert_eq!(result.model_content.as_deref(), Some("Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)\nagent_id: scout@session\nname: scout\nThe agent is now running and will receive instructions via mailbox."));
+        let calls = spawner.invocations();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].request.team_name, None);
+        assert_eq!(calls[0].request.mode.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn agent_names_reject_normalized_reserved_names_and_current_agent_ids() {
+        for name in [
+            "MAIN",
+            "team-lead",
+            "Team-Lead",
+            "a0123456789abcdef",
+            "aworker-0123456789abcdef",
+            "a_-0123456789ABCDEF",
+        ] {
+            assert!(validate_agent_name(name).is_err(), "reserved name {name}");
+        }
+        for name in [
+            "agent",
+            "a0123456789abcde",
+            "a0123456789abcdef0",
+            "a-0123456789abcdef",
+            "a1234567890abcdefg",
+        ] {
+            assert!(validate_agent_name(name).is_ok(), "ordinary name {name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn teammate_inherits_parent_plan_mode_and_resolved_model_ignoring_input_mode() {
+        let spawner = arc_mock_spawner();
+        spawner.enable_teammates();
+        spawner.script_selection(platform_api::subagent_spawn::SelectedAgentMeta {
+            agent_type: "general-purpose".into(),
+            resolved_model: "resolved-model-id".into(),
+            ..Default::default()
+        });
+        let mut builtin = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        builtin.permission_mode = permission::PermissionMode::Plan;
+        let tool = AgentTool::new(builtin);
+        let mut context = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        context.cwd = Some(std::path::PathBuf::from("/parent/current-repo"));
+        tool.call(json!({"description":"scout", "prompt":"inspect", "name":"scout", "mode":"bypassPermissions", "model":"haiku"}),
+            context, fresh_tx()).await.unwrap();
+        let calls = spawner.invocations();
+        assert_eq!(calls[0].request.mode.as_deref(), Some("plan"));
+        assert_eq!(calls[0].request.model.as_deref(), Some("resolved-model-id"));
+        assert_eq!(
+            calls[0].request.cwd.as_deref(),
+            Some("/parent/current-repo")
+        );
+    }
+
+    #[tokio::test]
+    async fn implicit_team_routing_requires_name_and_no_explicit_cwd_or_isolation() {
+        for (enabled, extra) in [
+            (false, json!({"name":"scout"})),
+            (true, json!({})),
+            (true, json!({"name":"scout","cwd":"/work"})),
+            (true, json!({"name":"scout","isolation":"remote"})),
+        ] {
+            let spawner = arc_mock_spawner();
+            if enabled {
+                spawner.enable_teammates();
+            }
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            let mut input =
+                json!({"description":"scout", "prompt":"inspect", "team_name":"ignored"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let result = tool
+                .call(
+                    input,
+                    fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(result.data["status"], "teammate_spawned");
+            assert_eq!(spawner.invocations()[0].request.team_name, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn teammate_nested_name_denial_precedes_background_denial() {
+        let tool = AgentTool::new(wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        for (name, expected) in [(Some("child"), "Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter."),
+            (None, "In-process teammates cannot spawn background agents. Use run_in_background=false for synchronous subagents.")] {
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.agent_name = Some("scout".into());
+            ctx.team_name = Some("session".into());
+            let mut input = json!({"description":"child", "prompt":"go", "run_in_background":true});
+            if let Some(name) = name { input["name"] = json!(name); }
+            let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+            assert!(matches!(error, ToolError::InvalidInput(ref text) if text == expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn in_process_teammates_default_to_sync_and_reject_background_frontmatter() {
+        for background in [false, true] {
+            let spawner = arc_mock_spawner();
+            spawner.script_selection(platform_api::subagent_spawn::SelectedAgentMeta {
+                agent_type: "general-purpose".into(),
+                background,
+                ..Default::default()
+            });
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.agent_name = Some("scout".into());
+            ctx.team_name = Some("session".into());
+            let result = tool
+                .call(
+                    json!({"description":"child", "prompt":"go"}),
+                    ctx,
+                    fresh_tx(),
+                )
+                .await;
+            if background {
+                assert!(
+                    matches!(result, Err(ToolError::InvalidInput(ref text)) if text == "In-process teammates cannot spawn background agents. Agent 'general-purpose' has background: true in its definition.")
+                );
+                assert!(spawner.invocations().is_empty());
+            } else {
+                assert_eq!(result.unwrap().data["status"], "completed");
+                assert!(!spawner.invocations()[0].request.run_in_background);
+            }
+        }
+    }
+
     // The new params thread into the spawn request.
     #[tokio::test]
     async fn spawn_request_carries_new_parity_params() {
@@ -4892,7 +5244,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "an explicit family override must not be pinned to the inherited provider"
         );
         assert_eq!(req.name.as_deref(), Some("scout"));
-        assert_eq!(req.team_name.as_deref(), Some("alpha"));
+        assert_eq!(req.team_name, None);
         // (parity 2.1.212) The `mode` call param is DEPRECATED and ignored — it is
         // accepted on the wire but NEVER threaded into the spawn request, so the
         // child inherits the parent's live permission mode instead.
@@ -5108,6 +5460,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let entry = |t: &str| platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: t.into(),
             when_to_use: "x".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         };
         assert!(general_purpose_is_available(&[entry("general-purpose")]));
@@ -5132,11 +5485,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "use for anything".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools".into(),
             },
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Explore".into(),
                 when_to_use: "search".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
         ]
@@ -5277,6 +5632,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "Explore".into(),
             when_to_use: "search".into(),
+            when_to_use_lean: None,
             tools_description: "All tools except Edit".into(),
         }];
         let short = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, false);
@@ -5321,11 +5677,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Explore".into(),
                 when_to_use: "search".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Plan".into(),
                 when_to_use: "plan".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
         ]);
@@ -5369,11 +5727,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "anything".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools".into(),
             },
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "statusline-setup".into(),
                 when_to_use: "status line".into(),
+                when_to_use_lean: None,
                 tools_description: "Read, Edit".into(),
             },
         ]);
@@ -5417,11 +5777,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "anything".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools".into(),
             },
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "statusline-setup".into(),
                 when_to_use: "status line".into(),
+                when_to_use_lean: None,
                 tools_description: "Read, Edit".into(),
             },
         ]);
@@ -5494,6 +5856,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let full = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
@@ -5521,6 +5884,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let prompt = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
@@ -5549,6 +5913,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
@@ -5600,6 +5965,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         platform_api::subscription::set_current_subscription(Some(
@@ -5628,6 +5994,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
 
@@ -5681,6 +6048,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         platform_api::session_flags::set_non_interactive_session(true);
@@ -5711,6 +6079,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let prior_global = platform_api::session_flags::is_non_interactive_session();
@@ -5748,6 +6117,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let p = AgentTool::build_prompt(
@@ -5778,6 +6148,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let p = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
@@ -5938,7 +6309,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // claude finalize shape: status/prompt/agentId/agentType/content/totals/usage.
         assert_eq!(data["status"], "completed");
         assert_eq!(data["prompt"], "do it");
-        assert_eq!(data["agentId"], child_id.to_string());
+        assert_eq!(data["agentId"], child_id.as_uuid().to_string());
+        assert_eq!(
+            protocol::AgentId::parse_prefixed(data["agentId"].as_str().unwrap()),
+            Some(child_id)
+        );
         assert_eq!(data["agentType"], "general-purpose");
         assert_eq!(
             data["content"],
@@ -5983,7 +6358,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(
             mc,
             format!(
-                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>"
+                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>",
+                child_id = child_id.as_uuid(),
             )
         );
     }
@@ -6201,6 +6577,264 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         // Non-one-shot → trailer still present after the marker.
         assert!(mc.contains("<usage>subagent_tokens: 0"));
+    }
+
+    /// The declared `outputSchema` must cover BOTH shapes `call` returns, or a
+    /// PostToolUse hook's replacement would be discarded for results the port
+    /// produces itself. Checked structurally (the crate carries no JSON Schema
+    /// validator): every `required` key of the matching arm must be present in
+    /// the payload the tool actually builds.
+    #[test]
+    fn output_schema_covers_every_status_the_tool_emits() {
+        let arms = AGENT_OUTPUT_SCHEMA["anyOf"].as_array().expect("anyOf");
+        assert_eq!(arms.len(), 2, "completed + async_launched, no remote arm");
+
+        let completed = json!({
+            "status": "completed",
+            "prompt": "do it",
+            "agentId": "01J000000000000000000000",
+            "agentType": "general-purpose",
+            "content": [{ "type": "text", "text": "done" }],
+            "totalToolUseCount": 2,
+            "totalDurationMs": 30,
+            "totalTokens": 100,
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        });
+        let async_launched = json!({
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": "01J000000000000000000000",
+            "description": "d",
+            "resolvedModel": "claude-opus-5",
+            "prompt": "do it",
+            "outputFile": "/tmp/x.output",
+            "canReadOutputFile": true
+        });
+
+        for payload in [&completed, &async_launched] {
+            let status = payload["status"].as_str().unwrap();
+            let arm = arms
+                .iter()
+                .find(|a| a["properties"]["status"]["const"] == json!(status))
+                .unwrap_or_else(|| panic!("no arm declares status {status}"));
+            for key in arm["required"].as_array().unwrap() {
+                let key = key.as_str().unwrap();
+                assert!(
+                    payload.get(key).is_some(),
+                    "{status} arm requires `{key}`, which the emitted payload does not carry",
+                );
+            }
+            // Every key the tool emits must be declared, or a hook replacement
+            // carrying it would still validate but silently lose its shape
+            // guarantee. `model_content` is the port's own transport field.
+            let props = arm["properties"].as_object().unwrap();
+            for key in payload.as_object().unwrap().keys() {
+                assert!(
+                    props.contains_key(key),
+                    "{status} arm does not declare `{key}`",
+                );
+            }
+        }
+
+        // The remote arm is deliberately absent, so the union is not a
+        // catch-all: nothing declares that status.
+        assert!(
+            !arms
+                .iter()
+                .any(|a| a["properties"]["status"]["const"] == json!("remote_launched")),
+            "the port has no remote path and must not widen what a hook may substitute",
+        );
+    }
+
+    /// `vBo`'s `shouldRunAsync`, arm by arm. The interesting one is `!Pw(n)`:
+    /// it gates ONLY the implicit default, so the two explicit arms still
+    /// background the built-in web-fetch agent.
+    #[test]
+    fn background_decision_ports_vbo() {
+        let base = || BackgroundDecision {
+            wants_background: None,
+            definition_background: false,
+            is_builtin_web_fetch: false,
+            is_coordinator: false,
+            caller_is_in_process_teammate: false,
+            background_tasks_disabled: false,
+        };
+
+        // Default: background.
+        assert!(should_run_in_background(base()));
+        // Explicit false: foreground.
+        assert!(!should_run_in_background(BackgroundDecision {
+            wants_background: Some(false),
+            ..base()
+        }));
+        // A coordinator backgrounds its workers anyway (`e.isCoordinator&&!o`).
+        assert!(should_run_in_background(BackgroundDecision {
+            wants_background: Some(false),
+            is_coordinator: true,
+            ..base()
+        }));
+        // `n.background===!0` outranks an explicit false.
+        assert!(should_run_in_background(BackgroundDecision {
+            wants_background: Some(false),
+            definition_background: true,
+            ..base()
+        }));
+
+        // `!Pw(n)`: the built-in web-fetch agent does NOT auto-background …
+        assert!(!should_run_in_background(BackgroundDecision {
+            is_builtin_web_fetch: true,
+            ..base()
+        }));
+        // … not even on a coordinator, since the factor wraps the whole `d` …
+        assert!(!should_run_in_background(BackgroundDecision {
+            is_builtin_web_fetch: true,
+            is_coordinator: true,
+            ..base()
+        }));
+        // … but both explicit arms sit outside the factor.
+        assert!(should_run_in_background(BackgroundDecision {
+            is_builtin_web_fetch: true,
+            wants_background: Some(true),
+            ..base()
+        }));
+        assert!(should_run_in_background(BackgroundDecision {
+            is_builtin_web_fetch: true,
+            definition_background: true,
+            ..base()
+        }));
+
+        // The kill-switch and the teammate carve-out defeat every arm.
+        for d in [
+            BackgroundDecision {
+                wants_background: Some(true),
+                background_tasks_disabled: true,
+                ..base()
+            },
+            BackgroundDecision {
+                wants_background: Some(true),
+                caller_is_in_process_teammate: true,
+                ..base()
+            },
+            BackgroundDecision {
+                definition_background: true,
+                caller_is_in_process_teammate: true,
+                ..base()
+            },
+        ] {
+            assert!(!should_run_in_background(d));
+        }
+    }
+
+    /// `bft`'s max-turns harness NOTE (src_162329786.js @3532630). The runner
+    /// stamps `reason`/`max_turns` onto the ordinary completion result, so the
+    /// agent's partial text survives AND the note fronts it.
+    #[tokio::test]
+    async fn turn_limited_agent_reports_the_limit_and_keeps_partial_output() {
+        let spawner = arc_mock_spawner();
+        let child_id = protocol::AgentId::new();
+        spawner.script_completed_with(
+            child_id,
+            json!({
+                "content": [{ "type": "text", "text": "found three call sites" }],
+                "text": "found three call sites",
+                "reason": "max_turns_exhausted",
+                "max_turns": 7,
+            }),
+            platform_api::subagent_spawn::SubagentUsage::default(),
+            0,
+            0,
+            0,
+        );
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let result = tool
+            .call(
+                json!({
+                    "description": "d",
+                    "subagent_type": "general-purpose",
+                    "prompt": "do it",
+                    "run_in_background": false
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let mc = result.data["model_content"].as_str().unwrap();
+        assert!(
+            mc.starts_with("NOTE: this agent stopped at its 7-turn limit before finishing. The text below is PARTIAL output; treat it as incomplete. Send the agent a message (SendMessage) to let it continue from where it stopped.\n"),
+            "the harness note must front the report; got: {mc}"
+        );
+        assert!(
+            mc.contains("found three call sites"),
+            "the partial output must survive the turn-limited exit; got: {mc}"
+        );
+        assert!(
+            !mc.contains("(Subagent completed but returned no output.)"),
+            "a run with partial text is not a no-output run; got: {mc}"
+        );
+        // The note is a harness block, so it reaches the structured content too
+        // (`Tt=[...Le,...je,...Xe]`).
+        let blocks = result.data["content"].as_array().unwrap();
+        assert!(blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("NOTE: this agent stopped at its 7-turn limit"));
+    }
+
+    /// The other arm of `Dt`, plus `PKt`: a one-shot built-in cannot be
+    /// continued, so it gets no "send it a message" tail, and a run that
+    /// produced no text says so instead of claiming partial output.
+    #[tokio::test]
+    async fn turn_limited_one_shot_builtin_omits_the_continuation_tail() {
+        let spawner = arc_mock_spawner();
+        let child_id = protocol::AgentId::new();
+        spawner.script_completed_with(
+            child_id,
+            json!({
+                "content": [],
+                "text": "",
+                "reason": "max_turns_exhausted",
+                "max_turns": 3,
+            }),
+            platform_api::subagent_spawn::SubagentUsage::default(),
+            0,
+            0,
+            0,
+        );
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let result = tool
+            .call(
+                json!({
+                    "description": "d",
+                    "subagent_type": "Explore",
+                    "prompt": "look",
+                    "run_in_background": false
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let mc = result.data["model_content"].as_str().unwrap();
+        assert_eq!(
+            mc,
+            "NOTE: this agent stopped at its 3-turn limit before finishing. It was still calling tools and had produced no report.\n",
+            "one-shot built-ins take no continuation tail, and a text-less run is not `PARTIAL output`",
+        );
     }
 
     // ── G3: required-MCP-servers gate (AgentTool.tsx:367-409) ──

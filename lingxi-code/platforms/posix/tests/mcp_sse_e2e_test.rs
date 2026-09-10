@@ -60,11 +60,18 @@ async fn sse_handler(
             }
         }
     });
+    // A legacy HTTP+SSE server names its POST url first, on a named `endpoint`
+    // event, and real ones use a different path from the stream's. Naming
+    // `/messages` here means this round trip only passes if the client honours
+    // it.
+    let endpoint = stream::once(async {
+        Ok::<_, Infallible>(Event::default().event("endpoint").data("/messages"))
+    });
     // `warmup` yields one `None` (just the delay), then the real replies flow.
     let stream = warmup
         .chain(replies)
         .filter_map(|maybe| async move { maybe.map(|v| Ok(Event::default().data(v.to_string()))) });
-    Sse::new(stream)
+    Sse::new(endpoint.chain(stream))
 }
 
 /// POST handler: parse the JSON-RPC frame, compute the reply keyed on method +
@@ -118,7 +125,8 @@ async fn spawn_mock() -> String {
     let state = MockState { replies: tx };
     let app = Router::new()
         .route("/mcp", get(sse_handler))
-        .route("/mcp", post(post_handler))
+        // No POST on the stream url: the client must use the named endpoint.
+        .route("/messages", post(post_handler))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

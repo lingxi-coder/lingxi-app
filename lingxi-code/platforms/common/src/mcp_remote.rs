@@ -287,16 +287,30 @@ impl McpTransport for RemoteMcpTransport {
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
         let id = protocol::McpConnectionId::new();
         let connection = match spec {
-            McpTransportSpec::Sse { url, headers, .. } => crate::connect_sse(url, None, headers)
-                .await
-                .map_err(McpError::from)?,
+            // A configured `type: "sse"` server speaks the legacy HTTP+SSE
+            // contract: it names its POST url in an `endpoint` event.
+            McpTransportSpec::Sse { url, headers, .. } => crate::connect_sse(
+                url,
+                None,
+                headers,
+                crate::mcp_sse::SseEndpointMode::EndpointEvent,
+            )
+            .await
+            .map_err(McpError::from)?,
             McpTransportSpec::SseIde {
                 url, auth_token, ..
             } => {
                 let headers = platform_api::McpHeaders::default();
-                crate::connect_sse(url, auth_token.as_deref(), &headers)
-                    .await
-                    .map_err(McpError::from)?
+                // The IDE serves both directions on one url and sends no
+                // `endpoint` event.
+                crate::connect_sse(
+                    url,
+                    auth_token.as_deref(),
+                    &headers,
+                    crate::mcp_sse::SseEndpointMode::SameUrl,
+                )
+                .await
+                .map_err(McpError::from)?
             }
             McpTransportSpec::WsIde {
                 url, auth_token, ..

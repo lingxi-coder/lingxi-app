@@ -1,13 +1,28 @@
 //! MCP SSE transport: GET text/event-stream from `url` for inbound JSON-RPC
-//! messages, POST to the same URL for outbound. Matches claude-code's
-//! `SSEClientTransport` wire format from `src/services/mcp/client.ts:626-707`.
+//! messages, POST outbound frames back.
 //!
-//! Wire contract (LITERAL):
+//! 🚨 **Where the POST goes depends on [`SseEndpointMode`], and the two modes
+//! are different protocols.** An earlier version of this file POSTed to the GET
+//! url unconditionally and described that as claude-code's `SSEClientTransport`
+//! wire format. It is not: upstream's transport keeps `_url` and `_endpoint`
+//! separately and learns the second from a named `endpoint` event. A
+//! spec-conformant `type: "sse"` server therefore never received this port's
+//! POSTs at all.
+//!
+//! Wire contract (LITERAL), both modes:
 //! - GET `Accept: text/event-stream`
 //! - When `auth_token` is `Some`, both GET and POST carry
 //!   `X-LingXi-Ide-Authorization: <token>` verbatim (no `Bearer ` prefix).
-//! - POST goes to the SAME URL as the GET. `Content-Type: application/json`.
-//! - Each SSE event is a single JSON-RPC `Message`: `data: {...}\n\n`.
+//! - `Content-Type: application/json` on POST.
+//! - A DEFAULT-event frame is one JSON-RPC `Message`: `data: {...}\n\n`
+//!   (upstream's `onmessage`).
+//!
+//! [`SseEndpointMode::EndpointEvent`] adds upstream's handshake:
+//! - A named `endpoint` event carries the POST url, resolved RELATIVE to the
+//!   stream url, and it must be SAME-ORIGIN.
+//! - The connect does not complete until that event arrives — upstream
+//!   resolves its connect promise from inside the listener, and refuses to
+//!   send before then (`NotConnected`).
 
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -30,6 +45,23 @@ pub fn user_agent() -> String {
     format!("claude-code/{}", env!("CARGO_PKG_VERSION"))
 }
 
+/// How the POST url for outbound frames is determined.
+///
+/// These are two different protocols sharing one transport, so the caller says
+/// which one it is speaking rather than the transport guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SseEndpointMode {
+    /// The MCP legacy HTTP+SSE contract (`McpTransportSpec::Sse`): the server
+    /// names the POST url in a named `endpoint` event, resolved relative to the
+    /// stream url and required to be same-origin. The connect completes only
+    /// once that event has arrived.
+    EndpointEvent,
+    /// POST to the same url the stream was opened on
+    /// (`McpTransportSpec::SseIde`). This is the IDE contract, where the
+    /// extension serves both on one url and sends no `endpoint` event.
+    SameUrl,
+}
+
 /// Errors specific to opening an MCP SSE connection.
 #[derive(Debug, Error)]
 pub enum SseConnectError {
@@ -39,6 +71,11 @@ pub enum SseConnectError {
     /// Authorization header value was invalid (non-ASCII, control chars).
     #[error("invalid auth token: {0}")]
     InvalidAuth(String),
+    /// The stream ended, or produced a bad `endpoint` event, before the POST
+    /// url was known. Upstream rejects its connect promise from inside the
+    /// `endpoint` listener for exactly these cases.
+    #[error("sse endpoint handshake failed: {0}")]
+    Endpoint(String),
     /// Remote response retained for authentication recovery.
     #[error("HTTP {status}{detail}", detail = www_authenticate.as_ref().map(|value| format!(": {value}")).unwrap_or_default())]
     HttpResponse {
@@ -62,6 +99,35 @@ impl From<SseConnectError> for McpError {
             other => Self::Connection(other.to_string()),
         }
     }
+}
+
+/// Resolve an `endpoint` event's data against the stream url.
+///
+/// Upstream, verbatim:
+///
+/// ```js
+/// this._endpoint = new URL(o.data, this._url);
+/// if (this._endpoint.origin !== this._url.origin)
+///   throw Error(`Endpoint origin does not match connection origin: ${this._endpoint.origin}`);
+/// ```
+///
+/// The same-origin check is the load-bearing half: without it a server could
+/// name any host and this transport would POST the session's JSON-RPC — tools,
+/// arguments and all — to it. `Url::join` performs the relative resolution, so
+/// a bare path like `/messages?sessionId=…` lands on the stream's own origin.
+fn resolve_endpoint(stream_url: &str, data: &str) -> Result<String, SseConnectError> {
+    let base = url::Url::parse(stream_url)
+        .map_err(|e| SseConnectError::Endpoint(format!("stream url is not a url: {e}")))?;
+    let resolved = base
+        .join(data.trim())
+        .map_err(|e| SseConnectError::Endpoint(format!("endpoint {data:?} is not a url: {e}")))?;
+    if resolved.origin() != base.origin() {
+        return Err(SseConnectError::Endpoint(format!(
+            "Endpoint origin does not match connection origin: {}",
+            resolved.origin().ascii_serialization()
+        )));
+    }
+    Ok(resolved.to_string())
 }
 
 fn build_headers<H>(
@@ -115,6 +181,7 @@ pub async fn connect_sse<H>(
     url: &str,
     auth_token: Option<&str>,
     extra_headers: &H,
+    endpoint_mode: SseEndpointMode,
 ) -> Result<Connection, SseConnectError>
 where
     H: Clone + Send + 'static,
@@ -153,12 +220,31 @@ where
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
 
+    // Carries the resolved POST url (or the reason there will not be one) from
+    // the reader task to the connect, which cannot complete without it in
+    // `EndpointEvent` mode.
+    let (endpoint_tx, endpoint_rx) =
+        tokio::sync::oneshot::channel::<Result<String, SseConnectError>>();
+    let mut endpoint_tx = Some(endpoint_tx);
+    let stream_url = url.to_string();
+
     // SSE reader task: parse `data:` JSON frames and forward as Message.
     let reader_inbound_tx = inbound_tx.clone();
     tokio::spawn(async move {
         while let Some(item) = event_stream.next().await {
             match item {
                 Ok(event) => {
+                    // A NAMED `endpoint` event is the legacy handshake, not a
+                    // JSON-RPC frame: upstream resolves its data against the
+                    // stream url and requires the same origin, rejecting the
+                    // connect otherwise. Handled before the default-event path
+                    // below so it is never parsed as a message.
+                    if event.event == "endpoint" {
+                        if let Some(tx) = endpoint_tx.take() {
+                            let _ = tx.send(resolve_endpoint(&stream_url, &event.data));
+                        }
+                        continue;
+                    }
                     // claude-code's SDK uses default-event SSE (no `event:` name)
                     // with the `data:` field carrying the JSON-RPC frame. Skip
                     // keep-alive comments / empty data lines.
@@ -183,16 +269,37 @@ where
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "mcp sse: stream error, terminating reader");
+                    if let Some(tx) = endpoint_tx.take() {
+                        let _ = tx.send(Err(SseConnectError::Endpoint(format!(
+                            "stream ended before an endpoint event: {e}"
+                        ))));
+                    }
                     break;
                 }
             }
+        }
+        // The stream closed cleanly without ever naming an endpoint. Report it
+        // rather than leaving a connect awaiting a sender that has been
+        // dropped.
+        if let Some(tx) = endpoint_tx.take() {
+            let _ = tx.send(Err(SseConnectError::Endpoint(
+                "stream closed before an endpoint event".to_string(),
+            )));
         }
     });
 
     // POST writer task: drain outbound frames and POST each as one JSON-RPC
     // body. Reuses the same `reqwest::Client` so the underlying connection
     // pool serves both GET and POST.
-    let post_url = url.to_string();
+    // `SameUrl` is the IDE contract; `EndpointEvent` waits for the server to
+    // name the url, which is what makes this a legacy HTTP+SSE client rather
+    // than a transport that posts into the stream url and hopes.
+    let post_url = match endpoint_mode {
+        SseEndpointMode::SameUrl => url.to_string(),
+        SseEndpointMode::EndpointEvent => endpoint_rx.await.map_err(|_| {
+            SseConnectError::Endpoint("reader stopped before an endpoint event".to_string())
+        })??,
+    };
     let post_auth = auth_token.map(str::to_string);
     let post_extra = extra_headers.clone();
     let post_client = client.clone();

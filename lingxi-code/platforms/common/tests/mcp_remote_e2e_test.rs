@@ -74,6 +74,13 @@ async fn sse_get(
     State(state): State<SseState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.replies.subscribe();
+    // A legacy HTTP+SSE server names its POST url in an `endpoint` event before
+    // anything else. This mock deliberately names a DIFFERENT path from the
+    // stream's, the way real ones do, so the round trip only succeeds if the
+    // client honours it.
+    let endpoint = stream::once(async {
+        Ok::<_, Infallible>(Event::default().event("endpoint").data("/messages"))
+    });
     let warmup = stream::once(async {
         tokio::time::sleep(Duration::from_millis(30)).await;
         None::<Value>
@@ -85,9 +92,11 @@ async fn sse_get(
             Err(broadcast::error::RecvError::Closed) => None,
         }
     });
-    Sse::new(warmup.chain(replies).filter_map(|value| async move {
-        value.map(|value| Ok(Event::default().data(value.to_string())))
-    }))
+    Sse::new(
+        endpoint.chain(warmup.chain(replies).filter_map(|value| async move {
+            value.map(|value| Ok(Event::default().data(value.to_string())))
+        })),
+    )
 }
 
 async fn sse_post(State(state): State<SseState>, Json(body): Json<Value>) -> &'static str {
@@ -110,7 +119,9 @@ async fn spawn_sse() -> String {
     let state = SseState { replies };
     let app = Router::new()
         .route("/mcp", get(sse_get))
-        .route("/mcp", post(sse_post))
+        // No POST route on the stream url: the client must use the endpoint the
+        // server named, or this test 404s.
+        .route("/messages", post(sse_post))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

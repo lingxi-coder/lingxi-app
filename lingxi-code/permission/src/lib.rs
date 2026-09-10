@@ -104,8 +104,8 @@ pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
 pub use bypass_guard::{enforce_bypass_safety, BypassEnv};
 pub use classifier::is_classifier_permissions_enabled;
 pub use cli_mode::{
-    initial_permission_mode_from_cli, initial_permission_mode_from_cli_with_ide,
-    boot_agent_may_adopt_bypass, permission_mode_from_cli_string, CliModeSettings,
+    boot_agent_may_adopt_bypass, initial_permission_mode_from_cli,
+    initial_permission_mode_from_cli_with_ide, permission_mode_from_cli_string, CliModeSettings,
     IdeSessionInputs, IDE_BYPASS_UNCONSENTED_MSG,
 };
 pub use command_path_containment::check_command_path_containment;

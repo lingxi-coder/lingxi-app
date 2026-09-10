@@ -162,7 +162,7 @@ impl ConversationOrchestrator {
         }
         Ok(Some(OutputTurn {
             scope,
-            failed: self.model_runtime.output_accounting_failed.clone(),
+            failed: Arc::new(AtomicBool::new(false)),
         }))
     }
 
@@ -174,14 +174,43 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = prepared;
     }
 
+    /// Disclose an accounting write that failed AFTER the provider answered.
+    ///
+    /// The answer is kept: the user paid for it and the model produced it.
+    /// What must not happen is another paid call on a ledger that cannot
+    /// record it, and that is already enforced before dispatch --
+    /// `cost_scope.preflight()` fails once the durability gate is frozen, at
+    /// every call site in both turn loops. So this reports; it does not gate.
+    pub(crate) async fn note_cost_settlement_failure(&self, error: &impl std::fmt::Display) {
+        tracing::error!(%error, "cost settlement failed after the provider response");
+        self.output
+            .emit_system_notice(
+                &format!(
+                    "Spend for that response could not be recorded ({error}). \
+The answer is unaffected; /cost may under-report this session, and new model \
+calls are paused until the ledger recovers."
+                ),
+                true,
+            )
+            .await;
+    }
+
+    /// Refuse further dispatch within a turn whose output write already
+    /// failed. A fresh turn is fine: a storage fault is a fact about the write
+    /// that failed, not a verdict on the session. What stops paid work on a
+    /// broken ledger is the durability preflight, checked before every
+    /// dispatch in both turn loops.
     pub(crate) fn check_output_accounting(&self) -> Result<(), OrchestratorError> {
-        if self
+        let failed = self
             .model_runtime
-            .output_accounting_failed
-            .load(Ordering::Acquire)
-        {
+            .output_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|turn| turn.failed.load(Ordering::Acquire));
+        if failed {
             Err(OrchestratorError::Internal(
-                "output accounting is unavailable".into(),
+                "output accounting for this turn is unavailable".into(),
             ))
         } else {
             Ok(())
@@ -194,17 +223,6 @@ impl ConversationOrchestrator {
         let Some(provider) = &self.model_runtime.output_scopes else {
             return Ok(());
         };
-        // Conservative instance-wide latch: a custom provider must not regain
-        // dispatch authority merely by rotating turns after a failed write.
-        if self
-            .model_runtime
-            .output_accounting_failed
-            .load(Ordering::Acquire)
-        {
-            return Err(OrchestratorError::Internal(
-                "output accounting is unavailable".into(),
-            ));
-        }
         let session = self.session.lock().await.session_id;
         let scope = provider
             .begin_turn(session, generation, self.config.token_budget)
@@ -223,7 +241,7 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(OutputTurn {
             scope,
-            failed: self.model_runtime.output_accounting_failed.clone(),
+            failed: Arc::new(AtomicBool::new(false)),
         });
         Ok(())
     }
@@ -280,6 +298,8 @@ mod tests {
         session: SessionId,
         generation: MessageId,
         events: Mutex<HashMap<WorkflowOutputEventId, u64>>,
+        /// Fail the next write, standing in for a real storage fault.
+        fail_next: AtomicBool,
     }
     impl WorkflowOutputAccount for Account {
         fn session_id(&self) -> SessionId {
@@ -296,6 +316,9 @@ mod tests {
             event: WorkflowOutputEventId,
             tokens: u64,
         ) -> Result<(), BudgetError> {
+            if self.fail_next.swap(false, Ordering::AcqRel) {
+                return Err(BudgetError::Internal("ledger volume went away".into()));
+            }
             let mut events = self.events.lock().unwrap();
             if let Some(old) = events.get(&event) {
                 if *old != tokens {
@@ -308,7 +331,12 @@ mod tests {
         }
     }
     #[derive(Default)]
-    struct Scopes(Mutex<HashMap<SessionId, WorkflowOutputScope>>, AtomicBool);
+    /// `1` rejects scope preparation; `2` arms the next account to fail one write.
+    struct Scopes(
+        Mutex<HashMap<SessionId, WorkflowOutputScope>>,
+        AtomicBool,
+        AtomicBool,
+    );
     #[async_trait]
     impl WorkflowOutputScopes for Scopes {
         async fn ensure_current(
@@ -335,6 +363,7 @@ mod tests {
                 session,
                 generation,
                 events: Mutex::new(HashMap::new()),
+                fail_next: AtomicBool::new(self.2.swap(false, Ordering::AcqRel)),
             }));
             self.0.lock().unwrap().insert(session, scope.clone());
             Ok(scope)
@@ -369,6 +398,39 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// P0-4: a failed output write is a fact about that turn, not a verdict on
+    /// the session. One storage fault must not make every later turn refuse.
+    #[tokio::test]
+    async fn a_failed_output_write_does_not_refuse_the_next_turn() {
+        let scopes = Arc::new(Scopes::default());
+        let orch = orch(vec![]).with_workflow_output_scopes(scopes.clone());
+        let session = orch.session.lock().await.session_id;
+        orch.begin_output_turn(MessageId::new()).await.unwrap();
+
+        // Arm one write to fail, the shape a real storage fault takes.
+        scopes
+            .capture(session)
+            .unwrap()
+            .record_legacy(WorkflowOutputEventId::MainResponse(MessageId::new()), 1)
+            .unwrap();
+        scopes.2.store(true, Ordering::Release);
+        orch.begin_output_turn(MessageId::new()).await.unwrap();
+        let mut observation = orch.capture_main_output().await.unwrap().unwrap();
+        observation.observe(&usage(9, 0));
+        assert!(
+            observation.finish().is_err(),
+            "the conflicting write must fail"
+        );
+
+        // The next turn is a fresh one and must be allowed to proceed.
+        assert!(
+            orch.begin_output_turn(MessageId::new()).await.is_ok(),
+            "a later turn was refused because an earlier one failed to record"
+        );
+        assert!(orch.check_output_accounting().is_ok());
+        assert!(orch.capture_main_output().await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -589,15 +651,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_output_missing_capture_and_overflow_fail_closed_across_turns() {
+    async fn main_output_missing_capture_and_overflow_fail_closed_within_the_turn() {
         let orch = orch(vec![]).with_workflow_output_scopes(Arc::new(Scopes::default()));
         assert!(orch.capture_main_output().await.is_err());
         orch.begin_output_turn(MessageId::new()).await.unwrap();
         let mut observation = orch.capture_main_output().await.unwrap().unwrap();
         observation.observe(&usage(u64::MAX, 1));
         assert!(observation.finish().is_err());
+        // The failure closes THIS turn: no further capture inside it.
         assert!(orch.capture_main_output().await.is_err());
-        assert!(orch.begin_output_turn(MessageId::new()).await.is_err());
+        // It does not condemn the session. A new turn starts clean, and paid
+        // work on a broken ledger is stopped by the durability preflight.
+        assert!(orch.begin_output_turn(MessageId::new()).await.is_ok());
+        assert!(orch.capture_main_output().await.is_ok());
     }
 
     #[tokio::test]

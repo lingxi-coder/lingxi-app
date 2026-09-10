@@ -1077,7 +1077,6 @@ pub(crate) struct ModelRuntime {
     pub(crate) cost_tracker: Option<Arc<cost::CostTracker>>,
     pub(crate) output_scopes: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
     pub(crate) output_turn: std::sync::Mutex<Option<super::output_accounting_impl::OutputTurn>>,
-    pub(crate) output_accounting_failed: Arc<std::sync::atomic::AtomicBool>,
     /// Session-pinned response finalizer scope captured before provider work.
     /// It remains fixed across hot-session switches until the switch
     /// publishes a hydrated destination.
@@ -1161,7 +1160,6 @@ impl ModelRuntime {
             cost_tracker: None,
             output_scopes: None,
             output_turn: std::sync::Mutex::new(None),
-            output_accounting_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cost_scope: std::sync::Mutex::new(None),
             cost_session_switcher: None,
             analytics_bus: None,

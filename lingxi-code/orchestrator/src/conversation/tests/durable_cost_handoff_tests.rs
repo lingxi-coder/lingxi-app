@@ -734,3 +734,117 @@ async fn manual_compaction_post_response_cancel_retains_known_usage() {
         .await;
     assert_eq!(client.calls.load(Ordering::Acquire), 1);
 }
+
+/// Persistence that always refuses. Every settlement through it fails after
+/// the provider has already answered and billed.
+struct RefusingPersistence;
+
+#[async_trait]
+impl CostPersistence for RefusingPersistence {
+    async fn acquire_permit(
+        &self,
+        _session_id: SessionId,
+    ) -> Result<CostPersistPermit, CostPersistError> {
+        Err(CostPersistError::Storage("ledger volume went away".into()))
+    }
+}
+
+fn refusing_durability(session_id: SessionId) -> Arc<CostTracker> {
+    durable_tracker(
+        session_id,
+        Arc::new(RefusingPersistence),
+        CostDurabilityGate::default(),
+    )
+}
+
+fn answer_response(text: &str) -> llm_client::LlmResponse {
+    let mut response = mock_message_response(
+        vec![LlmContentBlock::Text {
+            text: text.into(),
+            cache_control: None,
+        }],
+        Some("end_turn"),
+    );
+    response.usage = llm_usage(11, 7, 3, 5);
+    response
+}
+
+/// The model's text has to be in the session, not merely returned: a turn that
+/// errors out before translating the response leaves the history without it.
+async fn assert_answer_reached_history(orchestrator: &ConversationOrchestrator, text: &str) {
+    let handle = orchestrator.session();
+    let session = handle.lock().await;
+    let found = session.history.iter().any(|message| match message {
+        ConversationMessage::Assistant { content, .. } => content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text: body } if body.contains(text))
+        }),
+        _ => false,
+    });
+    assert!(
+        found,
+        "the paid answer never reached the session history: {:?}",
+        session.history.len()
+    );
+}
+
+/// P0-6: an accounting write that fails AFTER the provider answered must not
+/// cost the user the answer they already paid for. The pre-dispatch preflight
+/// is what stops the next paid call, and it already does.
+#[tokio::test]
+async fn batched_settlement_failure_keeps_the_answer_and_stops_the_next_call() {
+    let base = batched_orchestrator(answer_response("the paid answer"));
+    let session_id = base.session().lock().await.session_id;
+    let orchestrator = base.with_cost_tracker(refusing_durability(session_id));
+
+    orchestrator
+        .run_turn("ask once")
+        .await
+        .expect("the answer survives a failed accounting write");
+    assert_answer_reached_history(&orchestrator, "the paid answer").await;
+
+    let next = orchestrator.run_turn("ask again").await;
+    let error = next.expect_err("a frozen ledger refuses the next paid call");
+    assert!(
+        error.to_string().contains("preflight"),
+        "the next call must be stopped by the pre-dispatch gate, got {error}"
+    );
+}
+
+/// The same contract on the streaming driver, which desktop and mobile run.
+#[tokio::test]
+async fn streaming_settlement_failure_keeps_the_answer_and_stops_the_next_call() {
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+        message_start_with_usage("stream-cost", "claude-opus-4-8", llm_usage(13, 0, 2, 4)),
+        content_block_start_text(0),
+        text_delta(0, "the paid answer"),
+        content_block_stop(0),
+        message_delta_stop_with_usage("end_turn", llm_usage(0, 9, 0, 0)),
+        message_stop(),
+    ]]));
+    let base = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        streaming,
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    let session_id = base.session().lock().await.session_id;
+    let orchestrator = base.with_cost_tracker(refusing_durability(session_id));
+
+    orchestrator
+        .run_turn_streaming("ask once")
+        .await
+        .expect("the streamed answer survives a failed accounting write");
+    assert_answer_reached_history(&orchestrator, "the paid answer").await;
+
+    let next = orchestrator.run_turn_streaming("ask again").await;
+    let error = next.expect_err("a frozen ledger refuses the next paid call");
+    assert!(
+        error.to_string().contains("preflight"),
+        "the next call must be stopped by the pre-dispatch gate, got {error}"
+    );
+}

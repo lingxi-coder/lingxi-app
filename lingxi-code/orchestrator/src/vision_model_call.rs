@@ -266,9 +266,7 @@ impl ModelCallPreparer for VisionModelCallPreparer {
                 .api_calls_recorded
                 .fetch_add(api_calls, std::sync::atomic::Ordering::SeqCst);
             if let Err(error) = settlement.persistence_result() {
-                return Err(OrchestratorError::Internal(format!(
-                    "vision cost settlement failed after provider response: {error}"
-                )));
+                orch.note_cost_settlement_failure(error).await;
             }
         }
         let analyzed = match analyzed {

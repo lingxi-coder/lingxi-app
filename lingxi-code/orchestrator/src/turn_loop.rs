@@ -885,9 +885,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             .api_calls_recorded
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Err(error) = settlement.persistence_result() {
-            return Err(OrchestratorError::Internal(format!(
-                "cost settlement failed after provider response: {error}"
-            )));
+            orch.note_cost_settlement_failure(error).await;
         }
         // strict-parity (2.1.195): fire `tengu_api_success` on the per-request
         // success path (claude `j("tengu_api_success", {...})`). The port-only

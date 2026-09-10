@@ -334,23 +334,6 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           return null;
         })}
 
-        {/* Streaming affordance — shown at the tail while a live turn runs. */}
-        {running && (
-          <div className="transcript-run-item" data-run-type="status" style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
-            <div style={{ display: 'flex', alignItems: 'center', color: t.text3, fontSize: 13.5 }}>
-              <span
-                className="running-sweep"
-                style={{
-                  '--sweep-base': t.text3,
-                  '--sweep-highlight': t.text,
-                } as CSSProperties}
-              >
-                Thinking…
-              </span>
-            </div>
-          </div>
-        )}
-
         {/* Scroll anchor — keeps the newest content in view as deltas arrive. */}
         <div ref={tailRef} />
       </div>

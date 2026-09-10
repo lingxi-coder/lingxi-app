@@ -22,6 +22,7 @@ pub mod run_skill_generator_skill;
 pub mod simplify_skill;
 pub mod update_config_skill;
 pub mod verify_skill;
+pub mod workflow_authoring_skill;
 
 /// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
 /// `bundledSkills.ts`).
@@ -37,6 +38,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_verify_skill(reg);
     register_run_skill(reg);
     register_simplify_skill(reg);
+    register_workflow_authoring_skill(reg);
     register_run_skill_generator_skill(reg);
     register_fewer_permission_prompts_skill(reg);
     register_code_review_skill(reg);
@@ -244,6 +246,31 @@ fn register_run_skill_generator_skill(reg: &mut CommandRegistry) {
 /// reference (registrar `eVp`, `userInvocable:!0`, `argumentHint:"[<target>]"`,
 /// no `isEnabled` gate). Its `getPromptForCommand` PREPENDS a `Review target:`
 /// line (see [`simplify_skill`]).
+/// `dCr()` — the `workflow-authoring` skill.
+///
+/// Registered unconditionally; see the module doc for why this port does not
+/// mirror upstream's `isEnabled: () => qc()`.
+fn register_workflow_authoring_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "workflow-authoring".into(),
+        description: workflow_authoring_skill::WORKFLOW_AUTHORING_DESCRIPTION.into(),
+        menu_description: Some(
+            workflow_authoring_skill::WORKFLOW_AUTHORING_MENU_DESCRIPTION.into(),
+        ),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(
+                workflow_authoring_skill::WorkflowAuthoringPromptFn,
+            )),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
 fn register_simplify_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "simplify".into(),
@@ -376,7 +403,7 @@ mod tests {
     ///
     /// | in both | LingXi-only | upstream-only |
     /// |---|---|---|
-    /// | batch, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator | cron, deep-research, simplify, verify | the remaining 13 |
+    /// | batch, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator, workflow-authoring | cron, deep-research, simplify, verify | the remaining 12 |
     ///
     /// ⚠️ The upstream-only 13 are NOT automatically a backlog. Most ride
     /// surfaces this port does not have (artifact-components / whiteboard /
@@ -426,6 +453,10 @@ mod tests {
             // key the loader would reject.
             "update-config".to_string(),
             "verify".to_string(),
+            // Ported 2026-09-10 with the 2.1.267 Workflow description split:
+            // this skill IS the 17 KB script-writing reference that the tool
+            // description no longer inlines on every request.
+            "workflow-authoring".to_string(),
         ];
         assert_eq!(
             got, want,

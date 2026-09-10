@@ -250,6 +250,16 @@ fn subagent_model_forced() -> bool {
     )
 }
 
+/// Upstream `eFt()` — the body the `workflow-authoring` skill serves.
+///
+/// The environment read sits here, at the skill boundary, exactly where
+/// upstream's `wpn()` reads it. [`authoring_skill_body`] stays parameterised so
+/// the tests can pin both renderings without `set_var`.
+#[must_use]
+pub fn authoring_skill_prompt() -> String {
+    authoring_skill_body(subagent_model_forced())
+}
+
 /// Upstream `Epn(e)` — assemble what the model reads for the Workflow tool.
 ///
 /// `skill_reachable` answers "can this request load the `workflow-authoring`

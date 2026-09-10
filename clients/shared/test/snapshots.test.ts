@@ -252,12 +252,16 @@ test('ALL_TASK_ROW_DTO_KEYS (src/protocolCoverage.ts) matches TaskRowDto exactly
     'awaiting_plan_approval',
     'can_resume',
     'description',
+    'effort',
     'error',
+    'kind',
+    'model',
     'stage',
     'started_at_ms',
     'status',
     'task_id',
     'task_type',
+    'unread',
   ].sort());
 });
 
@@ -1562,6 +1566,9 @@ function validateCommand(name: string, v: unknown): void {
     case 'task_stop':
       assert.ok(isString(o['task_id']));
       break;
+    case 'task_message':
+      assert.ok(isString(o['task_id']) && isString(o['message']));
+      break;
     case 'resume_workflow':
       assert.ok(isString(o['task_id']));
       break;
@@ -2097,6 +2104,21 @@ function validateEvent(name: string, v: unknown): void {
       validateTaskRow(o['task']);
       break;
     }
+    case 'message_identity':
+    case 'message_retracted':
+      assert.ok(isString(o['message_id']));
+      break;
+    case 'loop_wakeup':
+      // `companion` rides only on a collapsed streak, so it stays optional
+      // while the counters are always present.
+      assert.ok(isString(o['message']) && isNumber(o['streak']) && isNumber(o['since_ms']));
+      if ('companion' in o) assert.ok(isString(o['companion']));
+      break;
+    case 'task_lifecycle':
+      // The engine forwards the SDK record already serialized, so the wire
+      // guarantee here is the envelope: exactly one JSON string payload.
+      assert.ok(isString(o['event_json']));
+      break;
     case 'task_output_chunk':
       assert.ok(
         isString(o['task_id']) &&

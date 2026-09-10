@@ -172,6 +172,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   auth_state: true,
   doctor_report: true,
   task_row: true,
+  task_lifecycle: true,
   task_output_chunk: true,
   task_status_changed: true,
   workflow_resumed: true,
@@ -258,6 +259,10 @@ export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
   started_at_ms: true,
   error: true,
   stage: true,
+  kind: true,
+  unread: true,
+  model: true,
+  effort: true,
 };
 
 export const ALL_LOCAL_APP_PLUGIN_ERROR_CODES: Record<LocalAppPluginErrorCodeDto, true> = {

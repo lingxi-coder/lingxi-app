@@ -1024,6 +1024,14 @@ export interface TaskRowDto {
   error?: string;
   /** `local_fusion` only (F005): the run's current progress-stage label. */
   stage?: string;
+  /** Additive shell specialization, e.g. a command event monitor. */
+  kind?: string;
+  /** Agent completion has not yet been delivered or consumed. */
+  unread?: boolean;
+  /** Concrete model used by an agent task. */
+  model?: string;
+  /** String effort label; numeric budgets are omitted. */
+  effort?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2150,6 +2158,9 @@ export type ClientEvent =
   | { type: 'auth_state'; state: AuthStateDto }
   | { type: 'doctor_report'; report: DoctorReportDto }
   | { type: 'task_row'; task: TaskRowDto }
+  /** SDK task lifecycle receipt (`ClientEvent::TaskLifecycle`). The payload is the
+   *  already-serialized `system` / `task_*` SDK record, forwarded verbatim. */
+  | { type: 'task_lifecycle'; event_json: string }
   | {
       type: 'task_output_chunk';
       task_id: string;

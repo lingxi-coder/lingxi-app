@@ -58,6 +58,36 @@ pub enum TodoState {
     Completed,
 }
 
+/// How a goal came to be active — the `origin` field of every `tengu_goal_*`
+/// analytics event.
+///
+/// Upstream 2.1.267 resolves it in `y(e,t)` (`src_161508826.js`), which reads a
+/// `queuedGoalOrigin` staged by `ProposeGoal` and otherwise returns the literal
+/// `"user"`, so the value is never absent. `ProposeGoal`'s two spellings
+/// (`proposal_direct` / `proposal_approved`) are unreachable here — LingXi does
+/// not ship that tool (see the accepted-divergence register) — which leaves the
+/// two values below.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalOrigin {
+    /// `y()`'s fallback: the user set this goal in this session.
+    #[default]
+    User,
+    /// `mon` (`src_182607998.js`) — the goal came back with a resumed session.
+    Restored,
+}
+
+impl GoalOrigin {
+    /// The analytics spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Restored => "restored",
+        }
+    }
+}
+
 /// Active session-scoped `/goal` state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveGoalState {
@@ -74,6 +104,16 @@ pub struct ActiveGoalState {
     /// Cumulative session tokens when the goal was set.
     #[serde(default)]
     pub tokens_at_start: u64,
+    /// How the goal became active. Upstream keeps `origin` on the in-memory
+    /// app-state object only — the persisted `goal_status` schema is
+    /// `{condition, iterations, set_at, tokens_at_start, last_reason}` — so this
+    /// is `skip`ped rather than added to a pinned wire shape. It survives a
+    /// compact boundary through
+    /// [`CompactActiveGoalState`](../../protocol/messages/struct.CompactActiveGoalState.html),
+    /// which mirrors upstream's raw dump of the same object, and the resume fold
+    /// re-derives it as [`GoalOrigin::Restored`] regardless of what was stored.
+    #[serde(skip)]
+    pub origin: GoalOrigin,
 }
 
 /// Timestamp sidecar for timing-sensitive history policies.

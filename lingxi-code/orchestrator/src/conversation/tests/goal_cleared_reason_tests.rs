@@ -46,6 +46,7 @@ async fn set_goal(orch: &ConversationOrchestrator, condition: &str) {
         last_reason: None,
         iterations: 0,
         tokens_at_start: 0,
+        origin: lingxi_core::session::GoalOrigin::User,
     });
 }
 

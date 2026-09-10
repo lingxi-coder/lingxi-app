@@ -323,6 +323,23 @@ pub struct CompactActiveGoalState {
     /// Cumulative tokens when the goal was activated.
     #[serde(default, alias = "tokensAtStart")]
     pub tokens_at_start: u64,
+    /// How the goal became active. Mirrors the engine's `GoalOrigin` without a
+    /// `protocol` → `engine` dependency; carried so a goal that survives a
+    /// compact boundary keeps reporting the origin it actually had, the way
+    /// upstream's compact metadata does by dumping the whole goal object.
+    #[serde(default)]
+    pub origin: CompactGoalOrigin,
+}
+
+/// The `protocol`-side mirror of the engine's `GoalOrigin`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactGoalOrigin {
+    /// The user set this goal in this session.
+    #[default]
+    User,
+    /// The goal came back with a resumed session.
+    Restored,
 }
 
 /// Typed metadata carried by a compact-boundary system message.

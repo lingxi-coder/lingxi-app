@@ -50,6 +50,21 @@ async fn bus_and_sink() -> (Arc<telemetry::AnalyticsBus>, Arc<telemetry::InMemor
     (bus, sink)
 }
 
+async fn set_goal_with_origin(
+    orch: &ConversationOrchestrator,
+    iterations: u64,
+    origin: lingxi_core::session::GoalOrigin,
+) {
+    set_goal(orch, iterations).await;
+    orch.session
+        .lock()
+        .await
+        .active_goal
+        .as_mut()
+        .unwrap()
+        .origin = origin;
+}
+
 async fn set_goal(orch: &ConversationOrchestrator, iterations: u64) {
     let mut s = orch.session.lock().await;
     s.active_goal = Some(lingxi_core::session::ActiveGoalState {
@@ -58,6 +73,7 @@ async fn set_goal(orch: &ConversationOrchestrator, iterations: u64) {
         last_reason: None,
         iterations,
         tokens_at_start: 0,
+        origin: lingxi_core::session::GoalOrigin::User,
     });
 }
 
@@ -300,6 +316,7 @@ async fn only_a_real_verdict_bumps_the_iteration_count() {
             last_reason: None,
             iterations: 5,
             tokens_at_start: 0,
+            origin: lingxi_core::session::GoalOrigin::User,
         };
 
         orch.fire_goal_evaluated(&goal, outcome, false, &[]).await;
@@ -340,4 +357,31 @@ async fn the_outcome_strings_match_the_oracle_vocabulary() {
             "absent"
         ]
     );
+}
+
+/// `origin: we(Fe.origin)`. Upstream's `y()` defaults the field to `"user"`,
+/// but `mon` stamps `"restored"` on every goal a resume recovers — so a goal
+/// that came back with the session must not be reported as one the user just
+/// set. This port hardcoded `"user"` at all three `tengu_goal_*` emitters.
+#[tokio::test]
+async fn a_resumed_goal_reports_its_origin_as_restored() {
+    let (bus, sink) = bus_and_sink().await;
+    let orch = orch(bus);
+    set_goal_with_origin(&orch, 2, lingxi_core::session::GoalOrigin::Restored).await;
+
+    stop_dispatch(&orch, false).await;
+
+    assert_eq!(str_field(&the_event(&sink).await, "origin"), "restored");
+}
+
+/// The control: an ordinary `/goal` still reports `y()`'s `"user"` fallback.
+#[tokio::test]
+async fn a_goal_set_in_this_session_reports_its_origin_as_user() {
+    let (bus, sink) = bus_and_sink().await;
+    let orch = orch(bus);
+    set_goal_with_origin(&orch, 2, lingxi_core::session::GoalOrigin::User).await;
+
+    stop_dispatch(&orch, false).await;
+
+    assert_eq!(str_field(&the_event(&sink).await, "origin"), "user");
 }

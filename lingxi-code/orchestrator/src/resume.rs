@@ -13,7 +13,7 @@
 use crate::config::OrchestratorConfig;
 use crate::conversation::{ConversationOrchestrator, NoStreamingApiClient, OrchestratorApiClient};
 use crate::test_support::{HookExecutor, PermissionGate};
-use lingxi_core::session::ActiveGoalState;
+use lingxi_core::session::{ActiveGoalState, GoalOrigin};
 use lingxi_core::SessionState;
 use platform_api::{FileSystem, OutputStream};
 use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
@@ -943,6 +943,7 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
                     last_reason: goal.last_reason,
                     iterations: goal.iterations,
                     tokens_at_start: goal.tokens_at_start,
+                    origin: GoalOrigin::Restored,
                 })
             });
         }
@@ -957,11 +958,26 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
         == Some("thread_goal_updated")
     {
         let goal_state = message.extra.get("goalState")?;
-        return serde_json::from_value::<Option<ActiveGoalState>>(goal_state.clone()).ok();
+        return serde_json::from_value::<Option<ActiveGoalState>>(goal_state.clone())
+            .ok()
+            .map(restored);
     }
     let compact_metadata = message.extra.get("compactMetadata")?;
     let goal_state = compact_metadata.get("activeGoal")?;
-    serde_json::from_value::<Option<ActiveGoalState>>(goal_state.clone()).ok()
+    serde_json::from_value::<Option<ActiveGoalState>>(goal_state.clone())
+        .ok()
+        .map(restored)
+}
+
+/// `mon` (`src_182607998.js`) stamps `origin:"restored"` on the goal it hands
+/// back, whichever transcript record it recovered the goal from. `origin` is not
+/// part of the persisted shape, so the fold re-derives it here rather than
+/// trusting whatever a decode defaulted to.
+fn restored(goal: Option<ActiveGoalState>) -> Option<ActiveGoalState> {
+    goal.map(|goal| ActiveGoalState {
+        origin: GoalOrigin::Restored,
+        ..goal
+    })
 }
 
 fn is_compact_boundary(message: &JsonlMessage) -> bool {

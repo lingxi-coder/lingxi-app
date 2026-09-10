@@ -713,10 +713,12 @@ impl ConversationOrchestrator {
     ///
     /// ## Divergence (reason)
     ///
-    /// `origin` is always `"user"` here. Upstream reads it from
-    /// `queuedGoalOrigin`, which only ever holds `proposal_direct` /
-    /// `proposal_approved` — both set exclusively by `ProposeGoal`, which LingXi
-    /// does not ship (see the accepted-divergence register).
+    /// `origin` comes off the goal. Upstream resolves it in `y(e,t)`
+    /// (`src_161508826.js`), which returns a `queuedGoalOrigin` staged by
+    /// `ProposeGoal` and otherwise the literal `"user"` — so it is never absent.
+    /// `ProposeGoal`'s two spellings are unreachable here (LingXi does not ship
+    /// that tool; see the accepted-divergence register), but `"restored"` is
+    /// not: `mon` stamps it on every goal recovered by a resume.
     pub(crate) async fn fire_goal_terminal_event(
         &self,
         status: platform_api::GoalStatusKind,
@@ -787,7 +789,7 @@ impl ConversationOrchestrator {
         );
         metadata.insert(
             "origin".into(),
-            telemetry::AnalyticsValue::String("user".to_string()),
+            telemetry::AnalyticsValue::String(goal.origin.as_str().to_string()),
         );
         bus.log_event(event, metadata).await;
     }
@@ -820,7 +822,7 @@ impl ConversationOrchestrator {
     /// orchestrator does not model subagent identity (see
     /// [`Self::fire_stop_hook_block_count`]) and only ever runs the main thread.
     ///
-    /// `origin` is always `"user"` here, for the reason recorded on
+    /// `origin` is the goal's, for the reason recorded on
     /// [`Self::fire_goal_terminal_event`].
     pub(super) async fn fire_goal_evaluated(
         &self,
@@ -863,7 +865,7 @@ impl ConversationOrchestrator {
         );
         metadata.insert(
             "origin".into(),
-            telemetry::AnalyticsValue::String("user".to_string()),
+            telemetry::AnalyticsValue::String(goal.origin.as_str().to_string()),
         );
         // `...Xe` — present ONLY on the deferred branch, where upstream sets
         // `Xe = {activeAgents: j(An, A9t), activeShells: j(An, v9t)}`. Both

@@ -1,6 +1,6 @@
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
-use lingxi_core::session::ActiveGoalState;
+use lingxi_core::session::{ActiveGoalState, GoalOrigin};
 use orchestrator::{
     replay_session_state, runtime_metadata_from_messages, state_from_messages, ResumeError,
 };
@@ -445,6 +445,10 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
         last_reason: Some("initial".to_string()),
         iterations: 1,
         tokens_at_start: 10,
+        // `origin` is `serde(skip)`, so this never reaches the transcript — the
+        // fold re-derives it. Left as the default so the assertion below can
+        // only pass if the fold actually stamped it.
+        origin: GoalOrigin::User,
     };
     let updated_goal = ActiveGoalState {
         condition: "ship it".to_string(),
@@ -452,6 +456,7 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
         last_reason: Some("still working".to_string()),
         iterations: 2,
         tokens_at_start: 10,
+        origin: GoalOrigin::User,
     };
     let messages = vec![
         line(json!({
@@ -480,6 +485,12 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
     let restored = state.active_goal.expect("goal restored");
     assert_eq!(restored.condition, "ship it");
     assert_eq!(restored.last_reason.as_deref(), Some("still working"));
+    assert_eq!(
+        restored.origin,
+        GoalOrigin::Restored,
+        "`mon` stamps `origin:\"restored\"` on whatever it recovers, so the \
+         `tengu_goal_*` metrics do not report a resumed goal as freshly set"
+    );
 }
 
 #[test]
@@ -539,6 +550,7 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
         .expect("typed set attachment restores goal");
     assert_eq!(goal.iterations, 2);
     assert_eq!(goal.tokens_at_start, 500);
+    assert_eq!(goal.origin, GoalOrigin::Restored);
 
     for status in [
         platform_api::GoalStatusKind::Achieved,

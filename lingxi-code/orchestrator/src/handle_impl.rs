@@ -312,6 +312,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             last_reason: goal.last_reason,
             iterations: goal.iterations,
             tokens_at_start: goal.tokens_at_start,
+            // Adopting a goal along with a resumed session is `mon`'s case.
+            origin: lingxi_core::session::GoalOrigin::Restored,
         });
         let resumed_effort = runtime.effort.clone();
         let resumed_reasoning = runtime.reasoning_selection.clone();
@@ -467,6 +469,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             last_reason: None,
             iterations: 0,
             tokens_at_start,
+            // `fxe`'s `origin: o`, where `y()` returned its `"user"` fallback.
+            origin: lingxi_core::session::GoalOrigin::User,
         });
         let snapshot = s.active_goal.clone();
         drop(s);

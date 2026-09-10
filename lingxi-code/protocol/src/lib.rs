@@ -34,8 +34,8 @@ pub use ids::{
 pub use mcp_name::normalize_name_for_mcp;
 pub use message_size::text_byte_size;
 pub use messages::{
-    is_nested_media_value, CompactActiveGoalState, CompactBoundaryMetadata, CompactTrigger,
-    ContentBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
+    is_nested_media_value, CompactActiveGoalState, CompactBoundaryMetadata, CompactGoalOrigin,
+    CompactTrigger, ContentBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
     MediaObservation, MemoryEntry, MemoryEntryTier, MessageRole, PreservedMessages,
     PreservedSegment,
 };

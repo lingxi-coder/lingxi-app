@@ -45,9 +45,6 @@ pub enum ProviderStreamTransport {
 /// Canonical request passed to provider protocols.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LlmRequest {
-    /// Host-only evidence provenance; model JSON and persisted requests cannot mint it.
-    #[serde(skip)]
-    pub evidence: Option<crate::evidence::CanonicalEvidence>,
     /// Host-only registered logical call. JSON cannot create or forward this
     /// authority, and it is never included in a provider request body.
     #[serde(skip)]

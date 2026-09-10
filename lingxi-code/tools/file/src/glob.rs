@@ -206,9 +206,6 @@ impl Tool for GlobTool {
         TOOL_NAME
     }
 
-    fn evidence_capability(&self) -> Option<platform_api::EvidenceCapability> {
-        Some(platform_api::EvidenceCapability::Glob)
-    }
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
     fn search_hint(&self) -> Option<&str> {
@@ -758,17 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_exposes_only_its_reviewed_evidence_capability() {
-        let tmp = TempDir::new().unwrap();
-        let (ctx, _sink) = make_ctx(&tmp);
-        let tool = GlobTool::new(ctx);
-        assert_eq!(
-            tool.evidence_capability(),
-            Some(platform_api::EvidenceCapability::Glob)
-        );
-    }
-
-    #[test]
+        #[test]
     fn max_matches_byte_locked() {
         assert_eq!(MAX_GLOB_MATCHES, 100);
     }

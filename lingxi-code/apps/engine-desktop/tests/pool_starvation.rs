@@ -125,7 +125,6 @@ impl BudgetEnforcerHandle for OpenBudget {
 fn parked_teammate_ctx() -> SubagentContext {
     SubagentContext {
         model_attempt: None,
-        evidence_context: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_name: None,
@@ -225,7 +224,6 @@ async fn fill_with_parked_teammates(pool: &StateMachinePool) {
 fn agent_tool_request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
         model_attempt: None,
-        evidence_context: None,
         subagent_type: "general-purpose".into(),
         prompt: "do one thing".into(),
         observer: None,

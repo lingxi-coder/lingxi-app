@@ -327,7 +327,6 @@ mod tests {
     fn make_ctx() -> SubagentContext {
         SubagentContext {
             model_attempt: None,
-            evidence_context: None,
             agent_id: AgentId::new(),
             parent_agent_id: None,
             agent_name: None,

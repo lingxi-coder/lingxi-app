@@ -1713,9 +1713,6 @@ impl Tool for FileReadTool {
         TOOL_NAME
     }
 
-    fn evidence_capability(&self) -> Option<platform_api::EvidenceCapability> {
-        Some(platform_api::EvidenceCapability::Read)
-    }
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
     fn search_hint(&self) -> Option<&str> {
@@ -2726,17 +2723,7 @@ mod tests {
     }
 
     #[test]
-    fn read_exposes_only_its_reviewed_evidence_capability() {
-        let tmp = TempDir::new().unwrap();
-        let (ctx, _sink) = make_ctx(&tmp);
-        let tool = FileReadTool::new(ctx);
-        assert_eq!(
-            tool.evidence_capability(),
-            Some(platform_api::EvidenceCapability::Read)
-        );
-    }
-
-    // ── Fix #2: short dedup string (jbi) ──────────────────────────────────────
+        // ── Fix #2: short dedup string (jbi) ──────────────────────────────────────
 
     #[test]
     fn file_unchanged_stub_is_byte_locked() {

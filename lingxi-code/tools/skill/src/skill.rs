@@ -344,7 +344,6 @@ impl SkillTool {
         };
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
             model_attempt: None,
-            evidence_context: None,
             subagent_type: desc
                 .agent
                 .clone()

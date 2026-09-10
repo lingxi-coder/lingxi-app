@@ -24,16 +24,6 @@ pub trait Tool: Send + Sync {
     /// Canonical tool name (e.g. `"Read"`, `"Bash"`).
     fn name(&self) -> &str;
 
-    /// Trusted host capability for Fusion evidence capture.
-    ///
-    /// This is deliberately selected by the concrete registered Tool, not by
-    /// its display name or by model JSON. The registry only consults it on a
-    /// trusted `FusionPanel` invocation after the tool returns a successful,
-    /// non-error result. Ordinary tools keep the default `None` path.
-    fn evidence_capability(&self) -> Option<platform_api::EvidenceCapability> {
-        None
-    }
-
     /// Alternate names the dispatcher should accept for this tool.
     ///
     /// Defaults to no aliases.

@@ -20,7 +20,6 @@ pub mod cost;
 pub mod credentials;
 pub mod error;
 pub mod eventstream;
-pub mod evidence;
 pub mod fusion_hints;
 pub mod model;
 pub mod model_attempt;

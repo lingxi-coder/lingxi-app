@@ -104,7 +104,7 @@ pub(crate) async fn synthesize_registered(
                 return Err((SynthError::Failed, usage));
             }
             let sanitized = sanitize_blocks(&[raw.replace('\0', "")]).content.join("");
-            if crate::evidence::citations::validate_merged_citations(&sanitized, &allowed_citations)
+            if crate::citations::validate_merged_citations(&sanitized, &allowed_citations)
                 .is_err()
             {
                 return Err((SynthError::InvalidCitations, usage));
@@ -267,8 +267,6 @@ mod tests {
 
     #[tokio::test]
     async fn citation_integrity_preserves_billed_usage_without_an_extra_query() {
-        let host = crate::evidence::tests::included_host_evidence();
-        let reference = host.attestation.receipt_ref().to_owned();
         let panel = PanelInternal {
             index: 0,
             profile: "p".into(),
@@ -280,7 +278,12 @@ mod tests {
                 summary: "summary".into(),
                 candidate_answer: "candidate".into(),
                 claims: vec![],
-                evidence: vec![],
+                evidence: vec![platform_api::PanelEvidence {
+                    id: "e1".into(),
+                    kind: platform_api::EvidenceKind::File,
+                    locator: "a.rs".into(),
+                    excerpt: None,
+                }],
                 assumptions: vec![],
                 risks: vec![],
                 unresolved_questions: vec![],
@@ -290,15 +293,13 @@ mod tests {
             error_detail: None,
             usage: None,
             spawn_prompt: String::new(),
-            host_evidence: vec![host],
         };
         for (answer, valid) in [
-            (format!("answer [evidence:{reference}]"), true),
-            ("legacy answer".into(), true),
-            (
-                "answer [evidence:evr_00000000000000000000000000000000]".into(),
-                false,
-            ),
+            ("answer [evidence:P1:e1]".to_string(), true),
+            ("answer with no citation".into(), true),
+            // An id the panel never listed, and one listed under another panel.
+            ("answer [evidence:P1:e9]".into(), false),
+            ("answer [evidence:P2:e1]".into(), false),
         ] {
             let client = Arc::new(BilledCitationClient {
                 answer,

@@ -825,7 +825,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         opts: agent::api::SubagentApiCallOpts,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         self.service
-            .stream_with_evidence_opts(
+            .stream_with_attempt_opts(
                 model,
                 profile,
                 system,
@@ -836,7 +836,6 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
                 opts.max_output_tokens,
                 opts.query_source_label.as_deref(),
                 opts.model_attempt,
-                opts.evidence_delivery,
             )
             .await
     }
@@ -853,7 +852,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         opts: agent::api::SubagentApiCallOpts,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         self.service
-            .stream_with_evidence_opts(
+            .stream_with_attempt_opts(
                 model,
                 profile,
                 system,
@@ -864,7 +863,6 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
                 opts.max_output_tokens,
                 opts.query_source_label.as_deref(),
                 opts.model_attempt,
-                opts.evidence_delivery,
             )
             .await
     }
@@ -1210,7 +1208,6 @@ mod tests {
                 agent::api::SubagentApiCallOpts {
                     max_output_tokens: Some(777),
                     model_attempt: None,
-                    evidence_delivery: None,
                     query_source_label: Some("fusion_panel".to_string()),
                 },
             )
@@ -1243,7 +1240,6 @@ mod tests {
                 agent::api::SubagentApiCallOpts {
                     max_output_tokens: Some(321),
                     model_attempt: None,
-                    evidence_delivery: None,
                     query_source_label: Some("fusion_panel".to_string()),
                 },
             )

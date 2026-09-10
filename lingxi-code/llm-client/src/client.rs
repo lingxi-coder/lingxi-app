@@ -391,11 +391,6 @@ impl DefaultLlmClient {
             &routed_request
         };
         let provider_request = codec.encode_request(encoding_request)?;
-        let evidence_proof = crate::evidence::PreparedEvidenceProof::prepare(
-            encoding_request,
-            codec.as_ref(),
-            &provider_request.body_json,
-        );
         let mut provider_request = self
             .authenticate_at(entry, &resolved_route.profile_name, provider_request, now)
             .await?;
@@ -408,7 +403,6 @@ impl DefaultLlmClient {
         }
 
         Ok(PreparedLlmCall {
-            evidence_proof,
             registered_attempt: request.model_attempt.is_some(),
             route: Route {
                 resolved_route,
@@ -1421,7 +1415,6 @@ fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), Ll
 
 #[derive(Debug)]
 pub struct PreparedLlmCall {
-    pub(crate) evidence_proof: Option<crate::evidence::PreparedEvidenceProof>,
     registered_attempt: bool,
     pub route: Route,
     pub provider_request: ProviderRequest,

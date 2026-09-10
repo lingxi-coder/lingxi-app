@@ -40,8 +40,6 @@ pub enum ToolExecutionPolicy {
 /// concrete `ToolUseContext` from `lingxi-tools`.
 #[derive(Debug, Clone)]
 pub struct SubagentInvocationContext {
-    /// Host-only per-panel owner; ignored unless the trusted policy is FusionPanel.
-    pub evidence_context: Option<crate::EvidenceContext>,
     /// Parent agent id (the agent that is dispatching the child).
     pub parent_agent_id: Option<AgentId>,
     /// Trusted originating session for nested Agent/Fusion budget scoping.
@@ -203,32 +201,6 @@ impl ToolInvokerError {
     }
 }
 
-/// Unchanged tool value plus an optional host-only evidence capability.
-/// This envelope is intentionally not serializable and does not claim delivery.
-pub struct ToolInvocationResult {
-    /// Tool data, unchanged from the legacy invocation path.
-    pub value: Value,
-    /// Successful authorized capture, never inferred from the value's fields.
-    pub evidence: Option<crate::CapturedToolEvidence>,
-}
-
-impl From<Value> for ToolInvocationResult {
-    fn from(value: Value) -> Self {
-        Self {
-            value,
-            evidence: None,
-        }
-    }
-}
-
-impl std::fmt::Debug for ToolInvocationResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolInvocationResult")
-            .field("has_evidence", &self.evidence.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
 /// Tool invocation seam used by `AgentTool` to recurse into the registry.
 ///
 /// Concrete impls live in `lingxi-tools` (production wrapper around
@@ -254,31 +226,6 @@ pub trait ToolInvoker: Send + Sync + Any {
         _workspace_lease_token: Option<u64>,
     ) -> Result<Value, ToolInvokerError> {
         self.invoke(name, input, ctx).await
-    }
-
-    /// Observe optional host evidence without requiring legacy implementors to
-    /// implement a new method. The default never invents a capture.
-    async fn invoke_observed(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-    ) -> Result<ToolInvocationResult, ToolInvokerError> {
-        self.invoke(name, input, ctx).await.map(Into::into)
-    }
-
-    /// Observed lease entrypoint. Delegate to the existing lease method, not
-    /// `invoke_observed`, so legacy lease-aware permission checks are retained.
-    async fn invoke_observed_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
-    ) -> Result<ToolInvocationResult, ToolInvokerError> {
-        self.invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
-            .await
-            .map(Into::into)
     }
 
     /// Cast to `&dyn Any` for downcast-based test introspection.

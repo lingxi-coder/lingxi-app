@@ -12,7 +12,7 @@ mod attempts;
 mod budget;
 mod config;
 mod decision;
-pub mod evidence;
+mod citations;
 mod model_resolver;
 mod orchestrator;
 mod packing;

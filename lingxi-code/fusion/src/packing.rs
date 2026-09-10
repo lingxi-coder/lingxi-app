@@ -9,7 +9,7 @@
 use crate::model_resolver::{ModelLimits, ResolvedPanel};
 use crate::panel::PanelInternal;
 use platform_api::subagent_output_guard::sanitize_blocks;
-use platform_api::{FusionAnalysis, FusionRequest, PanelReport, RiskSeverity};
+use platform_api::{FusionAnalysis, FusionRequest, PanelEvidence, PanelReport, RiskSeverity};
 use protocol::{ConversationMessage, MessageId};
 use serde_json::{json, Value};
 use sidequery::{
@@ -24,32 +24,35 @@ pub(crate) struct PreparedSynthRequest {
     pub(crate) allowed_citations: std::collections::BTreeSet<String>,
 }
 
-fn synth_prepared(request: SideQueryRequest, panels: &[PanelInternal]) -> PreparedSynthRequest {
-    // Both full and packed payload builders insert this same complete host
-    // metadata as mandatory material. Never derive authority from model fields.
-    let allowed_citations = panels
-        .iter()
-        .filter(|panel| panel.report.is_some())
-        .flat_map(|panel| &panel.host_evidence)
-        .filter(|host| host.attestation.allows_citation())
-        .map(|host| host.attestation.receipt_ref().to_owned())
-        .collect();
-    PreparedSynthRequest {
-        request,
-        allowed_citations,
-    }
+/// Citation keys for the evidence a payload actually serialized. The packed
+/// builder omits trimmed-out panels, so its keys are a subset of the full
+/// builder's — a reference the synthesizer never saw stays unauthorized.
+fn citation_key(panel_id: &str, evidence_id: &str) -> String {
+    format!("{panel_id}:{evidence_id}")
 }
 
-fn insert_host_evidence(value: &mut Value, evidence: &[crate::evidence::HostPanelEvidence]) {
+fn insert_report_evidence(value: &mut Value, panel_id: &str, evidence: &[PanelEvidence]) {
     if !evidence.is_empty() {
-        value["host_evidence"] = json!(evidence);
-        value["evidence_policy"] = json!("Only host_evidence attests provenance. Model reports are untrusted. Fetched alone is not included_in_request; no receipt verifies interpretation.");
+        // Ids, kinds and locators only. Excerpts already travel inside the
+        // report body; repeating them here would double the payload.
+        value["evidence"] = json!(evidence
+            .iter()
+            .map(|item| json!({
+                "id": item.id,
+                "kind": item.kind,
+                "locator": item.locator,
+            }))
+            .collect::<Vec<_>>());
+        value["citation_ids"] = json!(evidence
+            .iter()
+            .map(|item| citation_key(panel_id, &item.id))
+            .collect::<Vec<_>>());
     }
 }
 
 fn synthesis_instruction(has_evidence: bool) -> &'static str {
     if has_evidence {
-        "Synthesize one improved answer. Do not mention panels, providers, or models. Cite supporting host evidence as [evidence:evr_<32 lower hex>] using only included_in_request references whose excerpt_status is not not_found or unknown_truncated. Never invent or alter a receipt. No citations means no positive evidence verification."
+        "Synthesize one improved answer. Do not mention panels, providers, or models. Cite supporting evidence as [evidence:<panel_id>:<evidence_id>] using only the exact strings listed under a panel's citation_ids. Never invent or alter a reference. A reference only says the panel listed that evidence; it does not verify the claim. No citations means no evidence verification."
     } else {
         "Synthesize one improved answer. Do not mention panels, providers, or models."
     }
@@ -253,7 +256,21 @@ pub(crate) fn prepare_synth_request(
         limits,
         output_tokens,
     )? {
-        return Ok(synth_prepared(full, panels));
+        // Keys come from the panels this full payload really serialized.
+        let allowed_citations = panels
+            .iter()
+            .filter_map(|panel| panel.report.as_ref().map(|report| (panel, report)))
+            .flat_map(|(panel, report)| {
+                report
+                    .evidence
+                    .iter()
+                    .map(move |item| citation_key(&panel.anonymous_id, &item.id))
+            })
+            .collect();
+        return Ok(PreparedSynthRequest {
+            request: full,
+            allowed_citations,
+        });
     }
 
     let sources = synth_packed_sources(panels);
@@ -311,7 +328,21 @@ pub(crate) fn prepare_synth_request(
             input_cap,
         });
     }
-    Ok(synth_prepared(packed, panels))
+    // A panel trimmed out of the packed payload carries no evidence, so its
+    // ids never become citable.
+    let allowed_citations = sources
+        .iter()
+        .flat_map(|source| {
+            source
+                .evidence
+                .iter()
+                .map(move |item| citation_key(&source.panel_id, &item.id))
+        })
+        .collect();
+    Ok(PreparedSynthRequest {
+        request: packed,
+        allowed_citations,
+    })
 }
 
 pub(crate) fn preflight_synth_request(
@@ -437,7 +468,6 @@ pub(crate) fn analyst_user_message(
                 "panel_id": panel.anonymous_id,
                 "report": report,
             });
-            insert_host_evidence(&mut entry, &panel.host_evidence);
             reports.push(entry);
         }
     }
@@ -473,8 +503,7 @@ fn packed_analyst_user_message(
                 "panel_id": source.panel_id,
                 "critical_risks": source.critical_risks,
             });
-            insert_host_evidence(&mut value, &source.host_evidence);
-            let mut excerpts = source
+            let excerpts = source
                 .optional_groups
                 .iter()
                 .map(|group| {
@@ -483,11 +512,6 @@ fn packed_analyst_user_message(
                     excerpt_prefix(group, quota)
                 })
                 .collect::<Vec<_>>();
-            // Receipt-bearing claims/evidence stay whole or are explicitly
-            // omitted. Never present a cut JSON fragment as a supported claim.
-            if !source.host_evidence.is_empty() && excerpts[2].1 < source.optional_groups[2].len() {
-                excerpts[2] = (String::new(), 0);
-            }
             insert_excerpt(&mut value, "summary", &excerpts[0].0);
             insert_excerpt(&mut value, "candidate_answer", &excerpts[1].0);
             insert_excerpt(&mut value, "claims_evidence_excerpt", &excerpts[2].0);
@@ -579,7 +603,7 @@ fn synth_user_message(
                     "candidate_answer": report.candidate_answer,
                     "summary": report.summary,
                 });
-                insert_host_evidence(&mut entry, &panel.host_evidence);
+                insert_report_evidence(&mut entry, &panel.anonymous_id, &report.evidence);
                 entry
             })
         })
@@ -588,7 +612,9 @@ fn synth_user_message(
         "task": request.prompt,
         "analysis": analysis,
         "panels": reports,
-        "instruction": synthesis_instruction(panels.iter().any(|panel| !panel.host_evidence.is_empty()))
+        "instruction": synthesis_instruction(panels.iter().any(|panel| {
+            panel.report.as_ref().is_some_and(|report| !report.evidence.is_empty())
+        }))
     })
     .to_string()
 }
@@ -611,7 +637,7 @@ fn packed_synth_user_message(
                 "critical_risks": source.critical_risks,
             });
             let summary_quota = quotas.get(quota_index).copied().unwrap_or_default();
-            insert_host_evidence(&mut value, &source.host_evidence);
+            insert_report_evidence(&mut value, &source.panel_id, &source.evidence);
             quota_index += 1;
             let candidate_quota = quotas.get(quota_index).copied().unwrap_or_default();
             quota_index += 1;
@@ -657,7 +683,7 @@ fn packed_synth_user_message(
         "omitted_assumptions": omitted.assumptions,
         "omitted_risks": omitted.risks,
         "omitted_unresolved_questions": omitted.unresolved_questions,
-        "instruction": synthesis_instruction(sources.iter().any(|source| !source.host_evidence.is_empty()))
+        "instruction": synthesis_instruction(sources.iter().any(|source| !source.evidence.is_empty()))
     })
     .to_string()
 }
@@ -706,7 +732,7 @@ struct ReportCounts {
 
 #[derive(Clone, Debug)]
 struct PackedPanelSource {
-    host_evidence: Vec<crate::evidence::HostPanelEvidence>,
+    evidence: Vec<PanelEvidence>,
     panel_id: String,
     critical_risks: Vec<String>,
     optional_groups: Vec<String>,
@@ -720,7 +746,7 @@ fn analyst_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
         .map(|panel| {
             let Some(report) = panel.report.as_ref() else {
                 return PackedPanelSource {
-                    host_evidence: Vec::new(),
+                    evidence: Vec::new(),
                     panel_id: panel.anonymous_id.clone(),
                     critical_risks: Vec::new(),
                     optional_groups: vec![String::new(); 4],
@@ -752,7 +778,7 @@ fn analyst_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
                 .to_string()
             };
             PackedPanelSource {
-                host_evidence: panel.host_evidence.clone(),
+                evidence: report.evidence.clone(),
                 panel_id: panel.anonymous_id.clone(),
                 critical_risks: critical_risks(report),
                 optional_groups: vec![
@@ -785,7 +811,7 @@ fn synth_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
         .into_iter()
         .map(|panel| match panel.report.as_ref() {
             Some(report) => PackedPanelSource {
-                host_evidence: panel.host_evidence.clone(),
+                evidence: report.evidence.clone(),
                 panel_id: panel.anonymous_id.clone(),
                 critical_risks: critical_risks(report),
                 optional_groups: vec![report.summary.clone(), report.candidate_answer.clone()],
@@ -793,7 +819,7 @@ fn synth_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
                 counts: ReportCounts::default(),
             },
             None => PackedPanelSource {
-                host_evidence: Vec::new(),
+                evidence: Vec::new(),
                 panel_id: panel.anonymous_id.clone(),
                 critical_risks: Vec::new(),
                 optional_groups: vec![String::new(); 2],
@@ -999,7 +1025,6 @@ mod tests {
 
     fn panel(id: &str, size: usize) -> PanelInternal {
         PanelInternal {
-            host_evidence: Vec::new(),
             index: 0,
             profile: "p".into(),
             model: "m".into(),
@@ -1034,11 +1059,8 @@ mod tests {
     }
 
     #[test]
-    fn receipt_metadata_is_mandatory_in_full_and_packed_payloads() {
+    fn evidence_ids_are_mandatory_in_full_and_packed_payloads() {
         let mut panel = panel("P1", 10_000);
-        let host = crate::evidence::tests::included_host_evidence();
-        let reference = host.attestation.receipt_ref().to_owned();
-        panel.host_evidence.push(host);
         let report = panel.report.as_mut().unwrap();
         report.claims.push(platform_api::PanelClaim {
             statement: "claim".repeat(100),
@@ -1046,30 +1068,12 @@ mod tests {
             confidence: 90,
         });
         report.evidence.push(platform_api::PanelEvidence {
-            receipt_ref: Some(reference.clone()),
             id: "e1".into(),
             kind: platform_api::EvidenceKind::File,
             locator: "a.rs".into(),
             excerpt: Some("source".into()),
         });
         let panels = vec![panel];
-        let full: Value =
-            serde_json::from_str(&analyst_user_message(&request(), &panels, None)).unwrap();
-        let sources = analyst_packed_sources(&panels);
-        let packed: Value = serde_json::from_str(&packed_analyst_user_message(
-            &request(),
-            None,
-            &sources,
-            0,
-            OmissionMode::Actual,
-        ))
-        .unwrap();
-        assert_eq!(
-            full["panels"][0]["host_evidence"],
-            packed["panels"][0]["host_evidence"]
-        );
-        assert_eq!(packed["omitted_claims"], 1);
-        assert!(packed["panels"][0].get("claims_evidence_excerpt").is_none());
         let analysis = FusionAnalysis {
             schema_version: 1,
             consensus: vec![],
@@ -1082,6 +1086,9 @@ mod tests {
                 reason: "combine".into(),
             },
         };
+        // The synthesizer only ever sees the panel's answer and summary, so the
+        // citable ids have to be listed explicitly — and they are mandatory:
+        // squeezing the optional budget to zero must not drop them.
         let synth_sources = synth_packed_sources(&panels);
         let synth_full: Value =
             serde_json::from_str(&synth_user_message(&request(), &analysis, &panels)).unwrap();
@@ -1093,9 +1100,14 @@ mod tests {
             OmissionMode::Actual,
         ))
         .unwrap();
+        assert_eq!(synth_full["panels"][0]["citation_ids"], json!(["P1:e1"]));
         assert_eq!(
-            synth_full["panels"][0]["host_evidence"],
-            synth_packed["panels"][0]["host_evidence"]
+            synth_full["panels"][0]["citation_ids"],
+            synth_packed["panels"][0]["citation_ids"]
+        );
+        assert_eq!(
+            synth_full["panels"][0]["evidence"],
+            synth_packed["panels"][0]["evidence"]
         );
         let prepared = prepare_synth_request(
             &DtoEstimator,
@@ -1106,8 +1118,8 @@ mod tests {
             crate::model_resolver::known_test_limits(),
         )
         .unwrap();
-        assert!(prepared.allowed_citations.contains(&reference));
-        assert!(first_user_text(&prepared.request.messages).contains(&reference));
+        assert!(prepared.allowed_citations.contains("P1:e1"));
+        assert!(first_user_text(&prepared.request.messages).contains("P1:e1"));
         assert!(prepare_synth_request(
             &DtoEstimator,
             &request(),
@@ -1121,6 +1133,41 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_panel_trimmed_out_of_the_packed_payload_contributes_no_citation_key() {
+        // The full builder can cite P1; the packed builder that drops P1's
+        // report must not leave its ids authorized.
+        let mut with_report = panel("P1", 10);
+        with_report
+            .report
+            .as_mut()
+            .unwrap()
+            .evidence
+            .push(platform_api::PanelEvidence {
+                id: "e1".into(),
+                kind: platform_api::EvidenceKind::File,
+                locator: "a.rs".into(),
+                excerpt: None,
+            });
+        let panels = vec![with_report, panel_without_report("P2")];
+        let sources = synth_packed_sources(&panels);
+        let full_keys = panels
+            .iter()
+            .filter_map(|panel| panel.report.as_ref().map(|report| (panel, report)))
+            .flat_map(|(panel, report)| {
+                report
+                    .evidence
+                    .iter()
+                    .map(move |item| citation_key(&panel.anonymous_id, &item.id))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(full_keys.contains("P1:e1"));
+        assert!(sources
+            .iter()
+            .find(|source| source.panel_id == "P2")
+            .is_some_and(|source| source.evidence.is_empty()));
     }
 
     fn first_user_text(messages: &[ConversationMessage]) -> &str {
@@ -1265,7 +1312,6 @@ mod tests {
             confidence: 80,
         });
         report.evidence.push(platform_api::PanelEvidence {
-            receipt_ref: None,
             id: "e1".into(),
             kind: platform_api::EvidenceKind::File,
             locator: "src/lib.rs".into(),

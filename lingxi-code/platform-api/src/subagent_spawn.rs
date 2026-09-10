@@ -85,9 +85,6 @@ pub enum StructuredOutputMode {
 /// so the trait surface stays insulated from `lingxi-tools`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SubagentSpawnRequest {
-    /// Host-owned panel evidence scope. Persisted/model-authored input cannot mint it.
-    #[serde(skip)]
-    pub evidence_context: Option<crate::EvidenceContext>,
     /// Host-only registered model-call capability for this child. Neither
     /// model-authored input nor serialized task replay may mint this authority.
     #[serde(skip)]
@@ -1080,16 +1077,17 @@ pub trait SubagentSpawner: Send + Sync {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn evidence_scope_is_not_restored_from_serialized_spawn() {
-        let request = super::SubagentSpawnRequest {
-            evidence_context: Some(crate::EvidenceRun::new().new_panel()),
-            ..super::SubagentSpawnRequest::default()
-        };
+    fn model_attempt_authority_is_not_restored_from_serialized_spawn() {
+        // A spawn request round-trips through task replay and the wire, so a
+        // persisted or model-authored payload must not be able to mint the
+        // host's registered model-call authority.
+        let request = super::SubagentSpawnRequest::default();
         let mut value = serde_json::to_value(&request).unwrap();
-        assert!(value.get("evidence_context").is_none());
-        value["evidence_context"] = serde_json::json!({"forged": true});
+        assert!(value.get("model_attempt").is_none());
+        value["model_attempt"] =
+            serde_json::json!({"logical_call_id": 1, "stage": "panel", "panel_slot": 0});
         let restored: super::SubagentSpawnRequest = serde_json::from_value(value).unwrap();
-        assert!(restored.evidence_context.is_none());
+        assert!(restored.model_attempt.is_none());
     }
     use super::*;
     use std::sync::Arc;

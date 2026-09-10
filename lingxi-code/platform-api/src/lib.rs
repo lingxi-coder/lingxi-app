@@ -51,7 +51,6 @@ pub mod deep_link;
 pub mod device_status;
 pub mod effect_handler;
 pub mod env;
-pub mod evidence;
 pub mod file_history_sink;
 pub mod filesystem;
 pub mod fork_resume_gate;
@@ -137,12 +136,6 @@ pub use contacts::{Contact, ContactsError, ContactsProvider, ContactsQuery};
 pub use deep_link::{DeepLinkError, DeepLinkOpener};
 pub use device_status::{DeviceStatus, DeviceStatusError, DeviceStatusProvider};
 pub use effect_handler::EffectHandler;
-pub use evidence::{
-    CapturedToolEvidence, EvidenceAttestation, EvidenceBlockRef, EvidenceCapability,
-    EvidenceContext, EvidenceDelivery, EvidenceExcerptStatus, EvidenceHistoryBinding,
-    EvidenceReceipt, EvidenceReceiptRef, EvidenceRun, EvidenceSource, SelectedEvidence,
-    MAX_EVIDENCE_BYTES_PER_PANEL, MAX_EVIDENCE_BYTES_PER_RECEIPT, MAX_EVIDENCE_BYTES_PER_RUN,
-};
 pub use file_history_sink::FileHistorySink;
 pub use filesystem::{
     apply_line_window, file_content_from_prefix_bytes, FileContent, FileEvent, FileEventKind,

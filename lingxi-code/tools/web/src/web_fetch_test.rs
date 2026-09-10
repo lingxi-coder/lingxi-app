@@ -1602,10 +1602,6 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             assert_eq!(data["truncated"], true);
             assert_eq!(data["source"], "network");
             assert_eq!(data["fetched_at_ms"], 123);
-            assert_eq!(
-                data["truncation_limit_bytes"],
-                FUSION_WEBFETCH_RESULT_MAX_BYTES
-            );
             assert!(data["result"]
                 .as_str()
                 .expect("result string")

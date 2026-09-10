@@ -750,7 +750,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
             model_attempt: None,
-            evidence_context: None,
             subagent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
             origin_session_id: Some(origin_session_id),
             // NOTE (deliberate deviation from the plan's `String::new()`): the

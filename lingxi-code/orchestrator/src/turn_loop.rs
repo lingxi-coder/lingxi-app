@@ -9156,7 +9156,6 @@ mod tool_hook_wiring_tests {
         let invoker =
             RegistryToolInvoker::new(Arc::new(registry)).with_gate(Arc::new(NoOpPermissionGate));
         let ctx = SubagentInvocationContext {
-            evidence_context: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,

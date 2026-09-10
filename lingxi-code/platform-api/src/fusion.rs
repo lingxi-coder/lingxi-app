@@ -1508,9 +1508,6 @@ pub enum EvidenceKind {
 /// One evidence item cited by claims.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanelEvidence {
-    /// Optional host-minted receipt; absent legacy evidence remains unverified.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receipt_ref: Option<String>,
     /// Report-local unique id.
     pub id: String,
     /// Evidence kind.
@@ -3155,14 +3152,12 @@ mod tests {
             }],
             evidence: vec![
                 PanelEvidence {
-                    receipt_ref: None,
                     id: "e1".into(),
                     kind: EvidenceKind::File,
                     locator: "src/a.rs".into(),
                     excerpt: None,
                 },
                 PanelEvidence {
-                    receipt_ref: None,
                     id: "e1".into(),
                     kind: EvidenceKind::File,
                     locator: "src/b.rs".into(),

@@ -683,49 +683,8 @@ impl ApiService {
         query_source: Option<&str>,
         model_attempt: Option<platform_api::ModelAttemptContext>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        self.stream_with_evidence_opts(
-            model,
-            profile,
-            system,
-            messages,
-            tools,
-            forced_tool,
-            effort,
-            max_tokens,
-            query_source,
-            model_attempt,
-            None,
-        )
-        .await
-    }
-
-    /// Panel stream with immutable host evidence selection. No inclusion is
-    /// recorded until the real physical request passes dispatch authorization.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn stream_with_evidence_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-        max_tokens: Option<u32>,
-        query_source: Option<&str>,
-        model_attempt: Option<platform_api::ModelAttemptContext>,
-        evidence: Option<platform_api::EvidenceDelivery>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut request = self.build_request_observed(
-            model,
-            profile,
-            system,
-            messages,
-            tools,
-            true,
-            max_tokens,
-            evidence.as_ref(),
-        )?;
+        let mut request =
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
         request.effort = effort;
         request.query_source = query_source.map(str::to_string);
         request.model_attempt = model_attempt;
@@ -1264,23 +1223,7 @@ impl ApiService {
         stream: bool,
         max_tokens: Option<u32>,
     ) -> Result<LlmRequest, LlmError> {
-        self.build_request_observed(
-            model, profile, system, msgs, tools, stream, max_tokens, None,
-        )
-    }
 
-    #[allow(clippy::too_many_arguments)]
-    fn build_request_observed(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        stream: bool,
-        max_tokens: Option<u32>,
-        evidence: Option<&platform_api::EvidenceDelivery>,
-    ) -> Result<LlmRequest, LlmError> {
         // Pre-wire pipeline (claude-code order): strip_excess_media →
         // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
         // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
@@ -1301,8 +1244,6 @@ impl ApiService {
             .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
             .map(str::to_string)
             .collect();
-        let tagged =
-            evidence.and_then(|delivery| crate::evidence::tag_conversation(delivery, &msgs));
         let normalize = |messages| {
             to_llm_messages(ensure_tool_result_pairing(
                 normalize_messages_for_api_with_tool_search(
@@ -1313,14 +1254,9 @@ impl ApiService {
             ))
         };
         let messages = normalize(msgs)?;
-        let mapped_evidence = tagged.and_then(|tagged| {
-            let canonical_twin = normalize(tagged.messages.clone()).ok()?;
-            crate::evidence::map_canonical(&messages, &canonical_twin, tagged)
-        });
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);
-        req.evidence = mapped_evidence;
         if let Some(p) = profile {
             req = req.with_profile(p);
         }
@@ -2756,18 +2692,8 @@ impl ApiService {
             };
             Self::log_deepseek_prepared_request(&req.model, &prepared, false);
             self.inject_headers(&mut prepared, &request_id, dispatch);
-            if prepared
-                .evidence_proof
-                .as_mut()
-                .is_some_and(|proof| !proof.seal_final_request(&prepared.provider_request))
-            {
-                prepared.evidence_proof = None;
-            }
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
             attempt.mark_dispatched()?;
-            if let Some(proof) = &prepared.evidence_proof {
-                proof.mark_request_submitted(&prepared.provider_request);
-            }
             let resp_result = self.transport.execute(&prepared.provider_request).await;
 
             match resp_result {
@@ -3752,17 +3678,13 @@ impl ApiService {
                 )
             });
 
+            // A registered attempt is metered on the HTTP path only: the
+            // prepared-WebSocket path below never marks dispatch, so reusing a
+            // WS session would lose the attempt. Restoring WS reuse for
+            // registered calls means pushing `mark_dispatched` into that path.
             let registered = req.model_attempt.is_some();
-            let observed = registered || req.evidence.is_some();
-            if observed {
+            if registered {
                 prepared.provider_request.stream_transport = crate::ProviderStreamTransport::Http;
-            }
-            if prepared
-                .evidence_proof
-                .as_mut()
-                .is_some_and(|proof| !proof.seal_final_request(&prepared.provider_request))
-            {
-                prepared.evidence_proof = None;
             }
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
 
@@ -3770,11 +3692,8 @@ impl ApiService {
             // preserved while OpenAI Responses providers can reuse a WebSocket
             // session and apply previous_response_id deltas.
             let open = async {
-                if observed {
+                if registered {
                     attempt.mark_dispatched()?;
-                    if let Some(proof) = &prepared.evidence_proof {
-                        proof.mark_request_submitted(&prepared.provider_request);
-                    }
                     let streaming = self
                         .transport
                         .open_stream(&prepared.provider_request)

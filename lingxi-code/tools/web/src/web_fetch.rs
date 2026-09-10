@@ -145,10 +145,6 @@ fn cap_fusion_result_data(
             .expect("checked that Fusion result data is an object");
         object.insert("source".into(), json!(source.source_label()));
         object.insert("fetched_at_ms".into(), json!(fetched_at_ms));
-        object.insert(
-            "truncation_limit_bytes".into(),
-            json!(FUSION_WEBFETCH_RESULT_MAX_BYTES),
-        );
         object.insert("truncated".into(), json!(false));
     }
 
@@ -841,9 +837,6 @@ impl Tool for WebFetchTool {
         TOOL_NAME
     }
 
-    fn evidence_capability(&self) -> Option<platform_api::EvidenceCapability> {
-        Some(platform_api::EvidenceCapability::WebFetch)
-    }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
     fn search_hint(&self) -> Option<&str> {
         Some("fetch and extract content from a URL")

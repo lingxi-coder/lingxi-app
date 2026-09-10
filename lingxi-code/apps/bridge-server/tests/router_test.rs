@@ -955,6 +955,7 @@ async fn set_fast_mode_routes_and_acknowledges_authoritative_state() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
     let sink = CapturingSink::arc();
+    router.set_turn_active(true);
 
     router
         .route(ClientCommand::SetFastMode { enabled: true }, sink.clone())
@@ -983,6 +984,7 @@ async fn set_model_keeps_provider_in_acknowledgement() {
     }]);
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
     let sink = CapturingSink::arc();
+    router.set_turn_active(true);
 
     router
         .route(
@@ -1030,29 +1032,126 @@ async fn set_permission_mode_routes_and_acknowledges_authoritative_mode() {
 }
 
 #[tokio::test]
-async fn set_permission_mode_is_rejected_while_a_turn_is_active() {
-    let handle = Arc::new(MockOrchestratorHandle::new());
-    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
-    let sink = CapturingSink::arc();
-    router.set_turn_active(true);
+async fn control_commands_synchronize_snapshots_while_a_turn_is_active() {
+    use client_protocol::controls::ReasoningSelectionDto;
+    use platform_api::{ConversationControls, PermissionControlState, ReasoningSelection};
 
-    router
-        .route(
+    let cases = [
+        (
             ClientCommand::SetPermissionMode {
                 mode: "acceptEdits".into(),
             },
-            sink.clone(),
-        )
-        .await;
+            "claude-opus-4-8",
+            "acceptEdits",
+            ReasoningSelectionDto::Automatic,
+            false,
+        ),
+        (
+            ClientCommand::SetModel {
+                model: "claude-sonnet-4-6".into(),
+            },
+            "claude-sonnet-4-6",
+            "default",
+            ReasoningSelectionDto::Automatic,
+            false,
+        ),
+        (
+            ClientCommand::SetReasoningSelection {
+                selection: ReasoningSelectionDto::Enabled,
+            },
+            "claude-opus-4-8",
+            "default",
+            ReasoningSelectionDto::Enabled,
+            false,
+        ),
+        (
+            ClientCommand::SetFastMode { enabled: true },
+            "claude-opus-4-8",
+            "default",
+            ReasoningSelectionDto::Automatic,
+            true,
+        ),
+    ];
+    for (command, model, permission, reasoning, fast) in cases {
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        handle.set_conversation_controls(ConversationControls {
+            model_reference: "claude-opus-4-8".into(),
+            permission: PermissionControlState {
+                requested: "default".into(),
+                effective: "default".into(),
+                modes: vec![platform_api::PermissionModeAvailability {
+                    mode: "acceptEdits".into(),
+                    available: true,
+                    disabled_reason: None,
+                }],
+            },
+            requested_reasoning_selection: ReasoningSelection::Automatic,
+            effective_reasoning_selection: ReasoningSelection::Automatic,
+            reasoning_spec: platform_api::ReasoningControlSpec {
+                available: vec![ReasoningSelection::Automatic, ReasoningSelection::Enabled],
+                modifiable: true,
+                disabled_reason: None,
+                ..Default::default()
+            },
+        });
+        let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+        let sink = CapturingSink::arc();
+        router.set_turn_active(true);
+        let command_label = format!("{command:?}");
+        router.route(command, sink.clone()).await;
 
-    assert_eq!(handle.current_permission_mode().as_deref(), Some("default"));
-    assert_eq!(
-        sink.events().await,
-        vec![ClientEvent::Error {
-            kind: ErrorKindDto::Rejected,
-            message: "cannot change permission mode while a turn is active".into(),
-        }]
-    );
+        let events = sink.events().await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::Error { .. })),
+            "{command_label}: {events:?}"
+        );
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::ConversationControlsChanged { controls } => Some(controls),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "{command_label}: missing or duplicate controls snapshot: {events:?}"
+        );
+        let controls = snapshots[0];
+        assert_eq!(controls.qualified_model, model, "{command_label}");
+        assert_eq!(controls.permission.requested, permission, "{command_label}");
+        assert_eq!(controls.permission.effective, permission, "{command_label}");
+        assert_eq!(
+            controls.permission.options,
+            vec![client_protocol::controls::PermissionModeOptionDto {
+                mode: "acceptEdits".into(),
+                available: true,
+                disabled_reason: None,
+            }]
+        );
+        assert_eq!(controls.reasoning.requested, reasoning, "{command_label}");
+        assert_eq!(controls.reasoning.effective, reasoning, "{command_label}");
+        let authoritative = handle.conversation_controls().await.unwrap();
+        assert_eq!(
+            controls.reasoning.spec,
+            client_adapter::lowering::lower_reasoning_control_spec(&authoritative.reasoning_spec)
+        );
+        let fast_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::FastModeChanged { enabled } => Some(*enabled),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fast_events.last(), Some(&fast), "{command_label}");
+        assert!(
+            fast_events.iter().all(|enabled| *enabled == fast),
+            "{command_label}"
+        );
+        assert_eq!(handle.fast_mode().await, fast);
+    }
 }
 
 #[tokio::test]

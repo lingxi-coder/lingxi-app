@@ -3339,14 +3339,6 @@ impl CommandRouter for EngineCommandRouter {
 
             // ── Permission mode ────────────────────────────────────────────
             ClientCommand::SetPermissionMode { mode } => {
-                if self.is_turn_active() {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Rejected,
-                        message: "cannot change permission mode while a turn is active".to_string(),
-                    })
-                    .await;
-                    return;
-                }
                 match self.handle.set_permission_mode(&mode).await {
                     Ok(()) => {
                         let active = self.handle.permission_mode().await.unwrap_or(mode);
@@ -3414,15 +3406,6 @@ impl CommandRouter for EngineCommandRouter {
                 self.emit_controls_snapshot(&*sink).await;
             }
             ClientCommand::SetReasoningSelection { selection } => {
-                if self.is_turn_active() {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Rejected,
-                        message: "cannot change reasoning selection while a turn is active"
-                            .to_string(),
-                    })
-                    .await;
-                    return;
-                }
                 if let Err(error) = self
                     .handle
                     .set_reasoning_selection(decode_reasoning_selection(selection))
@@ -3438,14 +3421,6 @@ impl CommandRouter for EngineCommandRouter {
                 self.emit_controls_snapshot(&*sink).await;
             }
             ClientCommand::SetFastMode { enabled } => {
-                if self.is_turn_active() {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Rejected,
-                        message: "cannot change fast mode while a turn is active".to_string(),
-                    })
-                    .await;
-                    return;
-                }
                 if let Err(error) = self.handle.set_fast_mode(enabled).await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
@@ -3458,6 +3433,7 @@ impl CommandRouter for EngineCommandRouter {
                     enabled: self.handle.fast_mode().await,
                 })
                 .await;
+                self.emit_controls_snapshot(&*sink).await;
             }
 
             // ── Slash commands ──────────────────────────────────────────────

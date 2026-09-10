@@ -67,7 +67,7 @@ async function main() {
     })()`);
     assert.deepEqual(emptyState, { placeholderPosition: 'absolute', sendVisibility: 'hidden', disabled: true, tabIndex: -1, offset: 0 });
     await webContents.insertText('Hello');
-    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).opacity === '1'`);
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
     const typedState = await webContents.executeJavaScript(`(() => {
       const prompt = document.querySelector('[aria-label="Prompt"]');
       const range = document.createRange();
@@ -81,8 +81,42 @@ async function main() {
     if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
       await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.filled.png', (await webContents.capturePage()).toPNG());
     }
+    const sendBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').getBoundingClientRect().toJSON()`);
     await setPrompt(webContents, '');
     await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).visibility === 'hidden'`);
+    await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(true)`);
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-stop-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
+    const stopBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop current turn"]').getBoundingClientRect().toJSON()`);
+    assert.equal(stopBounds.x, sendBounds.x);
+    assert.equal(stopBounds.y, sendBounds.y);
+    assert.equal(stopBounds.width, sendBounds.width);
+    if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
+      await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.stop.png', (await webContents.capturePage()).toPNG());
+    }
+    await setPrompt(webContents, 'pending');
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
+    const pendingBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Send pending message"]').getBoundingClientRect().toJSON()`);
+    assert.equal(pendingBounds.x, sendBounds.x);
+    await waitFor(webContents, `document.querySelector('.composer-submit-actions').getBoundingClientRect().width === 84`);
+    const pendingStopBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop current turn"]').getBoundingClientRect().toJSON()`);
+    assert.equal(pendingBounds.x - pendingStopBounds.x, 44);
+    if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
+      await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.pending.png', (await webContents.capturePage()).toPNG());
+    }
+    // Reverse an in-flight transition and verify it settles at the requested state.
+    await setPrompt(webContents, '');
+    await setPrompt(webContents, 'quick correction');
+    await setPrompt(webContents, '');
+    await waitFor(webContents, `document.querySelector('.composer-submit-actions').getBoundingClientRect().width === 40`);
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).visibility === 'hidden'`);
+    webContents.debugger.attach('1.3');
+    await webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    assert.equal(await webContents.executeJavaScript(`getComputedStyle(document.querySelector('.composer-submit-actions')).transitionDuration`), '0s');
+    await webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
+    webContents.debugger.detach();
+    await setPrompt(webContents, '');
+    await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(false)`);
+
     await setPrompt(webContents, '   ');
     assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').disabled`), true);
     await setPrompt(webContents, '');
@@ -109,7 +143,7 @@ async function main() {
       await webContents.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files: [filePath] });
       await waitFor(webContents, `Boolean(document.querySelector('[data-file-mention]'))`);
       assert.equal(await webContents.executeJavaScript(`document.querySelector('[data-file-mention]').dataset.fileMention`), filePath);
-      await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).opacity === '1'`);
+      await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
       if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
         await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.file.png', (await webContents.capturePage()).toPNG());
       }
@@ -143,64 +177,94 @@ async function main() {
       return;
     }
 
-    await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
-    await webContents.executeJavaScript(`document.querySelector('[aria-label="Start ordinary recording"]').click()`);
-    await waitFor(webContents, `document.querySelector('[aria-label="Stop dictation"]')?.disabled === false`);
-    const dictationStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
-    await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop dictation"]').click()`);
-    await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === 'dictated text'`);
-    const dictatedText = await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`);
+    async function exerciseComposerControls(running) {
+      await setPrompt(webContents, '');
+      await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(${running})`);
+      await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label^="Permission mode:"]').click()`);
+      await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Permission modes"]'))`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="Permission modes"] [role="menuitemradio"][aria-checked="false"]').click()`);
+      await waitFor(webContents, `!document.querySelector('[aria-label="Permission modes"]')`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="Start ordinary recording"]').click()`);
+      await waitFor(webContents, `document.querySelector('[aria-label="Stop dictation"]')?.disabled === false`);
+      if (running) {
+        await waitFor(webContents, `document.querySelector('[aria-label="Stop current turn"]')?.disabled === false`);
+        const stopState = await webContents.executeJavaScript(`(() => {
+          const stop = document.querySelector('[aria-label="Stop current turn"]');
+          const rect = stop.getBoundingClientRect();
+          return { visible: getComputedStyle(stop.parentElement).visibility, width: rect.width, tabIndex: stop.tabIndex,
+            hitTarget: stop.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)) };
+        })()`);
+        assert.deepEqual(stopState, { visible: 'visible', width: 40, tabIndex: 0, hitTarget: true });
+        const cancellations = await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`);
+        await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop current turn"]').click()`);
+        assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`), cancellations + 1);
+        assert.deepEqual(await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`), ['request_authorization', 'start_listening']);
+        assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop dictation"]')?.disabled`), false);
+      }
+      const dictationStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop dictation"]').click()`);
+      await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === 'dictated text'`);
+      const dictatedText = await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`);
 
-    await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
-    await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').click()`);
-    await waitFor(webContents, `Boolean(document.querySelector('[role="group"][aria-label="心流模式"]'))`);
-    await waitFor(webContents, `window.__composerDraftTest.audioRequestTypes().includes('start_listening')`);
-    const flowStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
-    const audioInteraction = { dictationStartRequests, dictatedText, flowStartRequests };
-    await webContents.executeJavaScript(`document.querySelector('[aria-label="关闭心流模式"]').click()`);
-    await waitFor(webContents, `!document.querySelector('[role="group"][aria-label="心流模式"]')`);
+      await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').click()`);
+      await waitFor(webContents, `Boolean(document.querySelector('[role="group"][aria-label="心流模式"]'))`);
+      await waitFor(webContents, `window.__composerDraftTest.audioRequestTypes().includes('start_listening')`);
+      const flowStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
+      const audioInteraction = { dictationStartRequests, dictatedText, flowStartRequests };
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="关闭心流模式"]').click()`);
+      await waitFor(webContents, `!document.querySelector('[role="group"][aria-label="心流模式"]')`);
 
-    await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
-    await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Model settings"]'))`);
-    const modelSettings = await webContents.executeJavaScript(`({
-      resetToDefaultVisible: document.querySelector('[aria-label="Model settings"]')?.textContent?.includes('Reset to default') ?? false,
-    })`);
-    await webContents.executeJavaScript(`document.querySelector('[aria-label="Model settings"] button').click()`);
-    await waitFor(webContents, `document.querySelector('[aria-label="Search models"]') === document.activeElement`);
-    const initialPicker = await webContents.executeJavaScript(`(() => ({
-      sections: [...document.querySelectorAll('[aria-label="Available models"] div')]
-        .map((element) => element.textContent?.trim())
-        .filter((text) => text === 'Paid' || text === 'Free'),
-      models: [...document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]')]
-        .map((element) => element.textContent?.trim()),
-    }))()`);
+      await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
+      await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Model settings"]'))`);
+      const modelSettings = await webContents.executeJavaScript(`({
+        resetToDefaultVisible: document.querySelector('[aria-label="Model settings"]')?.textContent?.includes('Reset to default') ?? false,
+      })`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="Model settings"] button').click()`);
+      await waitFor(webContents, `document.querySelector('[aria-label="Search models"]') === document.activeElement`);
+      const initialPicker = await webContents.executeJavaScript(`(() => ({
+        sections: [...document.querySelectorAll('[aria-label="Available models"] div')]
+          .map((element) => element.textContent?.trim())
+          .filter((text) => text === 'Paid' || text === 'Free'),
+        models: [...document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]')]
+          .map((element) => element.textContent?.trim()),
+      }))()`);
 
-    const screenshotPath = process.env.LINGXI_MODEL_PICKER_SCREENSHOT;
-    if (screenshotPath) {
-      const bounds = await webContents.executeJavaScript(`(() => {
-        const rect = document.querySelector('[aria-label="Available models"]').getBoundingClientRect();
-        return { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
+      const screenshotPath = process.env.LINGXI_MODEL_PICKER_SCREENSHOT;
+      if (screenshotPath) {
+        const bounds = await webContents.executeJavaScript(`(() => {
+          const rect = document.querySelector('[aria-label="Available models"]').getBoundingClientRect();
+          return { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
+        })()`);
+        const image = await webContents.capturePage(bounds);
+        await writeFile(screenshotPath, image.toPNG());
+      }
+
+      await webContents.executeJavaScript(`(() => {
+        const input = document.querySelector('[aria-label="Search models"]');
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(input, 'flash fin');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
       })()`);
-      const image = await webContents.capturePage(bounds);
-      await writeFile(screenshotPath, image.toPNG());
-    }
+      await waitFor(webContents, `document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]').length === 1`);
+      const filteredPicker = await webContents.executeJavaScript(`({
+        focused: document.activeElement?.getAttribute('aria-label'),
+        models: [...document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]')]
+          .map((element) => element.textContent?.trim()),
+        clearVisible: Boolean(document.querySelector('[aria-label="Clear model search"]')),
+      })`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="Clear model search"]').click()`);
+      await waitFor(webContents, `document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]').length === 4`);
+      await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
 
-    await webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('[aria-label="Search models"]');
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(input, 'flash fin');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`);
-    await waitFor(webContents, `document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]').length === 1`);
-    const filteredPicker = await webContents.executeJavaScript(`({
-      focused: document.activeElement?.getAttribute('aria-label'),
-      models: [...document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]')]
-        .map((element) => element.textContent?.trim()),
-      clearVisible: Boolean(document.querySelector('[aria-label="Clear model search"]')),
-    })`);
-    await webContents.executeJavaScript(`document.querySelector('[aria-label="Clear model search"]').click()`);
-    await waitFor(webContents, `document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]').length === 4`);
-    await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
+      return { audioInteraction, modelSettings, initialPicker, filteredPicker };
+    }
+    const idleControls = await exerciseComposerControls(false);
+    const runningControls = await exerciseComposerControls(true);
+    assert.deepEqual(runningControls, idleControls, 'running retains all idle audio and model picker behavior');
+    const { audioInteraction, modelSettings, initialPicker, filteredPicker } = idleControls;
+    await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(false)`);
 
     const sessionA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const sessionB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';

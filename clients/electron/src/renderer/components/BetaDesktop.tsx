@@ -903,11 +903,12 @@ function nativeAudioApi(): NativeAudioApi | undefined {
 
 const DICTATION_WAVEFORM_SAMPLES = 160;
 
-export function DictationRecorderBar({ audio, owner, onCancel, onFinish }: {
+export function DictationRecorderBar({ audio, owner, onCancel, onFinish, turnAction }: {
   audio: NativeAudioApi | undefined;
   owner: NativeAudioOwner;
   onCancel(): void;
   onFinish(): void;
+  turnAction?: ReactNode;
 }) {
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1013,6 +1014,7 @@ export function DictationRecorderBar({ audio, owner, onCancel, onFinish }: {
       <button className="dictation-recorder-action" type="button" aria-label="Stop dictation" title="Stop dictation" onClick={onFinish} style={actionStyle}>
         <span aria-hidden="true" style={{ width: 14, height: 14, borderRadius: 2, background: 'currentColor' }} />
       </button>
+      {turnAction}
     </div>
   );
 }
@@ -2201,6 +2203,18 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           ? 'LingXi is working — draft your next message…'
           : 'Do anything';
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
+  const stopTurnButton = (
+    <button
+      type="button"
+      className="composer-submit-button"
+      disabled={!bridge.running || bridge.isCancelling}
+      tabIndex={bridge.running ? 0 : -1}
+      onClick={() => invoke(() => bridge.cancel())}
+      aria-label={bridge.isCancelling ? 'Stopping current turn' : 'Stop current turn'}
+      title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
+      style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
+    ><Icon name="stop" size={15} color="#fff" /></button>
+  );
   return (
     <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '12px var(--conversation-gutter) 20px', background: t.stageBg }}>
       {flowMode && (
@@ -2322,6 +2336,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         {voiceState === 'listening' && !flowMode ? (
           <DictationRecorderBar
             audio={audio}
+            turnAction={bridge.running ? stopTurnButton : undefined}
             owner={dictationOwner.current ?? audioOwner('dictation')}
             onCancel={() => { void cancelStandardListening(); }}
             onFinish={() => { void finishStandardListening(); }}
@@ -2329,9 +2344,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         ) : (
         <div className="composer-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 48, padding: '0 8px 8px' }}>
           <input ref={imageFileInput} type="file" multiple onChange={(event) => { void addFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
-          <button type="button" disabled={!ready} aria-label="Attach files" title="Attach files or images" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
+          <button type="button" disabled={!ready} className="composer-icon-action" aria-label="Attach files" title="Attach files or images" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <div ref={fileControl}>
-            <button type="button" disabled={!ready} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
+            <button type="button" disabled={!ready} className="composer-icon-action" aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
             {fileMenuOpen && (
               <div role="dialog" aria-label="Search workspace files" style={{ ...composerMenuStyle(t, 'left'), width: 560, maxWidth: 'min(560px, calc(100vw - 44px))', padding: 7, overflow: 'hidden' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '3px 4px 7px', borderBottom: `0.5px solid ${t.border}` }}>
@@ -2393,7 +2408,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             <button
               ref={permissionButton}
               type="button"
-              disabled={!ready || bridge.running}
+              disabled={!ready}
               aria-haspopup="menu"
               aria-expanded={permissionOpen}
               aria-label={`Permission mode: ${permissionMode.label}`}
@@ -2470,7 +2485,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             <button
               ref={modelTrigger}
               type="button"
-              disabled={!ready || bridge.running || bridge.desktop.models.length === 0}
+              disabled={!ready || bridge.desktop.models.length === 0}
               aria-haspopup="menu"
               aria-expanded={modelOpen}
               aria-label={`${fastModeAvailable && bridge.desktop.fastMode ? 'Fast mode, ' : ''}Model: ${modelLabel(bridge.desktop.currentModel)}, reasoning ${reasoningSelectionLabel(selectedReasoning)}`}
@@ -2645,11 +2660,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                 {modelSubmenu === 'speed' && fastModeAvailable && (
                   <div style={{ ...modelPickerSubmenuStyle(t), width: 300, maxWidth: 'min(300px, calc(100vw - 44px))', maxHeight: 'min(300px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Speed">
                     <div style={{ padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Speed</div>
-                    <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!ready || bridge.running} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !ready || bridge.running)}>
+                    <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !ready)}>
                       <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Standard</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>Default speed</span></span>
                       {(!bridge.desktop.fastMode || !fastModeAvailable) && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
                     </button>
-                    {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!ready || bridge.running} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !ready || bridge.running)}>
+                    {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !ready)}>
                       <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Fast</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>1.5x speed, more usage</span></span>
                       {bridge.desktop.fastMode && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
                     </button>}
@@ -2658,10 +2673,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               </div>
             )}
           </div>
-          <button type="button" disabled={!ready || flowMode} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
+          <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
           <button
             type="button"
             disabled={!ready}
+            className="composer-icon-action"
             aria-label={flowMode ? '关闭心流模式' : '开启心流模式'}
             aria-pressed={flowMode}
             title={flowMode ? '关闭心流模式' : '开启心流模式'}
@@ -2670,27 +2686,23 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           >
             <Icon name="waveform" size={18} color="currentColor" stroke={2.15} />
           </button>
-          {bridge.running && (
-            <button
-              type="button"
-              disabled={bridge.isCancelling}
-              onClick={() => invoke(() => bridge.cancel())}
-              aria-label={bridge.isCancelling ? 'Stopping current turn' : 'Stop current turn'}
-              title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
-              style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
-            ><Icon name="stop" size={15} color="#fff" /></button>
-          )}
-          <span className="composer-send-presence" data-visible={hasPrompt} aria-hidden={!hasPrompt}>
-            <button
-              type="button"
-              disabled={!ready || !hasPrompt || flowMode}
-              tabIndex={hasPrompt ? 0 : -1}
-              onClick={() => { void submit(); }}
-              aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
-              title={bridge.running ? 'Send as pending message' : 'Send prompt'}
-              style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
-            ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? t.windowBg : t.text4} /></button>
-          </span>
+          <div className="composer-submit-actions" data-pending={bridge.running && hasPrompt}>
+            <span className="composer-stop-presence" data-visible={bridge.running} aria-hidden={!bridge.running}>
+              {stopTurnButton}
+            </span>
+            <span className="composer-send-presence" data-visible={hasPrompt} aria-hidden={!hasPrompt}>
+              <button
+                type="button"
+                className="composer-submit-button"
+                disabled={!ready || !hasPrompt || flowMode}
+                tabIndex={hasPrompt ? 0 : -1}
+                onClick={() => { void submit(); }}
+                aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
+                title={bridge.running ? 'Send as pending message' : 'Send prompt'}
+                style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
+              ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? t.windowBg : t.text4} /></button>
+            </span>
+          </div>
         </div>
         )}
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>

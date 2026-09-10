@@ -15,6 +15,7 @@ const projectPath = '/tmp/composer-draft-project';
 let resolvePendingSend: (() => void) | undefined;
 let sendPending = false;
 let lastSentPrompt = '';
+let cancelCount = 0;
 const audioRequests: NativeAudioCommand[] = [];
 
 function audioResponse(command: NativeAudioCommand): NativeAudioResponse {
@@ -131,7 +132,7 @@ function bridgeFixture(sessionId: string, running: boolean) {
         resolve();
       };
     }),
-    cancel: async () => undefined,
+    cancel: async () => { cancelCount += 1; },
   };
 }
 
@@ -143,6 +144,7 @@ function Fixture() {
     window.__composerDraftTest = {
       switchSession: setSessionId,
       setRunning,
+      cancelCount: () => cancelCount,
       sendPending: () => sendPending,
       lastSentPrompt: () => lastSentPrompt,
       resolveSend: () => resolvePendingSend?.(),
@@ -171,6 +173,7 @@ declare global {
     __composerDraftTest?: {
       switchSession(sessionId: string): void;
       setRunning(running: boolean): void;
+      cancelCount(): number;
       sendPending(): boolean;
       lastSentPrompt(): string;
       resolveSend(): void;

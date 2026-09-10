@@ -811,6 +811,8 @@ pub struct MockOrchestratorHandle {
     permission_mode: StdMutex<Option<String>>,
     /// Live effort value used by `/effort` command tests.
     effort: StdMutex<Option<String>>,
+    /// Optional live controls snapshot for routing synchronization tests.
+    conversation_controls: StdMutex<Option<platform_api::ConversationControls>>,
     /// Session-scoped fast-mode flag used by bridge routing tests.
     fast_mode: AtomicBool,
     /// Session-owned dynamic-workflow gate exposed through the handle.
@@ -886,6 +888,7 @@ impl MockOrchestratorHandle {
             switch_model_error: StdMutex::new(None),
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
+            conversation_controls: StdMutex::new(None),
             fast_mode: AtomicBool::new(false),
             dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::new(
                 false, false,
@@ -958,6 +961,12 @@ impl MockOrchestratorHandle {
     /// Make the next `open_memory_editor` call return `ActionFailed(reason)`.
     pub fn set_memory_editor_error(&self, reason: String) {
         *self.memory_error.lock().unwrap() = Some(reason);
+    }
+
+    /// Enable authoritative controls snapshots; successful control setters update them.
+    pub fn set_conversation_controls(&self, controls: platform_api::ConversationControls) {
+        *self.permission_mode.lock().unwrap() = Some(controls.permission.effective.clone());
+        *self.conversation_controls.lock().unwrap() = Some(controls);
     }
 
     /// Number of `switch_model` calls so far.
@@ -1191,11 +1200,29 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         if let Some(reason) = self.switch_model_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
+        if let Some(controls) = self.conversation_controls.lock().unwrap().as_mut() {
+            controls.model_reference = platform_api::qualified_model_ref(model, profile);
+        }
         Ok(())
     }
 
     async fn permission_mode(&self) -> Option<String> {
         self.permission_mode.lock().unwrap().clone()
+    }
+
+    async fn conversation_controls(&self) -> Option<platform_api::ConversationControls> {
+        self.conversation_controls.lock().unwrap().clone()
+    }
+
+    async fn set_reasoning_selection(
+        &self,
+        selection: platform_api::ReasoningSelection,
+    ) -> Result<(), HandleError> {
+        if let Some(controls) = self.conversation_controls.lock().unwrap().as_mut() {
+            controls.requested_reasoning_selection = selection.clone();
+            controls.effective_reasoning_selection = selection;
+        }
+        Ok(())
     }
 
     async fn current_effort(&self) -> Option<String> {
@@ -1274,6 +1301,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             return Err(HandleError::ActionFailed(reason));
         }
         *self.permission_mode.lock().unwrap() = Some(mode.to_string());
+        if let Some(controls) = self.conversation_controls.lock().unwrap().as_mut() {
+            controls.permission.requested = mode.to_string();
+            controls.permission.effective = mode.to_string();
+        }
         Ok(())
     }
 

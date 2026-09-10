@@ -393,6 +393,42 @@ fs/net/env/进程、取消是怎么实现的。
 
 **重新评估的时机**：请求路径上出现 cache-TTL seam 的那一刻。
 
+#### 🚨 2026-09-10 推翻：那个 seam **早就在了**，这条不再是「已关闭的决定」
+
+上面写的「端口根本没有 prompt-cache TTL 这个概念」**是错的**。实测，请求侧有一条完整的活链路：
+
+```
+apps/engine-desktop/src/lib.rs:4442  prompt_cache_write_ttl_1h_enabled()   env 门
+  → llm-client/src/service.rs:1095   should_1h_cache_ttl()                 ENABLE_PROMPT_CACHING_1H
+  → llm-client/src/service.rs:1219   SplitOptions{ ttl_1h }
+  → llm-client/src/prompt_format.rs:111/121  CacheControl::EphemeralScoped{ ttl_1h }
+  → llm-client/src/providers/anthropic.rs:359  上线 `ttl:"1h"`
+```
+
+⚠️ 原记录取证只看了 `stream_accumulator.rs`（**响应**解析）和 `convert.rs`，
+**漏了 `prompt_format.rs` 这个真正的请求侧格式化器**——正是
+[[divergence-reason-enumerated-one-setter]] 那个形状：找到第一个点就当成全部。
+
+**上游契约**（`src_163219561.js` @1339284 / @3483567）：
+`experimental.cacheTtl: "5m" | "1h"`，**仅当** `subagentPromptCacheTtl` 设置/env 都没设时生效；
+订阅处于 overage 时 `"1h"` 被忽略。消费点是 `agentCacheTtlOverride: e.cacheTtl`。
+端口的 `ttl_1h: bool` 正好能表达（`"5m"` = 普通 Ephemeral，`"1h"` = ttl_1h）。
+
+**所以这条现在是「未做」，不是「不该做」。真实成本（实测，不是估的）：**
+
+| | 数量 | 说明 |
+|---|---|---|
+| `AgentDefinition {` 字面量 | **75** | 没有 `Default` derive，没有一处用 `..Default::default()` ⇒ 加字段必须全改 |
+| `build_request(` 调用点 | **58** | 分布在 llm-client(18) / service_test(31) / tool-api(6) / web / sidequery / test-harness |
+
+⛔ **不能用「在 service 上加个字段」偷懒**：`ApiService` 是
+`Arc<llm_client::ApiService>` 共享的（`orchestrator/src/provider_adapter.rs:27`），
+并发子代理会互相踩。必须按请求传参 —— 干净的做法是把 `build_request` 的位置参数
+收进一个 options struct（顺带解决它已经 8 个参数的问题）。
+
+**结论**：范围是「一次 options-struct 重构 + 133 处机械修改 + 优先级/overage 语义」，
+不是「加一个没人读的字段」。⛔ 别再引用「没有消费者」当理由——那个理由已经被推翻。
+
 **2026-09-10 复核**（因为这一整轮里「N 个调用点」这类估算我错过两次，所以实测）：
 `llm-client/src/convert.rs` 里出往 wire 的 `cache_control` **恒为 `None`**（589/597 行，
 外加文档表格里两行），没有断点选择、没有 TTL 字段；`AgentDefinition {` 字面量现在是

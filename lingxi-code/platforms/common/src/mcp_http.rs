@@ -218,7 +218,15 @@ where
                 // Preserve only a small local diagnostic prefix so the MCP
                 // client can apply the SDK's narrow stale-session classifier;
                 // this value is never attached to telemetry.
-                let body = if status == 400 {
+                //
+                // 404 and 405 are kept for a second reader: they are how a
+                // server that speaks only legacy HTTP+SSE rejects a streamable
+                // `initialize` POST, and the legacy fallback decides whether to
+                // re-dial by asking whether that body is a JSON-RPC message. A
+                // rejection carrying a real JSON-RPC error is a protocol
+                // failure and must NOT be re-dialled, so the body is the
+                // evidence, not the status alone.
+                let body = if matches!(status, 400 | 404 | 405) {
                     bounded_error_body(response, 4_096).await
                 } else {
                     String::new()

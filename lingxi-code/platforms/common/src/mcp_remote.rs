@@ -161,17 +161,38 @@ impl RemoteMcpTransport {
         version: &str,
         deadline: tokio::time::Instant,
     ) -> Result<ServerCapabilitiesDto, McpError> {
+        self.initialize_before_detailed(conn, version, deadline)
+            .await
+            .map_err(|(error, _)| error)
+    }
+
+    /// [`Self::initialize_before`], also handing back the HTTP detail behind a
+    /// rejected handshake. Only the legacy-SSE fallback needs it; everything
+    /// else goes through the plain form above.
+    async fn initialize_before_detailed(
+        &self,
+        conn: &McpRawConnection,
+        version: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<ServerCapabilitiesDto, (McpError, Option<HandshakeHttp>)> {
         let Some(remaining) = Self::remaining(deadline) else {
-            return Err(McpError::Connection(
-                "MCP connection deadline exceeded".into(),
+            return Err((
+                McpError::Connection("MCP connection deadline exceeded".into()),
+                None,
             ));
         };
-        tokio::time::timeout(
+        match tokio::time::timeout(
             remaining,
-            self.initialize_with_version(conn, version, remaining),
+            self.initialize_with_version_detailed(conn, version, remaining),
         )
         .await
-        .map_err(|_| McpError::Connection("MCP connection deadline exceeded".into()))?
+        {
+            Ok(result) => result,
+            Err(_) => Err((
+                McpError::Connection("MCP connection deadline exceeded".into()),
+                None,
+            )),
+        }
     }
 
     async fn probe_modern(
@@ -253,8 +274,22 @@ impl RemoteMcpTransport {
         version: &str,
         timeout: Duration,
     ) -> Result<ServerCapabilitiesDto, McpError> {
+        self.initialize_with_version_detailed(conn, version, timeout)
+            .await
+            .map_err(|(error, _)| error)
+    }
+
+    async fn initialize_with_version_detailed(
+        &self,
+        conn: &McpRawConnection,
+        version: &str,
+        timeout: Duration,
+    ) -> Result<ServerCapabilitiesDto, (McpError, Option<HandshakeHttp>)> {
         let connection = self.connection_for(conn.connection_id).ok_or_else(|| {
-            McpError::Connection(format!("no such connection: {}", conn.connection_id))
+            (
+                McpError::Connection(format!("no such connection: {}", conn.connection_id)),
+                None,
+            )
         })?;
         let result: Value = connection
             .call_with_timeout(
@@ -267,18 +302,185 @@ impl RemoteMcpTransport {
                 timeout,
             )
             .await
-            .map_err(|error| handshake_error(&error))?;
+            .map_err(|error| (handshake_error(&error), handshake_http(&error)))?;
         let caps = result
             .get("capabilities")
             .and_then(Value::as_object)
             .ok_or_else(|| {
-                McpError::Handshake("initialize result missing `capabilities` object".into())
+                (
+                    McpError::Handshake("initialize result missing `capabilities` object".into()),
+                    None,
+                )
             })?;
         let dto = capabilities_from_wire(caps, result.get("capabilities"));
         connection
             .notify("notifications/initialized", json!({}))
-            .map_err(|error| McpError::Handshake(error.to_string()))?;
+            .map_err(|error| (McpError::Handshake(error.to_string()), None))?;
         Ok(dto)
+    }
+
+    /// Install a freshly dialled connection: attach the ping handler and put it
+    /// in the map. Shared by [`Self::connect`] and the legacy-SSE rescue so the
+    /// rescue's connection is indistinguishable from any other.
+    async fn register_connection(
+        &self,
+        connection: Connection,
+    ) -> Result<McpRawConnection, McpError> {
+        self.register_connection_with_id(protocol::McpConnectionId::new(), connection)
+            .await
+    }
+
+    async fn register_connection_with_id(
+        &self,
+        id: protocol::McpConnectionId,
+        connection: Connection,
+    ) -> Result<McpRawConnection, McpError> {
+        let connection = Arc::new(connection);
+        connection
+            .register_handler("ping", Arc::new(PingHandler))
+            .await;
+        self.connections
+            .lock()
+            .map_err(|_| McpError::Internal("remote connection map poisoned".into()))?
+            .insert(id, connection);
+        Ok(McpRawConnection { connection_id: id })
+    }
+
+    /// Upstream's legacy HTTP+SSE rescue: a streamable-HTTP server that rejects
+    /// the `initialize` POST may simply not speak streamable HTTP, so re-dial it
+    /// the old way before giving up.
+    ///
+    /// `None` means "not a rescue case, keep the original error". `Some` is the
+    /// rescue's own verdict.
+    ///
+    /// Upstream guards the attempt four ways before it starts — a legacy
+    /// factory exists for this config, the transport has not already negotiated
+    /// a protocol version, [`rejection_invites_legacy_sse`] holds, and the flag
+    /// is on (default TRUE, so this is live behaviour and not a dormant gate).
+    async fn legacy_sse_rescue(
+        &self,
+        spec: &McpTransportSpec,
+        http: Option<&HandshakeHttp>,
+        original: &McpError,
+        deadline: tokio::time::Instant,
+    ) -> Option<Result<McpConnectResult, McpError>> {
+        let McpTransportSpec::Http {
+            url,
+            headers,
+            headers_helper,
+            oauth,
+        } = spec
+        else {
+            return None;
+        };
+        let http = http?;
+        if !rejection_invites_legacy_sse(http) {
+            return None;
+        }
+        if !telemetry::flag_bool(LEGACY_SSE_FALLBACK_FLAG, true) {
+            return None;
+        }
+        let post_method_not_allowed = http.status == 405;
+        tracing::warn!(
+            status = http.status,
+            "mcp: initialize POST rejected; trying legacy HTTP+SSE"
+        );
+
+        // `Math.min(5000, Math.max(1000, connectTimeout - elapsed))` — what is
+        // left of the dial budget, floored so a nearly-spent deadline still
+        // gets a real attempt, and capped so the rescue cannot become the whole
+        // connect.
+        let budget = Self::remaining(deadline)
+            .unwrap_or_default()
+            .clamp(LEGACY_SSE_MIN_BUDGET, LEGACY_SSE_MAX_BUDGET);
+        let rescue_deadline = tokio::time::Instant::now() + budget;
+
+        // Same url, same headers, same oauth: only the transport changes.
+        // ⚠️ This is why the rescue lives here and not in the registry's
+        // retry seam — `oauth::server_key` folds the spec KIND into the key,
+        // so re-dialling through that seam with an `Sse` spec would silently
+        // repartition the stored token and the discovery cache. Upstream keeps
+        // its config and swaps only the transport object.
+        let sse_spec = McpTransportSpec::Sse {
+            url: url.clone(),
+            headers: headers.clone(),
+            headers_helper: headers_helper.clone(),
+            oauth: oauth.clone(),
+        };
+        let negotiated = McpNegotiatedProtocol {
+            era: McpProtocolEra::Legacy,
+            version: MCP_PROTOCOL_VERSION.to_string(),
+        };
+
+        let rescue = async {
+            let connection = self
+                .connect_sse_rescue(&sse_spec, post_method_not_allowed, rescue_deadline)
+                .await?;
+            let guard = RemoteConnectionCleanupGuard {
+                transport: self,
+                id: connection.connection_id,
+                armed: true,
+            };
+            if let Ok(mut map) = self.negotiated.lock() {
+                map.insert(connection.connection_id, negotiated.clone());
+            }
+            let capabilities = self
+                .initialize_before(&connection, &negotiated.version, rescue_deadline)
+                .await?;
+            guard.disarm();
+            Ok::<_, McpError>(McpConnectResult {
+                connection,
+                capabilities,
+                negotiated: negotiated.clone(),
+            })
+        }
+        .await;
+
+        match rescue {
+            Ok(result) => {
+                tracing::info!("mcp: connected over legacy HTTP+SSE");
+                Some(Ok(result))
+            }
+            Err(rescue_error) => Some(Err(choose_rescue_error(
+                original,
+                &rescue_error,
+                post_method_not_allowed,
+            ))),
+        }
+    }
+
+    /// The rescue's dial. Split out so the rescue reads as one sequence.
+    async fn connect_sse_rescue(
+        &self,
+        sse_spec: &McpTransportSpec,
+        post_method_not_allowed: bool,
+        deadline: tokio::time::Instant,
+    ) -> Result<McpRawConnection, McpError> {
+        let McpTransportSpec::Sse { url, headers, .. } = sse_spec else {
+            return Err(McpError::Internal(
+                "legacy rescue built a non-SSE spec".into(),
+            ));
+        };
+        let Some(remaining) = Self::remaining(deadline) else {
+            return Err(McpError::Connection(
+                "MCP connection deadline exceeded".into(),
+            ));
+        };
+        let connection = tokio::time::timeout(
+            remaining,
+            crate::connect_sse(
+                url,
+                None,
+                headers,
+                crate::mcp_sse::SseEndpointMode::LegacyRescue {
+                    post_method_not_allowed,
+                },
+            ),
+        )
+        .await
+        .map_err(|_| McpError::Connection("MCP connection deadline exceeded".into()))?
+        .map_err(McpError::from)?;
+        self.register_connection(connection).await
     }
 }
 
@@ -329,15 +531,7 @@ impl McpTransport for RemoteMcpTransport {
             }
             other => return Err(McpError::UnsupportedTransport(other.transport_kind())),
         };
-        let connection = Arc::new(connection);
-        connection
-            .register_handler("ping", Arc::new(PingHandler))
-            .await;
-        self.connections
-            .lock()
-            .map_err(|_| McpError::Internal("remote connection map poisoned".into()))?
-            .insert(id, connection);
-        Ok(McpRawConnection { connection_id: id })
+        self.register_connection_with_id(id, connection).await
     }
 
     async fn connect_and_initialize(
@@ -392,7 +586,7 @@ impl McpTransport for RemoteMcpTransport {
             armed: true,
         };
         match self
-            .initialize_before(&connection, &negotiated.version, deadline)
+            .initialize_before_detailed(&connection, &negotiated.version, deadline)
             .await
         {
             Ok(capabilities) => {
@@ -403,7 +597,16 @@ impl McpTransport for RemoteMcpTransport {
                     negotiated,
                 })
             }
-            Err(error) => Err(error),
+            Err((error, http)) => {
+                if let Some(result) = self
+                    .legacy_sse_rescue(spec, http.as_ref(), &error, deadline)
+                    .await
+                {
+                    live_guard.disarm();
+                    return result;
+                }
+                Err(error)
+            }
         }
     }
 
@@ -836,6 +1039,168 @@ fn http_status(data: &Option<Value>) -> Option<u16> {
 
 fn is_modern_compatibility_error(code: i32) -> bool {
     matches!(code, jsonrpc::METHOD_NOT_FOUND | -32001 | -32020 | -32021)
+}
+
+/// `tengu_mcp_legacy_sse_fallback`. Default TRUE upstream, so this is live
+/// behaviour rather than a dormant gate.
+const LEGACY_SSE_FALLBACK_FLAG: &str = "tengu_mcp_legacy_sse_fallback";
+/// `Math.max(1000, …)` — a nearly-spent deadline still gets a real attempt.
+const LEGACY_SSE_MIN_BUDGET: Duration = Duration::from_millis(1000);
+/// `Math.min(Go, …)` with `Go = 5000` — the rescue cannot become the connect.
+const LEGACY_SSE_MAX_BUDGET: Duration = Duration::from_millis(5000);
+
+/// Which error a failed rescue surfaces.
+///
+/// Upstream, where `qe` is "the rescue dial timed out", `dt` is `Fo(...)`
+/// ("this failure is auth-ish"), `L` is `postMethodNotAllowed`, `E` the
+/// original POST rejection and `Ie` the rescue's own error:
+///
+/// ```js
+/// if (qe && L && Xe) throw new gb("… requires authorization …");
+/// if (qe || (Ie instanceof M$t && !dt) || (dt && !L)) throw E;
+/// throw Ie;
+/// ```
+///
+/// The default is deliberately the ORIGINAL rejection: unless the rescue
+/// produced evidence that this really is a legacy SSE server, the user should
+/// see the problem they actually have, not a confusing SSE error on a url that
+/// was never an SSE endpoint.
+///
+/// ⚠️ Approximated in one place. Upstream's `sawAuthChallenge` is set by a fetch
+/// wrapper, so it sees a 401/403 on ANY request in the dial; here only the
+/// dial's final error is observable, so "a NEW auth challenge appeared" reads
+/// as "the rescue failed auth-ish". A rejection that reaches this function is
+/// always a 400/404/405 (the predicate admits nothing else), so the original
+/// dial's own final error can never have been the 401/403 that would make the
+/// difference — the two agree except when a 401/403 occurred on some earlier
+/// request of the original dial and was then followed by one of those statuses.
+fn choose_rescue_error(
+    original: &McpError,
+    rescue: &McpError,
+    post_method_not_allowed: bool,
+) -> McpError {
+    let timed_out = matches!(rescue, McpError::Connection(message)
+        if message.contains("deadline exceeded"));
+    let auth_ish = matches!(
+        rescue,
+        McpError::HttpResponse {
+            status: 401 | 403,
+            ..
+        }
+    ) || matches!(rescue, McpError::OAuth(_));
+    let structured_http = matches!(rescue, McpError::HttpResponse { .. });
+
+    if timed_out && post_method_not_allowed && auth_ish {
+        return McpError::Connection(
+            "MCP server requires authorization: its legacy HTTP+SSE stream answered with an \
+             auth challenge and the authorization flow did not finish within the connect budget"
+                .to_string(),
+        );
+    }
+    if timed_out || (structured_http && !auth_ish) || (auth_ish && !post_method_not_allowed) {
+        return clone_original(original);
+    }
+    clone_original(rescue)
+}
+
+/// `McpError` is not `Clone`; the two the rescue picks between are both simple
+/// enough to rebuild by shape.
+fn clone_original(error: &McpError) -> McpError {
+    match error {
+        McpError::HttpResponse {
+            status,
+            www_authenticate,
+        } => McpError::HttpResponse {
+            status: *status,
+            www_authenticate: www_authenticate.clone(),
+        },
+        // Preserve the variant rather than re-wrapping, or the message picks up
+        // a second "connection failed:" on its way out.
+        McpError::Connection(message) => McpError::Connection(message.clone()),
+        McpError::Handshake(message) => McpError::Handshake(message.clone()),
+        McpError::OAuth(message) => McpError::OAuth(message.clone()),
+        other => McpError::Connection(other.to_string()),
+    }
+}
+
+/// Whether a rejected streamable `initialize` POST means "this server speaks
+/// legacy HTTP+SSE" rather than "this server said no".
+///
+/// Upstream `Hs`, verbatim (2.1.267, present identically in both chunks that
+/// carry the fallback):
+///
+/// ```js
+/// function Hs(e){
+///   if(!(e instanceof o_) || (e.status!==400 && e.status!==404 && e.status!==405)) return !1;
+///   let n = e.data.text;
+///   if(typeof n !== "string") return !0;
+///   return !js(n);
+/// }
+/// ```
+///
+/// 🚨 **Both halves are load-bearing.** The status alone is not evidence: a
+/// server that answers the rejected POST with a valid JSON-RPC error has a real
+/// protocol failure, and re-dialling it would turn protocol errors into silent
+/// transport churn. Only a rejection whose body is *not* a JSON-RPC message
+/// says "you are speaking the wrong protocol at me".
+///
+/// A body we never captured maps to upstream's `typeof n !== "string"` arm and
+/// therefore falls back — a transport that cannot supply one does not get to
+/// veto the rescue.
+fn rejection_invites_legacy_sse(http: &HandshakeHttp) -> bool {
+    if !matches!(http.status, 400 | 404 | 405) {
+        return false;
+    }
+    if http.body.trim().is_empty() {
+        return true;
+    }
+    !body_is_jsonrpc(&http.body)
+}
+
+/// Upstream `js`: read the body as a JSON-RPC message, tolerating SSE framing.
+///
+/// ```js
+/// function js(e){ let n = e.split(/\r?\n/).find((r)=>r.startsWith("data:"));
+///                 let o = Rt(n===void 0 ? e : n.slice(5), !1); return Ane(o) }
+/// ```
+///
+/// The `data:` hop matters: a server can reject the POST with an SSE-framed
+/// error, and that is still a JSON-RPC answer rather than a wrong-protocol
+/// signal.
+fn body_is_jsonrpc(body: &str) -> bool {
+    let payload = body
+        .lines()
+        .find(|line| line.starts_with("data:"))
+        .map_or(body, |line| &line[5..]);
+    serde_json::from_str::<jsonrpc::messages::Message>(payload.trim()).is_ok()
+}
+
+/// The HTTP detail behind a failed handshake.
+///
+/// [`McpError::HttpResponse`] deliberately carries only `status` and
+/// `www_authenticate`; widening that public type would touch every construction
+/// and match site across the workspace. The legacy-SSE fallback is the only
+/// reader that needs the body, and it lives in this file, so the detail is
+/// carried privately from the one place that still has it.
+#[derive(Debug, Clone)]
+struct HandshakeHttp {
+    status: u16,
+    body: String,
+}
+
+fn handshake_http(error: &ConnectionError) -> Option<HandshakeHttp> {
+    let ConnectionError::Router(RouterError::Remote(remote)) = error else {
+        return None;
+    };
+    let status = http_status(&remote.data)?;
+    let body = remote
+        .data
+        .as_ref()
+        .and_then(|data| data.get("body"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Some(HandshakeHttp { status, body })
 }
 
 fn handshake_error(error: &ConnectionError) -> McpError {

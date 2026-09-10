@@ -60,6 +60,27 @@ pub enum SseEndpointMode {
     /// (`McpTransportSpec::SseIde`). This is the IDE contract, where the
     /// extension serves both on one url and sends no `endpoint` event.
     SameUrl,
+    /// [`Self::EndpointEvent`], plus upstream's 401 guard on the stream GET.
+    /// Used ONLY when rescuing a streamable-HTTP server whose `initialize`
+    /// POST was rejected — never for a directly configured `type: "sse"`
+    /// server, which must stay free to authenticate normally.
+    ///
+    /// Upstream puts the guard inside the fallback-only transport factory:
+    ///
+    /// ```js
+    /// if(!Te && !Xe){                       // Te = postMethodNotAllowed
+    ///   if(ft.status===401) throw Error("legacy HTTP+SSE stream GET answered 401     ///     after the initialize POST was not a 405; not starting OAuth against this URL");
+    ///   Xe = ft.ok }
+    /// ```
+    ///
+    /// A 405 says "wrong method here", which is real evidence the url is an SSE
+    /// endpoint. A 400 or 404 is not, so a 401 on the stream GET must not be
+    /// allowed to point an OAuth flow at a url that may not be an MCP endpoint
+    /// at all.
+    LegacyRescue {
+        /// Whether the streamable `initialize` POST was rejected with 405.
+        post_method_not_allowed: bool,
+    },
 }
 
 /// Errors specific to opening an MCP SSE connection.
@@ -200,6 +221,20 @@ where
         .await
         .map_err(|e| SseConnectError::Transport(e.to_string()))?;
 
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+        && matches!(
+            endpoint_mode,
+            SseEndpointMode::LegacyRescue {
+                post_method_not_allowed: false
+            }
+        )
+    {
+        return Err(SseConnectError::Endpoint(
+            "legacy HTTP+SSE stream GET answered 401 after the initialize POST was not a 405; \
+             not starting OAuth against this URL"
+                .to_string(),
+        ));
+    }
     if !response.status().is_success() {
         return Err(SseConnectError::HttpResponse {
             status: response.status().as_u16(),
@@ -296,9 +331,11 @@ where
     // than a transport that posts into the stream url and hopes.
     let post_url = match endpoint_mode {
         SseEndpointMode::SameUrl => url.to_string(),
-        SseEndpointMode::EndpointEvent => endpoint_rx.await.map_err(|_| {
-            SseConnectError::Endpoint("reader stopped before an endpoint event".to_string())
-        })??,
+        SseEndpointMode::EndpointEvent | SseEndpointMode::LegacyRescue { .. } => {
+            endpoint_rx.await.map_err(|_| {
+                SseConnectError::Endpoint("reader stopped before an endpoint event".to_string())
+            })??
+        }
     };
     let post_auth = auth_token.map(str::to_string);
     let post_extra = extra_headers.clone();

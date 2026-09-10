@@ -52,9 +52,15 @@ pub const TOOL_NAME: &str = "Workflow";
 
 const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
-/// The long-form tool description (claude-code v2.1.245 `prompt`), reproduced
-/// byte-for-byte. A trailing newline (should an editor add one to the data file)
-/// is stripped so the ORACLE text matches the binary exactly.
+/// The tool description (claude-code v2.1.267 `t`), reproduced byte-for-byte.
+/// A trailing newline (should an editor add one to the data file) is stripped so
+/// the ORACLE text matches the binary exactly.
+///
+/// 2.1.267 SPLIT what 2.1.245 shipped as a single 19,200-byte description. This
+/// file is now only the head — the part every request pays for. The 17 KB
+/// script-writing reference moved to [`ORACLE_AUTHORING_SKILL`], served on
+/// demand by the `workflow-authoring` bundled skill. Upstream's own changelog
+/// puts the saving at "about 1k tokens instead of 5.7k".
 ///
 /// ⛔ This is the oracle, not the shipped text. Never edit
 /// `workflow_description.txt` to change what the model reads — register the
@@ -62,6 +68,26 @@ const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 /// id and a reason. [`DESCRIPTION`] is what actually ships.
 static ORACLE_DESCRIPTION: Lazy<String> = Lazy::new(|| {
     include_str!("workflow_description.txt")
+        .trim_end_matches('\n')
+        .to_string()
+});
+
+/// The authoring reference (claude-code v2.1.267 `wpn()`), reproduced
+/// byte-for-byte in its DEFAULT rendering — the branch taken when no subagent
+/// model is pinned.
+///
+/// Upstream's `wpn()` is a template literal, not a constant: three fragments are
+/// interpolated as `${e?"":"…"}`, where `e` is `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
+/// A pinned deployment model makes per-agent `model` overrides meaningless, so
+/// upstream drops the three passages that document them. Storing the *unforced*
+/// text and subtracting those fragments (see [`MODEL_FORCE_OMISSIONS`]) keeps
+/// this file a byte-for-byte oracle rather than a template the tests cannot
+/// compare against the binary.
+///
+/// ⛔ Same rule as above: edits belong in the divergence register, targeted at
+/// `"skill"`. [`AUTHORING_SKILL`] is what actually ships.
+static ORACLE_AUTHORING_SKILL: Lazy<String> = Lazy::new(|| {
+    include_str!("workflow_authoring_skill.txt")
         .trim_end_matches('\n')
         .to_string()
 });
@@ -76,12 +102,29 @@ static ORACLE_DESCRIPTION: Lazy<String> = Lazy::new(|| {
 #[derive(Debug, serde::Deserialize)]
 struct DescriptionDivergence {
     id: String,
+    /// Which of the two oracle texts this entry edits.
+    target: DivergenceTarget,
     /// The finding this divergence answers, for the audit trail.
     #[allow(dead_code)]
     finding: String,
     reason: String,
     anchor: String,
     text: String,
+}
+
+/// Which byte-locked oracle text a divergence attaches to.
+///
+/// 2.1.267 split the description in two, and the two registered divergences
+/// went to opposite halves: the local-app opt-in clause belongs with the
+/// per-request description, while the `fusion()` hook belongs with the authoring
+/// reference that documents every other script-body hook. Naming the target
+/// keeps `compose` from searching the wrong document and silently reporting a
+/// missing anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DivergenceTarget {
+    Description,
+    Skill,
 }
 
 /// The register of local divergences. See the `_doc` block in the data file for
@@ -105,9 +148,10 @@ static DESCRIPTION_DIVERGENCES: Lazy<Vec<DescriptionDivergence>> = Lazy::new(|| 
 fn compose_description(
     oracle: &str,
     divergences: &[DescriptionDivergence],
+    target: DivergenceTarget,
 ) -> Result<String, String> {
     let mut composed = oracle.to_string();
-    for divergence in divergences {
+    for divergence in divergences.iter().filter(|d| d.target == target) {
         match composed.matches(divergence.anchor.as_str()).count() {
             1 => {}
             0 => {
@@ -136,11 +180,97 @@ fn compose_description(
     Ok(composed)
 }
 
-/// The shipped description: the oracle plus every registered divergence.
+/// The shipped tool description: the oracle head plus its registered divergences.
 static DESCRIPTION: Lazy<String> = Lazy::new(|| {
-    compose_description(&ORACLE_DESCRIPTION, &DESCRIPTION_DIVERGENCES)
-        .unwrap_or_else(|error| panic!("Workflow tool description: {error}"))
+    compose_description(
+        &ORACLE_DESCRIPTION,
+        &DESCRIPTION_DIVERGENCES,
+        DivergenceTarget::Description,
+    )
+    .unwrap_or_else(|error| panic!("Workflow tool description: {error}"))
 });
+
+/// The three passages upstream omits when a subagent model is pinned
+/// (`${e?"":"…"}` in `wpn()`, `e` = `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`).
+///
+/// Each must occur EXACTLY ONCE in the oracle text — the same anchor discipline
+/// the divergence register uses, and for the same reason: a fragment that stops
+/// matching after an oracle refresh must fail loudly instead of silently
+/// subtracting nothing.
+const MODEL_FORCE_OMISSIONS: [&str; 3] = [
+    " Add `model` to a phase entry when that phase uses a specific model override.",
+    " model?: string,",
+    " opts.model overrides the model for this agent call. Default to omitting it — the agent \
+     inherits the main-loop model (the resolved session model), which is almost always correct. \
+     Only set it when you're highly confident a different tier fits the task; when unsure, omit.",
+];
+
+/// The shipped authoring reference, in its unforced rendering.
+static AUTHORING_SKILL: Lazy<String> = Lazy::new(|| {
+    compose_description(
+        &ORACLE_AUTHORING_SKILL,
+        &DESCRIPTION_DIVERGENCES,
+        DivergenceTarget::Skill,
+    )
+    .unwrap_or_else(|error| panic!("Workflow authoring reference: {error}"))
+});
+
+/// The pointer sentence (claude-code v2.1.267 `i`) that replaces the reference
+/// in the tool description when the skill can actually be loaded.
+const AUTHORING_SKILL_POINTER: &str = "Before writing a script, load the `workflow-authoring` \
+     skill — the workflow authoring reference: script API and gotchas, resume, the **Ultracode** \
+     section, quality patterns, worked examples.";
+
+/// The authoring reference as the `workflow-authoring` skill serves it.
+///
+/// `model_forced` mirrors upstream's `e`: when a deployment pins the subagent
+/// model, the three `model`-override passages are subtracted.
+pub fn authoring_skill_body(model_forced: bool) -> String {
+    let mut body = AUTHORING_SKILL.clone();
+    if model_forced {
+        for fragment in MODEL_FORCE_OMISSIONS {
+            body = body.replace(fragment, "");
+        }
+    }
+    body
+}
+
+/// `a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` — the deployment pin that makes
+/// per-agent `model` overrides meaningless, so the passages documenting them are
+/// dropped. Read here at the edge and passed down as a parameter: a gate that
+/// reads the environment deep inside the call graph cannot be tested without
+/// `set_var`, which flakes the moment the suite runs in parallel.
+#[must_use]
+fn subagent_model_forced() -> bool {
+    platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
+            .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Upstream `Epn(e)` — assemble what the model reads for the Workflow tool.
+///
+/// `skill_reachable` answers "can this request load the `workflow-authoring`
+/// skill?". When it can, the description carries a one-line pointer; when it
+/// cannot, the whole reference is inlined exactly as 2.1.245 shipped it.
+///
+/// ⛔ The fallback is not an optimisation detail — it is a reachability
+/// invariant. A script only ever learns which hooks exist from this text, so
+/// pointing at a skill the model cannot load would make every hook (including
+/// LingXi's `fusion()`) unreachable. Upstream inlines for the same reason.
+fn assemble_description(skill_reachable: bool, model_forced: bool) -> String {
+    if skill_reachable {
+        format!("{}\n\n{}", *DESCRIPTION, AUTHORING_SKILL_POINTER)
+    } else {
+        format!(
+            "{}\n\n{}",
+            *DESCRIPTION,
+            authoring_skill_body(model_forced)
+        )
+    }
+}
 
 /// The input schema (claude-code v2.1.245 `inputSchema`), reproduced from the
 /// zod `strictObject` definition (source-order properties, `additionalProperties:
@@ -1027,6 +1157,27 @@ impl WorkflowTool {
             })
     }
 
+    /// Upstream `nre(tools)` — can THIS request load the `workflow-authoring`
+    /// skill?
+    ///
+    /// Upstream answers with six conditions: workflows enabled, bundled skills
+    /// not disabled, slash commands not disabled, the entrypoint is not
+    /// `local-agent`, no `skillOverrides` entry of `off` /
+    /// `user-invocable-only`, the session skill allowlist (when there is one)
+    /// includes it — and then, per call, that the `Skill` tool is among the
+    /// advertised tools.
+    ///
+    /// This port has no substrate for three of them (`disableBundledSkills`,
+    /// `skillOverrides`, and the session skill allowlist do not exist here), and
+    /// — more decisively — does not yet register the skill at all. Every one of
+    /// upstream's conditions is therefore unsatisfied, and `false` is not a stub
+    /// standing in for unfinished work: it is the answer `nre()` itself returns
+    /// for a build where the skill is absent, which is why upstream keeps the
+    /// inline branch. The reachability invariant holds either way.
+    fn authoring_skill_reachable(&self, _options: &PromptOptions) -> bool {
+        false
+    }
+
     /// Is the tool disabled, by env var OR managed setting? Binary `fbn()`.
     fn workflows_disabled(&self) -> bool {
         !workflows_enabled(self.managed_disable_workflows)
@@ -1356,14 +1507,19 @@ impl Tool for WorkflowTool {
         "Running a workflow".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        // Binary: `async prompt(){ return qAs + VAs(St().workflowSizeGuideline) }`
-        // — the base description plus the (possibly-empty) size-guideline
-        // appendix. `/config` updates the live session snapshot, so prefer that
-        // value over the construction-time fallback on every prompt build.
+    async fn prompt(&self, options: &PromptOptions) -> String {
+        // Binary (2.1.267): `async prompt(e){ return Epn(nre(e?.tools)) +
+        // Kvn(ne().workflowSizeGuideline) + ct() }` — the assembled description
+        // plus the (possibly-empty) size-guideline appendix. (`ct()` is
+        // `return ""` in this build, so there is nothing to port for it.)
+        // `/config` updates the live session snapshot, so prefer that value over
+        // the construction-time fallback on every prompt build.
         format!(
             "{}{}",
-            *DESCRIPTION,
+            assemble_description(
+                self.authoring_skill_reachable(options),
+                subagent_model_forced()
+            ),
             self.workflow_size_guideline().prompt_appendix()
         )
     }
@@ -2047,29 +2203,69 @@ mod tests {
     }
 
     /// The ORACLE half of the old `description_matches_the_binary_byte_for_byte`.
-    /// Unchanged in substance: `workflow_description.txt` is still pinned to the
-    /// binary, byte for byte. What moved out is the claim that the SHIPPED text
-    /// equals it — that is now [`the_shipped_description_is_the_oracle_plus_the_register`].
+    /// Unchanged in substance: the oracle files are still pinned to the binary,
+    /// byte for byte. What moved out is the claim that the SHIPPED text equals
+    /// them — that is now [`the_shipped_description_is_the_oracle_plus_the_register`].
+    ///
+    /// 2.1.267 split the 19,200-byte 2.1.245 description in two, so this pins
+    /// both halves. Every marker below was re-derived by resolving `Epn`'s two
+    /// operands in `src_178675664.js`: each one occurs in exactly ONE half, and
+    /// the test asserts its absence from the other — a marker that merely
+    /// "still appears somewhere" would not notice a passage sliding between the
+    /// two documents, which is precisely the drift this split introduces.
     #[test]
     fn oracle_description_matches_the_binary_byte_for_byte() {
-        // v2.1.245 runtime markers of the Workflow tool description.
+        // ── The per-request head (`t`) ──
         assert_eq!(
             ORACLE_DESCRIPTION.len(),
-            19200,
-            "oracle description byte length drifted from Claude Code 2.1.245"
+            3031,
+            "oracle description byte length drifted from Claude Code 2.1.267"
         );
         assert!(ORACLE_DESCRIPTION.starts_with(
             "Execute a workflow script that orchestrates multiple subagents deterministically."
         ));
-        assert!(ORACLE_DESCRIPTION.ends_with("hand-author a continuation script."));
+        assert!(ORACLE_DESCRIPTION
+            .ends_with("No wasted wall-clock."));
         assert!(ORACLE_DESCRIPTION.contains("Use the Agent tool (if available)"));
-        assert!(ORACLE_DESCRIPTION.contains("min(16, available CPUs - 2)"));
-        assert!(ORACLE_DESCRIPTION.contains("e.g. 'general-purpose', 'code-reviewer'"));
-        assert!(ORACLE_DESCRIPTION.contains("Before diagnosing why a completed workflow returned an empty or unexpected result, Read <transcriptDir>/journal.jsonl"));
-        // The ${r1e} interpolation resolved to the ▸ group marker.
-        assert!(ORACLE_DESCRIPTION.contains("\"▸ name\" group in /workflows"));
-        // No leftover raw escape sequences.
-        assert!(!ORACLE_DESCRIPTION.contains("\\u2014"));
+
+        // ── The on-demand reference (`wpn()`), unforced rendering ──
+        assert_eq!(
+            ORACLE_AUTHORING_SKILL.len(),
+            17141,
+            "oracle authoring reference byte length drifted from Claude Code 2.1.267"
+        );
+        assert!(ORACLE_AUTHORING_SKILL.starts_with("# Workflow authoring reference"));
+        assert!(ORACLE_AUTHORING_SKILL.ends_with("hand-author a continuation script."));
+        assert!(ORACLE_AUTHORING_SKILL.contains("min(16, available CPUs - 2)"));
+        assert!(ORACLE_AUTHORING_SKILL.contains("e.g. 'general-purpose', 'code-reviewer'"));
+        assert!(ORACLE_AUTHORING_SKILL.contains("Before diagnosing why a completed workflow returned an empty or unexpected result, Read <transcriptDir>/journal.jsonl"));
+        // The ${PP} interpolation resolved to the ▸ group marker.
+        assert!(ORACLE_AUTHORING_SKILL.contains("\"▸ name\" group in /workflows"));
+
+        // Each marker lives in ONE half. Without this, a paragraph migrating
+        // between the two files would keep every `contains` above green.
+        for stray in [
+            "min(16, available CPUs - 2)",
+            "e.g. 'general-purpose', 'code-reviewer'",
+            "\"▸ name\" group in /workflows",
+        ] {
+            assert!(
+                !ORACLE_DESCRIPTION.contains(stray),
+                "{stray:?} belongs to the authoring reference, not the per-request description"
+            );
+        }
+        assert!(
+            !ORACLE_AUTHORING_SKILL.contains("Use the Agent tool (if available)"),
+            "the opt-in clauses belong to the per-request description"
+        );
+
+        // No leftover raw escape sequences. `\\x` matters as much as `\\u`: the
+        // binary stores `×` as `\\xD7`, and an extractor that only unescaped
+        // `\\uXXXX` left it raw — which read as a genuine oracle delta.
+        for oracle in [&*ORACLE_DESCRIPTION, &*ORACLE_AUTHORING_SKILL] {
+            assert!(!oracle.contains("\\u2014"));
+            assert!(!oracle.contains("\\x"));
+        }
     }
 
     /// Every entry in the register carries the two things a bare byte count
@@ -2102,13 +2298,36 @@ mod tests {
                 "divergence `{}` inserts nothing",
                 divergence.id
             );
+            let (target, other, target_name, other_name) = match divergence.target {
+                DivergenceTarget::Description => (
+                    &*ORACLE_DESCRIPTION,
+                    &*ORACLE_AUTHORING_SKILL,
+                    "description",
+                    "authoring reference",
+                ),
+                DivergenceTarget::Skill => (
+                    &*ORACLE_AUTHORING_SKILL,
+                    &*ORACLE_DESCRIPTION,
+                    "authoring reference",
+                    "description",
+                ),
+            };
             assert_eq!(
-                ORACLE_DESCRIPTION
-                    .matches(divergence.anchor.as_str())
-                    .count(),
+                target.matches(divergence.anchor.as_str()).count(),
                 1,
-                "divergence `{}`: its anchor must occur exactly once in the ORACLE text, so an \
-                 oracle refresh that moves the anchored passage fails here by name",
+                "divergence `{}`: its anchor must occur exactly once in the ORACLE {target_name}, \
+                 so an oracle refresh that moves the anchored passage fails here by name",
+                divergence.id
+            );
+            // ...and ZERO times in the other half. 2.1.267 split the text in
+            // two; a passage that migrates across would otherwise keep its stale
+            // `target` and still compose, landing the insert in the document the
+            // register no longer describes.
+            assert_eq!(
+                other.matches(divergence.anchor.as_str()).count(),
+                0,
+                "divergence `{}`: its anchor also occurs in the {other_name}, so `target` is \
+                 ambiguous — the anchored passage moved between the two oracle texts",
                 divergence.id
             );
         }
@@ -2120,36 +2339,146 @@ mod tests {
     /// deliberate divergence with accidental drift.
     #[test]
     fn the_shipped_description_is_the_oracle_plus_the_register() {
-        let registered: usize = DESCRIPTION_DIVERGENCES.iter().map(|d| d.text.len()).sum();
-        assert_eq!(
-            DESCRIPTION.len(),
-            ORACLE_DESCRIPTION.len() + registered,
-            "shipped description length is not the oracle plus the registered divergences: \
-             either the oracle drifted, or something was edited into one of the two files \
-             without an entry in workflow_description_divergences.json"
-        );
-        for divergence in DESCRIPTION_DIVERGENCES.iter() {
+        for (target, oracle, shipped, name) in [
+            (
+                DivergenceTarget::Description,
+                &*ORACLE_DESCRIPTION,
+                &*DESCRIPTION,
+                "description",
+            ),
+            (
+                DivergenceTarget::Skill,
+                &*ORACLE_AUTHORING_SKILL,
+                &*AUTHORING_SKILL,
+                "authoring reference",
+            ),
+        ] {
+            let entries = || DESCRIPTION_DIVERGENCES.iter().filter(|d| d.target == target);
+            let registered: usize = entries().map(|d| d.text.len()).sum();
             assert_eq!(
-                DESCRIPTION.matches(divergence.text.as_str()).count(),
-                1,
-                "divergence `{}` is registered but does not appear exactly once in the shipped \
-                 description",
-                divergence.id
+                shipped.len(),
+                oracle.len() + registered,
+                "shipped {name} length is not the oracle plus its registered divergences: \
+                 either the oracle drifted, or something was edited into one of the two files \
+                 without an entry in workflow_description_divergences.json"
             );
-            assert!(
-                !ORACLE_DESCRIPTION.contains(divergence.text.as_str()),
-                "divergence `{}` is already in the oracle — retire the entry instead of \
-                 inserting a duplicate",
-                divergence.id
-            );
+            for divergence in entries() {
+                assert_eq!(
+                    shipped.matches(divergence.text.as_str()).count(),
+                    1,
+                    "divergence `{}` is registered but does not appear exactly once in the \
+                     shipped {name}",
+                    divergence.id
+                );
+                assert!(
+                    !oracle.contains(divergence.text.as_str()),
+                    "divergence `{}` is already in the oracle — retire the entry instead of \
+                     inserting a duplicate",
+                    divergence.id
+                );
+            }
         }
-        // The shipped text is still the oracle at both ends: every registered
-        // insert is interior, so a divergence cannot silently re-open the tool
-        // description or change how it closes.
+        // Each shipped text is still the oracle at both ends: every registered
+        // insert is interior, so a divergence cannot silently re-open either
+        // document or change how it closes.
         assert!(DESCRIPTION.starts_with(
             "Execute a workflow script that orchestrates multiple subagents deterministically."
         ));
-        assert!(DESCRIPTION.ends_with("hand-author a continuation script."));
+        assert!(DESCRIPTION.ends_with("No wasted wall-clock."));
+        assert!(AUTHORING_SKILL.starts_with("# Workflow authoring reference"));
+        assert!(AUTHORING_SKILL.ends_with("hand-author a continuation script."));
+    }
+
+    /// The reachability invariant the split must not break.
+    ///
+    /// A script only ever learns which hooks exist from the text the model
+    /// reads. Moving 17 KB of that text behind a skill is safe ONLY while the
+    /// fallback inlines it whenever the skill cannot be loaded — which is why
+    /// upstream's `Epn` keeps both branches. This asserts the property directly:
+    /// in the branch the model gets when it cannot load the skill, every hook is
+    /// still documented.
+    #[test]
+    fn the_inline_branch_documents_every_script_body_hook() {
+        let inline = assemble_description(false, false);
+        for hook in [
+            "- agent(prompt: string",
+            "- pipeline(items,",
+            "- parallel(thunks:",
+            "- phase(",
+            "- workflow(nameOrRef:",
+            "- fusion(prompt: string",
+        ] {
+            assert!(
+                inline.contains(hook),
+                "{hook:?} is unreachable: a script cannot call a hook the description never \
+                 mentions, and the inline branch is what a model without the skill receives"
+            );
+        }
+        // The pointer branch is the OTHER half of the same invariant: it may
+        // omit the hooks only because it names the skill that documents them.
+        let pointed = assemble_description(true, false);
+        assert!(
+            pointed.contains("`workflow-authoring`"),
+            "the short branch must name the skill that carries the reference"
+        );
+        assert!(
+            !pointed.contains("- fusion(prompt: string"),
+            "the short branch is pointless if it still inlines the reference"
+        );
+        assert!(
+            pointed.len() < inline.len() / 4,
+            "the split exists to cut the per-request footprint; got {} vs {}",
+            pointed.len(),
+            inline.len()
+        );
+    }
+
+    /// The three `${e?"":"…"}` fragments are subtracted only when a subagent
+    /// model is pinned — and each must still be FOUND, or the subtraction
+    /// silently removes nothing.
+    #[test]
+    fn a_pinned_subagent_model_drops_the_model_override_passages() {
+        for fragment in MODEL_FORCE_OMISSIONS {
+            assert_eq!(
+                ORACLE_AUTHORING_SKILL.matches(fragment).count(),
+                1,
+                "the model-force fragment {fragment:?} must occur exactly once in the oracle; a \
+                 fragment that stopped matching would subtract nothing and pass unnoticed"
+            );
+        }
+        let unforced = authoring_skill_body(false);
+        let forced = authoring_skill_body(true);
+        assert!(forced.len() < unforced.len(), "forcing must remove text");
+        for fragment in MODEL_FORCE_OMISSIONS {
+            assert!(unforced.contains(fragment));
+            assert!(
+                !forced.contains(fragment),
+                "{fragment:?} documents a `model` override that a pinned deployment ignores"
+            );
+        }
+        // Only those three passages go; the rest of the reference is intact.
+        assert_eq!(
+            unforced.len() - forced.len(),
+            MODEL_FORCE_OMISSIONS.iter().map(|f| f.len()).sum::<usize>()
+        );
+        assert!(forced.starts_with("# Workflow authoring reference"));
+        assert!(forced.contains("- fusion(prompt: string"));
+    }
+
+    /// The point of the 2.1.267 split, stated as a number so a regression that
+    /// re-inlines the reference into every request is loud.
+    #[test]
+    fn the_per_request_description_stays_small() {
+        assert!(
+            DESCRIPTION.len() < 5_000,
+            "the per-request description is {} bytes; 2.1.267 split the 19,200-byte 2.1.245 \
+             text precisely so every request stops paying for the reference",
+            DESCRIPTION.len()
+        );
+        assert!(
+            AUTHORING_SKILL.len() > 15_000,
+            "the reference did not survive the split"
+        );
     }
 
     /// The composition must be able to go RED, and to say WHICH entry failed.
@@ -2158,12 +2487,13 @@ mod tests {
     fn a_divergence_whose_anchor_drifted_fails_by_name() {
         let drifted = vec![DescriptionDivergence {
             id: "planted-anchor-drift".into(),
+            target: DivergenceTarget::Description,
             finding: "self-test".into(),
             reason: "planted by the test to prove composition can fail loudly".into(),
             anchor: "this sentence is not in the Workflow tool description".into(),
             text: "unreachable".into(),
         }];
-        let error = compose_description(&ORACLE_DESCRIPTION, &drifted)
+        let error = compose_description(&ORACLE_DESCRIPTION, &drifted, DivergenceTarget::Description)
             .expect_err("a missing anchor must not compose silently");
         assert!(
             error.contains("planted-anchor-drift"),
@@ -2172,12 +2502,13 @@ mod tests {
 
         let ambiguous = vec![DescriptionDivergence {
             id: "planted-ambiguous-anchor".into(),
+            target: DivergenceTarget::Description,
             finding: "self-test".into(),
             reason: "planted by the test to prove an ambiguous anchor is refused".into(),
             anchor: "the".into(),
             text: "unreachable".into(),
         }];
-        let error = compose_description(&ORACLE_DESCRIPTION, &ambiguous)
+        let error = compose_description(&ORACLE_DESCRIPTION, &ambiguous, DivergenceTarget::Description)
             .expect_err("an anchor with many matches must not compose");
         assert!(
             error.contains("planted-ambiguous-anchor") && error.contains("ambiguous"),
@@ -2222,17 +2553,17 @@ mod tests {
     /// exists cannot call it. Asserted on both sides so the bullet can neither
     /// vanish from the shipped text nor creep into the oracle.
     #[test]
-    fn the_shipped_description_documents_the_fusion_hook() {
+    fn the_shipped_authoring_reference_documents_the_fusion_hook() {
         assert!(
-            !ORACLE_DESCRIPTION.contains("fusion(prompt: string, opts?:"),
+            !ORACLE_AUTHORING_SKILL.contains("fusion(prompt: string, opts?:"),
             "the oracle must stay free of LingXi-only hooks; that is what the register is for"
         );
         assert!(
-            DESCRIPTION.contains("fusion(prompt: string, opts?:"),
+            AUTHORING_SKILL.contains("fusion(prompt: string, opts?:"),
             "the shipped description must document the fusion() script hook"
         );
         assert!(
-            DESCRIPTION.contains("WorkflowFusionOptionError"),
+            AUTHORING_SKILL.contains("WorkflowFusionOptionError"),
             "the catchable rejection names must be documented, or a script cannot handle them"
         );
         // `platform_api::normalize_dimensions`' real rules. Pinned as prose, not
@@ -2240,19 +2571,19 @@ mod tests {
         // and until it was written down the rejection did not even reach the
         // script as a named error.
         assert!(
-            DESCRIPTION
+            AUTHORING_SKILL
                 .contains("lowercase snake_case, at most 12, never a provider/model/panel name"),
             "the dimensions rule must stay documented on the option it constrains"
         );
         // It belongs in the script-body hook list, next to the other hooks a
         // script can call — not in the prose after it.
-        let hooks = DESCRIPTION
+        let hooks = AUTHORING_SKILL
             .find("Script body hooks:")
             .expect("the hook list must exist");
-        let bullet = DESCRIPTION
+        let bullet = AUTHORING_SKILL
             .find("- fusion(prompt: string")
             .expect("checked above");
-        let after_hooks = DESCRIPTION
+        let after_hooks = AUTHORING_SKILL
             .find("Subagents are told their final text IS the return value")
             .expect("the paragraph after the hook list must exist");
         assert!(
@@ -2275,12 +2606,12 @@ mod tests {
     #[test]
     fn fusion_bullet_documents_only_real_fusion_result_keys() {
         let marker = "compact result object ({";
-        let start = DESCRIPTION
+        let start = AUTHORING_SKILL
             .find(marker)
             .expect("fusion() bullet documents the resolved object shape")
             + marker.len()
             - 1; // keep the leading '{'
-        let rest = &DESCRIPTION[start..];
+        let rest = &AUTHORING_SKILL[start..];
         let end = rest
             .find('}')
             .expect("object literal in the fusion() bullet is closed");
@@ -2461,6 +2792,10 @@ mod tests {
     #[tokio::test]
     async fn prompt_appends_size_guideline_when_configured() {
         let opts = PromptOptions::default();
+        // The base is the ASSEMBLED description, not the bare oracle: 2.1.267
+        // appends either the authoring reference or the one-line pointer to it.
+        // Computed the same way `prompt()` does, so this cannot drift from it.
+        let base = assemble_description(false, subagent_model_forced());
         // The DEFAULT is `medium` (oracle `_Td`), not unrestricted, so an
         // unconfigured tool already carries the medium appendix. Shipping
         // `Unrestricted` by default meant shipping NO agent cap where the
@@ -2469,7 +2804,7 @@ mod tests {
             tool(None).prompt(&opts).await,
             format!(
                 "{}{}",
-                *DESCRIPTION,
+                base,
                 WorkflowSizeGuideline::Medium.prompt_appendix()
             )
         );
@@ -2482,7 +2817,7 @@ mod tests {
             WorkflowSizeGuideline::Large,
         ] {
             let t = WorkflowTool::new(None).with_size_guideline(size);
-            let want = format!("{}{}", *DESCRIPTION, size.prompt_appendix());
+            let want = format!("{}{}", base, size.prompt_appendix());
             assert_eq!(t.prompt(&opts).await, want, "size={:?}", size);
             // Sanity: the model-visible cap text is present.
             assert!(t
@@ -2492,7 +2827,7 @@ mod tests {
         }
         // Explicit unrestricted also yields no appendix.
         let u = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Unrestricted);
-        assert_eq!(u.prompt(&opts).await, *DESCRIPTION);
+        assert_eq!(u.prompt(&opts).await, base);
 
         // `/config` updates the session snapshot after construction; the next
         // prompt must reflect it without rebuilding the tool registry.
@@ -2502,7 +2837,7 @@ mod tests {
             live.prompt(&opts).await,
             format!(
                 "{}{}",
-                *DESCRIPTION,
+                base,
                 WorkflowSizeGuideline::Small.prompt_appendix()
             )
         );
@@ -2519,7 +2854,7 @@ mod tests {
             session_owned.prompt(&opts).await,
             format!(
                 "{}{}",
-                *DESCRIPTION,
+                base,
                 WorkflowSizeGuideline::Large.prompt_appendix()
             ),
             "session-owned state must win over the process-global compatibility snapshot"

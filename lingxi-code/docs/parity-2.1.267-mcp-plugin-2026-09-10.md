@@ -89,7 +89,7 @@ connects upstream. The substrate exists — `McpTransportSpec::Sse` is already a
 supported *configured* transport — so this is wiring a fallback, not building a
 transport.
 
-## MCP-02 — a project `.mcp.json` can smuggle an unresolved `${…}` into a command — ✅ REAL, security-relevant
+## MCP-02 — a project `.mcp.json` can smuggle an unresolved `${…}` into a command — ✅ FIXED in `7a710a252`
 
 `src_175313539.js` @26576, in the project-scope arm of the approval builder:
 
@@ -115,7 +115,15 @@ content test. `env_expansion.rs:133`'s `contains("${")` is an early-out inside
 the expander, and `discovery_cache.rs:749`'s `has_placeholder` is cache-safety —
 neither refuses anything.
 
-**This is the highest-value implementable item in this audit.**
+**Fixed in `7a710a252`.** `McpServerBlockReason::ProjectUnresolvedEnvRef`,
+refused ahead of the approval bookkeeping so `enableAllProjectMcpServers` cannot
+admit it either.
+
+⚠️ Worth carrying forward: `load_mcp_servers` decides whether a blocked entry is
+disabled by **matching on the block reason**, so a new reason the match does not
+list is inert. Removing that arm left the entire 688-test `mcp` suite green —
+the gate would have read as implemented and done nothing. Any future block
+reason needs the same wiring test.
 
 ## MCP-03 — `managedMcpServers` is not read — ⚠️ REAL, needs a scope decision
 
@@ -163,9 +171,10 @@ managed-settings approval subsystem, not this crate).
 
 ## Recommended order
 
-1. **MCP-02** — bounded, security-relevant, exact spec above, and the approval
-   path already exists to hang it on.
-2. **MCP-01** — real interop loss, substrate present, but touches the dial path
-   and needs both halves of the predicate to avoid turning protocol errors into
-   transport churn.
+1. ~~MCP-02~~ — **done** (`7a710a252`).
+2. **MCP-01** — real interop loss, substrate present (`McpTransportSpec::Sse`
+   already exists as a configured transport), but it touches the dial path and
+   needs BOTH halves of the predicate: a 400/404/405 *and* a body that does not
+   parse as JSON-RPC. Implementing only the status half would turn genuine
+   protocol errors into silent transport churn.
 3. **MCP-03** — needs a scope decision before any code.

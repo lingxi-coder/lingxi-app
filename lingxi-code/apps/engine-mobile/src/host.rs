@@ -5460,6 +5460,26 @@ pub struct MobileEngineHandle {
     /// (`TurnStarted` / `MessageComplete`) and push listing replies to the SAME
     /// outbound channel the streamed turn events ride.
     event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    /// The same outbound channel as [`Self::event_sink`], taken BEFORE the
+    /// [`TurnLifecycleListener`] wrap.
+    ///
+    /// `SystemNotice` is live-turn payload (`TurnLifecycleListener::
+    /// is_live_turn_payload`), so the turn gate drops one emitted while no turn
+    /// is in flight. That is right for stray turn output arriving after the
+    /// active-turn slot is cleared, and wrong for a connection-scoped
+    /// acknowledgement a command handler owes the user right now — the gate
+    /// cannot tell the two apart, because both ride the same variant.
+    ///
+    /// This is mobile's counterpart to bridge-server's private
+    /// `unscoped_event_sink` (`apps/bridge-server/src/server.rs`), which is why
+    /// the desktop host does not have this bug: `server.rs` already routes every
+    /// `ClientCommand` through the unscoped sink, so a command handler's reply
+    /// never meets the turn filter there.
+    ///
+    /// Use ONLY for events that belong to the connection rather than to a turn;
+    /// anything a turn produces must keep going through [`Self::event_sink`] so
+    /// it stays gated, sequenced and journaled.
+    connection_sink: Arc<dyn client_adapter::ClientEventSink>,
     /// The cancellation token for the IN-FLIGHT turn, armed by
     /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
     /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
@@ -9103,7 +9123,12 @@ impl MobileEngineHandle {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 match handle.force_compact().await {
                     Ok(summary) => {
-                        self.event_sink
+                        // Same gate as the task-message reply: `/compact` is
+                        // issued BETWEEN turns by construction, and
+                        // `CompactionCompleted` is live-turn payload, so the
+                        // turn-scoped sink drops the confirmation in exactly the
+                        // case the user asked for it.
+                        self.connection_sink
                             .emit(ClientEvent::CompactionCompleted {
                                 messages_before: summary.messages_before,
                                 messages_after: summary.messages_after,
@@ -9800,7 +9825,9 @@ impl MobileEngineHandle {
                 }
                 let registry: &dyn platform_api::task_registry::TaskRegistryHandle = &*self.inner.task_registry;
                 registry.send_human_task_message(&task_id, &message).await.map_err(|error| ClientError::Rejected { message: format!("task message failed: {error}") })?;
-                self.event_sink.emit(ClientEvent::SystemNotice { message: format!("Message accepted for task {task_id}"), is_error: false }).await;
+                // Connection-scoped: the user sent this outside any turn, so the
+                // turn gate would drop it (see `connection_sink`).
+                self.connection_sink.emit(ClientEvent::SystemNotice { message: format!("Message accepted for task {task_id}"), is_error: false }).await;
                 Ok(())
             }
             ClientCommand::TaskStop { task_id } => {
@@ -12544,6 +12571,9 @@ pub fn build_mobile_engine_inner(
     // listener used by the eventual handle.
     let active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>> = Arc::new(Mutex::new(None));
     let durable_turns = Arc::new(DurableTurnStore::new(lingxi_home.join("mobile-turns")));
+    // Taken before the wrap: the gate below is what a connection-scoped notice
+    // has to get past, so it cannot be reached through the wrapped listener.
+    let connection_sink = ListenerSink::arc(listener.clone());
     let lifecycle_listener: Arc<dyn ClientEventListener> = Arc::new(
         TurnLifecycleListener::new_durable(listener, active_cancel.clone(), durable_turns.clone()),
     );
@@ -12915,6 +12945,7 @@ pub fn build_mobile_engine_inner(
         runtime,
         inner,
         event_sink,
+        connection_sink,
         active_cancel,
         message_queue,
         cancel_reason,
@@ -18572,6 +18603,62 @@ mod tests {
                 TurnRecoveryStateDto::Cancelled
             );
         });
+    }
+
+    /// The gate [`MobileEngineHandle::connection_sink`] exists to get past.
+    ///
+    /// This is the NO-active-turn window, not the cancelled/quiescing one the
+    /// test below covers — two different mechanisms with the same observable
+    /// effect, so each needs an input only it can reach. Here every live-turn
+    /// payload is dropped, including the `SystemNotice` and
+    /// `CompactionCompleted` a command handler emits as its reply, while a
+    /// connection-scoped event still forwards. "Nothing arrived" would not have
+    /// distinguished the two.
+    #[tokio::test]
+    async fn lifecycle_listener_drops_turn_payload_when_no_turn_is_active() {
+        let inner = Arc::new(FakeListener::default());
+        let active = Arc::new(tokio::sync::Mutex::new(None));
+        let listener = super::TurnLifecycleListener::new(inner.clone(), active.clone());
+
+        listener
+            .on_event(Ev::SystemNotice {
+                message: "Message accepted for task a12345678".to_string(),
+                is_error: false,
+            })
+            .await;
+        listener
+            .on_event(Ev::CompactionCompleted {
+                messages_before: 2,
+                messages_after: 1,
+                bytes_saved: 10,
+                summary: "kept context".to_string(),
+            })
+            .await;
+        listener
+            .on_event(Ev::TaskLifecycle {
+                event_json: "{\"type\":\"system\"}".to_string(),
+            })
+            .await;
+
+        let seen = inner.received.lock().await;
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Ev::SystemNotice { .. })),
+            "a command reply on SystemNotice is dropped with no turn to own it"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Ev::CompactionCompleted { .. })),
+            "so is the ForceCompact confirmation"
+        );
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, Ev::TaskLifecycle { .. })),
+            "a connection-scoped event still forwards, so the drop above is the \
+             turn gate and not a dead listener"
+        );
     }
 
     #[tokio::test]

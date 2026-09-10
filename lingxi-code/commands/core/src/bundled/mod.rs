@@ -353,6 +353,89 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
 mod tests {
     use super::*;
 
+    /// The bundled-skill NAME SET, locked against Claude Code 2.1.267.
+    ///
+    /// Nothing pinned this before: the per-skill tests below check one skill
+    /// each, so adding or losing a whole skill changed no assertion. A name set
+    /// is the right shape for it — a count would tell you something moved
+    /// without telling you what, which is exactly how the workflow-event count
+    /// went stale for six removals.
+    ///
+    /// Upstream 2.1.267 registers 21 bundled skills (`uo({name:…})`, resolved
+    /// from `~/.claude/oracle-chunks/2.1.267`): artifact-components, batch,
+    /// claude-api, claude-in-chrome, code-review, dataviz, debug, design-sync,
+    /// doctor, explain-usage, fewer-permission-prompts, keybindings-help, loop,
+    /// memory-types, run, run-skill-generator, setup-claude, update-config,
+    /// whiteboard, workflow-authoring, workshop.
+    ///
+    /// | in both | LingXi-only | upstream-only |
+    /// |---|---|---|
+    /// | batch, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator | cron, deep-research, simplify, verify | the remaining 13 |
+    ///
+    /// ⚠️ The upstream-only 13 are NOT automatically a backlog. Most ride
+    /// surfaces this port does not have (artifact-components / whiteboard /
+    /// workshop / design-sync need the Artifact and Design surfaces, which are
+    /// register-but-disabled here; claude-in-chrome needs the Chrome
+    /// extension). Each needs its own adjudication before anyone ports it —
+    /// see `docs/parity-2.1.267-skills-2026-09-10.md`.
+    ///
+    /// `claude-api` is registered separately, as the `skill-api` compiled-in
+    /// builtin rather than through this registrar, and is locked by
+    /// `skill_api::builtin`'s own test.
+    #[test]
+    fn the_bundled_skill_name_set_is_locked() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, true);
+
+        // Enumerate what actually registered, so this catches an ADDITION as
+        // well as a loss. Filtering a hardcoded list against the registry would
+        // only ever notice removals -- a new skill would slip in silently,
+        // which is half a lock.
+        let mut got: Vec<String> = reg
+            .list_all()
+            .into_iter()
+            .filter(|cmd| cmd.source == CommandSource::Bundled)
+            .map(|cmd| cmd.name.clone())
+            .collect();
+        got.sort();
+
+        let want = vec![
+            "batch".to_string(),
+            "code-review".to_string(),
+            "cron".to_string(),
+            "dataviz".to_string(),
+            "deep-research".to_string(),
+            "fewer-permission-prompts".to_string(),
+            "loop".to_string(),
+            "run".to_string(),
+            "run-skill-generator".to_string(),
+            "simplify".to_string(),
+            "verify".to_string(),
+        ];
+        assert_eq!(
+            got, want,
+            "every name above must still register; losing one silently is the \
+             failure this test exists to catch"
+        );
+
+        // The other half of a name set: names that must NOT be here. These are
+        // upstream bundled skills whose surfaces this port does not ship, so a
+        // sudden appearance means someone wired a skill without its substrate.
+        for absent in [
+            "artifact-components",
+            "claude-in-chrome",
+            "design-sync",
+            "whiteboard",
+            "workshop",
+        ] {
+            assert!(
+                reg.resolve(absent).is_none(),
+                "{absent} needs a surface this port does not have -- registering \
+                 it would advertise a skill that cannot run"
+            );
+        }
+    }
+
     #[test]
     fn registers_loop_when_cron_enabled() {
         let mut reg = CommandRegistry::new();

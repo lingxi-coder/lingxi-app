@@ -75,7 +75,7 @@ as a *product* observation, and the handoff says so itself ("needs a product
 decision, not a mechanical fix"). It is **not** a parity gap. ⛔ Do not "align"
 it.
 
-## AUDIT-02 — `tengu_agent_tool_terminated` never fires, and would misreport origin — ✅ REAL
+## AUDIT-02 — `tengu_agent_tool_terminated` never fires, and would misreport origin — ✅ FIXED (`a72861009`)
 
 The genuine defect adjacent to AUDIT-01, and the legitimate consumer of
 `killed_by`.
@@ -216,8 +216,18 @@ a divergence as omitting one it does.
 
 ## What to carry forward
 
-1. AUDIT-02 is the only item here worth code, and it needs the metadata and the
-   bus threaded into the async lifecycle together.
+1. ~~AUDIT-02 is the only item here worth code~~ — done (`a72861009`).
+
+   The blocker was real but resolved by picking the right HALF to emit from
+   rather than threading everything into one place: `killed_by` is the part that
+   cannot be reconstructed later, so the registry emits, and
+   `AgentTerminalOutcome` (which already carried the model) gains
+   `agent_depth` / `is_built_in` for the tool to stamp at launch.
+
+   ⚠️ Those two are omitted from the event until someone stamps them —
+   `SubagentSpawnRequest` has 54 construction sites and 3 use
+   `..Default::default()`, so plumbing them is its own change. Omitting beats a
+   plausible zero.
 2. ~~AUDIT-04 needs a test, not a fix.~~ Done (`624635a6d`) — and the first attempt at that test was itself a false green; see the section.
 3. ~~AUDIT-05 needs one more oracle read before anyone touches it.~~ Done — STRUCK: upstream's `TaskCompleted` is a task-BOARD event, not a background-shell one.
 4. AUDIT-01 and AUDIT-03 should be struck from the backlog.

@@ -404,6 +404,11 @@ struct CostDurabilityGateInner {
 #[derive(Default)]
 struct CostDurabilityGateState {
     frozen_reason: Option<String>,
+    /// Bumped by every `freeze`, including one whose reason is discarded
+    /// because an earlier one is kept. A validated thaw compares this rather
+    /// than the reason, so a failure that arrives while the proof is running
+    /// cannot be cleared by it.
+    freeze_epoch: u64,
     next_ticket: u64,
     serving_ticket: u64,
     abandoned_tickets: BTreeSet<u64>,
@@ -458,6 +463,48 @@ impl CostDurabilityGate {
             .clone()
     }
 
+    /// Clear a freeze when the caller can prove the ledger is still intact.
+    ///
+    /// A failed append does not by itself corrupt anything: the in-memory
+    /// revision only advances after the write, its fsync and its fingerprint
+    /// check all succeed, so the next append reuses the same revision. What
+    /// makes continuing unsafe is the one case where bytes reached the file
+    /// but the fsync did not -- appending again would then write that revision
+    /// twice. Only a full replay can tell those apart, so `validate` performs
+    /// it and this method does nothing else on its own.
+    ///
+    /// Returns whether the gate is now open. A freeze that arrived while
+    /// `validate` was running is preserved: the reason is compared, not just
+    /// its presence, so a newer failure is never cleared by an older proof.
+    pub fn thaw_if_intact(&self, validate: impl FnOnce() -> bool) -> bool {
+        let epoch = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.frozen_reason.is_none() {
+                return true;
+            }
+            state.freeze_epoch
+        };
+        if !validate() {
+            return false;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.freeze_epoch != epoch {
+            return false;
+        }
+        state.frozen_reason = None;
+        drop(state);
+        self.inner.changed.notify_waiters();
+        true
+    }
+
     /// Freeze once; later failures preserve the first actionable reason.
     pub fn freeze(&self, reason: impl Into<String>) {
         let mut state = self
@@ -465,6 +512,7 @@ impl CostDurabilityGate {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.freeze_epoch = state.freeze_epoch.saturating_add(1);
         if state.frozen_reason.is_none() {
             state.frozen_reason = Some(reason.into());
         }
@@ -804,5 +852,40 @@ mod tests {
             drain.await,
             Err(CostPersistError::Frozen(message)) if message == "first append failed"
         ));
+    }
+}
+
+#[cfg(test)]
+mod thaw_tests {
+    use super::CostDurabilityGate;
+
+    #[test]
+    fn a_validated_thaw_reopens_the_gate_and_an_unvalidated_one_does_not() {
+        let gate = CostDurabilityGate::default();
+        assert!(gate.frozen_reason().is_none());
+        // Nothing frozen: the gate is already open and validation is not run.
+        assert!(gate.thaw_if_intact(|| panic!("must not validate an open gate")));
+
+        gate.freeze("write failed");
+        assert!(!gate.thaw_if_intact(|| false), "an unproven ledger stays shut");
+        assert_eq!(gate.frozen_reason().as_deref(), Some("write failed"));
+
+        assert!(gate.thaw_if_intact(|| true));
+        assert!(gate.frozen_reason().is_none());
+    }
+
+    #[test]
+    fn a_freeze_that_arrives_during_validation_is_not_cleared() {
+        let gate = CostDurabilityGate::default();
+        gate.freeze("first failure");
+        let during = gate.clone();
+        // The proof concerns the state before this newer failure, so it must
+        // not clear it. Comparing the reason, not just its presence, is what
+        // makes that hold.
+        assert!(!gate.thaw_if_intact(|| {
+            during.freeze("second failure");
+            true
+        }));
+        assert_eq!(gate.frozen_reason().as_deref(), Some("first failure"));
     }
 }

@@ -1093,15 +1093,18 @@ impl SessionStateCoordinator {
                             let result =
                                 worker.persist_attempt(request.session_id, request.mutation);
                             if let Err(error) = &result {
-                                worker.durability_gate.freeze(error.to_string());
+                                freeze_then_try_recovery(&worker, error);
                             }
                             let _ = request.ack.send(result);
                         })
                         .await;
                         if let Err(error) = result {
-                            state
-                                .durability_gate
-                                .freeze(format!("attempt persistence worker failed: {error}"));
+                            freeze_then_try_recovery(
+                                &state,
+                                &CostPersistError::Storage(format!(
+                                    "attempt persistence worker failed: {error}"
+                                )),
+                            );
                         }
                     }
                     SessionMutation::Cost(request) => {
@@ -1120,7 +1123,7 @@ impl SessionStateCoordinator {
                             let error = CostPersistError::Storage(format!(
                                 "session state persistence worker failed: {join_error}"
                             ));
-                            state.durability_gate.freeze(error.to_string());
+                            freeze_then_try_recovery(&state, &error);
                             state
                                 .results
                                 .lock()
@@ -2005,6 +2008,54 @@ impl CoordinatorState {
     }
 }
 
+/// Freeze on a persistence failure, then try to prove the ledger survived it.
+///
+/// Most write failures leave nothing behind: the journal advances its revision
+/// only after the write, its fsync and its fingerprint check all pass, so a
+/// failed append simply did not happen. Two other shapes are not survivable
+/// and this must not clear either:
+///
+/// * the file is damaged -- a replay says so;
+/// * the record landed but the in-memory projection never folded it, which is
+///   what a failed acknowledgement after a complete write leaves behind. The
+///   file replays perfectly there, so a replay alone would wrongly recover and
+///   let later work build on a projection that is behind the disk.
+///
+/// So the proof is both: the ledger replays, AND the last revision on disk is
+/// the one this coordinator has already accounted for. It runs off the
+/// caller's path, in the worker that just failed.
+fn freeze_then_try_recovery(state: &CoordinatorState, error: &CostPersistError) {
+    state.durability_gate.freeze(error.to_string());
+    let recovered = state.durability_gate.thaw_if_intact(|| {
+        let Ok(replay) = state.journal.replay() else {
+            return false;
+        };
+        let on_disk = replay
+            .entries
+            .last()
+            .map_or(0, |entry| entry.journal_revision);
+        let accounted = state
+            .projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest
+            .as_ref()
+            .map_or(0, |(_, revision)| *revision);
+        on_disk == accounted
+    });
+    if recovered {
+        tracing::warn!(
+            %error,
+            "session ledger write failed and left nothing behind; the session continues"
+        );
+    } else {
+        tracing::error!(
+            %error,
+            "session ledger write failed; the ledger and its projection disagree"
+        );
+    }
+}
+
 fn mutation_conflict(mutation_id: &CostMutationId) -> CostPersistError {
     CostPersistError::Storage(format!(
         "cost mutation id conflict: {}",
@@ -2594,6 +2645,62 @@ mod tests {
             "the original bytes are preserved for inspection"
         );
         drop(directory);
+    }
+
+    /// A write that never reached the file is survivable: the journal only
+    /// advances its revision after the write, its fsync and its fingerprint
+    /// check all pass, so nothing was left behind and the session continues.
+    #[test]
+    fn a_write_that_left_nothing_behind_recovers_the_session() {
+        let (_directory, coordinator, session_id) = coordinator();
+        coordinator.hydrate_blocking().unwrap();
+        let error = CostPersistError::Storage("transient volume error".into());
+
+        freeze_then_try_recovery(&coordinator.state, &error);
+
+        assert!(
+            coordinator.durability_gate().frozen_reason().is_none(),
+            "an intact ledger must not stay shut after a failed write"
+        );
+        // And it is still usable: the projection and the file agree, so the
+        // next mutation is accepted rather than refused.
+        assert_eq!(
+            coordinator.hydrate_blocking().unwrap().state.session_id,
+            session_id
+        );
+    }
+
+    /// A record that landed while the projection never folded it is NOT
+    /// survivable, even though the file replays perfectly: later work would
+    /// build on a projection that is behind the disk.
+    #[test]
+    fn a_landed_record_the_projection_missed_keeps_the_session_shut() {
+        let (_directory, coordinator, session_id) = coordinator();
+        coordinator.hydrate_blocking().unwrap();
+        let mutation_id = CostMutationId::new("landed-but-unfolded");
+        coordinator
+            .journal()
+            .append_once(
+                mutation_id.as_str(),
+                &encode_session_event(&SessionEvent::Cost(CostMutationRecord {
+                    cost_revision: 1,
+                    mutation_id: mutation_id.clone(),
+                    source: CostMutationSource::ModelResponse,
+                    state: CostStateVector::from(&state(session_id, 1, 99)),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+        freeze_then_try_recovery(
+            &coordinator.state,
+            &CostPersistError::Storage("acknowledgement lost after the write".into()),
+        );
+
+        assert!(
+            coordinator.durability_gate().frozen_reason().is_some(),
+            "a projection behind the disk must not be treated as intact"
+        );
     }
 
     /// A durability freeze is bounded to the session that hit it. Each

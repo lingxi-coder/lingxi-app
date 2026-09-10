@@ -11,9 +11,27 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 /// Disk cap for a single task's output file. Mirrors claude-code's
-/// `MAX_TASK_OUTPUT_BYTES = 5 * 1024 * 1024 * 1024` (`diskOutput.ts:30`).
-/// Past this, [`TaskOutputManager::append`] drops further chunks and writes a
-/// single truncation marker, matching `DiskTaskOutput.append`.
+/// `MAX_TASK_OUTPUT_BYTES = 5 * 1024 * 1024 * 1024` — upstream `WUe`
+/// (2.1.267 `src_163219561.js`, exported as `MAX_TASK_OUTPUT_BYTES` beside
+/// `pKt = "5GB"`). Past it, [`TaskOutputManager::append`] drops further chunks
+/// and writes a single truncation marker, matching `DiskTaskOutput.append`.
+///
+/// 🚨 **This one constant is deliberately spent in TWO different units, and
+/// that is upstream's own shape — do not "unify" them.** Upstream measures it
+///
+/// * against a UTF-16 accumulator on the write side —
+///   `append(t){ this.#f += t.length; … }`, `t` being a JS string; and
+/// * against real BYTES on the read side — `Gvt(path, WUe)` compares the
+///   filesystem `stat` `size` and calls `truncate(WUe)`.
+///
+/// So [`TaskOutputManager::append`] counting [`utf16_units`] and
+/// [`TaskOutputManager::validate_terminal_result`] counting `str::len` are BOTH
+/// faithful; they are the port's halves of those two upstream consumers. The
+/// name says "BYTES" because upstream's does.
+///
+/// The consequence is real and inherited: a spool of CJK text passes 5 GB on
+/// disk at roughly 1.7 G code units, so the write-side marker fires late (an
+/// emoji-heavy spool later still). That is upstream behaviour, not a port bug.
 pub const MAX_TASK_OUTPUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// The cap's unit: JS `String.length`, i.e. UTF-16 code units. A CJK character
@@ -170,6 +188,9 @@ struct CapState {
     /// Running size in UTF-16 CODE UNITS — the unit claude-code's
     /// `DiskTaskOutput.append` accumulates (`this.#f += t.length` over JS
     /// strings), not bytes on disk.
+    /// Running total for the [`MAX_TASK_OUTPUT_BYTES`] write-side cap, in
+    /// UTF-16 CODE UNITS (upstream's `this.#f += t.length`) — NOT bytes,
+    /// despite the name it inherits from the constant. See [`utf16_units`].
     bytes_written: u64,
     capped: bool,
     /// claude-code `lostOutput` — a write for this spool has failed at least
@@ -209,9 +230,22 @@ struct OutputRootState {
 /// Read options for [`TaskOutputManager::read`].
 #[derive(Debug, Clone, Default)]
 pub struct OutputOptions {
-    /// Byte offset to start reading from.
+    /// Number of LINES to skip from the start.
+    ///
+    /// These two said "bytes" for as long as they have existed, while `read`
+    /// has always forwarded them to `platform_api::apply_line_window`, whose
+    /// own doc says "line-indexed offset/limit window". Nothing in the tree
+    /// constructs either as `Some`, so no caller was ever wrong — but one
+    /// following the old contract (resume a poll at the byte count already
+    /// consumed) would have skipped that many LINES and read an empty tail
+    /// while `truncated` reported the read complete.
+    ///
+    /// Upstream's disk read is a different API and is genuinely byte-based:
+    /// `gTn(path, n)` takes a tail length in bytes and walks UTF-8
+    /// continuation bytes off the front so the window cannot split a
+    /// codepoint. It is not what this struct drives.
     pub offset: Option<u64>,
-    /// Maximum number of bytes to return.
+    /// Maximum number of LINES to return. See [`Self::offset`].
     pub limit: Option<u64>,
 }
 
@@ -796,6 +830,13 @@ impl TaskOutputManager {
         Ok(())
     }
 
+    /// Refuse a terminal payload that would not fit the spool.
+    ///
+    /// Counts real BYTES, deliberately: this is the port's half of upstream's
+    /// READ-side use of the cap (`Gvt(path, WUe)` measuring the filesystem
+    /// `size`), not of the UTF-16 write accumulator in [`Self::append`]. The
+    /// two units against one constant are upstream's own — see
+    /// [`MAX_TASK_OUTPUT_BYTES`].
     pub(crate) fn validate_terminal_result(
         &self,
         output_file: &Path,

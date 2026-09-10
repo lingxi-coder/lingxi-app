@@ -225,6 +225,11 @@ pub struct CommandFrontmatter {
     pub background: Option<bool>,
     /// Agent type a forking command spawns. `None` ⇒ `general-purpose`.
     pub agent: Option<String>,
+    /// Frontmatter `user-invocable`. `None` ⇒ the key was absent, which upstream
+    /// reads as invocable (`userInvocable: dt===void 0 ? !0 : htt(dt)`); a
+    /// declared value has already been through the `htt` coercion, so a
+    /// `Some(false)` here hides the skill from the `/` menu.
+    pub user_invocable: Option<bool>,
 }
 
 /// Shell selected by a markdown command's frontmatter for embedded shell

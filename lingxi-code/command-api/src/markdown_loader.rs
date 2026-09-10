@@ -125,6 +125,13 @@ struct RawFrontmatter {
     /// The agent type a forking skill spawns.
     #[serde(default)]
     agent: Option<String>,
+    /// `user-invocable` — whether the skill appears in the `/` menu at all.
+    /// Absent means yes; upstream 2.1.267 is
+    /// `let dt=v["user-invocable"], en=dt===void 0?!0:htt(dt)`
+    /// (`src_163219561.js` @4578657), and the command it builds carries
+    /// `isHidden:!(userInvocable??!0)`.
+    #[serde(default, rename = "user-invocable")]
+    user_invocable: Option<Boolish>,
 }
 
 /// A frontmatter value the boolean coercer accepts: a real YAML bool, a
@@ -794,6 +801,15 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
     // default (background) in force — NOT `false`, which would silently
     // un-background a forking skill over a typo.
     let background = raw.background.as_ref().and_then(Boolish::coerce);
+    // `en = dt === void 0 ? !0 : htt(dt)` where `htt(e) = c1(e) ?? !1`. So an
+    // ABSENT key is undeclared (`None`, read as invocable at the use site),
+    // while a key that is present but coerces to neither set is `false` — the
+    // author said something, and upstream reads anything unparseable as "hide
+    // it". This is `rtr`, not the bare `Kde` that `background` uses.
+    let user_invocable = raw
+        .user_invocable
+        .as_ref()
+        .map(|value| Boolish::coerce(value).unwrap_or(false));
     CommandFrontmatter {
         disallowed_tools,
         context: raw.context,
@@ -810,6 +826,7 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         disable_model_invocation,
         // SLASH.4: TS copies `frontmatter.when_to_use` verbatim.
         when_to_use: raw.when_to_use,
+        user_invocable,
     }
 }
 
@@ -979,7 +996,9 @@ pub fn build_skill_command(file: &SkillMarkdownCommandFile, source: CommandSourc
         disable_model_invocation: file.frontmatter.disable_model_invocation,
         when_to_use: file.frontmatter.when_to_use.clone(),
         skill_root: Some(file.skill_root.clone()),
-        user_invocable: Some(true),
+        // `userInvocable: en` — was hardcoded `true`, which made an on-disk
+        // `user-invocable: false` a no-op and left the skill in the `/` menu.
+        user_invocable: Some(file.frontmatter.user_invocable.unwrap_or(true)),
         content_length: Some(file.content_length),
         ..SlashCommand::default()
     }
@@ -1566,6 +1585,75 @@ mod tests {
             load_command_markdown_files(&root.join("noproj"), &lingxi_home, &managed, &home).await;
         assert!(files.is_empty());
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn frontmatter_user_invocable_absent_is_undeclared_not_false() {
+        // `dt === void 0 ? !0 : htt(dt)` — an absent key must stay
+        // distinguishable from a declared `false`, or every skill that never
+        // mentions the key would be hidden.
+        let (fm, _) = parse_frontmatter("---\ndescription: d\n---\nx");
+        assert_eq!(fm.user_invocable, None, "absent key is undeclared");
+    }
+
+    #[test]
+    fn frontmatter_user_invocable_coerces_like_htt() {
+        // `htt(e) = c1(e) ?? !1`: the truthy set, the falsy set, and — unlike
+        // `background`, which uses the bare `c1` — garbage lands on FALSE.
+        for (raw, want) in [
+            ("---\nuser-invocable: true\n---\nx", Some(true)),
+            ("---\nuser-invocable: \"Yes\"\n---\nx", Some(true)),
+            ("---\nuser-invocable: on\n---\nx", Some(true)),
+            ("---\nuser-invocable: 1\n---\nx", Some(true)),
+            ("---\nuser-invocable: false\n---\nx", Some(false)),
+            ("---\nuser-invocable: \"No\"\n---\nx", Some(false)),
+            ("---\nuser-invocable: off\n---\nx", Some(false)),
+            ("---\nuser-invocable: 0\n---\nx", Some(false)),
+            ("---\nuser-invocable: \"garbage\"\n---\nx", Some(false)),
+        ] {
+            let (fm, _) = parse_frontmatter(raw);
+            assert_eq!(fm.user_invocable, want, "raw: {raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_skill_declaring_user_invocable_false_is_not_user_invocable() {
+        // The defect this pins: `build_skill_command` hardcoded `Some(true)`,
+        // so a skill asking to be hidden stayed in the `/` menu. Upstream
+        // carries the parsed value (`userInvocable: en`) and derives
+        // `isHidden: !(userInvocable ?? !0)` from it.
+        let root = temp_dir("skills_user_invocable");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let skills = repo.join(".lingxi").join("skills");
+        write(
+            &skills.join("hidden").join("SKILL.md"),
+            "---\ndescription: Hidden\nuser-invocable: false\n---\nbody\n",
+        );
+        write(
+            &skills.join("shown").join("SKILL.md"),
+            "---\ndescription: Shown\n---\nbody\n",
+        );
+
+        let lingxi_home = home.join(".lingxi");
+        let files = load_skill_markdown_files(&repo, &lingxi_home, &home).await;
+        assert_eq!(files.len(), 2, "both skills load");
+
+        for file in &files {
+            let cmd = build_skill_command(file, CommandSource::Project);
+            let want = match cmd.name.as_str() {
+                "hidden" => Some(false),
+                "shown" => Some(true),
+                other => panic!("unexpected skill {other}"),
+            };
+            assert_eq!(
+                cmd.user_invocable, want,
+                "{} must honour its frontmatter",
+                cmd.name
+            );
+        }
     }
 
     #[tokio::test]

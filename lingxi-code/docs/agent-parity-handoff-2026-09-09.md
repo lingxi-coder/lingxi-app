@@ -314,52 +314,42 @@ agent 类型 / model / cwd / background，改写后再对权限规则复核。�
 
 ## 子代理拒答级联（subagent refusal cascade）
 
-**状态：架构阻塞已拆除（`cc363fe49`），接线未做。**
+**状态：已落地（`cc363fe49` 拆架构阻塞 + `d072cc4dd` 接线）。**
 
-### 为什么本端口的子代理没有
+### 为什么本端口的子代理原先没有
 
 上游子代理和主线程走**同一个 query 生成器**（`Nfr`），级联是天然共享的。本端口有两条循环，
-级联只在 `orchestrator/`：
+级联只在 `orchestrator/`，而 `agent` **不能**依赖 `orchestrator`（方向相反）——
+所以唯一的短路做法是把一个带 latch / provisional / collapse 的状态机抄两份。
 
-* `agent/src/runner.rs` 把 `refusal` 当普通终止 stop reason（该文件 fallback/model-swap 零命中）；
-* `refusal_cascade.rs` / `refusal_notice.rs` 原先只在 `orchestrator/`；
-* 生产 `SubagentApiClient` 实现（`orchestrator/src/provider_adapter.rs:721`）不带它 ——
-  那个 `messages_create_with_fallback` 挂在 **`OrchestratorApiClient`**（:151），
-  且是 provider 层的 fallback 模型参数，不是拒答级联。
+### 做法
 
-⛔ `agent` **不能**依赖 `orchestrator`（方向相反），所以「照抄一份到 runner」是唯一的短路做法——
-而那是把一个有 latch/provisional/collapse 的状态机抄两份，正是本仓库栽过跟头的形状。
+`refusal_cascade.rs` / `refusal_notice.rs`（**零 import**）移到 `platform-api`，
+`orchestrator` 侧 re-export 保持 `crate::refusal_*` 不变；新增
+`platform_api::refusal_driver::RefusalCascadeState` 收拢两条循环必须一致的部分
+（chain 走位、latch、tried 集合、notice 累积/折叠），**不含**换模型 / post-switch hooks /
+写 transcript 帧这些宿主形状的东西。orchestrator 也改走它，`ModelRuntime` 四个字段并成一个；
+判据是那 15 个 refusal 测试的**断言一个字没改**。
 
-### 已完成
+配置下发：`OrchestratorConfig::refusal_chain()` 现在是「空 chain ⇒ 退回单个
+`refusal_fallback_model`」这条规则的**唯一**所在，主线程和 spawner 都读它，
+两边不会漂。两个生产组合根（desktop `lib.rs` / mobile `host.rs`）都已接。
 
-两个模块（**零 import**，纯自包含）已移到 `platform-api`，`orchestrator` 侧 re-export 保持
-`crate::refusal_*` 路径不变；新增 `platform_api::refusal_driver::RefusalCascadeState`
-把两条循环必须一致的部分收在一处：chain 走位、每会话 latch、tried 集合、notice 累积/折叠。
-**不含**任何宿主形状的东西（换模型、post-switch hooks、写 transcript 帧）——那三件事两边本就不同。
+runner：`resolve_model` 的绑定改成 `mut`，hop 改写它，下一轮 round-trip 就打到 fallback；
+拒答臂对齐两条主循环（`turn_loop.rs:1333` / `drivers/mod.rs:3192`），同样只是 continue，
+**都不**给被拒的那一轮立碑。
 
-orchestrator 已改为走它（`ModelRuntime` 四个字段并成一个）。判据是 15 个 refusal 测试的**断言
-一个字没改**。
+### 🚨 `scope` 是 `"local"` 不是 `"session"`
 
-### 剩下的接线（按依赖顺序）
+子代理的换模型只在这一次 run 内有效，不碰会话模型 —— 对应上游 `scope:"local"`。
+主线程那条是持久换会话模型（`"session"`）。**`ICe` 恰好只认 `local`**，
+所以照抄主线程的 `"session"` 会让 notice 永远找不到，而这里没有任何编译期或类型判据
+能拦住 —— 已用测试钉死。
 
-1. **配置下发**：`SubagentContext` 上没有任何 refusal 配置。要加
-   `refusal_fallback_chain: Vec<String>`，由 `PoolSubagentSpawner` 填。
-   ⚠️ spawner 自己也没有 config 对象（只有 pool / api_client / registry），
-   要按仓库既有的 set-once / builder 惯例加一个字段，再由**组合根**从 `OrchestratorConfig`
-   灌进来 —— 注意组合根**不止一个**（见 permission 交接文档 §4.1 的两个根）。
-2. **runner 的 model 要可变**：`agent/src/runner.rs:1174` 是
-   `let model = resolve_model(&ctx);`，在 turn loop **之前**取一次且不可变。
-   换模型要改成 `let mut model` 并确认循环内每个使用点读的是这个变量而不是重新解析。
-3. **拒答分支**：目前 `should_continue` 只在 `stop_reason == "tool_use"` 时为真，其余（含
-   `refusal`）一律终止（`runner.rs:2234` 附近）。要加一条
-   `Some("refusal") if <hop>` 的重试臂，对齐两条主循环的写法
-   （`turn_loop.rs:1333` / `drivers/mod.rs:3192`）。
-4. **写帧**：把 typed `model_refusal_fallback` 系统消息 push 进 runner 的 `history`
-   （`c9f8c5941` 已经把这个帧做好了）。⚠️ `convert_messages` 会在上线前丢掉所有 `System`，
-   所以它进 transcript 但不进模型上下文 —— 这正是 `ICe` 需要的位置。
-5. **scope 还有一层不对齐**：`ICe` 找的是 `scope==="local"`，而本端口的级联是**持久换会话模型**
-   （= 上游 `scope:"session"`）。子代理这条按理应该是 `local`（只影响这次 run），
-   接线时要把两种换法分开，别沿用主线程的 `"session"`。
+### 判据
+
+4 个测试 + 3 个种雷（拒答臂删掉 / 不换模型 / scope 改回 session）全部点名变红。
+含两个控制组：无 chain 时拒答仍然终止；chain 用尽后停下（每跳只消费一次，按序）。
 
 ### 这条通了之后
 

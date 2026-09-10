@@ -61,6 +61,104 @@ The full CLI run exposed 21 fixture failures caused by attempts to initialize th
 
 ## Remaining rows
 
+None in the audit table. `TN-11` was the last row still carrying "partly fixed"
+prose; its historical row text is superseded by the closure note above that
+table and by `IN_HUMAN_TURN_HEADER` / `render_reminders_with_options`'s two
+branches in `platform-api/src/task_notification.rs`.
+
+What is NOT closed is the gate state, which is a different question from the
+ledger. See the corrections below.
+
+## Corrections from an independent re-run (2026-09-09)
+
+The claims above were re-measured against a clean checkout of the landing
+commit, in a separate worktree with its own `CARGO_TARGET_DIR`. Four of them do
+not survive.
+
+**The workspace did not compile.** `cargo build --workspace --all-targets`
+failed with two errors the landing never saw:
+
+- `apps/cli/src/mode.rs:1792` — `E0382 borrow of moved value: orchestrator`,
+  which takes down the `cli` **lib**, i.e. the shipping binary. Fixed
+  separately in `59c4a744a`.
+- `apps/engine-mobile/src/host.rs` — the new `NoWork` fixture implements
+  `ToolInvoker` without `as_any`, so the whole `engine-mobile` lib-test target
+  failed to build and none of its 725 tests could run. Fixed in `53fc576e7`.
+
+`cargo check` does not see test modules; only `--all-targets` does. Neither
+error is in the `Tested:` list of the landing commit, and the second one hid
+the next item.
+
+**Three tests that shipped with the change had never executed.** All three were
+red on first run:
+
+- `engine-mobile host::tests::submit_task_message_enters_the_real_human_inbox_without_using_model_send`
+- `engine-mobile host::tests::mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_history`
+- `engine-desktop auto_mode_propose::tests::task_stop_cancels_a_scan_while_provider_stream_is_establishing`
+
+The first two failed at setup: `TaskRegistry::create` had no `TaskType::LocalAgent`
+arm, so a `local_agent` row was built as `LocalBash` and every agent-only
+operation refused it with `Unsupported` (`53fc576e7`). The first then failed
+again on its acknowledgement, which `TurnLifecycleListener` was dropping
+(`31a46baa2`). The third is still red.
+
+**"The full rerun passed 1,243 tests" is `-p cli --lib` only.** The
+isolated-credential fix in `apps/cli/src/init.rs` is `#[cfg(test)]`-gated, so it
+cannot reach the five CLI *integration* binaries — `cli_repl`, `cli_print`,
+`cli_argv_errors`, `cli_resume`, `mcp_serve` — which spawn the real
+`lingxi-cli` executable, where `cfg(test)` is false. Those ~21 tests still fail
+on `secure storage init failed: backend unavailable`. That is a pre-existing
+condition of unsigned dev binaries, not a regression from this work, but the
+sentence as written reads as though the CLI suite is green.
+
+**The `/tmp/*.log` evidence files are gone.** They were session-local and did
+not survive. A checkpoint that names a vanished log cannot be re-checked; future
+evidence belongs in the repo or under `~/.claude`.
+
+### Gate state at `31a46baa2`, with attribution
+
+Red, and caused by this work — 1:
+
+- `engine-desktop auto_mode_propose::tests::task_stop_cancels_a_scan_while_provider_stream_is_establishing`
+  (fails in isolation under `--test-threads=1`, so not a parallelism artifact).
+
+Red, and pre-existing or owned by other work — verified one by one, each by
+finding the commit that last touched the mechanism:
+
+| test(s) | mechanism | last changed by |
+| --- | --- | --- |
+| ~21 CLI integration tests | credential broker refuses unsigned binaries (by design) | predates; the `cfg(test)` fix cannot reach a spawned binary |
+| `bridge-server real_boot_handshakes_and_surfaces_turn_error` | `late_credential_route` in `needs_credential_driver` | `21771b43a` |
+| `parity_mcp_permission_gate denied_fqn_tool_use_…` | `find_dispatchable_tool`'s `main_agent_tool_names` filter | `db8da7abd` |
+| `parity_claude_2_1_220` prompt + output-style byte locks | `body_sections.rs`; manifest not re-pinned | `3537e08cf` |
+| `core settings::merger every_field_merge_…` | `teammateMode` has no merge probe | `bd0abff79` |
+| `desktop_tool_list_snapshot` | `TeamCreate`/`TeamDelete` removed; snapshot stale | implicit-teams work |
+| `parity_permission_denial` / `parity_output_truncation` scanners | both read the deleted `tools/team/src/team.rs` | implicit-teams work |
+| `telemetry names_array_contains_all_workflow_events` | 129 declared vs 135 expected | cron/tool work |
+| `hooks confined_session_drops_a_hook_permission_allow` | `CLAUDE_CODE_EVAL_CONFINED` read under parallel `set_var` | passes in isolation — a flake, not a failure |
+
+`b09e21789` itself repaired one pre-existing break rather than causing it:
+`permission/src/policy.rs` did not parse at `b09e21789^` (the plan-file block had
+been spliced into the middle of the `edit_covered_by_read_deny` if-condition), so
+nothing before this commit could be built or measured at all. That is why "did
+this test pass before?" is unanswerable by running, and every attribution above
+had to be made by reading history instead.
+
+### Coverage of the ledger's own claims
+
+Of the 86 rows marked fixed, eight were independently re-derived from the code
+(`AGT-05`, `TN-10`, `TN-03`, `TN-11`, `CW-02`, `TID-06`, `AGT-06`, `MON-02`), and
+all eight held. Five structural properties were checked across the whole change
+and also held: every new module has a non-test caller; the UniFFI metadata budget
+and variant-ordinal locks pass under `--features uniffi`; the supervisor
+directory is rejected unless it is absolute, non-symlink, owned by the euid and
+mode `0700`, with its socket at `0600`; the `LXS_TEST_*` supervisor hooks are
+`#[cfg(test)]` and do not ship; and `BASH_TURN_ABORT_BACKGROUNDED` has a real
+emitter at `tools/shell/src/bash.rs:3036`, matching its new doc comment.
+
+The remaining ~78 rows rest on the landing's own account. A systematic
+claim-versus-code sweep was attempted and did not complete.
+
 
 ## Handoff and ownership constraints
 

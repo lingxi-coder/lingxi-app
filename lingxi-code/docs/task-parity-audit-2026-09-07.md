@@ -119,10 +119,11 @@ The original 2026-09-07 pass fixed the P0 root cause, plus `TO-01`, `tools-02`, 
 
 ### Ids, records, registry
 
-Current closure note: the historical TN-11 row below predates the provenance
-wiring. `render_reminders_in_turn` now receives the real `in_human_turn` bit
-from both streaming and batched turn drivers; focused tests cover both header
-variants and the idempotence guard. TN-11 is therefore closed in production.
+Closure note (row text updated in place 2026-09-09): `render_reminders_in_turn`
+receives the real `in_human_turn` bit from both the streaming and the batched
+turn driver; focused tests cover both header variants and the idempotence guard.
+TN-11 is closed in production, and its verdict below now says so rather than
+carrying the superseded "partly fixed" prose.
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
@@ -149,7 +150,7 @@ variants and the idempotence guard. TN-11 is therefore closed in production.
 | `TN-09` | confirmed **[fixed: paired SDK stopped receipt and model-notification suppression for shell and Monitor tasks; stamping alone is not the implementation]** | P2 | medium | TaskStop does not stamp `notified` on shell/monitor tasks, so a model-initiated stop is followed by a redundant 'was stopped' notification **[deferred: stamping `notified` alone would delete the stop notification; needs the paired direct enqueue]** |
 | `TN-10` | fixed | P2 | medium | Recipient-scoped registry drain and the subagent runner's owner-aware fold route notifications to the owning agent |
 | `TN-08` | confirmed **[fixed]** | P3 | medium | Monitor completion never emits 'ended without producing output (exit N)' — port lacks the piped-stdout byte count |
-| `TN-11` | confirmed **[partly fixed: the idempotence guard now matches 2.1.263 `QSn` — `startsWith(Ae)` where `Ae` is the open tag PLUS the provenance header — and the 2.1.238 citations are refreshed to `QSn`/`Bbt`/`sGt` at `src_160256736.js` @4187 (call site `src_160988549.js` @5297223). The `inHumanTurn` variant (`oGt`/`cQn`) is NOT ported: selecting it needs a signal for "this turn was started by a genuine user message", which does not exist here (`git grep human_turn` is empty) and which only becomes meaningful once TN-03 adds the second delivery path. Adding the constant with no selector would be dead code]** | P3 | low | Envelope idempotence check and 'inHumanTurn' header variant drift from 2.1.263 (port comment cites 2.1.238 @285068292) |
+| `TN-11` | confirmed **[fixed: the idempotence guard matches 2.1.263 `QSn` — `startsWith(Ae)` where `Ae` is the open tag PLUS the provenance header — and BOTH header variants are ported. `IN_HUMAN_TURN_HEADER` (`oGt`) and `NON_USER_INPUT_HEADER` are selected by `render_reminders_with_options(in_human_turn)` in `platform-api/src/task_notification.rs`; the `in_human_turn` bit reaches it from BOTH turn drivers (`orchestrator/src/turn_loop.rs` batched, `conversation/drivers/mod.rs` streaming) and from `bridge-server/src/driver.rs`. The earlier verdict said the selector "does not exist here (`git grep human_turn` is empty)" — that was true when written and is not now; re-verified in code 2026-09-09]** | P3 | low | Envelope idempotence check and 'inHumanTurn' header variant drift from 2.1.263 (port comment cites 2.1.238 @285068292) |
 | `TN-12` | fixed | P3 | medium | `memory_pressure` notifications render the Claude-compatible low-memory stop-cause text |
 | `TN-13` | keep | P3 | low | LingXi-only notification surfaces to keep: local_fusion arm and workflow host-capability redaction |
 

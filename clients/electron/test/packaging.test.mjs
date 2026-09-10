@@ -92,7 +92,7 @@ test('runtime dependency copy expands package file globs by copying installed pa
     writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
       name: 'fixture',
       version: '1.0.0',
-      files: ['lib/*.js'],
+      files: ['/lib/*.js'],
     }));
     writeFileSync(join(packageRoot, 'lib', 'runtime.js'), 'export const ready = true;');
 
@@ -100,6 +100,38 @@ test('runtime dependency copy expands package file globs by copying installed pa
     copyProductionDependencies({ fixture: '1.0.0' }, root, destination);
 
     assert.equal(existsSync(join(destination, 'fixture', 'lib', 'runtime.js')), true);
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+      name: 'fixture', version: '1.0.0', files: ['/../outside'],
+    }));
+    assert.throws(
+      () => copyProductionDependencies({ fixture: '1.0.0' }, root, join(root, 'unsafe')),
+      /unsafe package files entry/,
+    );
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('runtime dependency copy omits conflicting declaration-only packages', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-types-test-'));
+  try {
+    for (const [name, version] of [['first', '3.0.3'], ['second', '2.0.11']]) {
+      const packageRoot = join(root, 'node_modules', name);
+      const typesRoot = join(packageRoot, 'node_modules', '@types', 'unist');
+      mkdirSync(typesRoot, { recursive: true });
+      writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+        name, version: '1.0.0', dependencies: { '@types/unist': version },
+      }));
+      writeFileSync(join(packageRoot, 'index.js'), 'module.exports = 42;');
+      writeFileSync(join(typesRoot, 'package.json'), JSON.stringify({ name: '@types/unist', version }));
+    }
+    const destination = join(root, 'output', 'node_modules');
+    copyProductionDependencies({ first: '1.0.0', second: '1.0.0' }, root, destination);
+    assert.equal(existsSync(join(destination, '@types')), false);
+    for (const name of ['first', 'second']) {
+      assert.equal(existsSync(join(destination, name, 'index.js')), true);
+      assert.deepEqual(JSON.parse(readFileSync(join(destination, name, 'package.json'))).dependencies, {});
+    }
   } finally {
     rmSync(root, { force: true, recursive: true });
   }
@@ -112,7 +144,7 @@ test('runtime manifests discard development-only install metadata', () => {
     main: 'index.js',
     files: ['dist'],
     scripts: { test: 'false' },
-    dependencies: { ws: '1.0.0' },
+    dependencies: { ws: '1.0.0', '@types/unist': '3.0.3' },
     devDependencies: { typescript: '1.0.0' },
   });
   assert.deepEqual(runtime, {

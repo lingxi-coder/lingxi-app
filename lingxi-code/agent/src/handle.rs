@@ -1560,7 +1560,6 @@ impl PoolSubagentSpawner {
             )]
         };
         SubagentContext {
-            model_attempt: None,
             agent_id: AgentId::new(),
             parent_agent_id: None,
             agent_name: None,
@@ -1626,6 +1625,7 @@ impl PoolSubagentSpawner {
             max_input_bytes_per_turn: None,
             query_source_label: None,
             correlation_id: None,
+            model_attempt: None,
         }
     }
 

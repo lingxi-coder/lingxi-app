@@ -846,7 +846,6 @@ impl InProcessTeammateHandler {
             render_teammate_system_prompt(&base_system_prompt, definition.system_prompt.as_deref());
         let icon = definition.icon.clone();
         Ok(SubagentContext {
-            model_attempt: None,
             agent_id,
             parent_agent_id: None,
             // Swarm identity (claude-code `TeammateContext.agentName` /
@@ -928,6 +927,7 @@ impl InProcessTeammateHandler {
             // Teammates are not spawned through `SubagentSpawnRequest`, so
             // there is no caller correlation id to thread.
             correlation_id: None,
+            model_attempt: None,
         })
     }
 }

@@ -23,8 +23,6 @@ use tool_api::content_replacement::ContentReplacementState;
 /// re-allocating.
 #[derive(Clone)]
 pub struct SubagentContext {
-    /// Typed registered run context, retained across rounds and never serialized.
-    pub model_attempt: Option<platform_api::ModelAttemptContext>,
     /// Stable identifier for this spawn — every event carries this id.
     pub agent_id: AgentId,
     /// Parent agent id, when this agent was dispatched by another agent.
@@ -279,4 +277,10 @@ pub struct SubagentContext {
     /// panel's transcript file can be matched back to its run and panel
     /// index (G011).
     pub correlation_id: Option<String>,
+    /// Typed registered run context, retained across rounds and never serialized.
+    ///
+    /// Deliberately LAST, for the same reason as
+    /// [`platform_api::subagent_spawn::SubagentSpawnRequest::model_attempt`]:
+    /// `main` grows this struct from the front.
+    pub model_attempt: Option<platform_api::ModelAttemptContext>,
 }

@@ -124,7 +124,6 @@ impl BudgetEnforcerHandle for OpenBudget {
 /// its pool slot for the life of the test.
 fn parked_teammate_ctx() -> SubagentContext {
     SubagentContext {
-        model_attempt: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_name: None,
@@ -202,6 +201,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         max_input_bytes_per_turn: None,
         query_source_label: None,
         correlation_id: None,
+        model_attempt: None,
     }
 }
 

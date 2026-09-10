@@ -39,8 +39,8 @@ sets; two of the three defects below were exactly that.
 | bundled | ✅ 21 | ⚠️ 11 + 1, see §3 |
 | plugin | ✅ | ✅ |
 | MCP-derived | ✅ | partial — resolves as `Other` and is rejected by the tool |
-| legacy `commands/`-as-skills | ❓ unverified | ❌ `LoadedFrom::CommandsDeprecated` declared, never constructed |
-| conditional / `paths:`-activated | ✅ **verified present** (see §2.1) | ❌ absent |
+| legacy `commands/`-as-skills | ✅ verified (§2.3) | ✅ **present** — via `command-api`, not `skill-api` |
+| conditional / `paths:`-activated | ✅ verified (§2.1) | ✅ **ported** (`4c7fb33bd` + `f790dc179`) |
 
 ### 2.1 ✅ Conditional (`paths:`) skills — verified, 2026-09-10
 
@@ -97,20 +97,44 @@ only tests the final component), and a path outside the workspace activated a
 repo-scoped skill because the first version fell back to the absolute path when
 it could not be made relative.
 
-**What is left is one plumbing layer, not the mechanism.** The model-facing
-listing is built at the composition roots from **`command_api` commands**
-(`LazySkillListingProvider`, desktop `lib.rs:8957` / mobile `host.rs:2515`), and
-a command record carries no `paths` — so the filter has nothing to key on yet.
-Upstream's command metadata DOES carry `paths` (it sits next to `whenToUse` in
-the command shape), so the step is to plumb the frontmatter field onto the
-command and then drop un-activated conditional skills in those two closures,
-calling `activate_for_paths` with `tool_api::read_file_state::keys()` — which is
-this port's version of the touched-path list `lhr` takes. ⚠️ The sibling
+**Wired end to end (`f790dc179`).** `paths` travels from skill frontmatter onto
+the command record (upstream carries it on the command metadata too, beside
+`whenToUse`), and both composition roots drop un-activated conditional skills
+from the model-facing listing.
+
+🚨 **Activation is remembered, not recomputed.** `read_file_state` is an LRU
+capped at 100 entries, so the file that revealed a skill can age OUT of the
+touched set. Recomputing availability per turn would make a skill the model has
+already been shown disappear again; the state lives with the listing provider for
+the session, and a test evicts the matching path and asserts the skill stays.
+
+⚠️ The read-state map is session-owned, not a module global — the first attempt
+reached for an accessor that does not exist. It has to be threaded from the root
+that creates it (`read_state_map`). ⚠️ The sibling
 `tengu_dynamic_skills_changed` `source: "file_operation"` belongs to DYNAMIC skill
 discovery (`Dynamically discovered {n} skills from {m} directories`) — a
 different mechanism that is also absent; do not conflate them.
 
-⛔ The remaining unverified row is `commands/`-as-skills. Their upstream identifiers
+### 2.3 ✅ `commands/`-as-skills — verified present, and the old row was misleading
+
+Upstream's loader is at `src_163219561.js` @4565355: it walks the commands dirs
+and builds skills with `loadedFrom: "commands_DEPRECATED"`, `paths: void 0`
+(so a legacy command is never conditional) and the default description
+`"Custom command"`, reporting through `skill_load_commands_dir` /
+`skill_load_commands_parse_failed`.
+
+**This port already does it.** `command-api/src/markdown_loader.rs` scans
+`.lingxi/commands/**.md` (`SUBDIR = "commands"`, plus the managed dir) and tags
+every command `loaded_from: Some("commands_DEPRECATED")`, and both listing
+closures admit that tag alongside `bundled` / `skills`.
+
+🚨 The old row said "`LoadedFrom::CommandsDeprecated` declared, never
+constructed" and marked the tier absent. The declaration it named is
+`skill_api::LoadedFrom`'s variant — a DEAD variant in a parallel type, while the
+tier itself lives on `command_api`'s string-valued `loaded_from`. Reading one
+type's unused variant as the feature's absence is the same mistake as reading a
+0-hit grep for a foreign symbol as proof: the behaviour was never checked. The
+dead variant is worth removing on its own, but it is not this feature. Their upstream identifiers
 (`loadSkillsFromCommandsDir`, `activateConditionalSkillsForPaths`,
 `getDynamicSkills`) are **0 hits in the binary — which proves nothing**, because
 minification erases source-level function names. They must be established by a

@@ -1094,6 +1094,12 @@ mod tests {
             (json!("lower"), json!("upper")),
             (json!(true), json!(false)),
             (json!(1), json!(2)),
+            // String ENUMS reject the generic `"lower"`/`"upper"` pair, so they
+            // need real variants. Appended last on purpose: the search takes the
+            // first shape that round-trips, so this can only ever be reached by a
+            // field for which every shape above already failed — which is the
+            // case that used to panic.
+            (json!("auto"), json!("tmux")),
         ];
 
         // Whether `{field: value}` survives a `SettingsJson` round trip

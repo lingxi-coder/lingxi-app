@@ -569,6 +569,7 @@ mod tests {
                 content: "you are a helpful assistant".into(),
                 subtype: None,
                 compact_metadata: None,
+                refusal_fallback: None,
             },
             ConversationMessage::User {
                 id: MessageId::new(),

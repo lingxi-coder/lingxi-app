@@ -134,6 +134,7 @@ impl AgentTranscriptWriter {
             content: serde_json::to_string(&messages).expect("thinking ranges serialize"),
             subtype: Some("thinking_stripped".into()),
             compact_metadata: None,
+            refusal_fallback: None,
         })
         .await
     }
@@ -154,6 +155,7 @@ impl AgentTranscriptWriter {
                 content: detail.to_string(),
                 subtype: Some(format!("agent_{status}")),
                 compact_metadata: None,
+                refusal_fallback: None,
             },
             status: Some(status.to_string()),
             error: error.map(str::to_string),

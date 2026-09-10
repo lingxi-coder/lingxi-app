@@ -37,7 +37,7 @@ pub use messages::{
     is_nested_media_value, CompactActiveGoalState, CompactBoundaryMetadata, CompactGoalOrigin,
     CompactTrigger, ContentBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
     MediaObservation, MemoryEntry, MemoryEntryTier, MessageRole, PreservedMessages,
-    PreservedSegment,
+    PreservedSegment, RefusalFallbackMetadata,
 };
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,

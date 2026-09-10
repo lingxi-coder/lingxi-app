@@ -357,6 +357,7 @@ mod tests {
             content: "some other system text".to_string(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         };
         assert!(!is_compact_boundary(&plain));
         assert!(!is_compact_boundary(&user("hi")));
@@ -369,6 +370,7 @@ mod tests {
             content: BOUNDARY_CONTENT.to_string(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         };
         assert!(is_compact_boundary(&legacy));
     }

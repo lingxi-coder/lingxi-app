@@ -1409,9 +1409,40 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     emitted_via = e.emitted_via.as_str(),
                 );
             }
-            self.output
-                .emit_text(&Self::refusal_warning_text(&e.banner.serving_model))
-                .await;
+            let content = Self::refusal_warning_text(&e.banner.serving_model);
+            self.output.emit_text(&content).await;
+            // claude-code carries this notice as a TYPED system message in the
+            // conversation (`Dcr`, `src_163219561.js`), not only as banner text.
+            // Emitting it on the stream alone made it ephemeral: it never
+            // reached the transcript, so it was gone on resume and nothing
+            // could see WHICH earlier notices a later hop superseded —
+            // `retractedMessageUuids` had no carrier.
+            //
+            // `convert_messages` drops every `System` before the wire
+            // (`llm-client/src/convert.rs`), so this is transcript + TUI only
+            // and never becomes model context.
+            let notice_msg = protocol::ConversationMessage::System {
+                id: protocol::MessageId::new(),
+                content,
+                subtype: Some("model_refusal_fallback".to_string()),
+                compact_metadata: None,
+                refusal_fallback: Some(protocol::RefusalFallbackMetadata {
+                    trigger: "refusal".to_string(),
+                    direction: "retry".to_string(),
+                    // This port's cascade persistently swaps the SESSION model
+                    // (see the latch above), which is upstream's `swapSession`
+                    // arm — `scope: Mt ? "session" : "local"`.
+                    scope: Some("session".to_string()),
+                    original_model: e.banner.origin_model.clone(),
+                    fallback_model: e.banner.serving_model.clone(),
+                    request_id: e.banner.request_id.clone(),
+                    api_refusal_category: e.banner.api_refusal_category.clone(),
+                    retracted_message_uuids: e.banner.retracted_message_uuids.clone(),
+                    refused_user_message_uuid: e.banner.refused_user_message_uuid.clone(),
+                }),
+            };
+            self.session.lock().await.history.push(notice_msg.clone());
+            self.persist_message_to_jsonl(&notice_msg).await;
         }
         // Success-path analytics — inline event name (NOT a locked telemetry
         // const), so the 347-entry `ALL_EVENT_NAMES` fixture lock is unperturbed.

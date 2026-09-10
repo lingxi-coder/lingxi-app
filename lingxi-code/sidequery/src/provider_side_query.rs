@@ -1106,6 +1106,7 @@ mod tests {
                 content: "Conversation compacted".to_string(),
                 subtype: None,
                 compact_metadata: None,
+                refusal_fallback: None,
             },
             ConversationMessage::user(MessageId::new(), "existing context".into()),
             ConversationMessage::user(MessageId::new(), "compact prompt".into()),

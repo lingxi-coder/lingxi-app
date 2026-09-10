@@ -450,7 +450,62 @@ pub enum ConversationMessage {
             skip_serializing_if = "Option::is_none"
         )]
         compact_metadata: Option<CompactBoundaryMetadata>,
+        /// Typed refusal-fallback metadata, on `subtype ==
+        /// "model_refusal_fallback"` only.
+        #[serde(
+            default,
+            rename = "refusalFallback",
+            skip_serializing_if = "Option::is_none"
+        )]
+        refusal_fallback: Option<RefusalFallbackMetadata>,
     },
+}
+
+/// The `model_refusal_fallback` system message's payload.
+///
+/// claude-code carries the refusal notice as a TYPED system message in the
+/// conversation itself (`Dcr` / `Jbt`, `src_163219561.js`), not as loose banner
+/// text: it persists into the transcript, comes back on resume, and — through
+/// [`Self::retracted_message_uuids`] — lets a later hop's notice say which
+/// earlier ones it superseded, which is what makes them filterable rather than
+/// merely stale.
+///
+/// ## What this port does NOT carry, and why
+///
+/// Upstream's object also has `apiRefusalExplanation` and `sawCyberRefusal`.
+/// Neither has a source here — the cascade records a category but no
+/// explanation, and nothing classifies a cyber refusal — so they are omitted
+/// rather than serialized as permanent `null`s that read like a wired field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefusalFallbackMetadata {
+    /// What provoked the swap. `"refusal"` for the refusal cascade.
+    pub trigger: String,
+    /// `"retry"` — the swap is followed by a retry of the same turn.
+    pub direction: String,
+    /// `"session"` when the swap sticks for the rest of the session,
+    /// `"local"` when it applies to this turn alone. This port's cascade
+    /// persistently swaps the session model, so it reports `"session"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// The model the episode started on.
+    pub original_model: String,
+    /// The model now serving.
+    pub fallback_model: String,
+    /// The provider request id of the refused call, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The API's refusal category for this hop, when the provider gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_refusal_category: Option<String>,
+    /// Earlier notices this one supersedes. A consumer rebuilding the
+    /// conversation drops the messages named here rather than showing a swap
+    /// the session has already moved past.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retracted_message_uuids: Vec<String>,
+    /// The user message that was refused, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_user_message_uuid: Option<String>,
 }
 
 impl ConversationMessage {
@@ -533,6 +588,7 @@ impl ConversationMessage {
             content,
             subtype: Some("compact_boundary".to_string()),
             compact_metadata: Some(metadata),
+            refusal_fallback: None,
         }
     }
 
@@ -922,6 +978,7 @@ mod tests {
             content: "notice".to_string(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         };
         assert_eq!(
             serde_json::to_string(&message).unwrap(),

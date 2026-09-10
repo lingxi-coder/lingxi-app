@@ -3573,6 +3573,7 @@ mod tests {
             content: "idle".to_string(),
             subtype: Some("agent_idle".to_string()),
             compact_metadata: None,
+            refusal_fallback: None,
         };
 
         assert_eq!(

@@ -1414,6 +1414,7 @@ mod tests {
             content: "you are a helpful assistant".to_string(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         };
         let dto = lower_conversation_message(&msg);
         assert_eq!(dto.role, "system");

@@ -77,6 +77,7 @@ mod tests {
             content: "abc".into(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         };
         assert_eq!(text_byte_size(&m), 3);
     }

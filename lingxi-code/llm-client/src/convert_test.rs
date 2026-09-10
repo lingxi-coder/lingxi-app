@@ -382,6 +382,7 @@ mod tests {
             content: "you are a helpful assistant".to_string(),
             subtype: None,
             compact_metadata: None,
+            refusal_fallback: None,
         };
         let err = to_llm_messages(vec![msg]).unwrap_err();
         assert!(matches!(err, LlmError::InvalidRequest { .. }));
@@ -564,6 +565,7 @@ mod tests {
                 content: "Conversation compacted".to_string(),
                 subtype: None,
                 compact_metadata: None,
+                refusal_fallback: None,
             },
             user(post_boundary_id, "summary"),
         ]);
@@ -612,6 +614,7 @@ mod tests {
                 content: "Conversation compacted".to_string(),
                 subtype: None,
                 compact_metadata: None,
+                refusal_fallback: None,
             },
             user(MessageId::new(), "first summary"),
             ConversationMessage::System {
@@ -619,6 +622,7 @@ mod tests {
                 content: "Conversation compacted".to_string(),
                 subtype: None,
                 compact_metadata: None,
+                refusal_fallback: None,
             },
             user(MessageId::new(), "latest summary"),
         ]);

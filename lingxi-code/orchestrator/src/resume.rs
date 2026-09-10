@@ -537,6 +537,7 @@ fn build_state_from_jsonl(
                         content,
                         subtype: Some("compact_boundary".to_string()),
                         compact_metadata,
+                        refusal_fallback: None,
                     });
                 }
                 if let Some(active_goal) = goal_state_from_message(m) {

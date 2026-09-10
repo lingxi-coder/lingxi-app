@@ -272,13 +272,21 @@ system 消息一起被滤）全部点名变红。含控制组：没 hop 过的 r
 `result["text"] == "done"`，加了 note 之后**理应**变红 —— 改的是断言本身
 （答案现在合法地带 note），不是绕开它。把它钉成「等于模型原话」就是把 bug 钉成契约。
 
-#### ❓ 留一个未定的窄竞态
+#### ✅ 那个窄竞态已核实：不是缺陷
 
-`qD` 在 `!p.notified` 时用**已存的** `p.result` 发 `finalMessage` + `usage`，状态记 `killed`；
-端口 `SubagentResult::Killed { agent_id }` 不带任何字段，Killed 分支
-（`local_agent.rs:1035`）也不填 outcome。**只有**「run 已完成并存下结果、通知还没 drain、
-此时 kill 到达」这一个竞态里两者不同。端口的设计注释说晚到的 kill 是 graceful no-op，
-所以这个竞态在端口可能压根不存在 —— **未验证**，记成问题不是发现。
+原记「`qD` 在 `!p.notified` 时用已存的 `p.result` 发 `finalMessage`+`usage`，端口
+`SubagentResult::Killed { agent_id }` 什么都不带 ⇒ 可能丢输出」。**实测不丢。**
+
+`local_agent.rs::kill()` 先读 `already_terminal = status_sink.is_terminal(task_id)`，
+并把 `publish_terminal = !already_terminal` 传下去；`already_terminal` 时既不
+`finish_persistent_terminal` 发布终态、也不 `set_status(Killed)`。所以「run 已完成并存下
+结果、通知还没 drain、此时 kill 到达」这一格里，行仍是 `Completed`，
+`outcome.result` 原样留着，通知照常带着答案 drain 出去。
+
+与上游的差别只剩**状态标签**：上游把它记成 `killed`（但同样带 `finalMessage`），
+端口记成 `completed`。两边都把模型该看到的字节送到了；而这一格里那个 run 确实是跑完的，
+端口的标签反而更准。⛔ 别为了对齐标签去动这条 —— 会把「不许晚到的 kill 覆盖真实终态」
+那条不变量拆掉。
 
 ### 3.3 AG-15 — `agent.spawn` 插件 function hook（P3）
 

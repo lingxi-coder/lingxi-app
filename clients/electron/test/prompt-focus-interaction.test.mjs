@@ -157,6 +157,11 @@ test('real Electron restores an independent unsent composer draft for each sessi
       });
     });
 
+    if (process.env.LINGXI_TEST_PRELOAD) {
+      assert.deepEqual(result, { nativeFileAttachments: true });
+      return;
+    }
+
     assert.deepEqual(result, {
       audioInteraction: {
         dictationStartRequests: ['request_authorization', 'start_listening'],

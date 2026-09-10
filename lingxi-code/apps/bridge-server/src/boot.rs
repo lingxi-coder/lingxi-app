@@ -592,8 +592,13 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
         memory_provider: trusted.then(orchestrator::prompt::real_provider),
-        // The Electron bridge has no permission-mode CLI flag; default mode.
-        permission_mode: permission::PermissionMode::Default,
+        // Trusted desktop sessions share the engine Auto default. Workspace
+        // trust is still required before granting autonomous permissions.
+        permission_mode: if trusted {
+            permission::PermissionMode::Auto
+        } else {
+            permission::PermissionMode::Default
+        },
         permission_mode_cli: None,
         permission_mode_cli_explicit: false,
         // Plan 3c: bridge has no interactive secure prompt; headless no-op.
@@ -1844,6 +1849,8 @@ mod tests {
             trusted_workspace: true,
             ..BridgeArgs::default()
         });
+        assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
+        assert!(!cfg.permission_mode_cli_explicit);
         assert_eq!(cfg.setting_source_scope, (true, true));
         assert_eq!(
             cfg.customization_gates,
@@ -1885,6 +1892,8 @@ mod tests {
             packaged_credential_stdin_only: true,
             ..BridgeArgs::default()
         });
+        assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
+        assert!(!cfg.permission_mode_cli_explicit);
         assert_eq!(cfg.setting_source_scope, (true, true));
         assert_eq!(
             cfg.customization_gates,

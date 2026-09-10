@@ -1,5 +1,5 @@
 import type { CronJobDto } from '@lingxi/bridge-client';
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type {
   AskUserQuestionRequestDto,
   AudioOpDto,
@@ -153,6 +153,7 @@ export interface NativeAudioApi {
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
+  getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
@@ -238,6 +239,7 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   platform: process.platform,
   isElectron: true,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,

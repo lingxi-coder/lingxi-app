@@ -172,3 +172,12 @@ test('desktop state ignores Local App mobile-only events without crashing', () =
 
   assert.deepEqual(before, emptyDesktopState());
 });
+
+test('new desktop sessions start in Auto and honor authoritative permission changes', () => {
+  const initial = emptyDesktopState();
+  assert.equal(initial.permissionMode, 'auto');
+  for (const mode of ['default', 'plan', 'auto'] as const) {
+    const state = reduceDesktopEvent(initial, { type: 'permission_mode_changed', mode });
+    assert.equal(state.permissionMode, mode);
+  }
+});

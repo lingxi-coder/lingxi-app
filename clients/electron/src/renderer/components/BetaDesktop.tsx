@@ -12,6 +12,7 @@ import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
+import { settingsLabel } from '../settingsLabel';
 import {
   activeFileMention,
   promptWithFileMentions,
@@ -141,31 +142,6 @@ function Button({ children, onClick, disabled = false, primary = false, success 
     >
       {children}
     </button>
-  );
-}
-
-function ConnectionDot({ bridge }: { bridge: UseBridge }) {
-  const t = useT();
-  const status = bridge.connection.status;
-  const color = status === 'connected' ? t.ok : status === 'error' || status === 'disconnected' ? t.danger : t.warn;
-  const label = status === 'connected'
-    ? 'Engine ready'
-    : status === 'spawning'
-      ? 'Starting engine'
-      : status === 'restarting'
-        ? 'Restarting engine'
-        : status === 'connecting'
-          ? 'Connecting'
-          : status === 'error'
-            ? 'Engine error'
-            : status === 'disconnected'
-              ? 'Disconnected'
-              : 'Engine idle';
-  return (
-    <span role="status" aria-live="polite" title={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: t.text3 }}>
-      <span style={{ width: 7, height: 7, borderRadius: 99, background: color, boxShadow: `0 0 0 3px color-mix(in oklab, ${color} 18%, transparent)` }} />
-      {label}
-    </span>
   );
 }
 
@@ -623,13 +599,12 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       </nav>
 
       <div className="desktop-sidebar-footer" style={{ padding: 10, borderTop: `0.5px solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: 5 }}>
-        <ConnectionDot bridge={bridge} />
         <button
           type="button"
           onClick={onOpenSettings}
           style={{ minHeight: 40, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 5px', border: 0, borderRadius: 8, background: 'transparent', color: t.text2, cursor: 'pointer', fontSize: 12.5 }}
         >
-          <Icon name="cog" size={15} /> Settings & diagnostics
+          <Icon name="cog" size={15} /> {settingsLabel()}
         </button>
       </div>
 
@@ -1886,6 +1861,27 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     });
   };
 
+  const addFiles = async (files: File[]) => {
+    if (!ready) return;
+    const images: File[] = [];
+    let notice: string | null = null;
+    for (const file of files) {
+      if (/^image\/(png|jpeg|gif|webp)$/.test(file.type) || /\.(png|jpe?g|gif|webp)$/i.test(file.name)) {
+        images.push(file);
+        continue;
+      }
+      try {
+        const path = window.lingxi?.getPathForFile(file);
+        if (!path) throw new Error(`无法获取“${file.name}”的本地路径，请先保存文件后再添加。`);
+        chooseFile(path, true);
+      } catch (error) {
+        notice = error instanceof Error ? error.message : `无法添加“${file.name}”。`;
+      }
+    }
+    if (images.length) await addImageFiles(images);
+    if (notice || !images.length) setImageNotice(notice);
+  };
+
   const removeImage = (id: string) => {
     setImageAttachments((current) => {
       const removed = current.find((attachment) => attachment.id === id);
@@ -2044,14 +2040,14 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     });
   };
 
-  const chooseFile = (path: string) => {
+  const chooseFile = (path: string, attachment = false) => {
     const editor = input.current;
-    if (!filePicker || !editor) return;
-    const range = filePicker.source === 'mention'
+    if ((!filePicker && !attachment) || !editor) return;
+    const range = !attachment && filePicker?.source === 'mention'
       ? activeMentionRange.current
       : savedEditorSelection.current;
     const insertion = range?.cloneRange() ?? editorSelection(editor);
-    if (filePicker.source === 'mention') insertion.deleteContents();
+    if (!attachment && filePicker?.source === 'mention') insertion.deleteContents();
 
     const duplicate = [...editor.querySelectorAll<HTMLElement>(FILE_MENTION_SELECTOR)]
       .some((token) => token.dataset.fileMention === path);
@@ -2166,12 +2162,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
   const pastePlainText = (event: ClipboardEvent<HTMLDivElement>) => {
     const clipboardImages = [...event.clipboardData.items]
-      .filter((item) => item.kind === 'file' && (item.type.startsWith('image/') || item.type === ''))
+      .filter((item) => item.kind === 'file')
       .map((item) => item.getAsFile())
       .filter((file): file is File => Boolean(file));
     if (clipboardImages.length) {
       event.preventDefault();
-      void addImageFiles(clipboardImages);
+      void addFiles(clipboardImages);
       return;
     }
     event.preventDefault();
@@ -2230,7 +2226,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         onDrop={(event) => {
           event.preventDefault();
           setImageDragActive(false);
-          void addImageFiles([...event.dataTransfer.files]);
+          void addFiles([...event.dataTransfer.files]);
         }}
         style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 20, border: `1px solid ${imageDragActive ? t.accent : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: t.dark ? '0 8px 24px rgba(0,0,0,.20), 0 1px 3px rgba(0,0,0,.16)' : '0 8px 24px rgba(24,28,36,.06), 0 1px 3px rgba(24,28,36,.04)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
       >
@@ -2332,8 +2328,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           />
         ) : (
         <div className="composer-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 48, padding: '0 8px 8px' }}>
-          <input ref={imageFileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => { void addImageFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
-          <button type="button" disabled={!ready} aria-label="Attach image" title="Attach image" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
+          <input ref={imageFileInput} type="file" multiple onChange={(event) => { void addFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
+          <button type="button" disabled={!ready} aria-label="Attach files" title="Attach files or images" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <div ref={fileControl}>
             <button type="button" disabled={!ready} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
             {fileMenuOpen && (
@@ -2684,16 +2680,17 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
             ><Icon name="stop" size={15} color="#fff" /></button>
           )}
-          {(!bridge.running || hasPrompt) && (
+          <span className="composer-send-presence" data-visible={hasPrompt} aria-hidden={!hasPrompt}>
             <button
               type="button"
               disabled={!ready || !hasPrompt || flowMode}
+              tabIndex={hasPrompt ? 0 : -1}
               onClick={() => { void submit(); }}
               aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
               title={bridge.running ? 'Send as pending message' : 'Send prompt'}
               style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
             ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? '#fff' : t.text4} /></button>
-          )}
+          </span>
         </div>
         )}
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>

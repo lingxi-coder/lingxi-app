@@ -466,6 +466,11 @@ fn preserved_group_step(tokens: &[u64], gap: Option<u64>) -> usize {
 }
 
 fn is_media_compaction_error(error: &llm_client::LlmError) -> bool {
+    // Non-vision summary routes reject raw history media before sending HTTP.
+    // Reuse the bounded media retry, retaining text and prior MediaAnalysis.
+    if let llm_client::LlmError::UnsupportedCapability { capability } = error {
+        return matches!(capability.as_str(), "vision" | "documents");
+    }
     if matches!(error, llm_client::LlmError::RequestTooLarge) {
         return true;
     }
@@ -1138,6 +1143,77 @@ mod tests {
         assert_eq!(requests[1].messages[2].text_content(), "[image]");
         assert_eq!(requests[0].messages[0], requests[1].messages[0]);
         assert_eq!(result.messages_to_preserve[0].text_content(), "a2");
+    }
+
+    #[tokio::test]
+    async fn unsupported_media_capability_recovers_for_manual_and_auto_compaction() {
+        for capability in ["vision", "documents"] {
+            for manual in [false, true] {
+                let media = if capability == "vision" {
+                    serde_json::json!({"type": "image", "source": {"type": "url", "url": "https://example.invalid/image.png"}})
+                } else {
+                    serde_json::json!({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "cGRm"}})
+                };
+                let mut attachment = user_msg("attachment context");
+                if let ConversationMessage::User { content, .. } = &mut attachment {
+                    content.push(serde_json::from_value(media).unwrap());
+                }
+                let history = vec![
+                    user_msg("q1"),
+                    assistant_text("image evidence already described"),
+                    attachment.clone(),
+                    assistant_text("a2"),
+                ];
+                let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
+                *client.texts.lock().unwrap() = VecDeque::from(vec![
+                    Err(llm_client::LlmError::UnsupportedCapability {
+                        capability: capability.into(),
+                    }),
+                    Ok("<summary>ok</summary>".into()),
+                ]);
+                let result = if manual {
+                    compactor
+                        .compact_manual_with_instructions(history.clone(), None)
+                        .await
+                } else {
+                    compactor.compact(history.clone()).await
+                }
+                .unwrap();
+                let requests = client.seen.lock().unwrap();
+                assert_eq!(requests.len(), 2);
+                assert_eq!(requests[0].messages[2], attachment);
+                assert_eq!(requests[1].messages[0], history[0]);
+                assert_eq!(requests[1].messages[1], history[1]);
+                let expected = if capability == "vision" {
+                    "[image]"
+                } else {
+                    "[document]"
+                };
+                assert!(requests[1].messages[2].text_content().contains(expected));
+                assert!(requests[1].messages[2]
+                    .text_content()
+                    .contains("attachment context"));
+                assert_eq!(
+                    result.messages_to_preserve,
+                    if manual {
+                        vec![history[3].clone()]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_unsupported_capabilities_do_not_trigger_media_recovery() {
+        for capability in ["tools", "reasoning", "structured_output"] {
+            assert!(!is_media_compaction_error(
+                &llm_client::LlmError::UnsupportedCapability {
+                    capability: capability.into(),
+                }
+            ));
+        }
     }
 
     #[tokio::test]

@@ -55,7 +55,7 @@ export function emptyDesktopState(): DesktopState {
     currentModel: null,
     conversationControls: null,
     fastMode: false,
-    permissionMode: 'default',
+    permissionMode: 'auto',
     slashCommands: [],
     tasks: {},
     taskOutput: {},

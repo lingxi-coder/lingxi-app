@@ -211,6 +211,9 @@ test('sidebar renders global pins before projects and limits each project sessio
   ));
 
   assert.ok(markup.indexOf('Pinned work') < markup.indexOf('id="projects-heading"'));
+  const footer = markup.slice(markup.indexOf('class="desktop-sidebar-footer"'), markup.indexOf('class="sidebar-resize-handle'));
+  assert.match(footer, /> Settings<|>Settings<|> <!-- -->Settings</);
+  assert.doesNotMatch(footer, /Engine|diagnostics|role="status"/);
   assert.match(markup, /MLPlatform/);
   assert.match(markup, /LingXi-Next/);
   assert.match(markup, /Session 5/);
@@ -299,12 +302,14 @@ test('a running turn keeps drafting and local composer controls interactive', ()
 
   assert.match(promptTag, /contentEditable="true"/i);
   assert.match(promptTag, /aria-disabled="false"/);
-  for (const marker of ['aria-label="Attach image"', 'aria-label="Search workspace files"', 'aria-label="Start ordinary recording"']) {
+  for (const marker of ['aria-label="Attach files"', 'aria-label="Search workspace files"', 'aria-label="Start ordinary recording"']) {
     assert.doesNotMatch(openingTag(markup, marker), /\bdisabled\b/, `${marker} must remain interactive`);
   }
   assert.doesNotMatch(markup, /aria-label="Goal active"/);
   assert.doesNotMatch(openingTag(markup, 'aria-label="Stop current turn"'), /\bdisabled\b/);
-  assert.doesNotMatch(markup, /aria-label="Send pending message"/);
+  assert.match(markup, /class="composer-send-presence" data-visible="false" aria-hidden="true"/);
+  assert.match(openingTag(markup, 'aria-label="Send pending message"'), /\bdisabled\b/);
+  assert.match(openingTag(markup, 'aria-label="Send pending message"'), /tabindex="-1"/i);
 
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
   const submitStart = source.indexOf('const submit = async');

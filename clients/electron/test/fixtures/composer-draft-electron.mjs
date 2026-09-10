@@ -1,5 +1,7 @@
 import { app, BrowserWindow } from 'electron';
+import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 const url = process.argv.find((argument) => argument.startsWith('http://') || argument.startsWith('https://'));
 if (!url) throw new Error('fixture URL is required');
@@ -43,13 +45,47 @@ async function main() {
     show: false,
     width: 900,
     height: 700,
-    webPreferences: { sandbox: true },
+    webPreferences: { sandbox: true, ...(process.env.LINGXI_TEST_PRELOAD ? { preload: process.env.LINGXI_TEST_PRELOAD } : {}) },
   });
 
   try {
     await window.loadURL(url);
     const { webContents } = window;
     await waitFor(webContents, `Boolean(window.__composerDraftTest && document.querySelector('[aria-label="Prompt"]'))`);
+
+    const emptyState = await webContents.executeJavaScript(`(() => {
+      const prompt = document.querySelector('[aria-label="Prompt"]');
+      prompt.focus();
+      const send = document.querySelector('[aria-label="Send prompt"]');
+      return {
+        placeholderPosition: getComputedStyle(prompt, '::before').position,
+        sendVisibility: getComputedStyle(send.parentElement).visibility,
+        disabled: send.disabled,
+        tabIndex: send.tabIndex,
+        offset: window.getSelection().anchorOffset,
+      };
+    })()`);
+    assert.deepEqual(emptyState, { placeholderPosition: 'absolute', sendVisibility: 'hidden', disabled: true, tabIndex: -1, offset: 0 });
+    await webContents.insertText('Hello');
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).opacity === '1'`);
+    const typedState = await webContents.executeJavaScript(`(() => {
+      const prompt = document.querySelector('[aria-label="Prompt"]');
+      const range = document.createRange();
+      range.setStart(prompt.firstChild, 0);
+      range.setEnd(prompt.firstChild, 1);
+      return { firstCharacterX: range.getBoundingClientRect().x - prompt.getBoundingClientRect().x,
+        enabled: !document.querySelector('[aria-label="Send prompt"]').disabled };
+    })()`);
+    assert.equal(typedState.firstCharacterX, 18);
+    assert.equal(typedState.enabled, true);
+    if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
+      await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.filled.png', (await webContents.capturePage()).toPNG());
+    }
+    await setPrompt(webContents, '');
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).visibility === 'hidden'`);
+    await setPrompt(webContents, '   ');
+    assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').disabled`), true);
+    await setPrompt(webContents, '');
 
     const composerScreenshotPath = process.env.LINGXI_COMPOSER_SCREENSHOT;
     if (composerScreenshotPath) {
@@ -61,6 +97,50 @@ async function main() {
       })()`);
       const image = await webContents.capturePage(bounds);
       await writeFile(composerScreenshotPath, image.toPNG());
+    }
+
+    if (process.env.LINGXI_TEST_PRELOAD && testUserData) {
+      const filePath = join(testUserData, 'notes 中文.txt');
+      await writeFile(filePath, 'File attachment regression test');
+      webContents.debugger.attach('1.3');
+      const { root } = await webContents.debugger.sendCommand('DOM.getDocument');
+      const { nodeId } = await webContents.debugger.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type="file"]' });
+      await webContents.executeJavaScript(`document.querySelector('input[type="file"]').addEventListener('change', (event) => { window.__nativeAttachment = event.target.files[0]; }, { capture: true })`);
+      await webContents.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files: [filePath] });
+      await waitFor(webContents, `Boolean(document.querySelector('[data-file-mention]'))`);
+      assert.equal(await webContents.executeJavaScript(`document.querySelector('[data-file-mention]').dataset.fileMention`), filePath);
+      await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).opacity === '1'`);
+      if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
+        await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.file.png', (await webContents.capturePage()).toPNG());
+      }
+      // Duplicate attachments are deduplicated; session switching preserves the token.
+      await webContents.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files: [filePath] });
+      assert.equal(await webContents.executeJavaScript(`document.querySelectorAll('[data-file-mention]').length`), 1);
+      for (const eventType of ['paste', 'drop']) {
+        await setPrompt(webContents, '');
+        await webContents.executeJavaScript(`(() => {
+          const transfer = new DataTransfer();
+          transfer.items.add(window.__nativeAttachment);
+          const event = ${JSON.stringify(eventType)} === 'paste'
+            ? new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true })
+            : new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true });
+          document.querySelector('[aria-label="Prompt"]').dispatchEvent(event);
+        })()`);
+        await waitFor(webContents, `Boolean(document.querySelector('[data-file-mention]'))`);
+        assert.equal(await webContents.executeJavaScript(`document.querySelector('[data-file-mention]').dataset.fileMention`), filePath);
+      }
+      await switchSession(webContents, 'ffffffff-ffff-4fff-8fff-ffffffffffff');
+      await waitFor(webContents, `!document.querySelector('[data-file-mention]')`);
+      await switchSession(webContents, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+      await waitFor(webContents, `Boolean(document.querySelector('[data-file-mention]'))`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').click()`);
+      await waitFor(webContents, `window.__composerDraftTest.sendPending()`);
+      assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.lastSentPrompt()`), '@"' + filePath + '"');
+      await webContents.executeJavaScript(`window.__composerDraftTest.resolveSend()`);
+      await waitFor(webContents, `!document.querySelector('[data-file-mention]')`);
+      webContents.debugger.detach();
+      process.stdout.write(JSON.stringify({ nativeFileAttachments: true }) + '\n');
+      return;
     }
 
     await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
@@ -180,7 +260,7 @@ async function main() {
     await waitFor(webContents, `document.querySelector('[aria-label="Send pending message"]')?.disabled === false`);
     const runningInteraction = await webContents.executeJavaScript(`({
       editable: document.querySelector('[aria-label="Prompt"]')?.isContentEditable,
-      attachEnabled: document.querySelector('[aria-label="Attach image"]')?.disabled === false,
+      attachEnabled: document.querySelector('[aria-label="Attach files"]')?.disabled === false,
       goalEnabled: document.querySelector('[aria-label="Toggle goal mode"]')?.disabled === false,
       stopEnabled: document.querySelector('[aria-label="Stop current turn"]')?.disabled === false,
     })`);

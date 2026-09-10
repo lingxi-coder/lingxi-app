@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import { app, BrowserWindow } from 'electron';
 
 // Electron may insert its own switches into argv before app arguments. Pick
@@ -73,6 +74,14 @@ async function main() {
       activeText: document.activeElement?.textContent?.trim() ?? null,
       activeIsSidebar: document.activeElement?.classList.contains('sidebar-primary-action') === true,
     })`);
+
+    if (process.env.LINGXI_SIDEBAR_SCREENSHOT) {
+      const bounds = await webContents.executeJavaScript(`(() => {
+        const rect = document.querySelector('.desktop-sidebar-footer').getBoundingClientRect();
+        return { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
+      })()`);
+      await writeFile(process.env.LINGXI_SIDEBAR_SCREENSHOT, (await webContents.capturePage(bounds)).toPNG());
+    }
 
     const resizeGeometry = await webContents.executeJavaScript(`(() => {
       const handle = document.querySelector('[aria-label="Resize sidebar"]');

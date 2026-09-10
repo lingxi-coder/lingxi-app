@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import '../../src/renderer/global.css';
 
 import { BetaComposer } from '../../src/renderer/components/BetaDesktop';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
@@ -53,7 +54,7 @@ function audioResponse(command: NativeAudioCommand): NativeAudioResponse {
   }
 }
 
-(window as unknown as { lingxi: { audio: unknown } }).lingxi = {
+if (!window.lingxi) (window as unknown as { lingxi: { audio: unknown } }).lingxi = {
   audio: {
     request: async (command: NativeAudioCommand) => {
       audioRequests.push(command);

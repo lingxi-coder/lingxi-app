@@ -160,6 +160,15 @@ pub enum JournalError {
     InvalidRoot(String),
 }
 
+/// Where a damaged ledger and snapshot were set aside, and why.
+#[derive(Debug, Clone)]
+pub struct QuarantineReport {
+    /// Paths the damaged files were moved to. Empty when neither existed.
+    pub moved: Vec<PathBuf>,
+    /// The failure that triggered the quarantine.
+    pub reason: String,
+}
+
 /// Root-pinned journal owner. A `DurableJournal` is cheap to clone by value and
 /// carries the exact identity of the opened session directory.
 ///
@@ -485,6 +494,59 @@ impl DurableJournal {
             SESSION_STATE_FILE_MODE,
             Some(&self.identity),
         )?)
+    }
+
+    /// Move this session's damaged ledger and snapshot aside, under the
+    /// exclusive `ledger.lock`, and return where they went.
+    ///
+    /// The reader is deliberately untouched: it must keep refusing to parse a
+    /// corrupt record, so recovery can never come from loosening it. What
+    /// recovers is the caller, which decides that a derivative money ledger is
+    /// worth less than the session it would otherwise block. The bytes are
+    /// preserved, never deleted, so a damaged ledger stays inspectable.
+    pub fn quarantine(&self, reason: &str) -> Result<QuarantineReport, JournalError> {
+        let _lock = self.lock()?;
+        // Both paths are validated relative names under a root whose identity
+        // was verified when the journal was opened and re-verified here by the
+        // lock. There is no rooted rename primitive; a rename between two
+        // checked names inside that one directory is the narrowest operation
+        // that preserves the evidence.
+        let identity = platform_api::rooted_fs::root_identity(&self.root)?;
+        if identity != self.identity {
+            return Err(JournalError::InvalidRoot(
+                self.root.to_string_lossy().into_owned(),
+            ));
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        let directory = platform_api::rooted_fs::checked_join(&self.root, Path::new("quarantine"))?;
+        std::fs::create_dir_all(&directory).map_err(|error| FsError::Io(error.to_string()))?;
+        let mut moved = Vec::new();
+        for name in [JOURNAL_FILE_NAME, SNAPSHOT_FILE_NAME] {
+            let from = platform_api::rooted_fs::checked_join(&self.root, Path::new(name))?;
+            if !from.exists() {
+                continue;
+            }
+            let to = directory.join(format!("{name}.{stamp}"));
+            std::fs::rename(&from, &to).map_err(|error| FsError::Io(error.to_string()))?;
+            moved.push(to);
+        }
+        platform_api::rooted_fs::sync_parent_pinned(
+            &self.root,
+            Path::new(JOURNAL_FILE_NAME),
+            Some(&self.identity),
+        )?;
+        // The cached prefix index describes bytes that are no longer there.
+        *self
+            .index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        tracing::warn!(%reason, "cost ledger quarantined");
+        Ok(QuarantineReport {
+            moved,
+            reason: reason.to_string(),
+        })
     }
 
     fn read_locked(&self) -> Result<JournalReplay, JournalError> {

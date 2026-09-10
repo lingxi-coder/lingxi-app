@@ -630,10 +630,8 @@ impl DefaultLlmClient {
         prepared: PreparedLlmCall,
         transport: &dyn Transport,
         session: &mut ResponsesWebSocketSession,
+        on_dispatch: &mut (dyn FnMut() -> Result<(), LlmError> + Send),
     ) -> Result<(PreparedLlmCall, StreamingResponse), LlmError> {
-        if prepared.registered_attempt {
-            return Err(crate::model_attempt::missing_hooks_error());
-        }
         let logical_body = prepared.provider_request.body_json.clone();
         self.open_prepared_stream_with_session_internal(
             prepared,
@@ -642,6 +640,7 @@ impl DefaultLlmClient {
             logical_body,
             false,
             true,
+            on_dispatch,
         )
         .await
     }
@@ -676,6 +675,11 @@ impl DefaultLlmClient {
         logical_body: serde_json::Value,
         from_prewarm: bool,
         allow_http_fallback: bool,
+        // Fired immediately before whichever transport call actually carries
+        // this attempt, with no await in between. Every path below goes
+        // through it exactly once, so a WebSocket send is metered exactly like
+        // an HTTP one.
+        on_dispatch: &mut (dyn FnMut() -> Result<(), LlmError> + Send),
     ) -> Result<(PreparedLlmCall, StreamingResponse), LlmError> {
         if session.fallback_to_http()
             || !matches!(
@@ -684,6 +688,7 @@ impl DefaultLlmClient {
             )
         {
             prepared.provider_request.stream_transport = ProviderStreamTransport::Http;
+            on_dispatch()?;
             let streaming = transport.open_stream(&prepared.provider_request).await?;
             return Ok((prepared, streaming));
         }
@@ -699,6 +704,7 @@ impl DefaultLlmClient {
                     session.mark_http_fallback();
                     if allow_http_fallback {
                         prepared.provider_request.stream_transport = ProviderStreamTransport::Http;
+                        on_dispatch()?;
                         let streaming = transport.open_stream(&prepared.provider_request).await?;
                         return Ok((prepared, streaming));
                     }
@@ -715,6 +721,7 @@ impl DefaultLlmClient {
         }
         record_responses_wire_request(&session.state, &logical_body, &send_request.body_json);
 
+        on_dispatch()?;
         let streaming = match session
             .connection
             .as_mut()
@@ -727,6 +734,11 @@ impl DefaultLlmClient {
                 session.mark_http_fallback();
                 if allow_http_fallback {
                     prepared.provider_request.stream_transport = ProviderStreamTransport::Http;
+                    // The WebSocket send never reached the provider, so this
+                    // HTTP retry is the dispatch that counts. `mark_dispatched`
+                    // is single-use, so re-marking is a programming error the
+                    // hook surfaces rather than a silent double count.
+                    on_dispatch()?;
                     let streaming = transport.open_stream(&prepared.provider_request).await?;
                     return Ok((prepared, streaming));
                 }
@@ -778,6 +790,7 @@ impl DefaultLlmClient {
                 logical_body,
                 from_prewarm,
                 allow_http_fallback,
+                &mut || Ok(()),
             )
             .await?;
         if streaming.status >= 400 {

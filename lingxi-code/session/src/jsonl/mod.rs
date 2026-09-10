@@ -67,8 +67,8 @@ pub use durable_writer::{
 };
 pub use journal::{
     DurableJournal, JournalAppend, JournalEntry, JournalEnvelope, JournalError, JournalReplay,
-    JournalSnapshot, JOURNAL_FILE_NAME, JOURNAL_LOCK_FILE_NAME, JOURNAL_SCHEMA_VERSION,
-    SNAPSHOT_FILE_NAME,
+    JournalSnapshot, QuarantineReport, JOURNAL_FILE_NAME, JOURNAL_LOCK_FILE_NAME,
+    JOURNAL_SCHEMA_VERSION, SNAPSHOT_FILE_NAME,
 };
 pub use path::{project_dir_name, session_path, tool_results_dir};
 // `reader::SessionMetadata` (lite head-only struct) is intentionally NOT

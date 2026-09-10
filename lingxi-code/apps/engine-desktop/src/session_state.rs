@@ -1921,7 +1921,30 @@ impl CoordinatorState {
         if let Some(reason) = self.durability_gate.frozen_reason() {
             return Err(CostPersistError::Frozen(reason));
         }
-        let hydrated = hydrate_from_journal(&self.journal, self.session_id)?;
+        let hydrated = match hydrate_from_journal(&self.journal, self.session_id) {
+            Ok(hydrated) => hydrated,
+            Err(error) if rebuildable_ledger_damage(&error) => {
+                // The transcript is a separate file and is untouched, so the
+                // conversation resumes. What is lost is this session's
+                // recorded spend and any queued Fusion delivery, which is why
+                // the damaged bytes are preserved rather than deleted.
+                let report = self
+                    .journal
+                    .quarantine(&error.to_string())
+                    .map_err(|failure| {
+                        CostPersistError::Storage(format!(
+                            "cost ledger is damaged ({error}) and could not be set aside: {failure}"
+                        ))
+                    })?;
+                tracing::warn!(
+                    reason = %report.reason,
+                    moved = ?report.moved,
+                    "cost ledger was damaged; the session resumes with a fresh one"
+                );
+                hydrate_from_journal(&self.journal, self.session_id)?
+            }
+            Err(error) => return Err(error),
+        };
         *self
             .attempts
             .lock()
@@ -1987,6 +2010,32 @@ fn mutation_conflict(mutation_id: &CostMutationId) -> CostPersistError {
         "cost mutation id conflict: {}",
         mutation_id.as_str()
     ))
+}
+
+/// Whether a hydration failure describes damage this host can rebuild from.
+///
+/// Rebuildable means "the ledger's own bytes are unusable": the reader stays
+/// strict and the damaged file is set aside. Everything else is deliberately
+/// fatal -- an IO error means renaming would likely fail too and would
+/// destroy evidence on a sick volume; a lock failure means another live
+/// process owns this session; a frozen gate means this process already knows
+/// its own writes are failing.
+fn rebuildable_ledger_damage(error: &CostPersistError) -> bool {
+    let CostPersistError::Storage(message) = error else {
+        return false;
+    };
+    [
+        "journal corruption",
+        "does not follow",
+        "journal event id conflict",
+        "unsupported journal schema version",
+        "journal record exceeds",
+        "without its authoritative WAL",
+        "cost vector",
+        "cost mutation id conflict",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
 }
 
 fn hydrate_from_journal(
@@ -2489,18 +2538,96 @@ mod tests {
         ));
     }
 
+    /// P0-7: the cost ledger is derivative. One damaged byte in it must not
+    /// make the conversation unresumable -- the transcript is a separate file
+    /// and is untouched. The damaged ledger is set aside, not deleted, and the
+    /// session starts a fresh one.
     #[test]
-    fn snapshot_without_authoritative_wal_fails_closed() {
+    fn corrupt_ledger_is_quarantined_and_the_session_still_hydrates() {
+        let (directory, coordinator, session_id) = coordinator();
+        let mutation_id = CostMutationId::new("cost-1");
+        coordinator
+            .journal()
+            .append_once(
+                mutation_id.as_str(),
+                &encode_session_event(&SessionEvent::Cost(CostMutationRecord {
+                    cost_revision: 1,
+                    mutation_id: mutation_id.clone(),
+                    source: CostMutationSource::ModelResponse,
+                    state: CostStateVector::from(&state(session_id, 1, 99)),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let wal = coordinator.journal().root().join("ledger.v1.jsonl");
+        let original = std::fs::read(&wal).unwrap();
+        // An interior corrupt record: the reader must keep refusing to parse
+        // this, so recovery cannot come from loosening the reader.
+        let mut damaged = b"{not json\n".to_vec();
+        damaged.extend_from_slice(&original);
+        std::fs::write(&wal, &damaged).unwrap();
+
+        let hydrated = coordinator
+            .hydrate_blocking()
+            .expect("a damaged ledger must not block the session");
+        assert_eq!(
+            hydrated.state.total_nano_usd, 0,
+            "the fresh ledger starts from zero"
+        );
+
+        let quarantined: Vec<_> = std::fs::read_dir(coordinator.journal().root().join("quarantine"))
+            .expect("a quarantine directory exists")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        let ledger = quarantined
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("ledger.v1."))
+            })
+            .expect("the damaged ledger was set aside");
+        assert_eq!(
+            std::fs::read(ledger).unwrap(),
+            damaged,
+            "the original bytes are preserved for inspection"
+        );
+        drop(directory);
+    }
+
+    /// The fatal classes stay fatal, and leave no quarantine behind. A frozen
+    /// gate means this process already knows its own writes are failing;
+    /// rebuilding on top of that would be inventing a clean state.
+    #[test]
+    fn a_frozen_gate_is_not_quarantined() {
+        let (_directory, coordinator, _session_id) = coordinator();
+        coordinator
+            .durability_gate()
+            .freeze("this process cannot write");
+        assert!(matches!(
+            coordinator.hydrate_blocking(),
+            Err(CostPersistError::Frozen(_))
+        ));
+        assert!(
+            !coordinator.journal().root().join("quarantine").exists(),
+            "a frozen gate must not move the ledger aside"
+        );
+    }
+
+    #[test]
+    fn snapshot_without_authoritative_wal_is_quarantined_not_trusted() {
         let (_directory, coordinator, session_id) = coordinator();
         coordinator
             .journal()
             .write_snapshot(1, &CostStateVector::from(&state(session_id, 1, 99)))
             .unwrap();
 
-        assert!(matches!(
-            coordinator.hydrate_blocking(),
-            Err(CostPersistError::Storage(message)) if message.contains("without its authoritative WAL")
-        ));
+        // A snapshot is derivative of the WAL. Alone it has no authority, so
+        // it is set aside; the totals it claimed are never adopted.
+        let hydrated = coordinator.hydrate_blocking().unwrap();
+        assert_eq!(hydrated.state.total_nano_usd, 0);
+        assert!(coordinator.journal().root().join("quarantine").exists());
     }
 
     #[test]

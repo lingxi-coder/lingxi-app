@@ -141,12 +141,7 @@ mod tests {
             prepared: &crate::PreparedLlmCall,
         ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
             assert!(request.model_attempt.is_some());
-            if request.stream {
-                assert_eq!(
-                    prepared.provider_request.stream_transport,
-                    crate::ProviderStreamTransport::Http
-                );
-            }
+            let _ = prepared;
             self.events.lock().unwrap().push("begin");
             Ok(Box::new(ProbeLease {
                 probe: self.clone(),
@@ -274,16 +269,43 @@ mod tests {
         {
             self.ws_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async {
-                Err(LlmError::Transport {
-                    message: "unmetered WebSocket path reached".into(),
-                })
+            let frames = self.frames.clone();
+            Box::pin(async move {
+                Ok(Box::new(ProbeWsSession { frames })
+                    as Box<dyn crate::ResponsesWebSocketTransportSession>)
             })
         }
     }
 
+    struct ProbeWsSession {
+        frames: Vec<Vec<u8>>,
+    }
+
+    impl crate::ResponsesWebSocketTransportSession for ProbeWsSession {
+        fn send<'a>(
+            &'a mut self,
+            _: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            let frames = self.frames.clone();
+            Box::pin(async move {
+                Ok(StreamingResponse {
+                    status: 101,
+                    headers: BTreeMap::new(),
+                    frames: Box::new(ScriptedFrames::new(frames)),
+                })
+            })
+        }
+
+        fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), LlmError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// P0-9: a registered attempt on a WebSocket-capable route keeps the
+    /// WebSocket. It used to be forced onto HTTP, because the prepared-WS path
+    /// never marked dispatch and metering would have been lost.
     #[tokio::test]
-    async fn registered_websocket_capable_route_uses_one_http_attempt_without_fallback() {
+    async fn a_registered_attempt_keeps_the_websocket_and_is_still_metered() {
         use futures::StreamExt;
         let transport = Arc::new(HttpOnlyProbeTransport {
             frames: vec![
@@ -323,15 +345,17 @@ mod tests {
             transport
                 .http_calls
                 .load(std::sync::atomic::Ordering::SeqCst),
-            1
+            0,
+            "a WebSocket-capable route must not be pushed onto HTTP"
         );
         assert_eq!(
             transport.ws_calls.load(std::sync::atomic::Ordering::SeqCst),
-            0
+            1
         );
         assert_eq!(
             *probe.events.lock().unwrap(),
-            vec!["begin", "dispatch", "finish-owned", "settled"]
+            vec!["begin", "dispatch", "finish-owned", "settled"],
+            "the WebSocket send is metered exactly like an HTTP one"
         );
         assert_eq!(
             probe.observations.lock().unwrap().last().unwrap().1,

@@ -3678,34 +3678,22 @@ impl ApiService {
                 )
             });
 
-            // A registered attempt is metered on the HTTP path only: the
-            // prepared-WebSocket path below never marks dispatch, so reusing a
-            // WS session would lose the attempt. Restoring WS reuse for
-            // registered calls means pushing `mark_dispatched` into that path.
-            let registered = req.model_attempt.is_some();
-            if registered {
-                prepared.provider_request.stream_transport = crate::ProviderStreamTransport::Http;
-            }
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
 
             // Open stream through the prepared-call path so injected headers are
             // preserved while OpenAI Responses providers can reuse a WebSocket
-            // session and apply previous_response_id deltas.
+            // session and apply previous_response_id deltas. A registered
+            // attempt takes the same path: the opener marks dispatch
+            // immediately before whichever transport call carries it, so a
+            // WebSocket send is metered exactly like an HTTP one.
             let open = async {
-                if registered {
-                    attempt.mark_dispatched()?;
-                    let streaming = self
-                        .transport
-                        .open_stream(&prepared.provider_request)
-                        .await?;
-                    return Ok((prepared, streaming));
-                }
                 let mut responses_ws_session = self.responses_ws_session.lock().await;
                 self.client
                     .open_prepared_stream_with_session(
                         prepared,
                         self.transport.as_ref(),
                         &mut responses_ws_session,
+                        &mut || attempt.mark_dispatched(),
                     )
                     .await
             };

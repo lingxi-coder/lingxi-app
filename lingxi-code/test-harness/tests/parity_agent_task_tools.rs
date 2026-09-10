@@ -112,8 +112,10 @@ fn task_id_regex_matches_validate_task_id_acceptance() {
     let re = regex::Regex::new(&f.task_id_regex).unwrap();
     // Probe with a few well-formed prefixes (one per TaskType).
     // One probe per TaskType prefix, incl. 's' (oracle `monitor_ws:"s"`
-    // @242497270) and 'k' (`mcp_task`).
-    for prefix in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k', 's', 'f'] {
+    // @242497270), 'k' (`mcp_task`) and 'e' (`auto_mode_scan`, oracle table `k`
+    // in src_160932144.js). Without a probe per prefix a widened production
+    // regex passes this test while accepting an id the fixture never pinned.
+    for prefix in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k', 's', 'f', 'e'] {
         let id = format!("{prefix}12345678");
         assert!(
             re.is_match(&id),

@@ -652,18 +652,21 @@ mod command_arm_tests {
     /// takes permission grants only from its command line. Block and ask are
     /// untouched, which is the point of running hooks in a confined harness at
     /// all.
+    /// The confined fold, exercised WITHOUT touching the process environment.
+    ///
+    /// This used to `set_var("CLAUDE_CODE_EVAL_CONFINED", …)` around each arm.
+    /// Rust runs a binary's tests on parallel threads in ONE process, so during
+    /// those windows every other test that built a hook decision was silently
+    /// confined too — and several of them assert `Approve` / `Allow`. The flag
+    /// is now per-executor, so the arms below are hermetic.
     #[tokio::test]
     async fn confined_session_drops_a_hook_permission_allow() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let allow_json =
             r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
 
         // Baseline: unconfined, the allow lands.
-        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
-        let exec = executor_with(MockRunner::ok(output(allow_json, "", 0)));
+        let exec =
+            executor_with(MockRunner::ok(output(allow_json, "", 0))).with_eval_confined(false);
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         assert_eq!(
             agg.decision,
@@ -672,8 +675,8 @@ mod command_arm_tests {
         );
 
         // Confined: the same output yields no decision at all.
-        std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", "true");
-        let exec = executor_with(MockRunner::ok(output(allow_json, "", 0)));
+        let exec =
+            executor_with(MockRunner::ok(output(allow_json, "", 0))).with_eval_confined(true);
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         assert_eq!(
             agg.decision, None,
@@ -685,35 +688,64 @@ mod command_arm_tests {
             r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"nope"}}"#,
             "",
             0,
-        )));
+        )))
+        .with_eval_confined(true);
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         assert_eq!(
             agg.decision,
             Some(HookDecision::Block),
             "a confined session must still honour a hook block"
         );
-        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
+    }
+
+    /// A neighbour that must stay green while the confined test runs beside it.
+    ///
+    /// Before the flag was per-executor this could not exist honestly: an
+    /// executor built during the other test's `set_var` window dropped its
+    /// allow. Its value is as a canary — if the gate ever goes back to reading
+    /// the environment, this is what starts flaking.
+    #[tokio::test]
+    async fn a_default_executor_is_not_confined_while_a_confined_one_runs() {
+        let allow_json =
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
+        let confined =
+            executor_with(MockRunner::ok(output(allow_json, "", 0))).with_eval_confined(true);
+        let plain = executor_with(MockRunner::ok(output(allow_json, "", 0)));
+
+        let (confined_agg, plain_agg) = tokio::join!(
+            confined.execute(pre_event(), HookContext::default()),
+            plain.execute(pre_event(), HookContext::default()),
+        );
+
+        assert_eq!(
+            confined_agg.decision, None,
+            "the confined executor drops it"
+        );
+        assert_eq!(
+            plain_agg.decision,
+            Some(HookDecision::Approve),
+            "a concurrent default executor keeps its allow"
+        );
     }
 
     /// The binary compares against the literal `true`; the usual truthy
     /// spellings do NOT arm it.
+    ///
+    /// Pinned against the pure comparison rather than the process environment:
+    /// a `set_var` here would be visible to every other test running in
+    /// parallel in this same binary, several of which assert that a hook allow
+    /// survives.
     #[test]
     fn eval_confined_matches_only_the_literal_true() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
-        assert!(!crate::executor::eval_confined_session());
+        use platform_api::env::is_eval_confined_value;
+        assert!(!is_eval_confined_value(None));
         for spelling in ["1", "yes", "on", "TRUE", ""] {
-            std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", spelling);
             assert!(
-                !crate::executor::eval_confined_session(),
+                !is_eval_confined_value(Some(spelling)),
                 "{spelling:?} must not arm the confined gate"
             );
         }
-        std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", "true");
-        assert!(crate::executor::eval_confined_session());
-        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
+        assert!(is_eval_confined_value(Some("true")));
     }
 
     #[tokio::test]

@@ -19,7 +19,18 @@
 /// truthy allowlist, that would silently widen the gate.
 #[must_use]
 pub fn is_eval_confined_session() -> bool {
-    std::env::var("CLAUDE_CODE_EVAL_CONFINED").as_deref() == Ok("true")
+    is_eval_confined_value(std::env::var("CLAUDE_CODE_EVAL_CONFINED").ok().as_deref())
+}
+
+/// The comparison [`is_eval_confined_session`] makes, without the environment.
+///
+/// Exists so the spelling rule can be pinned by a test that does not mutate a
+/// process-global. `cargo test` runs a binary's tests on parallel threads in
+/// one process, so a `set_var` here is visible to every test in flight — which
+/// is exactly how the `hooks` suite grew an intermittent failure.
+#[must_use]
+pub fn is_eval_confined_value(value: Option<&str>) -> bool {
+    value == Some("true")
 }
 
 /// `isEnvTruthy(envVar)` — see module docs.

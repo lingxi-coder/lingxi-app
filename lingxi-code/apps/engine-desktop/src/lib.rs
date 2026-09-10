@@ -995,6 +995,28 @@ pub const TEAMMATE_POOL_CAP: usize = 4;
 /// headroom under a ten-second grace.
 pub const DESKTOP_SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// Create the private root for an ephemeral host's spend ledger.
+///
+/// `--no-session-persistence` promises no transcript, not unaccounted spend.
+/// The ledger lives under the OS temp root, is owner-only, and is removed by
+/// the shutdown barrier; a killed process leaves at most one directory the OS
+/// reclaims on its own.
+fn ephemeral_session_home() -> Result<std::path::PathBuf, BuildError> {
+    let name = format!(
+        "lingxi-ephemeral-{}-{}",
+        std::process::id(),
+        protocol::SessionId::new().as_uuid().simple()
+    );
+    let root = std::env::temp_dir();
+    platform_api::rooted_fs::ensure_private_directory(
+        &root,
+        std::path::Path::new(&name),
+        session::jsonl::journal::SESSION_STATE_DIR_MODE,
+    )
+    .map_err(|error| BuildError::DurableSession(error.to_string()))?;
+    Ok(root.join(name))
+}
+
 /// Derive the [`permission::SandboxAutoAllowConfig`] the enforced
 /// [`permission::PermissionPolicy`] consults from the same `settings.json`
 /// tiers the policy block already reads.
@@ -7148,6 +7170,10 @@ pub struct DesktopSessionLifecycle {
     session_state_manager: Option<Arc<session_state::SessionStateManager>>,
     fusion_recorder_factory: Option<Arc<fusion_recorder::DesktopFusionRecorderFactory>>,
     fusion_recovery_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Disposable ledger root created for a `--no-session-persistence` host.
+    /// Removed once every queue is closed, so the promise of leaving nothing
+    /// behind holds for the spend ledger as well as the transcript.
+    ephemeral_home: Option<std::path::PathBuf>,
 }
 
 /// Truthful result of a host shutdown drain. Independent producer barriers are
@@ -7327,6 +7353,18 @@ impl DesktopSessionLifecycle {
                 report
                     .errors
                     .push(format!("session state shutdown failed: {error}"));
+            }
+        }
+        if let Some(home) = self.ephemeral_home.as_ref() {
+            // Every queue and claim above is closed by now. A failure here is
+            // reported rather than swallowed: leftover state under the OS temp
+            // root is exactly what this host promised not to leave.
+            if let Err(error) = std::fs::remove_dir_all(home) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    report
+                        .errors
+                        .push(format!("ephemeral ledger cleanup failed: {error}"));
+                }
             }
         }
         report.complete = report.errors.is_empty();
@@ -11460,7 +11498,20 @@ pub async fn build(
         legacy_config_path.as_deref(),
         &cfg.cwd,
     );
-    let session_state_manager = cfg.session_persistence.then(|| {
+    // `--no-session-persistence` means "leave no transcript behind", not
+    // "spend without accounting". Fusion charges several models per run, so it
+    // needs a ledger; giving the ephemeral host a disposable one is what lets
+    // there be a single billing path instead of two. The directory lives under
+    // the OS temp root and is removed at shutdown.
+    let ephemeral_home = if cfg.session_persistence {
+        None
+    } else {
+        Some(ephemeral_session_home()?)
+    };
+    let ledger_home = ephemeral_home
+        .clone()
+        .unwrap_or_else(|| cfg.lingxi_home.clone());
+    let session_state_manager = Some(()).map(|()| {
         let legacy_shadow = legacy_opening_balance.map(|(legacy_session_id, amount)| {
             Arc::new(move |session_id| (session_id == legacy_session_id).then_some(amount))
                 as Arc<
@@ -11468,23 +11519,23 @@ pub async fn build(
                 >
         });
         session_state::SessionStateManager::new_with_legacy_shadow(
-            cfg.lingxi_home.clone(),
+            ledger_home.clone(),
             legacy_shadow,
         )
     });
-    let (session_state, durable_hydration) = if cfg.session_persistence {
+    let (session_state, durable_hydration) = {
         let lease = if let Some(lease) = construction_writer_lease {
             lease
         } else {
             platform_api::live_sessions::LiveSessionDir::at_live(
-                cfg.lingxi_home.join("sessions"),
+                ledger_home.join("sessions"),
             )
             .claim_session_id(&main_session_id.to_string(), std::process::id())
             .map_err(|error| BuildError::DurableSession(error.to_string()))?
             .into_shared()
         };
         let coordinator = session_state::SessionStateCoordinator::open(
-            &cfg.lingxi_home,
+            &ledger_home,
             main_session_id,
             lease.clone(),
         )
@@ -11523,15 +11574,15 @@ pub async fn build(
             }
         };
         (Some(coordinator), Some(hydration))
-    } else {
-        (None, None)
     };
 
     // Decorate the same writer that the orchestrator receives. Fusion delivery
     // resolves its active path under this writer's lock and the coordinator's
     // durable transaction, so ordinary append, outbox delivery, and `/cd`
     // retargeting share one authority.
-    let main_jsonl_writer = if let Some(coordinator) = session_state.as_ref() {
+    let main_jsonl_writer = if let Some(coordinator) =
+        session_state.as_ref().filter(|_| cfg.session_persistence)
+    {
         let durable_writer = Arc::new(session::jsonl::DurableTranscriptWriter::from_pinned(
             coordinator.journal().root().to_path_buf(),
             coordinator.journal().root_identity(),
@@ -15789,6 +15840,7 @@ pub async fn build(
         .or_insert_with(|| "api_key".to_string());
 
     let session_lifecycle = Arc::new(DesktopSessionLifecycle {
+        ephemeral_home: ephemeral_home.clone(),
         settings_watcher: settings_watcher.clone(),
         file_changed_watcher: file_changed_watcher.clone(),
         cron_scheduler,
@@ -15863,6 +15915,7 @@ pub async fn build(
 mod tests {
     use super::{
         build, build_shared_credential_stack_for_config, desktop_fusion_runtime_config,
+        ephemeral_session_home,
         desktop_tool_registry, filter_fusion_catalog, fusion_route_flag, model_deprecation_warning,
         parse_worktree_slash_action, refresh_fusion_catalog_after_credential_delete,
         refresh_fusion_catalog_after_credential_write, register_fusion_catalog_refresher,
@@ -15875,6 +15928,55 @@ mod tests {
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// `--no-session-persistence` still needs a spend ledger: Fusion charges
+    /// several models per run, and one billing path is better than two. The
+    /// ledger goes somewhere disposable, owner-only, and is removed at
+    /// shutdown -- the flag promises no transcript, not unaccounted spend.
+    #[tokio::test]
+    async fn an_ephemeral_host_gets_a_private_working_ledger_root() {
+        let home = ephemeral_session_home().expect("ephemeral ledger root");
+        assert!(home.is_dir());
+        assert!(
+            home.starts_with(std::env::temp_dir()),
+            "the disposable ledger must not land in the user's home: {home:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "the ledger root is owner-only"
+            );
+        }
+
+        // A coordinator opened under it behaves like any other: this is the
+        // same ledger code, only rooted somewhere disposable.
+        let session_id = protocol::SessionId::new();
+        struct Lease(String);
+        impl platform_api::live_sessions::SessionWriterLease for Lease {
+            fn session_id(&self) -> &str {
+                &self.0
+            }
+        }
+        let coordinator = crate::session_state::SessionStateCoordinator::open(
+            &home,
+            session_id,
+            std::sync::Arc::new(Lease(session_id.to_string())),
+        )
+        .expect("ephemeral coordinator opens");
+        coordinator.start().await.unwrap();
+        assert_eq!(
+            coordinator.hydrate_blocking().unwrap().state.total_nano_usd,
+            0
+        );
+        coordinator.close_and_drain().await.unwrap();
+
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(!home.exists());
+    }
+
 
     #[cfg(target_os = "macos")]
     #[tokio::test]

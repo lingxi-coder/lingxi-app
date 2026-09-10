@@ -111,3 +111,161 @@ mod tests {
         assert!(snapshot(owner).is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stop-pending agent ids (claude-code `stopPendingAgentIds` on the same
+// `PDt` registry that owns the live-process map above).
+// ---------------------------------------------------------------------------
+
+fn stop_pending() -> &'static Mutex<HashMap<String, u32>> {
+    static STOP_PENDING: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    STOP_PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Marks an agent's stop as IN PROGRESS for as long as this value lives
+/// (claude-code `_Ve` / `oSe` around the `Cre` kill-escalation window).
+///
+/// A kill here is cooperative before it is forced: the drop of a spawn future
+/// sends `UserInterrupt` and then polls for up to `SPAWN_CANCEL_GRACE` before
+/// deallocating, and the persistent path sends `UserExit` and awaits MCP
+/// teardown before it does. The runner only *observes* those events where it
+/// races them — at the model round-trip — so a runner that is part-way through
+/// dispatching one assistant turn's `tool_use` blocks keeps dispatching the
+/// rest. Without this window a dying agent can still launch new agents, skills
+/// and workflows, which then outlive it.
+///
+/// Upstream additionally arms a 10s escalation and a 30s overdue timer, because
+/// nothing else forces its loop to settle. This port's grace-poll-then-
+/// `deallocate` already bounds the window, so the timers have no work to do
+/// here; the observable — a stopping agent launches nothing — is the same.
+#[derive(Debug)]
+pub struct StopPending {
+    agent_id: String,
+}
+
+impl Drop for StopPending {
+    fn drop(&mut self) {
+        let mut pending = stop_pending()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(depth) = pending.get_mut(&self.agent_id) {
+            // Guards are 1:1 with markings by construction, so this cannot
+            // underflow — but a panic unwinding out of a `Drop` aborts the
+            // process, which is never the right way to report a bookkeeping
+            // slip. Saturate and let the gate reopen instead.
+            *depth = depth.saturating_sub(1);
+            if *depth == 0 {
+                pending.remove(&self.agent_id);
+            }
+        }
+    }
+}
+
+/// Open the stop-pending window for `agent_id`. Hold the returned guard until
+/// the stop has settled; the window closes when the LAST guard drops.
+///
+/// Nesting is the normal case, not an edge case: killing a persistent agent
+/// runs the dropped-spawn cleanup AND `stop()`, so two windows overlap on one
+/// agent id and can settle in either order. A refcount is what keeps the gate
+/// shut until both are done — a single owner token would let whichever settled
+/// first reopen it under the other.
+#[must_use]
+pub fn mark_stop_pending(agent_id: &str) -> StopPending {
+    *stop_pending()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(agent_id.to_owned())
+        .or_insert(0) += 1;
+    StopPending {
+        agent_id: agent_id.to_owned(),
+    }
+}
+
+/// `a0(e)` — is this agent stopped with its stop still completing?
+#[must_use]
+pub fn is_stop_pending(agent_id: &str) -> bool {
+    stop_pending()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(agent_id)
+}
+
+/// The refusal a tool raises when its caller is stopping. Upstream spells the
+/// tail per tool; the sentence up to it is shared.
+#[must_use]
+pub fn stop_pending_refusal(tail: &str) -> String {
+    format!("This agent has been stopped and its stop is still completing; it cannot {tail}")
+}
+
+#[cfg(test)]
+mod stop_pending_tests {
+    use super::*;
+
+    /// Every test picks a fresh id: the registry is process-global and the test
+    /// binary runs these on parallel threads.
+    fn fresh_id(tag: &str) -> String {
+        static N: AtomicU64 = AtomicU64::new(0);
+        format!("agent-{tag}-{}", N.fetch_add(1, Ordering::Relaxed))
+    }
+
+    #[test]
+    fn the_window_opens_on_mark_and_closes_when_the_guard_drops() {
+        let id = fresh_id("basic");
+        assert!(!is_stop_pending(&id), "clean id starts open");
+        {
+            let _guard = mark_stop_pending(&id);
+            assert!(is_stop_pending(&id));
+        }
+        assert!(!is_stop_pending(&id), "settling reopens the agent");
+    }
+
+    /// Killing a persistent agent opens two windows on one id — the dropped
+    /// spawn's cleanup and `stop()` — and they can settle in either order. The
+    /// gate must stay shut until BOTH are done.
+    #[test]
+    fn overlapping_stops_keep_the_gate_shut_until_the_last_one_settles() {
+        for reversed in [false, true] {
+            let id = fresh_id("overlap");
+            let first = mark_stop_pending(&id);
+            let second = mark_stop_pending(&id);
+            assert!(is_stop_pending(&id));
+
+            if reversed {
+                drop(second);
+                assert!(is_stop_pending(&id), "the first stop is still settling");
+                drop(first);
+            } else {
+                drop(first);
+                assert!(is_stop_pending(&id), "the second stop is still settling");
+                drop(second);
+            }
+            assert!(!is_stop_pending(&id), "both settled ⇒ open again");
+        }
+    }
+
+    #[test]
+    fn a_stopping_agent_does_not_gate_its_siblings() {
+        let stopping = fresh_id("stopping");
+        let sibling = fresh_id("sibling");
+        let _guard = mark_stop_pending(&stopping);
+        assert!(is_stop_pending(&stopping));
+        assert!(!is_stop_pending(&sibling));
+    }
+
+    /// The refusal reads as one sentence: upstream spells only the tail per
+    /// tool, so a tail that forgets its period or repeats the subject shows up
+    /// here rather than in six separate call sites.
+    #[test]
+    fn the_refusal_matches_the_oracle_sentence() {
+        assert_eq!(
+            stop_pending_refusal("launch new agents."),
+            "This agent has been stopped and its stop is still completing; \
+             it cannot launch new agents."
+        );
+        assert_eq!(
+            stop_pending_refusal("launch workflows or act on existing runs."),
+            "This agent has been stopped and its stop is still completing; \
+             it cannot launch workflows or act on existing runs."
+        );
+    }
+}

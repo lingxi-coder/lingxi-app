@@ -936,6 +936,16 @@ impl Tool for SendMessageTool {
         let invocation_id = Self::fresh_invocation_id();
         let bus = self.ctx.bus.clone();
 
+        // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
+        // (see `agent_processes::mark_stop_pending`).
+        if let Some(agent_id) = ctx.agent_id {
+            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+                return Err(ToolError::InvalidInput(
+                    platform_api::agent_processes::stop_pending_refusal("send messages."),
+                ));
+            }
+        }
+
         let input = tool_api::send_message_contract::coerce(&input)
             .map_or(input.clone(), |coerced| coerced.input);
         if input.get("to").and_then(Value::as_str) == Some("*") {

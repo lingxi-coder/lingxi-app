@@ -856,6 +856,22 @@ present this turn, the skill is loaded — follow it directly rather than callin
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
+        // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
+        // (see `agent_processes::mark_stop_pending`).
+        if let Some(agent_id) = ctx.agent_id {
+            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+                emit_failed(
+                    &bus,
+                    "skill_fork_spawner_stop_pending",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(
+                    platform_api::agent_processes::stop_pending_refusal("launch skills."),
+                ));
+            }
+        }
+
         let skill = match input.get("skill").and_then(Value::as_str) {
             Some(s) => s.to_string(),
             None => {

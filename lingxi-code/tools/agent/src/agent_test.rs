@@ -374,6 +374,80 @@ mod tests {
     // Claude Code 2.1.217 concurrent + nested subagent caps.
     // =====================================================================
 
+    /// 2.1.266 `a0` (`src_163219561.js` @3592282): a kill is cooperative before
+    /// it is forced — `SpawnDeallocGuard`'s drop sends `UserInterrupt` and then
+    /// polls for up to `SPAWN_CANCEL_GRACE` (2s) before deallocating, and the
+    /// runner only races that at a model round-trip. A runner part-way through
+    /// one turn's `tool_use` blocks keeps dispatching them, so without this gate
+    /// a dying agent still spawns children that outlive it.
+    #[tokio::test]
+    async fn a_stopping_agent_cannot_launch_another_agent() {
+        let spawner = arc_mock_spawner();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let agent_id = protocol::AgentId::new();
+        ctx.agent_id = Some(agent_id);
+        let _stopping = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "work that would outlive me",
+                    "subagent_type": "general-purpose",
+                    "prompt": "hi"
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect_err("an agent whose stop is still completing must not spawn");
+        match err {
+            ToolError::InvalidInput(message) => assert_eq!(
+                message,
+                "This agent has been stopped and its stop is still completing; \
+                 it cannot launch new agents."
+            ),
+            other => panic!("expected InvalidInput, got {other}"),
+        }
+        assert!(
+            spawner.invocations().is_empty(),
+            "the refusal must happen BEFORE the spawner is reached"
+        );
+    }
+
+    /// The control. Without it the test above would still pass if the gate
+    /// refused every spawn, or if `call` were failing for an unrelated reason.
+    #[tokio::test]
+    async fn an_agent_that_is_not_stopping_still_launches() {
+        let spawner = arc_mock_spawner();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.agent_id = Some(protocol::AgentId::new());
+
+        tool.call(
+            serde_json::json!({
+                "description": "ordinary work",
+                "subagent_type": "general-purpose",
+                "prompt": "hi"
+            }),
+            ctx,
+            fresh_tx(),
+        )
+        .await
+        .expect("an agent with no stop pending spawns normally");
+        assert_eq!(spawner.invocations().len(), 1);
+    }
+
     #[tokio::test]
     async fn nested_spawn_rejects_at_configured_depth_with_exact_message() {
         use platform_api::task_registry::TaskRegistryHandle;

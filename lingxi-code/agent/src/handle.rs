@@ -2165,6 +2165,10 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
     }
 
     async fn stop(&self, agent_id: &AgentId) -> Result<(), SubagentSpawnError> {
+        // claude-code `Cre`, persistent twin: `UserExit` is cooperative and the
+        // MCP teardown below is awaited before `deallocate`, so the runner is
+        // still live across both. Close the spawn gate until this settles.
+        let _stop_pending = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
         // Cooperative exit first: a parked runner wakes on `UserExit` and emits
         // a clean `Killed` before the hard cancel. A send failure means the slot
         // is already gone (runner dropped its receiver) — non-fatal, proceed to
@@ -2513,6 +2517,15 @@ impl Drop for SpawnDeallocGuard {
             let mcp_cleanups = std::mem::take(&mut self.mcp_cleanups);
             let agent_type = std::mem::take(&mut self.agent_type);
             handle.spawn(async move {
+                // claude-code `Cre`: the agent is stopping but has NOT stopped.
+                // `UserInterrupt` is cooperative and the runner only races it at
+                // the model round-trip, so a runner part-way through one turn's
+                // `tool_use` blocks keeps dispatching them for up to
+                // `SPAWN_CANCEL_GRACE`. Close the spawn gate for that window so
+                // it cannot launch work that would outlive it. Held until after
+                // `deallocate` below, which is this port's settle point.
+                let _stop_pending =
+                    platform_api::agent_processes::mark_stop_pending(&id.to_string());
                 // Best-effort: a slot that is already gone (naturally
                 // completed, or raced by another deallocate) makes this a
                 // no-op — `send_event` and `deallocate` are both graceful on

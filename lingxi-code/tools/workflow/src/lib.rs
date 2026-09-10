@@ -1566,6 +1566,18 @@ impl Tool for WorkflowTool {
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
+        // (see `agent_processes::mark_stop_pending`).
+        if let Some(agent_id) = ctx.agent_id {
+            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+                return Err(ToolError::InvalidInput(
+                    platform_api::agent_processes::stop_pending_refusal(
+                        "launch workflows or act on existing runs.",
+                    ),
+                ));
+            }
+        }
+
         let launcher = self.launcher.as_ref().ok_or_else(|| {
             ToolError::Internal("Workflow launching is not available in this host".into())
         })?;

@@ -3440,6 +3440,26 @@ impl Tool for AgentTool {
             )));
         }
 
+        // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing.
+        // A kill is cooperative before it is forced — the runner keeps
+        // dispatching the rest of the current turn's `tool_use` blocks until it
+        // next races the stop at a model round-trip — so without this a dying
+        // agent can still launch a child that outlives it.
+        if let Some(agent_id) = ctx.agent_id {
+            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "subagent_spawner_stop_pending",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(
+                    platform_api::agent_processes::stop_pending_refusal("launch new agents."),
+                ));
+            }
+        }
+
         // 2.1.263: nesting denial precedes the explicit background denial and
         // both run before fork/type resolution. A named ordinary child has no
         // team_name, so it must not be mistaken for a teammate.

@@ -200,7 +200,7 @@ list is inert. Removing that arm left the entire 688-test `mcp` suite green —
 the gate would have read as implemented and done nothing. Any future block
 reason needs the same wiring test.
 
-## MCP-03 — `managedMcpServers` is not read — ⚠️ REAL, needs a scope decision
+## MCP-03 — `managedMcpServers` is not read — ✅ FIXED in `807dc6fb4` + `62fa5e3fb`
 
 2.1.267 accepts managed MCP servers under a `managedMcpServers` **settings key**,
 with its own shape validation:
@@ -210,12 +210,49 @@ with its own shape validation:
 > accepted here: use the server name as the key and "type" instead of
 > "transport"). No managed MCP servers are installed from it until it is fixed.`
 
-**Port:** `managedMcpServers` is 0 hits. The port reads managed MCP policy from a
-**separate file** instead (`enterprise_policy.rs:46` `managed_mcp_config_path()`,
-with `allowedMcpServers` / `allowManagedMcpServersOnly`). So this is not a
-missing validator — it is a different intake shape, and adopting the key means
-deciding whether the two coexist. Do not bolt the error string onto the existing
-reader; it validates a key this port does not consume.
+**It was not a different intake shape — upstream has BOTH channels**, and they
+carry different trust. Investigating before acting turned up the opposite of the
+worry: the port was *stricter* than upstream, not looser.
+
+### The trust rule — `807dc6fb4`
+
+`apply_enterprise_mcp_policy_with` filtered EVERY `managed-mcp.json` server
+through the allowlist, so an organization shipping both a file and an
+`allowedMcpServers` list had its own servers dropped unless it listed them.
+Upstream exempts them, conditionally (`F6`):
+
+```js
+if (Pme(e,n)) return !1;                                   // denylist wins
+if (n?.scope !== void 0 && XJ(n.scope) && !n.expandedFromEnv && !n.pluginSource) return !0;
+```
+
+with `XJ(e) = ["enterprise","managed"].includes(e)`. The `expandedFromEnv`
+conjunct is the whole point: managed settings forbid `${VAR}` outright — *"a
+managed settings document must not read the user's environment"* — so a document
+that cannot read the environment is fully determined by what the organization
+signed off on and is trusted, while one that CAN stays on the allowlist's hook.
+
+`expandedFromEnv` is computed from the RAW document before expansion (claude
+`Fxo`, testing exactly the fields that expand), because afterwards the reference
+is gone and the entry looks like any other literal. Ordering is pinned: the
+denylist runs BEFORE the exemption, so an organization cannot deliver its way
+past its own denylist.
+
+`!n.pluginSource` has no port analogue and is vacuous here — `mcp` carries no
+plugin-source provenance, and a plugin server is never loaded at
+Enterprise/Managed scope.
+
+### The settings key — `62fa5e3fb`
+
+Its contract is much tighter than the file channel's: **http/sse only** (an
+organization may push a URL to every user, not a program to run on their
+machine), **no `${VAR}`**, name-shape validated, `deniedMcpServers` still
+applies, no `allowedMcpServers` entry needed. Precedence follows
+`$Tn = [enterprise, managed, local, project, user]`, earlier wins a name.
+
+On `${VAR}` upstream has belt and braces — the schema refuses one AND the load
+runs with `expandVars: false`. This port implements the belt, rejecting such an
+entry before the parser, which is why it needs no no-expansion parse path.
 
 ## MCP-04 — three further new gates, all classified
 
@@ -248,5 +285,6 @@ managed-settings approval subsystem, not this crate).
 
 1. ~~MCP-02~~ — **done** (`7a710a252`).
 2. ~~MCP-01~~ — **done** (`ff8bda8b4` + `a1e070f4e`).
-3. **MCP-03** — needs a scope decision before any code. Still the only open item
-   here.
+3. ~~MCP-03~~ — **done** (`807dc6fb4` + `62fa5e3fb`).
+
+**No open items remain in this audit.**

@@ -1014,3 +1014,51 @@ mod tests {
         );
     }
 }
+
+/// claude-code `Qu`'s bypass gate (`src_173281385.js` @8342): may a
+/// `permissionMode: bypassPermissions` declared in a BOOT AGENT's frontmatter
+/// actually be adopted?
+///
+/// ```js
+/// let b = !O_() && (kM() || Boolean(ne().bypassPermissionsModeAccepted)),
+///     k = m === "bypassPermissions" && !b ? void 0 : m;
+/// ```
+///
+/// `O_()` is the `disableBypassPermissionsMode` killswitch and `kM()` is
+/// `skipDangerousModePermissionPrompt` in any tier. So the killswitch is only
+/// HALF the gate: bypass must also have been earned, either by the user
+/// accepting the disclaimer once (`bypassPermissionsModeAccepted`) or by a
+/// settings tier waiving the prompt. Without that second half, one frontmatter
+/// line in a discovered agent file grants full bypass at startup to a user who
+/// was never asked.
+///
+/// The same two flags already gate the background-session downgrade
+/// ([`CliModeSettings::bg_bypass_disclaimer_gate_trips`]); upstream applies them
+/// here regardless of session kind.
+#[must_use]
+pub fn boot_agent_may_adopt_bypass(
+    bypass_disabled: bool,
+    skip_dangerous_mode_permission_prompt: bool,
+    bypass_permissions_mode_accepted: bool,
+) -> bool {
+    !bypass_disabled && (skip_dangerous_mode_permission_prompt || bypass_permissions_mode_accepted)
+}
+
+#[cfg(test)]
+mod boot_agent_bypass_tests {
+    use super::boot_agent_may_adopt_bypass;
+
+    #[test]
+    fn the_killswitch_alone_is_not_the_whole_gate() {
+        // Not disabled, but never earned — upstream drops the mode.
+        assert!(!boot_agent_may_adopt_bypass(false, false, false));
+        // Earned either way.
+        assert!(boot_agent_may_adopt_bypass(false, true, false));
+        assert!(boot_agent_may_adopt_bypass(false, false, true));
+    }
+
+    #[test]
+    fn the_killswitch_overrides_having_earned_it() {
+        assert!(!boot_agent_may_adopt_bypass(true, true, true));
+    }
+}

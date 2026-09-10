@@ -11901,8 +11901,26 @@ pub async fn build(
             mode = cfg.permission_mode;
         } else if !env_scrub_active {
             if let Some(agent_mode) = selected_main_agent_permission_mode {
-                if !(agent_mode == permission::PermissionMode::BypassPermissions && bypass_disabled)
-                {
+                // claude-code `Qu`: the `disableBypassPermissionsMode` killswitch
+                // is only HALF the gate. Bypass must also have been EARNED —
+                // the disclaimer accepted once, or a tier waiving the prompt —
+                // or a single frontmatter line in a discovered agent file grants
+                // full bypass at startup to a user who was never asked.
+                let bypass_ok = permission::boot_agent_may_adopt_bypass(
+                    bypass_disabled,
+                    // `kM()` — truthy in ANY tier.
+                    raw_tier_refs.iter().copied().any(
+                        permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json,
+                    ),
+                    migrations::global_config::global_config_path()
+                        .and_then(|p| migrations::global_config::read_map(&p).ok())
+                        .and_then(|m| {
+                            m.get("bypassPermissionsModeAccepted")
+                                .and_then(serde_json::Value::as_bool)
+                        })
+                        .unwrap_or(false),
+                );
+                if !(agent_mode == permission::PermissionMode::BypassPermissions && !bypass_ok) {
                     mode = agent_mode;
                 }
             }

@@ -624,6 +624,44 @@ impl TaskRegistry {
                 cwd: None,
                 is_backgrounded: None,
             }),
+            // A `local_agent` row must carry the agent-shaped state, not the
+            // `_` fallback's `LocalBash`: `bind_agent_id` and every other
+            // agent-only registry operation match on the variant, so a row
+            // created through this path would otherwise report `local_agent`
+            // on the wire (`state_to_record` reads `base.task_type`) while
+            // refusing every agent operation with `Unsupported`.
+            TaskType::LocalAgent => {
+                let (agent_id, subagent_type, prompt, is_backgrounded) = match &input {
+                    TaskSpawnInput::LocalAgent {
+                        agent_id,
+                        subagent_type,
+                        prompt,
+                        is_backgrounded,
+                        ..
+                    } => (
+                        *agent_id,
+                        subagent_type.clone(),
+                        prompt.clone(),
+                        *is_backgrounded,
+                    ),
+                    _ => (protocol::AgentId::nil(), String::new(), String::new(), false),
+                };
+                TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+                    is_parked: false,
+                    is_observer: false,
+                    observed_agent_id: None,
+                    forked_skill_name: None,
+                    base,
+                    agent_id,
+                    subagent_type,
+                    prompt,
+                    error: None,
+                    messages: vec![],
+                    pending_messages: vec![],
+                    is_backgrounded,
+                    outcome: Default::default(),
+                })
+            }
             TaskType::AutoModeScan => {
                 TaskState::AutoModeScan(crate::state::AutoModeScanTaskState { base })
             }

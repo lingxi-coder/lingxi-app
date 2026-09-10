@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '13.0.0';
+export const CLIENT_PROTOCOL_VERSION = '13.1.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -279,6 +279,7 @@ export type ClientCommand =
   | { type: 'task_list'; status_filter?: TaskStatusDto }
   | { type: 'task_output'; task_id: string; offset: number }
   | { type: 'task_stop'; task_id: string }
+  | { type: 'task_message'; task_id: string; message: string }
   | { type: 'resume_workflow'; task_id: string }
   // ── Local apps ──────────────────────────────────────────────────────────────
   | { type: 'list_apps' }

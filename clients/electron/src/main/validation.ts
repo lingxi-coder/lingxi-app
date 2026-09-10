@@ -489,6 +489,9 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'task_stop':
       exactKeys(input, ['type', 'task_id']);
       return { type, task_id: string(input['task_id'], 'task id') };
+    case 'task_message':
+      exactKeys(input, ['type', 'task_id', 'message']);
+      return { type, task_id: string(input['task_id'], 'task id'), message: string(input['message'], 'task message', MAX_PROMPT_LENGTH) };
     case 'list_session_agents':
       exactKeys(input, ['type']);
       return { type };

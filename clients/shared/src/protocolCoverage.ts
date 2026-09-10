@@ -80,6 +80,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   task_list: true,
   task_output: true,
   task_stop: true,
+  task_message: true,
   resume_workflow: true,
   list_apps: true,
   get_app_details: true,

@@ -1359,9 +1359,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let submit_queue = prompt_queue.clone();
     let submit_turn_gate = teammate_turn_gate.clone();
     let submit_cancel_reason = queue_cancel_reason.clone();
+    let submit_orchestrator = orchestrator.clone();
     let on_submit =
         move |prompt: String, images: Vec<std::path::PathBuf>, cancel: CancellationToken| {
-            let orch = orchestrator.clone();
+            let orch = submit_orchestrator.clone();
             let tx = turn_tx.clone();
             let queue = submit_queue.clone();
             let pending_slashes = submit_pending_slashes.clone();

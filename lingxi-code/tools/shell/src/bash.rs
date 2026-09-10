@@ -2516,6 +2516,27 @@ impl Tool for BashTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
             .to_string();
+        // 2.1.266 `a0` (`src_163219561.js` @1939367): refuse to start a process
+        // while THIS agent's own stop is still completing, so a dying agent
+        // cannot leave one running behind it.
+        //
+        // Upstream returns `rSe()` here — the SAME value its abort path returns
+        // (`xDt`: `status:"killed"`, `interrupted:true`) — rather than an error
+        // carrying the sentence, and logs the sentence instead. This port keeps
+        // that invariant in its own vocabulary: `ToolError::Aborted` is what its
+        // cancel path returns, and `turn_loop` maps it to the `"interrupted"`
+        // `toolDenialKind`. Synthesizing upstream's `code:145` /
+        // "Command aborted before execution" body would mean inventing a result
+        // shape that exists nowhere else here, and would report a refusal as a
+        // command that ran and failed.
+        if let Some(agent_id) = ctx.agent_id {
+            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+                tracing::debug!(
+                    "Shell exec refused: agent {agent_id} has a kill pending loop settlement"
+                );
+                return Err(ToolError::Aborted);
+            }
+        }
         // claude-code `BashTool.tsx` sends the timeout as `timeout` (ms). Resolve
         // it with the faithful `VF` (numeric-string coercion) + `H5a` (use iff a
         // finite number > 0, else default) logic — no upper clamp/rejection (#4/#5).
@@ -4211,6 +4232,56 @@ mod tests {
             matches!(err, ToolError::Aborted),
             "expected ToolError::Aborted, got {err:?}"
         );
+    }
+
+    /// 2.1.266 `a0` (`src_163219561.js` @1939367): a stopping agent must not
+    /// start a process that would outlive it.
+    ///
+    /// Upstream returns `rSe()` — the very value its abort path returns — and
+    /// logs the sentence rather than surfacing it. The port's abort value is
+    /// `ToolError::Aborted`, which `turn_loop` maps to the `"interrupted"`
+    /// `toolDenialKind`; reporting this as a command that ran and failed would
+    /// be the wrong shape.
+    #[tokio::test]
+    async fn a_stopping_agent_cannot_start_a_shell_command() {
+        let out = ProcessOutput {
+            stdout: "should-not-be-seen\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let mut ctx = use_ctx();
+        let agent_id = protocol::AgentId::new();
+        ctx.agent_id = Some(agent_id);
+        let _stopping = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
+
+        let err = tool
+            .call(json!({"command": "echo hi"}), ctx, fresh_tx())
+            .await
+            .expect_err("an agent whose stop is still completing must not exec");
+        assert!(
+            matches!(err, ToolError::Aborted),
+            "the refusal reuses the abort shape, as `rSe()` does upstream; got {err:?}"
+        );
+    }
+
+    /// Control: the same call with no stop pending runs, so the test above is
+    /// pinning the gate rather than a broken fixture.
+    #[tokio::test]
+    async fn a_shell_command_runs_when_its_agent_is_not_stopping() {
+        let out = ProcessOutput {
+            stdout: "hi\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let mut ctx = use_ctx();
+        ctx.agent_id = Some(protocol::AgentId::new());
+        tool.call(json!({"command": "echo hi"}), ctx, fresh_tx())
+            .await
+            .expect("no stop pending ⇒ the command runs");
     }
 
     /// Control: with NO cancel token (`ctx.cancel == None`) the run is awaited

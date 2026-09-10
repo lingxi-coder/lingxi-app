@@ -426,7 +426,21 @@ apps/engine-desktop/src/lib.rs:4442  prompt_cache_write_ttl_1h_enabled()   env �
 并发子代理会互相踩。必须按请求传参 —— 干净的做法是把 `build_request` 的位置参数
 收进一个 options struct（顺带解决它已经 8 个参数的问题）。
 
-**结论**：范围是「一次 options-struct 重构 + 133 处机械修改 + 优先级/overage 语义」，
+**两条可选实现路径（先选一条再动手）：**
+
+- **A. options struct**：把 `build_request` 的 8 个位置参数收进一个结构体，
+  加 `agent_cache_ttl` 字段。干净、显式，但要动 **58** 个调用点。
+- **B. `tokio::task_local!`**：runner 在自己那一轮外面套一层 scope，
+  `should_1h_cache_ttl()` 在 env 没设时读它。调用点 **0** 处改动。
+  本仓库已有先例：`tasks/src/handlers/local_workflow.rs:2736` 就是这么用的。
+
+🚨 **选 B 之前必须先验一件事**：LLM 请求是不是**在 runner 自己那个 tokio task 里**发出的。
+如果请求是丢给另一个 task（channel / spawn）去发，task-local **传不过去**，
+结果是一个恒为 None 的读点 —— 测试照绿、线上无效，正是本审计要抓的
+「named, computed, never wired」换了个马甲。判据：在 `should_1h_cache_ttl()` 里
+读到的值必须能在一个**真的走完 runner→请求**的测试里断言到，而不是单测里手动 set 一遍。
+
+**结论**：范围是「选一条实现路径 + 75 处字段修改 + 优先级/overage 语义 + 端到端断言」，
 不是「加一个没人读的字段」。⛔ 别再引用「没有消费者」当理由——那个理由已经被推翻。
 
 **2026-09-10 复核**（因为这一整轮里「N 个调用点」这类估算我错过两次，所以实测）：

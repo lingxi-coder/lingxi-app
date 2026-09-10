@@ -77,6 +77,16 @@ the browser extension. Each needs adjudicating on its own substrate before
 anyone ports it. The ones with no obvious blocker and therefore worth triaging
 first are `update-config`, `keybindings-help`, `explain-usage` and `doctor`.
 
+⚠️ **A near miss worth recording.** `stuck` was reported out of this audit as a
+fourth portable name. It is not a bundled skill — it has ~50 occurrences in the
+2.1.267 binary and **no `uo({name:"stuck"` registration**; they are the English
+word. The list above never contained it, because it was built from
+registrations; the claim came from reading a substring count as if it were one.
+🚨 A bundled name is only a bundled name when a registration says so — literal
+`uo({name:"…"})` or a resolved variable. `skillify` and `lorem-ipsum` fail the
+same test from the other direction (present in the stale TS mirror, absent from
+the binary).
+
 **Now locked.** `the_bundled_skill_name_set_is_locked`
 (`commands/core/src/bundled/mod.rs`) pins the set in BOTH directions — it
 enumerates `list_all()` rather than filtering a hardcoded list, so an addition
@@ -133,6 +143,29 @@ copy: the exact "named, computed, never wired" shape this audit exists to find,
 doubled. **Build the consumer first, then the plumbing.** `effort` was the one
 member of this group with a live consumer, which is why it is in §4 and these
 are not.
+
+## 5b. The two portable bundled skills — sized
+
+`update-config` and `keybindings-help` are the two upstream-only names with no
+substrate blocker, and both are genuinely LIVE upstream:
+
+| | gate | user-invocable |
+|---|---|---|
+| `update-config` | none — always on | yes |
+| `keybindings-help` | `OF(){return H("tengu_keybinding_customization_release",!0)}` — default **true** | **no** (model-only) |
+
+⚠️ **Neither is a quick win, and an earlier note here implied otherwise.** Both
+carry a DYNAMIC prompt: `getPromptForCommand(e)` assembled from live host state,
+not a static body. `update-config` additionally branches on a `[hooks-only]`
+prefix; `keybindings-help` composes roughly nine sections plus the session's
+actual keybindings. The port has the substrate for this (`dynamic_body` /
+`BundledPromptFn` on `SkillDescriptor`), so it is a port rather than an
+invention — but it is a feature each, not an afternoon.
+
+They also both name Claude Code and `~/.claude/` paths in copy the model reads,
+so porting them lands on the established branding divergence and needs the
+LingXi rebrand rather than a byte-exact copy. That is a decision to take
+deliberately, not incidentally.
 
 ## 6. Gates
 

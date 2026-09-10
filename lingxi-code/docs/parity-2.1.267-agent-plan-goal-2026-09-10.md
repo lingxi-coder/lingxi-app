@@ -78,6 +78,55 @@ subagent that ends without calling it), a safety review of the report, and a
 
 ---
 
+## `tengu_goal_evaluated` — spec complete, one blocker
+
+Not emitted here (`git grep tengu_goal_evaluated` → docs only). The spec is now
+fully resolved, so whoever picks it up does not have to re-derive it.
+`src_163219561.js` @4343091, in the evaluator's `finally`:
+
+```js
+if (Fe) {                                             // an active goal existed
+  let Qe = p.abortController.signal.aborted,
+      Je = We === "met" || We === "not_met" || We === "impossible";
+  i("tengu_goal_evaluated", {
+    outcome: u(We ?? (_e ? "error" : Qe ? "cancelled" : "absent")),
+    durationMs: Date.now() - D,                       // D = evaluation START
+    iterations: Fe.iterations + (Je ? 1 : 0),
+    parentAborted: Qe,
+    origin: we(Fe.origin),
+    ...Xe })
+}
+```
+
+Three details that are easy to get wrong, all settled:
+
+* **`iterations` is `+1` only for a real verdict.** met / not_met / impossible
+  increment; error, cancelled, absent and deferred do not. This port's
+  `record_goal_evaluation` increments the STORED count on every path, so the
+  telemetry value must be computed from the count read BEFORE the evaluation,
+  not from the mutated one.
+* **`...Xe` is not general.** It is set in exactly one branch — the deferred one
+  — as `{activeAgents, activeShells}`. Everywhere else it contributes nothing.
+  The port already computes that split for `fire_goal_checkin_injected` from
+  `DeferringTask::label`, so it is a reuse, not new plumbing.
+* **The seventh outcome is `deferred`**, and this port already has that branch
+  (`goal_deferred`, `hooks.rs:465`).
+
+**⛔ The blocker is `parentAborted`.** It reads
+`p.abortController.signal.aborted`, and no equivalent is reachable from
+`goal_stop_hook_disposition`: the `CancellationToken` lives in
+`run_turn_with_cancel` (`conversation.rs`), nothing stores it on the
+orchestrator or the session, and threading it means changing `fire_stop_hooks`
+and both of its `pub(super)` callers — which reaches **both turn loops**, the
+hazard this repo has been bitten by before. Emitting the event without the field
+was rejected: a metric that is silently missing a dimension is worse than one
+that is absent, because it looks present.
+
+**Everything else is ready.** The five disposition arms in
+`goal_stop_hook_disposition` map to met / not_met / impossible / error, the
+deferred branch is upstream of them, and a single emission point at the end
+mirrors the `finally`.
+
 ## Where the 2.1.267 sweep now stands
 
 | subsystem | verdict |

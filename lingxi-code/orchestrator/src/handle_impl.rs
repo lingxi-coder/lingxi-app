@@ -369,11 +369,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Seed the parent-uuid chain so any future append chains off the
         // resumed tail (matching the M5-07 writer's chain semantics).
         *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+        // The latch resets with the session, and so does the cascade's
+        // tried-models list (see `clear_session`).
         self.model_runtime
-            .refusal_fallback_latched
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        // …and so does the cascade's tried-models list (see `clear_session`).
-        self.model_runtime.refusal_tried_models.lock().await.clear();
+            .refusal_cascade
+            .lock()
+            .await
+            .reset_routing();
         self.hooks.clear_session_hooks(old_session_id).await;
         let (to_model, to_profile) = {
             let session = self.session.lock().await;

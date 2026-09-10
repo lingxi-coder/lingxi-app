@@ -309,7 +309,7 @@ pub struct OrchestratorConfig {
     /// `bin/claude.exe` offset ~205871579). When `Some(id)` and a turn's response
     /// arrives with `stop_reason == "refusal"`, BOTH drivers swap the session
     /// model to `id` (ONCE per session — the `refusalFallbackModelLatch` analog,
-    /// tracked by [`crate::ConversationOrchestrator::refusal_fallback_latched`]),
+    /// tracked by the session's `refusal_cascade` latch),
     /// warn the user, and retry the turn against the fallback model. This is the
     /// `s.refusalFallbackModel` half of the binary's
     /// `rc = s.refusalFallbackModel ?? (s.serverRefusalFallback?.model)` —

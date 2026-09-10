@@ -837,20 +837,8 @@ pub(crate) struct ModelRuntime {
     /// keeps today's terminal behavior (no re-swap), so the fallback fires at
     /// most ONCE per session — matching the binary, where the latch makes the
     /// `mainLoopModel` override sticky.
-    pub(crate) refusal_fallback_latched: std::sync::atomic::AtomicBool,
-    /// Models already routed to this session's refusal cascade. Consumed by
-    /// the stage resolver so a chain never loops back onto a model that has
-    /// already refused — the bound that lets a multi-hop chain terminate
-    /// without relying on the once-per-session latch.
-    pub(crate) refusal_tried_models: Mutex<Vec<String>>,
-    /// The refusal episode's accumulating notice: hops fold into one notice
-    /// describing where the session ended up, rather than each hop announcing a
-    /// model the cascade may already have left.
-    pub(crate) refusal_episode: Mutex<crate::refusal_notice::RefusalEpisode>,
-    /// The collapse queue in front of the notice stream. Holds a provisional
-    /// notice and drops it when a later one supersedes it, counting the
-    /// collapse for `tengu_refusal_fallback_notice_collapsed`.
-    pub(crate) refusal_notice_queue: Mutex<crate::refusal_notice::NoticeQueue>,
+    pub(crate) refusal_cascade: Mutex<platform_api::refusal_driver::RefusalCascadeState>,
+
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
     /// zero-shaped stub. The CLI binary (M6-06 init.rs) always populates
@@ -926,10 +914,9 @@ impl ModelRuntime {
             current_effort: std::sync::RwLock::new(current_effort),
             current_reasoning_selection: std::sync::RwLock::new(current_reasoning_selection),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
-            refusal_fallback_latched: std::sync::atomic::AtomicBool::new(false),
-            refusal_tried_models: Mutex::new(Vec::new()),
-            refusal_episode: Mutex::new(crate::refusal_notice::RefusalEpisode::default()),
-            refusal_notice_queue: Mutex::new(crate::refusal_notice::NoticeQueue::new()),
+            refusal_cascade: Mutex::new(
+                platform_api::refusal_driver::RefusalCascadeState::default(),
+            ),
             cost_tracker: None,
             analytics_bus: None,
             session_started_at: std::sync::Mutex::new(std::time::Instant::now()),
@@ -973,11 +960,9 @@ impl ModelRuntime {
 
     /// Reset refusal routing after compaction token accounting is cleared.
     pub(crate) fn reset_refusal_fallback(&self) {
-        self.refusal_fallback_latched
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.refusal_tried_models
+        self.refusal_cascade
             .try_lock()
-            .map(|mut v| v.clear())
+            .map(|mut c| c.reset_routing())
             .ok();
     }
 }

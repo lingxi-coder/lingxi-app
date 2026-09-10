@@ -265,3 +265,16 @@ pub mod shell_supervisor;
 pub mod shell_watchdog;
 
 pub mod human_task_message;
+
+/// The refusal-fallback CHAIN walk (which model to try next).
+///
+/// Lives here rather than in `orchestrator` because both turn loops need it:
+/// the main thread's, and the subagent runner's in the `agent` crate, which
+/// cannot depend on `orchestrator`.
+pub mod refusal_cascade;
+
+/// The refusal-notice episode accumulator and collapse queue.
+pub mod refusal_notice;
+
+/// One refusal hop, decided identically for both turn loops.
+pub mod refusal_driver;

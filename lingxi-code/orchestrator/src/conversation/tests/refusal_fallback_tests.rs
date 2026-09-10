@@ -129,9 +129,7 @@ async fn a_single_hop_chain_still_latches_once_per_session() {
     let (orch, _out) = orch_with_refusal_chain(&["only"]);
     assert!(orch.maybe_swap_to_refusal_fallback().await);
     assert!(
-        orch.model_runtime
-            .refusal_fallback_latched
-            .load(std::sync::atomic::Ordering::SeqCst),
+        orch.model_runtime.refusal_cascade.lock().await.is_latched(),
         "a single-hop chain still sets the latch"
     );
     assert!(
@@ -158,10 +156,11 @@ async fn clearing_the_session_lets_the_cascade_start_over() {
     assert!(orch.maybe_swap_to_refusal_fallback().await);
     assert!(!orch.maybe_swap_to_refusal_fallback().await);
 
-    orch.model_runtime.refusal_tried_models.lock().await.clear();
     orch.model_runtime
-        .refusal_fallback_latched
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+        .refusal_cascade
+        .lock()
+        .await
+        .reset_routing();
     assert!(
         orch.maybe_swap_to_refusal_fallback().await,
         "a reset session walks the chain again"
@@ -184,10 +183,7 @@ async fn no_fallback_configured_is_a_strict_noop() {
     );
     assert!(out.text_events().await.is_empty(), "no warning emitted");
     assert!(
-        !orch
-            .model_runtime
-            .refusal_fallback_latched
-            .load(std::sync::atomic::Ordering::SeqCst),
+        !orch.model_runtime.refusal_cascade.lock().await.is_latched(),
         "latch must stay unset when nothing was configured"
     );
 }
@@ -251,10 +247,7 @@ async fn clear_session_resets_refusal_fallback_latch() {
         .expect("clear_session succeeds");
 
     assert!(
-        !orch
-            .model_runtime
-            .refusal_fallback_latched
-            .load(std::sync::atomic::Ordering::SeqCst),
+        !orch.model_runtime.refusal_cascade.lock().await.is_latched(),
         "clear_session must reset the per-session refusal fallback latch"
     );
     assert!(
@@ -283,10 +276,7 @@ async fn resume_session_resets_refusal_fallback_latch() {
     .expect("resume_session succeeds");
 
     assert!(
-        !orch
-            .model_runtime
-            .refusal_fallback_latched
-            .load(std::sync::atomic::Ordering::SeqCst),
+        !orch.model_runtime.refusal_cascade.lock().await.is_latched(),
         "resume_session must reset the per-session refusal fallback latch"
     );
     assert!(

@@ -1288,63 +1288,29 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         } else {
             self.config.refusal_fallback_chain.clone()
         };
-        if chain.is_empty() {
-            return false;
-        }
-        // Models already tried THIS EPISODE, so a cascade cannot loop back onto
-        // one that has already refused.
-        let tried = self.model_runtime.refusal_tried_models.lock().await.clone();
-        let route = crate::refusal_cascade::route_refusal(
-            &crate::refusal_cascade::RouteInputs {
-                chain: Some(&chain),
-                armed_fallback_model: None,
-                armed_target_is_refusing_model: false,
-                catch_all_enabled: false,
-            },
-            |stage| {
-                // A stage is reachable when it has not already been routed to
-                // this episode. Claude's exclusion is exactly `triedModels`,
-                // which resets with the session — deliberately NOT "differs
-                // from the current model": after a hop the current model IS the
-                // previous fallback, and excluding it would make a cleared
-                // session unable to route to that model again.
-                (!tried.iter().any(|m| m == stage)).then(|| stage.to_string())
-            },
-        );
+        let current_model = { self.session.lock().await.model.clone() };
+        let notice_uuid = uuid::Uuid::new_v4().to_string();
+        // Routing, the once-per-session latch, the tried set and the notice
+        // accumulate/collapse pair all live in `platform_api::refusal_driver`,
+        // because the subagent runner needs to behave identically and cannot
+        // depend on this crate.
+        let hop = {
+            let mut cascade = self.model_runtime.refusal_cascade.lock().await;
+            cascade.next_hop(&chain, &current_model, notice_uuid.clone())
+        };
         // Report every stage the walk passed over. A chain that silently
         // degraded to its last entry is otherwise indistinguishable from one
         // that worked first try.
-        for report in crate::refusal_cascade::decline_reports(&route) {
+        for report in hop.as_ref().map_or(&[][..], |h| &h.declines) {
             tracing::info!(
                 event = "tengu_refusal_fallback_route_declined",
                 reason = report.as_str(),
             );
         }
-        let crate::refusal_cascade::RefusalRoute::Category { stage, .. } = route else {
+        let Some(hop) = hop else {
             return false;
         };
-        // What the cascade still has left. A hop with stages remaining may be
-        // superseded, so its notice is provisional.
-        let stage_remaining = stage.remaining_chain;
-        let fallback = stage.model;
-        // Once-per-session latch (refusalFallbackModelLatch analog) — applies
-        // only to a SINGLE-hop chain, which is the historical shape. A real
-        // cascade is bounded by the chain instead: each hop is consumed by
-        // `tried`, so the walk terminates on its own without needing the latch
-        // to cap it.
-        if chain.len() <= 1
-            && self
-                .model_runtime
-                .refusal_fallback_latched
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            return false;
-        }
-        self.model_runtime
-            .refusal_tried_models
-            .lock()
-            .await
-            .push(fallback.clone());
+        let fallback = hop.fallback_model;
         // Persistently swap the session model to the fallback.
         let (original_model, original_profile) = {
             let mut s = self.session.lock().await;
@@ -1360,47 +1326,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
         // User-visible warning. 2.1.206 `VPn(e,t,r)` =
         //   `${f_t(r) ? mmi(e) : hmi(e,r)} Switched to ${Mf(t)}. ${bxr(e)}`
-        // for the common `category == "other"` path: `f_t("other")` is false, so
-        // `hmi(e,"other")` fires with the generic `$7m` prefix ("This model's
-        // safeguards flagged this message. This sometimes happens with safe,
-        // normal conversations."); `bxr(e)` is the feedback line. `Mf(t)` = the
-        // fallback's MARKETING NAME (byte-verified: 206 uses the friendly name,
-        // not the raw id) — resolve it, falling back to the id for an unknown
-        // model. (The cyber/bio `mmi(e)` "intentionally broad" variant needs the
-        // refusal category routed through here — deferred with the typed
-        // model_refusal_fallback system frame.)
-        // Route the notice through the episode accumulator and the collapse
-        // queue rather than emitting it directly. A hop that a LATER hop
-        // supersedes must not reach the user: "switched to X" stops being true
-        // the moment the cascade moves on from X. So an intermediate hop is
-        // held PROVISIONALLY and folded into the notice that finally settles,
-        // which reports how many hops it collapsed.
-        let more_hops_possible = !stage_remaining.is_empty();
-        let notice_uuid = uuid::Uuid::new_v4().to_string();
-        let emitted = {
-            let mut episode = self.model_runtime.refusal_episode.lock().await;
-            episode.merge(crate::refusal_notice::RefusalNotice {
-                uuid: notice_uuid.clone(),
-                origin_model: original_model.clone(),
-                serving_model: fallback.clone(),
-                ..crate::refusal_notice::RefusalNotice::default()
-            });
-            let taken = if more_hops_possible {
-                episode.take_provisional(&notice_uuid)
-            } else {
-                episode.settle()
-            };
-            drop(episode);
-            match taken {
-                Some(notice) => self
-                    .model_runtime
-                    .refusal_notice_queue
-                    .lock()
-                    .await
-                    .accept(notice, more_hops_possible),
-                None => Vec::new(),
-            }
-        };
+        // for the common `category == "other"` path.
+        let emitted = hop.notices;
         for e in emitted {
             if e.suppressed_count > 0 {
                 tracing::info!(

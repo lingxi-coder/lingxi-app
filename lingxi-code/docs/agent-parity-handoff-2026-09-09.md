@@ -120,29 +120,63 @@ agent 表面集中在两个 chunk：
 
 4 条未做。每条都附了**确切阻塞**和**下一步**。
 
-### 3.1 AG-13 — 2.1.266 新增的 stop-pending 生成门（P2）
+### 3.1 AG-13 — stop-pending 生成门（**2026-09-10 已落地 `aa49fb523`**）
 
-oracle（`src_162329786.js` @3578059）：
+oracle 2.1.267 的谓词是 `a0`（`src_163219561.js` @699180，.266 里叫 `jH`）：
+`function a0(e){return ek().stopPendingAgentIds.has(e)}`。
 
-```js
-if(n.agentId!==void 0&&jH(n.agentId))
-  throw new pE("This agent has been stopped and its stop is still completing; it cannot launch new agents.")
-```
+**读取点是 7 个不是 3 个**（原条目按 .266 记的）：
 
-三个读取点：`Agent` 工具、`Skill` 工具（@3643268，文案改成 "…cannot launch skills."）、
-shell exec（@1927426，`Shell exec refused: agent ${id} has a kill pending loop settlement`）。
+| 文案尾巴 | 端口位置 |
+|---|---|
+| `launch new agents.` | ✅ `tools/agent/src/agent.rs`（紧跟 depth cap，与上游同序） |
+| `launch skills.` | ✅ `tools/skill/src/skill.rs` |
+| `launch workflows or act on existing runs.` | ✅ `tools/workflow/src/lib.rs` |
+| `send messages.` | ✅ `tools/ui/src/send_message.rs` |
+| `start monitors.` | ✅ `tools/task/src/monitor.rs` |
+| `resume other agents.` | ⬜ 未接 |
+| `Shell exec refused: agent ${id} has a kill pending loop settlement` | ⬜ 见下 |
 
-集合由**杀进程升级路径** `Xne`（@700514）填充：一次 kill 把该任务所有 agent id 标为
-stop-pending，装 10s 升级定时器和 30s 逾期定时器，settle 回调清空；`N3` 在新 run 开始时
-再清一次。
+#### 🚨 原来的阻塞判断是错的，我中途的替代判断也是错的
 
-**⛔ 阻塞（这条经受住了复核）**：端口没有这个窗口。`tasks/src/registry.rs`
-`kill_backing_task` 自己的注释写着「a handler's status sink flips the row to `Killed`
-INSIDE `handler.kill(..)`」—— `kill()` 返回时任务已终态，那个集合会在同一次调用里
-**填了又清**。只加读取点等于加一个**永远不会触发的门**，比不加更糟。
+原条目：`kill()` 里 status sink 同步把行翻成 `Killed` ⇒ 集合会「填了又清」。
+**这条把「任务行终态」当成了「loop 已 settle」**。上游清空走的是
+`E8e(taskId, cb)` —— **loop 的 settle 回调**（`AWt` 返回的那个函数），跟行状态无关。
 
-**下一步**：先搬 `Xne` 的升级机制（per-agent-id 跟踪 + 两个定时器 + settle 回调），
-再接三个读取点。它在 `tasks/`，动手前先确认没有并发会话正在改那些文件。
+我随后以为 `runtime.cancel` 是 tokio `abort()` 硬杀 ⇒ 门永不触发。**也错**：
+`abort()` 杀掉的只是 `local_agent.rs` 里那个 **drainer future**；真正的 runner 由
+`pool.allocate_with_startup` 起在自己的 task 里。drainer 被 drop ⇒
+`SpawnDeallocGuard::drop` 起一个清理 task，先发**协作式** `UserInterrupt`，
+再以 50ms 轮询等最多 `SPAWN_CANCEL_GRACE = 2s`，然后才 `deallocate`。
+
+而 runner 只在**模型往返**处 `select!` 上观察 UserExit/UserInterrupt；
+工具分发循环里 `event_rx` / `UserExit` / `select!` **零出现**（实测计数）。
+⇒ kill 落在一次 assistant turn 的多个 `tool_use` 块中间时，剩下的块照常执行，
+其中的 Agent / Skill / Workflow / SendMessage / Monitor 调用会起出**比它活得久**的活儿。
+**门是可达的。**
+
+#### 端口的填 / 清点（不搬定时器）
+
+`platform_api::agent_processes`（就是上游 `PDt` 里放 `liveProcessesByAgentId` 的那个
+registry）新增 refcount 的 stop-pending 集合，RAII guard：
+
+* 填：`SpawnDeallocGuard::drop` 的清理 task（发 `UserInterrupt` 之前）、
+  `PoolSubagentSpawner::stop`（发 `UserExit` 之前）。
+* 清：guard 落地即 `deallocate` 之后 —— 端口的 settle 点。
+
+⚠️ **必须 refcount**：杀一个 persistent agent 会**同时**开两个窗口（drainer drop 一个、
+`stop()` 一个），且 settle 顺序不定。单 owner token 会让先结束的那个把门给另一个提前打开。
+
+上游那对 10s 升级 / 30s 逾期定时器**故意没搬**：它们存在是因为上游没有别的东西强制 loop
+settle；端口的「轮询 + `deallocate`」本身就给窗口封了顶，定时器在这儿无事可做，
+可观测行为一致。
+
+#### ⬜ 剩下的一个：shell exec
+
+上游 `if(Fe!==void 0&&a0(Fe)) return t('Shell exec refused: …'), rSe();` —— 记日志后
+返回它那个 canned 的 aborted **结果**；端口的 cancel 路径返回的是 **Err**
+（`foreground_returns_aborted_when_cancel_token_fired`）。两种形状要先定一个，
+不是照抄那三行就行，所以单独留着。
 
 ### 3.2 AG-14 — harness-note 分层（**2026-09-10 复查：不是一个整层的移植任务**）
 

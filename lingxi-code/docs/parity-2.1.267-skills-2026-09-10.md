@@ -154,12 +154,13 @@ Upstream 2.1.267 registers **21** (`uo({name:…})`, variable names resolved):
 `run-skill-generator`, `setup-claude`, `update-config`, `whiteboard`,
 `workflow-authoring`, `workshop`.
 
-The port registers 11 through `register_bundled_skills`, plus `claude-api` as
-the `skill-api` compiled-in builtin.
+The port registers **13** through `register_bundled_skills` (11 + `update-config`
+and `keybindings-help`, added 2026-09-10), plus `claude-api` as the `skill-api`
+compiled-in builtin.
 
 | in both (8) | LingXi-only (4) | upstream-only (13) |
 |---|---|---|
-| batch, claude-api, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, doctor, explain-usage, keybindings-help, memory-types, setup-claude, update-config, whiteboard, workflow-authoring, workshop |
+| batch, claude-api, code-review, dataviz, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, doctor, explain-usage, memory-types, setup-claude, whiteboard, workflow-authoring, workshop |
 
 ⚠️ **The 13 are not a backlog.** Most ride surfaces this port does not have:
 `artifact-components` / `whiteboard` / `workshop` / `design-sync` need the
@@ -168,6 +169,35 @@ register-but-disabled skeleton pinned at 2.1.207), and `claude-in-chrome` needs
 the browser extension. Each needs adjudicating on its own substrate before
 anyone ports it. The ones with no obvious blocker and therefore worth triaging
 first are `update-config`, `keybindings-help`, `explain-usage` and `doctor`.
+
+### ✅ `update-config` (`29a8e64a4`) and `keybindings-help` (`f7fb8840a`) — ported
+
+Both were recorded as needing "dynamic-prompt plumbing plus a branding decision".
+**Neither blocker was real.** `SlashCommandKind::Bundled` already carries a
+`prompt_fn`, and the `branding` crate already fixes the product name, config dir
+and env prefix — there was nothing left to decide.
+
+What makes both worth having is the same property: their prompts carry LIVE data
+rather than prose.
+
+* `update-config` injects the settings schema generated from the very
+  `SettingsJson` the loader parses (`schemars::schema_for!`), so it cannot
+  describe a key the loader would reject. Both prompt shapes are ported,
+  including the `[hooks-only]` one that swaps the entire prompt and carries no
+  schema.
+* `keybindings-help` builds its contexts / actions / reserved tables from
+  `command_core::keybindings` — the same tables the validator uses. The action
+  column INVERTS the default-binding table, so a moved default shows its new key
+  with no prose to update. `userInvocable:!1` is kept verbatim: model-invocable
+  only, the user route stays `/keybindings`.
+
+⚠️ Both bodies are the binary's, rebranded (`Claude Code`→`LingXi`,
+`.claude/`→`.lingxi/`, `claude --debug`→`lingxi-cli --debug`), with a test per
+skill asserting none of those strings survive.
+
+🚨 The name-set lock caught BOTH additions, and caught `keybindings-help` going
+in out of alphabetical order (the list is compared sorted). Update it
+deliberately; do not re-bless it.
 
 ⚠️ **A near miss worth recording.** `stuck` was reported out of this audit as a
 fourth portable name. It is not a bundled skill — it has ~50 occurrences in the

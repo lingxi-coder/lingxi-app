@@ -817,7 +817,9 @@ fn register_explain_usage_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "explain-usage".into(),
         description: explain_usage_skill::EXPLAIN_USAGE_DESCRIPTION.into(),
-        menu_description: Some("See where this session\u{2019}s tokens went, in plain words".into()),
+        menu_description: Some(
+            "See where this session\u{2019}s tokens went, in plain words".into(),
+        ),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),

@@ -154,13 +154,13 @@ Upstream 2.1.267 registers **21** (`uo({name:…})`, variable names resolved):
 `run-skill-generator`, `setup-claude`, `update-config`, `whiteboard`,
 `workflow-authoring`, `workshop`.
 
-The port registers **13** through `register_bundled_skills` (11 + `update-config`
-and `keybindings-help`, added 2026-09-10), plus `claude-api` as the `skill-api`
+The port registers **14** through `register_bundled_skills` (11 + `update-config`,
+`keybindings-help` and `explain-usage`, added 2026-09-10), plus `claude-api` as the `skill-api`
 compiled-in builtin.
 
 | in both (8) | LingXi-only (4) | upstream-only (13) |
 |---|---|---|
-| batch, claude-api, code-review, dataviz, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, doctor, explain-usage, memory-types, setup-claude, whiteboard, workflow-authoring, workshop |
+| batch, claude-api, code-review, dataviz, explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, memory-types, setup-claude, whiteboard, workflow-authoring, workshop |
 
 ⚠️ **The 13 are not a backlog.** Most ride surfaces this port does not have:
 `artifact-components` / `whiteboard` / `workshop` / `design-sync` need the
@@ -198,6 +198,36 @@ skill asserting none of those strings survive.
 🚨 The name-set lock caught BOTH additions, and caught `keybindings-help` going
 in out of alphabetical order (the list is compared sorted). Update it
 deliberately; do not re-bless it.
+
+### ✅ `explain-usage` (`724b9e52b`) — ported
+
+A single-prompt skill, so the only judgement in it is what NOT to rebrand:
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}` becomes the LingXi pair, but
+`mcp__claude-in-chrome__` stays **verbatim** — that is an MCP server id on the
+wire, not a product reference, and rewriting it would point the skill at a
+server that does not exist. A test pins each direction.
+
+Also pinned: the line telling the model to treat transcript contents as data
+rather than instructions. It is the skill's only defence against a transcript
+that contains instruction-shaped text.
+
+### ⛔ `doctor` — NOT a port; this surface already exists by another mechanism
+
+Upstream's `doctor` is a bundled SKILL (`uo({name:"doctor",aliases:["checkup"],
+survivesBundledKillSwitch:!0,requires:{workspace:!0},terminalOriented:!0,…})`) —
+an LLM-driven health check that reads local data and proposes fixes.
+
+**This port already ships `/doctor`**, but as a deterministic builtin command
+handler (`commands/core/src/doctor.rs`) rendering a LOCKED report, plus the
+`lingxi-cli doctor` subcommand. Registering a bundled skill under the same name
+would collide with that builtin registration.
+
+So this is an adjudication, not a backlog item: the user-facing capability is
+present, delivered differently. ⛔ Do not "port" it by registering a second
+`doctor` — decide first whether this port wants the deterministic report, the
+model-driven one, or both under distinct names. Same shape as the
+`commands/`-as-skills row above: a feature judged absent because one mechanism
+was missing, when another already covers it.
 
 ⚠️ **A near miss worth recording.** `stuck` was reported out of this audit as a
 fourth portable name. It is not a bundled skill — it has ~50 occurrences in the

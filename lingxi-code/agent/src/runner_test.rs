@@ -5506,12 +5506,22 @@ async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {
     run_subagent(ctx, event_rx, out_tx).await;
 
     let events = drain(out_rx).await;
+    let text = events
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => {
+                Some(result["text"].as_str().unwrap_or_default().to_string())
+            }
+            _ => None,
+        })
+        .expect("the run completed");
     assert!(
-        events.iter().any(
-            |e| matches!(e, SubagentEvent::Completed { result, .. } if result["text"] == "done")
-        ),
-        "the retry's answer is the run's result: {events:?}"
+        text.contains("done"),
+        "the retry's answer is the run's result: {text:?}"
     );
+    // The answer also carries the `ICe` note naming the model that produced it
+    // — see `a_hopped_subagents_answer_carries_the_refusal_note`.
+    assert!(text.contains('\u{26A0}'), "…prefixed by the note: {text:?}");
     assert_eq!(
         api.call_count(),
         2,
@@ -5609,4 +5619,130 @@ fn a_subagent_refusal_frame_is_scoped_local() {
         }
         other => panic!("expected a typed system frame, got {other:?}"),
     }
+}
+
+// ── `ICe` / `PZo`: the harness note and the retraction filter ───────────────
+
+/// `iht`'s `⚠ ${notice.content}` note. The parent asked a subagent a question
+/// and got an answer from a DIFFERENT model than it dispatched; upstream says
+/// so in the result. Without the note the swap is invisible to the caller.
+#[tokio::test]
+async fn a_hopped_subagents_answer_carries_the_refusal_note() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("the answer", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.refusal_fallback_chain = vec!["fallback-model".to_string()];
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    let events = drain(out_rx).await;
+    let result = events
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("the run completed");
+    let text = result["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains('\u{26A0}') && text.contains("fallback-model"),
+        "the answer must name the model that actually produced it: {text:?}"
+    );
+    assert!(
+        text.contains("the answer"),
+        "and it must still carry the report: {text:?}"
+    );
+    let first = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        first.starts_with('\u{26A0}'),
+        "the note is a leading block, ahead of the report: {first:?}"
+    );
+}
+
+/// The control: a run that never hopped has no note. Without it the test above
+/// would pass just as well if the note were unconditional.
+#[tokio::test]
+async fn a_subagent_that_never_refused_carries_no_note() {
+    let api = StreamingMockApiClient::new(vec![streamed_text_turn("the answer", "end_turn")]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.refusal_fallback_chain = vec!["fallback-model".to_string()];
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    let events = drain(out_rx).await;
+    let result = events
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("the run completed");
+    assert_eq!(result["text"].as_str(), Some("the answer"));
+}
+
+/// `PZo` — a notice that supersedes an earlier hop names the messages that hop
+/// produced, and those must not survive into the answer. System messages always
+/// do: the notices are how the retraction is expressed at all.
+#[test]
+fn retracted_messages_are_dropped_but_notices_survive() {
+    let assistant = |text: &str| ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![protocol::ContentBlock::Text {
+            text: text.to_string(),
+        }],
+        stop_reason: None,
+    };
+    let doomed = assistant("superseded output");
+    let doomed_uuid = doomed.id().as_uuid().to_string();
+    let kept = assistant("live output");
+    let notice = super::refusal_fallback_frame(
+        MessageId::new(),
+        &platform_api::refusal_notice::RefusalNotice {
+            origin_model: "refusing".to_string(),
+            serving_model: "fallback".to_string(),
+            retracted_message_uuids: vec![doomed_uuid],
+            ..platform_api::refusal_notice::RefusalNotice::default()
+        },
+    );
+
+    let live = super::drop_retracted(&[doomed, notice, kept]);
+
+    assert_eq!(live.len(), 2, "the superseded message is gone: {live:?}");
+    assert!(
+        live.iter()
+            .any(|m| matches!(m, ConversationMessage::System { .. })),
+        "the notice itself survives"
+    );
+    assert!(
+        live.iter().any(|m| matches!(
+            m,
+            ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|b| matches!(b, protocol::ContentBlock::Text { text } if text == "live output"))
+        )),
+        "the unretracted message survives"
+    );
+}
+
+/// A notice for a model that is NOT the one serving the answer is not this
+/// run's explanation — matching upstream's `fallbackModel === answer's model`.
+#[test]
+fn a_notice_for_another_model_is_not_picked() {
+    let notice = super::refusal_fallback_frame(
+        MessageId::new(),
+        &platform_api::refusal_notice::RefusalNotice {
+            serving_model: "hop-one".to_string(),
+            ..platform_api::refusal_notice::RefusalNotice::default()
+        },
+    );
+    let history = vec![notice];
+    assert!(super::local_refusal_notice(&history, "hop-two").is_none());
+    assert!(super::local_refusal_notice(&history, "hop-one").is_some());
 }

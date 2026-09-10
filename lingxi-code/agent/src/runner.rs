@@ -656,8 +656,19 @@ fn build_completed_result(
     history: &[protocol::ConversationMessage],
     final_assistant_blocks: &[protocol::ContentBlock],
     stop_reason: Option<&str>,
+    serving_model: &str,
 ) -> serde_json::Value {
-    let blocks = final_text_blocks(history, final_assistant_blocks);
+    // `ICe`: retracted messages come out before the answer is picked, so a
+    // superseded hop's output cannot become the report.
+    let live = drop_retracted(history);
+    let mut blocks = final_text_blocks(&live, final_assistant_blocks);
+    // The `⚠ {notice}` harness note. Upstream unshifts it in `iht` AFTER the
+    // turn-limit note; here the turn-limit note is inserted at index 0 by the
+    // agent tool's finalizer, so prepending here lands the pair in upstream's
+    // order — turn-limit, then this, then the report.
+    if let Some(notice) = local_refusal_notice(&live, serving_model) {
+        blocks.insert(0, format!("\u{26A0} {notice}\n"));
+    }
     let content: Vec<serde_json::Value> = blocks
         .iter()
         .map(|t| serde_json::json!({ "type": "text", "text": t }))
@@ -2347,9 +2358,12 @@ async fn run_subagent_loop(
                 // A `schema` run returns the captured StructuredOutput tool input.
                 let result = match structured_result.take() {
                     Some(structured) => structured,
-                    None => {
-                        build_completed_result(history, &assistant_blocks, stop_reason.as_deref())
-                    }
+                    None => build_completed_result(
+                        history,
+                        &assistant_blocks,
+                        stop_reason.as_deref(),
+                        &model,
+                    ),
                 };
                 // Persist all messages before publishing the terminal event; the
                 // consumer is allowed to tear down a one-shot runner immediately.
@@ -2454,7 +2468,7 @@ async fn run_subagent_loop(
             // result and carry the reason alongside it, so the reason readers
             // (`tasks::handlers::local_agent::max_turns_reached_from`,
             // `fusion::panel::max_turns_exhausted_detail`) still see it.
-            let mut result = build_completed_result(history, &[], None);
+            let mut result = build_completed_result(history, &[], None, &model);
             if let Some(obj) = result.as_object_mut() {
                 obj.insert(
                     "reason".to_string(),
@@ -2963,4 +2977,80 @@ fn refusal_fallback_frame(
             refused_user_message_uuid: banner.refused_user_message_uuid.clone(),
         }),
     }
+}
+
+/// The uuid prefix length `PZo` compares on (claude `D4n = 24`).
+const RETRACTED_UUID_PREFIX: usize = 24;
+
+/// `PZo` — drop the messages a refusal notice retracted.
+///
+/// A cascade that supersedes an earlier hop names the messages that hop
+/// produced; replaying them would show the user work the session has already
+/// moved past. System messages always survive: the notices themselves are how
+/// the retraction is expressed.
+fn drop_retracted(history: &[ConversationMessage]) -> Vec<ConversationMessage> {
+    let retracted: std::collections::HashSet<String> = history
+        .iter()
+        .filter_map(|m| match m {
+            ConversationMessage::System {
+                subtype: Some(subtype),
+                refusal_fallback: Some(meta),
+                ..
+            } if subtype == "model_refusal_fallback" => Some(&meta.retracted_message_uuids),
+            _ => None,
+        })
+        .flatten()
+        .map(|u| u.chars().take(RETRACTED_UUID_PREFIX).collect())
+        .collect();
+    if retracted.is_empty() {
+        return history.to_vec();
+    }
+    let live: Vec<ConversationMessage> = history
+        .iter()
+        .filter(|m| {
+            matches!(m, ConversationMessage::System { .. })
+                || !retracted.contains(
+                    &m.id()
+                        .as_uuid()
+                        .to_string()
+                        .chars()
+                        .take(RETRACTED_UUID_PREFIX)
+                        .collect::<String>(),
+                )
+        })
+        .cloned()
+        .collect();
+    if live.len() != history.len() {
+        tracing::info!(
+            event = "tengu_resume_retracted_dropped",
+            dropped = history.len() - live.len(),
+            chain_length = history.len(),
+        );
+    }
+    live
+}
+
+/// `ICe`'s notice half — the `scope: "local"` refusal frame that explains the
+/// model which actually produced this run's answer.
+///
+/// Upstream finds the last non-error assistant message with real text, reads
+/// its `model`, and matches a frame whose `fallbackModel` equals it. This
+/// port's `Assistant` carries no model, but the runner knows the serving model
+/// outright — and that IS the model that produced the answer, because every hop
+/// retries the turn. So the match is on the same value, not an approximation.
+fn local_refusal_notice(live: &[ConversationMessage], serving_model: &str) -> Option<String> {
+    live.iter().rev().find_map(|m| match m {
+        ConversationMessage::System {
+            subtype: Some(subtype),
+            refusal_fallback: Some(meta),
+            content,
+            ..
+        } if subtype == "model_refusal_fallback"
+            && meta.scope.as_deref() == Some("local")
+            && meta.fallback_model == serving_model =>
+        {
+            Some(content.clone())
+        }
+        _ => None,
+    })
 }

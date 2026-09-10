@@ -158,9 +158,19 @@ had to be made by reading history instead.
 
 ### Coverage of the ledger's own claims
 
-Of the 86 rows marked fixed, eight were independently re-derived from the code
-(`AGT-05`, `TN-10`, `TN-03`, `TN-11`, `CW-02`, `TID-06`, `AGT-06`, `MON-02`), and
-all eight held. Five structural properties were checked across the whole change
+Of the 86 rows marked fixed, fifteen were independently re-derived from the code
+— `AGT-05`, `TN-10`, `TN-03`, `TN-11`, `CW-02`, `TID-02`, `TID-06`, `AGT-02`,
+`AGT-06`, `AGT-10`, `MON-02`, `TOF-09`, `SLT-05`, `SLT-06`, `bg-09` — and all
+fifteen held. Each was checked the same way: find the production call site and
+count it, excluding test modules. Examples: `TID-02`'s producer is
+`TaskRegistry::register_auto_mode_scan`, called from `auto_mode_propose.rs:674`;
+`TOF-09`'s exclusion is applied at `tools/file/src/glob.rs:391` via
+`task_output_directory()`; `SLT-05`'s exit path runs through
+`apps/cli/src/bg_session_forker.rs:121`; `bg-09`/`SLT-06`'s watchdogs fire from
+`platforms/posix/src/process/runner.rs:414` and `:417`. `AGT-10` is genuinely
+env-gated (`agent/src/observer.rs` reads
+`CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS`), so its row's own caveat is honest:
+the feature is off by default. Five structural properties were checked across the whole change
 and also held: every new module has a non-test caller; the UniFFI metadata budget
 and variant-ordinal locks pass under `--features uniffi`; the supervisor
 directory is rejected unless it is absolute, non-symlink, owned by the euid and
@@ -168,8 +178,9 @@ mode `0700`, with its socket at `0600`; the `LXS_TEST_*` supervisor hooks are
 `#[cfg(test)]` and do not ship; and `BASH_TURN_ABORT_BACKGROUNDED` has a real
 emitter at `tools/shell/src/bash.rs:3036`, matching its new doc comment.
 
-The remaining ~78 rows rest on the landing's own account. A systematic
-claim-versus-code sweep was attempted and did not complete.
+The remaining ~71 rows rest on the landing's own account. A systematic
+claim-versus-code sweep over all of them was attempted with a fan-out of agents
+and did not complete; the fifteen above were done by hand instead.
 
 
 ## Handoff and ownership constraints

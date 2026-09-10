@@ -2894,16 +2894,28 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         bus.log_event(SUBAGENT_OUTPUT_FLAGGED, md).await;
     }
 
-    /// (G11) Emit claude `tengu_agent_tool_terminated` (agentToolUtils.ts:646-656):
-    /// an ASYNC subagent killed by the user (`reason:'user_kill_async'`). Fired by
-    /// the async lifecycle on kill; not reached on the sync path.
-    #[allow(dead_code)]
+    /// Emit claude `tengu_agent_tool_terminated` — a subagent run that ENDED by
+    /// being stopped rather than finishing.
+    ///
+    /// Upstream has three sites: the async kill (`reason` from `killedBy`:
+    /// `parent_kill_async` / `system_kill_async` / `user_kill_async`) and two
+    /// sync cancels, both `user_cancel_sync`.
+    ///
+    /// `final_model` / `model_swapped` are NOT emitted. Upstream reads them off
+    /// the run's models-used list, and `SubagentResult::Killed` carries only an
+    /// agent id here — so the honest options were to omit them or to invent
+    /// `model_swapped: false` for a run that may well have hopped. A subagent CAN
+    /// swap models now (the refusal cascade), which is exactly why a hardcoded
+    /// `false` would be a lie rather than a harmless default.
     async fn emit_agent_tool_terminated(
         bus: &Arc<AnalyticsBus>,
         agent_type: &str,
         model: &str,
         duration_ms: u64,
         is_built_in_agent: bool,
+        is_async: bool,
+        agent_depth: u32,
+        reason: &str,
     ) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -2922,16 +2934,18 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             "duration_ms".into(),
             AnalyticsValue::Int(duration_ms as i64),
         );
-        md.insert("is_async".into(), AnalyticsValue::Bool(true));
+        md.insert("is_async".into(), AnalyticsValue::Bool(is_async));
         md.insert(
             "is_built_in_agent".into(),
             AnalyticsValue::Bool(is_built_in_agent),
         );
         md.insert(
+            "agent_depth".into(),
+            AnalyticsValue::Int(i64::from(agent_depth)),
+        );
+        md.insert(
             "reason".into(),
-            AnalyticsValue::String(
-                Verified::assert_safe("user_kill_async".to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(reason.to_string()).into_inner()),
         );
         bus.log_event(TOOL_TERMINATED, md).await;
     }
@@ -4705,6 +4719,20 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
             Ok(SubagentResult::Killed { .. }) => {
                 Self::emit_failed(&bus, &invocation_id, "killed", duration_ms).await;
+                // The sync twin of upstream's kill sites. Before this the event
+                // had an emitter and no caller — the run ended and the metric
+                // that exists to count stopped runs never fired.
+                Self::emit_agent_tool_terminated(
+                    &bus,
+                    &effective_type,
+                    &selected.resolved_model,
+                    duration_ms,
+                    selected.is_built_in,
+                    false,
+                    ctx.depth,
+                    "user_cancel_sync",
+                )
+                .await;
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
             }
             Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {

@@ -448,6 +448,61 @@ mod tests {
         assert_eq!(spawner.invocations().len(), 1);
     }
 
+    /// `tengu_agent_tool_terminated` — the metric that counts runs which were
+    /// STOPPED rather than finished. It had an emitter and no caller, so it
+    /// never fired: a killed subagent was invisible to it.
+    #[tokio::test]
+    async fn a_killed_subagent_reports_itself_as_terminated() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let spawner = arc_mock_spawner();
+        spawner.script_killed();
+        let bctx = wired_ctx_with_bus(spawner, bus).await;
+        let tool = AgentTool::new(bctx);
+
+        let outcome = tool
+            .call(
+                serde_json::json!({
+                    "description": "work",
+                    "subagent_type": "general-purpose",
+                    "prompt": "hi",
+                    "run_in_background": false
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await;
+        assert!(
+            matches!(outcome, Err(ToolError::Internal(ref m)) if m.contains("was killed")),
+            "precondition: the SYNC kill arm is the one reached, got {outcome:?}"
+        );
+
+        let events = sink.events().await;
+        let terminated = events
+            .iter()
+            .find(|e| e.name == "tengu_agent_tool_terminated")
+            .unwrap_or_else(|| {
+                panic!(
+                    "a killed run must report itself terminated; saw {:?}",
+                    events.iter().map(|e| &e.name).collect::<Vec<_>>()
+                )
+            });
+        assert!(matches!(
+            terminated.metadata.get("reason"),
+            Some(AnalyticsValue::String(r)) if r == "user_cancel_sync"
+        ));
+        assert!(matches!(
+            terminated.metadata.get("is_async"),
+            Some(AnalyticsValue::Bool(false))
+        ));
+        assert!(
+            terminated.metadata.contains_key("agent_depth"),
+            "upstream carries the depth: {:?}",
+            terminated.metadata
+        );
+    }
+
     #[tokio::test]
     async fn nested_spawn_rejects_at_configured_depth_with_exact_message() {
         use platform_api::task_registry::TaskRegistryHandle;

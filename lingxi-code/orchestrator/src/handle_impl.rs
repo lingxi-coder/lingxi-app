@@ -441,6 +441,25 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn set_active_goal(&self, condition: &str) {
         let tokens_at_start = self.snapshot_cost_real().await.total_tokens;
+        // `let l = t.getAppState().activeGoal; if (l !== void 0) kB(l,"superseded")`
+        // (`src_161508826.js`) — a goal replaced by a newer one is torn down as
+        // surely as one that was cleared, and upstream accounts for it before
+        // the overwrite so `iterations` / `durationMs` still describe the OLD
+        // goal. Only the event fires here: the Stop hook is not removed, because
+        // `sync_active_goal_stop_hook_for_current_state` below re-points it at
+        // the replacement.
+        let superseded = {
+            let s = self.session.lock().await;
+            s.active_goal.clone()
+        };
+        if let Some(superseded) = superseded.as_ref() {
+            self.fire_goal_terminal_event(
+                platform_api::GoalStatusKind::Cleared,
+                superseded,
+                Some(platform_api::GoalClearedReason::Superseded),
+            )
+            .await;
+        }
         let mut s = self.session.lock().await;
         s.active_goal = Some(lingxi_core::session::ActiveGoalState {
             condition: condition.to_string(),
@@ -476,7 +495,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn clear_active_goal(&self) -> Option<ActiveGoalSnapshot> {
-        self.clear_active_goal_state_and_hook().await
+        // The `/goal clear` arm — upstream's `kB(n,"user_clear")`.
+        self.clear_active_goal_state_and_hook(platform_api::GoalClearedReason::UserClear)
+            .await
     }
 
     async fn set_active_goal_last_reason(&self, reason: Option<String>) {

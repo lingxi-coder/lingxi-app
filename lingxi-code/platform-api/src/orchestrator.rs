@@ -292,6 +292,61 @@ pub struct ActiveGoalSnapshot {
     pub tokens_at_start: u64,
 }
 
+/// Why a goal was torn down — the `reason` field of `tengu_goal_cleared`.
+///
+/// Upstream 2.1.267 emits the event through one helper that takes the reason as
+/// an argument (`src_161508826.js`):
+///
+/// ```js
+/// function kB(e,t){i("tengu_goal_cleared",{reason:u(t),iterations:e.iterations,
+///   durationMs:Date.now()-e.setAt,origin:we(e.origin)})}
+/// ```
+///
+/// and its call sites pass six distinct values. This enum is that argument, so
+/// a teardown cannot silently report somebody else's reason:
+///
+/// | call site | reason |
+/// |---|---|
+/// | `/goal clear` (Stop hook removed) | `user_clear` |
+/// | a new `/goal` over a live one | `superseded` |
+/// | `kB(e,d==="context_limit"?…)` | `context_limit` / `api_error` |
+/// | session clear | `session_clear` |
+/// | resume replacing a restored goal | `resume_swap` |
+///
+/// ⚠️ This is the TELEMETRY reason and is independent of
+/// [`GoalStatusKind`], which is the transcript attachment's shape. A
+/// context-limit teardown still writes a `Cleared` attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalClearedReason {
+    /// The user asked for it — `/goal clear` and friends.
+    UserClear,
+    /// A new goal replaced a live one.
+    Superseded,
+    /// Torn down because the context window ran out.
+    ContextLimit,
+    /// Torn down by a non-transient provider error.
+    ApiError,
+    /// The whole session was cleared.
+    SessionClear,
+    /// A resume replaced a goal restored from the transcript.
+    ResumeSwap,
+}
+
+impl GoalClearedReason {
+    /// The exact wire string upstream passes as `kB`'s second argument.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserClear => "user_clear",
+            Self::Superseded => "superseded",
+            Self::ContextLimit => "context_limit",
+            Self::ApiError => "api_error",
+            Self::SessionClear => "session_clear",
+            Self::ResumeSwap => "resume_swap",
+        }
+    }
+}
+
 /// Which `goal_status` record to write.
 ///
 /// NOT serialized any more: the 2.1.266 wire shape distinguishes the variants

@@ -2171,7 +2171,17 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
     // `context_limit` / `api_error`; `platform_api::GoalStatusKind` has only
     // `Set|Cleared|Achieved`, and widening it would change a serialized
     // transcript enum, so the teardown records `Cleared`.
-    let Some(goal) = orch.clear_active_goal_state_and_hook().await else {
+    // `kB(e, d==="context_limit" ? "context_limit" : "api_error")` — upstream
+    // discriminates on the BUCKET, and `GoalClearBucket::ContextLimit` is
+    // reachable only from `GoalClearReason::ContextLimit` (every `ApiError` arm
+    // yields `Auth` / `Billing` / `ModelUnavailable` / no-clear), so testing the
+    // bucket here is the same test.
+    let cleared_reason = if bucket == GoalClearBucket::ContextLimit {
+        platform_api::GoalClearedReason::ContextLimit
+    } else {
+        platform_api::GoalClearedReason::ApiError
+    };
+    let Some(goal) = orch.clear_active_goal_state_and_hook(cleared_reason).await else {
         return;
     };
     // `de("goal_met", s)` — the failure-flavoured twin of the success event.

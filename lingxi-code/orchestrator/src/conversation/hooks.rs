@@ -63,16 +63,24 @@ impl ConversationOrchestrator {
         self.sync_goal_checkin_idle_task().await;
     }
 
+    /// Tear the active goal down, reporting `reason` on `tengu_goal_cleared`.
+    ///
+    /// The reason is a parameter because upstream's is: `kB(goal, reason)`
+    /// (`src_161508826.js`) is reached with six different values, and a
+    /// context-limit teardown that reports `user_clear` is indistinguishable in
+    /// the metric from somebody typing `/goal clear`.
     pub(crate) async fn clear_active_goal_state_and_hook(
         &self,
+        reason: platform_api::GoalClearedReason,
     ) -> Option<platform_api::ActiveGoalSnapshot> {
-        self.finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Cleared)
+        self.finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Cleared, Some(reason))
             .await
     }
 
     async fn finish_active_goal_state_and_hook(
         &self,
         status: platform_api::GoalStatusKind,
+        cleared_reason: Option<platform_api::GoalClearedReason>,
     ) -> Option<platform_api::ActiveGoalSnapshot> {
         let (session_id, goal, cleared) = {
             let mut s = self.session.lock().await;
@@ -89,7 +97,8 @@ impl ConversationOrchestrator {
         if let Some(goal) = goal.as_ref() {
             self.persist_goal_status_attachment(status, Some(goal))
                 .await;
-            self.fire_goal_terminal_event(status, goal).await;
+            self.fire_goal_terminal_event(status, goal, cleared_reason)
+                .await;
         }
         let _ = self
             .remove_active_goal_stop_hook_for_session(session_id)
@@ -649,10 +658,11 @@ impl ConversationOrchestrator {
     /// `queuedGoalOrigin`, which only ever holds `proposal_direct` /
     /// `proposal_approved` — both set exclusively by `ProposeGoal`, which LingXi
     /// does not ship (see the accepted-divergence register).
-    async fn fire_goal_terminal_event(
+    pub(crate) async fn fire_goal_terminal_event(
         &self,
         status: platform_api::GoalStatusKind,
         goal: &lingxi_core::session::ActiveGoalState,
+        cleared_reason: Option<platform_api::GoalClearedReason>,
     ) {
         let Some(bus) = self.model_runtime.analytics_bus.as_ref() else {
             return;
@@ -660,7 +670,17 @@ impl ConversationOrchestrator {
         let (event, reason) = match status {
             platform_api::GoalStatusKind::Achieved => ("tengu_goal_achieved", None),
             platform_api::GoalStatusKind::Failed => ("tengu_goal_failed", None),
-            platform_api::GoalStatusKind::Cleared => ("tengu_goal_cleared", Some("user_clear")),
+            platform_api::GoalStatusKind::Cleared => (
+                "tengu_goal_cleared",
+                // `kB`'s second argument. A `Cleared` teardown always carries
+                // one; the fallback keeps this total rather than silently
+                // dropping `reason` from the event.
+                Some(
+                    cleared_reason
+                        .unwrap_or(platform_api::GoalClearedReason::UserClear)
+                        .as_str(),
+                ),
+            ),
             // `Set` never tears a goal down, and `NotMet` leaves it running.
             platform_api::GoalStatusKind::Set | platform_api::GoalStatusKind::NotMet => return,
         };
@@ -981,7 +1001,10 @@ impl ConversationOrchestrator {
                     self.record_goal_evaluation(response.reason.clone(), false)
                         .await;
                     let _ = self
-                        .finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Failed)
+                        .finish_active_goal_state_and_hook(
+                            platform_api::GoalStatusKind::Failed,
+                            None,
+                        )
                         .await;
                     return None;
                 }
@@ -990,7 +1013,7 @@ impl ConversationOrchestrator {
                 // `set` attachment for the same successful evaluation.
                 self.record_goal_evaluation(None, false).await;
                 let _ = self
-                    .finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Achieved)
+                    .finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Achieved, None)
                     .await;
                 None
             }

@@ -34,8 +34,8 @@ pub use autonomous_loop::{
     resolve_loop_default_fire, resolve_loop_file_fire, set_loop_consecutive_keepalives,
     take_loop_rescheduled, take_loop_tick_in_flight_prompt, LoopFile, LoopFoldOutcome,
     LoopFoldVeto, LoopRuntime, LoopSpanCounts, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
-    AUTONOMOUS_LOOP_PREAMBLE,
-    AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
+    AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
+    LOOP_FILE_SENTINEL,
 };
 pub use lock::{release_lock, try_acquire_lock, CronLockError, LockRecord};
 pub use run_due::{

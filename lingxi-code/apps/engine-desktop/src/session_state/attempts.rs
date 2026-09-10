@@ -250,13 +250,7 @@ impl CoordinatorState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .latest = Some((current.clone().try_into_state()?, append.journal_revision));
         drop(attempts);
-        let snapshot = encode_projection_snapshot(&self.snapshot_projection());
-        if let Err(error) = self
-            .journal
-            .write_snapshot(append.journal_revision, &snapshot)
-        {
-            tracing::warn!("attempt snapshot rebuild deferred: {error}");
-        }
+        self.note_durable_append(append.journal_revision);
         Ok(AttemptPersistAck {
             persistence,
             state: current,

@@ -20,7 +20,7 @@ use platform_api::{FusionPublicationReceipt, FusionPublicationStatus, FusionRunI
 use protocol::SessionId;
 use session::jsonl::{DurableJournal, JournalError};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 #[cfg(test)]
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
@@ -59,6 +59,8 @@ struct HydratedCostLedger {
     fusion_terminals: std::collections::HashMap<String, DurableFusionTerminalRecord>,
     fusion_outbox: std::collections::HashMap<String, DurableFusionOutboxRecord>,
     fusion_acks: std::collections::HashMap<String, CostPersistAck>,
+    /// Whether a snapshot file sits beside the WAL after this hydration.
+    snapshot_present: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,6 +507,14 @@ struct CoordinatorState {
     results: Mutex<std::collections::HashMap<CostMutationId, CachedCostResult>>,
     writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
     durability_gate: CostDurabilityGate,
+    /// Highest journal revision this coordinator has appended or hydrated.
+    /// Kept here because the journal exposes no cheap accessor and a barrier
+    /// must stamp the snapshot with the revision it actually covers.
+    last_journal_revision: AtomicU64,
+    /// Whether a snapshot file currently sits beside the WAL.  Hydration
+    /// treats a snapshot with no WAL as proof that an authoritative ledger was
+    /// lost, so that inference only holds while every WAL has one.
+    snapshot_present: AtomicBool,
 }
 
 /// App-owned collection of hydrated session authorities. A hot clear/resume
@@ -881,6 +891,8 @@ impl SessionStateCoordinator {
                 results: Mutex::new(std::collections::HashMap::new()),
                 writer_lease,
                 durability_gate: CostDurabilityGate::default(),
+                last_journal_revision: AtomicU64::new(0),
+                snapshot_present: AtomicBool::new(false),
             }),
             queue_tx,
             queue_rx: Arc::new(AsyncMutex::new(Some(queue_rx))),
@@ -1184,6 +1196,17 @@ impl SessionStateCoordinator {
                         // Reaching this arm proves every earlier accepted FIFO
                         // mutation finished its blocking append and projection
                         // update. A dropped waiter does not affect the drain.
+                        // It is also the one point where refreshing the whole
+                        // derivative snapshot is worth its fsync, so a clean
+                        // shutdown leaves a current one behind.
+                        let worker = state.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let revision = worker
+                                .last_journal_revision
+                                .load(AtomicOrdering::Acquire);
+                            worker.write_projection_snapshot(revision);
+                        })
+                        .await;
                         let _ = ack.send(());
                     }
                 }
@@ -1626,15 +1649,7 @@ impl CoordinatorState {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     projection.latest = Some((validated_state.clone(), append.journal_revision));
                 }
-                // Snapshot failure is derivative.  The WAL append has
-                // already crossed the durable acknowledgement boundary.
-                let snapshot = encode_projection_snapshot(&self.snapshot_projection());
-                if let Err(error) = self
-                    .journal
-                    .write_snapshot(append.journal_revision, &snapshot)
-                {
-                    tracing::warn!("cost snapshot rebuild deferred: {error}");
-                }
+                self.note_durable_append(append.journal_revision);
                 Ok(CostPersistAck {
                     mutation_id: request.mutation_id.clone(),
                     journal_revision: append.journal_revision,
@@ -1758,7 +1773,7 @@ impl CoordinatorState {
                 .fusion_acks
                 .insert(event_id.to_string(), ack.clone());
         }
-        self.write_projection_snapshot(append.journal_revision);
+        self.note_durable_append(append.journal_revision);
         Ok(ack)
     }
 
@@ -1854,7 +1869,7 @@ impl CoordinatorState {
                 .fusion_acks
                 .insert(event_id.to_string(), ack.clone());
         }
-        self.write_projection_snapshot(append.journal_revision);
+        self.note_durable_append(append.journal_revision);
         Ok(ack)
     }
 
@@ -1877,10 +1892,35 @@ impl CoordinatorState {
         }
     }
 
+    /// Rebuild the whole derivative snapshot.  This serializes every terminal
+    /// record, each carrying a run's full answer text, and fsyncs, so it
+    /// belongs at hydration and at a flush barrier -- not on the append path.
     fn write_projection_snapshot(&self, journal_revision: u64) {
         let snapshot = encode_projection_snapshot(&self.snapshot_projection());
-        if let Err(error) = self.journal.write_snapshot(journal_revision, &snapshot) {
-            tracing::warn!("session projection snapshot rebuild deferred: {error}");
+        match self.journal.write_snapshot(journal_revision, &snapshot) {
+            Ok(()) => self.snapshot_present.store(true, AtomicOrdering::Release),
+            Err(error) => {
+                tracing::warn!("session projection snapshot rebuild deferred: {error}");
+            }
+        }
+    }
+
+    /// Record an accepted append and keep the snapshot's *existence* current
+    /// without keeping its *contents* current.
+    ///
+    /// The snapshot has exactly one production reader, and that reader only
+    /// asks whether the file is there: a snapshot beside a missing WAL means
+    /// an authoritative ledger was lost.  Nothing reads what is inside it.
+    /// Rewriting the full projection per append therefore bought that reader
+    /// nothing while costing one fsync and one serialization of the entire
+    /// session history for every model response.  Snapshot failure stays
+    /// derivative either way: the WAL append already crossed the durable
+    /// acknowledgement boundary.
+    fn note_durable_append(&self, journal_revision: u64) {
+        self.last_journal_revision
+            .store(journal_revision, AtomicOrdering::Release);
+        if !self.snapshot_present.load(AtomicOrdering::Acquire) {
+            self.write_projection_snapshot(journal_revision);
         }
     }
 
@@ -1948,6 +1988,10 @@ impl CoordinatorState {
             }
             Err(error) => return Err(error),
         };
+        self.last_journal_revision
+            .store(hydrated.hydration.journal_revision, AtomicOrdering::Release);
+        self.snapshot_present
+            .store(hydrated.snapshot_present, AtomicOrdering::Release);
         *self
             .attempts
             .lock()
@@ -2144,6 +2188,7 @@ fn hydrate_from_journal(
                 fusion_terminals,
                 fusion_outbox,
                 fusion_acks,
+                snapshot_present: false,
             }),
             Ok(Some(_)) | Err(_) => Err(CostPersistError::Storage(
                 "cost snapshot exists without its authoritative WAL".into(),
@@ -2159,9 +2204,13 @@ fn hydrate_from_journal(
         fusion_outbox: fusion_outbox.values().cloned().collect(),
     };
     let snapshot = encode_projection_snapshot(&snapshot);
-    if let Err(error) = journal.write_snapshot(replay.last_revision, &snapshot) {
-        tracing::warn!("cost snapshot rebuild deferred: {error}");
-    }
+    let snapshot_present = match journal.write_snapshot(replay.last_revision, &snapshot) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!("cost snapshot rebuild deferred: {error}");
+            false
+        }
+    };
     Ok(HydratedCostLedger {
         attempts,
         hydration: CostHydration {
@@ -2173,6 +2222,7 @@ fn hydrate_from_journal(
         fusion_terminals,
         fusion_outbox,
         fusion_acks,
+        snapshot_present,
     })
 }
 
@@ -2757,6 +2807,64 @@ mod tests {
         let hydrated = coordinator.hydrate_blocking().unwrap();
         assert_eq!(hydrated.state.total_nano_usd, 0);
         assert!(coordinator.journal().root().join("quarantine").exists());
+    }
+
+    /// The projection snapshot has exactly one production reader: hydration
+    /// treats a snapshot beside a missing WAL as proof that an authoritative
+    /// ledger was lost. That reader needs the file to EXIST whenever the WAL
+    /// does and never reads what is inside it. Rewriting the whole projection
+    /// on every append therefore bought that reader nothing, while costing one
+    /// fsync and one serialization of every terminal record -- each carrying a
+    /// run's full answer text -- per model response.
+    #[tokio::test]
+    async fn appends_do_not_rewrite_the_snapshot_but_a_flush_does() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = SessionId::new();
+        let manager = SessionStateManager::new(directory.path());
+        let coordinator = manager.ensure_coordinator(session_id).await.unwrap();
+        let snapshot = coordinator
+            .journal()
+            .root()
+            .join(session::jsonl::SNAPSHOT_FILE_NAME);
+        assert!(snapshot.exists(), "hydration leaves a snapshot behind");
+        std::fs::remove_file(&snapshot).unwrap();
+
+        for revision in 2..=5 {
+            persist_cost(&coordinator, session_id, revision, revision * 10).await;
+        }
+
+        assert!(
+            !snapshot.exists(),
+            "an append rewrote the whole projection snapshot"
+        );
+
+        manager.flush_all().await.unwrap();
+        assert!(
+            snapshot.exists(),
+            "a flush barrier must leave a current snapshot behind"
+        );
+    }
+
+    /// A lost ledger is detected by finding a snapshot with no WAL beside it.
+    /// That inference only holds while every WAL has a snapshot, so the first
+    /// append after hydration still writes one. This guards the fix above from
+    /// overshooting into silence.
+    #[tokio::test]
+    async fn the_first_append_leaves_a_snapshot_so_a_lost_wal_stays_detectable() {
+        let (_directory, coordinator, session_id) = coordinator();
+        coordinator.hydrate_blocking().unwrap();
+        let snapshot = coordinator
+            .journal()
+            .root()
+            .join(session::jsonl::SNAPSHOT_FILE_NAME);
+        assert!(!snapshot.exists(), "a session with no WAL has no snapshot");
+
+        persist_cost(&coordinator, session_id, 1, 10).await;
+
+        assert!(
+            snapshot.exists(),
+            "a WAL with no snapshot beside it hides its own loss"
+        );
     }
 
     #[test]

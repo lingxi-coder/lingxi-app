@@ -1339,7 +1339,6 @@ mod tests {
             fusion_activation_deadline: None,
             publication_status: platform_api::FusionPublicationStatus::Pending,
             publication_error: None,
-            result_published: false,
         });
         registry.insert_state_for_test(state).await;
 
@@ -1410,7 +1409,6 @@ mod tests {
                 fusion_activation_deadline: None,
                 publication_status: platform_api::FusionPublicationStatus::Pending,
                 publication_error: None,
-                result_published: false,
             }))
             .await;
 

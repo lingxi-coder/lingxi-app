@@ -3122,10 +3122,9 @@ fn fusion_result_ready(state: &tasks::state::TaskState) -> bool {
         // failures do retain an answer and must await its publication tail.
         return true;
     }
-    // `result_published` is retained as a compatibility read for task rows
-    // written before the typed status existed. New rows use the enum as the
-    // source of truth, and every state other than Pending is terminal.
-    fusion.result_published || fusion.publication_status.is_terminal()
+    // Every publication state other than Pending is terminal for a waiter:
+    // the append either landed, is durably queued, or definitively failed.
+    fusion.publication_status.is_terminal()
 }
 
 fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOutcome> {
@@ -3135,7 +3134,7 @@ fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOu
     Some(match fusion.base.status {
         tasks::state::TaskStatus::Completed => {
             let answer = fusion.final_text.clone().unwrap_or_default();
-            match effective_fusion_publication_status(fusion) {
+            match fusion.publication_status {
                 FusionPublicationStatus::Published => FusionPrintOutcome::FinalText(answer),
                 FusionPublicationStatus::Queued => FusionPrintOutcome::Queued(answer),
                 FusionPublicationStatus::NotRequired => FusionPrintOutcome::PublicationFailed {
@@ -3172,18 +3171,6 @@ fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOu
         }
         other => FusionPrintOutcome::Other(format!("{other:?}")),
     })
-}
-
-/// Read the typed publication status while accepting old task rows whose
-/// only publication signal was the legacy boolean.
-fn effective_fusion_publication_status(
-    fusion: &tasks::state::LocalFusionTaskState,
-) -> FusionPublicationStatus {
-    if fusion.result_published {
-        FusionPublicationStatus::Published
-    } else {
-        fusion.publication_status
-    }
 }
 
 /// Poll interval while print mode waits for a background `/fusion` run.
@@ -7289,17 +7276,12 @@ mod tests {
             fusion_activation_deadline: None,
             publication_status: platform_api::FusionPublicationStatus::Published,
             publication_error: None,
-            // Every existing caller of this helper wants "the run is fully
-            // done, print it now" — the one test that cares about the
-            // publish-not-landed-yet window builds its own
-            // `LocalFusionTaskState` with `result_published: false`.
-            result_published: true,
         })
     }
 
     /// Like [`fusion_state`] with `status: Completed`, but returns the inner
     /// [`tasks::state::LocalFusionTaskState`] (not the wrapping enum) so a
-    /// caller can override `result_published` with struct-update syntax.
+    /// caller can override `publication_status` with struct-update syntax.
     fn completed_fusion_state(final_text: &str) -> tasks::state::LocalFusionTaskState {
         let tasks::state::TaskState::LocalFusion(fusion) =
             fusion_state(tasks::state::TaskStatus::Completed, Some(final_text), None)
@@ -7449,21 +7431,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legacy_published_boolean_overrides_the_new_pending_default() {
-        let state = tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
-            publication_status: platform_api::FusionPublicationStatus::Pending,
-            result_published: true,
-            ..completed_fusion_state("legacy answer")
-        });
-
-        assert!(fusion_result_ready(&state));
-        assert_eq!(
-            fusion_print_outcome(&state),
-            Some(FusionPrintOutcome::FinalText("legacy answer".to_string()))
-        );
-    }
-
     #[tokio::test]
     async fn fusion_accounting_failure_keeps_answer_and_waits_for_publication() {
         let mut pending = fusion_state(
@@ -7474,7 +7441,6 @@ mod tests {
         let tasks::state::TaskState::LocalFusion(fusion) = &mut pending else {
             unreachable!();
         };
-        fusion.result_published = false;
         fusion.publication_status = platform_api::FusionPublicationStatus::Pending;
         assert!(!fusion_result_ready(&pending));
         let mut published = pending.clone();
@@ -7505,7 +7471,6 @@ mod tests {
             unreachable!("fusion_state always builds a LocalFusion state");
         };
         fusion.publication_status = platform_api::FusionPublicationStatus::NotRequired;
-        fusion.result_published = false;
 
         assert!(fusion_result_ready(&state));
         let outcome = fusion_print_outcome(&state);
@@ -7568,7 +7533,6 @@ mod tests {
             unreachable!("fusion_state always builds a LocalFusion state");
         };
         fusion.publication_status = platform_api::FusionPublicationStatus::Queued;
-        fusion.result_published = false;
         let lookup = ScriptedLookup::new(vec![Some(queued)]);
         let sink = RecordingFusionSink::default();
 
@@ -7607,7 +7571,6 @@ mod tests {
         };
         fusion.publication_status = platform_api::FusionPublicationStatus::StorageFailure;
         fusion.publication_error = Some("append failed".to_string());
-        fusion.result_published = false;
         let lookup = ScriptedLookup::new(vec![Some(failed_publication)]);
         let sink = RecordingFusionSink::default();
 
@@ -7687,18 +7650,16 @@ mod tests {
     /// after this function returns, so the append is aborted mid-flight and
     /// the session never gets its `<fusion-result>` row. This pins that the
     /// waiter keeps polling a `Completed`-but-not-yet-published run instead
-    /// of returning immediately, and only reports the outcome once
-    /// `result_published` flips true.
+    /// of returning immediately, and only reports the outcome once the
+    /// publication receipt leaves `Pending`.
     #[tokio::test]
     async fn await_local_fusion_result_waits_for_publish_before_reporting_completed() {
         let unpublished =
             tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
-                result_published: false,
                 publication_status: platform_api::FusionPublicationStatus::Pending,
                 ..completed_fusion_state("not yet on disk")
             });
         let published = tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
-            result_published: true,
             publication_status: platform_api::FusionPublicationStatus::Published,
             ..completed_fusion_state("not yet on disk")
         });

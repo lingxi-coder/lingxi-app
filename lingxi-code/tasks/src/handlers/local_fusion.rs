@@ -223,18 +223,9 @@ async fn finalize_fusion_outcome(
                     .set_fusion_publication(worker_task_id, receipt.clone())
                     .await;
             }
-            // Publication is independent from computation. The terminal
-            // answer is retained even when the append fails; only the typed
-            // receipt decides readiness and the legacy `result_published`
-            // compatibility flag.
-            if receipt.is_published() {
-                // Keep the old narrow hook for standalone sinks and older
-                // status adapters; its registry implementation now writes a
-                // typed `Published` receipt as well.
-                status_sink
-                    .mark_fusion_result_published(worker_task_id)
-                    .await;
-            }
+            // Publication is independent from computation: the terminal
+            // answer is retained even when the append fails, and the typed
+            // receipt written above is the only thing that decides readiness.
         }
         Err(FusionError::Cancelled) => {
             // [Finding 14] Same ordering rule as the `Ok` arm above: write

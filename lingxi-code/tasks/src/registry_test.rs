@@ -2243,7 +2243,6 @@ fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskSt
         fusion_activation_deadline: None,
         publication_status: platform_api::FusionPublicationStatus::Pending,
         publication_error: None,
-        result_published: false,
     })
 }
 
@@ -2401,11 +2400,10 @@ async fn set_fusion_stage_updates_the_local_fusion_task_state_in_place() {
 /// distinguish "terminal status landed" from "the durable `<fusion-result>`
 /// session append actually finished" — otherwise a one-shot host can return
 /// (and exit the process) while the append is still in flight and silently
-/// lose the row. `TaskRegistry::mark_fusion_result_published` is the seam
-/// `local_fusion`'s worker calls, AFTER `FusionCompletionSink::publish`
-/// resolves, to flip that flag.
+/// lose the row. The typed receipt written after the publish resolves is
+/// what a waiter reads to tell the two apart.
 #[tokio::test]
-async fn mark_fusion_result_published_flips_the_flag_in_place() {
+async fn a_published_receipt_lands_on_the_row_in_place() {
     use crate::handlers::TaskStatusSink;
     use crate::registry_status_sink::RegistryStatusSink;
 
@@ -2416,28 +2414,34 @@ async fn mark_fusion_result_published_flips_the_flag_in_place() {
         .insert_state_for_test(local_fusion_state_for_test(id, dir.path()))
         .await;
 
-    let published_of = |state: &TaskState| match state {
-        TaskState::LocalFusion(fusion) => fusion.result_published,
+    let status_of = |state: &TaskState| match state {
+        TaskState::LocalFusion(fusion) => fusion.publication_status,
         other => panic!("expected LocalFusion, got {other:?}"),
     };
 
-    assert!(
-        !published_of(&registry.get(id).await.expect("task exists")),
+    assert_eq!(
+        status_of(&registry.get(id).await.expect("task exists")),
+        platform_api::FusionPublicationStatus::Pending,
         "a freshly spawned run has not published its result yet"
     );
 
     let sink = RegistryStatusSink::new();
     sink.bind(registry.clone());
-    sink.mark_fusion_result_published(id).await;
+    sink.set_fusion_publication(id, platform_api::FusionPublicationReceipt::published())
+        .await;
 
-    assert!(
-        published_of(&registry.get(id).await.expect("task exists")),
-        "mark_fusion_result_published must flip result_published to true"
+    assert_eq!(
+        status_of(&registry.get(id).await.expect("task exists")),
+        platform_api::FusionPublicationStatus::Published
     );
 
     // An unknown/evicted task id is a benign no-op, same as the other
     // best-effort fusion status-sink writes above (set_fusion_stage etc).
-    sink.mark_fusion_result_published("fu_does_not_exist").await;
+    sink.set_fusion_publication(
+        "fu_does_not_exist",
+        platform_api::FusionPublicationReceipt::published(),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2477,7 +2481,6 @@ async fn fusion_publication_failure_keeps_answer_and_never_sets_legacy_published
         platform_api::FusionPublicationStatus::StorageFailure
     );
     assert_eq!(fusion.publication_error.as_deref(), Some("append failed"));
-    assert!(!fusion.result_published);
 
     let notifications = registry.take_pending_task_notifications().await;
     assert_eq!(notifications.len(), 1);

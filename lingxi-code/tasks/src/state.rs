@@ -511,19 +511,6 @@ pub struct LocalFusionTaskState {
     /// Sanitized publication/outbox failure detail, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_error: Option<String>,
-    /// Whether `DesktopFusionCompletionSink::publish` (the durable
-    /// `<fusion-result>` session append) has completed for a `Completed`
-    /// run. `finish_fusion_terminal` flips [`TaskStateBase::status`] to
-    /// `Completed` BEFORE the handler's worker awaits the publish (the
-    /// registry's notification drain is terminal-status-gated, so that
-    /// ordering cannot change) — so a consumer that returns the instant it
-    /// observes `Completed` can race the still-in-flight append and, in a
-    /// one-shot host, exit the process before it lands (review finding
-    /// #17). `false` until a `FusionPublicationStatus::Published` receipt
-    /// lands. This legacy field remains for older clients; it is never true
-    /// for `Queued`, `NotRequired`, or a publication failure. Additive.
-    #[serde(default)]
-    pub result_published: bool,
 }
 
 /// Tripwire for the residual documented on
@@ -683,58 +670,4 @@ mod taskstate_scope_readback_tripwire {
         );
     }
 
-    #[test]
-    fn legacy_local_fusion_rows_default_typed_publication_to_pending() {
-        let state = LocalFusionTaskState {
-            base: TaskStateBase {
-                id: "flegacy01".to_string(),
-                task_type: TaskType::LocalFusion,
-                status: TaskStatus::Completed,
-                description: "legacy fusion row".to_string(),
-                tool_use_id: None,
-                start_time: SystemTime::UNIX_EPOCH,
-                end_time: Some(SystemTime::UNIX_EPOCH),
-                total_paused_ms: 0,
-                output_file: PathBuf::from("/dev/null"),
-                output_offset: 0,
-                notified: false,
-                creator_teammate_name: None,
-                creator_team_name: None,
-                creator_agent_id: None,
-            },
-            conversation_id: "conversation".to_string(),
-            prompt: "compare".to_string(),
-            run_id: Some("fu_legacy".to_string()),
-            preset: "quality".to_string(),
-            cross_provider: false,
-            final_text: Some("answer".to_string()),
-            error: None,
-            egress_profiles: Vec::new(),
-            usage: None,
-            stage: None,
-            effective_timeout_ms: None,
-            planned_panels: None,
-            fusion_activation_deadline: None,
-            publication_status: platform_api::FusionPublicationStatus::Published,
-            publication_error: None,
-            result_published: true,
-        };
-        let mut legacy = serde_json::to_value(state).expect("serialize fixture");
-        legacy
-            .as_object_mut()
-            .expect("LocalFusionTaskState serializes as an object")
-            .remove("publication_status");
-
-        let restored: LocalFusionTaskState =
-            serde_json::from_value(legacy).expect("legacy row remains readable");
-        assert_eq!(
-            restored.publication_status,
-            platform_api::FusionPublicationStatus::Pending
-        );
-        assert!(
-            restored.result_published,
-            "the legacy durable-publication proof must survive independently of the new default"
-        );
-        assert!(restored.publication_error.is_none());
-    }
 }

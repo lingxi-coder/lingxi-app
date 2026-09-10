@@ -749,8 +749,15 @@ impl TaskStatusSink for RecordingStatusSink {
         self.set_status(task_id, status).await;
     }
 
-    async fn mark_fusion_result_published(&self, _task_id: &str) {
-        self.events.lock().unwrap().push("published".to_string());
+    async fn set_fusion_publication(
+        &self,
+        _task_id: &str,
+        receipt: platform_api::FusionPublicationReceipt,
+    ) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("receipt:{:?}", receipt.status));
     }
 
     async fn is_terminal(&self, task_id: &str) -> bool {
@@ -942,8 +949,12 @@ impl TaskStatusSink for BlockingStageSink {
             .await;
     }
 
-    async fn mark_fusion_result_published(&self, task_id: &str) {
-        self.inner.mark_fusion_result_published(task_id).await;
+    async fn set_fusion_publication(
+        &self,
+        task_id: &str,
+        receipt: platform_api::FusionPublicationReceipt,
+    ) {
+        self.inner.set_fusion_publication(task_id, receipt).await;
     }
 
     async fn is_terminal(&self, task_id: &str) -> bool {
@@ -1206,16 +1217,14 @@ async fn spawn_forwards_fusion_progress_into_set_fusion_stage() {
     );
 }
 
-/// Review finding #17: a print-mode waiter that returns on terminal status
-/// alone can race the still-in-flight `FusionCompletionSink::publish`
-/// append and, on process exit, lose the durable `<fusion-result>` session
-/// row. The fix is `TaskStatusSink::mark_fusion_result_published`, called
-/// from the worker AFTER `publish` resolves — this pins that it fires, and
-/// fires strictly AFTER `publish`, on the SAME shared timeline as the
-/// terminal-status transition (never before it, since the notification
-/// drain still needs `finish_fusion_terminal` first).
+/// A print-mode waiter that returns on terminal status alone can race the
+/// still-in-flight publication append and, on process exit, lose the durable
+/// `<fusion-result>` row. The typed receipt is what distinguishes the two:
+/// this pins that it is written, and written strictly AFTER the publish, on
+/// the same timeline as the terminal-status transition — never before it,
+/// since the notification drain still needs `finish_fusion_terminal` first.
 #[tokio::test]
-async fn finalize_fusion_outcome_marks_result_published_after_the_completion_sink_publish() {
+async fn the_publication_receipt_lands_after_the_completion_sink_publish() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
@@ -1254,9 +1263,9 @@ async fn finalize_fusion_outcome_marks_result_published_after_the_completion_sin
             "outcome".to_string(),
             "status:Completed".to_string(),
             "publish".to_string(),
-            "published".to_string(),
+            "receipt:Published".to_string(),
         ],
-        "mark_fusion_result_published must fire, and strictly after both \
+        "the Published receipt must land, and strictly after both \
          finish_fusion_terminal (\"outcome\"/\"status:Completed\") and the \
          completion sink's own publish — never before either"
     );
@@ -1787,6 +1796,7 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
         vec![
             "status:Running".to_string(),
             "egress_and_usage:0:true".to_string(),
+            "receipt:NotRequired".to_string(),
             format!("error:{error}"),
             "status:Failed".to_string(),
         ]
@@ -1874,6 +1884,7 @@ async fn failing_executor_that_already_spent_tokens_discloses_partial_usage_befo
         vec![
             "status:Running".to_string(),
             "egress_and_usage:0:true".to_string(),
+            "receipt:NotRequired".to_string(),
             format!("error:{error}"),
             "status:Failed".to_string(),
         ]
@@ -2003,11 +2014,11 @@ async fn ok_executor_records_egress_and_usage_before_completed_status() {
     assert_eq!(usage.subagent_tokens, 0);
     assert_eq!(usage.tool_uses, 0);
     assert_eq!(usage.duration_ms, 0);
-    // Ordering: egress/usage lands before the terminal `outcome` publish,
-    // and `mark_fusion_result_published` (review finding #17) fires last —
-    // after the completion sink's own publish, which for `CountingCompletionSink`
-    // has already run by the time we observe a terminal status (there is no
-    // real await point between them here), so it is on this same log too.
+    // Ordering: egress/usage lands before the terminal `outcome` publish, and
+    // the publication receipt fires last — after the completion sink's own
+    // publish, which for `CountingCompletionSink` has already run by the time
+    // we observe a terminal status (there is no real await point between them
+    // here), so it is on this same log too.
     assert_eq!(
         status_sink.events(),
         vec![
@@ -2015,7 +2026,7 @@ async fn ok_executor_records_egress_and_usage_before_completed_status() {
             "egress_and_usage:0:true".to_string(),
             "outcome".to_string(),
             "status:Completed".to_string(),
-            "published".to_string(),
+            "receipt:Published".to_string(),
         ]
     );
     assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);

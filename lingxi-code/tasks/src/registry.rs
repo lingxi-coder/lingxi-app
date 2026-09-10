@@ -1629,10 +1629,8 @@ impl TaskRegistry {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
         if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
-            let is_published = receipt.is_published();
             fusion.publication_status = receipt.status;
             fusion.publication_error = receipt.error;
-            fusion.result_published = is_published;
         }
     }
 
@@ -1651,22 +1649,6 @@ impl TaskRegistry {
             fusion.egress_profiles = egress_profiles;
             fusion.usage = usage;
         }
-    }
-
-    /// Record that [`platform_api::FusionCompletionSink::publish`]'s durable
-    /// `<fusion-result>` session append has completed for a `Completed` run
-    /// — called from `local_fusion`'s worker AFTER `sink.publish` resolves,
-    /// necessarily after [`Self::finish_fusion_terminal`] already flipped the
-    /// status (the notification drain's ordering requirement runs the other
-    /// way and is unaffected). A one-shot host (print mode) that returns the
-    /// instant it observes `Completed` can otherwise exit the process while
-    /// the append is still in flight and lose the row entirely (review
-    /// finding #17) — `apps/cli`'s `await_local_fusion_result_bounded` keeps
-    /// polling a `Completed` run until this flips. Best-effort: a
-    /// since-evicted task is a benign no-op.
-    pub async fn mark_fusion_result_published(&self, task_id: &str) {
-        self.set_fusion_publication(task_id, platform_api::FusionPublicationReceipt::published())
-            .await;
     }
 
     /// Atomically publish a Fusion run's terminal payload and terminal status.
@@ -2539,7 +2521,6 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             fusion_activation_deadline: None,
             publication_status: platform_api::FusionPublicationStatus::Pending,
             publication_error: None,
-            result_published: false,
         }),
     }
 }

@@ -70,6 +70,12 @@ pub struct SlashCommand {
     /// Skill spec).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when_to_use: Option<String>,
+    /// Gitignore-style patterns from a skill's `paths:` frontmatter. `Some`
+    /// makes this a CONDITIONAL skill — withheld from the model-facing listing
+    /// until the session touches a matching file (claude-code `lhr`; upstream
+    /// carries `paths` on the command metadata beside `whenToUse` too).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
     /// Alternate names this command also resolves by (TS `aliases`). Indexed by
     /// [`crate::registry::CommandRegistry::register_command`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -217,6 +223,9 @@ pub struct CommandFrontmatter {
     /// SLASH.4: TS `when_to_use` frontmatter — advisory text describing when the
     /// command applies (carried onto [`SlashCommand::when_to_use`]).
     pub when_to_use: Option<String>,
+    /// Gitignore-style `paths:` patterns, carried onto
+    /// [`SlashCommand::paths`]. `Some` marks a CONDITIONAL skill.
+    pub paths: Option<Vec<String>>,
     /// Execution context: `Some("fork")` runs the command as a subagent under
     /// its own permission scoping. Anything else (including `None`) is inline.
     pub context: Option<String>,

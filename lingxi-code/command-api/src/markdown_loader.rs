@@ -114,6 +114,10 @@ struct RawFrontmatter {
     /// SLASH.4: TS `when_to_use` (`snake_case` key, free-form string).
     #[serde(default)]
     when_to_use: Option<String>,
+    /// Gitignore-style patterns that make this a CONDITIONAL skill: it stays
+    /// unlisted until the session touches a matching file (claude-code `lhr`).
+    #[serde(default)]
+    paths: Option<Vec<String>>,
     /// `context: fork` runs the skill as a subagent under its own permission
     /// scoping instead of expanding it inline.
     #[serde(default)]
@@ -852,6 +856,10 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         disable_model_invocation,
         // SLASH.4: TS copies `frontmatter.when_to_use` verbatim.
         when_to_use: raw.when_to_use,
+        // Carried so the model-facing listing can withhold a conditional skill
+        // until one of these matches; the command record is what that listing is
+        // built from, so the field has to reach it or the filter has no key.
+        paths: raw.paths.filter(|p| !p.is_empty()),
         user_invocable,
         effort: raw.effort.map(EffortField::into_raw),
     }
@@ -990,6 +998,7 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
         // and `when_to_use` from the parsed frontmatter onto the top-level command.
         disable_model_invocation: file.frontmatter.disable_model_invocation,
         when_to_use: file.frontmatter.when_to_use.clone(),
+        paths: file.frontmatter.paths.clone(),
         ..SlashCommand::default()
     }
 }
@@ -1022,6 +1031,7 @@ pub fn build_skill_command(file: &SkillMarkdownCommandFile, source: CommandSourc
         loaded_from: Some("skills".to_string()),
         disable_model_invocation: file.frontmatter.disable_model_invocation,
         when_to_use: file.frontmatter.when_to_use.clone(),
+        paths: file.frontmatter.paths.clone(),
         skill_root: Some(file.skill_root.clone()),
         // `userInvocable: en` — was hardcoded `true`, which made an on-disk
         // `user-invocable: false` a no-op and left the skill in the `/` menu.

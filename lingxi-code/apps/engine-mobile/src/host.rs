@@ -2510,13 +2510,27 @@ fn mobile_skill_listing_provider(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
     session_mode: session::jsonl::SessionMode,
     local_app_scope: bool,
+    read_file_state: Option<tool_api::read_file_state::ReadFileStateMap>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
+    // Session state: once a touched file has revealed a conditional skill, a
+    // later turn must not hide it again (the read-state map is an LRU, so the
+    // matching path can age out).
+    let conditional = Arc::new(std::sync::Mutex::new(skill_api::ConditionalSkills::new()));
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
             let registry = registry.clone();
+            let conditional = conditional.clone();
+            let read_file_state = read_file_state.clone();
             async move {
                 use command_api::{CommandSource, SlashCommandKind};
                 let reg = registry.read().await;
+                let touched = read_file_state.as_ref().map_or_else(Vec::new, |m| {
+                    m.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .keys()
+                });
+                let root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
                     .into_iter()
                     // TS `cmd.type === 'prompt'` — markdown/plugin/bundled
@@ -2531,6 +2545,16 @@ fn mobile_skill_listing_provider(
                     })
                     // TS `cmd.source !== 'builtin'`.
                     .filter(|c| c.source != CommandSource::Builtin)
+                    // A CONDITIONAL skill (`paths:`) stays out of the listing
+                    // until the session has touched a matching file
+                    // (claude-code `lhr`).
+                    .filter(|c| match c.paths.as_deref() {
+                        None => true,
+                        Some(patterns) => conditional
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .is_available_named(&c.name, patterns, &touched, &root),
+                    })
                     // Local App's full specialist/tooling skill set is only
                     // useful inside an app workspace. Global/project
                     // conversations keep the three entry routers visible;
@@ -4662,6 +4686,7 @@ async fn build_mobile_inner_with_ask(
         shared_command_registry.clone(),
         cfg.session_mode,
         local_app_scope_id.is_some(),
+        Some(read_state_map.clone()),
     );
     #[cfg(test)]
     let wired_skill_loader = skill_loader.clone();
@@ -13723,7 +13748,7 @@ mod tests {
             "mobile orchestrator must expose a skill-listing provider"
         );
         let listed =
-            mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, false)
+            mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, false, None)
                 .skill_entries()
                 .await;
         let listed_names: std::collections::BTreeSet<_> =
@@ -13778,7 +13803,7 @@ mod tests {
             );
         }
         let app_scoped =
-            mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, true)
+            mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, true, None)
                 .skill_entries()
                 .await;
         let app_scoped_names: std::collections::BTreeSet<_> =
@@ -13983,6 +14008,7 @@ mod tests {
             registry.clone(),
             session::jsonl::SessionMode::Chat,
             false,
+            None,
         )
         .skill_entries()
         .await;
@@ -13999,7 +14025,7 @@ mod tests {
         );
 
         let code =
-            mobile_skill_listing_provider(registry, session::jsonl::SessionMode::Code, false)
+            mobile_skill_listing_provider(registry, session::jsonl::SessionMode::Code, false, None)
                 .skill_entries()
                 .await;
         assert!(code

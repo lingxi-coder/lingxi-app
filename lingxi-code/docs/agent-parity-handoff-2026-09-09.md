@@ -144,21 +144,75 @@ INSIDE `handler.kill(..)`」—— `kill()` 返回时任务已终态，那个集
 **下一步**：先搬 `Xne` 的升级机制（per-agent-id 跟踪 + 两个定时器 + settle 回调），
 再接三个读取点。它在 `tasks/`，动手前先确认没有并发会话正在改那些文件。
 
-### 3.2 AG-14 — agent 结果的 harness-note 分层（P2）
+### 3.2 AG-14 — harness-note 分层（**2026-09-10 复查：不是一个整层的移植任务**）
 
-`bft`（@3532630）返回 `{harnessNoteCount, harnessTailCount, harnessSectionHash, content}`，
-下游 `Rae(content, harnessNoteCount, …)` 把 note 和正文切开：kill 路径把 `pRe` note
-从 `finalMessage` 里滤掉（@2100176），`TaskOutput` 把剩下的 note 作为 `harnessHead`
-呈现（@3754042）。端口整层不存在（`harness_note` / `harness_tail` / `harness_head` 零命中）。
+原条目写着「端口整层不存在（`harness_note` / `harness_tail` / `harness_head` 零命中）」，
+并把它记成一个 P2 的整层移植。对 2.1.267 逐个调用点复查后，这个前提在**三处**是错的，
+拆开之后真正开放的只剩一条，而且它被另一个子系统挡着。
 
-**已经修掉的那一半**：同步路径的 turn-limit NOTE（AG-05，`cc4e31307`）—— 那是模型
-今天真正丢失的字节。剩下的是第二条 `⚠ {notice}` note、note/正文切分、以及异步路径的
-`harnessHead`。
+#### 生产者 `iht`（原 `bft`，`src_163219561.js` @3542572）
 
-**⛔ 阻塞**：在 `tasks/src/handlers/local_agent.rs`，本轮全程是并发会话的未提交文件。
+```js
+let {live:ue, notice:me} = ICe(e);            // ← notice = model_refusal_fallback
+let {content:Xe, findings:Qe} = V4n(Ce);      // ← 输出护栏
+let Je=[], ut=t5n(e);                          // ut = max_turns_reached
+if(ut) Je.push({type:"text", text:`${Exe}${ut}-turn limit before finishing. …`});
+if(me) Je.push({type:"text", text:`⚠ ${me.content}\n`});
+if(Pe!==void 0) Je.push({type:"text", text:Pe});   // Pe = handback
+let {report:dt, harnessTail:en} = r.persistedToolResultFiles ? res(…) : {report:Xe, harnessTail:[]};
+let qt = Qe.some(Mn=>Mn.reportable) && dt.length>0 && dt[0]===Xe[0],
+    yn = Je.length + (qt?1:0), bn = [...Je, ...dt, ...en];
+return {…, harnessNoteCount:yn, harnessTailCount:en.length, harnessSectionHash:oj(bn), content:bn, …}
+```
 
-**下一步**：异步路径别把 note 塞进 `outcome.result` —— oracle 不放在 `<result>` 里，
-放进去是**制造新的 divergence**。要按 `Rae` 的形状加 `harnessHead` 通道。
+#### 逐条落点
+
+| 片段 | 状态 |
+|---|---|
+| turn-limit note (`ut`) | ✅ 已移植（AG-05，`cc4e31307`） |
+| `V4n` findings + `Y4n` | ✅ 已移植 —— `subagent_output_guard::sanitize_blocks` + `tengu_subagent_output_flagged`（`agent.rs:4577`） |
+| `TaskOutput` 的 notes/body 切分 | ✅ 已移植 —— `harness_head`（`tasks/src/handle.rs:875`），原条目说的「零命中」已过期 |
+| `⚠ ${me.content}` note | ⛔ 见下 |
+| handback note (`Pe`) | 🔒 上游休眠：`vln`/`Eln`/`Cln` 全部记在 `lively_waffle` 上，`tengu_lively_waffle` 默认 **false** |
+| `harnessTail` (`res`) | 🔒 门在 `r.persistedToolResultFiles`，端口**零命中**（无 tool-result 落盘） |
+| `harnessNoteCount` / `TailCount` / `SectionHash` | 见下 |
+
+#### 🚨 `Ofe()` 只挡住一个调用点，不是整层
+
+`function Ofe(){let e=Rn.CLAUDE_CODE_HANDBACK_PROVENANCE; if(e!==void 0)return e;
+return H("tengu_melodic_wolf",!1)}` —— 默认 **false**。
+
+它只出现在 agent tool result 那一处（@3619534，`Ofe()?TGt(…):d`）。切分函数 `lue`
+另有**两个无门调用点**：kill 通知（`qD` @2112497）和 `TaskOutput`（@3769938）。
+⚠️ 「这个字段被 flag 挡着」不能从一个调用点推广到全部——按调用点数门。
+
+端口今天只产出**一条** note（turn-limit），`harness_head` 用 `max_turns_reached`
+重建它、并在 `status == Killed` 时返回 `None`；对单条 note 而言这与
+`lue` + `filter(!startsWith(Exe))` 等价。**计数与 hash 只有在第二条 note 可达时才需要**，
+而第二条的两个来源现在一个休眠、一个被挡住。
+
+#### ⛔ 唯一开放的一条：`⚠ notice` 与 `PZo` 撤回过滤
+
+`ICe(e)` 的 `notice` 是**最后一条 `model_refusal_fallback` 系统消息**（`scope==="local"`
+且 `fallbackModel` 归一化后等于最后一条 assistant 的 model）；`PZo` 依据
+`retractedMessageUuids` 把被撤回的消息从 `live` 里滤掉，并发
+`tengu_resume_retracted_dropped`。
+
+端口有完整的 refusal-notice 子系统（`orchestrator/src/refusal_notice.rs`，含
+`retracted_message_uuids`），但通知是用 `self.output.emit_text(...)` 以**纯文本**发出的，
+**没有** typed `model_refusal_fallback` 系统帧 —— 这一点 `model.rs:1371` 自己记着是
+deferred。没有那个帧，`ICe` 无从查找、`PZo` 无从过滤。
+
+**下一步**：先做 typed `model_refusal_fallback` 系统帧（在 model/refusal 子系统，不在 agent），
+再回来接这两条。⛔ 别只加 `⚠` 文案 —— 没有帧就没有 `notice.content` 可读。
+
+#### ❓ 留一个未定的窄竞态
+
+`qD` 在 `!p.notified` 时用**已存的** `p.result` 发 `finalMessage` + `usage`，状态记 `killed`；
+端口 `SubagentResult::Killed { agent_id }` 不带任何字段，Killed 分支
+（`local_agent.rs:1035`）也不填 outcome。**只有**「run 已完成并存下结果、通知还没 drain、
+此时 kill 到达」这一个竞态里两者不同。端口的设计注释说晚到的 kill 是 graceful no-op，
+所以这个竞态在端口可能压根不存在 —— **未验证**，记成问题不是发现。
 
 ### 3.3 AG-15 — `agent.spawn` 插件 function hook（P3）
 

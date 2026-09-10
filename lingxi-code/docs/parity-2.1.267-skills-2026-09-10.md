@@ -40,9 +40,56 @@ sets; two of the three defects below were exactly that.
 | plugin | ✅ | ✅ |
 | MCP-derived | ✅ | partial — resolves as `Other` and is rejected by the tool |
 | legacy `commands/`-as-skills | ❓ unverified | ❌ `LoadedFrom::CommandsDeprecated` declared, never constructed |
-| conditional / `paths:`-activated | ❓ unverified | ❌ absent |
+| conditional / `paths:`-activated | ✅ **verified present** (see §2.1) | ❌ absent |
 
-⛔ The last two are marked unverified deliberately. Their upstream identifiers
+### 2.1 ✅ Conditional (`paths:`) skills — verified, 2026-09-10
+
+The needle the old note asked for, found without relying on symbol names:
+`"skill_paths"` is a real pattern-source tag (`Yf` in `src_161574736.js`, beside
+`claudemd_rule_globs` / `permission_rules`), and the activator is `lhr`
+(`src_163219561.js` @4573642):
+
+```js
+function lhr(e,n){ if((g_e()?.conditionalSkills.size??0)===0) return [];
+  let r=[];
+  for(let[o,d] of PR().conditionalSkills){
+    if(d.type!=="prompt"||!d.paths||d.paths.length===0) continue;
+    let p=uhr.default().add(y8(d.paths,"skill_paths"));      // gitignore-style
+    for(let y of e){ let v=sCt(y)?dhr(n,y):y;
+      if(!v||v.startsWith("..")||sCt(v)) continue;
+      if(p.ignores(v)){ PR().dynamicSkills.set(MGe(d),d);
+        PR().conditionalSkills.delete(o);
+        PR().activatedConditionalSkillNames.add(o);
+        r.push(o), t(`[skills] Activated conditional skill '${o}' (matched path: ${v})`);
+        break } } }
+  if(r.length>0) i("tengu_dynamic_skills_changed",{source:_("conditional_paths"),…}) }
+```
+
+So the shape is:
+
+* a skill whose frontmatter carries `paths:` is loaded into **`conditionalSkills`**,
+  NOT into the listed set — it is invisible until activated;
+* when the session touches a file matching any of its patterns
+  (**gitignore semantics**, the `ignore` library, same compiler as
+  `claudemd_rule_globs`), it moves into `dynamicSkills` and becomes available;
+* the move is **one-way and once** (`conditionalSkills.delete`, and the name is
+  recorded in `activatedConditionalSkillNames`);
+* relative paths escaping the root (`v.startsWith("..")`) are skipped;
+* it emits `tengu_dynamic_skills_changed` with `source: "conditional_paths"`, and
+  logs `[skills] Activated conditional skill '{name}' (matched path: {path})`.
+
+`paths` is also in the recognized-frontmatter-key union `O` (`src_161416353.js`)
+alongside `when_to_use` / `hooks` / `context`, and in the command-metadata shape
+next to `whenToUse` — consistent with skills surfacing as commands.
+
+**Still absent here, and now a specified task rather than a question.** It needs
+a second skill bucket, a gitignore matcher over the frontmatter patterns, and a
+hook wherever this port learns a file was touched. ⚠️ The sibling
+`tengu_dynamic_skills_changed` `source: "file_operation"` belongs to DYNAMIC skill
+discovery (`Dynamically discovered {n} skills from {m} directories`) — a
+different mechanism that is also absent; do not conflate them.
+
+⛔ The remaining unverified row is `commands/`-as-skills. Their upstream identifiers
 (`loadSkillsFromCommandsDir`, `activateConditionalSkillsForPaths`,
 `getDynamicSkills`) are **0 hits in the binary — which proves nothing**, because
 minification erases source-level function names. They must be established by a

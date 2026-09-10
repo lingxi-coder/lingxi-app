@@ -43,7 +43,7 @@ for a port pinned at 251.
 
 ---
 
-## MCP-01 — no legacy HTTP+SSE fallback on a rejected `initialize` — ✅ REAL
+## MCP-01 — no legacy HTTP+SSE fallback on a rejected `initialize` — ✅ FIXED in `a1e070f4e`
 
 Upstream dials streamable HTTP, and when the `initialize` POST is rejected it
 **re-dials the server over legacy HTTP+SSE** (`src_187489883.js` @63137,
@@ -87,7 +87,12 @@ live upstream behaviour, not a dormant flag).
 **Impact:** an MCP server that speaks only HTTP+SSE fails to connect here and
 connects upstream.
 
-**Blocker, measured.** This is bigger than "wire a fallback":
+**Fixed in `a1e070f4e`**, on top of the prerequisite in `ff8bda8b4`. The
+blocker below was measured before implementation and turned out to be avoidable:
+siting the rescue inside `RemoteMcpTransport::connect_and_initialize` rather than
+the registry retry seam removed almost all of it. See "How it was actually done".
+
+**Blocker as originally measured:**
 
 * `McpError::HttpResponse { status, www_authenticate }` carries the **status but
   not the response body**, and the predicate needs both. Widening it is additive
@@ -109,6 +114,55 @@ to `None` without inventing a policy.
 with a valid JSON-RPC error is a real protocol failure; re-dialling it would
 convert protocol errors into silent transport churn, which is worse than the
 missing fallback.
+
+### How it was actually done
+
+**Where it lives decided the cost.** The registry retry seam
+(`registry.rs:3667`) varies the `McpTransportSpec`, and `Http → Sse` is a
+lossless four-field conversion, so it looked like the home. It is a trap:
+`oauth::server_key` folds the spec KIND into the key, so re-dialling there would
+silently repartition the stored OAuth token and the discovery cache. Upstream
+keeps its config and swaps only the transport object.
+
+Putting the rescue inside the transport therefore:
+
+* kept `McpError::HttpResponse` untouched — the body is still in scope there, so
+  the 7 construction sites and 4 match sites in `platform-api` never moved;
+* made `sawAuthChallenge` a local flag instead of cross-crate plumbing, so
+  `McpConnectOptions` kept its `Copy` derive;
+* confined the whole change to `platforms/common/`.
+
+Ported in full: the four guards, the `min(5000, max(1000, remaining))` budget,
+the three-arm error rule, and `postMethodNotAllowed`'s real job — refusing to
+start OAuth when the stream GET answers 401 and the original rejection was a
+400/404 rather than a 405. That guard is fallback-only, as upstream scopes it.
+
+**One approximation**, recorded at `choose_rescue_error`: upstream's
+`sawAuthChallenge` is set by a fetch wrapper and sees a 401/403 on ANY request in
+the dial; only the dial's final error is observable here. Since the predicate
+admits only 400/404/405, the two agree except when a 401/403 occurred on an
+earlier request of the original dial and was then followed by one of those
+statuses.
+
+### 🚨 The prerequisite nobody had recorded — `ff8bda8b4`
+
+Implementing MCP-01 surfaced a defect that existed independently of it: **this
+port's SSE transport was not a legacy HTTP+SSE client at all.** `connect_sse`
+POSTed to the url it opened the stream on and skipped named SSE events, while
+upstream keeps `_url` and `_endpoint` apart and learns the second from a named
+`endpoint` event, resolved relative to the stream url, required to be
+same-origin, with no sending before it arrives.
+
+So a configured `type: "sse"` server following that contract **never received
+this port's outbound frames**, and re-dialling as SSE without fixing it would
+have connected the stream and posted into the void. The module doc had described
+POST-to-the-same-url as a LITERAL contract "matching claude-code's
+`SSEClientTransport`" — it did not match it, and this was not a recorded
+divergence. `connect_sse` now takes an explicit `SseEndpointMode`; the IDE
+variant, which really does serve both directions on one url, keeps its
+behaviour. Two e2e mocks were not conformant either and now name a different
+path, so those round trips only pass if the client honours what the server
+named.
 
 ## MCP-02 — a project `.mcp.json` can smuggle an unresolved `${…}` into a command — ✅ FIXED in `7a710a252`
 
@@ -193,9 +247,6 @@ managed-settings approval subsystem, not this crate).
 ## Recommended order
 
 1. ~~MCP-02~~ — **done** (`7a710a252`).
-2. **MCP-01** — real interop loss, substrate present (`McpTransportSpec::Sse`
-   already exists as a configured transport), but it touches the dial path and
-   needs BOTH halves of the predicate: a 400/404/405 *and* a body that does not
-   parse as JSON-RPC. Implementing only the status half would turn genuine
-   protocol errors into silent transport churn.
-3. **MCP-03** — needs a scope decision before any code.
+2. ~~MCP-01~~ — **done** (`ff8bda8b4` + `a1e070f4e`).
+3. **MCP-03** — needs a scope decision before any code. Still the only open item
+   here.

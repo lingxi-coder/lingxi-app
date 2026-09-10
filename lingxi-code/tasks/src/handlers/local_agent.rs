@@ -513,6 +513,23 @@ impl Task for LocalAgentHandler {
             .get(task_id)
             .copied()
             .ok_or(TaskError::TerminatedTask)?;
+        // 2.1.266 `a0`, the TARGET half of the resume gate: refuse to re-enter an
+        // agent whose own stop has not finished. Upstream's condition is
+        // `a0(e) || !xh(e) && Ps(status)` — either the target is stop-pending, or
+        // it still holds a loop entry while its row already reads terminal, which
+        // is the same "stopped but not exited" state seen from the other side.
+        // The port's loop entry is the live worker record.
+        let target_still_stopping =
+            platform_api::agent_processes::is_stop_pending(&agent_id.to_string())
+                || (self.workers.lock().await.contains_key(task_id)
+                    && self.status_sink.is_terminal(task_id).await);
+        if target_still_stopping {
+            return Err(TaskError::Internal(format!(
+                "Agent {agent_id} is still stopping \u{2014} its previous run was stopped \
+                 but has not exited. Re-run TaskStop on it or wait for it to exit before \
+                 resuming."
+            )));
+        }
         // Resuming a parked agent re-enters it with the permissions of whatever
         // is wired NOW. For a forked skill that is the parent's scoping, which
         // is strictly wider than the skill's — so the gate re-establishes (or
@@ -2114,7 +2131,68 @@ mod tests {
         );
     }
 
+    /// 2.1.266 `a0`, the TARGET half: an agent whose own stop has not finished
+    /// must not be re-entered. Upstream refuses with its own message, distinct
+    /// from the caller-side refusals — the caller here is fine; the agent being
+    /// resumed is the one that is mid-teardown.
     #[tokio::test]
+    async fn resuming_an_agent_that_is_still_stopping_is_refused() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (dir, mgr) = make_output_manager(fs.clone());
+        let _ = &dir;
+        let sink = Arc::new(RecordingSink::default());
+        let ctx = make_ctx(fs);
+        let tx_slot = Arc::new(StdMutex::new(None));
+        let streaming = MockStreamingSpawner::new(
+            tx_slot.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink)
+            .with_streaming_spawner(streaming.clone());
+
+        let handle = handler
+            .spawn(local_agent_input("start"), ctx.clone())
+            .await
+            .expect("spawn should succeed");
+        let task_id = handle.task_id.clone();
+
+        // Wait for the persistent worker to register its agent id.
+        let agent_id = {
+            let mut got = None;
+            for _ in 0..200 {
+                if let Some(id) = *streaming.spawned_id.lock().unwrap() {
+                    got = Some(id);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            got.expect("spawn_persistent should have run")
+        };
+
+        // Control: with no stop pending the resume is accepted.
+        handler
+            .send_message(&task_id, "first".into(), ctx.clone())
+            .await
+            .expect("a live agent accepts a message");
+
+        // Now its stop is in flight.
+        let _stopping = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
+        let err = handler
+            .send_message(&task_id, "again".into(), ctx)
+            .await
+            .expect_err("an agent mid-stop must not be re-entered");
+        match err {
+            TaskError::Internal(message) => {
+                assert!(
+                    message.contains("is still stopping")
+                        && message.contains("Re-run TaskStop on it"),
+                    "upstream's target-side wording: {message}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
     async fn send_message_requires_seam_and_live_agent() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let dir = tempdir().unwrap();

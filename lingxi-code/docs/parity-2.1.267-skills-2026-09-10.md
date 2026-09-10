@@ -82,9 +82,30 @@ So the shape is:
 alongside `when_to_use` / `hooks` / `context`, and in the command-metadata shape
 next to `whenToUse` — consistent with skills surfacing as commands.
 
-**Still absent here, and now a specified task rather than a question.** It needs
-a second skill bucket, a gitignore matcher over the frontmatter patterns, and a
-hook wherever this port learns a file was touched. ⚠️ The sibling
+### 2.2 Mechanism landed (`4c7fb33bd`), listing filter still to wire
+
+`skill_api::ConditionalSkills` implements the state machine:
+`is_conditional` (non-empty `paths`), `is_available`, and `activate_for_paths`,
+which matches gitignore-style through the `ignore` crate — the same crate the
+`.worktreeinclude` matcher uses, and reporting through the already-declared
+`SITE_SKILL_PATHS` telemetry site. Activation is one-way and once, and a path
+that escapes the root is skipped.
+
+⚠️ **Two bugs worth knowing about, both caught by the tests:** `docs/` matched
+nothing until the matcher moved to `matched_path_or_any_parents` (plain `matched`
+only tests the final component), and a path outside the workspace activated a
+repo-scoped skill because the first version fell back to the absolute path when
+it could not be made relative.
+
+**What is left is one plumbing layer, not the mechanism.** The model-facing
+listing is built at the composition roots from **`command_api` commands**
+(`LazySkillListingProvider`, desktop `lib.rs:8957` / mobile `host.rs:2515`), and
+a command record carries no `paths` — so the filter has nothing to key on yet.
+Upstream's command metadata DOES carry `paths` (it sits next to `whenToUse` in
+the command shape), so the step is to plumb the frontmatter field onto the
+command and then drop un-activated conditional skills in those two closures,
+calling `activate_for_paths` with `tool_api::read_file_state::keys()` — which is
+this port's version of the touched-path list `lhr` takes. ⚠️ The sibling
 `tengu_dynamic_skills_changed` `source: "file_operation"` belongs to DYNAMIC skill
 discovery (`Dynamically discovered {n} skills from {m} directories`) — a
 different mechanism that is also absent; do not conflate them.

@@ -317,7 +317,6 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
                 cross_provider: true,
                 parent_profile: String::new(),
                 parent_model: String::new(),
-                conversation_id: None,
                 workflow_run_id: None,
             },
             conversation_id: String::new(),

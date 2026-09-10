@@ -707,7 +707,6 @@ fn parse_workflow_fusion_request(
         cross_provider: opts.cross_provider.unwrap_or(false),
         parent_profile,
         parent_model: parent_model.to_string(),
-        conversation_id: None,
         workflow_run_id: Some(run_id.to_string()),
     })
 }
@@ -3827,13 +3826,11 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                         parent_model.as_deref(),
                         parent_model_profile.as_deref(),
                     ) {
-                        Ok(mut request) => {
+                        Ok(request) => {
                             // Keep a background workflow tied to the session
-                            // that launched it. The Fusion engine uses this
-                            // named request identity to select the scoped
-                            // budget, so do not infer it from the current
-                            // router/model state at dispatch time.
-                            request.conversation_id = workflow_session_uuid.clone();
+                            // that launched it: the identity below names that
+                            // session, so the scoped budget is never inferred
+                            // from router/model state at dispatch time.
                             let executor = fusion
                                 .as_ref()
                                 .expect("fusion request parsing requires an executor")

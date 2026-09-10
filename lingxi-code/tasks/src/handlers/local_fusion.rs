@@ -656,12 +656,9 @@ impl Task for LocalFusionHandler {
             },
             cancel.clone(),
         );
-        let mut request = request;
-        // The task input is the host-trusted session identity. Keep request
-        // text from selecting another ledger (or silently becoming an
-        // unscoped legacy identity) by replacing the compatibility field with
-        // this value before preparation.
-        request.conversation_id = trusted_session.map(|_| conversation_id.clone());
+        // The task input is the host-trusted session identity, and it reaches
+        // preparation only through the identity below. Request text has no say
+        // in which ledger this run bills.
         let identity = FusionRunIdentity::new(
             FusionRunId::generated(),
             trusted_session,

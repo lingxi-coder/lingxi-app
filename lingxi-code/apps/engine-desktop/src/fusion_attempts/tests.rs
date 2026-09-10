@@ -507,7 +507,6 @@ fn workflow_registration(
     request.origin = platform_api::FusionOrigin::Workflow;
     request.parent_model = "unavailable-parent".into();
     request.workflow_run_id = Some("original-scope".into());
-    request.conversation_id = Some(session.to_string());
     let panel = fusion::ResolvedPanel {
         profile: "profile".into(),
         model: "wire".into(),
@@ -1134,7 +1133,6 @@ async fn authority() -> Arc<RunAuthority> {
             cross_provider: false,
             parent_profile: "profile".into(),
             parent_model: "test".into(),
-            conversation_id: None,
             workflow_run_id: None,
         },
         resolved: fusion::ResolvedSet {

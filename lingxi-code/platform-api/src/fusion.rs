@@ -203,9 +203,6 @@ pub struct FusionRequest {
     pub parent_profile: String,
     /// Parent wire model id.
     pub parent_model: String,
-    /// Conversation this run belongs to (slash / agent).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation_id: Option<String>,
     /// Workflow run id when origin is [`FusionOrigin::Workflow`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
@@ -351,33 +348,13 @@ impl FusionRunIdentity {
         }
     }
 
-    /// Build a legacy identity from a request's optional conversation id.
-    pub fn for_legacy_request(
-        request: &FusionRequest,
-        parent_operation_id: Option<String>,
-    ) -> Result<Self, FusionError> {
-        let session_id = match request.conversation_id.as_deref() {
-            None => None,
-            Some(raw) => Some(protocol::SessionId::parse_prefixed(raw).ok_or_else(|| {
-                FusionError::InvalidRequest(
-                    "fusion conversation_id must be a prefixed session id".into(),
-                )
-            })?),
-        };
-        Ok(Self::new(
-            FusionRunId::generated(),
-            session_id,
-            request.origin,
-            parent_operation_id,
-        ))
-    }
 }
 
 /// Immutable request/inheritance handoff consumed by `prepare`.
 #[derive(Clone)]
 pub struct FusionSubmission {
-    /// Caller request DTO. Its string session field is compatibility data only
-    /// once `identity.session_id` is present.
+    /// Caller request DTO. It carries what to run, never who owns it: the
+    /// session is `identity.session_id` and nothing else.
     pub request: FusionRequest,
     /// Parent handles captured by the caller.
     pub inherit: FusionInheritance,
@@ -397,19 +374,6 @@ impl FusionSubmission {
             return Err(FusionError::InvalidRequest(
                 "fusion origin does not match the trusted run identity".into(),
             ));
-        }
-        if let Some(raw) = request.conversation_id.as_deref() {
-            if let Some(parsed) = protocol::SessionId::parse_prefixed(raw) {
-                if identity.session_id != Some(parsed) {
-                    return Err(FusionError::InvalidRequest(
-                        "fusion request session does not match the trusted run identity".into(),
-                    ));
-                }
-            } else {
-                return Err(FusionError::InvalidRequest(
-                    "fusion conversation_id is not a session id".into(),
-                ));
-            }
         }
         if let Some(parent_operation_id) = identity.parent_operation_id.as_deref() {
             if parent_operation_id.trim().is_empty() {
@@ -1165,10 +1129,6 @@ impl FusionRunOutcome {
 
     /// Consume the envelope for legacy callers.
     #[must_use]
-    pub fn into_legacy_result(self) -> Result<FusionResult, FusionError> {
-        self.result
-    }
-
     /// Whether attempt receipts or the legacy aggregate own accounting.
     #[must_use]
     pub fn billing_mode(&self) -> crate::ModelAttemptBillingMode {

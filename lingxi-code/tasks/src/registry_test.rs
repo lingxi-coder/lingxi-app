@@ -508,7 +508,6 @@ async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state(
         cross_provider: false,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
-        conversation_id: Some("11111111-2222-4333-8444-555555555555".into()),
         workflow_run_id: None,
     };
 
@@ -1628,7 +1627,6 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
                         cross_provider: false,
                         parent_profile: "openai".into(),
                         parent_model: "gpt-5.4".into(),
-                        conversation_id: Some("11111111-2222-4333-8444-555555555555".into()),
                         workflow_run_id: None,
                     },
                     conversation_id: "11111111-2222-4333-8444-555555555555".into(),

@@ -703,7 +703,6 @@ fn request(prompt: &str) -> FusionRequest {
         cross_provider: true,
         parent_profile: "anthropic".into(),
         parent_model: "claude-sonnet-5".into(),
-        conversation_id: None,
         workflow_run_id: None,
     }
 }
@@ -2062,7 +2061,6 @@ async fn anthropic_only_catalog_clears_structured_output_preflight() {
         cross_provider: false,
         parent_profile: "anthropic".into(),
         parent_model: "claude-sonnet-5".into(),
-        conversation_id: None,
         workflow_run_id: None,
     };
     let result = orch.run(req, inherit(), None).await;
@@ -5459,8 +5457,7 @@ async fn prepared_identity_requires_and_uses_its_scoped_budget_view() {
         },
         CancellationToken::new(),
     );
-    let mut scoped_request = request("task");
-    scoped_request.conversation_id = Some(session_id.to_string());
+    let scoped_request = request("task");
     let identity = FusionRunIdentity::new(
         FusionRunId::generated(),
         Some(session_id),
@@ -5479,8 +5476,7 @@ async fn prepared_identity_requires_and_uses_its_scoped_budget_view() {
     assert_eq!(scopes.lock().unwrap().as_slice(), &[session_id]);
     assert_eq!(scoped_reserves.load(Ordering::SeqCst), 1);
 
-    let mut unscopable_request = request("task");
-    unscopable_request.conversation_id = Some(session_id.to_string());
+    let unscopable_request = request("task");
     let unscopable_identity = FusionRunIdentity::new(
         FusionRunId::generated(),
         Some(session_id),
@@ -5500,16 +5496,16 @@ async fn prepared_identity_requires_and_uses_its_scoped_budget_view() {
     };
     assert_eq!(error, FusionError::BudgetReservationUnavailable);
 
-    let mut direct_request = request("task");
-    direct_request.conversation_id = Some(session_id.to_string());
+    let direct_request = request("task");
     let direct_error = orchestrator
-        .run(
+        .run_scoped(
             direct_request,
+            Some(session_id),
             inherit_cancel(CancellationToken::new()),
             None,
         )
         .await
-        .expect_err("the production run compatibility shim must fail closed too");
+        .expect_err("the one-shot entrypoint must fail closed on the same session too");
     assert_eq!(direct_error, FusionError::BudgetReservationUnavailable);
 }
 
@@ -6550,7 +6546,6 @@ async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
         // tie-break key never discriminates among the analyst candidates.
         parent_profile: "somewhere-else".into(),
         parent_model: "unused".into(),
-        conversation_id: None,
         workflow_run_id: None,
     };
     let spawner = FakeSpawner::new(HashMap::new());

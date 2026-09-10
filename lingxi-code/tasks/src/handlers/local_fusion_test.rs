@@ -1035,7 +1035,6 @@ fn dummy_request() -> FusionRequest {
         cross_provider: true,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
-        conversation_id: Some(TEST_CONVERSATION_ID.into()),
         workflow_run_id: None,
     }
 }

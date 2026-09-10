@@ -186,7 +186,6 @@ fn submission(
         cross_provider: false,
         parent_profile: "anthropic".into(),
         parent_model: MODELS[0].into(),
-        conversation_id: Some(session.to_string()),
         workflow_run_id: None,
     };
     platform_api::FusionSubmission::new(

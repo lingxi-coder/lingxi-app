@@ -882,6 +882,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     struct CapturingFusion {
         requests: std::sync::Mutex<Vec<platform_api::FusionRequest>>,
+        /// The session each run was prepared under. It travels on the trusted
+        /// identity, never on the request, so capture it where it arrives.
+        sessions: std::sync::Mutex<Vec<Option<protocol::SessionId>>>,
     }
 
     #[async_trait::async_trait]
@@ -892,6 +895,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
+            self.sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(submission.identity.session_id);
             ::platform_api::prepared_from_oneshot(
                 submission,
                 timeout,
@@ -3173,6 +3180,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }));
         let fusion = Arc::new(CapturingFusion {
             requests: std::sync::Mutex::new(Vec::new()),
+            sessions: std::sync::Mutex::new(Vec::new()),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
@@ -3211,6 +3219,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         let fusion = Arc::new(CapturingFusion {
             requests: std::sync::Mutex::new(Vec::new()),
+            sessions: std::sync::Mutex::new(Vec::new()),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
         let previous_session = protocol::SessionId::new();
@@ -3244,7 +3253,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].conversation_id, Some(switched_session.to_string()));
+        drop(seen);
+        assert_eq!(
+            fusion
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[Some(switched_session)],
+            "the run must be prepared under the session live at dispatch"
+        );
     }
 
     #[tokio::test]

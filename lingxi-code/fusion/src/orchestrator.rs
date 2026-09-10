@@ -2613,29 +2613,32 @@ impl FusionOrchestrator {
             inherit: FusionInheritance,
             progress: Option<Sender<FusionProgress>>,
         ) -> Result<FusionResult, FusionError> {
-            // Keep the trait's legacy entrypoint for fake/source compatibility,
-            // but route the production orchestrator through the same immutable
-            // preparation snapshot and owned supervisor used by every host.
+            self.run_scoped(request, None, inherit, progress).await
+        }
+
+        /// The same path bound to a session, for the tests that assert
+        /// scoped-ledger behaviour.
+        pub(crate) async fn run_scoped(
+            &self,
+            request: FusionRequest,
+            session_id: Option<protocol::SessionId>,
+            inherit: FusionInheritance,
+            progress: Option<Sender<FusionProgress>>,
+        ) -> Result<FusionResult, FusionError> {
+            // Routed through the same immutable preparation snapshot and owned
+            // supervisor every host uses.
             let request_for_failure = request.clone();
             let parent_operation_id = if request.origin == FusionOrigin::Workflow {
                 request.workflow_run_id.clone()
             } else {
                 None
             };
-            let identity = match FusionRunIdentity::for_legacy_request(&request, parent_operation_id) {
-                Ok(identity) => identity,
-                Err(error) => {
-                    let run_id = FusionRunId::generated();
-                    self.emit_preparation_failed(
-                        &request_for_failure,
-                        run_id.as_str(),
-                        &progress,
-                        &error,
-                    )
-                    .await;
-                    return Err(error);
-                }
-            };
+            let identity = FusionRunIdentity::new(
+                FusionRunId::generated(),
+                session_id,
+                request.origin,
+                parent_operation_id,
+            );
             let run_id = identity.run_id.to_string();
             let submission = match FusionSubmission::new(request, inherit, identity) {
                 Ok(submission) => submission,
@@ -2656,7 +2659,7 @@ impl FusionOrchestrator {
             prepared
                 .activate(FusionActivation::now(), progress)
                 .await
-                .into_legacy_result()
+                .result
         }
 }
 
@@ -4095,7 +4098,6 @@ mod check_panel_bar_preflight_tests {
             cross_provider: false,
             parent_profile: "p".into(),
             parent_model: "m".into(),
-            conversation_id: None,
             workflow_run_id: None,
         }
     }
@@ -4461,7 +4463,6 @@ mod outer_err_arm_realized_tokens_tests {
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            conversation_id: None,
             workflow_run_id: None,
         }
     }

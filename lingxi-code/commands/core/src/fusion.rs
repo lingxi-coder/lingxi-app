@@ -299,7 +299,6 @@ pub fn fusion_request_from_slash(
     parsed: FusionSlashArgs,
     parent_profile: String,
     parent_model: String,
-    conversation_id: String,
     slash_cross_provider_default: bool,
     default_preset: FusionPreset,
     default_partial_ok: bool,
@@ -324,7 +323,6 @@ pub fn fusion_request_from_slash(
             .unwrap_or(slash_cross_provider_default),
         parent_profile,
         parent_model,
-        conversation_id: Some(conversation_id),
         workflow_run_id: None,
     }
 }
@@ -494,7 +492,6 @@ mod tests {
             parsed,
             "anthropic".into(),
             "claude-sonnet-5".into(),
-            "conv".into(),
             true,
             FusionPreset::Fast,
             true,
@@ -502,7 +499,6 @@ mod tests {
         assert!(req.cross_provider);
         assert_eq!(req.preset, FusionPreset::Fast);
         assert_eq!(req.origin, FusionOrigin::Slash);
-        assert_eq!(req.conversation_id.as_deref(), Some("conv"));
     }
 
     #[test]
@@ -606,7 +602,6 @@ mod tests {
             parsed,
             "anthropic".into(),
             "claude-sonnet-5".into(),
-            "conv".into(),
             true,
             FusionPreset::Quality,
             false,

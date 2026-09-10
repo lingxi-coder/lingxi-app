@@ -725,7 +725,6 @@ fn fusion_request_from_agent(
         cross_provider: parsed.cross_provider.unwrap_or(false),
         parent_profile,
         parent_model,
-        conversation_id: None,
         workflow_run_id: None,
     })
 }
@@ -1591,12 +1590,9 @@ impl AgentTool {
                 return Err(err);
             }
         };
-        // Fusion's orchestrator scopes its budget ledger from the request's
-        // conversation id.  Read the live session immediately before dispatch
-        // so a session switch that happened earlier in this turn cannot leave
-        // the request unscoped (the parser intentionally has no session
-        // dependency and keeps this wire field `None` for other callers).
-        request.conversation_id = origin_session_id.map(|session_id| session_id.to_string());
+        // The run's session is `identity.session_id` below, read live
+        // immediately before dispatch so a session switch earlier in this turn
+        // cannot leave the run scoped to the wrong ledger.
         let parent_registry = ctx
             .subagent_registry
             .clone()

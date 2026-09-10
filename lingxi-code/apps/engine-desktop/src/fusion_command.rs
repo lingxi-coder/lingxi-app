@@ -427,7 +427,6 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
                     .unwrap_or_default()
             }),
             snapshot.model.clone(),
-            conversation_id.clone(),
             surface.slash_cross_provider_default,
             surface.default_preset,
             surface.default_partial_ok,

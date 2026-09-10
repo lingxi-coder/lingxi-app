@@ -612,6 +612,9 @@ struct ImmediateFusionExecutor {
     surface: FusionAgentSurface,
     cap: u32,
     seen: StdMutex<Vec<FusionRequest>>,
+    /// The session each run was prepared under. It travels on the trusted
+    /// identity, never on the request.
+    seen_sessions: StdMutex<Vec<Option<protocol::SessionId>>>,
     response: StdMutex<Result<FusionResult, FusionError>>,
 }
 
@@ -625,6 +628,7 @@ impl ImmediateFusionExecutor {
             surface,
             cap,
             seen: StdMutex::new(Vec::new()),
+            seen_sessions: StdMutex::new(Vec::new()),
             response: StdMutex::new(response),
         })
     }
@@ -638,6 +642,10 @@ impl FusionExecutor for ImmediateFusionExecutor {
     ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
+        self.seen_sessions
+            .lock()
+            .unwrap()
+            .push(submission.identity.session_id);
         ::platform_api::prepared_from_oneshot(
             submission,
             timeout,
@@ -3181,8 +3189,11 @@ async fn workflow_fusion_round_trips_a_compact_result() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].origin, platform_api::FusionOrigin::Workflow);
     assert_eq!(
-        seen[0].conversation_id.as_deref(),
-        Some("11111111-2222-4333-8444-555555555555")
+        executor.seen_sessions.lock().unwrap().as_slice(),
+        &[protocol::SessionId::parse_prefixed(
+            "11111111-2222-4333-8444-555555555555"
+        )],
+        "a background workflow stays tied to the session that launched it"
     );
     assert_eq!(seen[0].workflow_run_id.as_deref(), Some("wf_fusion"));
     assert_eq!(seen[0].parent_model, "gpt-5.4");
@@ -4180,12 +4191,17 @@ async fn handler_waits_for_registry_publication_before_reporting_status() {
     );
 
     sink.set_registered(true);
-    for _ in 0..200 {
-        if sink.last_status().is_some_and(TaskStatus::is_terminal) {
-            break;
+    // Wait on the condition, not on a fixed number of scheduler turns: the
+    // worker's path between publication and its terminal status is not
+    // bounded by any particular yield count, so counting them makes this
+    // assert a guess about scheduling rather than about the handler.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !sink.last_status().is_some_and(TaskStatus::is_terminal) {
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .expect("worker must reach a terminal status once the registry publishes");
     let statuses = sink.statuses();
     assert_eq!(
         statuses

@@ -187,8 +187,9 @@ impl ConversationOrchestrator {
             .emit_system_notice(
                 &format!(
                     "Spend for that response could not be recorded ({error}). \
-The answer is unaffected; /cost may under-report this session, and new model \
-calls are paused until the ledger recovers."
+The answer is unaffected, and /cost will under-report this session. New model \
+calls are paused for this session only: start a new one with /clear, or \
+restart, which rebuilds a damaged ledger."
                 ),
                 true,
             )

@@ -84,6 +84,10 @@ pub struct DurableTranscriptWriter {
     fail_next_append_sync: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     duplicate_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Counts `fsync` calls made by this writer, so a regression can assert
+    /// which appends pay for durability and which do not.
+    #[cfg(test)]
+    syncs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// One stable transcript transaction. Target resolution, relocation, and the
@@ -325,6 +329,8 @@ impl DurableTranscriptWriter {
             #[cfg(test)]
             fail_next_append_sync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
+            syncs: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
             duplicate_scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
@@ -502,10 +508,14 @@ impl DurableTranscriptWriter {
                 "synthetic written transcript sync failure".into(),
             )));
         }
+        #[cfg(test)]
+        self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         file.sync_all().map_err(|error| {
             TranscriptWriterError::WrittenButNotDurable(FsError::Io(error.to_string()))
         })?;
         if !file_present {
+            #[cfg(test)]
+            self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             sync_parent_pinned(
                 transcript_root,
                 transcript_relative,
@@ -548,6 +558,11 @@ impl DurableTranscriptWriter {
     fn fail_next_existing_sync_for_test(&self) {
         self.fail_next_existing_sync
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_count_for_test(&self) -> usize {
+        self.syncs.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -800,6 +815,21 @@ impl DurableTranscriptTransaction<'_> {
         let mut line = serde_json::to_vec(&payload)
             .map_err(|error| FsError::Io(error.to_string()))?;
         line.push(b'\n');
+        // Ordinary transcript rows do not buy durability, and never did: the
+        // non-durable writer this path replaced only flushed. They travel
+        // through the transaction for ORDERING -- so a `/cd` relocation cannot
+        // split an ordinary append from a Fusion delivery -- not for fsync.
+        // Paying `F_FULLFSYNC` per row costs 10-100ms each on macOS and turns
+        // an ordinary turn into several of them.
+        //
+        // The directory entry is a different matter: creating the file is
+        // worth one parent sync, so a crash cannot lose the transcript itself.
+        let file_present = platform_api::rooted_fs::checked_join(
+            transcript_root,
+            transcript_relative,
+        )
+        .map(|path| path.exists())
+        .unwrap_or(false);
         let mut file = open_append_file_pinned(
             transcript_root,
             transcript_relative,
@@ -807,13 +837,17 @@ impl DurableTranscriptTransaction<'_> {
         )?;
         file.write_all(&line)
             .map_err(|error| FsError::Io(error.to_string()))?;
-        file.sync_all()
-            .map_err(|error| FsError::Io(error.to_string()))?;
-        sync_parent_pinned(
-            transcript_root,
-            transcript_relative,
-            Some(transcript_identity),
-        )?;
+        if !file_present {
+            #[cfg(test)]
+            self.writer
+                .syncs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            sync_parent_pinned(
+                transcript_root,
+                transcript_relative,
+                Some(transcript_identity),
+            )?;
+        }
         Ok(())
     }
 
@@ -886,6 +920,51 @@ fn payload_without_delivery_id(mut payload: Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Ordinary rows travel through the durable transaction for ORDERING, not
+    /// for durability, and must not pay an fsync each. Only creating the file
+    /// is worth a parent sync; a Fusion delivery, whose receipt claims the row
+    /// is on disk, still pays for one.
+    #[test]
+    fn ordinary_rows_do_not_fsync_but_a_delivery_still_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
+        let path = Path::new("transcript.jsonl");
+        let identity = platform_api::rooted_fs::root_identity(dir.path()).unwrap();
+
+        writer
+            .with_transaction(|transaction| {
+                transaction.append_raw_json_at(dir.path(), &identity, path, json!({"n": 1}))
+            })
+            .unwrap();
+        // One parent sync for creating the file, and nothing else.
+        assert_eq!(writer.sync_count_for_test(), 1);
+
+        for n in 2..=5 {
+            writer
+                .with_transaction(|transaction| {
+                    transaction.append_raw_json_at(dir.path(), &identity, path, json!({"n": n}))
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            writer.sync_count_for_test(),
+            1,
+            "four more ordinary rows must not add a single fsync"
+        );
+
+        assert_eq!(
+            writer
+                .append_json_once(path, "delivery", json!({"uuid": "fusion"}))
+                .unwrap(),
+            TranscriptAppendOutcome::Appended
+        );
+        assert_eq!(
+            writer.sync_count_for_test(),
+            2,
+            "a delivery whose receipt claims durability pays for it"
+        );
+    }
 
     #[test]
     fn retry_after_written_row_sync_failure_reports_whether_duplicate_is_still_tip() {

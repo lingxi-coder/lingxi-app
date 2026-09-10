@@ -2596,6 +2596,28 @@ mod tests {
         drop(directory);
     }
 
+    /// A durability freeze is bounded to the session that hit it. Each
+    /// coordinator mints its own gate, so starting a new session recovers
+    /// without a restart -- which is what the user-facing notice promises.
+    #[test]
+    fn a_freeze_does_not_follow_the_process_into_a_new_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let frozen_id = SessionId::new();
+        let frozen = SessionStateCoordinator::open(directory.path(), frozen_id, lease(frozen_id))
+            .unwrap();
+        frozen.durability_gate().freeze("ledger volume went away");
+        assert!(frozen.durability_gate().frozen_reason().is_some());
+
+        let fresh_id = SessionId::new();
+        let fresh =
+            SessionStateCoordinator::open(directory.path(), fresh_id, lease(fresh_id)).unwrap();
+        assert!(
+            fresh.durability_gate().frozen_reason().is_none(),
+            "a new session must not inherit another session's freeze"
+        );
+        assert!(fresh.hydrate_blocking().is_ok());
+    }
+
     /// The fatal classes stay fatal, and leave no quarantine behind. A frozen
     /// gate means this process already knows its own writes are failing;
     /// rebuilding on top of that would be inventing a clean state.

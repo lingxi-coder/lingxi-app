@@ -253,16 +253,28 @@ return H("tengu_melodic_wolf",!1)}` —— 默认 **false**。
 
 `ICe(e)` 的 `notice` 是**最后一条 `model_refusal_fallback` 系统消息**（`scope==="local"`
 且 `fallbackModel` 归一化后等于最后一条 assistant 的 model）；`PZo` 依据
-`retractedMessageUuids` 把被撤回的消息从 `live` 里滤掉，并发
-`tengu_resume_retracted_dropped`。
+`retractedMessageUuids` 把被撤回的消息从 `live` 里滤掉。
 
-端口有完整的 refusal-notice 子系统（`orchestrator/src/refusal_notice.rs`，含
-`retracted_message_uuids`），但通知是用 `self.output.emit_text(...)` 以**纯文本**发出的，
-**没有** typed `model_refusal_fallback` 系统帧 —— 这一点 `model.rs:1371` 自己记着是
-deferred。没有那个帧，`ICe` 无从查找、`PZo` 无从过滤。
+🚨 **2026-09-10 更正：这里原先记的阻塞（「先做 typed `model_refusal_fallback` 帧」）是错的。**
+typed 帧已经做了（`c9f8c5941`），但**它不解锁这一条**。
 
-**下一步**：先做 typed `model_refusal_fallback` 系统帧（在 model/refusal 子系统，不在 agent），
-再回来接这两条。⛔ 别只加 `⚠` 文案 —— 没有帧就没有 `notice.content` 可读。
+`ICe(e)` 读的是**子代理自己的消息列表**。而本端口的**子代理根本没有 refusal fallback**：
+
+* `agent/src/runner.rs` 把 `refusal` 当成一个普通的终止 stop reason，不换模型
+  （该文件里 fallback / model-swap 零命中）；
+* 整套级联机制（`refusal_notice.rs` / `refusal_cascade.rs`）只存在于 `orchestrator/`；
+* 生产用的 `SubagentApiClient` 实现（`orchestrator/src/provider_adapter.rs:721`）不带它
+  —— 那个 `messages_create_with_fallback` 挂在 **`OrchestratorApiClient`**（:151）上，
+  而且它是 provider 层的 fallback 模型参数，不是拒答级联。
+
+上游子代理走的是**和主线程同一个 query 生成器**（`Nfr`），所以天然有；本端口的子代理跑
+`agent/src/runner.rs` 这条独立循环，于是没有。
+
+⚠️ 还有一层：即使补上，`ICe` 找的是 `scope==="local"`，而本端口的级联是**持久换会话模型**
+（= 上游的 `scope:"session"`）。要对上还得区分 local / session 两种换法。
+
+**下一步**：这是「子代理拒答级联」这个独立课题，不是 agent 结果分层的收尾。⛔ 别只往
+finalizer 里加 `⚠` 文案 —— 没有级联就没有 notice 可读。
 
 #### ❓ 留一个未定的窄竞态
 

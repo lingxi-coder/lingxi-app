@@ -23,6 +23,7 @@ pub mod simplify_skill;
 pub mod update_config_skill;
 pub mod verify_skill;
 pub mod workflow_authoring_skill;
+pub mod checkup_skill;
 
 /// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
 /// `bundledSkills.ts`).
@@ -39,6 +40,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_run_skill(reg);
     register_simplify_skill(reg);
     register_workflow_authoring_skill(reg);
+    register_checkup_skill(reg);
     register_run_skill_generator_skill(reg);
     register_fewer_permission_prompts_skill(reg);
     register_code_review_skill(reg);
@@ -246,6 +248,33 @@ fn register_run_skill_generator_skill(reg: &mut CommandRegistry) {
 /// reference (registrar `eVp`, `userInvocable:!0`, `argumentHint:"[<target>]"`,
 /// no `isEnabled` gate). Its `getPromptForCommand` PREPENDS a `Review target:`
 /// line (see [`simplify_skill`]).
+/// `No()` — upstream's `doctor` skill, registered here under its own upstream
+/// alias `checkup` because this port's `/doctor` is a different, deterministic
+/// command with a client-rendered DTO. See `checkup_skill`'s module doc.
+fn register_checkup_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "checkup".into(),
+        description: checkup_skill::CHECKUP_DESCRIPTION.into(),
+        menu_description: Some(checkup_skill::CHECKUP_MENU_DESCRIPTION.into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(checkup_skill::CheckupPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        // Upstream `disableModelInvocation:!0` — the user asks for a checkup;
+        // the model does not start one on its own.
+        disable_model_invocation: true,
+        has_user_specified_description: true,
+        // ⚠️ Upstream also sets `progressMessage:"running checkup"`.
+        // `SlashCommand` has no such field in this port, so the spinner keeps
+        // its generic text. Recorded rather than dropped silently: the constant
+        // stays in `checkup_skill` so the copy is not lost if the field lands.
+        ..SlashCommand::default()
+    });
+}
+
 /// `dCr()` — the `workflow-authoring` skill.
 ///
 /// Registered unconditionally; see the module doc for why this port does not
@@ -438,6 +467,10 @@ mod tests {
 
         let want = vec![
             "batch".to_string(),
+            // Ported 2026-09-10 as `checkup`, upstream's own alias for it:
+            // upstream registers `doctor` (aliases ["checkup"]), but this
+            // port's `/doctor` is a deterministic client-rendered report.
+            "checkup".to_string(),
             "code-review".to_string(),
             "cron".to_string(),
             "dataviz".to_string(),

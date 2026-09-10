@@ -114,6 +114,11 @@ pub const DEFAULT_ONE_SHOT_MINUTE_MOD: u32 = 30;
 pub const DEFAULT_CACHE_LEAD: Duration = Duration::from_secs(15);
 
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// How long `stop` waits for proof that the tick future and its captured
+/// owners were destroyed. Host shutdown awaits this, so it cannot be
+/// unbounded.
+const TICK_DESTRUCTION_BUDGET: Duration = Duration::from_secs(2);
 const SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug)]
@@ -768,7 +773,20 @@ impl CronScheduler {
             self.runtime.cancel(&tick.runtime_handle).await?;
             // Channel closure, not a sent value, proves TickFuture and all its
             // captured owners were destroyed. Retain the receiver across await.
-            let _ = (&mut tick.completed).await;
+            //
+            // Bounded, because host shutdown awaits this: a spawner whose
+            // `cancel` acknowledges without dropping the future would park the
+            // whole barrier. On expiry the handle is retained so a retry can
+            // join again; reporting a stop that did not happen would be worse
+            // than reporting the timeout.
+            if tokio::time::timeout(TICK_DESTRUCTION_BUDGET, &mut tick.completed)
+                .await
+                .is_err()
+            {
+                return Err(platform_api::RuntimeError::Internal(
+                    "cron tick did not release its owners within the shutdown budget".into(),
+                ));
+            }
         }
         *tick_handle = None;
         let key = task_registry_identity(&self.task_registry);

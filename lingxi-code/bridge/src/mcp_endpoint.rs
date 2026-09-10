@@ -32,6 +32,15 @@ pub const WS_SUBPROTOCOL: &str = "mcp";
 /// pinned by [`mcp_endpoint_test.rs`].
 const UNAUTHORIZED_BODY: &str = "unauthorized\n";
 
+/// How long the accept loop waits for in-flight connection tasks to close
+/// their pump hooks before aborting them. An OAuth callback or a plugin
+/// install runs inside one of those, so the budget is generous -- but host
+/// shutdown awaits this, so it is a budget rather than an open wait.
+const CONNECTION_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Outer bound on joining the accept loop itself.
+const ENDPOINT_SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Largest single inbound WebSocket frame this endpoint will read.
 ///
 /// DECLARED, not inherited. tungstenite's `WebSocketConfig::default()` already
@@ -199,7 +208,24 @@ impl McpEndpoint {
                     biased;
                     _ = &mut shutdown_rx => {
                         let _ = connection_shutdown_tx.send(true);
-                        while connections.join_next().await.is_some() {}
+                        // An in-flight frame handler can be an OAuth browser
+                        // flow or a plugin install: give those the budget to
+                        // finish, then stop waiting. Host shutdown awaits this
+                        // task, and the desktop host is itself on a clock.
+                        let drained = tokio::time::timeout(
+                            CONNECTION_DRAIN_BUDGET,
+                            async {
+                                while connections.join_next().await.is_some() {}
+                            },
+                        )
+                        .await;
+                        if drained.is_err() {
+                            tracing::warn!(
+                                "bridge connections did not close within the drain budget"
+                            );
+                            connections.abort_all();
+                            while connections.join_next().await.is_some() {}
+                        }
                         break;
                     }
                     completed = connections.join_next(), if !connections.is_empty() => {
@@ -260,7 +286,15 @@ impl McpEndpoint {
             let _ = tx.send(());
         }
         if let Some(task) = self.accept_task.take() {
-            let _ = task.await;
+            // The accept loop bounds its own connection drain; this outer
+            // bound covers the loop itself so a wedged accept cannot park the
+            // host. It is deliberately larger than the inner one.
+            if tokio::time::timeout(ENDPOINT_SHUTDOWN_BUDGET, &mut { task })
+                .await
+                .is_err()
+            {
+                tracing::warn!("bridge endpoint did not stop within the shutdown budget");
+            }
         }
     }
 }

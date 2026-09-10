@@ -986,6 +986,15 @@ pub fn model_deprecation_warning(model_id: Option<&str>) -> Option<String> {
 /// count to the single production source of truth (no magic-number drift).
 pub const TEAMMATE_POOL_CAP: usize = 4;
 
+/// Total wall-clock budget for one host shutdown barrier.
+///
+/// Every desktop exit path awaits `shutdown_and_drain`, and the electron host
+/// hard-kills the engine after its own grace period. A barrier that outlives
+/// that grace turns an orderly drain into a kill in the middle of settlement,
+/// which is the outcome the barrier exists to prevent. Eight seconds leaves
+/// headroom under a ten-second grace.
+pub const DESKTOP_SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// Derive the [`permission::SandboxAutoAllowConfig`] the enforced
 /// [`permission::PermissionPolicy`] consults from the same `settings.json`
 /// tiers the policy block already reads.
@@ -7163,18 +7172,53 @@ impl DesktopSessionLifecycle {
     pub async fn shutdown_and_drain(&self) -> DesktopSessionShutdownReport {
         let mut report = DesktopSessionShutdownReport::default();
         let mut producers_drained = true;
+        let started = tokio::time::Instant::now();
+        let deadline = started + DESKTOP_SHUTDOWN_BUDGET;
+        // Per-stage allowance, further clipped by the overall deadline. A
+        // stage that overruns is abandoned, not aborted: its detached owner
+        // still holds its own guard and settles on its own.
+        let stage = |budget: std::time::Duration| {
+            deadline.min(tokio::time::Instant::now() + budget)
+        };
         // Both watcher families can fire hooks that retain the orchestrator or
         // create children. Join their actual jobs before draining consumers.
-        tokio::join!(
-            self.settings_watcher.shutdown_and_drain(),
-            self.file_changed_watcher.shutdown_and_drain(),
-        );
+        if tokio::time::timeout_at(
+            stage(std::time::Duration::from_millis(500)),
+            async {
+                tokio::join!(
+                    self.settings_watcher.shutdown_and_drain(),
+                    self.file_changed_watcher.shutdown_and_drain(),
+                );
+            },
+        )
+        .await
+        .is_err()
+        {
+            producers_drained = false;
+            report
+                .errors
+                .push("watchers did not drain within the shutdown budget".into());
+        }
         if let Some(scheduler) = self.cron_scheduler.as_ref() {
-            if let Err(error) = scheduler.stop().await {
-                producers_drained = false;
-                report
-                    .errors
-                    .push(format!("cron scheduler shutdown failed: {error}"));
+            match tokio::time::timeout_at(
+                stage(std::time::Duration::from_secs(2)),
+                scheduler.stop(),
+            )
+            .await
+            {
+                Ok(Err(error)) => {
+                    producers_drained = false;
+                    report
+                        .errors
+                        .push(format!("cron scheduler shutdown failed: {error}"));
+                }
+                Err(_) => {
+                    producers_drained = false;
+                    report
+                        .errors
+                        .push("cron scheduler did not stop within the shutdown budget".into());
+                }
+                Ok(Ok(())) => {}
             }
         }
         if let Some(reconnect) = self.mcp_reconnect_task.lock().await.take() {
@@ -7185,9 +7229,23 @@ impl DesktopSessionLifecycle {
             refresh.abort();
             let _ = refresh.await;
         }
-        if let Err(error) = self.task_registry.shutdown_background_tasks().await {
-            producers_drained = false;
-            report.errors.push(format!("task shutdown failed: {error}"));
+        match tokio::time::timeout_at(
+            stage(std::time::Duration::from_secs(2)),
+            self.task_registry.shutdown_background_tasks(),
+        )
+        .await
+        {
+            Ok(Err(error)) => {
+                producers_drained = false;
+                report.errors.push(format!("task shutdown failed: {error}"));
+            }
+            Err(_) => {
+                producers_drained = false;
+                report
+                    .errors
+                    .push("background tasks did not drain within the shutdown budget".into());
+            }
+            Ok(Ok(())) => {}
         }
         report.errors.extend(
             self.orchestrator
@@ -7241,7 +7299,9 @@ impl DesktopSessionLifecycle {
             }
         }
         if let Some(factory) = self.fusion_recorder_factory.as_ref() {
-            report.publications = factory.drain_pending_all().await;
+            report.publications = factory
+                .drain_pending_all(stage(std::time::Duration::from_secs(2)))
+                .await;
             for receipt in &report.publications {
                 if !matches!(
                     receipt.status,

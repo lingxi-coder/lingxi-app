@@ -91,6 +91,31 @@ pub struct DesktopFusionRecorder {
 
 type DeliveryLocks = Arc<Mutex<HashMap<(protocol::SessionId, String), Arc<Mutex<()>>>>>;
 
+/// How long a delivery owner waits for the foreground turn gate before giving
+/// up on the in-memory history projection. The durable transcript row is
+/// already written by then, and the projection is UUID-idempotent, so a later
+/// owner can still add it. Generous, because a real turn holds that gate for
+/// as long as the model takes.
+const LIVE_PROJECTION_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wait for every in-flight delivery to release its lock, but no longer than
+/// `deadline`. A delivery that is still running when the budget expires keeps
+/// its lock and its persisted receipt: abandoning the wait must never upgrade
+/// a receipt this host did not observe delivered. The detached owner finishes
+/// on its own and the next startup retry picks up whatever is still queued.
+async fn await_delivery_locks(locks: &DeliveryLocks, deadline: tokio::time::Instant) {
+    let Ok(snapshot) = tokio::time::timeout_at(deadline, locks.lock()).await else {
+        return;
+    };
+    let snapshot = snapshot.values().cloned().collect::<Vec<_>>();
+    for lock in snapshot {
+        if tokio::time::timeout_at(deadline, lock.lock()).await.is_err() {
+            tracing::warn!("Fusion delivery did not drain within the shutdown budget");
+            return;
+        }
+    }
+}
+
 fn retry_delay_seconds(attempt: u64, cycle_start: u64) -> Option<u64> {
     let power = attempt.checked_sub(cycle_start)?;
     let power = u32::try_from(power).ok()?;
@@ -148,10 +173,18 @@ impl DesktopFusionRecorderFactory {
     /// every detached append/fsync that owns a delivery lock, then run normal
     /// automatic recovery and wait once more for any operation whose caller's
     /// five-second waiter elapsed. Dead letters remain explicit-local-only.
-    pub async fn drain_pending_all(&self) -> Vec<FusionPublicationReceipt> {
-        self.await_in_flight_deliveries().await;
-        let _ = self.retry_pending_all().await;
-        self.await_in_flight_deliveries().await;
+    pub async fn drain_pending_all(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Vec<FusionPublicationReceipt> {
+        self.await_in_flight_deliveries(deadline).await;
+        if tokio::time::timeout_at(deadline, self.retry_pending_all())
+            .await
+            .is_err()
+        {
+            tracing::warn!("Fusion outbox retry did not finish within the shutdown budget");
+        }
+        self.await_in_flight_deliveries(deadline).await;
 
         let mut receipts = Vec::new();
         for session_id in self.manager.session_ids() {
@@ -167,17 +200,8 @@ impl DesktopFusionRecorderFactory {
         receipts
     }
 
-    async fn await_in_flight_deliveries(&self) {
-        let locks = self
-            .delivery_locks
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for lock in locks {
-            let _guard = lock.lock().await;
-        }
+    async fn await_in_flight_deliveries(&self, deadline: tokio::time::Instant) {
+        await_delivery_locks(&self.delivery_locks, deadline).await;
     }
 
     /// Return the concrete recorder for one already-hydrated session.
@@ -331,6 +355,12 @@ impl DesktopFusionRecorder {
         self
     }
 
+    /// Bounded wait for this recorder's own in-flight deliveries. Shares the
+    /// factory's lock map when the factory created it.
+    async fn await_in_flight_deliveries(&self, deadline: tokio::time::Instant) {
+        await_delivery_locks(&self.delivery_locks, deadline).await;
+    }
+
     async fn lock_for_delivery(&self, delivery_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.delivery_locks.lock().await;
         locks
@@ -477,11 +507,30 @@ impl DesktopFusionRecorder {
             // for the foreground turn gate instead of timing out and losing
             // the only live-history projection permanently. The projection is
             // UUID-idempotent, so a late owner cannot append it twice.
-            if let Err(error) = orchestrator
-                .record_persisted_fusion_meta(outbox.session_id, &outbox.message_uuid, text)
-                .await
+            // This waits on the foreground turn gate, which a long turn holds
+            // legitimately, so the budget is generous: a busy history must
+            // delay the projection, not lose it. It is still a budget, because
+            // this owner holds the delivery lock -- a permanently wedged gate
+            // would otherwise block every later retry of the same delivery.
+            // Host shutdown does not depend on this bound: it abandons the
+            // wait for the delivery lock on its own budget.
+            match tokio::time::timeout(
+                LIVE_PROJECTION_BUDGET,
+                orchestrator.record_persisted_fusion_meta(
+                    outbox.session_id,
+                    &outbox.message_uuid,
+                    text,
+                ),
+            )
+            .await
             {
-                tracing::warn!(%error, "live Fusion history projection failed");
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "live Fusion history projection failed");
+                }
+                Err(_) => {
+                    tracing::warn!("live Fusion history projection timed out");
+                }
+                Ok(Ok(())) => {}
             }
 
             if let Ok(current_session) = tokio::time::timeout(
@@ -1316,6 +1365,47 @@ mod tests {
         assert_eq!(
             loaded[0].extra.get("isModelContextExcluded"),
             Some(&serde_json::json!(true))
+        );
+        coordinator.close_and_drain().await.unwrap();
+    }
+
+    /// P0-5: shutdown must not wait forever on a delivery that is wedged.
+    ///
+    /// `await_in_flight_deliveries` took every delivery lock unconditionally,
+    /// and the operation holding one waits on the foreground turn gate with no
+    /// timeout. A turn stuck on a provider at quit time therefore parked the
+    /// whole host barrier -- which every desktop exit path awaits.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drain_abandons_a_wedged_delivery_within_its_budget() {
+        let (_directory, coordinator, session_id) = started_coordinator().await;
+        let recorder = DesktopFusionRecorder::new(coordinator.clone(), None);
+        let outbox = exhausted_outbox(&coordinator, session_id, 4).await;
+        // Hold the delivery lock for the whole test, the way a blocked
+        // append/fsync owner does.
+        let wedged = recorder.lock_for_delivery(&outbox.delivery_id).await;
+        let _held = wedged.lock_owned().await;
+
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let drain = tokio::spawn(async move {
+            recorder.await_in_flight_deliveries(deadline).await;
+        });
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), drain)
+                .await
+                .is_ok(),
+            "the drain never returned while a delivery lock was held"
+        );
+        // The wedged item is still queued: abandoning the wait must never
+        // upgrade a receipt it did not deliver.
+        let persisted = coordinator
+            .fusion_outbox(&outbox.delivery_id)
+            .expect("the outbox survives an abandoned drain");
+        assert!(
+            !persisted.receipt.is_published(),
+            "an abandoned delivery must not claim publication: {:?}",
+            persisted.receipt
         );
         coordinator.close_and_drain().await.unwrap();
     }

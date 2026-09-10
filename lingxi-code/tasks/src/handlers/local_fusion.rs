@@ -38,6 +38,11 @@ const HANDLER_NAME: &str = "local_fusion";
 /// `cancel_workflow_worker`.
 const FUSION_KILL_COMPLETION_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long host shutdown waits for handler-owned Fusion workers that already
+/// won natural finalization. Bounded because every desktop exit path awaits
+/// it; an overrun is reported rather than parked on.
+const FUSION_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 struct WorkerCancel {
     handle: BackgroundTaskHandle,
     runtime: Arc<dyn RuntimeSpawner>,
@@ -810,6 +815,7 @@ impl Task for LocalFusionHandler {
     }
 
     async fn drain_shutdown(&self) -> Result<(), TaskError> {
+        let deadline = tokio::time::Instant::now() + FUSION_DRAIN_BUDGET;
         let completions = {
             let workers = self.workers.lock().await;
             workers
@@ -823,8 +829,16 @@ impl Task for LocalFusionHandler {
                 })
                 .collect::<Vec<_>>()
         };
+        let mut timed_out = 0_usize;
         for completion in completions {
-            let _ = completion.await;
+            if tokio::time::timeout_at(deadline, completion).await.is_err() {
+                timed_out += 1;
+            }
+        }
+        if timed_out > 0 {
+            return Err(TaskError::Internal(format!(
+                "{timed_out} Fusion worker(s) did not finish within the shutdown budget"
+            )));
         }
         Ok(())
     }

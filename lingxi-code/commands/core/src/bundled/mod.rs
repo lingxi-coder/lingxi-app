@@ -18,6 +18,7 @@ pub mod loop_skill;
 pub mod run_skill;
 pub mod run_skill_generator_skill;
 pub mod simplify_skill;
+pub mod update_config_skill;
 pub mod verify_skill;
 
 /// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
@@ -40,6 +41,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_deep_research_skill(reg);
     register_batch_skill(reg);
     register_dataviz_skill(reg);
+    register_update_config_skill(reg);
 }
 
 /// Register the user-facing `/cron` scheduler command.
@@ -410,6 +412,10 @@ mod tests {
             "run".to_string(),
             "run-skill-generator".to_string(),
             "simplify".to_string(),
+            // Ported 2026-09-10: settings.json / hooks authoring. Its prompt
+            // carries the LIVE `SettingsJson` schema, so it cannot describe a
+            // key the loader would reject.
+            "update-config".to_string(),
             "verify".to_string(),
         ];
         assert_eq!(
@@ -746,4 +752,29 @@ mod tests {
             other => panic!("expected Bundled kind, got {other:?}"),
         }
     }
+}
+
+/// Register the `/update-config` bundled skill (reference registrar `cn`).
+///
+/// `allowedTools:["Read"]` and `userInvocable:!0`, both verbatim. The skill is
+/// model-invocable — its whole purpose is to be reached when the user asks for
+/// an automated behaviour that only a hook can deliver.
+fn register_update_config_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "update-config".into(),
+        description: update_config_skill::UPDATE_CONFIG_DESCRIPTION.into(),
+        menu_description: Some("Change settings: hooks, permissions, environment variables".into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                allowed_tools: Some(vec!["Read".to_string()]),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(update_config_skill::UpdateConfigPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
 }

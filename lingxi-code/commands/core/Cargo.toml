@@ -12,6 +12,11 @@ license.workspace = true
 [dependencies]
 branding.workspace = true
 command-api = { path = "../../command-api" }
+# `/update-config` injects the LIVE settings schema into its prompt, exactly as
+# the reference does (`Zle(zA(),{io:"input"})` → JSON). Generated from the real
+# `SettingsJson` so the skill cannot describe a shape the loader does not accept.
+core = { path = "../../core" }
+schemars = "0.8"
 protocol = { path = "../../protocol" }
 skill-api = { path = "../../skill-api" }
 # The bundled `/loop` skill's flag-on (autonomous-default) builder imports the

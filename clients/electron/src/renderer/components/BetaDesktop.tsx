@@ -2689,7 +2689,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
               title={bridge.running ? 'Send as pending message' : 'Send prompt'}
               style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
-            ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? '#fff' : t.text4} /></button>
+            ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? t.windowBg : t.text4} /></button>
           </span>
         </div>
         )}
@@ -2715,7 +2715,7 @@ function composerPillStyle(t: ReturnType<typeof useT>, active: boolean): CSSProp
 }
 
 function composerSendStyle(t: ReturnType<typeof useT>, enabled: boolean): CSSProperties {
-  return { ...composerPrimaryActionStyle(t, enabled), background: enabled ? t.accent : t.surfaceActive, color: enabled ? '#fff' : t.text4, opacity: enabled ? 1 : .82 };
+  return { ...composerPrimaryActionStyle(t, enabled), background: enabled ? t.text : t.surfaceActive, color: enabled ? t.windowBg : t.text4, opacity: enabled ? 1 : .82 };
 }
 
 function composerMenuStyle(t: ReturnType<typeof useT>, side: 'left' | 'right'): CSSProperties {

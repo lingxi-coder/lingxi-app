@@ -304,7 +304,7 @@ test('a running turn keeps drafting and local composer controls interactive', ()
   }
   assert.doesNotMatch(markup, /aria-label="Goal active"/);
   assert.doesNotMatch(openingTag(markup, 'aria-label="Stop current turn"'), /\bdisabled\b/);
-  assert.match(markup, /aria-label="Send pending message"/);
+  assert.doesNotMatch(markup, /aria-label="Send pending message"/);
 
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
   const submitStart = source.indexOf('const submit = async');

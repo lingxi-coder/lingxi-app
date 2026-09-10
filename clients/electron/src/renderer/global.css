@@ -745,10 +745,6 @@ body {
   transition-duration: 160ms !important;
   transition-timing-function: cubic-bezier(.2, 0, 0, 1) !important;
 }
-.beta-composer:focus-within {
-  outline: 2px solid color-mix(in oklab, currentColor 14%, transparent);
-  outline-offset: 2px;
-}
 .composer-model-control { max-width: 340px; }
 .composer-toolbar > button,
 .composer-toolbar > div > button {
@@ -1528,6 +1524,7 @@ aside[data-resizing='true'] > .sidebar-resize-handle::after { opacity: .72; }
 button { font-family: inherit; }
 textarea, input { font-family: inherit; }
 :focus-visible { outline: 2px solid oklch(72% 0.18 268); outline-offset: 2px; }
+input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { outline: none; }
 .slash-command-row {
   transition: background-color 110ms ease, color 110ms ease;
 }

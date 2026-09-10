@@ -2684,14 +2684,16 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
             ><Icon name="stop" size={15} color="#fff" /></button>
           )}
-          <button
-            type="button"
-            disabled={!ready || !hasPrompt || flowMode}
-            onClick={() => { void submit(); }}
-            aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
-            title={bridge.running ? 'Send as pending message' : 'Send prompt'}
-            style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
-          ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? '#fff' : t.text4} /></button>
+          {(!bridge.running || hasPrompt) && (
+            <button
+              type="button"
+              disabled={!ready || !hasPrompt || flowMode}
+              onClick={() => { void submit(); }}
+              aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
+              title={bridge.running ? 'Send as pending message' : 'Send prompt'}
+              style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
+            ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? '#fff' : t.text4} /></button>
+          )}
         </div>
         )}
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>

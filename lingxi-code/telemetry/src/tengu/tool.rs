@@ -663,9 +663,38 @@ mod m4_04_workflow_event_tests {
         }
         assert_eq!(
             NAMES.len(),
-            135,
-            "M3-06 34 (40 baseline − 6 grep/glob removed to match claude-code) + M4-02 9 + M4-03 3 + M4-04 12 (TodoWrite 3 removed for 2.1.195 parity) + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 + worktree-206-parity 2 (WORKTREE_CREATED/WORKTREE_ENTERED_EXISTING) + exit-worktree-206-parity 2 (WORKTREE_KEPT/WORKTREE_REMOVED) = 135 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
+            129,
+            "M3-06 34 (40 baseline − 6 grep/glob removed to match claude-code) + M4-02 9 + M4-03 3 + M4-04 12 (TodoWrite 3 removed for 2.1.195 parity) + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 + worktree-206-parity 2 (WORKTREE_CREATED/WORKTREE_ENTERED_EXISTING) + exit-worktree-206-parity 2 (WORKTREE_KEPT/WORKTREE_REMOVED) = 135, − 6 team_create/team_delete retired with the explicit team tools (bd0abff79) = 129 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
         );
+    }
+
+    /// The six names `bd0abff79` retired, pinned as ABSENT.
+    ///
+    /// 2.1.263 replaced the explicit TeamCreate / TeamDelete tools with a single
+    /// implicit team, and the tools went with them (`tools/team/` no longer
+    /// exists). The count above dropped 135 → 129 for exactly this reason and
+    /// nothing else.
+    ///
+    /// A bare count cannot tell "six were correctly retired" from "six went
+    /// missing", and updating the arithmetic without saying which six is how the
+    /// comment above went stale in the first place. Assert the membership, not
+    /// just the total: if one of these ever comes back, that is a decision
+    /// someone should make on purpose.
+    #[test]
+    fn the_retired_team_tool_events_stay_retired() {
+        for name in [
+            "tengu_tool_team_create_started",
+            "tengu_tool_team_create_completed",
+            "tengu_tool_team_create_failed",
+            "tengu_tool_team_delete_started",
+            "tengu_tool_team_delete_completed",
+            "tengu_tool_team_delete_failed",
+        ] {
+            assert!(
+                !NAMES.contains(&name),
+                "{name} belongs to a tool this build does not ship"
+            );
+        }
     }
 }
 

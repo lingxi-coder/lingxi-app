@@ -251,15 +251,20 @@ mod session_end_batch_deadline_tests {
     ///   is a ceiling, not a forced wait).
     #[tokio::test]
     async fn batch_deadline_cuts_off_slow_hook_but_not_fast_hook() {
-        let prev = std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok();
+        // The deadline is set PER EXECUTOR rather than through
+        // `SESSION_END_HOOKS_TIMEOUT_ENV`. That variable is a process global and
+        // Rust runs a binary's tests on parallel threads in one process, so the
+        // old `set_var` windows made every neighbouring SessionEnd dispatch run
+        // under this test's deadline — a 50ms ceiling briefly imposed on the
+        // whole binary.
 
         // --- Half 1: tiny deadline (50ms), hook sleeps 5s → cut off. ---
-        std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, "50");
         let slow_ran = Arc::new(AtomicBool::new(false));
         let mut registry = HookRegistry::new();
         registry.register(session_end_builtin_hook("slow"));
         let reg = Arc::new(RwLock::new(registry));
-        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
+            .with_session_end_timeout_ms("50");
         exec.register_builtin(Arc::new(SleepingHandler {
             id: "slow".into(),
             delay: Duration::from_secs(5),
@@ -272,12 +277,12 @@ mod session_end_batch_deadline_tests {
         let elapsed = start.elapsed();
 
         // --- Half 2: generous deadline (5000ms), hook sleeps 10ms → completes. ---
-        std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, "5000");
         let fast_ran = Arc::new(AtomicBool::new(false));
         let mut registry = HookRegistry::new();
         registry.register(session_end_builtin_hook("fast"));
         let reg = Arc::new(RwLock::new(registry));
-        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
+            .with_session_end_timeout_ms("5000");
         exec.register_builtin(Arc::new(SleepingHandler {
             id: "fast".into(),
             delay: Duration::from_millis(10),
@@ -287,16 +292,16 @@ mod session_end_batch_deadline_tests {
             .execute_session_end(session_end_event(), HookContext::default())
             .await;
 
-        // Restore env before asserting so a panic doesn't leak it.
-        match prev {
-            Some(v) => std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, v),
-            None => std::env::remove_var(SESSION_END_HOOKS_TIMEOUT_ENV),
-        }
-
-        // Half 1 assertions: cut off well before the 5s sleep.
+        // Half 1 assertions: cut off at the CONFIGURED 50ms, not merely somewhere
+        // before the 5s sleep. The default deadline is the 1500ms floor
+        // (`SESSION_END_HOOK_TIMEOUT_FLOOR_MS`, and this fixture declares no
+        // per-hook timeout), so a bound of 2s would pass whether or not the 50ms
+        // was honoured at all — it did, which is how the override could have
+        // silently stopped being read.
         assert!(
-            elapsed < Duration::from_secs(2),
-            "batch deadline must abort fast, took {elapsed:?}"
+            elapsed < Duration::from_millis(500),
+            "the configured 50ms deadline must be the one that applies (the default \
+             floor is {SESSION_END_HOOK_TIMEOUT_FLOOR_MS}ms), took {elapsed:?}"
         );
         assert!(
             !slow_ran.load(Ordering::SeqCst),

@@ -243,6 +243,10 @@ pub struct HookExecutorImpl {
     /// `PermissionPolicy::from_rules` — read the environment at the edge and
     /// pass the answer down.
     eval_confined: bool,
+    /// Per-executor override for the SessionEnd batch deadline, in place of
+    /// reading [`SESSION_END_HOOKS_TIMEOUT_ENV`] at dispatch. `None` reads the
+    /// environment as before.
+    session_end_timeout_override: Option<String>,
     /// Optional background registry for non-blocking (`blocking == false`)
     /// hooks (B5). Attached via [`Self::with_async_registry`]. When `None`, a
     /// non-blocking hook falls back to running synchronously (so its result is
@@ -308,6 +312,7 @@ impl HookExecutorImpl {
             sandbox: None,
             mcp_invoker: None,
             eval_confined: eval_confined_session(),
+            session_end_timeout_override: None,
             async_registry: None,
             policy_disable_all_hooks: false,
             hook_observer: None,
@@ -351,6 +356,18 @@ impl HookExecutorImpl {
     #[must_use]
     pub fn with_eval_confined(mut self, eval_confined: bool) -> Self {
         self.eval_confined = eval_confined;
+        self
+    }
+
+    /// Override the SessionEnd batch deadline instead of setting
+    /// [`SESSION_END_HOOKS_TIMEOUT_ENV`].
+    ///
+    /// Same reason as [`Self::with_eval_confined`]: the env var is a process
+    /// global, so a test that mutates it is visible to every other test
+    /// dispatching SessionEnd on a neighbouring thread.
+    #[must_use]
+    pub fn with_session_end_timeout_ms(mut self, timeout_ms: &str) -> Self {
+        self.session_end_timeout_override = Some(timeout_ms.to_string());
         self
     }
 
@@ -669,7 +686,10 @@ impl HookExecutorImpl {
 
         // Compute the batch deadline from the env override / the max declared
         // per-hook timeout across the matched set (claude-code `Wqt`).
-        let env_value = std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok();
+        let env_value = match &self.session_end_timeout_override {
+            Some(override_ms) => Some(override_ms.clone()),
+            None => std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok(),
+        };
         let batch_timeout_ms =
             session_end_batch_timeout_ms(env_value.as_deref(), max_per_hook_timeout_ms(&matched));
         let deadline = tokio::time::Instant::now() + Duration::from_millis(batch_timeout_ms);

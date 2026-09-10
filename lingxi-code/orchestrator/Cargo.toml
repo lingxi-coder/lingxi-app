@@ -20,6 +20,7 @@ tool-api = { path = "../tool-api" }
 # (core/tool-api/platform-api/protocol/permission/telemetry), never on orchestrator.
 tool-task = { path = "../tools/task" }
 tool-workflow = { path = "../tools/workflow" }
+tool-skill = { path = "../tools/skill" }
 # REM-05: the `edited_text_file` (changed-files) reminder needs the jsdiff
 # `structuredPatch` port at context 8 (`tool_file::structured_patch::
 # build_structured_patch_with_context`). Default features only — the image/PDF

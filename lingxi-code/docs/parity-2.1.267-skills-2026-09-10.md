@@ -154,13 +154,13 @@ Upstream 2.1.267 registers **21** (`uo({name:…})`, variable names resolved):
 `run-skill-generator`, `setup-claude`, `update-config`, `whiteboard`,
 `workflow-authoring`, `workshop`.
 
-The port registers **14** through `register_bundled_skills` (11 + `update-config`,
-`keybindings-help` and `explain-usage`, added 2026-09-10), plus `claude-api` as the `skill-api`
+The port registers **15** through `register_bundled_skills` (11 + `update-config`,
+`keybindings-help`, `explain-usage` and `workflow-authoring`, added 2026-09-10), plus `claude-api` as the `skill-api`
 compiled-in builtin.
 
-| in both (8) | LingXi-only (4) | upstream-only (13) |
+| in both (9) | LingXi-only (4) | upstream-only (12) |
 |---|---|---|
-| batch, claude-api, code-review, dataviz, explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, memory-types, setup-claude, whiteboard, workflow-authoring, workshop |
+| batch, claude-api, code-review, dataviz, explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config, workflow-authoring | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, memory-types, setup-claude, whiteboard, workshop |
 
 ### The remaining nine, adjudicated one by one (2026-09-10)
 
@@ -170,7 +170,7 @@ blanket "they ride surfaces this port does not have":
 | skill | verdict |
 |---|---|
 | `memory-types` | 🔒 **DORMANT upstream** — `var Jxn="memory-types"` sits next to `function Qxn(){return H("tengu_ochre_finch",!1)}`, its `isEnabled`. Flag defaults **false**, so absence here is ALIGNMENT, not a gap. Same shape as `melodic_wolf` / `lively_waffle`. |
-| `workflow-authoring` | ⚠️ **NOT a missing surface — see §2.4 for the full investigation** — this port has the Workflow tool. Upstream 2.1.267 moved the script-writing reference out of the tool description into this skill (changelog: "about 1k tokens instead of 5.7k"). The port's `workflow_description.txt` is **byte-locked to 2.1.245** with an anchor-enforced divergence register, so adopting the split is a VERSION RE-BASE of a locked model-facing surface (refresh the oracle text, re-anchor every registered divergence, then add the skill) — not a port of a missing feature. ⛔ Adding the skill WITHOUT the trim would duplicate ~19KB into the bundle and make the footprint worse. |
+| `workflow-authoring` | ✅ **LANDED 2026-09-10** — see §2.4. The three reasons previously recorded for not landing it were all artefacts of a truncating extractor; 27 of 31 paragraphs survive byte-identical and both divergence anchors survive verbatim. |
 | `debug` | ⛔ needs a per-session debug LOG FILE it can enable (`WY()`) and read (`zY()` path, tail via `Po`). This port has `--debug` with categories but writes no session log file, so the skill would point at nothing. |
 | `setup-claude` | ⛔ `isEnabled:()=>a.CLAUDE_CODE_ENTRYPOINT==="remote_cowork"` — inert without that entrypoint, which this port does not have. |
 | `artifact-components` | ⛔ `files:()=>wt().then(e=>e.SKILL_FILES)` + `isEnabled:we` — needs the Artifact surface (a deliberate register-but-disabled skeleton here) AND bundled skill files. |
@@ -178,8 +178,8 @@ blanket "they ride surfaces this port does not have":
 | `design-sync` | ⛔ pushes a design system to claude.ai/design; `isEnabled:MF` plus a `policyGate`. No Design surface here, and the destination is a claude.ai service. |
 | `claude-in-chrome` | ⛔ needs the Chrome extension. |
 
-So of the original 13: **4 ported**, 1 dormant upstream, 1 blocked on a locked-surface
-re-base, 7 blocked on surfaces this port does not ship.
+So of the original 13: **5 ported** (`workflow-authoring` landed 2026-09-10 — see
+§2.4), 1 dormant upstream, 7 blocked on surfaces this port does not ship.
 
 ⚠️ **The 13 are not a backlog.** Most ride surfaces this port does not have:
 `artifact-components` / `whiteboard` / `workshop` / `design-sync` need the
@@ -358,56 +358,71 @@ deliberately, not incidentally.
 | the seven unread keys (§5) | need a consumer before they need a parser |
 
 
-## 2.4 `workflow-authoring` — investigated in full, deliberately NOT landed
+## 2.4 `workflow-authoring` — LANDED 2026-09-10
 
-This is the only remaining skill with a substrate here, so it got a full pass.
-Everything below is measured, not estimated.
+Commits: `64ca3fc2e` (the split + machinery), `8568a51a9` (the skill),
+plus the reachability gate.
 
-**The split is real and both halves are located.** In `src_178675664.js`:
-the trimmed tool description is the template assigned near @917; the skill body
-is what `wpn()` returns, opening `# Workflow authoring reference` and continuing
-with the exact "A workflow structures work across many agents…" paragraph that
-this port still carries INLINE in `workflow_description.txt`.
+**What shipped.** The tool description is now 2.1.267's 3,031-byte head; the
+17,141-byte authoring reference moved to `workflow_authoring_skill.txt`, served
+by the `workflow-authoring` bundled skill. `assemble_description` is upstream's
+`Epn`: it emits the head plus a one-line pointer when the skill is loadable, and
+the head plus the whole reference when it is not.
 
-**The saving is large.** The port's oracle description is 19,200 bytes
-(byte-locked to 2.1.245). The 2.1.267 description is ~3.0 KB. That is roughly 4k
-tokens off every request that advertises the tool.
+### The three reasons recorded here for NOT landing it were all wrong
 
-### Why it was not landed
+They are left in place, because each was a plausible reading of bad evidence and
+the way each failed is the reusable part. **All three traced to one cause: the
+extractor scanned for a closing backtick and truncated at 3,500 chars.**
 
-**1. It is a REWRITE, not a trim.** Of the 31 paragraphs in the .245 text, only
-**2** survive byte-identical in .267. So this is a full oracle refresh: all eight
-markers in `oracle_description_matches_the_binary_byte_for_byte` need
-re-deriving, and both register entries need re-anchoring in reworded prose.
+**1. "It is a REWRITE — only 2 of 31 paragraphs survive."** The comparison was
+against the 3 KB HEAD alone. Against both halves, **27 of 31 survive
+byte-identical**. The four real deltas are three cross-references the split
+itself required (`"below"` → `"in the workflow authoring reference"`,
+`"above"` → `"in the Workflow tool description"`, `"(example below)"` →
+`"(the review-changes example)"`) and one added sentence about schemas.
+🚨 A fifth apparent delta, `×` vs `\xD7`, was the extractor: it unescaped
+`\uXXXX` but not `\xNN`, which the binary also uses. The byte-lock now rejects
+both spellings.
 
-**2. 🚨 One divergence's anchor is already gone, and it guards a REACHABILITY
-invariant.** `workflow-fusion-hook` documents LingXi's `fusion()` script hook,
-and its own reason says it plainly: *"A script only ever learns which hooks exist
-from this description, so an undocumented hook is an unreachable one."* Its
-anchor (`child syntax error; catch to handle gracefully.\n`) occurs **0 times**
-in the .267 text — the passage moved into the skill. A naive re-base therefore
-makes `fusion()` unreachable. The fix is known (re-anchor it into the trimmed
-description so it stays inline regardless of whether the skill loads) but it is a
-judgement call, not a mechanical edit.
+**2. "The fusion anchor occurs 0 times in .267."** It occurs **exactly once** —
+past the truncation point. Both registered divergences survive verbatim, each in
+the correct half (`local-app-create-handoff` in the description, the fusion hook
+in the reference), and **neither needed re-anchoring**. The recommendation this
+section made — move `fusion()` inline into the trimmed description — would have
+separated it from the hook list it belongs to for no reason.
 
-**3. ⛔ The skill body is not a static string.** It is assembled from
-env-conditional fragments — `${e?"":"…"}` where `e` is
-`CLAUDE_CODE_SUBAGENT_MODEL_FORCE` — with three nested `${…}` containing quotes
-and one containing a backtick. A naive backtick scanner terminates early (mine
-did, at 3,500 chars, mid-sentence). Porting it faithfully means reproducing the
-conditional assembly, not pasting extracted text.
+The reachability invariant is real, but the fix is upstream's own: `Epn` keeps
+an inline branch, so a build that cannot load the skill still gets every hook.
+That is now asserted directly
+(`the_inline_branch_documents_every_script_body_hook`) rather than implied.
 
-**A truncated or unconditionally-assembled reference would be shipped into every
-workflow-authoring invocation.** That is worse than the 4k-token footprint it
-would save, which is why this stops here rather than landing half-done.
+**3. "The skill body is not a static string."** True, and it was the one finding
+that held — but it is three `${e?"":"…"}` fragments on
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, which this port already reads. Stored as the
+unforced text plus a subtraction list, each fragment required to match exactly
+once so a stale fragment cannot silently subtract nothing.
 
-### What the next person needs
+⚠️ The generalisable error: **the conclusion "this is a rewrite" and the
+conclusion "the anchor is gone" were both produced by an instrument that had
+silently stopped reading.** Neither was re-checked against a second method. A
+truncating parser does not announce itself — it returns a shorter string that
+looks complete. See [[an-exit-code-is-not-evidence]]: the extractor exited 0.
 
-* Write a real template-literal parser (balance `${}` including nested quotes and
-  backticks) rather than scanning for the closing backtick.
-* Decide `fusion()`'s home FIRST — keeping it inline in the trimmed description
-  is the option that cannot regress reachability.
-* Re-derive all eight byte-lock markers from the .267 text; do not port the .245
-  ones.
-* Treat it as an oracle re-base of a locked surface (the register is designed to
-  fail by name here — let it).
+### How the gate is expressed
+
+Upstream's `nre(tools)` is six session conditions plus a per-call check that the
+`Skill` tool is advertised. This port has no substrate for three of them
+(`disableBundledSkills`, `skillOverrides`, the session skill allowlist), so it
+answers the question those conditions ask rather than reproducing them: the
+registrar publishes that the skill exists, the wire-schema build publishes
+whether this request advertises `Skill`, and both must hold. The
+wire-schema cache is keyed on the result, so an entry built before the registrar
+ran cannot outlive it.
+
+⚠️ Divergence: upstream gates registration on `isEnabled: () => qc()`.
+`register_bundled_skills` never receives the managed workflow-disable setting,
+and gating on a predicate the registration site cannot see risks the one state
+the invariant forbids — the skill absent while the description claims it is
+loadable. Registered unconditionally instead; a reference readable while
+workflows are off is inert.

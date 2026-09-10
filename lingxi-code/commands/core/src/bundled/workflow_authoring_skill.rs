@@ -15,7 +15,7 @@
 //! 2.1.267 moved the 17 KB script-writing reference out of the Workflow tool
 //! description and behind this skill, cutting the per-request footprint from
 //! about 5.7k tokens to 1k. The text itself lives with the tool
-//! (`tool_workflow::authoring_skill_prompt`), which owns both byte-locked
+//! (`workflow::description`), which owns both byte-locked
 //! oracle documents and the single divergence register that edits them —
 //! keeping the `fusion()` entry next to the hooks it belongs with.
 //!
@@ -45,7 +45,7 @@ pub struct WorkflowAuthoringPromptFn;
 
 impl BundledPromptFn for WorkflowAuthoringPromptFn {
     fn build(&self, _args: &str) -> String {
-        tool_workflow::authoring_skill_prompt()
+        workflow::description::authoring_skill_prompt()
     }
 }
 

@@ -52,235 +52,9 @@ pub const TOOL_NAME: &str = "Workflow";
 
 const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
-/// The tool description (claude-code v2.1.267 `t`), reproduced byte-for-byte.
-/// A trailing newline (should an editor add one to the data file) is stripped so
-/// the ORACLE text matches the binary exactly.
-///
-/// 2.1.267 SPLIT what 2.1.245 shipped as a single 19,200-byte description. This
-/// file is now only the head — the part every request pays for. The 17 KB
-/// script-writing reference moved to [`ORACLE_AUTHORING_SKILL`], served on
-/// demand by the `workflow-authoring` bundled skill. Upstream's own changelog
-/// puts the saving at "about 1k tokens instead of 5.7k".
-///
-/// ⛔ This is the oracle, not the shipped text. Never edit
-/// `workflow_description.txt` to change what the model reads — register the
-/// change in `workflow_description_divergences.json` instead, so it carries an
-/// id and a reason. [`DESCRIPTION`] is what actually ships.
-static ORACLE_DESCRIPTION: Lazy<String> = Lazy::new(|| {
-    include_str!("workflow_description.txt")
-        .trim_end_matches('\n')
-        .to_string()
-});
-
-/// The authoring reference (claude-code v2.1.267 `wpn()`), reproduced
-/// byte-for-byte in its DEFAULT rendering — the branch taken when no subagent
-/// model is pinned.
-///
-/// Upstream's `wpn()` is a template literal, not a constant: three fragments are
-/// interpolated as `${e?"":"…"}`, where `e` is `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
-/// A pinned deployment model makes per-agent `model` overrides meaningless, so
-/// upstream drops the three passages that document them. Storing the *unforced*
-/// text and subtracting those fragments (see [`MODEL_FORCE_OMISSIONS`]) keeps
-/// this file a byte-for-byte oracle rather than a template the tests cannot
-/// compare against the binary.
-///
-/// ⛔ Same rule as above: edits belong in the divergence register, targeted at
-/// `"skill"`. [`AUTHORING_SKILL`] is what actually ships.
-static ORACLE_AUTHORING_SKILL: Lazy<String> = Lazy::new(|| {
-    include_str!("workflow_authoring_skill.txt")
-        .trim_end_matches('\n')
-        .to_string()
-});
-
-/// One named, reasoned local edit to the oracle description.
-///
-/// The `anchor` is an exact oracle substring that must occur EXACTLY ONCE;
-/// `text` is inserted immediately after it. Anchoring rather than offsetting is
-/// deliberate: when an oracle refresh reworders or removes the anchored passage,
-/// composition fails by divergence id instead of quietly landing the insert in
-/// the wrong paragraph.
-#[derive(Debug, serde::Deserialize)]
-struct DescriptionDivergence {
-    id: String,
-    /// Which of the two oracle texts this entry edits.
-    target: DivergenceTarget,
-    /// The finding this divergence answers, for the audit trail.
-    #[allow(dead_code)]
-    finding: String,
-    reason: String,
-    anchor: String,
-    text: String,
-}
-
-/// Which byte-locked oracle text a divergence attaches to.
-///
-/// 2.1.267 split the description in two, and the two registered divergences
-/// went to opposite halves: the local-app opt-in clause belongs with the
-/// per-request description, while the `fusion()` hook belongs with the authoring
-/// reference that documents every other script-body hook. Naming the target
-/// keeps `compose` from searching the wrong document and silently reporting a
-/// missing anchor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum DivergenceTarget {
-    Description,
-    Skill,
-}
-
-/// The register of local divergences. See the `_doc` block in the data file for
-/// why the old single-number lock was replaced.
-static DESCRIPTION_DIVERGENCES: Lazy<Vec<DescriptionDivergence>> = Lazy::new(|| {
-    #[derive(serde::Deserialize)]
-    struct Register {
-        divergences: Vec<DescriptionDivergence>,
-    }
-    let register: Register =
-        serde_json::from_str(include_str!("workflow_description_divergences.json"))
-            .expect("workflow_description_divergences.json is valid JSON");
-    register.divergences
-});
-
-/// Apply the register to the oracle text.
-///
-/// Returns `Err` naming the divergence when its anchor is missing or ambiguous
-/// — the loud failure that a byte-count lock could not give, because a count
-/// cannot distinguish an intentional edit from accidental drift.
-fn compose_description(
-    oracle: &str,
-    divergences: &[DescriptionDivergence],
-    target: DivergenceTarget,
-) -> Result<String, String> {
-    let mut composed = oracle.to_string();
-    for divergence in divergences.iter().filter(|d| d.target == target) {
-        match composed.matches(divergence.anchor.as_str()).count() {
-            1 => {}
-            0 => {
-                return Err(format!(
-                    "divergence `{}`: its anchor is no longer present in the Workflow tool \
-                     description. The oracle passage it attaches to was reworded or removed, so \
-                     the insert has nowhere to go. Re-anchor it against the current oracle text \
-                     (or retire the divergence) — do not delete this check.",
-                    divergence.id
-                ));
-            }
-            n => {
-                return Err(format!(
-                    "divergence `{}`: its anchor occurs {n} times, so where the insert lands is \
-                     ambiguous. Lengthen the anchor until it is unique.",
-                    divergence.id
-                ));
-            }
-        }
-        let at = composed
-            .find(divergence.anchor.as_str())
-            .expect("occurrence count checked above")
-            + divergence.anchor.len();
-        composed.insert_str(at, &divergence.text);
-    }
-    Ok(composed)
-}
-
-/// The shipped tool description: the oracle head plus its registered divergences.
-static DESCRIPTION: Lazy<String> = Lazy::new(|| {
-    compose_description(
-        &ORACLE_DESCRIPTION,
-        &DESCRIPTION_DIVERGENCES,
-        DivergenceTarget::Description,
-    )
-    .unwrap_or_else(|error| panic!("Workflow tool description: {error}"))
-});
-
-/// The three passages upstream omits when a subagent model is pinned
-/// (`${e?"":"…"}` in `wpn()`, `e` = `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`).
-///
-/// Each must occur EXACTLY ONCE in the oracle text — the same anchor discipline
-/// the divergence register uses, and for the same reason: a fragment that stops
-/// matching after an oracle refresh must fail loudly instead of silently
-/// subtracting nothing.
-const MODEL_FORCE_OMISSIONS: [&str; 3] = [
-    " Add `model` to a phase entry when that phase uses a specific model override.",
-    " model?: string,",
-    " opts.model overrides the model for this agent call. Default to omitting it — the agent \
-     inherits the main-loop model (the resolved session model), which is almost always correct. \
-     Only set it when you're highly confident a different tier fits the task; when unsure, omit.",
-];
-
-/// The shipped authoring reference, in its unforced rendering.
-static AUTHORING_SKILL: Lazy<String> = Lazy::new(|| {
-    compose_description(
-        &ORACLE_AUTHORING_SKILL,
-        &DESCRIPTION_DIVERGENCES,
-        DivergenceTarget::Skill,
-    )
-    .unwrap_or_else(|error| panic!("Workflow authoring reference: {error}"))
-});
-
-/// The pointer sentence (claude-code v2.1.267 `i`) that replaces the reference
-/// in the tool description when the skill can actually be loaded.
-const AUTHORING_SKILL_POINTER: &str = "Before writing a script, load the `workflow-authoring` \
-     skill — the workflow authoring reference: script API and gotchas, resume, the **Ultracode** \
-     section, quality patterns, worked examples.";
-
-/// The authoring reference as the `workflow-authoring` skill serves it.
-///
-/// `model_forced` mirrors upstream's `e`: when a deployment pins the subagent
-/// model, the three `model`-override passages are subtracted.
-pub fn authoring_skill_body(model_forced: bool) -> String {
-    let mut body = AUTHORING_SKILL.clone();
-    if model_forced {
-        for fragment in MODEL_FORCE_OMISSIONS {
-            body = body.replace(fragment, "");
-        }
-    }
-    body
-}
-
-/// `a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` — the deployment pin that makes
-/// per-agent `model` overrides meaningless, so the passages documenting them are
-/// dropped. Read here at the edge and passed down as a parameter: a gate that
-/// reads the environment deep inside the call graph cannot be tested without
-/// `set_var`, which flakes the moment the suite runs in parallel.
-#[must_use]
-fn subagent_model_forced() -> bool {
-    platform_api::env::is_env_truthy(
-        std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
-            .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
-            .ok()
-            .as_deref(),
-    )
-}
-
-/// Upstream `eFt()` — the body the `workflow-authoring` skill serves.
-///
-/// The environment read sits here, at the skill boundary, exactly where
-/// upstream's `wpn()` reads it. [`authoring_skill_body`] stays parameterised so
-/// the tests can pin both renderings without `set_var`.
-#[must_use]
-pub fn authoring_skill_prompt() -> String {
-    authoring_skill_body(subagent_model_forced())
-}
-
-/// Upstream `Epn(e)` — assemble what the model reads for the Workflow tool.
-///
-/// `skill_reachable` answers "can this request load the `workflow-authoring`
-/// skill?". When it can, the description carries a one-line pointer; when it
-/// cannot, the whole reference is inlined exactly as 2.1.245 shipped it.
-///
-/// ⛔ The fallback is not an optimisation detail — it is a reachability
-/// invariant. A script only ever learns which hooks exist from this text, so
-/// pointing at a skill the model cannot load would make every hook (including
-/// LingXi's `fusion()`) unreachable. Upstream inlines for the same reason.
-fn assemble_description(skill_reachable: bool, model_forced: bool) -> String {
-    if skill_reachable {
-        format!("{}\n\n{}", *DESCRIPTION, AUTHORING_SKILL_POINTER)
-    } else {
-        format!(
-            "{}\n\n{}",
-            *DESCRIPTION,
-            authoring_skill_body(model_forced)
-        )
-    }
-}
+use workflow::description::{
+    assemble_description, subagent_model_forced, DESCRIPTION,
+};
 
 /// The input schema (claude-code v2.1.245 `inputSchema`), reproduced from the
 /// zod `strictObject` definition (source-order properties, `additionalProperties:
@@ -1177,15 +951,19 @@ impl WorkflowTool {
     /// includes it — and then, per call, that the `Skill` tool is among the
     /// advertised tools.
     ///
-    /// This port has no substrate for three of them (`disableBundledSkills`,
-    /// `skillOverrides`, and the session skill allowlist do not exist here), and
-    /// — more decisively — does not yet register the skill at all. Every one of
-    /// upstream's conditions is therefore unsatisfied, and `false` is not a stub
-    /// standing in for unfinished work: it is the answer `nre()` itself returns
-    /// for a build where the skill is absent, which is why upstream keeps the
-    /// inline branch. The reachability invariant holds either way.
+    /// This port has no substrate for three of them — `disableBundledSkills`,
+    /// `skillOverrides` and the session skill allowlist do not exist here — so
+    /// it answers the question those six conditions are asking, rather than
+    /// reproducing the conditions: the registrar reports that the skill exists,
+    /// and the wire-schema build reports whether this request advertises the
+    /// `Skill` tool that loads it. Both are published by the code that knows
+    /// the fact, and either being false takes the inline branch.
+    ///
+    /// ⛔ False must stay the safe answer. An unset flag inlines the reference,
+    /// which costs tokens; a wrongly-set one points at a skill the model cannot
+    /// load, which makes every documented hook unreachable.
     fn authoring_skill_reachable(&self, _options: &PromptOptions) -> bool {
-        false
+        platform_api::session_flags::workflow_authoring_skill_reachable()
     }
 
     /// Is the tool disabled, by env var OR managed setting? Binary `fbn()`.
@@ -1890,6 +1668,10 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 
 #[cfg(test)]
 mod tests {
+    // The oracle texts and their register moved to the workflow runtime
+    // crate (§8.1: a command crate may not depend on a tool crate, and the
+    // `workflow-authoring` skill reads the same texts).
+    use workflow::description::*;
     use super::*;
     use std::sync::Mutex as StdMutex;
 
@@ -2269,6 +2051,17 @@ mod tests {
             "the opt-in clauses belong to the per-request description"
         );
 
+        // The pointer sentence (`i`) is oracle text too: it is what the model
+        // reads INSTEAD of the reference, so it is pinned byte-for-byte rather
+        // than merely checked for the skill name.
+        assert_eq!(
+            AUTHORING_SKILL_POINTER,
+            "Before writing a script, load the `workflow-authoring` skill \u{2014} the workflow \
+             authoring reference: script API and gotchas, resume, the **Ultracode** section, \
+             quality patterns, worked examples."
+        );
+        assert_eq!(AUTHORING_SKILL_POINTER.len(), 192);
+
         // No leftover raw escape sequences. `\\x` matters as much as `\\u`: the
         // binary stores `×` as `\\xD7`, and an extractor that only unescaped
         // `\\uXXXX` left it raw — which read as a genuine oracle delta.
@@ -2397,6 +2190,52 @@ mod tests {
         assert!(DESCRIPTION.ends_with("No wasted wall-clock."));
         assert!(AUTHORING_SKILL.starts_with("# Workflow authoring reference"));
         assert!(AUTHORING_SKILL.ends_with("hand-author a continuation script."));
+    }
+
+    /// Serialises the tests that drive the process-global reachability flags.
+    ///
+    /// `prompt()` reads them live, so a test that flips them races any other
+    /// test asserting what `prompt()` returns — the classic "green alone, red in
+    /// the full suite" flake, which also reads as another session's fault.
+    static GATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Put the reachability flags in a known state and report the previous one.
+    fn set_gate(registered: bool, skill_tool: bool) {
+        platform_api::session_flags::set_workflow_authoring_skill_registered(registered);
+        platform_api::session_flags::set_skill_tool_advertised(skill_tool);
+    }
+
+    /// Both halves of `nre` must hold. Either one false inlines the reference,
+    /// because a skill that is registered but unloadable — or loadable but
+    /// absent — leaves every documented hook unreachable.
+    #[tokio::test]
+    async fn the_description_points_at_the_skill_only_when_both_halves_hold() {
+        let _guard = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let opts = PromptOptions::default();
+        let tool = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Unrestricted);
+
+        set_gate(true, true);
+        let pointed = tool.prompt(&opts).await;
+        assert!(
+            pointed.contains("`workflow-authoring`") && !pointed.contains("- fusion(prompt: string"),
+            "with the skill registered and the Skill tool advertised, the description must point"
+        );
+
+        for (registered, skill_tool, why) in [
+            (false, true, "the skill is not registered"),
+            (true, false, "this request does not advertise the Skill tool"),
+            (false, false, "neither holds"),
+        ] {
+            set_gate(registered, skill_tool);
+            let inlined = tool.prompt(&opts).await;
+            assert!(
+                inlined.contains("- fusion(prompt: string"),
+                "the reference must be inlined when {why}: otherwise the description points at \
+                 documentation the model cannot load, and every hook it lists is unreachable"
+            );
+            assert!(inlined.len() > pointed.len() * 4);
+        }
+        set_gate(false, false);
     }
 
     /// The reachability invariant the split must not break.
@@ -2801,6 +2640,8 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_appends_size_guideline_when_configured() {
+        let _guard = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_gate(false, false);
         let opts = PromptOptions::default();
         // The base is the ASSEMBLED description, not the bare oracle: 2.1.267
         // appends either the authoring reference or the one-line pointer to it.

@@ -96,7 +96,7 @@
 //! DENY-list ([`SKIPPED_EXTENSIONS`]) of formats that cannot be UTF-8 source,
 //! not an allow-list of the ones we happened to think of. An UNKNOWN extension
 //! is scanned. It used to be `["rs", "js"]`, which left
-//! `tools/workflow/src/workflow_description.txt` and
+//! `workflow/src/workflow_description.txt` and
 //! `workflow_input_schema.json` — both `include_str!`ed into production, the
 //! first being the Workflow tool's own model-facing description — unscanned
 //! INSIDE a declared root.
@@ -185,7 +185,8 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// 6 → 11 (2026-09-06): three in `host.rs`, where the session-mode command
 /// filter keeps exactly the three plugin entry routers visible outside an app
 /// workspace — a membership test on `c.name`, so the names ARE the datum — and
-/// two in `tools/workflow/src/workflow_description_divergences.json`, the
+/// two in `workflow/src/workflow_description_divergences.json` (moved there
+/// from `tools/workflow/src` on 2026-09-10), the
 /// register that composes the Workflow tool's shipped description. The latter
 /// is the arrival this file's scan-surface note predicted when it put `.txt`
 /// and `.json` under `tools/workflow/src` into the scan: prose selecting a
@@ -197,7 +198,18 @@ const ALLOWLIST_BASELINE_COUNT: usize = 11;
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is
 /// an out-of-line `#[cfg(test)]` module.
-const SCAN_ROOTS: &[&str] = &["apps/engine-mobile/src", "tasks/src", "tools/workflow/src"];
+const SCAN_ROOTS: &[&str] = &[
+    "apps/engine-mobile/src",
+    "tasks/src",
+    "tools/workflow/src",
+    // 2026-09-10: the Workflow tool's two model-facing oracle texts and their
+    // divergence register moved here from `tools/workflow/src` (§8.1 forbids a
+    // command crate depending on a tool crate, and the `workflow-authoring`
+    // bundled skill reads the same texts). Without this root they would have
+    // left the scan surface entirely — the exact asymmetry the SKIPPED_EXTENSIONS
+    // note below describes, and the STALE entries were the only thing that said so.
+    "workflow/src",
+];
 
 /// File extensions that are NOT scanned — a DENY-list, deliberately, so that
 /// "deny-by-default" holds for file TYPES the way it already holds for files.
@@ -206,7 +218,9 @@ const SCAN_ROOTS: &[&str] = &["apps/engine-mobile/src", "tasks/src", "tools/work
 /// the declared roots: `tools/workflow/src` also holds
 /// `workflow_description.txt` (the Workflow tool's own description, 19 KB of
 /// text handed straight to the model) and `workflow_input_schema.json`, both
-/// `include_str!`ed into production at `tools/workflow/src/lib.rs:58` and `:68`.
+/// `include_str!`ed into production (the description text now from
+/// `workflow/src/description.rs`, the input schema from
+/// `tools/workflow/src/lib.rs`).
 /// The rationale that put `.js` on the allow-list — "production source that
 /// merely happens not to be Rust", and §19.3 stating its criterion over the
 /// DIRECTORY — applies to those two verbatim, yet a component name planted in
@@ -1310,9 +1324,9 @@ fn every_scan_root_exists_and_contains_source() {
 
 /// (D1) — the extension filter is a DENY-list, so a file type nobody thought
 /// of is SCANNED, not skipped. Two files inside a declared scan root prove the
-/// point concretely: `tools/workflow/src/workflow_description.txt` is the
+/// point concretely: `workflow/src/workflow_description.txt` is the
 /// Workflow tool's own description — 19 KB of text `include_str!`ed at
-/// `tools/workflow/src/lib.rs:58` and handed to the model — and
+/// `workflow/src/description.rs` and handed to the model — and
 /// `workflow_input_schema.json` is `include_str!`ed at `:68`. Under the old
 /// `SCANNED_EXTENSIONS = ["rs", "js"]` allow-list, planting a component name in
 /// either left this gate green. A later phase moving workflow-selection prose
@@ -1327,7 +1341,9 @@ fn known_include_str_data_files_are_inside_the_scan_surface() {
         collect_source_files(&root, &mut files);
     }
     for rel in [
-        "tools/workflow/src/workflow_description.txt",
+        "workflow/src/workflow_description.txt",
+        "workflow/src/workflow_authoring_skill.txt",
+        "workflow/src/workflow_description_divergences.json",
         "tools/workflow/src/workflow_input_schema.json",
     ] {
         let path = base.join(rel);

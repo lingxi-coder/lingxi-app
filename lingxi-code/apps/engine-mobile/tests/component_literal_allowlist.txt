@@ -7,7 +7,7 @@
 # `literal`. No globs, no directory entries, no prefixes.
 #
 # Scan surface (component_literal_scan.rs's SCAN_ROOTS):
-#   apps/engine-mobile/src, tasks/src, tools/workflow/src
+#   apps/engine-mobile/src, tasks/src, tools/workflow/src, workflow/src
 # — the latter two because design doc §19.3's last bullet and P-1.9's
 # completion condition are stated over exactly those directories, so a scanner
 # rooted only at engine-mobile could never gate them.
@@ -15,7 +15,7 @@
 # Within those roots EVERY file type is scanned except the known-binary
 # extensions in SKIPPED_EXTENSIONS: the filter is a deny-list, so an unknown
 # extension is scanned rather than skipped. That is why `.txt` and `.json` under
-# tools/workflow/src (`workflow_description.txt`, the Workflow tool's own
+# workflow/src (`workflow_description.txt`, the Workflow tool's own
 # model-facing description, and `workflow_input_schema.json` — both
 # `include_str!`ed into production) are in the scan surface. Neither contains a
 # component name today, so neither appears below; if a later phase moves
@@ -157,7 +157,7 @@ apps/engine-mobile/src/local_apps_build.rs:lingxi-local-app:create-local-app:1
 # does not exist and never did. The scanner's own workflow needles now come
 # from `component_literal_scan.rs`'s `local_app_workflow_basenames()`.
 
-# --- tools/workflow/src ----------------------------------------------------
+# --- workflow/src ----------------------------------------------------------
 
 # builtins.rs and the workflow scripts — no entries. Phase 9 moved Local App
 # workflows out of the built-in workflow registry and into the verified plugin
@@ -187,5 +187,5 @@ apps/engine-mobile/src/local_apps_build.rs:lingxi-local-app:create-local-app:1
 # not model-facing at all; it is a pointer to the file a reader has to open to
 # check the claim. There is no rewording that keeps a real path and drops the
 # basename, so it is listed here instead of being paraphrased away.
-tools/workflow/src/workflow_description_divergences.json:create-local-app:1
-tools/workflow/src/workflow_description_divergences.json:lingxi-local-app:create-local-app:2
+workflow/src/workflow_description_divergences.json:create-local-app:1
+workflow/src/workflow_description_divergences.json:lingxi-local-app:create-local-app:2

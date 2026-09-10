@@ -11,6 +11,13 @@ license.workspace = true
 # semantics as claude-code's AsyncFunction-based executor.
 
 [dependencies]
+# The Workflow tool description + authoring reference (`description.rs`) live
+# here because both the tool and the `workflow-authoring` bundled skill read
+# them, and §8.1 forbids a command crate depending on a tool crate.
+platform-api = { path = "../platform-api" }
+serde.workspace = true
+once_cell = "1"
+
 # JSON parsing for phase-context injection into the batch opts (`__wf_phase`).
 serde_json.workspace = true
 # rquickjs vendors quickjs-ng and compiles it by default (no system lib).

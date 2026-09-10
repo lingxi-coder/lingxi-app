@@ -19,7 +19,7 @@ core = { path = "../../core" }
 schemars = "0.8"
 protocol = { path = "../../protocol" }
 skill-api = { path = "../../skill-api" }
-tool-workflow = { path = "../../tools/workflow" }
+workflow = { path = "../../workflow" }
 # The bundled `/loop` skill's flag-on (autonomous-default) builder imports the
 # autonomous-loop module (binary `Xpc` imports `QVe = io(T3e)`): loop.md detection,
 # the preamble, the sentinels, and `logAutonomousLoopActivation`.

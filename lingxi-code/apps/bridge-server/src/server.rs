@@ -56,7 +56,7 @@ use client_adapter::{
 use client_protocol::commands::AudioResultDto;
 use client_protocol::commands::{ClientCommand, ImageRefDto};
 use client_protocol::computer_access::{ComputerAccessRequestDto, ComputerAccessResponseDto};
-use client_protocol::events::ClientEvent;
+use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
 use msgqueue::{
     join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,

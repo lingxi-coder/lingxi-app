@@ -178,6 +178,13 @@ tempfile = "3"
 # `agent::StateMachinePool` / `agent::PoolSubagentSpawner` with the
 # tokio-backed `MockRuntimeSpawner`. Dev-only — never reaches production builds.
 test-harness = { path = "../../test-harness" }
+# The Fusion pool-admission regressions drive tokio's paused clock
+# (`start_paused` / `time::advance`). The non-dev entry above inherits
+# `time` from the workspace but not `test-util`, so without this line
+# `cargo test -p engine-desktop` fails to COMPILE on its own; it only
+# built when co-compiled with a package whose dev-deps unified the
+# feature in.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -5670,6 +5670,9 @@ impl std::fmt::Debug for DesktopAudio {
 ///     system_prompt_override: None,
 ///     append_system_prompt: None,
 ///     session_id_override: None,
+///     // `None` ⟶ the engine opens its own writer claim rather than
+///     // consuming one the host already acquired.
+///     session_writer_lease: None,
 ///     parent_session_id: None,
 ///     disable_slash_commands: false,
 ///     add_dir: Vec::new(),

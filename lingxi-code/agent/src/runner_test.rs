@@ -76,6 +76,9 @@ struct StreamingMockApiClient {
     /// Tools seen on the most recent `messages_create_stream` call — lets a
     /// test prove `ctx.tool_schemas` threads through the seam.
     last_tools: Mutex<Vec<serde_json::Value>>,
+    /// The model each call was issued against, in order — lets a test prove a
+    /// refusal hop actually re-issued against the fallback.
+    models: Mutex<Vec<String>>,
 }
 
 impl StreamingMockApiClient {
@@ -84,7 +87,12 @@ impl StreamingMockApiClient {
             turns: Mutex::new(turns.into_iter().collect()),
             calls: AtomicUsize::new(0),
             last_tools: Mutex::new(Vec::new()),
+            models: Mutex::new(Vec::new()),
         })
+    }
+
+    fn models(&self) -> Vec<String> {
+        self.models.lock().unwrap().clone()
     }
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
@@ -108,7 +116,7 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
 
     async fn messages_create_stream(
         &self,
-        _model: &str,
+        model: &str,
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -119,6 +127,7 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
     > {
         use futures::StreamExt;
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.models.lock().unwrap().push(model.to_string());
         *self.last_tools.lock().unwrap() = tools;
         let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
@@ -559,6 +568,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         max_input_bytes_per_turn: None,
         query_source_label: None,
         correlation_id: None,
+        refusal_fallback_chain: Vec::new(),
     }
 }
 
@@ -5472,4 +5482,131 @@ async fn owner_notification_waits_for_handler_rest_acknowledgement() {
     assert_eq!(api.call_count(), 2);
     drop(event_tx);
     runner.await.unwrap();
+}
+
+// ── Subagent refusal cascade ───────────────────────────────────────────────
+//
+// claude-code runs subagents through the SAME query generator as the main
+// thread, so a refusing subagent hops to the fallback model and retries. This
+// port's subagent loop is separate and treated `refusal` as an ordinary
+// terminal stop reason, so the run simply ended.
+
+#[tokio::test]
+async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 3);
+    ctx.refusal_fallback_chain = vec!["fallback-model".to_string()];
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    let events = drain(out_rx).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, SubagentEvent::Completed { result, .. } if result["text"] == "done")
+        ),
+        "the retry's answer is the run's result: {events:?}"
+    );
+    assert_eq!(
+        api.call_count(),
+        2,
+        "a refusal with a hop left must re-issue, not end the run"
+    );
+    assert_eq!(
+        api.models().get(1).map(String::as_str),
+        Some("fallback-model"),
+        "the retry must go to the fallback, not back to the refusing model: {:?}",
+        api.models()
+    );
+}
+
+/// The control: with no chain configured a refusal is still terminal, which is
+/// every subagent's behaviour before this. Without it the test above would
+/// pass just as well if the loop retried unconditionally.
+#[tokio::test]
+async fn a_refusal_with_no_chain_configured_still_ends_the_run() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let ctx = loop_ctx(api.clone(), None, 3);
+    assert!(
+        ctx.refusal_fallback_chain.is_empty(),
+        "precondition: nothing configured"
+    );
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    assert_eq!(
+        api.call_count(),
+        1,
+        "no chain ⇒ the refusal is terminal, as before"
+    );
+}
+
+/// The cascade is bounded by its chain: each hop is consumed, so a subagent
+/// that keeps refusing stops rather than looping over the same models.
+#[tokio::test]
+async fn a_subagent_cascade_stops_when_the_chain_is_exhausted() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("", "refusal"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 8);
+    ctx.refusal_fallback_chain = vec!["hop-one".to_string(), "hop-two".to_string()];
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+
+    assert_eq!(
+        api.call_count(),
+        3,
+        "the original call plus one per chain entry, then terminal: {:?}",
+        api.models()
+    );
+    assert_eq!(
+        api.models()[1..].to_vec(),
+        vec!["hop-one".to_string(), "hop-two".to_string()],
+        "each hop is consumed once, in order"
+    );
+}
+
+/// A subagent's swap is `scope: "local"` — it lasts for this run and does not
+/// touch the session model, unlike the main thread's, which is `"session"`.
+/// claude-code's `ICe` looks for exactly the local one.
+#[test]
+fn a_subagent_refusal_frame_is_scoped_local() {
+    let frame = super::refusal_fallback_frame(
+        MessageId::new(),
+        &platform_api::refusal_notice::RefusalNotice {
+            origin_model: "refusing-model".to_string(),
+            serving_model: "fallback-model".to_string(),
+            ..platform_api::refusal_notice::RefusalNotice::default()
+        },
+    );
+    match frame {
+        ConversationMessage::System {
+            subtype,
+            refusal_fallback: Some(meta),
+            ..
+        } => {
+            assert_eq!(subtype.as_deref(), Some("model_refusal_fallback"));
+            assert_eq!(meta.scope.as_deref(), Some("local"));
+            assert_eq!(meta.original_model, "refusing-model");
+            assert_eq!(meta.fallback_model, "fallback-model");
+        }
+        other => panic!("expected a typed system frame, got {other:?}"),
+    }
 }

@@ -1171,7 +1171,11 @@ async fn run_subagent_loop(
     // `Some` consults the parent's cumulative cost once per turn; `None`
     // disables enforcement (legacy/test contexts).
     let budget = ctx.budget.clone();
-    let model = resolve_model(&ctx);
+    let mut model = resolve_model(&ctx);
+    // Per-run refusal cascade. claude-code's subagents share the main thread's
+    // because they share its query generator; here the loops are separate, so
+    // each run walks its own chain (handed down on the context).
+    let mut refusal_cascade = platform_api::refusal_driver::RefusalCascadeState::default();
     let system: Option<String> = ctx
         .rendered_system_prompt
         .as_ref()
@@ -2231,6 +2235,31 @@ async fn run_subagent_loop(
             // the truncated turn carried tool_uses we just dispatched.
             // A captured structured output terminates the run (it IS the result),
             // even though the forced tool call carries a `tool_use` stop reason.
+            // A `refusal` stop is NOT terminal while the cascade still has a
+            // hop left: swap the model and re-issue this turn against it, the
+            // same as both main-thread loops (`turn_loop.rs:1333`,
+            // `drivers/mod.rs:3192`, which likewise just Continue — neither
+            // tombstones the refused turn). Without this a refusing subagent
+            // simply ended its run.
+            if stop_reason.as_deref() == Some("refusal") {
+                let frame_id = MessageId::new();
+                let notice_uuid = frame_id.as_uuid().to_string();
+                if let Some(hop) =
+                    refusal_cascade.next_hop(&ctx.refusal_fallback_chain, &model, notice_uuid)
+                {
+                    for report in &hop.declines {
+                        tracing::info!(
+                            event = "tengu_refusal_fallback_route_declined",
+                            reason = report.as_str(),
+                        );
+                    }
+                    model = hop.fallback_model.clone();
+                    for emitted in hop.notices {
+                        history.push(refusal_fallback_frame(frame_id, &emitted.banner));
+                    }
+                    continue;
+                }
+            }
             let should_continue = stop_reason.as_deref() == Some("tool_use")
                 && !tool_uses.is_empty()
                 && structured_result.is_none();
@@ -2901,3 +2930,37 @@ fn cap_input_bytes(
 #[cfg(test)]
 #[path = "runner_test.rs"]
 mod runner_test;
+
+/// The typed `model_refusal_fallback` system message for a subagent hop.
+///
+/// `convert_messages` drops every `System` before the wire, so this rides in
+/// the run's history and its transcript without becoming model context — which
+/// is exactly where claude-code's `ICe` looks for it when the agent finalizes.
+///
+/// `scope` is `"local"`, not the main thread's `"session"`: a subagent's swap
+/// lasts for this run only and does not touch the session model.
+fn refusal_fallback_frame(
+    id: MessageId,
+    banner: &platform_api::refusal_notice::RefusalNotice,
+) -> ConversationMessage {
+    ConversationMessage::System {
+        id,
+        content: format!(
+            "This model's safeguards flagged this message. Switched to {}.",
+            banner.serving_model
+        ),
+        subtype: Some("model_refusal_fallback".to_string()),
+        compact_metadata: None,
+        refusal_fallback: Some(protocol::RefusalFallbackMetadata {
+            trigger: "refusal".to_string(),
+            direction: "retry".to_string(),
+            scope: Some("local".to_string()),
+            original_model: banner.origin_model.clone(),
+            fallback_model: banner.serving_model.clone(),
+            request_id: banner.request_id.clone(),
+            api_refusal_category: banner.api_refusal_category.clone(),
+            retracted_message_uuids: banner.retracted_message_uuids.clone(),
+            refused_user_message_uuid: banner.refused_user_message_uuid.clone(),
+        }),
+    }
+}

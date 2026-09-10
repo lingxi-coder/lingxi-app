@@ -118,6 +118,11 @@ pub struct PoolSubagentSpawner {
     /// child's [`SubagentContext`]. `None` keeps the legacy stub behavior
     /// (the runner emits a synthetic completion without calling the model).
     api_client: Option<Arc<dyn SubagentApiClient>>,
+    /// The refusal-fallback chain handed to every child runner. Empty (the
+    /// default) leaves a refusing subagent ending its run, which is what this
+    /// port did before the cascade reached the `agent` crate. Filled by the
+    /// composition root from `OrchestratorConfig`.
+    refusal_fallback_chain: Vec<String>,
     /// The live tool registry, used to resolve each spawn's advertised tools +
     /// allow-list PER-SPAWN: resolution reads whatever the registry holds at
     /// spawn time (rather than a one-time serialized snapshot taken at boot),
@@ -529,6 +534,7 @@ impl PoolSubagentSpawner {
         Self {
             pool,
             api_client: None,
+            refusal_fallback_chain: Vec::new(),
             tool_registry: Arc::new(std::sync::OnceLock::new()),
             task_registry: std::sync::OnceLock::new(),
             new_diagnostics_source_factory: None,
@@ -565,6 +571,16 @@ impl PoolSubagentSpawner {
     }
 
     /// Builder: attach a global structured observer for every spawned child.
+    /// Wire the refusal-fallback chain every child runner may walk.
+    ///
+    /// Without it a refusing subagent ends its run — this port's behaviour
+    /// before the cascade moved below both turn loops.
+    #[must_use]
+    pub fn with_refusal_fallback_chain(mut self, chain: Vec<String>) -> Self {
+        self.refusal_fallback_chain = chain;
+        self
+    }
+
     #[must_use]
     pub fn with_spawn_observer(mut self, observer: Arc<dyn SubagentSpawnObserver>) -> Self {
         self.spawn_observer = Some(observer);
@@ -1534,6 +1550,7 @@ impl PoolSubagentSpawner {
         };
         SubagentContext {
             task_registry: None,
+            refusal_fallback_chain: Vec::new(),
             agent_id,
             parent_agent_id: None,
             agent_name: None,
@@ -1799,6 +1816,10 @@ impl PoolSubagentSpawner {
         );
         ctx.session_interactive = self.session_interactive;
         ctx.origin_session_id = request.origin_session_id;
+        // Hand the child the refusal-fallback chain. Upstream's subagents share
+        // the main thread's cascade because they share its query generator;
+        // here the loops are separate, so it is passed down.
+        ctx.refusal_fallback_chain = self.refusal_fallback_chain.clone();
         // Append the subagent `<env>` block (claude-code 2.1.186 `tIm`, after the
         // `Notes:` trailer) on the NON-fork path only — the fork path replays the
         // parent's rendered prompt verbatim with no `enhanceSystemPromptWithEnvDetails`.

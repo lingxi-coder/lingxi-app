@@ -1279,15 +1279,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // one refuses. An empty chain falls back to the historical single
         // `refusal_fallback_model`, which is exactly a one-element chain — so
         // the default path is byte-identical to before the cascade existed.
-        let chain: Vec<String> = if self.config.refusal_fallback_chain.is_empty() {
-            self.config
-                .refusal_fallback_model
-                .clone()
-                .into_iter()
-                .collect()
-        } else {
-            self.config.refusal_fallback_chain.clone()
-        };
+        let chain = self.config.refusal_chain();
         let current_model = { self.session.lock().await.model.clone() };
         let notice_uuid = uuid::Uuid::new_v4().to_string();
         // Routing, the once-per-session latch, the tried set and the notice

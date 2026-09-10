@@ -11127,6 +11127,7 @@ pub async fn build(
     // session's hard-429 checkpoint.
     let subagent_hook_session_id = main_session_id;
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_session_interactive(interactive_session)
         .with_api_client(subagent_api)
         // #15: the parent model handed to the spawner must be the RESOLVED

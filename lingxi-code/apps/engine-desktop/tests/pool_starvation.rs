@@ -202,6 +202,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         max_input_bytes_per_turn: None,
         query_source_label: None,
         correlation_id: None,
+        refusal_fallback_chain: Vec::new(),
     }
 }
 

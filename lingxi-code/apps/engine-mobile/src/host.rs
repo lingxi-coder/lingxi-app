@@ -4322,6 +4322,7 @@ async fn build_mobile_inner_with_ask(
         active_session_uuid.clone(),
     ));
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)
         .with_session_interactive(interactive_launch)
         .with_default_model(agent::model_resolution::resolve_user_specified_model(

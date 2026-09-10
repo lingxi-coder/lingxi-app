@@ -690,3 +690,21 @@ mod tests {
         assert_eq!(back.resume_session_id, Some(sid));
     }
 }
+
+impl OrchestratorConfig {
+    /// The refusal-fallback chain to walk, in order.
+    ///
+    /// An empty [`Self::refusal_fallback_chain`] falls back to the historical
+    /// single [`Self::refusal_fallback_model`], which is exactly a one-element
+    /// chain — so the default path is byte-identical to before the cascade
+    /// existed. Both the main-thread loop and the subagent spawner read the
+    /// chain through here, so the two cannot drift apart on that rule.
+    #[must_use]
+    pub fn refusal_chain(&self) -> Vec<String> {
+        if self.refusal_fallback_chain.is_empty() {
+            self.refusal_fallback_model.clone().into_iter().collect()
+        } else {
+            self.refusal_fallback_chain.clone()
+        }
+    }
+}

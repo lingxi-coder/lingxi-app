@@ -968,6 +968,7 @@ impl InProcessTeammateHandler {
             // Teammates do not inherit forked skill execution, so
             // there is no caller correlation id to thread.
             correlation_id: None,
+            refusal_fallback_chain: Vec::new(),
         })
     }
 }

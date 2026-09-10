@@ -35,6 +35,16 @@ pub struct McpServerMetadata {
     /// True only for an explicitly injected MCP temporary credential.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ambient_credential: bool,
+    /// This entry read the user's ENVIRONMENT: it carried a `${VAR}` reference
+    /// on a field that expands, before expansion ran.
+    ///
+    /// Only ever set for an organization-delivered entry, and only there
+    /// because it changes that entry's trust. A managed document that cannot
+    /// read the user's environment is fully trusted and needs no
+    /// `allowedMcpServers` entry; one that CAN is still checked against the
+    /// list. See `enterprise_policy::org_delivered_needs_no_allowlist_entry`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub expanded_from_env: bool,
 }
 
 /// MCP server routing role.  `Comms` affects coordinator worker tool routing;

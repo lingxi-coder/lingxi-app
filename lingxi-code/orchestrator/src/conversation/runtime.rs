@@ -677,6 +677,14 @@ pub(crate) struct CompactionRuntime {
     /// turns' output is excluded. Updated by each turn driver as its per-turn
     /// token counter resets to 0.
     pub(crate) turn_start_output_baseline: Arc<std::sync::atomic::AtomicU64>,
+    /// claude-code `D = Date.now()` — stamped at the top of the query generator
+    /// (`Nfr`, `src_163219561.js` @163219699) and read by the analytics events
+    /// that fire from its `finally`: `tengu_stop_hook_error`'s `duration` and
+    /// `tengu_goal_evaluated`'s `durationMs` are both `Date.now() - D`, i.e. the
+    /// elapsed time of the WHOLE query up to that point — not of the stop-hook
+    /// dispatch or the goal evaluation. Stamped at the same three query entry
+    /// points as [`Self::turn_start_output_baseline`].
+    pub(crate) query_started_at: Arc<std::sync::Mutex<std::time::Instant>>,
     /// P1 session-memory standalone trigger (§6.5). `None` = inert (no caller
     /// wires it). When wired (via [`Self::with_session_memory`]) AND the
     /// extractor's threshold is crossed, [`Self::maybe_extract_session_memory`]
@@ -698,6 +706,7 @@ impl CompactionRuntime {
             ),
             output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_start_output_baseline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            query_started_at: Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
             session_memory: None,
         }
     }

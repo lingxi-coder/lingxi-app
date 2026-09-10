@@ -2,6 +2,47 @@
 
 use super::*;
 
+/// `tengu_goal_evaluated`'s `outcome`, and the `iterations` rule that rides
+/// on it.
+///
+/// Upstream (`src_163219561.js` @4343091):
+/// `outcome: u(We ?? (_e ? "error" : Qe ? "cancelled" : "absent"))` and
+/// `iterations: Fe.iterations + (Je ? 1 : 0)` where
+/// `Je = We==="met" || We==="not_met" || We==="impossible"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GoalEvalOutcome {
+    Met,
+    NotMet,
+    Impossible,
+    Deferred,
+    Error,
+    Cancelled,
+    Absent,
+}
+
+impl GoalEvalOutcome {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Met => "met",
+            Self::NotMet => "not_met",
+            Self::Impossible => "impossible",
+            Self::Deferred => "deferred",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Absent => "absent",
+        }
+    }
+
+    /// 🚨 Only a REAL verdict advances the count upstream. This port's
+    /// [`ConversationOrchestrator::record_goal_evaluation`] bumps the STORED
+    /// count on every path, so the telemetry value must be built from the
+    /// count read BEFORE the evaluation plus this, never from the mutated
+    /// one.
+    pub(super) fn counts_as_iteration(self) -> bool {
+        matches!(self, Self::Met | Self::NotMet | Self::Impossible)
+    }
+}
+
 impl ConversationOrchestrator {
     pub(crate) async fn upsert_active_goal_stop_hook_for_session(
         &self,
@@ -441,7 +482,12 @@ impl ConversationOrchestrator {
     /// loop forever. `prevent_continuation` (`continue:false`) always wins →
     /// [`StopHookDisposition::Prevent`]. Strict no-op (`Pass`) when no Stop hook
     /// is registered.
-    async fn fire_stop_hooks(&self, reason: &str, stop_hook_active: bool) -> StopHookDisposition {
+    async fn fire_stop_hooks(
+        &self,
+        reason: &str,
+        stop_hook_active: bool,
+        parent_aborted: bool,
+    ) -> StopHookDisposition {
         tracing::debug!(event = "hook_stop_started", reason, stop_hook_active);
         let mut ctx = self.lifecycle_hook_ctx(stop_hook_active).await;
         let goal_hook_id = self
@@ -462,6 +508,14 @@ impl ConversationOrchestrator {
         // The port cannot un-register the hook mid-dispatch, so it suppresses
         // the goal DISPOSITION instead — the observable effect is identical
         // (no `GoalContinue`, no `iterations` bump, no `goal_status` record).
+        // Upstream emits `tengu_goal_evaluated` from the evaluator's `finally`,
+        // so the goal it reports is the one that was active BEFORE the
+        // evaluation. Its `durationMs` is NOT measured from here: the oracle's
+        // base is `D`, stamped at the top of the query generator.
+        let goal_before = { self.session.lock().await.active_goal.clone() };
+        let deferring_tasks = Self::build_deferring_goal_checkin_tasks(
+            ctx.background_tasks.as_deref().unwrap_or(&[]),
+        );
         let goal_deferred = self
             .goal_checkin_pass(ctx.background_tasks.as_deref().unwrap_or(&[]))
             .await;
@@ -474,11 +528,16 @@ impl ConversationOrchestrator {
                 ctx,
             )
             .await;
-        let goal_disposition = if goal_deferred {
-            None
+        let (goal_disposition, goal_outcome) = if goal_deferred {
+            (None, GoalEvalOutcome::Deferred)
         } else {
-            self.goal_stop_hook_disposition(goal_hook_id, &agg).await
+            self.goal_stop_hook_disposition(goal_hook_id, &agg, parent_aborted)
+                .await
         };
+        if let Some(goal) = goal_before.as_ref() {
+            self.fire_goal_evaluated(goal, goal_outcome, parent_aborted, &deferring_tasks)
+                .await;
+        }
         let disposition = if agg.prevent_continuation {
             // FIX C: carry the hook's `stopReason` (parsed into `agg.reason`,
             // `hook_payload.rs:1113`) so `handle_stop_at_end` can persist the
@@ -733,6 +792,110 @@ impl ConversationOrchestrator {
         bus.log_event(event, metadata).await;
     }
 
+    /// `i("tengu_goal_evaluated", …)` — the evaluator's `finally`
+    /// (`src_163219561.js` @4343091).
+    ///
+    /// ```js
+    /// if (Fe) { let Qe = p.abortController.signal.aborted,
+    ///           Je = We==="met"||We==="not_met"||We==="impossible";
+    ///   i("tengu_goal_evaluated",{ outcome:u(We ?? (_e?"error":Qe?"cancelled":"absent")),
+    ///     durationMs:Date.now()-D, iterations:Fe.iterations+(Je?1:0),
+    ///     parentAborted:Qe, origin:we(Fe.origin), ...Xe }) }
+    /// ```
+    ///
+    /// `...Xe` is NOT a general spread: it is set in exactly one branch — the
+    /// deferred one — as `{activeAgents, activeShells}`, and contributes nothing
+    /// anywhere else. The split is the same one
+    /// [`Self::fire_goal_checkin_injected`] already makes off
+    /// [`crate::prompt::goal_checkin::DeferringTask::label`].
+    ///
+    /// `durationMs` is `Date.now() - D`, and `D` is stamped at the TOP of the
+    /// query generator — not where the goal evaluation begins. It is therefore
+    /// the elapsed time of the whole query up to this stop-hook firing; the port
+    /// reads the same clock through
+    /// [`crate::conversation::runtime::CompactionRuntime::query_started_at`].
+    ///
+    /// Upstream captures the goal as `Fe = p.agentId ? void 0 : activeGoal`, so
+    /// a subagent never emits this event. That gate is vacuous here: this
+    /// orchestrator does not model subagent identity (see
+    /// [`Self::fire_stop_hook_block_count`]) and only ever runs the main thread.
+    ///
+    /// `origin` is always `"user"` here, for the reason recorded on
+    /// [`Self::fire_goal_terminal_event`].
+    pub(super) async fn fire_goal_evaluated(
+        &self,
+        goal: &lingxi_core::session::ActiveGoalState,
+        outcome: GoalEvalOutcome,
+        parent_aborted: bool,
+        deferring_tasks: &[crate::prompt::goal_checkin::DeferringTask],
+    ) {
+        let Some(bus) = self.model_runtime.analytics_bus.as_ref() else {
+            return;
+        };
+        let mut metadata = telemetry::LogEventMetadata::new();
+        metadata.insert(
+            "outcome".into(),
+            telemetry::AnalyticsValue::String(outcome.as_str().to_string()),
+        );
+        metadata.insert(
+            "durationMs".into(),
+            telemetry::AnalyticsValue::Int(
+                self.compaction_runtime
+                    .query_started_at
+                    .lock()
+                    .unwrap()
+                    .elapsed()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64,
+            ),
+        );
+        metadata.insert(
+            "iterations".into(),
+            telemetry::AnalyticsValue::Int(
+                goal.iterations
+                    .saturating_add(u64::from(outcome.counts_as_iteration()))
+                    as i64,
+            ),
+        );
+        metadata.insert(
+            "parentAborted".into(),
+            telemetry::AnalyticsValue::Bool(parent_aborted),
+        );
+        metadata.insert(
+            "origin".into(),
+            telemetry::AnalyticsValue::String("user".to_string()),
+        );
+        // `...Xe` — present ONLY on the deferred branch, where upstream sets
+        // `Xe = {activeAgents: j(An, A9t), activeShells: j(An, v9t)}`. Both
+        // counts run over the SAME already-filtered list (`Ofr`), split by two
+        // disjoint predicates: `v9t` is `type === "local_bash"` (this port's
+        // `"shell"`) and `A9t` is the four agent-ish types. Counted by predicate
+        // rather than as `len - shells`, so a label neither side claims shows up
+        // as a missing count instead of silently inflating `activeAgents`.
+        if outcome == GoalEvalOutcome::Deferred {
+            let shells = deferring_tasks
+                .iter()
+                .filter(|t| t.label == "shell")
+                .count();
+            let agents = deferring_tasks
+                .iter()
+                .filter(|t| {
+                    crate::prompt::goal_checkin::GOAL_EVAL_AGENT_TASK_LABELS
+                        .contains(&t.label.as_str())
+                })
+                .count();
+            metadata.insert(
+                "activeShells".into(),
+                telemetry::AnalyticsValue::Int(shells as i64),
+            );
+            metadata.insert(
+                "activeAgents".into(),
+                telemetry::AnalyticsValue::Int(agents as i64),
+            );
+        }
+        bus.log_event("tengu_goal_evaluated", metadata).await;
+    }
+
     /// `Jer(trigger, deferredMs, goal, tasks)` (2.1.266 @4168800) —
     /// `i("tengu_goal_checkin_injected",{trigger,deferredMs,activeShells,activeAgents,checkinCount,idleCheckinCount})`.
     ///
@@ -966,8 +1129,19 @@ impl ConversationOrchestrator {
         &self,
         goal_hook_id: Option<HookId>,
         agg: &hooks::AggregateHookResult,
-    ) -> Option<StopHookDisposition> {
-        let goal_hook_id = goal_hook_id?;
+        parent_aborted: bool,
+    ) -> (Option<StopHookDisposition>, GoalEvalOutcome) {
+        let Some(goal_hook_id) = goal_hook_id else {
+            // No verdict at all: upstream's `We ?? (…)` fallback.
+            return (
+                None,
+                if parent_aborted {
+                    GoalEvalOutcome::Cancelled
+                } else {
+                    GoalEvalOutcome::Absent
+                },
+            );
+        };
         let Some((_, result)) = agg
             .all_results
             .iter()
@@ -975,9 +1149,12 @@ impl ConversationOrchestrator {
         else {
             self.record_goal_evaluation(Some("Goal completion hook did not run".to_string()), true)
                 .await;
-            return Some(StopHookDisposition::GoalContinue(
-                "Goal completion hook did not run".to_string(),
-            ));
+            return (
+                Some(StopHookDisposition::GoalContinue(
+                    "Goal completion hook did not run".to_string(),
+                )),
+                GoalEvalOutcome::Error,
+            );
         };
 
         match result.outcome {
@@ -992,7 +1169,10 @@ impl ConversationOrchestrator {
                             .unwrap_or_else(|| "Goal not met yet".to_string());
                         self.record_goal_evaluation(Some(reason.clone()), true)
                             .await;
-                        return Some(StopHookDisposition::GoalContinue(reason));
+                        return (
+                            Some(StopHookDisposition::GoalContinue(reason)),
+                            GoalEvalOutcome::NotMet,
+                        );
                     }
                 }
                 if let Some(response) = result.response.as_ref().filter(|r| r.impossible) {
@@ -1006,7 +1186,7 @@ impl ConversationOrchestrator {
                             None,
                         )
                         .await;
-                    return None;
+                    return (None, GoalEvalOutcome::Impossible);
                 }
                 // The terminal `achieved` attachment below carries the updated
                 // iteration count; avoid writing a redundant intermediate
@@ -1015,7 +1195,7 @@ impl ConversationOrchestrator {
                 let _ = self
                     .finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Achieved, None)
                     .await;
-                None
+                (None, GoalEvalOutcome::Met)
             }
             hooks::HookOutcome::Timeout
             | hooks::HookOutcome::Error
@@ -1029,7 +1209,10 @@ impl ConversationOrchestrator {
                 };
                 self.record_goal_evaluation(Some(reason.clone()), true)
                     .await;
-                Some(StopHookDisposition::GoalContinue(reason))
+                (
+                    Some(StopHookDisposition::GoalContinue(reason)),
+                    GoalEvalOutcome::Error,
+                )
             }
         }
     }
@@ -1096,6 +1279,7 @@ impl ConversationOrchestrator {
         stop_hook_blocking_count: &mut u32,
         turn_count: u32,
         final_message_id: MessageId,
+        parent_aborted: bool,
     ) -> StopHookFlow {
         if matches!(
             stop_reason,
@@ -1119,7 +1303,10 @@ impl ConversationOrchestrator {
             self.fire_stop_failure("invalid_request").await;
             return StopHookFlow::FallThrough;
         }
-        match self.fire_stop_hooks(stop_reason, *stop_hook_active).await {
+        match self
+            .fire_stop_hooks(stop_reason, *stop_hook_active, parent_aborted)
+            .await
+        {
             StopHookDisposition::Prevent(reason) => {
                 // FIX C (Stop hook_stopped_continuation): persist the stop-reason
                 // meta message (claude `query/stopHooks.ts:269-280`, an isMeta
@@ -1219,8 +1406,11 @@ impl ConversationOrchestrator {
         &self,
         stop_reason: &str,
         stop_hook_active: bool,
+        parent_aborted: bool,
     ) {
-        let disposition = self.fire_stop_hooks(stop_reason, stop_hook_active).await;
+        let disposition = self
+            .fire_stop_hooks(stop_reason, stop_hook_active, parent_aborted)
+            .await;
         if !matches!(disposition, StopHookDisposition::Pass) {
             tracing::debug!(
                 event = "hook_stop_disposition_discarded",

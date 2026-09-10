@@ -291,6 +291,8 @@ mod memory_update_reminder_tests;
 mod goal_checkin_wiring_tests;
 #[path = "conversation/tests/goal_cleared_reason_tests.rs"]
 mod goal_cleared_reason_tests;
+#[path = "conversation/tests/goal_evaluated_analytics_tests.rs"]
+mod goal_evaluated_analytics_tests;
 
 // ── REM-10: the periodic `tool_search_usage_reminder` ────────────────────────
 //

@@ -33,10 +33,21 @@ struct StreamingTurnState {
     malformed_tool_use_retried: bool,
     thinking_only_nudged: bool,
     last_message_id: MessageId,
+    /// The turn's user-cancel token, so the stop-hook firings reached through
+    /// `&ConversationOrchestrator` (which does not own one) can still report
+    /// `parentAborted` on `tengu_goal_evaluated`.
+    user_cancel: Option<CancellationToken>,
 }
 
 impl StreamingTurnState {
-    fn new(orch: &ConversationOrchestrator, last_message_id: MessageId) -> Self {
+    fn new(
+        orch: &ConversationOrchestrator,
+        last_message_id: MessageId,
+        user_cancel: Option<CancellationToken>,
+    ) -> Self {
+        // claude-code `D = Date.now()` at the top of the query generator: the
+        // duration base for the analytics that fire from its `finally`.
+        *orch.compaction_runtime.query_started_at.lock().unwrap() = std::time::Instant::now();
         orch.compaction_runtime.turn_start_output_baseline.store(
             orch.compaction_runtime
                 .output_token_pool
@@ -53,6 +64,7 @@ impl StreamingTurnState {
             malformed_tool_use_retried: false,
             thinking_only_nudged: false,
             last_message_id,
+            user_cancel,
         }
     }
 }
@@ -65,6 +77,15 @@ enum StreamingIterationDisposition {
     /// left for the next turn instead of causing another model invocation.
     ForcedComplete(MessageId),
     Return(ConversationOutcome),
+}
+
+/// `p.abortController.signal.aborted` — whether the USER cancelled this turn.
+///
+/// Read at each stop-hook firing so `tengu_goal_evaluated` can report
+/// `parentAborted`, and so a goal evaluation that produced no verdict is
+/// classified `cancelled` rather than `absent`.
+fn token_aborted(token: &Option<CancellationToken>) -> bool {
+    token.as_ref().is_some_and(CancellationToken::is_cancelled)
 }
 
 struct StreamingTurnDriver<'a> {
@@ -574,6 +595,7 @@ impl StreamingTurnDriver<'_> {
                     &mut loop_state.stop_hook_blocking_count,
                     loop_state.turn_count,
                     id,
+                    token_aborted(user_cancel),
                 )
                 .await;
             let cost = orch.snapshot_cost_real().await;
@@ -811,6 +833,7 @@ impl StreamingTurnDriver<'_> {
                                 &mut loop_state.stop_hook_blocking_count,
                                 loop_state.turn_count,
                                 id,
+                                token_aborted(user_cancel),
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
@@ -830,6 +853,7 @@ impl StreamingTurnDriver<'_> {
                                 &mut loop_state.stop_hook_blocking_count,
                                 loop_state.turn_count,
                                 id,
+                                token_aborted(user_cancel),
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
@@ -849,6 +873,7 @@ impl StreamingTurnDriver<'_> {
                                 &mut loop_state.stop_hook_blocking_count,
                                 loop_state.turn_count,
                                 id,
+                                token_aborted(user_cancel),
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
@@ -1740,8 +1765,11 @@ impl StreamingTurnDriver<'_> {
             });
         }
 
-        let mut loop_state =
-            StreamingTurnState::new(orch, prior_message_id.unwrap_or_else(|| user_msg.id()));
+        let mut loop_state = StreamingTurnState::new(
+            orch,
+            prior_message_id.unwrap_or_else(|| user_msg.id()),
+            user_cancel.clone(),
+        );
         let final_message_id;
         loop {
             // MID-TURN DRAIN (claude-code query.ts ~1570-1580): drain BEFORE
@@ -2349,6 +2377,9 @@ impl ConversationOrchestrator {
         // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot the
         // cumulative pool as this turn begins, so a workflow launched this turn
         // reads `budget.spent()` = `pool - baseline` (output spent THIS turn).
+        // claude-code `D = Date.now()` at the top of the query generator: the
+        // duration base for the analytics that fire from its `finally`.
+        *self.compaction_runtime.query_started_at.lock().unwrap() = std::time::Instant::now();
         self.compaction_runtime.turn_start_output_baseline.store(
             self.compaction_runtime
                 .output_token_pool
@@ -2395,8 +2426,14 @@ impl ConversationOrchestrator {
                     // (order: recovery → stop-hooks → token-budget, TS
                     // `query.ts:1262-1308`).
                     if tool_requested_end {
-                        self.fire_tool_result_end_stop_hooks(&stop_reason, stop_hook_active)
-                            .await;
+                        self.fire_tool_result_end_stop_hooks(
+                            &stop_reason,
+                            stop_hook_active,
+                            // Non-cancelable path: this turn has no user-cancel
+                            // token, so `parentAborted` can never be true here.
+                            false,
+                        )
+                        .await;
                     } else {
                         match self
                             .handle_stop_at_end(
@@ -2405,6 +2442,9 @@ impl ConversationOrchestrator {
                                 &mut stop_hook_blocking_count,
                                 turn_count,
                                 id,
+                                // Non-cancelable path: this turn has no user-cancel
+                                // token, so `parentAborted` can never be true here.
+                                false,
                             )
                             .await
                         {
@@ -2828,6 +2868,7 @@ impl ConversationOrchestrator {
                 &mut loop_state.stop_hook_blocking_count,
                 loop_state.turn_count,
                 assistant_id,
+                token_aborted(&loop_state.user_cancel),
             )
             .await
         {
@@ -2874,8 +2915,12 @@ impl ConversationOrchestrator {
         loop_state: &mut StreamingTurnState,
         assistant_id: MessageId,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
-        self.fire_tool_result_end_stop_hooks("end_turn", loop_state.stop_hook_active)
-            .await;
+        self.fire_tool_result_end_stop_hooks(
+            "end_turn",
+            loop_state.stop_hook_active,
+            token_aborted(&loop_state.user_cancel),
+        )
+        .await;
         let cost = self.snapshot_cost_real().await;
         self.output.emit_end_turn("end_turn", &cost).await;
         Ok(StreamingIterationDisposition::ForcedComplete(assistant_id))
@@ -3356,6 +3401,9 @@ impl ConversationOrchestrator {
         // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot
         // the cumulative pool as this turn begins, so a workflow launched this
         // turn reads `budget.spent()` = output spent THIS turn.
+        // claude-code `D = Date.now()` at the top of the query generator: the
+        // duration base for the analytics that fire from its `finally`.
+        *self.compaction_runtime.query_started_at.lock().unwrap() = std::time::Instant::now();
         self.compaction_runtime.turn_start_output_baseline.store(
             self.compaction_runtime
                 .output_token_pool
@@ -3429,8 +3477,12 @@ impl ConversationOrchestrator {
                     // working) loops. `handle_stop_at_end` already emits the
                     // end-turn on Terminate, so we don't re-emit there.
                     if tool_requested_end {
-                        self.fire_tool_result_end_stop_hooks(&stop_reason, stop_hook_active)
-                            .await;
+                        self.fire_tool_result_end_stop_hooks(
+                            &stop_reason,
+                            stop_hook_active,
+                            cancel.is_cancelled(),
+                        )
+                        .await;
                     } else {
                         match self
                             .handle_stop_at_end(
@@ -3439,6 +3491,7 @@ impl ConversationOrchestrator {
                                 &mut stop_hook_blocking_count,
                                 turn_count,
                                 id,
+                                cancel.is_cancelled(),
                             )
                             .await
                         {

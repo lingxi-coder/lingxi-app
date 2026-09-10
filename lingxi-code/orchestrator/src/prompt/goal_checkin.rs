@@ -76,6 +76,17 @@ pub const TASK_LINE_CHAR_CAP: usize = 120;
 pub const DEFERRING_TASK_LABELS: &[&str] =
     &["subagent", "workflow", "shell", "teammate", "cloud session"];
 
+/// The `A9t` half of [`DEFERRING_TASK_LABELS`] — the agent-ish task types, in
+/// this port's already-mapped label vocabulary. Upstream's predicate tests the
+/// wire type against `w = new Set(["local_agent","remote_agent",
+/// "in_process_teammate","local_workflow"])`; its complement within the
+/// deferring set is the single `v9t` type `local_bash` (`"shell"` here).
+///
+/// Used by `tengu_goal_evaluated`'s deferred branch, which reports the two
+/// counts separately rather than as a total and a remainder.
+pub const GOAL_EVAL_AGENT_TASK_LABELS: &[&str] =
+    &["subagent", "workflow", "teammate", "cloud session"];
+
 /// `w5(e, t)` @281369905 — truncate to `t` UTF-16 code units and append the
 /// dropped-character count:
 ///

@@ -292,7 +292,6 @@ pub trait RetryReporter: Send + Sync {
 /// Production service: drives `DefaultLlmClient` with full retry/rate-limit/betas.
 pub struct ApiService {
     model_attempt_hooks: RwLock<Option<Arc<dyn crate::ModelAttemptHooks>>>,
-    require_registered_model_attempts: std::sync::atomic::AtomicBool,
     client: Arc<DefaultLlmClient>,
     transport: Arc<dyn Transport>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
@@ -746,15 +745,6 @@ impl ApiService {
         drop(retired);
     }
 
-    /// Permanently narrow this service to host-registered model attempts.
-    /// Evaluation hosts enable this before exposing the service to producers.
-    /// There is intentionally no disable method; ordinary services default off.
-    /// OAuth refresh and token-count endpoints are not model dispatches.
-    pub fn require_registered_model_attempts(&self) {
-        self.require_registered_model_attempts
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
     /// Retire host authority after the host has drained all producers and
     /// receipts. Registered requests then fail closed; ordinary requests are
     /// unchanged. Other service owners must not extend a closed session lease.
@@ -775,16 +765,6 @@ impl ApiService {
         prepared: &crate::PreparedLlmCall,
     ) -> Result<crate::model_attempt::WireAttempt, LlmError> {
         let Some(context) = request.model_attempt.as_ref() else {
-            if self
-                .require_registered_model_attempts
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                return Err(LlmError::CostUnavailable {
-                    message:
-                        "this service requires a registered model-attempt context before dispatch"
-                            .into(),
-                });
-            }
             return Ok(crate::model_attempt::WireAttempt::new(None));
         };
         let hooks = self
@@ -952,7 +932,6 @@ impl ApiService {
         Self {
             client,
             model_attempt_hooks: RwLock::new(None),
-            require_registered_model_attempts: std::sync::atomic::AtomicBool::new(false),
             transport,
             subscriber,
             subscription: None,
@@ -3668,14 +3647,6 @@ impl ApiService {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<(), LlmError> {
-        if self
-            .require_registered_model_attempts
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(LlmError::CostUnavailable {
-                message: "unregistered websocket prewarm is disabled for this service".into(),
-            });
-        }
         let req = self.build_request(model, profile, system, messages, tools, true, None)?;
         let mut prepared = self.client.prepare(&req).await?;
         let request_id = new_request_id();

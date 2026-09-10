@@ -4,58 +4,6 @@ use llm_client::{ProtocolFamily, ProviderRequest};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[tokio::test]
-async fn evaluation_quota_decorates_real_durable_host_and_keeps_paid_receipt() {
-    let mut harness = DurableHarness::new(true).await;
-    let host = DesktopFusionAttempts::new(
-        harness.service.clone(),
-        harness.authority.budget.clone(),
-        harness.authority.tracker.clone(),
-        Arc::new(cost::PricingCatalog::empty()),
-        harness.authority.budget.workflow_output_scopes(),
-    );
-    host.registry.lock().unwrap().insert(
-        harness
-            .request
-            .model_attempt
-            .as_ref()
-            .unwrap()
-            .registration_id(),
-        Arc::downgrade(&harness.authority),
-    );
-    let quota = crate::fusion_evaluation::attempt_quota::AttemptQuota::new(host, 1).unwrap();
-    harness.service.set_model_attempt_hooks(quota.clone());
-    harness.service.require_registered_model_attempts();
-    let mut ordinary = harness.request.clone();
-    ordinary.model_attempt = None;
-    assert!(harness.service.stream_request(ordinary).await.is_err());
-    assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
-    assert!(harness.queue.try_recv().is_err());
-    for expected_success in [true, false] {
-        let service = harness.service.clone();
-        let request = harness.request.clone();
-        let call = tokio::spawn(async move {
-            let mut stream = service.stream_request(request).await?;
-            while let Some(event) = stream.next().await {
-                event?;
-            }
-            Ok::<(), LlmError>(())
-        });
-        let intent = harness.queue.recv().await.unwrap();
-        harness.acknowledge(intent);
-        let receipt = harness.queue.recv().await.unwrap();
-        harness.acknowledge(receipt);
-        assert_eq!(call.await.unwrap().is_ok(), expected_success);
-    }
-    assert_eq!(harness.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(quota.claimed(), 1);
-    assert_eq!(
-        harness.authority.budget.active_reservation_nano_usd().await,
-        0
-    );
-    assert!(harness.state.total_nano_usd > 0);
-}
-
 struct DurableLease(String);
 impl platform_api::live_sessions::SessionWriterLease for DurableLease {
     fn session_id(&self) -> &str {

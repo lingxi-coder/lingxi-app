@@ -36,7 +36,6 @@ pub mod file_changed_watch;
 pub mod fork_resume;
 mod fusion_command;
 mod fusion_attempts;
-pub mod fusion_evaluation;
 #[cfg(test)]
 mod fusion_evidence_e2e_test;
 pub mod fusion_recorder;
@@ -10961,18 +10960,9 @@ fn capture_legacy_opening_balance(
 }
 
 pub async fn build(
-    cfg: DesktopConfig,
-    output: Arc<dyn OutputStream>,
-    permission_sink: Arc<dyn PermissionRequestSink>,
-) -> Result<DesktopRuntime, BuildError> {
-    build_with_evaluation(cfg, output, permission_sink, None).await
-}
-
-async fn build_with_evaluation(
     mut cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
     permission_sink: Arc<dyn PermissionRequestSink>,
-    evaluation: Option<Arc<fusion_evaluation::EvaluationSetup>>,
 ) -> Result<DesktopRuntime, BuildError> {
     // Consume the construction-only writer claim before any config-derived
     // stack is cloned. Long-lived settings/catalog clones must not retain an
@@ -11218,11 +11208,6 @@ async fn build_with_evaluation(
     // forked summary call must use the same resolved provider route and live
     // credential as the parent turn (Claude Code's single API pipeline).
     let api_service = Arc::new(service_built);
-    if evaluation.is_some() {
-        // Narrow before constructing ANY provider adapters/background helpers.
-        // Until the durable host is installed, even registered calls fail shut.
-        api_service.require_registered_model_attempts();
-    }
     let provider_adapter = Arc::new(
         ProviderApiAdapter::new(api_service.clone())
             .with_initial_effort(cfg.initial_effort.clone().map(serde_json::Value::String))
@@ -11310,14 +11295,6 @@ async fn build_with_evaluation(
         let nano = (usd.max(0.0) * 1_000_000_000.0) as u64;
         nano
     });
-    if let Some(evaluation) = &evaluation {
-        let cap = evaluation.budget_nano_usd();
-        orch_cfg.max_budget_nano_usd = Some(
-            orch_cfg
-                .max_budget_nano_usd
-                .map_or(cap, |existing| existing.min(cap)),
-        );
-    }
     // Subscription-flag hop (API.6): thread the resolved Claude.ai-subscriber flag
     // (computed in step 3.2 from the OAuth token scopes) into the orchestrator
     // config so the fallback-aware api-client seam resolves the consecutive-529
@@ -11818,14 +11795,6 @@ async fn build_with_evaluation(
         pricing.clone(),
         workflow_output_scopes.clone(),
     );
-    if let Some(evaluation) = &evaluation {
-        let attempts = fusion_attempts.as_ref().ok_or_else(|| {
-            BuildError::DurableSession("evaluation requires durable attempt accounting".into())
-        })?;
-        evaluation
-            .install_quota(api_service.as_ref(), attempts.clone())
-            .map_err(|error| BuildError::DurableSession(error.to_string()))?;
-    }
     let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
         shared_budget_enforcer;
 
@@ -14381,31 +14350,6 @@ async fn build_with_evaluation(
             .with_gate(perms.clone())
             .with_background_owned(true),
     ));
-    if let Some(evaluation) = &evaluation {
-        evaluation
-            .install_host(fusion_evaluation::HostInputs {
-                cfg: cfg.clone(),
-                session: main_session_id,
-                parent_model: default_model_id.clone(),
-                parent_profile: default_model_profile.clone(),
-                spawner: lifecycle_subagent_spawner.clone(),
-                query: Arc::new(sidequery::ProviderSideQueryClient::from_service(
-                    api_service.clone(),
-                )),
-                attempts: fusion_attempts.clone().ok_or_else(|| {
-                    BuildError::DurableSession("missing evaluation attempts".into())
-                })?,
-                catalog: fusion_catalog_source.clone(),
-                pricing: pricing.clone(),
-                bus: analytics_bus.clone(),
-                inheritance: platform_api::subagent_spawn::SubagentInheritance {
-                    tool_invoker: local_agent_invoker.clone(),
-                    budget: budget_enforcer.clone(),
-                },
-                recorder: fusion_recorder.clone(),
-            })
-            .map_err(BuildError::DurableSession)?;
-    }
 
     // (5.5a-local-workflow) Bind the `LocalWorkflow` handler's `DeferredToolInvoker`
     //        to the real `RegistryToolInvoker` now that `tools` exists — so a

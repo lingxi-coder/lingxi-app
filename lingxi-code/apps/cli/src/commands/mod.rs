@@ -30,7 +30,6 @@ pub mod auto_mode_setup;
 pub mod bg_worker;
 pub mod daemon;
 pub mod doctor;
-pub mod fusion_eval;
 pub mod gateway;
 pub mod import;
 pub mod install;
@@ -62,9 +61,6 @@ pub mod update;
 /// (`plugin|plugins`, `update|upgrade`).
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
-    /// Offline-first Fusion evaluation; live execution requires explicit caps.
-    #[command(name = "fusion-eval")]
-    FusionEval(fusion_eval::Cli),
     /// Configure and manage MCP servers
     Mcp(mcp::Cli),
     /// Manage authentication
@@ -160,7 +156,6 @@ impl Commands {
     #[must_use]
     pub fn top_level_name(&self) -> &'static str {
         match self {
-            Commands::FusionEval(_) => "fusion-eval",
             Commands::Mcp(_) => "mcp",
             Commands::Auth(_) => "auth",
             Commands::AutoMode(_) => "auto-mode",
@@ -192,7 +187,6 @@ impl Commands {
     /// Execute the chosen subcommand, returning the process exit code.
     pub async fn run(&self) -> i32 {
         match self {
-            Commands::FusionEval(c) => fusion_eval::run(c, None).await,
             Commands::Mcp(c) => mcp::run(c).await,
             Commands::Auth(c) => auth::run(c).await,
             Commands::AutoMode(c) => auto_mode::run(c).await,

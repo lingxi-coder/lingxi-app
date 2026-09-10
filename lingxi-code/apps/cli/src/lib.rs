@@ -605,11 +605,6 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     };
     startup_trace::init(parsed.debug_filter());
-    // Evaluation validates every paid cap before ordinary startup/runtime
-    // initialization. Default dry-run must not read credentials or boot apps.
-    if let Some(commands::Commands::FusionEval(cli)) = parsed.command.as_ref() {
-        return commands::fusion_eval::run(cli, Some(&parsed)).await;
-    }
     startup_trace::mark("argv_parse");
 
     if parsed.restricted_enabled() {

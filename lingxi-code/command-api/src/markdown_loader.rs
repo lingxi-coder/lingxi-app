@@ -125,6 +125,13 @@ struct RawFrontmatter {
     /// The agent type a forking skill spawns.
     #[serde(default)]
     agent: Option<String>,
+    /// `effort` — the reasoning effort a forked skill runs under. Carried
+    /// RAW; the value domain (`low|medium|high|xhigh|max`, or an integer
+    /// 1..=1000) is enforced where it is converted, so an unparseable value
+    /// degrades to "declared none" exactly as upstream's `Gx` returns
+    /// `undefined`, rather than refusing the skill.
+    #[serde(default)]
+    effort: Option<EffortField>,
     /// `user-invocable` — whether the skill appears in the `/` menu at all.
     /// Absent means yes; upstream 2.1.267 is
     /// `let dt=v["user-invocable"], en=dt===void 0?!0:htt(dt)`
@@ -132,6 +139,25 @@ struct RawFrontmatter {
     /// `isHidden:!(userInvocable??!0)`.
     #[serde(default, rename = "user-invocable")]
     user_invocable: Option<Boolish>,
+}
+
+/// `effort` as YAML spells it: `effort: high` is a string, `effort: 500` is an
+/// integer. Both are legal in the union upstream validates against, so the raw
+/// carrier accepts either and normalizes to text.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EffortField {
+    Num(i64),
+    Str(String),
+}
+
+impl EffortField {
+    fn into_raw(self) -> String {
+        match self {
+            Self::Num(n) => n.to_string(),
+            Self::Str(s) => s,
+        }
+    }
 }
 
 /// A frontmatter value the boolean coercer accepts: a real YAML bool, a
@@ -827,6 +853,7 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         // SLASH.4: TS copies `frontmatter.when_to_use` verbatim.
         when_to_use: raw.when_to_use,
         user_invocable,
+        effort: raw.effort.map(EffortField::into_raw),
     }
 }
 
@@ -1585,6 +1612,32 @@ mod tests {
             load_command_markdown_files(&root.join("noproj"), &lingxi_home, &managed, &home).await;
         assert!(files.is_empty());
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn frontmatter_effort_accepts_both_yaml_spellings() {
+        // `effort: high` is a YAML string, `effort: 500` a YAML integer. Both
+        // are legal arms of upstream's union, so the raw carrier must take
+        // either -- an `Option<String>` field alone would fail to deserialize
+        // the integer form and silently lose it.
+        for (raw, want) in [
+            ("---\neffort: high\n---\nx", Some("high")),
+            ("---\neffort: 500\n---\nx", Some("500")),
+            ("---\neffort: \"max\"\n---\nx", Some("max")),
+            ("---\ndescription: d\n---\nx", None),
+        ] {
+            let (fm, _) = parse_frontmatter(raw);
+            assert_eq!(fm.effort.as_deref(), want, "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn frontmatter_effort_is_not_validated_at_parse_time() {
+        // Upstream validates in `Gx` at the conversion, not in the frontmatter
+        // reader; keeping this layer raw is what lets an unusable value degrade
+        // to "declared none" instead of failing the whole skill.
+        let (fm, _) = parse_frontmatter("---\neffort: nonsense\n---\nx");
+        assert_eq!(fm.effort.as_deref(), Some("nonsense"));
     }
 
     #[test]

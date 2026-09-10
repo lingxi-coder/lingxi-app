@@ -48,6 +48,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Prompt,
             model: frontmatter.model.clone(),
+            effort: frontmatter.effort.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: frontmatter.argument_names.clone(),
@@ -90,6 +91,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Prompt,
             model: frontmatter.model.clone(),
+            effort: frontmatter.effort.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: Vec::new(),
@@ -230,6 +232,46 @@ mod tests {
         assert_eq!(desc.allowed_tools, vec!["Bash".to_string()]);
         assert_eq!(desc.argument_names, vec!["name".to_string()]);
         assert!(!desc.disable_model_invocation);
+    }
+
+    /// A skill's declared `effort` must reach the descriptor.
+    ///
+    /// It previously stopped at the frontmatter reader, which never parsed the
+    /// key, so `try_fork` fed `effort: None` into every forked-skill scoping
+    /// record no matter what the skill declared. Upstream's skill->command
+    /// builder carries it (`wXe({… effort: De …})`) and the scoping spreads it
+    /// in conditionally (`…n.effort !== void 0 && { effort: n.effort }`).
+    #[tokio::test]
+    async fn a_declared_effort_reaches_the_descriptor() {
+        let mut reg = CommandRegistry::new();
+        let mut cmd = markdown_cmd("deep-review", "body");
+        if let SlashCommandKind::Markdown { frontmatter, .. } = &mut cmd.kind {
+            frontmatter.effort = Some("high".to_string());
+        }
+        reg.register_command(cmd);
+        reg.register_command(markdown_cmd("plain", "body"));
+        let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
+
+        let declared = loader
+            .load("deep-review")
+            .await
+            .expect("load ok")
+            .expect("present");
+        assert_eq!(
+            declared.effort.as_deref(),
+            Some("high"),
+            "a declared effort must survive to the descriptor"
+        );
+
+        let undeclared = loader
+            .load("plain")
+            .await
+            .expect("load ok")
+            .expect("present");
+        assert_eq!(
+            undeclared.effort, None,
+            "a skill that declares none stays none"
+        );
     }
 
     #[tokio::test]

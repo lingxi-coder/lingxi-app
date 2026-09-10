@@ -89,6 +89,24 @@ pub enum SkillCommandType {
     Other,
 }
 
+/// A skill's declared `effort`, or `None` when it declared nothing usable.
+///
+/// Upstream's parse is `Gx`, validating against
+/// `union([enum(low|medium|high|xhigh|max), int().min(1).max(1000)])` and
+/// yielding `undefined` when neither arm matches — so a typo silently means
+/// "no declared effort" rather than failing the skill. The integer arm is tried
+/// first because YAML hands `effort: 500` to this layer as text.
+fn parse_declared_effort(raw: &str) -> Option<session::forked_skill::Effort> {
+    use session::forked_skill::Effort;
+    let raw = raw.trim();
+    if let Ok(steps) = raw.parse::<i64>() {
+        let candidate = Effort::Steps(steps);
+        return candidate.is_valid().then_some(candidate);
+    }
+    let candidate = Effort::Level(raw.to_string());
+    candidate.is_valid().then_some(candidate)
+}
+
 /// Skill descriptor returned by a [`SkillLoader`]. Subset of the TS
 /// `PromptCommand` shape — the fields the Skill tool actually surfaces.
 #[derive(Debug, Clone)]
@@ -108,6 +126,10 @@ pub struct SkillDescriptor {
     pub command_type: SkillCommandType,
     /// Optional model override surfaced in the result (TS `command.model`).
     pub model: Option<String>,
+    /// The skill's declared `effort`, raw and unvalidated. A forked launch
+    /// converts it and writes it into the scoping record; upstream's
+    /// equivalent is the `effort` the skill→command builder carries.
+    pub effort: Option<String>,
     /// Tools this skill allows, surfaced in the result (TS `allowedTools`).
     pub allowed_tools: Vec<String>,
     /// Tools this skill REMOVES (frontmatter `disallowed-tools`). For a
@@ -174,6 +196,7 @@ impl Default for SkillDescriptor {
             disable_model_invocation: false,
             command_type: SkillCommandType::Prompt,
             model: None,
+            effort: None,
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),
             argument_names: Vec::new(),
@@ -308,10 +331,14 @@ impl SkillTool {
         let inputs = crate::fork::ForkLaunchInputs {
             skill_name: command_name,
             attribution_name: command_name,
-            // `SkillDescriptor` carries no effort today; the sidecar's
-            // `effort` key stays absent, which is claude's shape for a skill
-            // that declares none.
-            effort: None,
+            // The skill's declared `effort`, if it declared a usable one.
+            // Upstream spreads it conditionally into the scoping record
+            // (`…n.effort !== void 0 && { effort: n.effort }`), and its parse
+            // (`Gx`) yields `undefined` for a value outside
+            // `low|medium|high|xhigh|max` or `1..=1000` — so an unusable
+            // declaration degrades to "none" and the fork still launches,
+            // rather than failing `is_valid` and falling back to inline.
+            effort: desc.effort.as_deref().and_then(parse_declared_effort),
             // Snapshot the command deny rules in force RIGHT NOW (claude's
             // `freezeCommandDenies`, which it sets only on the background
             // path). Persisted with the scoping so a resume can replay them

@@ -530,6 +530,8 @@ fn seed_replay_session(root: &std::path::Path) -> String {
         .join(session::jsonl::project_dir_name(&cwd));
     std::fs::create_dir_all(&project_dir).unwrap();
     let session_id = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa".to_string();
+    let pre_user_id = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee";
+    let pre_assistant_id = "ffffffff-6666-4666-8666-ffffffffffff";
     let user_id = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
     let assistant_id = "cccccccc-3333-4333-8333-cccccccccccc";
     let boundary_id = "dddddddd-4444-4444-8444-dddddddddddd";
@@ -541,7 +543,7 @@ fn seed_replay_session(root: &std::path::Path) -> String {
         "subtype": "compact_boundary",
         "uuid": boundary_id,
         "parentUuid": serde_json::Value::Null,
-        "logicalParentUuid": serde_json::Value::Null,
+        "logicalParentUuid": pre_assistant_id,
         "sessionId": session_id,
         "timestamp": "2026-05-25T12:00:00.000Z",
         "cwd": cwd,
@@ -568,6 +570,33 @@ fn seed_replay_session(root: &std::path::Path) -> String {
         "isVisibleInTranscriptOnly": true,
         "message": {"role": "user", "content": "resume from disk"}
     });
+    let pre_user = serde_json::json!({
+        "type": "user",
+        "uuid": pre_user_id,
+        "parentUuid": serde_json::Value::Null,
+        "sessionId": session_id,
+        "timestamp": "2026-05-25T11:59:58.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "userType": "external",
+        "message": {"role": "user", "content": "pre-compaction question"}
+    });
+    let pre_assistant = serde_json::json!({
+        "type": "assistant",
+        "uuid": pre_assistant_id,
+        "parentUuid": pre_user_id,
+        "sessionId": session_id,
+        "timestamp": "2026-05-25T11:59:59.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "pre-compaction answer"}],
+            "model": "claude-opus-4-1"
+        }
+    });
     let assistant = serde_json::json!({
         "type": "assistant",
         "uuid": assistant_id,
@@ -586,7 +615,7 @@ fn seed_replay_session(root: &std::path::Path) -> String {
     });
     std::fs::write(
         project_dir.join(format!("{session_id}.jsonl")),
-        format!("{boundary}\n{user}\n{assistant}\n"),
+        format!("{pre_user}\n{pre_assistant}\n{boundary}\n{user}\n{assistant}\n"),
     )
     .unwrap();
     session_id
@@ -2237,10 +2266,18 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     assert_eq!(model, "claude-opus-4-1");
     assert_eq!(
         messages.len(),
-        2,
-        "the compact-summary row folds into the boundary block"
+        4,
+        "the UI transcript keeps pre-compaction messages while the engine history stays compacted"
     );
     // Assert the fold HAPPENED rather than the row simply being dropped —
+    assert!(messages.iter().any(|message| message.blocks.iter().any(|block| matches!(
+        block,
+        client_protocol::message::MessageBlockDto::Text { text } if text == "pre-compaction question"
+    ))));
+    assert!(messages.iter().any(|message| message.blocks.iter().any(|block| matches!(
+        block,
+        client_protocol::message::MessageBlockDto::Text { text } if text == "pre-compaction answer"
+    ))));
     // a count alone cannot tell those two apart.
     assert!(
         messages.iter().flat_map(|m| &m.blocks).any(|b| matches!(

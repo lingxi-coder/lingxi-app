@@ -50,6 +50,10 @@ pub enum ResumeError {
 pub struct ReplayedSession {
     /// Replayed session state with `history` populated from the JSONL.
     pub state: SessionState,
+    /// Complete main-thread history for UI transcript replay. This may include
+    /// messages before the latest compact boundary; callers must keep it out
+    /// of the model context and use [`Self::state`] for engine resume.
+    pub display_history: Vec<ConversationMessage>,
     /// UUID of the last replayed message — used to seed the orchestrator's
     /// `last_jsonl_uuid` so the next append chains via `parent_uuid`.
     pub last_message_uuid: Option<Uuid>,
@@ -171,6 +175,12 @@ pub async fn replay_session_state(
     let transcript_entries =
         load_session_entries_across_worktrees(lingxi_home, cwd, session_id, fs.clone()).await?;
     let (state, last_uuid, mut runtime_metadata) = build_state_from_jsonl(session_id, &messages);
+    let display_entries = transcript_entries
+        .iter()
+        .filter(|message| !message.is_sidechain)
+        .cloned()
+        .collect::<Vec<_>>();
+    let (display_state, _, _) = build_state_from_jsonl(session_id, &display_entries);
     let (agent_type, agent_definition) =
         session::jsonl::read_agent_resume_state(&transcript_path, fs, &sid_str).await;
     runtime_metadata.main_thread_agent_type = agent_type;
@@ -189,6 +199,7 @@ pub async fn replay_session_state(
     );
     Ok(ReplayedSession {
         state,
+        display_history: display_state.history,
         last_message_uuid: last_uuid,
         messages,
         runtime_metadata,

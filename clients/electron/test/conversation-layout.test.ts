@@ -38,3 +38,12 @@ test('resumed user prompts recover durable inline image projections', () => {
   const item = state.items[0];
   assert.deepEqual(item.type === 'narration' ? item.images : undefined, [image]);
 });
+
+test('resumed user rows made only of invisible format characters are omitted', () => {
+  const state = conversationFromMessages([
+    { role: 'user', blocks: [{ type: 'text', text: '\u200B\u200C\uFEFF' }] },
+    { role: 'user', blocks: [{ type: 'text', text: 'visible prompt' }] },
+  ]);
+  const narrations = state.items.filter((item) => item.type === 'narration');
+  assert.deepEqual(narrations.map((item) => item.type === 'narration' ? item.text : ''), ['visible prompt']);
+});

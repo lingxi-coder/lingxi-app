@@ -1701,6 +1701,61 @@ message with multiple tool uses so they run concurrently."
         *self.prompt_runtime.pending_skill_prefetch.lock().await = None;
     }
 
+    fn has_visible_prefetch_text(text: &str) -> bool {
+        text.chars().any(|ch| {
+            !ch.is_whitespace()
+                && !matches!(ch, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}')
+        })
+    }
+
+    fn latest_prefetch_query(history: &[ConversationMessage]) -> String {
+        Self::latest_prefetch_query_and_tools(history).0
+    }
+
+    fn latest_prefetch_query_and_tools(
+        history: &[ConversationMessage],
+    ) -> (String, Vec<String>) {
+        let query = history
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                ConversationMessage::User {
+                    content,
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                    ..
+                } => {
+                    let text = content
+                        .iter()
+                        .filter_map(|block| match block {
+                            protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Self::has_visible_prefetch_text(&text).then_some(text)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let last_assistant_tools = history
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role(), protocol::MessageRole::Assistant))
+            .map(|m| {
+                m.tool_calls()
+                    .into_iter()
+                    .filter_map(|b| match b {
+                        protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        (query, last_assistant_tools)
+    }
+
     pub(crate) async fn start_memory_prefetch(&self) {
         let Some(prefetch) = self.prompt_runtime.memory_prefetch.as_ref() else {
             return; // no prefetch wired ⇒ surfacing channel stays inert
@@ -1722,32 +1777,12 @@ message with multiple tool uses so they run concurrently."
         // are synthetic context rather than user intent.
         let (query, session_id) = {
             let s = self.session.lock().await;
-            let query = s
-                .history
-                .iter()
-                .rev()
-                .find_map(|message| match message {
-                    ConversationMessage::User {
-                        content,
-                        is_meta: false,
-                        is_compact_summary: false,
-                        is_visible_in_transcript_only: false,
-                        ..
-                    } => {
-                        let text = content
-                            .iter()
-                            .filter_map(|block| match block {
-                                protocol::ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (!text.is_empty()).then_some(text)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default();
-            (query, s.session_id.to_string())
+            // Memory selection must follow the same model-visible history as
+            // request assembly. Transcript-only/background rows can remain in
+            // the UI history, but they are not a valid user query and must not
+            // move the selector's starting point.
+            let history = s.model_context_history();
+            (Self::latest_prefetch_query(&history), s.session_id.to_string())
         };
         // Task 5 (worktree 206 session-cwd plumbing): the live cwd, so a future
         // non-stub prefetch derives the memdir from the post-swap worktree, not
@@ -1867,47 +1902,10 @@ message with multiple tool uses so they run concurrently."
         // predicate — both read in one history lock.
         let (query, last_assistant_tools) = {
             let s = self.session.lock().await;
-            let query = s
-                .history
-                .iter()
-                .rev()
-                .find_map(|message| match message {
-                    ConversationMessage::User {
-                        content,
-                        is_meta: false,
-                        is_compact_summary: false,
-                        is_visible_in_transcript_only: false,
-                        ..
-                    } => {
-                        let text = content
-                            .iter()
-                            .filter_map(|block| match block {
-                                protocol::ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (!text.is_empty()).then_some(text)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let last_assistant_tools = s
-                .history
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role(), protocol::MessageRole::Assistant))
-                .map(|m| {
-                    m.tool_calls()
-                        .into_iter()
-                        .filter_map(|b| match b {
-                            protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<String>>()
-                })
-                .unwrap_or_default();
-            (query, last_assistant_tools)
+            // Keep the query and write-pivot scan on the exact same
+            // model-visible slice. UI-only rows are deliberately excluded.
+            let history = s.model_context_history();
+            Self::latest_prefetch_query_and_tools(&history)
         };
         let is_write_pivot = skill_api::find_write_pivot(&last_assistant_tools);
         let pending = prefetch.start(query, is_write_pivot).await;
@@ -2016,5 +2014,32 @@ message with multiple tool uses so they run concurrently."
         let delta = self.tools.deferral().compute_deferred_delta(&current);
         let body = delta.render_reminder()?;
         Some(ConversationMessage::user_meta(MessageId::new(), body))
+    }
+}
+
+#[cfg(test)]
+mod prefetch_history_tests {
+    use super::*;
+    use lingxi_core::SessionState;
+    use protocol::{ConversationMessage, MessageId, SessionId};
+
+    fn user(text: &str) -> ConversationMessage {
+        ConversationMessage::user(MessageId::new(), text.to_string())
+    }
+
+    #[test]
+    fn prefetch_starts_from_model_visible_history() {
+        let excluded = user("background transcript row");
+        let invisible = user("\u{200B}\u{FEFF}");
+        let current = user("current request");
+        let mut state = SessionState::empty(SessionId::nil(), "model".into());
+        state.model_context_excluded_messages.insert(excluded.id());
+        state.history.extend([excluded, invisible, current]);
+
+        let visible = state.model_context_history();
+        let (query, tools) = ConversationOrchestrator::latest_prefetch_query_and_tools(&visible);
+
+        assert_eq!(query, "current request");
+        assert!(tools.is_empty());
     }
 }

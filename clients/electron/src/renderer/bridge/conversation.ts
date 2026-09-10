@@ -202,7 +202,7 @@ function settleRunningTools(items: RunItem[], status: 'done' | 'error'): boolean
 
 /** A user message immediately echoed when the composer submits (optimistic). */
 export function appendUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = []): ConversationState {
-  const trimmed = text.trim();
+  const trimmed = stripInvisibleText(text).trim();
   if (!trimmed) return state;
   const items = state.items.slice();
   // A new user turn closes any previously-open streaming lines.
@@ -795,18 +795,20 @@ export function conversationFromMessages(
     for (const block of message.blocks) {
       switch (block.type) {
         case 'text':
-          if (block.text.trim()) {
+          {
+            const displayText = stripInvisibleText(block.text);
+            if (!displayText.trim()) break;
             items.push({
               type: 'narration',
               id: itemId(nextId++),
-              text: block.text,
+              text: displayText,
               strong: message.role === 'user',
               role: message.role === 'user' ? 'user' : 'assistant',
               ...(!attachedImages && images.length ? { images } : {}),
             });
             attachedImages = true;
+            break;
           }
-          break;
         case 'thinking':
           if (block.thinking.trim()) {
             // Rehydrated, not streamed — starts collapsed.
@@ -917,6 +919,11 @@ function messageImageFromRef(image: ImageRefDto): MessageImageDto {
 
 function isRenderableMessageImage(image: MessageImageDto): boolean {
   return isSupportedImageMediaType(image.media_type) && image.url.trim().length > 0;
+}
+
+/** Remove invisible format characters before deciding whether a row is empty. */
+function stripInvisibleText(text: string): string {
+  return text.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
 }
 
 /** Fold a whole event sequence (handy for tests + re-hydration). */

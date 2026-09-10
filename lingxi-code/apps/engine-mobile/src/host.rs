@@ -7025,7 +7025,7 @@ impl MobileEngineHandle {
                         &self.inner.workflow_launcher.app_data_root,
                     )
                     .await;
-                let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
+                let messages = client_adapter::lowering::lower_transcript(&replayed.display_history);
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),

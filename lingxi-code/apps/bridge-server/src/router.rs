@@ -2633,7 +2633,7 @@ impl EngineCommandRouter {
                         }
                     };
                     (
-                        client_adapter::lowering::lower_transcript(&replayed.state.history),
+                        client_adapter::lowering::lower_transcript(&replayed.display_history),
                         engine_desktop::session_agents::transcript_revision(&raw),
                     )
                 }
@@ -3754,7 +3754,12 @@ impl CommandRouter for EngineCommandRouter {
                     }
                 };
 
-                let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
+                // The engine resumes from the compacted history below, while
+                // the renderer receives the complete main-thread transcript so
+                // pre-compaction messages remain visible without re-entering
+                // the LLM context.
+                let messages =
+                    client_adapter::lowering::lower_transcript(&replayed.display_history);
                 let resume_plan_mode = replayed.state.plan_mode;
                 let previous_permission_mode = self
                     .handle

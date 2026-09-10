@@ -3823,9 +3823,9 @@ async fn resume_resolved_session(
         sink.error("runtime", &message).await;
         return code;
     }
-    // Session exists and parsed — these are the raw transcript lines that seed
-    // both the orchestrator's `SessionState.history` (engine side) and the TUI
-    // scrollback (render side).
+    // Session exists and parsed — these are the compacted resumable transcript
+    // lines used to seed the orchestrator. The TUI render path reloads the full
+    // routed entry stream below so pre-compaction rows remain visible.
     let messages = loaded.unwrap_or_default();
 
     // (CLI-13, cc 2.1.238) The truncating resume. The oracle runs this block
@@ -4129,13 +4129,15 @@ async fn mount_resumed_tui_inner(
             return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
         }
     }
-    // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
-    // launch the ratatui backend with that replayed scrollback. Cold `--resume`
-    // has no SessionRegistration (fresh launches register). In-process `/resume`
-    // remounts pass the live registration through so status + permissionClass
-    // stay on `sessions/<pid>.json`. A carried one-shot notice (the `/branch`
-    // success confirmation) renders as the newest system cell.
-    let mut resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
+    // RENDER seed: use the complete routed transcript for scrollback, while
+    // `messages` above remains the compacted resumable chain used to seed the
+    // engine. This keeps pre-compaction rows visible without putting them back
+    // into the model context. Cold `--resume` has no SessionRegistration (fresh
+    // launches register). In-process `/resume` remounts pass the live
+    // registration through so status + permissionClass stay on `sessions/<pid>.json`.
+    // A carried one-shot notice (the `/branch` success confirmation) renders as
+    // the newest system cell.
+    let mut resumed_messages = tui::replay::rebuild_from_jsonl(&entries);
     if let Some(body) = boot_notice {
         resumed_messages.push(tui_core::message::RenderedMessage::SystemText {
             body,

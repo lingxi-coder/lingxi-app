@@ -5109,15 +5109,6 @@ impl platform_api::FusionExecutor for DesktopFusionExecutor {
         self.inner.effective_timeout_ms()
     }
 
-    async fn run(
-        &self,
-        request: platform_api::FusionRequest,
-        inherit: platform_api::FusionInheritance,
-        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-        self.inner.run(request, inherit, progress).await
-    }
-
     fn agent_surface(&self) -> platform_api::FusionAgentSurface {
         self.inner.agent_surface()
     }

@@ -2424,78 +2424,97 @@ impl Default for FusionAgentSurface {
     }
 }
 
+/// Build a prepared run around a single async body that produces the whole
+/// result at once.
+///
+/// Preparation for such an executor has nothing to resolve, so the body is
+/// simply deferred until activation and its result is folded into the run's
+/// facts: usage, timing, attempt count and confirmed egress on success, and a
+/// proven-zero marker for an error that guarantees no provider was reached.
+/// The prepared identity is authoritative, so a body that mints its own run id
+/// does not get to keep it.
+///
+/// This exists for test doubles and other executors with no routing of their
+/// own. A production executor resolves a route and owns its own supervisor,
+/// and builds its [`PreparedFusionRun`] directly.
+pub fn prepared_from_oneshot<F, Fut>(
+    submission: FusionSubmission,
+    effective_timeout_ms: Option<u64>,
+    run: F,
+) -> Result<PreparedFusionRun, FusionError>
+where
+    F: FnOnce(FusionRequest, FusionInheritance, Option<Sender<FusionProgress>>) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<Output = Result<FusionResult, FusionError>> + Send + 'static,
+{
+    let FusionSubmission {
+        request,
+        inherit,
+        identity,
+    } = FusionSubmission::new(submission.request, submission.inherit, submission.identity)?;
+    let duration_ms = inherit
+        .effective_timeout_ms
+        .or(effective_timeout_ms)
+        .unwrap_or_default();
+    let summary = FusionPreparedSummary {
+        identity: identity.clone(),
+        duration_ms,
+        planned_panels: None,
+    };
+    let control = FusionRunControl::new(
+        identity.clone(),
+        duration_ms,
+        inherit.cancel.clone(),
+        FusionRunFactsRecorder::default(),
+    );
+    let facts_control = control.clone();
+    Ok(PreparedFusionRun::new(
+        summary,
+        control,
+        move |_activation, progress| {
+            let facts_control = facts_control.clone();
+            async move {
+                let mut result = run(request, inherit, progress).await;
+                if let Ok(result) = &mut result {
+                    result.run_id = identity.run_id.to_string();
+                    let facts = facts_control.facts();
+                    facts.replace_usage(result.usage.clone(), result.usage.estimated);
+                    facts.set_timing(result.timing.clone());
+                    facts.set_attempts(result.usage.provider_requests);
+                    for profile in &result.egress_profiles {
+                        facts.add_confirmed_egress(profile.clone());
+                    }
+                } else if result
+                    .as_ref()
+                    .err()
+                    .is_some_and(FusionError::guarantees_zero_provider_calls)
+                {
+                    facts_control.facts().set_known_zero();
+                }
+                FusionRunOutcome::from_control(&facts_control, result)
+            }
+        },
+    ))
+}
+
 /// Executor implemented by the `fusion` crate and injected at the composition root.
 #[async_trait]
 pub trait FusionExecutor: Send + Sync + 'static {
-    /// Run one Fusion pipeline to a terminal [`FusionResult`] or [`FusionError`].
+    /// Prepare one immutable route/config/identity handoff.
     ///
-    /// [`FusionStatus::NeedsParent`] is returned as `Ok`, not as an error.
-    async fn run(
-        &self,
-        request: FusionRequest,
-        inherit: FusionInheritance,
-        progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
-    ) -> Result<FusionResult, FusionError>;
-
-    /// Prepare one immutable route/config/identity handoff. Production
-    /// executors override this; the default keeps existing fake executors
-    /// source-compatible by deferring their legacy `run()` until activation.
+    /// This is the only entrypoint. Preparation is pure: it resolves the
+    /// route and mints the run's control and facts without dispatching, and
+    /// the returned handle is what actually starts work. A test double with
+    /// nothing to prepare can build its handle with
+    /// [`prepared_from_oneshot`].
+    ///
+    /// [`FusionStatus::NeedsParent`] is carried as a completed outcome, not
+    /// as an error.
     fn prepare(
         self: Arc<Self>,
         submission: FusionSubmission,
-    ) -> Result<PreparedFusionRun, FusionError> {
-        let FusionSubmission {
-            request,
-            inherit,
-            identity,
-        } = FusionSubmission::new(submission.request, submission.inherit, submission.identity)?;
-        let duration_ms = inherit
-            .effective_timeout_ms
-            .or_else(|| self.effective_timeout_ms())
-            .unwrap_or_default();
-        let summary = FusionPreparedSummary {
-            identity: identity.clone(),
-            duration_ms,
-            planned_panels: None,
-        };
-        let control = FusionRunControl::new(
-            identity.clone(),
-            duration_ms,
-            inherit.cancel.clone(),
-            FusionRunFactsRecorder::default(),
-        );
-        let facts_control = control.clone();
-        Ok(PreparedFusionRun::new(
-            summary,
-            control,
-            move |_activation, progress| {
-                let executor = self;
-                let facts_control = facts_control.clone();
-                async move {
-                    let mut result = executor.run(request, inherit, progress).await;
-                    if let Ok(result) = &mut result {
-                        // Prepared identity is authoritative even for legacy fake
-                        // executors that mint their own result id in `run()`.
-                        result.run_id = identity.run_id.to_string();
-                        let facts = facts_control.facts();
-                        facts.replace_usage(result.usage.clone(), result.usage.estimated);
-                        facts.set_timing(result.timing.clone());
-                        facts.set_attempts(result.usage.provider_requests);
-                        for profile in &result.egress_profiles {
-                            facts.add_confirmed_egress(profile.clone());
-                        }
-                    } else if result
-                        .as_ref()
-                        .err()
-                        .is_some_and(FusionError::guarantees_zero_provider_calls)
-                    {
-                        facts_control.facts().set_known_zero();
-                    }
-                    FusionRunOutcome::from_control(&facts_control, result)
-                }
-            },
-        ))
-    }
+    ) -> Result<PreparedFusionRun, FusionError>;
 
     /// Return the effective end-to-end timeout for a newly spawned run, in
     /// milliseconds, when the host can expose one without starting work.
@@ -3040,13 +3059,18 @@ mod tests {
         struct DefaultCapExecutor;
         #[async_trait::async_trait]
         impl FusionExecutor for DefaultCapExecutor {
-            async fn run(
-                &self,
-                _request: FusionRequest,
-                _inherit: FusionInheritance,
-                _progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
-            ) -> Result<FusionResult, FusionError> {
-                unimplemented!()
+            fn prepare(
+                self: ::std::sync::Arc<Self>,
+                submission: crate::FusionSubmission,
+            ) -> Result<crate::PreparedFusionRun, crate::FusionError> {
+                let timeout = self.effective_timeout_ms();
+                crate::prepared_from_oneshot(
+                    submission,
+                    timeout,
+                    move |_request, _inherit, _progress| async move {
+                        unimplemented!()
+                    },
+                )
             }
         }
         assert_eq!(
@@ -3746,13 +3770,18 @@ RunningPanels{{completed:0,..}}"
 
     #[async_trait]
     impl FusionExecutor for PinnedFusionExecutor {
-        async fn run(
-            &self,
-            _request: FusionRequest,
-            _inherit: FusionInheritance,
-            _progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
-        ) -> Result<FusionResult, FusionError> {
-            unreachable!("not exercised by this test")
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: crate::FusionSubmission,
+        ) -> Result<crate::PreparedFusionRun, crate::FusionError> {
+            let timeout = self.effective_timeout_ms();
+            crate::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, _progress| async move {
+                    unreachable!("not exercised by this test")
+                },
+            )
         }
 
         fn preflight_error(&self) -> Option<FusionError> {
@@ -3768,13 +3797,18 @@ RunningPanels{{completed:0,..}}"
         struct DefaultExecutor;
         #[async_trait]
         impl FusionExecutor for DefaultExecutor {
-            async fn run(
-                &self,
-                _request: FusionRequest,
-                _inherit: FusionInheritance,
-                _progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
-            ) -> Result<FusionResult, FusionError> {
-                unreachable!("not exercised by this test")
+            fn prepare(
+                self: ::std::sync::Arc<Self>,
+                submission: crate::FusionSubmission,
+            ) -> Result<crate::PreparedFusionRun, crate::FusionError> {
+                let timeout = self.effective_timeout_ms();
+                crate::prepared_from_oneshot(
+                    submission,
+                    timeout,
+                    move |_request, _inherit, _progress| async move {
+                        unreachable!("not exercised by this test")
+                    },
+                )
             }
         }
         assert!(DefaultExecutor.preflight_error().is_none());

@@ -169,16 +169,22 @@ impl CancelAwareExecutor {
 
 #[async_trait]
 impl FusionExecutor for CancelAwareExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.runs.fetch_add(1, Ordering::SeqCst);
-        inherit.cancel.cancelled().await;
-        self.observed_cancel.fetch_add(1, Ordering::SeqCst);
-        Err(FusionError::Cancelled)
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, inherit, _progress| async move {
+                this.runs.fetch_add(1, Ordering::SeqCst);
+                inherit.cancel.cancelled().await;
+                this.observed_cancel.fetch_add(1, Ordering::SeqCst);
+                Err(FusionError::Cancelled)
+            },
+        )
     }
 }
 
@@ -196,14 +202,20 @@ impl ImmediateExecutor {
 
 #[async_trait]
 impl FusionExecutor for ImmediateExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.runs.fetch_add(1, Ordering::SeqCst);
-        Ok(dummy_result())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, _progress| async move {
+                this.runs.fetch_add(1, Ordering::SeqCst);
+                Ok(dummy_result())
+            },
+        )
     }
 }
 
@@ -224,17 +236,23 @@ impl TimeoutSnapshotExecutor {
 
 #[async_trait]
 impl FusionExecutor for TimeoutSnapshotExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.observed
-            .lock()
-            .unwrap()
-            .push(inherit.effective_timeout_ms);
-        Ok(dummy_result())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, inherit, _progress| async move {
+                this.observed
+                    .lock()
+                    .unwrap()
+                    .push(inherit.effective_timeout_ms);
+                Ok(dummy_result())
+            },
+        )
     }
 
     fn effective_timeout_ms(&self) -> Option<u64> {
@@ -259,34 +277,40 @@ impl ProgressEmittingExecutor {
 
 #[async_trait]
 impl FusionExecutor for ProgressEmittingExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.runs.fetch_add(1, Ordering::SeqCst);
-        if let Some(tx) = progress {
-            for stage in [
-                platform_api::FusionStage::ResolvingModels,
-                platform_api::FusionStage::RunningPanels {
-                    completed: 2,
-                    total: 3,
-                },
-            ] {
-                let _ = tx
-                    .send(platform_api::FusionProgress {
-                        message: stage.label(),
-                        stage,
-                        panel_id: None,
-                        realized_output_tokens: None,
-                        egress_profiles: None,
-                        panels_allocated: None,
-                    })
-                    .await;
-            }
-        }
-        Ok(dummy_result())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, progress| async move {
+                this.runs.fetch_add(1, Ordering::SeqCst);
+                if let Some(tx) = progress {
+                    for stage in [
+                        platform_api::FusionStage::ResolvingModels,
+                        platform_api::FusionStage::RunningPanels {
+                            completed: 2,
+                            total: 3,
+                        },
+                    ] {
+                        let _ = tx
+                            .send(platform_api::FusionProgress {
+                                message: stage.label(),
+                                stage,
+                                panel_id: None,
+                                realized_output_tokens: None,
+                                egress_profiles: None,
+                                panels_allocated: None,
+                            })
+                            .await;
+                    }
+                }
+                Ok(dummy_result())
+            },
+        )
     }
 }
 
@@ -329,36 +353,48 @@ impl NaturalAfterFinalizingExecutor {
 
 #[async_trait]
 impl FusionExecutor for NaturalAfterFinalizingExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        if let Some(tx) = self.started.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-        if let Some(release) = self.release.lock().await.take() {
-            let _ = release.await;
-        }
-        Ok(dummy_result())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, _progress| async move {
+                if let Some(tx) = this.started.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                if let Some(release) = this.release.lock().await.take() {
+                    let _ = release.await;
+                }
+                Ok(dummy_result())
+            },
+        )
     }
 }
 
 #[async_trait]
 impl FusionExecutor for BlockingCancelAwareExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.runs.fetch_add(1, Ordering::SeqCst);
-        if let Some(tx) = self.started.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-        inherit.cancel.cancelled().await;
-        Err(FusionError::Cancelled)
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, inherit, _progress| async move {
+                this.runs.fetch_add(1, Ordering::SeqCst);
+                if let Some(tx) = this.started.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                inherit.cancel.cancelled().await;
+                Err(FusionError::Cancelled)
+            },
+        )
     }
 }
 
@@ -386,30 +422,36 @@ impl RealizedProgressBlockingExecutor {
 
 #[async_trait]
 impl FusionExecutor for RealizedProgressBlockingExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        inherit: FusionInheritance,
-        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.runs.fetch_add(1, Ordering::SeqCst);
-        if let Some(tx) = &progress {
-            let _ = tx
-                .send(platform_api::FusionProgress {
-                    message: "panels billed real usage".into(),
-                    stage: platform_api::FusionStage::Analyzing,
-                    panel_id: None,
-                    realized_output_tokens: Some(12),
-                    egress_profiles: Some(vec!["anthropic".into(), "openai".into()]),
-                    panels_allocated: None,
-                })
-                .await;
-        }
-        if let Some(tx) = self.started.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-        inherit.cancel.cancelled().await;
-        Err(FusionError::Cancelled)
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, inherit, progress| async move {
+                this.runs.fetch_add(1, Ordering::SeqCst);
+                if let Some(tx) = &progress {
+                    let _ = tx
+                        .send(platform_api::FusionProgress {
+                            message: "panels billed real usage".into(),
+                            stage: platform_api::FusionStage::Analyzing,
+                            panel_id: None,
+                            realized_output_tokens: Some(12),
+                            egress_profiles: Some(vec!["anthropic".into(), "openai".into()]),
+                            panels_allocated: None,
+                        })
+                        .await;
+                }
+                if let Some(tx) = this.started.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                inherit.cancel.cancelled().await;
+                Err(FusionError::Cancelled)
+            },
+        )
     }
 }
 
@@ -641,13 +683,19 @@ struct FailingExecutor {
 
 #[async_trait]
 impl FusionExecutor for FailingExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        Err(self.error.clone())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, _progress| async move {
+                Err(this.error.clone())
+            },
+        )
     }
 }
 
@@ -808,27 +856,33 @@ impl SingleProgressExecutor {
 
 #[async_trait]
 impl FusionExecutor for SingleProgressExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.runs.fetch_add(1, Ordering::SeqCst);
-        if let Some(tx) = progress {
-            let stage = platform_api::FusionStage::ResolvingModels;
-            let _ = tx
-                .send(platform_api::FusionProgress {
-                    message: stage.label(),
-                    stage,
-                    panel_id: None,
-                    realized_output_tokens: None,
-                    egress_profiles: None,
-                    panels_allocated: None,
-                })
-                .await;
-        }
-        Ok(dummy_result())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, progress| async move {
+                this.runs.fetch_add(1, Ordering::SeqCst);
+                if let Some(tx) = progress {
+                    let stage = platform_api::FusionStage::ResolvingModels;
+                    let _ = tx
+                        .send(platform_api::FusionProgress {
+                            message: stage.label(),
+                            stage,
+                            panel_id: None,
+                            realized_output_tokens: None,
+                            egress_profiles: None,
+                            panels_allocated: None,
+                        })
+                        .await;
+                }
+                Ok(dummy_result())
+            },
+        )
     }
 }
 
@@ -849,31 +903,37 @@ struct PartialSpendThenFailExecutor {
 
 #[async_trait]
 impl FusionExecutor for PartialSpendThenFailExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        if let Some(tx) = progress {
-            let stage = platform_api::FusionStage::Failed;
-            let egress_profiles = if self.egress_profiles.is_empty() {
-                None
-            } else {
-                Some(self.egress_profiles.clone())
-            };
-            let _ = tx
-                .send(platform_api::FusionProgress {
-                    message: stage.label(),
-                    stage,
-                    panel_id: None,
-                    realized_output_tokens: Some(self.realized_output_tokens),
-                    egress_profiles,
-                    panels_allocated: None,
-                })
-                .await;
-        }
-        Err(self.error.clone())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, progress| async move {
+                if let Some(tx) = progress {
+                    let stage = platform_api::FusionStage::Failed;
+                    let egress_profiles = if this.egress_profiles.is_empty() {
+                        None
+                    } else {
+                        Some(this.egress_profiles.clone())
+                    };
+                    let _ = tx
+                        .send(platform_api::FusionProgress {
+                            message: stage.label(),
+                            stage,
+                            panel_id: None,
+                            realized_output_tokens: Some(this.realized_output_tokens),
+                            egress_profiles,
+                            panels_allocated: None,
+                        })
+                        .await;
+                }
+                Err(this.error.clone())
+            },
+        )
     }
 }
 
@@ -2211,26 +2271,31 @@ struct FullUsageExecutor;
 
 #[async_trait]
 impl FusionExecutor for FullUsageExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        Ok(FusionResult {
-            usage: FusionUsage {
-                input_tokens: 3_000,
-                output_tokens: 8_000,
-                reasoning_tokens: 90_000,
-                cache_read_tokens: 160_000,
-                cache_write_tokens: 40_000,
-                realized_nano_usd: 1,
-                reserved_max_nano_usd: 2,
-                estimated: false,
-                provider_requests: 7,
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, _progress| async move {
+                Ok(FusionResult {
+                    usage: FusionUsage {
+                        input_tokens: 3_000,
+                        output_tokens: 8_000,
+                        reasoning_tokens: 90_000,
+                        cache_read_tokens: 160_000,
+                        cache_write_tokens: 40_000,
+                        realized_nano_usd: 1,
+                        reserved_max_nano_usd: 2,
+                        estimated: false,
+                        provider_requests: 7,
+                    },
+                    ..dummy_result()
+                })
             },
-            ..dummy_result()
-        })
+        )
     }
 }
 

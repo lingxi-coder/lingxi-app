@@ -121,14 +121,6 @@ mod fusion_batch_contract_tests {
                 ..Default::default()
             }
         }
-        async fn run(
-            &self,
-            _: FusionRequest,
-            _: FusionInheritance,
-            _: Option<mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<FusionResult, FusionError> {
-            panic!("trusted preparation required")
-        }
         fn prepare(
             self: Arc<Self>,
             submission: FusionSubmission,
@@ -640,14 +632,20 @@ impl ImmediateFusionExecutor {
 
 #[async_trait]
 impl FusionExecutor for ImmediateFusionExecutor {
-    async fn run(
-        &self,
-        request: FusionRequest,
-        _inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.seen.lock().unwrap().push(request);
-        self.response.lock().unwrap().clone()
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |request, _inherit, _progress| async move {
+                this.seen.lock().unwrap().push(request);
+                this.response.lock().unwrap().clone()
+            },
+        )
     }
 
     fn agent_surface(&self) -> FusionAgentSurface {
@@ -681,25 +679,31 @@ struct FailingAfterRealSpendFusionExecutor {
 
 #[async_trait]
 impl FusionExecutor for FailingAfterRealSpendFusionExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        if let Some(tx) = &progress {
-            let _ = tx
-                .send(platform_api::FusionProgress {
-                    stage: platform_api::FusionStage::Failed,
-                    panel_id: None,
-                    message: "panel bar failed after real provider spend".into(),
-                    realized_output_tokens: Some(self.realized_output_tokens),
-                    egress_profiles: None,
-                    panels_allocated: None,
-                })
-                .await;
-        }
-        Err(FusionError::MinPanelsNotMet)
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, progress| async move {
+                if let Some(tx) = &progress {
+                    let _ = tx
+                        .send(platform_api::FusionProgress {
+                            stage: platform_api::FusionStage::Failed,
+                            panel_id: None,
+                            message: "panel bar failed after real provider spend".into(),
+                            realized_output_tokens: Some(this.realized_output_tokens),
+                            egress_profiles: None,
+                            panels_allocated: None,
+                        })
+                        .await;
+                }
+                Err(FusionError::MinPanelsNotMet)
+            },
+        )
     }
 
     fn agent_surface(&self) -> FusionAgentSurface {
@@ -733,22 +737,28 @@ impl BlockingFusionExecutor {
 
 #[async_trait]
 impl FusionExecutor for BlockingFusionExecutor {
-    async fn run(
-        &self,
-        request: FusionRequest,
-        inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        self.seen.lock().unwrap().push(request);
-        if let Some(tx) = self.started.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-        inherit.cancel.cancelled().await;
-        if let Some(tx) = self.cancelled.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-        Err(FusionError::Cancelled)
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |request, inherit, _progress| async move {
+                this.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                this.seen.lock().unwrap().push(request);
+                if let Some(tx) = this.started.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                inherit.cancel.cancelled().await;
+                if let Some(tx) = this.cancelled.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                Err(FusionError::Cancelled)
+            },
+        )
     }
 
     fn agent_surface(&self) -> FusionAgentSurface {
@@ -871,14 +881,20 @@ impl Default for PreflightRejectedFusionExecutor {
 
 #[async_trait]
 impl FusionExecutor for PreflightRejectedFusionExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        _inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        Err(self.error.clone())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, _inherit, _progress| async move {
+                this.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Err(this.error.clone())
+            },
+        )
     }
 
     fn preflight_error(&self) -> Option<FusionError> {
@@ -1256,15 +1272,21 @@ struct BudgetInspectingFusionExecutor {
 
 #[async_trait]
 impl FusionExecutor for BudgetInspectingFusionExecutor {
-    async fn run(
-        &self,
-        _request: FusionRequest,
-        inherit: FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        let total = inherit.budget().snapshot_total_nano_usd().await;
-        self.inherited_budget_totals.lock().unwrap().push(total);
-        Ok(workflow_fusion_result())
+    fn prepare(
+        self: ::std::sync::Arc<Self>,
+        submission: ::platform_api::FusionSubmission,
+    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        let this = ::std::sync::Arc::clone(&self);
+        let timeout = self.effective_timeout_ms();
+        ::platform_api::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, inherit, _progress| async move {
+                let total = inherit.budget().snapshot_total_nano_usd().await;
+                this.inherited_budget_totals.lock().unwrap().push(total);
+                Ok(workflow_fusion_result())
+            },
+        )
     }
 
     fn agent_surface(&self) -> FusionAgentSurface {

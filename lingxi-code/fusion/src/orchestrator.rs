@@ -2532,58 +2532,6 @@ impl FusionExecutor for FusionOrchestrator {
             .map(|config| config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS))
     }
 
-    async fn run(
-        &self,
-        request: FusionRequest,
-        inherit: FusionInheritance,
-        progress: Option<Sender<FusionProgress>>,
-    ) -> Result<FusionResult, FusionError> {
-        // Keep the trait's legacy entrypoint for fake/source compatibility,
-        // but route the production orchestrator through the same immutable
-        // preparation snapshot and owned supervisor used by every host.
-        let request_for_failure = request.clone();
-        let parent_operation_id = if request.origin == FusionOrigin::Workflow {
-            request.workflow_run_id.clone()
-        } else {
-            None
-        };
-        let identity = match FusionRunIdentity::for_legacy_request(&request, parent_operation_id) {
-            Ok(identity) => identity,
-            Err(error) => {
-                let run_id = FusionRunId::generated();
-                self.emit_preparation_failed(
-                    &request_for_failure,
-                    run_id.as_str(),
-                    &progress,
-                    &error,
-                )
-                .await;
-                return Err(error);
-            }
-        };
-        let run_id = identity.run_id.to_string();
-        let submission = match FusionSubmission::new(request, inherit, identity) {
-            Ok(submission) => submission,
-            Err(error) => {
-                self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
-                    .await;
-                return Err(error);
-            }
-        };
-        let prepared = match Arc::new(self.clone()).prepare(submission) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
-                    .await;
-                return Err(error);
-            }
-        };
-        prepared
-            .activate(FusionActivation::now(), progress)
-            .await
-            .into_legacy_result()
-    }
-
     fn agent_surface(&self) -> FusionAgentSurface {
         // F007: reload per call. A config that fails to (re)load — a
         // settings file edit that now fails validation — fails CLOSED to the
@@ -2650,6 +2598,68 @@ impl FusionExecutor for FusionOrchestrator {
             .clamp(1, 2)
     }
 }
+
+/// One-shot entrypoint retained for the crate's own tests.
+///
+/// Production never had a caller: every host goes through `prepare` and the
+/// returned handle. Keeping this as an inherent test-only method rather than
+/// a trait method means a second, identity-less way to start a run cannot be
+/// reached from outside the crate.
+#[cfg(test)]
+impl FusionOrchestrator {
+        pub(crate) async fn run(
+            &self,
+            request: FusionRequest,
+            inherit: FusionInheritance,
+            progress: Option<Sender<FusionProgress>>,
+        ) -> Result<FusionResult, FusionError> {
+            // Keep the trait's legacy entrypoint for fake/source compatibility,
+            // but route the production orchestrator through the same immutable
+            // preparation snapshot and owned supervisor used by every host.
+            let request_for_failure = request.clone();
+            let parent_operation_id = if request.origin == FusionOrigin::Workflow {
+                request.workflow_run_id.clone()
+            } else {
+                None
+            };
+            let identity = match FusionRunIdentity::for_legacy_request(&request, parent_operation_id) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let run_id = FusionRunId::generated();
+                    self.emit_preparation_failed(
+                        &request_for_failure,
+                        run_id.as_str(),
+                        &progress,
+                        &error,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+            let run_id = identity.run_id.to_string();
+            let submission = match FusionSubmission::new(request, inherit, identity) {
+                Ok(submission) => submission,
+                Err(error) => {
+                    self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
+                        .await;
+                    return Err(error);
+                }
+            };
+            let prepared = match Arc::new(self.clone()).prepare(submission) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
+                        .await;
+                    return Err(error);
+                }
+            };
+            prepared
+                .activate(FusionActivation::now(), progress)
+                .await
+                .into_legacy_result()
+        }
+}
+
 
 fn validate_request(mut request: FusionRequest) -> Result<FusionRequest, FusionError> {
     if request.prompt.trim().is_empty() {

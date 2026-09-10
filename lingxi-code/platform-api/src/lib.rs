@@ -143,6 +143,7 @@ pub use filesystem::{
 };
 pub use fusion::{
     normalize_dimensions, panel_never_dispatched, parse_fusion_model_ref, parse_fusion_models,
+    prepared_from_oneshot,
     validate_panel_report, DurableFusionOutboxRecord, DurableFusionTerminalRecord, EvidenceKind,
     FusionActivation, FusionAgentSurface, FusionAnalysis, FusionAttemptSettlementStatus, FusionCompletionSink,
     FusionContradiction, FusionCostClass, FusionDecision, FusionError, FusionExecutor,

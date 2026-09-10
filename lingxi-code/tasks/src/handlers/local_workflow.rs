@@ -2894,15 +2894,6 @@ mod captured_output_tests {
             }
         }
 
-        async fn run(
-            &self,
-            _: platform_api::FusionRequest,
-            _: platform_api::FusionInheritance,
-            _: Option<mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, FusionError> {
-            panic!("workflow must use trusted preparation")
-        }
-
         fn prepare(
             self: Arc<Self>,
             submission: FusionSubmission,

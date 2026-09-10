@@ -685,14 +685,20 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for ScriptedFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(self.result.clone())
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let this = ::std::sync::Arc::clone(&self);
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, _progress| async move {
+                    this.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(this.result.clone())
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -728,15 +734,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for PreparedAllocationFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            Ok(self.result.clone())
-        }
-
         fn prepare(
             self: Arc<Self>,
             submission: platform_api::FusionSubmission,
@@ -807,13 +804,19 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for ErroringFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            Err(self.error.clone())
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let this = ::std::sync::Arc::clone(&self);
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, _progress| async move {
+                    Err(this.error.clone())
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -847,13 +850,19 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for PreflightRejectedFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            Err(self.error.clone())
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let this = ::std::sync::Arc::clone(&self);
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, _progress| async move {
+                    Err(this.error.clone())
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -877,17 +886,23 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for CapturingFusion {
-        async fn run(
-            &self,
-            request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            self.requests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(request);
-            Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let this = ::std::sync::Arc::clone(&self);
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |request, _inherit, _progress| async move {
+                    this.requests
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(request);
+                    Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -908,34 +923,39 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for ProgressEmittingFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            if let Some(tx) = progress {
-                for stage in [
-                    platform_api::FusionStage::ResolvingModels,
-                    platform_api::FusionStage::RunningPanels {
-                        completed: 1,
-                        total: 3,
-                    },
-                    platform_api::FusionStage::Completed,
-                ] {
-                    let _ = tx
-                        .send(platform_api::FusionProgress {
-                            message: stage.label(),
-                            stage,
-                            panel_id: None,
-                            realized_output_tokens: None,
-                            egress_profiles: None,
-                            panels_allocated: None,
-                        })
-                        .await;
-                }
-            }
-            Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, progress| async move {
+                    if let Some(tx) = progress {
+                        for stage in [
+                            platform_api::FusionStage::ResolvingModels,
+                            platform_api::FusionStage::RunningPanels {
+                                completed: 1,
+                                total: 3,
+                            },
+                            platform_api::FusionStage::Completed,
+                        ] {
+                            let _ = tx
+                                .send(platform_api::FusionProgress {
+                                    message: stage.label(),
+                                    stage,
+                                    panel_id: None,
+                                    realized_output_tokens: None,
+                                    egress_profiles: None,
+                                    panels_allocated: None,
+                                })
+                                .await;
+                        }
+                    }
+                    Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -1750,29 +1770,34 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for CancelledAfterPanelSpawnFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            if let Some(tx) = progress {
-                let stage = platform_api::FusionStage::RunningPanels {
-                    completed: 1,
-                    total: 3,
-                };
-                let _ = tx
-                    .send(platform_api::FusionProgress {
-                        message: stage.label(),
-                        stage,
-                        panel_id: Some("p1".to_string()),
-                        realized_output_tokens: None,
-                        egress_profiles: None,
-                        panels_allocated: None,
-                    })
-                    .await;
-            }
-            Err(platform_api::FusionError::Cancelled)
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, progress| async move {
+                    if let Some(tx) = progress {
+                        let stage = platform_api::FusionStage::RunningPanels {
+                            completed: 1,
+                            total: 3,
+                        };
+                        let _ = tx
+                            .send(platform_api::FusionProgress {
+                                message: stage.label(),
+                                stage,
+                                panel_id: Some("p1".to_string()),
+                                realized_output_tokens: None,
+                                egress_profiles: None,
+                                panels_allocated: None,
+                            })
+                            .await;
+                    }
+                    Err(platform_api::FusionError::Cancelled)
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -1809,29 +1834,34 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for CancelledAfterPrespawnEventOnlyFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            if let Some(tx) = progress {
-                let stage = platform_api::FusionStage::RunningPanels {
-                    completed: 0,
-                    total: 3,
-                };
-                let _ = tx
-                    .send(platform_api::FusionProgress {
-                        message: stage.label(),
-                        stage,
-                        panel_id: None,
-                        realized_output_tokens: None,
-                        egress_profiles: None,
-                        panels_allocated: None,
-                    })
-                    .await;
-            }
-            Err(platform_api::FusionError::Cancelled)
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, progress| async move {
+                    if let Some(tx) = progress {
+                        let stage = platform_api::FusionStage::RunningPanels {
+                            completed: 0,
+                            total: 3,
+                        };
+                        let _ = tx
+                            .send(platform_api::FusionProgress {
+                                message: stage.label(),
+                                stage,
+                                panel_id: None,
+                                realized_output_tokens: None,
+                                egress_profiles: None,
+                                panels_allocated: None,
+                            })
+                            .await;
+                    }
+                    Err(platform_api::FusionError::Cancelled)
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -1989,16 +2019,22 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for NeverCompletesFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            if let Some(tx) = self.started.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
-            std::future::pending().await
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let this = ::std::sync::Arc::clone(&self);
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, _progress| async move {
+                    if let Some(tx) = this.started.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                    std::future::pending().await
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -2041,15 +2077,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for PreparedKnownZeroNeverCompletesFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            std::future::pending().await
-        }
-
         fn prepare(
             self: Arc<Self>,
             submission: platform_api::FusionSubmission,
@@ -2251,27 +2278,33 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for DispatchesFewerPanelsThenHangsFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            inherit: platform_api::FusionInheritance,
-            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            if let Some(tx) = progress {
-                let stage = platform_api::FusionStage::PanelsDispatched { total: 2 };
-                let _ = tx
-                    .send(platform_api::FusionProgress {
-                        message: stage.label(),
-                        stage,
-                        panel_id: None,
-                        realized_output_tokens: None,
-                        egress_profiles: None,
-                        panels_allocated: self.panels_allocated,
-                    })
-                    .await;
-            }
-            inherit.cancel.cancelled().await;
-            Err(platform_api::FusionError::Cancelled)
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let this = ::std::sync::Arc::clone(&self);
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, inherit, progress| async move {
+                    if let Some(tx) = progress {
+                        let stage = platform_api::FusionStage::PanelsDispatched { total: 2 };
+                        let _ = tx
+                            .send(platform_api::FusionProgress {
+                                message: stage.label(),
+                                stage,
+                                panel_id: None,
+                                realized_output_tokens: None,
+                                egress_profiles: None,
+                                panels_allocated: this.panels_allocated,
+                            })
+                            .await;
+                    }
+                    inherit.cancel.cancelled().await;
+                    Err(platform_api::FusionError::Cancelled)
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -2502,28 +2535,34 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for DispatchesFewerPanelsThenFailsFusion {
-        async fn run(
-            &self,
-            _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
-            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-            if let Some(tx) = progress {
-                let stage = platform_api::FusionStage::PanelsDispatched {
-                    total: self.dispatched_total,
-                };
-                let _ = tx
-                    .send(platform_api::FusionProgress {
-                        message: stage.label(),
-                        stage,
-                        panel_id: None,
-                        realized_output_tokens: None,
-                        egress_profiles: None,
-                        panels_allocated: self.panels_allocated,
-                    })
-                    .await;
-            }
-            Err(self.error.clone())
+        fn prepare(
+            self: ::std::sync::Arc<Self>,
+            submission: ::platform_api::FusionSubmission,
+        ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+            let this = ::std::sync::Arc::clone(&self);
+            let timeout = self.effective_timeout_ms();
+            ::platform_api::prepared_from_oneshot(
+                submission,
+                timeout,
+                move |_request, _inherit, progress| async move {
+                    if let Some(tx) = progress {
+                        let stage = platform_api::FusionStage::PanelsDispatched {
+                            total: this.dispatched_total,
+                        };
+                        let _ = tx
+                            .send(platform_api::FusionProgress {
+                                message: stage.label(),
+                                stage,
+                                panel_id: None,
+                                realized_output_tokens: None,
+                                egress_profiles: None,
+                                panels_allocated: this.panels_allocated,
+                            })
+                            .await;
+                    }
+                    Err(this.error.clone())
+                },
+            )
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {

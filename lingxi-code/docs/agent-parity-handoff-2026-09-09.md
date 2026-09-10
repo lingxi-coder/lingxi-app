@@ -358,6 +358,28 @@ turn.start       turn.step         turn.complete
 那是 Bun 打包的常量表在每个 chunk 里重复，不是 60 处逻辑。真正的逻辑集中在
 `src_163219561.js` 和 `src_180269027.js`。
 
+#### 🚨 第 1 条（安全模型）**无法照抄上游** —— 2026-09-10 实测
+
+想「照抄上游的隔离模型」这条路已经走到头了，结论是走不通，记下来免得再走一遍：
+
+- `HOOKS_WORKER_URL` 指向 `/$bunfs/root/src/plugins/functionHooks/hooks-worker/hooks-worker.js`，
+  是一个**独立的内嵌资源**，不在我抽出来的 1657 个 chunk 里
+  （chunk 是主 bundle；worker 另打一份）。
+- 直接在 200MB 二进制里搜：`self.postMessage` 只有 **2** 处，**两处都是打包进去的
+  node-forge 加密库**，不是 worker。
+- 那条路径字符串出现在 @70371141，紧跟其后的是**字符串表**
+  （`darwin`、`transport`、`timeout`… 带哈希的 interned 串），**不是资源正文**——
+  worker 是编译成 bytecode 的，拿不到源码。
+
+**能拿到的**：调度面。`budgetMs`(39)、`hookTimeout`(7)、`isCore`(20)、`agent.spawn`(55)
+在二进制里都有，所以**预算/超时/core 伪钩子的契约**是可以还原的。
+**拿不到的**：沙箱语义本身——worker 里暴露了哪些 global、插件 JS 能不能碰
+fs/net/env/进程、取消是怎么实现的。
+
+⇒ **第 1 条只能自己设计，不能移植。** 而「自动执行第三方插件代码」的沙箱是
+本仓库最不该临时拍脑袋的一类决定。⛔ 别因为「上游有 worker」就假设照着 worker 写就安全——
+上游 worker 的权限面我们**从未看到过**。
+
 ### 3.4 AG-16 — `cacheTtl`（P3，**明确不做，2026-09-10 复核仍成立**）
 
 `sKt(e)` 读 `frontmatter.experimental.cacheTtl`（key 归一化成 `cachettl`，值域 `k_e`）

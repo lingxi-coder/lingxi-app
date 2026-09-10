@@ -262,23 +262,6 @@ impl TasksView {
                     format!(" · {model}{effort}")
                 })
                 .unwrap_or_default();
-            let (label, model) = if r.task_type == "local_agent" {
-                let model = tui_core::render::truncate_to_width_ellipsis(&model, 31);
-                let model_width = unicode_width::UnicodeWidthStr::width(model.as_str());
-                if model_width > 0 && 40usize.saturating_sub(model_width) >= 20 {
-                    (
-                        tui_core::render::truncate_to_width_ellipsis(&label, 40 - model_width),
-                        model,
-                    )
-                } else {
-                    (
-                        tui_core::render::truncate_to_width_ellipsis(&label, 40),
-                        String::new(),
-                    )
-                }
-            } else {
-                (label, String::new())
-            };
             // A running Fusion row says which stage it is in, and a failed one
             // says why, both sanitized: the stage and error are model- and
             // provider-derived text reaching a terminal.
@@ -298,6 +281,32 @@ impl TasksView {
                     .unwrap_or_default()
             } else {
                 String::new()
+            };
+            // A Fusion row's stage is the point of the row, and it renders
+            // after the label. An unbounded label pushes it past the right
+            // edge at ordinary terminal widths, so bound it the way
+            // `local_agent` rows are already bounded.
+            let label = if r.task_type == "local_fusion" && !fusion.is_empty() {
+                tui_core::render::truncate_to_width_ellipsis(&label, 40)
+            } else {
+                label
+            };
+            let (label, model) = if r.task_type == "local_agent" {
+                let model = tui_core::render::truncate_to_width_ellipsis(&model, 31);
+                let model_width = unicode_width::UnicodeWidthStr::width(model.as_str());
+                if model_width > 0 && 40usize.saturating_sub(model_width) >= 20 {
+                    (
+                        tui_core::render::truncate_to_width_ellipsis(&label, 40 - model_width),
+                        model,
+                    )
+                } else {
+                    (
+                        tui_core::render::truncate_to_width_ellipsis(&label, 40),
+                        String::new(),
+                    )
+                }
+            } else {
+                (label, String::new())
             };
             let text = format!(
                 "{marker}{label} {} {status}{unread}{fusion}{model}",

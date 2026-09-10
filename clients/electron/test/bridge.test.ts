@@ -1132,6 +1132,49 @@ test('AskUserQuestion broker resolution clears replay state without a renderer a
   assert.equal((manager as any).pendingAskUserQuestionRequests.has(12), false);
 });
 
+test('permission resolutions clear every renderer and pending host state', () => {
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    sessionId: '44444444-5555-4666-8777-888888888888',
+    projectPath: '/workspace',
+    envelopeEvents: true,
+  } as any);
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const client = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return client; },
+  };
+  const first: Array<{ channel: string; payload: unknown }> = [];
+  const second: Array<{ channel: string; payload: unknown }> = [];
+  const firstWindow = fakeWebContents(first);
+  const secondWindow = fakeWebContents(second);
+
+  (runtime as any).wireClient(client, 0);
+  (runtime as any).activeTurn = true;
+  runtime.registerWindow(firstWindow as any, 'app://desktop/index.html');
+  handlers.get('permission')!({ request_id: 17, kind: { type: 'exit_plan_mode', plan: '# plan' } });
+
+  // A renderer that joins while the request is parked must receive the same
+  // request; permission frames are not part of the sequenced event replay.
+  runtime.registerWindow(secondWindow as any, 'app://desktop/index.html');
+  assert.equal(first.filter((entry) => entry.channel === 'lingxi:permission').length, 1);
+  assert.equal(second.filter((entry) => entry.channel === 'lingxi:permission').length, 1);
+  assert.equal(runtime.pendingInteractions, 1);
+
+  handlers.get('event')!({
+    type: 'permission_request_resolved',
+    request_id: 17,
+    resolution: 'expired',
+  });
+
+  assert.equal(runtime.pendingInteractions, 0);
+  assert.equal(first.filter((entry) => entry.channel === 'lingxi:event').length, 1);
+  assert.equal(second.filter((entry) => entry.channel === 'lingxi:event').length, 1);
+
+  // A delayed duplicate frame must not resurrect the terminal request.
+  handlers.get('permission')!({ request_id: 17, kind: { type: 'exit_plan_mode', plan: '# stale' } });
+  assert.equal(runtime.pendingInteractions, 0);
+});
+
 test('registerWindow replays pending AskUserQuestion requests to a reloaded renderer', () => {
   const manager = new BridgeManager({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),

@@ -339,6 +339,11 @@ export class HostController {
     webContents.once('destroyed', () => this.targets.delete(webContents));
   }
 
+  /** Re-deliver pending interaction prompts after the renderer document reloads. */
+  replayPendingInteractions(webContents: WebContents): void {
+    this.bridge.replayPendingInteractions(webContents);
+  }
+
   registerIpc(): void {
     if (this.registered) return;
     this.registered = true;

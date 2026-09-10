@@ -681,7 +681,10 @@ export class SessionRuntime {
   private activeTurnId: number | undefined;
   private cancellingTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
-  private readonly pendingPermissionIds = new Set<number>();
+  /** Permission requests remain replayable until the engine reports a terminal resolution. */
+  private readonly pendingPermissionIds = new Map<number, PermissionRequest>();
+  /** Prevent a delayed duplicate permission frame from resurrecting a terminal request. */
+  private readonly resolvedPermissionIds = new Set<number>();
   private readonly pendingComputerAccessIds = new Set<number>();
   private readonly pendingAskUserQuestionIds = new Set<number>();
   private readonly pendingAskUserQuestionRequests = new Map<number, PendingAskUserQuestionRequest>();
@@ -981,6 +984,14 @@ export class SessionRuntime {
     const origins = this.targets.get(webContents) ?? new Set<string>();
     origins.add(origin);
     this.targets.set(webContents, origins);
+    this.replayPendingInteractions(webContents);
+  }
+
+  /** Re-deliver interactions that may have arrived before a renderer reload. */
+  replayPendingInteractions(webContents: WebContents): void {
+    for (const request of this.pendingPermissionIds.values()) {
+      this.sendToWindow(webContents, CH_PERMISSION, request);
+    }
     for (const pending of this.pendingAskUserQuestionRequests.values()) {
       this.sendClientEvent(webContents, { type: 'ask_user_question', request: pending.request }, false);
     }
@@ -1067,6 +1078,7 @@ export class SessionRuntime {
    */
   private clearTurnInteractions(): void {
     this.pendingPermissionIds.clear();
+    this.resolvedPermissionIds.clear();
     this.pendingComputerAccessIds.clear();
     for (const requestId of [...this.pendingAskUserQuestionIds]) {
       this.clearPendingAskUserQuestion(requestId);
@@ -1598,23 +1610,29 @@ export class SessionRuntime {
       if (event.type === 'ask_user_question_resolved') {
         this.clearPendingAskUserQuestion(event.request_id);
       }
+      if (event.type === 'permission_request_resolved') {
+        this.resolvedPermissionIds.add(event.request_id);
+        this.pendingPermissionIds.delete(event.request_id);
+      }
       if (
         event.type === 'turn_started'
         || event.type === 'turn_ended'
         || event.type === 'session_ended'
         || event.type === 'ask_user_question'
         || event.type === 'ask_user_question_resolved'
+        || event.type === 'permission_request_resolved'
       ) this.notifyActivityChanged();
       this.broadcastClientEvent(event);
     });
     client.on('permission', (request: PermissionRequest) => {
       if (generation !== this.generation || !this.activeTurn || this.cancellingTurn) return;
       if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
+        if (this.resolvedPermissionIds.has(request.request_id)) return;
         if (!this.pendingPermissionIds.has(request.request_id) && this.pendingPermissionIds.size >= MAX_PENDING_PERMISSIONS) {
           this.diagnostics.add('warn', 'bridge', 'permission request limit reached');
           return;
         }
-        this.pendingPermissionIds.add(request.request_id);
+        this.pendingPermissionIds.set(request.request_id, request);
         this.notifyActivityChanged();
         this.broadcast(CH_PERMISSION, request);
       }
@@ -2376,6 +2394,11 @@ export class SessionRuntimeManager {
       webContents.once('destroyed', onDestroyed);
     }
     for (const runtime of this.runtimes.values()) runtime.registerWindow(webContents, rendererUrl);
+  }
+
+  /** Re-deliver pending interaction prompts after a renderer document reload. */
+  replayPendingInteractions(webContents: WebContents): void {
+    for (const runtime of this.runtimes.values()) runtime.replayPendingInteractions(webContents);
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */

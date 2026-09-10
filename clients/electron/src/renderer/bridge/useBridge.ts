@@ -360,6 +360,11 @@ function messageFrom(error: unknown): string {
   return 'The desktop host could not complete that action.';
 }
 
+/** An interaction can race an engine-side expiry or another window's answer. */
+export function isPermissionRequestGone(error: unknown): boolean {
+  return /\bpermission request is not pending\b/.test(messageFrom(error));
+}
+
 export const BRIDGE_RESTART_TIMEOUT_MS = 20_000;
 
 export function restartBridgePreconditionError(
@@ -670,6 +675,7 @@ interface RuntimeState {
   askUserQuestionQueue: AskUserQuestionRequestDto[];
   pendingInteractionsOverride?: number;
   pendingAskUserQuestionsOverride?: number;
+  resolvedPermissionIds: Set<number>;
   resolvedAskUserQuestionIds: Set<number>;
   isCancelling: boolean;
   error?: string;
@@ -801,6 +807,7 @@ function emptyRuntimeState(connection: ConnectionState = { status: 'idle' }): Ru
     permissionQueue: [],
     computerAccessQueue: [],
     askUserQuestionQueue: [],
+    resolvedPermissionIds: new Set(),
     resolvedAskUserQuestionIds: new Set(),
     isCancelling: false,
   };
@@ -1287,6 +1294,23 @@ export function useBridge(): UseBridge {
             ),
           };
         }
+        if (event.type === 'permission_request_resolved') {
+          const resolvedPermissionIds = new Set(state.resolvedPermissionIds);
+          resolvedPermissionIds.add(event.request_id);
+          const summary = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId);
+          next = {
+            ...next,
+            permissionQueue: state.permissionQueue.filter((entry) => entry.request_id !== event.request_id),
+            resolvedPermissionIds,
+            pendingInteractionsOverride: pendingCountAfterResponse(
+              state.pendingInteractionsOverride,
+              Math.max(
+                summary?.pendingInteractions ?? 0,
+                state.permissionQueue.length + state.computerAccessQueue.length + state.askUserQuestionQueue.length,
+              ),
+            ),
+          };
+        }
         if (event.type === 'turn_ended' || event.type === 'session_ended') {
           next = {
             ...next,
@@ -1295,6 +1319,7 @@ export function useBridge(): UseBridge {
             askUserQuestionQueue: [],
             pendingInteractionsOverride: 0,
             pendingAskUserQuestionsOverride: 0,
+            resolvedPermissionIds: new Set(),
             resolvedAskUserQuestionIds: new Set(),
             isCancelling: false,
           };
@@ -1406,6 +1431,7 @@ export function useBridge(): UseBridge {
           next.askUserQuestionQueue = [];
           next.pendingInteractionsOverride = 0;
           next.pendingAskUserQuestionsOverride = 0;
+          next.resolvedPermissionIds = new Set();
           next.resolvedAskUserQuestionIds = new Set();
           next.isCancelling = false;
         }
@@ -1429,6 +1455,7 @@ export function useBridge(): UseBridge {
     const offPermission = host.onPermission((envelope) => {
       if (removedRuntimeIds.current.has(envelope.sessionId)) return;
       updateRuntime(envelope.sessionId, (state) => {
+        if (state.resolvedPermissionIds.has(envelope.event.request_id)) return state;
         const alreadyQueued = state.permissionQueue.some((entry) => entry.request_id === envelope.event.request_id);
         return {
           ...state,
@@ -1654,6 +1681,7 @@ export function useBridge(): UseBridge {
         askUserQuestionQueue: [],
         pendingInteractionsOverride: 0,
         pendingAskUserQuestionsOverride: 0,
+        resolvedPermissionIds: new Set(),
         resolvedAskUserQuestionIds: new Set(),
       }));
     }).catch((cause) => {
@@ -1672,14 +1700,26 @@ export function useBridge(): UseBridge {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
     try { await host.approve(sessionId, requestId, response); acknowledgeInteraction(sessionId, requestId, 'permission'); }
-    catch (cause) { capture(cause); }
+    catch (cause) {
+      if (isPermissionRequestGone(cause)) {
+        acknowledgeInteraction(sessionId, requestId, 'permission');
+        return;
+      }
+      capture(cause);
+    }
   }, [acknowledgeInteraction, capture, host]);
 
   const deny = useCallback(async (requestId: number) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
     try { await host.deny(sessionId, requestId); acknowledgeInteraction(sessionId, requestId, 'permission'); }
-    catch (cause) { capture(cause); }
+    catch (cause) {
+      if (isPermissionRequestGone(cause)) {
+        acknowledgeInteraction(sessionId, requestId, 'permission');
+        return;
+      }
+      capture(cause);
+    }
   }, [acknowledgeInteraction, capture, host]);
 
   const approveComputerAccess = useCallback(async (requestId: number, response: ComputerAccessResponseDto) => {

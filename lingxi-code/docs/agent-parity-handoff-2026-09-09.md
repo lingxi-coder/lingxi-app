@@ -418,7 +418,7 @@ apps/engine-desktop/src/lib.rs:4442  prompt_cache_write_ttl_1h_enabled()   env �
 
 | | 数量 | 说明 |
 |---|---|---|
-| `AgentDefinition {` 字面量 | **75** | 没有 `Default` derive，没有一处用 `..Default::default()` ⇒ 加字段必须全改 |
+| `AgentDefinition {` **构造点** | **~17** | 没有 `Default` derive，没有一处用 `..Default::default()` ⇒ 加字段必须全改 |
 | `build_request(` 调用点 | **58** | 分布在 llm-client(18) / service_test(31) / tool-api(6) / web / sidequery / test-harness |
 
 ⛔ **不能用「在 service 上加个字段」偷懒**：`ApiService` 是
@@ -440,8 +440,15 @@ apps/engine-desktop/src/lib.rs:4442  prompt_cache_write_ttl_1h_enabled()   env �
 「named, computed, never wired」换了个马甲。判据：在 `should_1h_cache_ttl()` 里
 读到的值必须能在一个**真的走完 runner→请求**的测试里断言到，而不是单测里手动 set 一遍。
 
-**结论**：范围是「选一条实现路径 + 75 处字段修改 + 优先级/overage 语义 + 端到端断言」，
-不是「加一个没人读的字段」。⛔ 别再引用「没有消费者」当理由——那个理由已经被推翻。
+⚠️ **「75」是我数错的，实测是 ~17。** `grep -c 'AgentDefinition {'` 把**模式匹配和类型标注**
+也算进去了；真正需要补字段的**构造点**，靠编译器 `E0063` 迭代收敛，两轮就到 0
+（7 + 10）。⇒ 引用「N 处调用点」当成本理由之前，**用编译器数，别用 grep 数**。
+同一个错误形状：[[divergence-reason-enumerated-one-setter]]。
+
+**结论**：范围是「选一条实现路径 + ~17 处字段修改 + 优先级/overage 语义 + 端到端断言」，
+不是「加一个没人读的字段」。字段本身**已实测可加、两轮收敛**；真正的工作量在
+task-local 传播验证 + 优先级/overage 语义 + 那条端到端断言。
+⛔ 别再引用「没有消费者」当理由——那个理由已经被推翻。
 
 **2026-09-10 复核**（因为这一整轮里「N 个调用点」这类估算我错过两次，所以实测）：
 `llm-client/src/convert.rs` 里出往 wire 的 `cache_control` **恒为 `None`**（589/597 行，

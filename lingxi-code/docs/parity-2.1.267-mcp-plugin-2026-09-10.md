@@ -85,9 +85,30 @@ error straight to `McpClientError::Rpc` with no fallback; `legacy_sse`,
 live upstream behaviour, not a dormant flag).
 
 **Impact:** an MCP server that speaks only HTTP+SSE fails to connect here and
-connects upstream. The substrate exists — `McpTransportSpec::Sse` is already a
-supported *configured* transport — so this is wiring a fallback, not building a
-transport.
+connects upstream.
+
+**Blocker, measured.** This is bigger than "wire a fallback":
+
+* `McpError::HttpResponse { status, www_authenticate }` carries the **status but
+  not the response body**, and the predicate needs both. Widening it is additive
+  in spirit but enum struct variants take no `..Default::default()`, so all
+  **7** construction sites must change, in `platform-api` — a type the whole
+  workspace consumes.
+* There are **8** `connect_and_initialize` implementations (posix, common,
+  windows, mobile, desktop, plus test doubles); only the ones that can see a
+  body would populate it.
+* Upstream hands the SSE re-dial a small dial-state protocol —
+  `{postMethodNotAllowed, dialSignal, dialConnected}` — that this port's SSE
+  transport has no equivalent for.
+
+One thing that does fall out cleanly: upstream's `if(typeof n!=="string") return !0`
+means **an absent body falls back**, so a transport that cannot supply one maps
+to `None` without inventing a policy.
+
+⛔ Do not implement the status half alone. A server answering a rejected POST
+with a valid JSON-RPC error is a real protocol failure; re-dialling it would
+convert protocol errors into silent transport churn, which is worse than the
+missing fallback.
 
 ## MCP-02 — a project `.mcp.json` can smuggle an unresolved `${…}` into a command — ✅ FIXED in `7a710a252`
 

@@ -97,57 +97,51 @@ frontmatter line.
 
 ## 4. Open items
 
-### 4.1 ⚠️ Never type-checked: the two composition roots
+### 4.1 ✅ The two composition roots compile
 
-`b44f3b3c1` is **committed but never compiled.** The cargo build lock in this
-checkout was starved for >4 hours by other sessions running `cargo check
---workspace` back to back, and I chose not to build a private
-`CARGO_TARGET_DIR` (13 GiB free; an ENOSPC would have broken four other
-sessions).
+`b44f3b3c1` was committed without ever being built. It has since been through
+repeated `cargo build --workspace --all-features --tests` runs (2026-09-10) in a
+private `CARGO_TARGET_DIR`; both roots type-check.
 
-**First thing to do:** `cargo build --manifest-path lingxi-code/Cargo.toml -p
-engine-desktop -p engine-mobile --tests`. Three hunks per file, following the
-existing set-once-cell idiom, but unverified.
+### 4.2 ✅ The `hooks` env flake is gone (`e1b411b7d`)
 
-Lock diagnosis: `lsof lingxi-code/target/debug/.cargo-lock` lists every queued
-process; the real holder is the one where `pgrep -P <pid>` shows children — not
-the first row.
+Both halves are fixed. `CLAUDE_CODE_EVAL_CONFINED` became a per-executor flag
+(`with_eval_confined`) in an earlier session; the last `set_var` in that binary —
+`LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS` — is now `with_session_end_timeout_ms`.
+`grep -c 'std::env::set_var' hooks/src/executor_test.rs` is **0**.
 
-### 4.2 ⚠️ The `hooks` twin of the flake I already fixed — now unblocked
+🚨 The conversion alone did NOT pin the new plumbing: a mutation that ignores the
+override still passed, because the fixture declares no per-hook timeout so the
+default is the 1500ms floor, and the assertion was `elapsed < 2s` — true either
+way. That bound never proved the deadline VALUE was honoured. Tightened to 500ms,
+which separates the configured 50ms from the floor.
 
-`hooks/src/executor_test.rs` calls `std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", …)`
-at lines 665/675/695/705/708/714/716 while `executor.rs:4572` reads that variable
-as a gate. Rust runs a binary's tests on parallel threads in one process, so every
-other test in that binary that constructs a hook decision is exposed during those
-windows — five of them assert `HookDecision::Approve` / `PermissionRequestResult::Allow`.
+### 4.3 ✅ ANSWERED — and it was not the symmetry (`ea711b1a0`)
 
-This is the *identical* bug fixed in `PermissionPolicy::from_rules` (`80578f31f`).
-Fix shape: thread the flag (`…_confined(…, confined: bool)`) instead of reading
-the env inside the gate.
+The question was whether the boot-agent frontmatter fold should also check
+`cfg.restricted` / `YYe()`, by analogy with the subagent clamps. The boot fold is
+`Qu` (`src_173281385.js` @8342) and it checks **neither**:
 
-**It was blocked before because another session held the file; it is clean now.**
-🚨 The detector is a **repeated** full run — one green run proves nothing about a race.
-
-### 4.3 ❓ Open question: is the boot-agent frontmatter seam under-gated?
-
-`apps/engine-desktop/src/lib.rs:11877` folds a main-thread agent's frontmatter
-`permissionMode` into the boot mode precedence and **is** gated on
-`bypass_disabled`:
-
-```rust
-if !(agent_mode == permission::PermissionMode::BypassPermissions && bypass_disabled) {
-    mode = agent_mode;
-}
+```js
+let b = !O_() && (kM() || Boolean(ne().bypassPermissionsModeAccepted)),
+    k = m === "bypassPermissions" && !b ? void 0 : m;
 ```
 
-But it checks neither `cfg.restricted` nor `YYe()`. That is the same *shape* as
-the subagent gap just fixed, at a different seam (`--agent <type>` at startup
-rather than a spawn).
+`O_()` is the `disableBypassPermissionsMode` killswitch — which the port already
+had — and `kM()` is `skipDangerousModePermissionPrompt` in any tier. So the
+killswitch is only **half** the gate: bypass must also have been **earned**,
+either by the user accepting the disclaimer once
+(`bypassPermissionsModeAccepted`) or by a tier waiving the prompt.
 
-**I did not verify this against the oracle.** The boot fold is a different oracle
-function from `bs(Rn)`, and I do not know whether upstream gates it on
-confined/restricted. ⛔ Do not "fix" it from the symmetry alone — find the boot
-fold in the binary first. Recorded as a question, not a finding.
+Without that half, one frontmatter line in a discovered `.lingxi/agents` file
+granted full bypass at startup to a user who was never asked — and agent files
+arrive with a checkout. Both flags already existed in the port, wired only to the
+background-session downgrade; upstream applies them regardless of session kind.
+The predicate is `permission::boot_agent_may_adopt_bypass`.
+
+⛔ Note for the next reader: ⚠️-shaped symmetry arguments ("this other seam gates
+on X, so this one should too") pointed at the wrong predicate here. The fold was
+worth reading in the binary precisely because the guess was plausible.
 
 ### 4.4 The three curated permission items (unchanged, each structurally blocked)
 

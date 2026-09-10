@@ -249,32 +249,28 @@ return H("tengu_melodic_wolf",!1)}` —— 默认 **false**。
 `lue` + `filter(!startsWith(Exe))` 等价。**计数与 hash 只有在第二条 note 可达时才需要**，
 而第二条的两个来源现在一个休眠、一个被挡住。
 
-#### ⛔ 唯一开放的一条：`⚠ notice` 与 `PZo` 撤回过滤
+#### ✅ `⚠ notice` 与 `PZo` 撤回过滤（`db4fde31d`）
 
-`ICe(e)` 的 `notice` 是**最后一条 `model_refusal_fallback` 系统消息**（`scope==="local"`
-且 `fallbackModel` 归一化后等于最后一条 assistant 的 model）；`PZo` 依据
-`retractedMessageUuids` 把被撤回的消息从 `live` 里滤掉。
+落在 **runner** 而不是 agent 工具的 finalizer —— 因为 `ICe(e)` 要的是**消息列表**，
+而端口的 finalizer 只拿到抽好的文本块；runner 手里才有 `history`。
 
-🚨 **2026-09-10 更正：这里原先记的阻塞（「先做 typed `model_refusal_fallback` 帧」）是错的。**
-typed 帧已经做了（`c9f8c5941`），但**它不解锁这一条**。
+* **`PZo`**：把被后续 notice 撤回的消息在**挑答案之前**滤掉，否则一个被取代的 hop
+  的输出可能直接成为 report。system 消息恒留（notice 本身就是撤回的载体）。
+  比较取 uuid 前 **24** 个字符（上游 `D4n = 24`）。
+* **`ICe`**：上游是「最后一条有正文的非错误 assistant → 读它的 `model` →
+  匹配 `fallbackModel` 相等的帧」。端口的 `Assistant` **没有 model 字段**，
+  但 runner 本来就知道当前 serving model，而**那就是**产出答案的那个模型
+  （每次 hop 都会重跑这一轮）。所以是拿同一个值去匹配，不是近似，
+  **也不需要给 wire DTO 加字段**。
+* **顺序自然对上**：agent 工具的 finalizer 之后会把 turn-limit note 插到 index 0，
+  所以在 runner 这边前插，最终就是上游的「turn-limit → ⚠ → report」。
 
-`ICe(e)` 读的是**子代理自己的消息列表**。而本端口的**子代理根本没有 refusal fallback**：
+判据：4 个测试 + 4 个种雷（不前插 note / 撤回过滤变直通 / notice 不看 serving model /
+system 消息一起被滤）全部点名变红。含控制组：没 hop 过的 run 不带 note。
 
-* `agent/src/runner.rs` 把 `refusal` 当成一个普通的终止 stop reason，不换模型
-  （该文件里 fallback / model-swap 零命中）；
-* 整套级联机制（`refusal_notice.rs` / `refusal_cascade.rs`）只存在于 `orchestrator/`；
-* 生产用的 `SubagentApiClient` 实现（`orchestrator/src/provider_adapter.rs:721`）不带它
-  —— 那个 `messages_create_with_fallback` 挂在 **`OrchestratorApiClient`**（:151）上，
-  而且它是 provider 层的 fallback 模型参数，不是拒答级联。
-
-上游子代理走的是**和主线程同一个 query 生成器**（`Nfr`），所以天然有；本端口的子代理跑
-`agent/src/runner.rs` 这条独立循环，于是没有。
-
-⚠️ 还有一层：即使补上，`ICe` 找的是 `scope==="local"`，而本端口的级联是**持久换会话模型**
-（= 上游的 `scope:"session"`）。要对上还得区分 local / session 两种换法。
-
-**下一步**：这是「子代理拒答级联」这个独立课题，不是 agent 结果分层的收尾。⛔ 别只往
-finalizer 里加 `⚠` 文案 —— 没有级联就没有 notice 可读。
+🚨 上一版的 `a_refusing_subagent_hops_to_the_fallback_and_retries` 断言
+`result["text"] == "done"`，加了 note 之后**理应**变红 —— 改的是断言本身
+（答案现在合法地带 note），不是绕开它。把它钉成「等于模型原话」就是把 bug 钉成契约。
 
 #### ❓ 留一个未定的窄竞态
 

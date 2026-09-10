@@ -7521,6 +7521,41 @@ async fn killing_a_background_agent_reports_who_killed_it() {
     }
 }
 
+/// The launch metadata reaches the event. `agent_depth` and `is_built_in` are
+/// stamped by the handler at spawn (the registry cannot know them) and read back
+/// at kill time (the handler cannot know `killed_by`) — the two halves meeting
+/// on the row is the whole mechanism, so a test that only checked `reason` would
+/// not notice it coming apart.
+#[tokio::test]
+async fn a_terminated_agent_reports_its_launch_metadata() {
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let (_dir, registry) = registry_with_bus(&sink).await;
+    let id = "agent-under-test".to_string();
+    let mut row = agent_row(&id);
+    row.outcome.agent_depth = Some(2);
+    row.outcome.is_built_in = Some(true);
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(row))
+        .await;
+
+    registry.kill_with_reason(&id, "parent").await.unwrap();
+
+    let event = sink
+        .events()
+        .await
+        .into_iter()
+        .find(|e| e.name == "tengu_agent_tool_terminated")
+        .expect("terminated event");
+    assert!(matches!(
+        event.metadata.get("agent_depth"),
+        Some(telemetry::AnalyticsValue::Int(2))
+    ));
+    assert!(matches!(
+        event.metadata.get("is_built_in_agent"),
+        Some(telemetry::AnalyticsValue::Bool(true))
+    ));
+}
+
 /// A task that had already finished on its own is not "terminated by" anyone —
 /// the same reverse-race guard the `killed_by` stamp uses.
 #[tokio::test]

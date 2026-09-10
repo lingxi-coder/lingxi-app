@@ -695,6 +695,26 @@ impl LocalAgentHandler {
         //    (engine code must not call tokio::spawn directly — D17). The worker
         //    awaits `spawner.spawn`, spools the terminal payload, reports the
         //    terminal status, and removes its own cancel record on exit.
+        // Stamp the LAUNCH metadata now, not at termination: a kill lands
+        // mid-run, and `tengu_agent_tool_terminated` is emitted by the registry,
+        // which knows `killed_by` but nothing about how this agent was spawned.
+        // `set_agent_outcome` merges, so this partial never clears a later
+        // result. `depth` is already on the spawn request; `is_built_in` is
+        // derived from the real builtin catalog rather than a second list.
+        self.status_sink
+            .set_agent_outcome(
+                &task_id,
+                platform_api::task_registry::AgentTerminalOutcome {
+                    agent_depth: Some(request.depth),
+                    is_built_in: Some(
+                        agent::builtins::builtin_agent_definitions()
+                            .iter()
+                            .any(|def| def.agent_type == request.subagent_type),
+                    ),
+                    ..platform_api::task_registry::AgentTerminalOutcome::default()
+                },
+            )
+            .await;
         let spawner = self.spawner.clone();
         let status_sink = self.status_sink.clone();
         let workers = self.workers.clone();
@@ -2675,7 +2695,26 @@ mod tests {
         assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
         await_workers_drained(&workers).await;
 
-        assert_eq!(sink.calls(), vec!["outcome", "status"]);
+        // The invariant is the ORDER, not the transcript: an `outcome` must
+        // land before the terminal `status`, so a drain running in between
+        // cannot see a terminal row with none of its sections. There is also a
+        // launch-time `outcome` (the spawn metadata the kill path reads), so
+        // pinning an exact two-element vector would break on any additional
+        // partial report while the invariant still held.
+        let calls = sink.calls();
+        let status_at = calls
+            .iter()
+            .position(|c| *c == "status")
+            .expect("a terminal status is published");
+        assert_eq!(
+            status_at,
+            calls.len() - 1,
+            "the terminal status is last: {calls:?}"
+        );
+        assert!(
+            calls[..status_at].iter().any(|c| *c == "outcome"),
+            "a payload must precede the terminal status: {calls:?}"
+        );
     }
 
     /// A KEPT isolation worktree's `(path, branch)` — the binary's
@@ -3054,12 +3093,25 @@ mod tests {
             .expect("kill should succeed");
 
         assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
-        assert_eq!(
-            sink.calls(),
-            vec!["outcome", "outcome", "status"],
-            "the rest reports its accumulated payload (so the rest notification \
-             can read the exhausted turn budget off it), then the TERMINAL \
-             payload lands before Killed"
+        // Two payloads must precede the terminal status: the rest's accumulated
+        // one (so the rest notification can read the exhausted turn budget off
+        // it) and the terminal one. Counted rather than transcribed — there is
+        // also a launch-time payload (the spawn metadata the kill path reads),
+        // and pinning the exact vector would break on any additional partial
+        // report while the invariant still held.
+        let calls = sink.calls();
+        let status_at = calls
+            .iter()
+            .position(|c| *c == "status")
+            .expect("a terminal status is published");
+        assert_eq!(status_at, calls.len() - 1, "status is last: {calls:?}");
+        assert!(
+            calls[..status_at]
+                .iter()
+                .filter(|c| **c == "outcome")
+                .count()
+                >= 2,
+            "the rest payload AND the terminal payload must both precede Killed: {calls:?}"
         );
         let outcome = sink.outcome();
         assert_eq!(outcome.result.as_deref(), Some("rest answer"));

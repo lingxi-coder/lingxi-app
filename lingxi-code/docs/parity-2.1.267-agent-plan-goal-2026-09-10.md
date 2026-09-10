@@ -78,10 +78,8 @@ subagent that ends without calling it), a safety review of the report, and a
 
 ---
 
-## `tengu_goal_evaluated` — spec complete, one blocker
+## `tengu_goal_evaluated` — LANDED (`df42fedc5`)
 
-Not emitted here (`git grep tengu_goal_evaluated` → docs only). The spec is now
-fully resolved, so whoever picks it up does not have to re-derive it.
 `src_163219561.js` @4343091, in the evaluator's `finally`:
 
 ```js
@@ -90,7 +88,7 @@ if (Fe) {                                             // an active goal existed
       Je = We === "met" || We === "not_met" || We === "impossible";
   i("tengu_goal_evaluated", {
     outcome: u(We ?? (_e ? "error" : Qe ? "cancelled" : "absent")),
-    durationMs: Date.now() - D,                       // D = evaluation START
+    durationMs: Date.now() - D,                       // D = the QUERY start
     iterations: Fe.iterations + (Je ? 1 : 0),
     parentAborted: Qe,
     origin: we(Fe.origin),
@@ -98,34 +96,62 @@ if (Fe) {                                             // an active goal existed
 }
 ```
 
-Three details that are easy to get wrong, all settled:
+Four details that are easy to get wrong:
 
 * **`iterations` is `+1` only for a real verdict.** met / not_met / impossible
   increment; error, cancelled, absent and deferred do not. This port's
   `record_goal_evaluation` increments the STORED count on every path, so the
-  telemetry value must be computed from the count read BEFORE the evaluation,
-  not from the mutated one.
+  telemetry value is computed from the count read BEFORE the evaluation.
 * **`...Xe` is not general.** It is set in exactly one branch — the deferred one
   — as `{activeAgents, activeShells}`. Everywhere else it contributes nothing.
-  The port already computes that split for `fire_goal_checkin_injected` from
-  `DeferringTask::label`, so it is a reuse, not new plumbing.
-* **The seventh outcome is `deferred`**, and this port already has that branch
-  (`goal_deferred`, `hooks.rs:465`).
+  Both counts run over the same `Ofr`-filtered list under two disjoint
+  predicates (`A9t` = the four agent-ish types, `v9t` = `local_bash`), so the
+  port counts both by predicate rather than as a total and a remainder.
+* **The seventh outcome is `deferred`**, and this port already had that branch.
+* 🚨 **`D` is stamped at the TOP of the query generator, not where the goal
+  evaluation starts.** An earlier version of this section said the opposite.
+  `durationMs` is therefore the elapsed time of the whole query up to the stop
+  dispatch — the same base `tengu_stop_hook_error`'s `duration` uses. The port
+  had no clock at that seam; `CompactionRuntime::query_started_at` now sits
+  beside `turn_start_output_baseline`, whose three store sites already are the
+  port's spelling of that point.
 
-**⛔ The blocker is `parentAborted`.** It reads
-`p.abortController.signal.aborted`, and no equivalent is reachable from
-`goal_stop_hook_disposition`: the `CancellationToken` lives in
-`run_turn_with_cancel` (`conversation.rs`), nothing stores it on the
-orchestrator or the session, and threading it means changing `fire_stop_hooks`
-and both of its `pub(super)` callers — which reaches **both turn loops**, the
-hazard this repo has been bitten by before. Emitting the event without the field
-was rejected: a metric that is silently missing a dimension is worse than one
-that is absent, because it looks present.
+### 🚨 The retracted blocker
 
-**Everything else is ready.** The five disposition arms in
-`goal_stop_hook_disposition` map to met / not_met / impossible / error, the
-deferred branch is upstream of them, and a single emission point at the end
-mirrors the `finally`.
+This section previously recorded `parentAborted` as **blocked**, on the grounds
+that threading it would reach "both turn loops". That was asserted from the
+shape of the problem without reading the call graph, and it is wrong:
+`turn_loop::execute_one_turn` never calls `handle_stop_at_end`. Only
+`drivers/mod.rs` does, at ten sites, and it already holds `user_cancel`.
+
+Threading it found three different answers, which is the part worth keeping:
+the streaming driver has `user_cancel` as a local, `try_run_turn_cancelable`
+owns its token, and the non-cancelable `try_run_turn` has none at all — so it
+passes a commented `false`, not a stub. `StreamingTurnState` carries the token
+for the two firings that reach `&ConversationOrchestrator`, which owns no
+cancellation of its own.
+
+## `origin` — the "always user" note was one setter short (`047d5968e`)
+
+All three `tengu_goal_*` events carry `origin`, and the port hardcoded `"user"`
+with a note saying upstream reads it from `queuedGoalOrigin`, which only holds
+`ProposeGoal`'s two spellings — a tool LingXi does not ship.
+
+Resolving `y(e,t)` (`src_161508826.js`) confirms half of that: `"user"` is a
+literal fallback, so the field is never absent, and the two `proposal_*` values
+really are unreachable. But `mon` (`src_182607998.js`) stamps
+`origin:"restored"` on every goal a resume recovers, and this port has a resume
+fold — so a resumed session had been reporting its goal as freshly set.
+
+`origin` is not part of the persisted goal shape upstream, so it is `serde(skip)`
+here and the resume fold re-derives it. Compact metadata is the exception:
+upstream dumps the whole in-memory goal across a boundary, so
+`CompactActiveGoalState` mirrors the field.
+
+⚠️ **Not a defect:** the port restores a goal's `iterations` and `setAt` where
+`mon` resets them to 0/now. That follows from `goal_state`, already recorded on
+`GoalStatusAttachment` as a deliberate LingXi addition — upstream resets because
+it can only recover the condition string from the transcript.
 
 ## Where the 2.1.267 sweep now stands
 

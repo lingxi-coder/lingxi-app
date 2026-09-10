@@ -7314,3 +7314,113 @@ async fn cached_shell_exit_survives_registration_cancel_and_preserves_hook_order
     assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
     assert!(registry.take_pending_task_notifications().await.is_empty());
 }
+
+// ── AUDIT-04: the sink-flipped shell still gets its `[killed]` trailer ──────
+//
+// Upstream writes `\n[killed]\n` inside the same `update` closure that flips the
+// row, gated on `r && !o && !r.isAdopted`. This port cannot: a handler's status
+// sink flips the row to `Killed` INSIDE `handler.kill(..)`, before `mark_killed`
+// runs, so `kill_backing_task` reconstructs the gate from `was_live`, captured
+// BEFORE the kill dispatch.
+//
+// The existing trailer test drives the Running→kill shape, where nothing flips
+// the row mid-dispatch — it is structurally blind to this path. The audit read
+// the code and concluded it was handled; this runs it.
+
+/// A handler whose `kill` flips the row terminal through the registry sink
+/// before returning — the shape `was_live` exists to survive.
+struct SinkFlippingBashHandler {
+    sink: Arc<crate::registry_status_sink::RegistryStatusSink>,
+    kills: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Task for SinkFlippingBashHandler {
+    fn name(&self) -> &str {
+        "sink-flipping-bash"
+    }
+    fn task_type(&self) -> TaskType {
+        TaskType::LocalBash
+    }
+    async fn spawn(
+        &self,
+        _input: TaskSpawnInput,
+        _ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        Ok(TaskHandle::new(protocol::AgentId::new().to_string(), None))
+    }
+    async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        use crate::handlers::TaskStatusSink;
+        self.kills.fetch_add(1, Ordering::SeqCst);
+        // The flip happens DURING the kill, exactly as every handler with a
+        // bound `RegistryStatusSink` does when its worker reports terminal.
+        self.sink.set_status(task_id, TaskStatus::Killed).await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_shell_whose_handler_flips_the_row_mid_kill_still_gets_the_trailer() {
+    let (_d, mut registry) = make_registry();
+    let sink = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
+    let kills = Arc::new(AtomicUsize::new(0));
+    registry.register_handler(
+        TaskType::LocalBash,
+        Arc::new(SinkFlippingBashHandler {
+            sink: sink.clone(),
+            kills: kills.clone(),
+        }),
+    );
+    let registry = Arc::new(registry);
+    sink.bind(registry.clone());
+
+    let id = registry
+        .spawn(
+            TaskType::LocalBash,
+            TaskSpawnInput::LocalBash {
+                command: "sleep 60".into(),
+                timeout: None,
+                tool_use_id: None,
+            },
+            "long one".into(),
+        )
+        .await
+        .unwrap();
+    let path = registry.get(&id).await.unwrap().base().output_file.clone();
+    registry
+        .output_manager
+        .append(&path, "partial output\n")
+        .await
+        .unwrap();
+
+    registry.kill(&id).await.unwrap();
+
+    assert_eq!(
+        kills.load(Ordering::SeqCst),
+        1,
+        "precondition: the kill must go THROUGH the handler, or this test is \
+         exercising the plain Running->kill path the other test already covers"
+    );
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Killed,
+        "premise: the handler's sink really did flip the row"
+    );
+    let written = registry
+        .output_manager
+        .read(
+            &path,
+            crate::output_manager::OutputOptions {
+                offset: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        written.content.contains("[killed]"),
+        "the row went terminal inside `handler.kill`, so only `was_live` \
+         (captured before the dispatch) can still authorize the trailer; got {:?}",
+        written.content
+    );
+}

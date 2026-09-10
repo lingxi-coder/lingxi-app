@@ -360,23 +360,19 @@ impl DesktopFusionRecorder {
         )
     }
 
+    /// Build the transcript row for a run that is being published. Only a
+    /// successful result reaches here: `record_terminal` suppresses the outbox
+    /// for anything else, so there is no error body to render.
     fn transcript_payload(
-        outcome: &FusionRunOutcome,
+        result: &platform_api::FusionResult,
+        facts: &platform_api::FusionRunFacts,
         target: FusionSlashPublicationTarget,
         message_uuid: &str,
         cwd: &std::path::Path,
     ) -> serde_json::Value {
-        let mut body = outcome.result.as_ref().map_or_else(
-            |error| {
-                format!(
-                    "<fusion-error>{}</fusion-error>",
-                    tasks::escape_xml(&error.to_string())
-                )
-            },
-            tasks::fusion_result_xml,
-        );
+        let mut body = tasks::fusion_result_xml(result);
         if let Some(platform_api::FusionAttemptSettlementStatus::Failed { reason }) =
-            &outcome.facts.attempt_settlement
+            &facts.attempt_settlement
         {
             body.push_str(&format!(
                 "\n<fusion-accounting-error>{}</fusion-accounting-error>",
@@ -405,11 +401,11 @@ impl DesktopFusionRecorder {
                 "role": "user",
                 "content": [{"type": "text", "text": body}],
             },
-            "fusionRunId": outcome.identity.run_id.to_string(),
-            "fusionStatus": match outcome.result.as_ref() {
-                Ok(result) if result.status == FusionStatus::Completed => "completed",
-                Ok(_) => "needs_parent",
-                Err(_) => "error",
+            "fusionRunId": result.run_id,
+            "fusionStatus": if result.status == FusionStatus::Completed {
+                "completed"
+            } else {
+                "needs_parent"
             },
         })
     }
@@ -820,7 +816,10 @@ impl FusionRunRecorder for DesktopFusionRecorder {
                 .unwrap_or(outbox);
             return self.deliver_with_backoff(persisted, false).await;
         }
-        let Some(target) = slash_target else {
+        // Enforcement point for "Failed and Killed are never published": a run
+        // that did not produce a result still gets its durable terminal record
+        // below, but no outbox, no transcript row and no notice.
+        let Some(target) = slash_target.filter(|_| outcome.result.is_ok()) else {
             let record = DurableFusionTerminalRecord {
                 event_id: event_id.clone(),
                 identity: outcome.identity,
@@ -840,11 +839,21 @@ impl FusionRunRecorder for DesktopFusionRecorder {
             .and_then(|transcript| transcript.writer.session_target_cwd(target.session_id))
             .unwrap_or_default();
         let message_uuid = Self::message_uuid(&outcome);
+        let published = outcome
+            .result
+            .as_ref()
+            .expect("publication is filtered to a successful result");
         let outbox = DurableFusionOutboxRecord {
             delivery_id: format!("fusion-delivery:{}", outcome.identity.run_id),
             session_id: target.session_id,
             message_uuid: message_uuid.clone(),
-            payload: Self::transcript_payload(&outcome, target, &message_uuid, &cwd),
+            payload: Self::transcript_payload(
+                published,
+                &outcome.facts,
+                target,
+                &message_uuid,
+                &cwd,
+            ),
             attempt: 0,
             retry_cycle_end: 4,
             receipt: FusionPublicationReceipt::queued(),
@@ -924,8 +933,21 @@ mod tests {
         coordinator
             .append_fusion_terminal(DurableFusionTerminalRecord {
                 event_id: format!("fusion-terminal:{}", identity.run_id),
-                identity,
-                result: Err(FusionError::Internal),
+                identity: identity.clone(),
+                // A queued outbox only ever accompanies a successful result;
+                // `record_terminal` suppresses publication for anything else.
+                result: Ok(FusionResult {
+                    schema_version: 1,
+                    run_id: identity.run_id.to_string(),
+                    status: FusionStatus::Completed,
+                    decision: FusionDecision::Merged,
+                    final_text: "answer".into(),
+                    analysis: None,
+                    panels: vec![],
+                    usage: Default::default(),
+                    timing: Default::default(),
+                    egress_profiles: vec![],
+                }),
                 facts: FusionRunFacts::default(),
                 publication: FusionPublicationReceipt::queued(),
                 outbox: Some(outbox.clone()),
@@ -1029,7 +1051,8 @@ mod tests {
                 reason: "ledger <unavailable>".into(),
             });
         let payload = DesktopFusionRecorder::transcript_payload(
-            &outcome,
+            outcome.result.as_ref().unwrap(),
+            &outcome.facts,
             FusionSlashPublicationTarget {
                 session_id: session,
             },
@@ -1076,7 +1099,8 @@ mod tests {
         outcome.publication = FusionPublicationReceipt::queued();
         let uuid = DesktopFusionRecorder::message_uuid(&outcome);
         let payload = DesktopFusionRecorder::transcript_payload(
-            &outcome,
+            outcome.result.as_ref().unwrap(),
+            &outcome.facts,
             FusionSlashPublicationTarget { session_id },
             &uuid,
             std::path::Path::new("/workspace"),
@@ -1142,7 +1166,11 @@ mod tests {
                             session_id,
                             message_uuid: uuid.clone(),
                             payload: DesktopFusionRecorder::transcript_payload(
-                                &outcome, target, &uuid, &cwd_a,
+                                outcome.result.as_ref().unwrap(),
+                                &outcome.facts,
+                                target,
+                                &uuid,
+                                &cwd_a,
                             ),
                             attempt: 0,
                             retry_cycle_end: 4,
@@ -1292,6 +1320,45 @@ mod tests {
         coordinator.close_and_drain().await.unwrap();
     }
 
+    /// P0-8: a killed or failed run leaves a durable terminal record but must
+    /// publish nothing. Before this, `record_terminal` built a slash outbox for
+    /// any result, so cancelling a run wrote a `<fusion-error>` row into the
+    /// user's transcript and pushed a "Fusion run failed" notice -- including
+    /// for a prepared run the registry dropped before the user ever saw it.
+    #[tokio::test]
+    async fn a_killed_run_records_its_terminal_but_publishes_nothing() {
+        let (_directory, coordinator, session_id) = started_coordinator().await;
+        let recorder = DesktopFusionRecorder::new(coordinator.clone(), None);
+        let mut outcome = completed_outcome(session_id);
+        outcome.result = Err(FusionError::Cancelled);
+        let run_id = outcome.identity.run_id.to_string();
+
+        let receipt = recorder
+            .record_terminal(
+                outcome,
+                Some(FusionSlashPublicationTarget { session_id }),
+            )
+            .await;
+
+        assert_eq!(
+            receipt,
+            FusionPublicationReceipt::not_required(),
+            "a killed run has nothing to publish"
+        );
+        assert!(
+            coordinator
+                .fusion_outbox(&format!("fusion-delivery:{run_id}"))
+                .is_none(),
+            "no delivery may be queued for a killed run"
+        );
+        let terminal = coordinator
+            .fusion_terminal(&format!("fusion-terminal:{run_id}"))
+            .expect("the terminal record is still durable");
+        assert!(terminal.outbox.is_none());
+        assert!(terminal.result.is_err());
+        coordinator.close_and_drain().await.unwrap();
+    }
+
     #[tokio::test]
     async fn restart_resumes_a_partially_failed_explicit_retry_cycle() {
         let (directory, coordinator, session_id) = started_coordinator().await;
@@ -1356,7 +1423,8 @@ mod tests {
             session_id,
             message_uuid: message_uuid.clone(),
             payload: DesktopFusionRecorder::transcript_payload(
-                &outcome,
+                outcome.result.as_ref().unwrap(),
+                &outcome.facts,
                 FusionSlashPublicationTarget { session_id },
                 &message_uuid,
                 directory.path(),

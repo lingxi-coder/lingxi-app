@@ -790,7 +790,9 @@ impl Task for LocalFusionHandler {
             // Claim cancellation atomically with the lifecycle phase check.
             // A separate is_finalizing()/is_terminal() read lets natural
             // finalization win immediately afterward while kill still removes
-            // the worker and suppresses publication.
+            // the worker record. Publication is suppressed by the recorder,
+            // which builds an outbox only for a successful result -- this path
+            // skips the legacy sink but does not by itself stop a publication.
             if !rec.control.request_cancel() {
                 return Ok(());
             }

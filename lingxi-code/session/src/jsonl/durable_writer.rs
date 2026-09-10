@@ -366,15 +366,6 @@ impl DurableTranscriptWriter {
         operation(&transaction)
     }
 
-    /// Compatibility name for [`Self::with_transaction`]. The callback must
-    /// append through its guard rather than reacquiring the transcript lock.
-    pub fn with_lock<T, F>(&self, operation: F) -> Result<T, TranscriptWriterError>
-    where
-        F: FnOnce(&DurableTranscriptTransaction<'_>) -> Result<T, TranscriptWriterError>,
-    {
-        self.with_transaction(operation)
-    }
-
     /// Append a JSON object exactly once by `delivery_id`.
     pub fn append_json_once(
         &self,
@@ -1216,7 +1207,7 @@ mod tests {
         assert_eq!(first, TranscriptAppendOutcome::Appended);
 
         let duplicate = writer
-            .with_lock(|transaction| {
+            .with_transaction(|transaction| {
                 let transcript_identity = root_identity(transcript_dir.path())?;
                 transaction.append_json_once_at(
                     transcript_dir.path(),

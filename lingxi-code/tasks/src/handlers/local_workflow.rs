@@ -3301,8 +3301,13 @@ fn plugin_namespace_for_workflow(
     found
 }
 
+// Argument-defaulting wrappers over the recorded entrypoint. Production has
+// no caller: every host goes through `..._recorded`. They exist so a test can
+// omit the recorder, fusion and telemetry arguments, so they are compiled only
+// for tests rather than shipped as public API.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub async fn run_workflow_script(
+async fn run_workflow_script(
     script: &str,
     subagent_type: &str,
     // The caller-supplied `workflow_id` this run was launched under (e.g. a
@@ -3357,6 +3362,7 @@ pub async fn run_workflow_script(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_workflow_script_with_live_updates(
     script: &str,
@@ -3409,6 +3415,7 @@ async fn run_workflow_script_with_live_updates(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_workflow_script_with_live_updates_and_fusion(
     script: &str,

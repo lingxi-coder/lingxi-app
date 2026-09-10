@@ -100,22 +100,24 @@ impl FileSystem for InMemoryFs {
 struct RecordingHandler {
     task_type: TaskType,
     task_id: String,
-    fusion_timeout_ms: Option<u64>,
     spawns: AtomicUsize,
     killed: StdMutex<Vec<String>>,
     cleanup_count: Option<Arc<AtomicUsize>>,
     kill_failures_remaining: AtomicUsize,
+    /// Deadline the handler captured during preparation, published with the
+    /// task state before activation. `None` for non-Fusion handlers.
+    fusion_duration_ms: Option<u64>,
 }
 impl RecordingHandler {
     fn new(task_type: TaskType, task_id: &str) -> Arc<Self> {
         Arc::new(Self {
             task_type,
             task_id: task_id.to_string(),
-            fusion_timeout_ms: None,
             spawns: AtomicUsize::new(0),
             killed: StdMutex::new(Vec::new()),
             cleanup_count: None,
             kill_failures_remaining: AtomicUsize::new(0),
+            fusion_duration_ms: None,
         })
     }
     fn with_cleanup_counter(
@@ -126,22 +128,22 @@ impl RecordingHandler {
         Arc::new(Self {
             task_type,
             task_id: task_id.to_string(),
-            fusion_timeout_ms: None,
             spawns: AtomicUsize::new(0),
             killed: StdMutex::new(Vec::new()),
             cleanup_count: Some(cleanup_count),
             kill_failures_remaining: AtomicUsize::new(0),
+            fusion_duration_ms: None,
         })
     }
     fn with_fusion_timeout(task_id: &str, timeout_ms: u64) -> Arc<Self> {
         Arc::new(Self {
             task_type: TaskType::LocalFusion,
             task_id: task_id.to_string(),
-            fusion_timeout_ms: Some(timeout_ms),
             spawns: AtomicUsize::new(0),
             killed: StdMutex::new(Vec::new()),
             cleanup_count: None,
             kill_failures_remaining: AtomicUsize::new(0),
+            fusion_duration_ms: Some(timeout_ms),
         })
     }
     fn fail_next_kill(&self) {
@@ -173,8 +175,22 @@ impl Task for RecordingHandler {
                 count.fetch_add(1, Ordering::SeqCst);
             }) as Arc<dyn Fn() + Send + Sync>
         });
-        Ok(TaskHandle::new(self.task_id.clone(), cleanup)
-            .with_fusion_timeout_ms(self.fusion_timeout_ms))
+        let handle = TaskHandle::new(self.task_id.clone(), cleanup);
+        Ok(match self.fusion_duration_ms {
+            Some(duration_ms) => handle.with_fusion_prepared_summary(
+                platform_api::FusionPreparedSummary {
+                    identity: platform_api::FusionRunIdentity::new(
+                        platform_api::FusionRunId::generated(),
+                        None,
+                        platform_api::FusionOrigin::Slash,
+                        Some(self.task_id.clone()),
+                    ),
+                    duration_ms,
+                    planned_panels: None,
+                },
+            ),
+            None => handle,
+        })
     }
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
         if self

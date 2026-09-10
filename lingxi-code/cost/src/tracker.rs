@@ -1768,38 +1768,6 @@ impl CostTracker {
         self.selected_state().await.read().await.total_nano_usd
     }
 
-    /// Seed the cumulative cost from a restored session (resume). Mirrors
-    /// claude-code `setCostStateForRestore` (`bootstrap/state.ts`): a resumed
-    /// session must continue from the prior accumulated cost so the footer
-    /// shows the running total instead of `$0.0000`, and subsequent turns add
-    /// on top. Only the money total is restored here (the port's footer /
-    /// status-line cost is derived from it); the per-model token breakdown is
-    /// not yet persisted, so it is left empty (documented parity follow-up).
-    ///
-    /// Does NOT emit on the persist channel — this is a hydrate, not a new
-    /// charge, and the on-resume value is already the persisted truth.
-    pub async fn restore_total_nano_usd(&self, nano_usd: u64) {
-        if self
-            .ledger
-            .requires_durable
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            self.selected_entry()
-                .durability_gate
-                .freeze("legacy total restore attempted after durable authority was installed");
-            return;
-        }
-        let session_id = self.session_id().await;
-        let state = self
-            .selected_entry_for(session_id)
-            .expect("scoped cost session id remains immutable")
-            .state
-            .clone();
-        let mut hydrated = self.ledger.hydrated_sessions.lock().await;
-        state.write().await.total_nano_usd = nano_usd;
-        hydrated.insert(session_id, nano_usd);
-    }
-
     /// Update the in-memory state with externally-priced spend and return the
     /// snapshot that should be persisted.
     ///
@@ -3316,44 +3284,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_seeds_total_and_subsequent_records_add_on_top() {
-        // Resume parity: a restored session continues from the persisted total
-        // and new charges accumulate on top of it (not from zero).
-        let (tx, mut rx) = mpsc::channel(8);
-        let tracker = CostTracker::new(
-            SessionId::nil(),
-            Arc::new(PricingCatalog::builtin_reference()),
-            tx,
-        );
-        tracker.restore_total_nano_usd(17_500_000).await; // prior session $0.0175
-        assert_eq!(tracker.total_nano_usd().await, 17_500_000);
-
-        let mr = ModelRef {
-            provider: ProviderId::Anthropic,
-            model: "claude-opus-4-6".into(),
-        };
-        tracker
-            .record_api_response(
-                mr,
-                Usage {
-                    tokens: TokenUsage {
-                        input: 1000,
-                        output: 500,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                Duration::from_millis(200),
-                0,
-            )
-            .await;
-        let snap = rx.recv().await.unwrap();
-        // restored 17_500_000 + this turn's 17_500_000 = 35_000_000 nano-USD.
-        assert_eq!(snap.total_nano_usd, 35_000_000);
-        assert_eq!(tracker.total_nano_usd().await, 35_000_000);
-    }
-
-    #[tokio::test]
     async fn record_external_cost_adds_onto_existing_total_and_persists() {
         let (tx, mut rx) = mpsc::channel(8);
         let tracker = CostTracker::new(
@@ -3361,7 +3291,8 @@ mod tests {
             Arc::new(PricingCatalog::builtin_reference()),
             tx,
         );
-        tracker.restore_total_nano_usd(1_000).await;
+        tracker.record_external_cost(1_000).await;
+        let _ = rx.recv().await.unwrap();
         tracker.record_external_cost(2_500).await;
         assert_eq!(
             tracker.total_nano_usd().await,

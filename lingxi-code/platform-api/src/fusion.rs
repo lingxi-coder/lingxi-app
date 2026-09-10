@@ -1892,7 +1892,6 @@ impl FusionPublicationStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FusionPublicationReceipt {
     /// Result of the publication attempt.
-    #[serde(default)]
     pub status: FusionPublicationStatus,
     /// Short failure detail, when the status is `OutboxFailed` or
     /// `StorageFailure`.
@@ -1982,20 +1981,13 @@ pub struct DurableFusionOutboxRecord {
     pub message_uuid: String,
     /// Sanitized transcript payload.
     pub payload: serde_json::Value,
-    /// Monotonic retry generation. Existing `u8` JSON values remain valid,
-    /// while a long-lived dead letter never wraps back onto an earlier event.
-    #[serde(default)]
+    /// Monotonic retry generation. A long-lived dead letter never wraps back
+    /// onto an earlier event.
     pub attempt: u64,
-    /// Inclusive last attempt in this durable local retry cycle. Legacy
-    /// records predate this field and belong to the original `0..=4` cycle.
-    #[serde(default = "default_outbox_retry_cycle_end")]
+    /// Inclusive last attempt in this durable local retry cycle.
     pub retry_cycle_end: u64,
     /// Last durable delivery receipt.
     pub receipt: FusionPublicationReceipt,
-}
-
-const fn default_outbox_retry_cycle_end() -> u64 {
-    4
 }
 
 impl DurableFusionOutboxRecord {
@@ -2935,31 +2927,6 @@ mod tests {
                 back.status == FusionPublicationStatus::Published
             );
         }
-
-        let legacy: FusionPublicationReceipt =
-            serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(legacy, FusionPublicationReceipt::pending());
-    }
-
-    #[test]
-    fn legacy_outbox_records_default_to_the_original_wide_retry_cycle() {
-        let session_id = protocol::SessionId::new();
-        let legacy = serde_json::json!({
-            "delivery_id": "fusion-delivery:fu_test",
-            "session_id": session_id,
-            "message_uuid": "00000000-0000-0000-0000-000000000001",
-            "payload": {"body": "answer"},
-            "attempt": 0,
-            "receipt": {"status": "queued"},
-        });
-        let record: DurableFusionOutboxRecord = serde_json::from_value(legacy).unwrap();
-        assert_eq!(record.retry_cycle_end, 4);
-
-        let mut roundtrip = serde_json::to_value(record).unwrap();
-        assert_eq!(roundtrip["retry_cycle_end"], 4);
-        roundtrip["retry_cycle_end"] = serde_json::json!(u64::from(u8::MAX) + 5);
-        let wide: DurableFusionOutboxRecord = serde_json::from_value(roundtrip).unwrap();
-        assert_eq!(wide.retry_cycle_end, 260);
     }
 
     #[tokio::test]

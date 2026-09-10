@@ -263,13 +263,8 @@ pub struct TaskHandle {
     pub task_id: String,
     /// Optional cleanup hook to run on task termination.
     pub cleanup: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Effective Fusion end-to-end timeout captured by the handler before the
-    /// registry publishes the task. `None` for every non-Fusion task and for
-    /// hosts that do not expose a timeout snapshot.
-    pub(crate) fusion_timeout_ms: Option<u64>,
     /// Prepared Fusion identity/duration/panel summary copied into the task
-    /// row before `TaskCreated`. `None` for legacy handlers and non-Fusion
-    /// tasks.
+    /// row before `TaskCreated`. `None` for every non-Fusion task.
     pub(crate) fusion_prepared_summary: Option<FusionPreparedSummary>,
     /// One-shot worker activation owned by the registry handoff. Dropping an
     /// unactivated handle cancels handlers whose callback owns a readiness
@@ -287,18 +282,10 @@ impl TaskHandle {
         Self {
             task_id: task_id.into(),
             cleanup,
-            fusion_timeout_ms: None,
             fusion_prepared_summary: None,
             activation: None,
             fusion_activation: None,
         }
-    }
-
-    /// Attach the effective Fusion timeout captured for this run.
-    #[must_use]
-    pub fn with_fusion_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
-        self.fusion_timeout_ms = timeout_ms;
-        self
     }
 
     /// Attach the immutable summary captured during Fusion preparation.

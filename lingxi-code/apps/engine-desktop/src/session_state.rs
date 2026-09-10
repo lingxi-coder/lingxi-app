@@ -1545,7 +1545,7 @@ impl CoordinatorState {
                     "cost mutation id refers to a non-cost session event".into(),
                 ));
             }
-            Err(_) => decode_legacy_flat_cost(entry.event)?,
+            Err(error) => return Err(CostPersistError::Storage(error.to_string())),
         };
         if persisted.mutation_id.as_str() != entry.event_id || persisted != *submitted {
             return Err(mutation_conflict(&submitted.mutation_id));
@@ -1884,10 +1884,8 @@ impl CoordinatorState {
     fn legacy_import_ack(&self) -> Result<Option<CostPersistAck>, CostPersistError> {
         let replay = self.journal.replay().map_err(map_journal_error)?;
         for entry in replay.entries {
-            let event = match decode_session_event(entry.event.clone()) {
-                Ok(event) => event,
-                Err(_) => SessionEvent::Cost(decode_legacy_flat_cost(entry.event)?),
-            };
+            let event = decode_session_event(entry.event.clone())
+                .map_err(|error| CostPersistError::Storage(error.to_string()))?;
             let record = match event {
                 SessionEvent::Cost(record) => record,
                 _ => continue,
@@ -2112,24 +2110,6 @@ fn decode_session_event(value: serde_json::Value) -> Result<SessionEvent, CostPe
     }
 }
 
-fn decode_legacy_flat_cost(
-    value: serde_json::Value,
-) -> Result<CostMutationRecord, CostPersistError> {
-    let serde_json::Value::Object(fields) = &value else {
-        return Err(CostPersistError::Storage(
-            "unknown session journal event shape".into(),
-        ));
-    };
-    const LEGACY_KEYS: [&str; 4] = ["cost_revision", "mutation_id", "source", "state"];
-    if fields.len() != LEGACY_KEYS.len() || LEGACY_KEYS.iter().any(|key| !fields.contains_key(*key))
-    {
-        return Err(CostPersistError::Storage(
-            "unknown session journal event is not an exact legacy flat cost record".into(),
-        ));
-    }
-    serde_json::from_value(value).map_err(|error| CostPersistError::Storage(error.to_string()))
-}
-
 fn fold_session_entry(
     entry: session::jsonl::JournalEntry,
     session_id: SessionId,
@@ -2141,10 +2121,8 @@ fn fold_session_entry(
     fusion_acks: &mut std::collections::HashMap<String, CostPersistAck>,
     attempts: &mut AttemptProjection,
 ) -> Result<(), CostPersistError> {
-    let event = match decode_session_event(entry.event.clone()) {
-        Ok(event) => event,
-        Err(_) => SessionEvent::Cost(decode_legacy_flat_cost(entry.event.clone())?),
-    };
+    let event = decode_session_event(entry.event.clone())
+        .map_err(|error| CostPersistError::Storage(error.to_string()))?;
     match event {
         event @ (SessionEvent::AttemptIntent(_) | SessionEvent::AttemptReceipt(_, _)) => {
             attempts.replay(event, &entry.event_id, entry.journal_revision, latest)?;
@@ -2538,7 +2516,10 @@ mod tests {
         };
         coordinator
             .journal()
-            .append_once(mutation_id.as_str(), &record)
+            .append_once(
+                mutation_id.as_str(),
+                &encode_session_event(&SessionEvent::Cost(record)).unwrap(),
+            )
             .unwrap();
         std::fs::write(
             coordinator
@@ -2574,58 +2555,15 @@ mod tests {
         };
         coordinator
             .journal()
-            .append_once(mutation_id.as_str(), &record)
+            .append_once(
+                mutation_id.as_str(),
+                &encode_session_event(&SessionEvent::Cost(record)).unwrap(),
+            )
             .unwrap();
 
         assert!(matches!(
             coordinator.hydrate_blocking(),
             Err(CostPersistError::Storage(message)) if message.contains("revisions disagree")
-        ));
-    }
-
-    #[test]
-    fn legacy_flat_fallback_accepts_only_the_exact_historical_shape() {
-        for extra in [
-            ("future_field", serde_json::json!(true)),
-            ("FutureEvent", serde_json::json!({"payload": 1})),
-        ] {
-            let (_directory, coordinator, session_id) = coordinator();
-            let mutation_id = CostMutationId::new(format!("hybrid-{}", extra.0));
-            let record = CostMutationRecord {
-                cost_revision: 1,
-                mutation_id: mutation_id.clone(),
-                source: CostMutationSource::ModelResponse,
-                state: CostStateVector::from(&state(session_id, 1, 9)),
-            };
-            let mut hybrid = serde_json::to_value(&record).unwrap();
-            hybrid
-                .as_object_mut()
-                .expect("cost record is an object")
-                .insert(extra.0.into(), extra.1);
-            coordinator
-                .journal()
-                .append_once(mutation_id.as_str(), &hybrid)
-                .unwrap();
-
-            assert!(matches!(
-                coordinator.hydrate_blocking(),
-                Err(CostPersistError::Storage(message)) if message.contains("exact legacy flat")
-            ));
-            assert!(matches!(
-                coordinator.state.replayed_result(&record),
-                Err(CostPersistError::Storage(message)) if message.contains("exact legacy flat")
-            ));
-        }
-
-        let (_directory, coordinator, _session_id) = coordinator();
-        let unknown = serde_json::json!({"FutureEvent": {"payload": 1}});
-        coordinator
-            .journal()
-            .append_once("unknown-event", &unknown)
-            .unwrap();
-        assert!(matches!(
-            coordinator.hydrate_blocking(),
-            Err(CostPersistError::Storage(message)) if message.contains("exact legacy flat")
         ));
     }
 
@@ -2643,7 +2581,10 @@ mod tests {
         };
         coordinator
             .journal()
-            .append_once(mutation_id.as_str(), &record)
+            .append_once(
+                mutation_id.as_str(),
+                &encode_session_event(&SessionEvent::Cost(record)).unwrap(),
+            )
             .unwrap();
 
         let hydration = coordinator.hydrate_blocking().unwrap();
@@ -2703,7 +2644,10 @@ mod tests {
         };
         coordinator
             .journal()
-            .append_once(mutation_id.as_str(), &persisted)
+            .append_once(
+                mutation_id.as_str(),
+                &encode_session_event(&SessionEvent::Cost(persisted.clone())).unwrap(),
+            )
             .unwrap();
         let writer = coordinator.start().await.unwrap();
         assert!(
@@ -3514,12 +3458,13 @@ mod tests {
             .journal()
             .append_once(
                 mutation_id.as_str(),
-                &CostMutationRecord {
+                &encode_session_event(&SessionEvent::Cost(CostMutationRecord {
                     cost_revision: 1,
                     mutation_id: mutation_id.clone(),
                     source: CostMutationSource::ModelResponse,
                     state: CostStateVector::from(&initial),
-                },
+                }))
+                .unwrap(),
             )
             .unwrap();
         let writer = coordinator.start().await.unwrap();

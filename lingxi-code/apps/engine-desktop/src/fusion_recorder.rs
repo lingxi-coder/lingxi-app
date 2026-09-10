@@ -606,14 +606,6 @@ impl DesktopFusionRecorder {
         self.retry_pending_inner(false).await
     }
 
-    /// Explicitly retry durable dead letters without rerunning the executor.
-    /// The persisted payload/UUID is retained and the next checked attempt
-    /// generation is used, so a late Published event can never be overwritten
-    /// by a stale queued projection.
-    pub async fn retry_pending_local(&self) -> Vec<FusionPublicationReceipt> {
-        self.retry_pending_inner(true).await
-    }
-
     /// Explicit local retry for one run. The run id is mapped to its stable
     /// delivery id; no prompt, model choice, or executor handle is accepted.
     pub async fn retry_run_local(&self, run_id: &str) -> FusionPublicationReceipt {

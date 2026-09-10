@@ -825,14 +825,9 @@ impl TaskRegistry {
         };
         let mut state = state_for_spawn(base, &input);
         // Fusion handlers resolve their live settings before returning the
-        // prepared handle. Publish that captured timeout with the state before
+        // prepared handle. Publish that captured summary with the state before
         // activation so print-mode waiters cannot observe a task without its
         // per-run deadline, and never need to reload mutable settings.
-        if let (Some(timeout_ms), TaskState::LocalFusion(fusion)) =
-            (handle.fusion_timeout_ms, &mut state)
-        {
-            fusion.effective_timeout_ms = Some(timeout_ms);
-        }
         if let (Some(summary), TaskState::LocalFusion(fusion)) =
             (handle.fusion_prepared_summary.as_ref(), &mut state)
         {

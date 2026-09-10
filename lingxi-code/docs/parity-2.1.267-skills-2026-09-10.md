@@ -162,6 +162,25 @@ compiled-in builtin.
 |---|---|---|
 | batch, claude-api, code-review, dataviz, explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, memory-types, setup-claude, whiteboard, workflow-authoring, workshop |
 
+### The remaining nine, adjudicated one by one (2026-09-10)
+
+Every row below was checked at the binary. **Two were misclassified** by the
+blanket "they ride surfaces this port does not have":
+
+| skill | verdict |
+|---|---|
+| `memory-types` | 🔒 **DORMANT upstream** — `var Jxn="memory-types"` sits next to `function Qxn(){return H("tengu_ochre_finch",!1)}`, its `isEnabled`. Flag defaults **false**, so absence here is ALIGNMENT, not a gap. Same shape as `melodic_wolf` / `lively_waffle`. |
+| `workflow-authoring` | ⚠️ **NOT a missing surface** — this port has the Workflow tool. Upstream 2.1.267 moved the script-writing reference out of the tool description into this skill (changelog: "about 1k tokens instead of 5.7k"). The port's `workflow_description.txt` is **byte-locked to 2.1.245** with an anchor-enforced divergence register, so adopting the split is a VERSION RE-BASE of a locked model-facing surface (refresh the oracle text, re-anchor every registered divergence, then add the skill) — not a port of a missing feature. ⛔ Adding the skill WITHOUT the trim would duplicate ~19KB into the bundle and make the footprint worse. |
+| `debug` | ⛔ needs a per-session debug LOG FILE it can enable (`WY()`) and read (`zY()` path, tail via `Po`). This port has `--debug` with categories but writes no session log file, so the skill would point at nothing. |
+| `setup-claude` | ⛔ `isEnabled:()=>a.CLAUDE_CODE_ENTRYPOINT==="remote_cowork"` — inert without that entrypoint, which this port does not have. |
+| `artifact-components` | ⛔ `files:()=>wt().then(e=>e.SKILL_FILES)` + `isEnabled:we` — needs the Artifact surface (a deliberate register-but-disabled skeleton here) AND bundled skill files. |
+| `whiteboard`, `workshop` | ⛔ same Artifact family — they sit in one name block with `artifact-design` / `artifact-diagramming` / `artifact-capabilities` / `prototype`. |
+| `design-sync` | ⛔ pushes a design system to claude.ai/design; `isEnabled:MF` plus a `policyGate`. No Design surface here, and the destination is a claude.ai service. |
+| `claude-in-chrome` | ⛔ needs the Chrome extension. |
+
+So of the original 13: **4 ported**, 1 dormant upstream, 1 blocked on a locked-surface
+re-base, 7 blocked on surfaces this port does not ship.
+
 ⚠️ **The 13 are not a backlog.** Most ride surfaces this port does not have:
 `artifact-components` / `whiteboard` / `workshop` / `design-sync` need the
 Artifact and Design surfaces (the Artifact tool here is a deliberate

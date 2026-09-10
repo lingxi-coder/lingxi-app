@@ -294,14 +294,15 @@ system 消息一起被滤）全部点名变红。含控制组：没 hop 过的 r
 agent 类型 / model / cwd / background，改写后再对权限规则复核。六条错误文案
 （@3585420–3587034）端口全无。
 
-**⛔ 阻塞**：这不是 agent 子系统的缺口。oracle 把 function hook 跑在打包好的 JS worker 里
+**⛔ 阻塞（2026-09-10 复核：仍然零命中）**：`functionHooks` / `hooks-worker` /
+`FunctionHook` 在端口全树 `--include='*.rs'` 下 **0 命中**。这不是 agent 子系统的缺口。oracle 把 function hook 跑在打包好的 JS worker 里
 （`HOOKS_WORKER_URL: "/$bunfs/root/src/plugins/functionHooks/hooks-worker/hooks-worker.js"`），
 端口**整个 function-hook runtime 不存在**（`functionHooks` / `hooks-worker` 零命中），
 `HookEvent` 只有命令钩子那几个（`PreToolUse`/`PostToolUse`/`SubagentStart`/`SubagentStop`…）。
 
 **下一步**：等 function-hook 子系统本身立项，那是独立的一次移植。
 
-### 3.4 AG-16 — `cacheTtl`（P3，**明确不做**）
+### 3.4 AG-16 — `cacheTtl`（P3，**明确不做，2026-09-10 复核仍成立**）
 
 `sKt(e)` 读 `frontmatter.experimental.cacheTtl`（key 归一化成 `cachettl`，值域 `k_e`）
 挂到定义上。
@@ -313,6 +314,12 @@ agent 类型 / model / cwd / background，改写后再对权限规则复核。�
 不该自己造一个。
 
 **重新评估的时机**：请求路径上出现 cache-TTL seam 的那一刻。
+
+**2026-09-10 复核**（因为这一整轮里「N 个调用点」这类估算我错过两次，所以实测）：
+`llm-client/src/convert.rs` 里出往 wire 的 `cache_control` **恒为 `None`**（589/597 行，
+外加文档表格里两行），没有断点选择、没有 TTL 字段；`AgentDefinition {` 字面量现在是
+**75** 个（原记 74）。结论不变，而且现在有据：加上去就是改 75 处去产出一个
+**没有任何消费者**的值。这是一个**已关闭的决定**，不是待办。
 
 ---
 

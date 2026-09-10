@@ -12418,6 +12418,9 @@ pub async fn build(
             Arc::new(PosixFileSystem::new(cwd.clone())),
         )),
     )
+    // `tengu_agent_tool_terminated` (async twin): the registry is where
+    // `killed_by` is known, so it is where the event can name its origin.
+    .with_analytics_bus(analytics_bus.clone())
     // Fire the `TaskCompleted` hook (claude-code `executeTaskCompletedHooks`)
     // when a task reaches a terminal status. The firer wraps the SAME
     // `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through, so

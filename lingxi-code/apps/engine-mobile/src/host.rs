@@ -4209,6 +4209,9 @@ async fn build_mobile_inner_with_ask(
             fs.clone(),
         )),
     )
+    // `tengu_agent_tool_terminated` (async twin): the registry is where
+    // `killed_by` is known, so it is where the event can name its origin.
+    .with_analytics_bus(analytics_bus.clone())
     // Same blocking TaskCreated/TaskCompleted hook contract as desktop; the
     // transcript path is unavailable before the session mounts (matches the
     // `task_lifecycle_hooks` wiring below).

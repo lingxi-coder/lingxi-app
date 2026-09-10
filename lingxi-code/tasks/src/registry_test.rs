@@ -3598,6 +3598,8 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
                 worktree_path: Some("/repo/.lingxi/worktrees/agent-1".into()),
                 worktree_branch: Some("worktree-agent-1".into()),
                 max_turns_reached: None,
+                agent_depth: None,
+                is_built_in: None,
             },
         )
         .await;
@@ -7422,5 +7424,121 @@ async fn a_shell_whose_handler_flips_the_row_mid_kill_still_gets_the_trailer() {
         "the row went terminal inside `handler.kill`, so only `was_live` \
          (captured before the dispatch) can still authorize the trailer; got {:?}",
         written.content
+    );
+}
+
+// ── AUDIT-02: `tengu_agent_tool_terminated`, async twin ─────────────────────
+//
+// Upstream (`src_163219561.js` @3558604) reports the origin from `killedBy`:
+// `"parent"` → `parent_kill_async`, `"system"` → `system_kill_async`, anything
+// else → `user_kill_async`. The event never fired here, so a killed background
+// agent was invisible to it — and had it fired from the tool side, where the
+// launch metadata lives, it could not have known WHO killed it.
+
+fn agent_row(id: &str) -> crate::state::LocalAgentTaskState {
+    crate::state::LocalAgentTaskState {
+        is_parked: false,
+        is_observer: false,
+        observed_agent_id: None,
+        base: crate::state::TaskStateBase {
+            id: id.to_string(),
+            task_type: TaskType::LocalAgent,
+            status: TaskStatus::Running,
+            description: "dig into it".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from("/tmp/tasks/agent-under-test.output"),
+            evict_after: None,
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        },
+        agent_id: protocol::AgentId::new(),
+        subagent_type: "researcher".into(),
+        prompt: String::new(),
+        error: None,
+        messages: vec![],
+        pending_messages: vec![],
+        is_backgrounded: true,
+        outcome: Default::default(),
+        forked_skill_name: None,
+    }
+}
+
+async fn terminated_reasons(sink: &telemetry::InMemorySink) -> Vec<String> {
+    sink.events()
+        .await
+        .iter()
+        .filter(|e| e.name == "tengu_agent_tool_terminated")
+        .map(|e| match e.metadata.get("reason") {
+            Some(telemetry::AnalyticsValue::String(r)) => r.clone(),
+            other => panic!("reason must be a string, got {other:?}"),
+        })
+        .collect()
+}
+
+async fn registry_with_bus(
+    sink: &Arc<telemetry::InMemorySink>,
+) -> (tempfile::TempDir, Arc<TaskRegistry>) {
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    bus.attach_sink(sink.clone()).await;
+    let registry = TaskRegistry::new(runtime, fs, out_mgr).with_analytics_bus(bus);
+    (dir, Arc::new(registry))
+}
+
+#[tokio::test]
+async fn killing_a_background_agent_reports_who_killed_it() {
+    for (killed_by, expected) in [
+        ("parent", "parent_kill_async"),
+        ("system", "system_kill_async"),
+        ("user", "user_kill_async"),
+    ] {
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let (_dir, registry) = registry_with_bus(&sink).await;
+        let id = "agent-under-test".to_string();
+        registry
+            .insert_state_for_test(TaskState::LocalAgent(agent_row(&id)))
+            .await;
+
+        registry.kill_with_reason(&id, killed_by).await.unwrap();
+
+        assert_eq!(
+            terminated_reasons(&sink).await,
+            vec![expected.to_string()],
+            "killedBy {killed_by:?} must map to {expected:?}"
+        );
+    }
+}
+
+/// A task that had already finished on its own is not "terminated by" anyone —
+/// the same reverse-race guard the `killed_by` stamp uses.
+#[tokio::test]
+async fn a_kill_racing_a_finished_agent_reports_no_termination() {
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let (_dir, registry) = registry_with_bus(&sink).await;
+    let id = "agent-under-test".to_string();
+    let mut row = agent_row(&id);
+    // Already finished on its own before the kill lands.
+    row.base.status = TaskStatus::Completed;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(row))
+        .await;
+
+    registry.kill_with_reason(&id, "user").await.unwrap();
+
+    assert!(
+        terminated_reasons(&sink).await.is_empty(),
+        "an agent that finished on its own was not terminated by the kill"
     );
 }

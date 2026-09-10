@@ -485,6 +485,15 @@ pub struct AgentTerminalOutcome {
     /// "finished" verb. Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns_reached: Option<u64>,
+    /// Spawn depth of this agent, stamped at launch by the tool that has it.
+    /// Carried so the kill path — which knows `killed_by` but not the launch
+    /// metadata — can report `tengu_agent_tool_terminated`'s `agent_depth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_depth: Option<u32>,
+    /// Whether this agent type is built in, stamped at launch for the same
+    /// reason as [`Self::agent_depth`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_built_in: Option<bool>,
 }
 
 /// Agent-run usage for a `local_agent` task-notification's optional `<usage>`

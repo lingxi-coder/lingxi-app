@@ -331,6 +331,33 @@ function hook 跑的是**插件提供、每次 spawn 自动执行**的代码。�
 
 **判据**：第 1 条没有书面结论之前，2-6 都不要动。
 
+#### 🚨 规模复核：`agent.spawn` 是 **17 个** function-hook 事件里的一个
+
+`src_163219561.js @2127769` 的 `Akn` 表列全了 function-hook 的事件面：
+
+```
+tool.call        tool.describe     command.run     command.describe
+prompt.submit    prompt.section    prompt.context
+agent.offer      agent.spawn
+skill.prompt     attribution.text
+session.start    session.receive   session.compact
+turn.start       turn.step         turn.complete
+```
+
+而且每个 site 都带一个 `core` 伪钩子（`{name:"core",isCore:!0,budgetMs:0,run}`），
+每个钩子有 **`budgetMs` 预算**，`agent.spawn` 还有自己的结算规则
+（`Vvn="agent.spawn: a hook answered with neither model nor deny"`，
+`Yvn` 逐字段 diff 出「哪些字段被钩子改写了」并记日志）。
+
+**结论：AG-15 不是「加一个钩子」，是移植一个带调度/预算/17 个接入点的子系统。**
+把它当成 agent 子系统的一条待办去估工期一定会低估——我自己先按「一个钩子」估过一次。
+真要立项，范围是 function-hook 子系统本身，`agent.spawn` 只是其中一个 site，
+且它依赖前面那张表里的第 1 条（安全模型）和第 2 条（JS 执行 seam）。
+
+⚠️ 别被 `HOOKS_WORKER_URL` / `functionHooks` 在 60 个 chunk 里的高命中数误导：
+那是 Bun 打包的常量表在每个 chunk 里重复，不是 60 处逻辑。真正的逻辑集中在
+`src_163219561.js` 和 `src_180269027.js`。
+
 ### 3.4 AG-16 — `cacheTtl`（P3，**明确不做，2026-09-10 复核仍成立**）
 
 `sKt(e)` 读 `frontmatter.experimental.cacheTtl`（key 归一化成 `cachettl`，值域 `k_e`）

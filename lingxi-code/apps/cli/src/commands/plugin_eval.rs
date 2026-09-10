@@ -2543,9 +2543,9 @@ async fn grade_output(
                 let bounded_baseline =
                     truncate_utf8(baseline_output.unwrap_or_default(), MAX_GRADER_OUTPUT_BYTES);
                 format!(
-                    "Compare the candidate response produced with the plugin to the baseline \
-                     response produced without it. Score how well the candidate improves on or \
-                     preserves the baseline under the rubric. Return only JSON with fields score \
+                    "Compare the candidate response to the baseline response for the same \
+                     task. Score how well the candidate improves on or preserves the baseline \
+                     under the rubric. Return only JSON with fields score \
                      (number from 0 to 1) and reason (string).\n\n\
                      <case_prompt>\n{case_prompt}\n</case_prompt>\n\
                      <expected_outcome>\n{}\n</expected_outcome>\n\
@@ -5465,6 +5465,108 @@ arms:
     /// An arm that turns a subsystem on has to reach the child, and it has to
     /// do so WITHOUT dropping the plugin-enablement keys the harness relies on
     /// to keep a globally installed copy of the target out of the baseline.
+    /// The shipped corpus is a real input to this parser, so parse it here
+    /// rather than discovering a malformed case only when a paid run starts.
+    #[test]
+    fn the_shipped_fusion_corpus_parses_and_is_shaped_for_a_paired_delta() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../evals/fusion")
+            .canonicalize()
+            .expect("the fusion eval corpus ships in-tree");
+        let mut cases = Vec::new();
+        for entry in fs::read_dir(&root).expect("corpus root is readable") {
+            let dir = entry.expect("corpus entry").path();
+            if !dir.is_dir() {
+                continue;
+            }
+            cases.push(parse_case_yaml(&dir.join("case.yaml")).unwrap_or_else(|error| {
+                panic!("{} does not parse: {error}", dir.display())
+            }));
+        }
+        assert_eq!(cases.len(), 24, "the corpus is 24 cases");
+
+        for case in &cases {
+            let labels: Vec<&str> = case.arms.iter().map(|arm| arm.label.as_str()).collect();
+            assert_eq!(
+                labels,
+                ["single", "fusion"],
+                "{}: the baseline arm must come first, since every delta is measured against it",
+                case.name
+            );
+            // The fusion arm must actually ask for Fusion, and must carry the
+            // whole task rather than the first line of it.
+            let fusion_prompt = case.arms[1]
+                .prompt
+                .as_deref()
+                .expect("the fusion arm overrides the prompt");
+            assert!(
+                fusion_prompt.starts_with("/fusion --models "),
+                "{}: the fusion arm must invoke /fusion",
+                case.name
+            );
+            let task = case.prompt.trim();
+            let carried = fusion_prompt
+                .lines()
+                .skip(1)
+                .map(str::trim_end)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                carried.trim(),
+                task,
+                "{}: the fusion arm must carry the whole task",
+                case.name
+            );
+            assert_eq!(
+                case.arms[1].settings,
+                Some(serde_json::json!({"fusion": {"enabled": true}})),
+                "{}: the fusion arm must turn Fusion on for itself",
+                case.name
+            );
+            assert!(
+                case.arms[0].prompt.is_none() && case.arms[0].settings.is_none(),
+                "{}: the baseline arm must differ from the case in nothing at all",
+                case.name
+            );
+            // Two graders: one scores the answer, one scores it against the
+            // baseline arm. Without the second there is no paired delta.
+            assert!(
+                case.graders
+                    .iter()
+                    .any(|g| matches!(g, GraderDefinition::Baseline { .. })),
+                "{}: a paired delta needs a baseline grader",
+                case.name
+            );
+            assert!(
+                case.graders
+                    .iter()
+                    .any(|g| matches!(g, GraderDefinition::Llm { .. })),
+                "{}: a case needs a rubric of its own, not only a comparison",
+                case.name
+            );
+        }
+
+        let mut tags: Vec<&str> = cases
+            .iter()
+            .flat_map(|case| case.tags.iter().map(String::as_str))
+            .collect();
+        tags.sort_unstable();
+        let mut counts = std::collections::BTreeMap::new();
+        for tag in tags {
+            *counts.entry(tag).or_insert(0) += 1;
+        }
+        assert_eq!(
+            counts,
+            std::collections::BTreeMap::from([
+                ("patch", 6),
+                ("plan", 6),
+                ("research", 6),
+                ("review", 6)
+            ]),
+            "the corpus is six cases in each of the four categories"
+        );
+    }
+
     #[test]
     fn arm_settings_and_plugin_disablement_travel_in_one_argument() {
         let disabled = vec!["target".to_string()];

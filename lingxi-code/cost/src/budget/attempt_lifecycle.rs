@@ -14,6 +14,7 @@ pub struct CostBudgetAttempt {
     lifecycle: Arc<crate::tracker::AttemptLifecycle>,
     observation: AttemptReceipt,
     dispatched: bool,
+    no_provider_response: bool,
 }
 
 impl CostBudgetAttempt {
@@ -41,7 +42,15 @@ impl CostBudgetAttempt {
                 api_duration_without_retries_ms: 0,
             },
             dispatched: false,
+            no_provider_response: false,
         }
+    }
+
+    /// Record that the transport produced no provider response for this
+    /// attempt. Only meaningful once dispatch was marked and nothing was ever
+    /// observed; a later observation supersedes it.
+    pub fn mark_no_provider_response(&mut self) {
+        self.no_provider_response = true;
     }
 
     /// Mark possible egress without an await between this check and transport.
@@ -65,7 +74,10 @@ impl CostBudgetAttempt {
             || observation.attempt_id != self.observation.attempt_id
             || observation.revision != 1
             || observation.replaces_revision.is_some()
-            || observation.disposition == AttemptDisposition::ProvenNotSent
+            || matches!(
+                observation.disposition,
+                AttemptDisposition::ProvenNotSent | AttemptDisposition::NoProviderResponse
+            )
         {
             let error = CostPersistError::Rejected("invalid captured attempt observation".into());
             self.tracker.durability_gate().freeze(error.to_string());
@@ -94,6 +106,11 @@ impl CostBudgetAttempt {
             .ok_or_else(|| CostPersistError::Rejected("attempt already finalized".into()))?;
         if !self.dispatched {
             self.observation.disposition = AttemptDisposition::ProvenNotSent;
+        } else if self.no_provider_response
+            && self.observation.disposition == AttemptDisposition::Unknown
+            && self.observation.usage == crate::Usage::default()
+        {
+            self.observation.disposition = AttemptDisposition::NoProviderResponse;
         }
         let receipt = self.tracker.submit_budgeted_attempt_with_permit(
             self.observation.clone(),

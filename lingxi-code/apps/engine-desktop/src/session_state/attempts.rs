@@ -412,11 +412,14 @@ mod tests {
         assert!(!duplicate.applied);
         assert_eq!(duplicate.persistence, first_ack.persistence);
         assert_eq!(duplicate.state, second_ack.state);
-        assert_eq!(duplicate.state.total_nano_usd, 2000);
+        // Two dispatched attempts, neither with a usage report: nothing
+        // realized, both authorizations disclosed as unverified.
+        assert_eq!(duplicate.state.total_nano_usd, 0);
+        assert_eq!(duplicate.state.unverified_nano_usd, 2000);
         drop(coordinator);
         let reopened = open(root.path(), session);
         assert_eq!(
-            reopened.hydrate_blocking().unwrap().state.total_nano_usd,
+            reopened.hydrate_blocking().unwrap().state.unverified_nano_usd,
             2000
         );
         let duplicate = reopened
@@ -449,14 +452,15 @@ mod tests {
             .unwrap();
         // A live hydration must not manufacture a receipt for in-flight work.
         assert_eq!(
-            coordinator.hydrate_blocking().unwrap().state.total_nano_usd,
+            coordinator.hydrate_blocking().unwrap().state.unverified_nano_usd,
             0
         );
         drop(coordinator);
         let reopened = open(root.path(), session);
         let worker = reopened.start().await.unwrap();
         let recovered = reopened.hydrate_blocking().unwrap();
-        assert_eq!(recovered.state.total_nano_usd, 1000);
+        assert_eq!(recovered.state.total_nano_usd, 0);
+        assert_eq!(recovered.state.unverified_nano_usd, 1000);
         assert_eq!(recovered.state.cost_revision, 1);
         assert_eq!(recovered.attempt_outputs.len(), 1);
         assert_eq!(recovered.attempt_outputs[0].scope.generation_id, generation);
@@ -514,7 +518,9 @@ mod tests {
                 ack,
             })
             .unwrap();
-        assert_eq!(receiver.await.unwrap().unwrap().state.total_nano_usd, 1000);
+        let acked = receiver.await.unwrap().unwrap();
+        assert_eq!(acked.state.total_nano_usd, 0);
+        assert_eq!(acked.state.unverified_nano_usd, 1000);
         coordinator.close_and_drain().await.unwrap();
         worker.await.unwrap();
         assert_eq!(
@@ -666,6 +672,7 @@ mod tests {
         let reopened = open(root.path(), session);
         let recovered = reopened.hydrate_blocking().unwrap();
         assert_eq!(recovered.state.cost_revision, 1);
-        assert_eq!(recovered.state.total_nano_usd, 1000);
+        assert_eq!(recovered.state.total_nano_usd, 0);
+        assert_eq!(recovered.state.unverified_nano_usd, 1000);
     }
 }

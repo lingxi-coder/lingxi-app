@@ -560,7 +560,8 @@ impl llm_client::ModelAttemptHooks for DesktopFusionAttempts {
                 let lease = authority.budget.begin_model_attempt(intent.clone(), &authority.output,
                     authority.captured.snapshot.config.max_reserved_nano_usd.unwrap_or(u64::MAX), permit).await.map_err(|error| error.to_string())?;
                 Ok::<_, String>(HostLease { authority: authority.clone(), key, intent, lease: Some(lease),
-                    observation: None, dispatched: false, conversion_failed: false, started: Instant::now() })
+                    observation: None, dispatched: false, conversion_failed: false,
+                    no_provider_response: false, started: Instant::now() })
             };
             match std::panic::AssertUnwindSafe(worker).catch_unwind().await {
                 Ok(Ok(lease)) => { let _ = tx.send(Ok(Box::new(lease) as Box<dyn llm_client::ModelAttemptLease>)); }
@@ -585,6 +586,7 @@ struct HostLease {
     observation: Option<cost::AttemptReceipt>,
     dispatched: bool,
     conversion_failed: bool,
+    no_provider_response: bool,
     started: Instant,
 }
 
@@ -603,6 +605,11 @@ impl HostLease {
                 if let Err(error) = lease.observe(observation) {
                     self.authority.fail(error);
                 }
+            } else if self.no_provider_response {
+                // Dispatch was marked and nothing ever came back. Settle it as
+                // such rather than letting the default Unknown receipt stand
+                // in for a response that never existed.
+                lease.mark_no_provider_response();
             }
         }
         let receipt = lease.finish().map_err(|error| error.to_string());
@@ -635,6 +642,10 @@ impl Drop for HostLease {
     }
 }
 impl llm_client::ModelAttemptLease for HostLease {
+    fn mark_no_provider_response(&mut self) {
+        self.no_provider_response = true;
+    }
+
     fn mark_dispatched(&mut self) -> Result<(), LlmError> {
         self.authority.live(self.key).map_err(unavailable)?;
         // Serialize the final dispatch transition with panel close. Live-policy

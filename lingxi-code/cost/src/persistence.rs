@@ -88,6 +88,9 @@ pub struct CostStateVector {
     /// External aggregate spend.
     #[serde(default)]
     pub external_nano_usd: u64,
+    /// Authorized-but-unaccounted spend, disclosed beside the realized total.
+    #[serde(default)]
+    pub unverified_nano_usd: u64,
     /// Pre-V1 totals-only opening balance, kept distinct from new rollups.
     #[serde(default)]
     pub legacy_opening_balance_nano_usd: u64,
@@ -146,6 +149,7 @@ impl From<&CostState> for CostStateVector {
             last_cache_read_input_tokens: state.last_cache_read_input_tokens,
             last_cache_creation_input_tokens: state.last_cache_creation_input_tokens,
             external_nano_usd: state.external_nano_usd,
+            unverified_nano_usd: state.unverified_nano_usd,
             legacy_opening_balance_nano_usd: state.legacy_opening_balance_nano_usd,
             legacy_import_evaluated: state.legacy_import_evaluated,
         }
@@ -193,6 +197,7 @@ impl CostStateVector {
             last_cache_read_input_tokens: self.last_cache_read_input_tokens,
             last_cache_creation_input_tokens: self.last_cache_creation_input_tokens,
             external_nano_usd: self.external_nano_usd,
+            unverified_nano_usd: self.unverified_nano_usd,
             legacy_opening_balance_nano_usd: self.legacy_opening_balance_nano_usd,
             legacy_import_evaluated: self.legacy_import_evaluated,
         })

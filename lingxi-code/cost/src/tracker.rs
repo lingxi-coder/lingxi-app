@@ -80,6 +80,13 @@ pub struct CostState {
     /// per-model breakdown with no attributable source.
     #[serde(default)]
     pub external_nano_usd: u64,
+    /// Authorized-but-unaccounted spend from attempts whose provider usage
+    /// report never arrived or came back incomplete. NOT included in
+    /// [`Self::total_nano_usd`] — the realized total stays honest — but the
+    /// session halt is evaluated against the sum of the two, so an unpriced
+    /// or silently-failing run still cannot outrun its ceiling.
+    #[serde(default)]
+    pub unverified_nano_usd: u64,
     /// One-time `lastCost` opening balance imported from the pre-V1 aggregate
     /// store. This is included in [`Self::total_nano_usd`] but deliberately
     /// kept separate from both new per-model rows and Fusion aggregates.

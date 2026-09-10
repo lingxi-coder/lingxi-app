@@ -101,7 +101,9 @@ impl BoundAttemptBudget {
                 output_tokens: intent.authorized_output_tokens,
             },
             max_reserved_nano_usd,
-            state.total_nano_usd,
+            state
+                .total_nano_usd
+                .saturating_add(state.unverified_nano_usd),
             session_limit,
         )?;
         if !inserted {

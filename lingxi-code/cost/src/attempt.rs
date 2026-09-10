@@ -115,6 +115,11 @@ pub enum AttemptDisposition {
     Exact,
     /// Host proved no model request was dispatched.
     ProvenNotSent,
+    /// Dispatch was marked, but no provider response was ever accepted: the
+    /// transport failed, or the request was refused before any usage report.
+    /// Distinct from `Unknown`, which means a response arrived with incomplete
+    /// usage. Neither one licenses charging the authorization as if spent.
+    NoProviderResponse,
 }
 
 /// An immutable revision of one attempt's actual observation.
@@ -154,8 +159,13 @@ pub struct AttemptContribution {
     pub cache_read_input_tokens: u64,
     /// Explicit cache-creation counter, independent of normalized token classes.
     pub cache_creation_input_tokens: u64,
-    /// Exact pinned-price cost or conservative incomplete cost.
+    /// Exact pinned-price cost of the usage the provider actually reported.
     pub nano_usd: u64,
+    /// Authorized-but-unaccounted remainder for an attempt whose usage report
+    /// was incomplete. Disclosed beside the realized total, never inside it,
+    /// and still counted against the session halt so an unpriced run cannot
+    /// escape its ceiling.
+    pub unverified_nano_usd: u64,
     /// One for a dispatched/uncertain request, zero for proven-not-sent.
     pub request_count: u64,
     /// Conservative or actual output occupancy, separate from token usage.
@@ -905,12 +915,18 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(state.total_nano_usd, 1070);
+        // 6 token classes * 8 tokens * 2 nano + 8 searches * 3 nano + 70 seeded.
+        assert_eq!(state.total_nano_usd, 190);
+        assert_eq!(state.unverified_nano_usd, 1000 - 120);
         let exact = correction(&intent, 2);
         let ack = ledger
             .fold_receipt(&mut state, exact.clone(), initial.last_usage_revision)
             .unwrap();
         assert_eq!(state.total_nano_usd, 100); // 6 token classes * 2 * 2 + 2 searches * 3 + 70
+        assert_eq!(
+            state.unverified_nano_usd, 0,
+            "an exact correction retires the unverified remainder"
+        );
         assert_eq!(state.total_web_search_requests, 2);
         assert_eq!(state.total_api_duration_ms, 20);
         assert_eq!(state.total_api_duration_without_retries_ms, 10);
@@ -1041,6 +1057,67 @@ mod tests {
     }
 
     #[test]
+    fn unknown_receipt_never_charges_the_authorized_ceiling() {
+        // A dispatched attempt whose usage came back incomplete is charged for
+        // what was observed. The authorization was a ceiling on what the run
+        // was allowed to spend, never evidence that it spent it.
+        let (mut ledger, mut state, intent) = fixture();
+        assert_eq!(intent.authorized_nano_usd, 1000);
+        ledger.record_intent(intent.clone()).unwrap();
+        let ack = ledger
+            .fold_receipt(
+                &mut state,
+                receipt(&intent, AttemptDisposition::Unknown, 1),
+                None,
+            )
+            .unwrap();
+        // 6 token classes x 1 token x 2 nano + 1 web search x 3 nano.
+        assert_eq!(
+            ack.contribution.nano_usd, 15,
+            "only observed usage reaches the realized total"
+        );
+        assert_eq!(state.total_nano_usd, 15);
+        // The ceiling is not lost, only moved off the realized total.
+        assert_eq!(ack.contribution.unverified_nano_usd, 1000 - 15);
+        assert_eq!(state.unverified_nano_usd, 985);
+
+        // A complete correction retires the unverified remainder entirely.
+        let ack = ledger
+            .fold_receipt(&mut state, correction(&intent, 1), Some(1))
+            .unwrap();
+        assert_eq!(ack.contribution.unverified_nano_usd, 0);
+        assert_eq!(state.unverified_nano_usd, 0);
+        assert_eq!(state.total_nano_usd, 15);
+    }
+
+    #[test]
+    fn an_attempt_with_no_provider_response_contributes_nothing() {
+        // The transport failed after the dispatch marker. Nothing was
+        // observed, so nothing is charged and nothing is guessed.
+        let (mut ledger, mut state, intent) = fixture();
+        ledger.record_intent(intent.clone()).unwrap();
+        let mut receipt = receipt(&intent, AttemptDisposition::NoProviderResponse, 0);
+        receipt.usage = Usage::default();
+        receipt.cache_read_input_tokens = 0;
+        receipt.cache_creation_input_tokens = 0;
+        receipt.api_duration_ms = 0;
+        receipt.api_duration_without_retries_ms = 0;
+        let ack = ledger.fold_receipt(&mut state, receipt, None).unwrap();
+        assert_eq!(ack.contribution.nano_usd, 0, "nothing was reported");
+        assert_eq!(
+            ack.contribution.output_occupancy, 0,
+            "no response means no output tokens exist to hold"
+        );
+        // The send was still attempted, so it is one request and one
+        // incomplete attempt, with its whole authorization unaccounted for.
+        assert_eq!(ack.contribution.request_count, 1);
+        assert_eq!(ack.contribution.unknown_count, 1);
+        assert_eq!(ack.contribution.unverified_nano_usd, 1000);
+        assert_eq!(state.total_nano_usd, 0);
+        assert_eq!(state.unverified_nano_usd, 1000);
+    }
+
+    #[test]
     fn recovery_unknown_keeps_occupancy_without_inventing_usage_and_not_sent_is_zero() {
         let (mut ledger, mut state, intent_a) = fixture();
         ledger.record_intent(intent_a.clone()).unwrap();
@@ -1054,7 +1131,13 @@ mod tests {
         );
         let ack = ledger.fold_receipt(&mut state, recovered, None).unwrap();
         assert_eq!(ack.contribution.usage, Usage::default());
-        assert_eq!(ack.contribution.nano_usd, 1000);
+        // A recovered attempt reports no usage, so it costs nothing realized.
+        // The whole authorization stays visible as unverified rather than
+        // being charged as if the provider had billed it.
+        assert_eq!(ack.contribution.nano_usd, 0);
+        assert_eq!(ack.contribution.unverified_nano_usd, 1000);
+        // Output occupancy stays conservative: it guards publication rights,
+        // not money.
         assert_eq!(ack.contribution.output_occupancy, 200);
         assert_eq!(ack.contribution.request_count, 1);
         assert_eq!(ack.contribution.unknown_count, 1);
@@ -1392,15 +1475,33 @@ fn receipt_contribution(
             "non-retry duration exceeds duration",
         ));
     }
-    if receipt.disposition == AttemptDisposition::ProvenNotSent {
+    if matches!(
+        receipt.disposition,
+        AttemptDisposition::ProvenNotSent | AttemptDisposition::NoProviderResponse
+    ) {
         if receipt.usage != Usage::default()
-            || receipt.api_duration_ms != 0
             || receipt.cache_read_input_tokens != 0
             || receipt.cache_creation_input_tokens != 0
         {
             return Err(AttemptFoldError::Invalid("not-sent receipt carries usage"));
         }
-        return Ok(AttemptContribution::default());
+        if receipt.disposition == AttemptDisposition::ProvenNotSent {
+            if receipt.api_duration_ms != 0 {
+                return Err(AttemptFoldError::Invalid("not-sent receipt carries usage"));
+            }
+            return Ok(AttemptContribution::default());
+        }
+        // A physical send was attempted and nothing came back. No output
+        // tokens can exist, so occupancy stays zero, but the attempt is real
+        // and its whole authorization is unaccounted for.
+        return Ok(AttemptContribution {
+            unverified_nano_usd: intent.authorized_nano_usd,
+            request_count: 1,
+            unknown_count: 1,
+            api_duration_ms: receipt.api_duration_ms,
+            api_duration_without_retries_ms: receipt.api_duration_without_retries_ms,
+            ..AttemptContribution::default()
+        });
     }
     let exact_cost = calculate_pinned_attempt_cost(&receipt.usage, &intent.pricing)?;
     let output_tokens = receipt
@@ -1414,10 +1515,16 @@ fn receipt_contribution(
         usage: receipt.usage,
         cache_read_input_tokens: receipt.cache_read_input_tokens,
         cache_creation_input_tokens: receipt.cache_creation_input_tokens,
-        nano_usd: if unknown {
-            exact_cost.max(intent.authorized_nano_usd)
+        // Only what the provider actually reported reaches the realized total.
+        // An authorization is a ceiling on what the run may spend, never
+        // evidence that it was spent, so an incomplete usage report discloses
+        // the unverified remainder on its own channel instead of inflating the
+        // number `/cost` shows.
+        nano_usd: exact_cost,
+        unverified_nano_usd: if unknown {
+            intent.authorized_nano_usd.saturating_sub(exact_cost)
         } else {
-            exact_cost
+            0
         },
         request_count: 1,
         output_occupancy: if unknown {
@@ -1477,6 +1584,7 @@ fn replace_contribution(
         };
     }
     counter!(nano_usd);
+    counter!(unverified_nano_usd);
     counter!(request_count);
     counter!(output_occupancy);
     counter!(unknown_count);
@@ -1494,6 +1602,11 @@ fn replace_vector(
     new: &AttemptContribution,
 ) -> Result<(), AttemptFoldError> {
     state.total_nano_usd = replace(state.total_nano_usd, old.nano_usd, new.nano_usd)?;
+    state.unverified_nano_usd = replace(
+        state.unverified_nano_usd,
+        old.unverified_nano_usd,
+        new.unverified_nano_usd,
+    )?;
     state.total_api_duration_ms = replace(
         state.total_api_duration_ms,
         old.api_duration_ms,

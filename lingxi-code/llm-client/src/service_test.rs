@@ -171,6 +171,13 @@ mod tests {
                 .unwrap()
                 .push((usage.clone(), completeness));
         }
+        fn mark_no_provider_response(&mut self) {
+            self.probe
+                .events
+                .lock()
+                .unwrap()
+                .push("no-provider-response");
+        }
         fn finish(mut self: Box<Self>) -> Box<dyn crate::ModelAttemptSettlement> {
             self.finished = true;
             self.probe.events.lock().unwrap().push("finish-owned");
@@ -189,6 +196,31 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_settles_as_no_provider_response() {
+        let transport = FakeTransport::sequence(vec![FakeResponse::Err(LlmError::Transport {
+            message: "connection refused".into(),
+        })]);
+        // One attempt, no backoff ladder: this test is about how a dispatched
+        // attempt settles, not about the retry policy.
+        let service = make_adapter_with_retries(transport.clone(), Some(0));
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        assert!(service
+            .execute_side_query_request(registered_request())
+            .await
+            .is_err());
+        let events = probe.events.lock().unwrap().clone();
+        assert!(
+            events.contains(&"no-provider-response"),
+            "a dispatched attempt that saw no response must say so: {events:?}"
+        );
+        assert!(
+            probe.observations.lock().unwrap().is_empty(),
+            "nothing was observed, so nothing may be priced"
+        );
     }
 
     fn registered_request() -> LlmRequest {
@@ -394,6 +426,8 @@ mod tests {
             vec![
                 "begin",
                 "dispatch",
+                // The first physical send never saw a provider response.
+                "no-provider-response",
                 "finish-owned",
                 "settled",
                 "begin",
@@ -527,6 +561,8 @@ mod tests {
             vec![
                 "begin",
                 "dispatch",
+                // The first physical send never saw a provider response.
+                "no-provider-response",
                 "finish-owned",
                 "settled",
                 "begin",
@@ -981,7 +1017,12 @@ mod tests {
         )
     }
 
-    fn make_adapter(transport: Arc<dyn Transport>) -> ApiService {
+    /// `max_retries` bounds the retry ladder; `None` keeps the production
+    /// default, which walks ten rungs before giving up.
+    fn make_adapter_with_retries(
+        transport: Arc<dyn Transport>,
+        max_retries: Option<u32>,
+    ) -> ApiService {
         std::env::set_var("ADAPTER_TEST_KEY", "test-key");
         let client = Arc::new(
             DefaultLlmClient::from_config(ClientConfig {
@@ -1019,7 +1060,7 @@ mod tests {
             })
             .expect("client"),
         );
-        ApiService::new(
+        ApiService::new_with_routing(
             client,
             transport,
             SubscriberState::default(),
@@ -1031,7 +1072,15 @@ mod tests {
             "0.0.0",
             None,
             None,
+            None,
+            std::collections::BTreeMap::new(),
+            max_retries,
+            None,
         )
+    }
+
+    fn make_adapter(transport: Arc<dyn Transport>) -> ApiService {
+        make_adapter_with_retries(transport, None)
     }
 
     #[test]

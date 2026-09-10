@@ -170,7 +170,7 @@ blanket "they ride surfaces this port does not have":
 | skill | verdict |
 |---|---|
 | `memory-types` | 🔒 **DORMANT upstream** — `var Jxn="memory-types"` sits next to `function Qxn(){return H("tengu_ochre_finch",!1)}`, its `isEnabled`. Flag defaults **false**, so absence here is ALIGNMENT, not a gap. Same shape as `melodic_wolf` / `lively_waffle`. |
-| `workflow-authoring` | ⚠️ **NOT a missing surface** — this port has the Workflow tool. Upstream 2.1.267 moved the script-writing reference out of the tool description into this skill (changelog: "about 1k tokens instead of 5.7k"). The port's `workflow_description.txt` is **byte-locked to 2.1.245** with an anchor-enforced divergence register, so adopting the split is a VERSION RE-BASE of a locked model-facing surface (refresh the oracle text, re-anchor every registered divergence, then add the skill) — not a port of a missing feature. ⛔ Adding the skill WITHOUT the trim would duplicate ~19KB into the bundle and make the footprint worse. |
+| `workflow-authoring` | ⚠️ **NOT a missing surface — see §2.4 for the full investigation** — this port has the Workflow tool. Upstream 2.1.267 moved the script-writing reference out of the tool description into this skill (changelog: "about 1k tokens instead of 5.7k"). The port's `workflow_description.txt` is **byte-locked to 2.1.245** with an anchor-enforced divergence register, so adopting the split is a VERSION RE-BASE of a locked model-facing surface (refresh the oracle text, re-anchor every registered divergence, then add the skill) — not a port of a missing feature. ⛔ Adding the skill WITHOUT the trim would duplicate ~19KB into the bundle and make the footprint worse. |
 | `debug` | ⛔ needs a per-session debug LOG FILE it can enable (`WY()`) and read (`zY()` path, tail via `Po`). This port has `--debug` with categories but writes no session log file, so the skill would point at nothing. |
 | `setup-claude` | ⛔ `isEnabled:()=>a.CLAUDE_CODE_ENTRYPOINT==="remote_cowork"` — inert without that entrypoint, which this port does not have. |
 | `artifact-components` | ⛔ `files:()=>wt().then(e=>e.SKILL_FILES)` + `isEnabled:we` — needs the Artifact surface (a deliberate register-but-disabled skeleton here) AND bundled skill files. |
@@ -356,3 +356,58 @@ deliberately, not incidentally.
 | the 13 upstream-only bundled skills | most need a surface this port does not ship; triage `update-config` / `keybindings-help` / `explain-usage` / `doctor` first |
 | MCP-derived skills | resolve as `Other` and are rejected by the tool |
 | the seven unread keys (§5) | need a consumer before they need a parser |
+
+
+## 2.4 `workflow-authoring` — investigated in full, deliberately NOT landed
+
+This is the only remaining skill with a substrate here, so it got a full pass.
+Everything below is measured, not estimated.
+
+**The split is real and both halves are located.** In `src_178675664.js`:
+the trimmed tool description is the template assigned near @917; the skill body
+is what `wpn()` returns, opening `# Workflow authoring reference` and continuing
+with the exact "A workflow structures work across many agents…" paragraph that
+this port still carries INLINE in `workflow_description.txt`.
+
+**The saving is large.** The port's oracle description is 19,200 bytes
+(byte-locked to 2.1.245). The 2.1.267 description is ~3.0 KB. That is roughly 4k
+tokens off every request that advertises the tool.
+
+### Why it was not landed
+
+**1. It is a REWRITE, not a trim.** Of the 31 paragraphs in the .245 text, only
+**2** survive byte-identical in .267. So this is a full oracle refresh: all eight
+markers in `oracle_description_matches_the_binary_byte_for_byte` need
+re-deriving, and both register entries need re-anchoring in reworded prose.
+
+**2. 🚨 One divergence's anchor is already gone, and it guards a REACHABILITY
+invariant.** `workflow-fusion-hook` documents LingXi's `fusion()` script hook,
+and its own reason says it plainly: *"A script only ever learns which hooks exist
+from this description, so an undocumented hook is an unreachable one."* Its
+anchor (`child syntax error; catch to handle gracefully.\n`) occurs **0 times**
+in the .267 text — the passage moved into the skill. A naive re-base therefore
+makes `fusion()` unreachable. The fix is known (re-anchor it into the trimmed
+description so it stays inline regardless of whether the skill loads) but it is a
+judgement call, not a mechanical edit.
+
+**3. ⛔ The skill body is not a static string.** It is assembled from
+env-conditional fragments — `${e?"":"…"}` where `e` is
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE` — with three nested `${…}` containing quotes
+and one containing a backtick. A naive backtick scanner terminates early (mine
+did, at 3,500 chars, mid-sentence). Porting it faithfully means reproducing the
+conditional assembly, not pasting extracted text.
+
+**A truncated or unconditionally-assembled reference would be shipped into every
+workflow-authoring invocation.** That is worse than the 4k-token footprint it
+would save, which is why this stops here rather than landing half-done.
+
+### What the next person needs
+
+* Write a real template-literal parser (balance `${}` including nested quotes and
+  backticks) rather than scanning for the closing backtick.
+* Decide `fusion()`'s home FIRST — keeping it inline in the trimmed description
+  is the option that cannot regress reachability.
+* Re-derive all eight byte-lock markers from the .267 text; do not port the .245
+  ones.
+* Treat it as an oracle re-base of a locked surface (the register is designed to
+  fail by name here — let it).

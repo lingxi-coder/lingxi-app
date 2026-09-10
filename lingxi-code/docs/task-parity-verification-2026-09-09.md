@@ -117,10 +117,22 @@ evidence belongs in the repo or under `~/.claude`.
 
 ### Gate state at `31a46baa2`, with attribution
 
-Red, and caused by this work — 1:
+Red, and caused by this work — 0 remaining.
 
-- `engine-desktop auto_mode_propose::tests::task_stop_cancels_a_scan_while_provider_stream_is_establishing`
-  (fails in isolation under `--test-threads=1`, so not a parallelism artifact).
+`engine-desktop auto_mode_propose::tests::task_stop_cancels_a_scan_while_provider_stream_is_establishing`
+was the last one. Its fixture's `ModelProfile` declared only `streaming`, so
+`stream_json_schema`'s `response_format` was refused with `unsupported
+capability: structured_output` before the transport was ever called; the test
+then sat on its 5-second wait for a stream that could not open. Declaring the
+capability makes it exercise what it names. Probe: neutering the `cancel`
+arm of the query's biased select fails it with "scan cancellation must not
+await the provider".
+
+Known flake, not a failure: `platform-posix
+process::supervisor::tests::supervisor_cross_process_*` re-exec the test binary
+as a child. Under full-workspace parallelism the child can exit non-zero
+(`assertion failed: status.success()`); all nine pass in isolation, three runs
+in a row. Judge this family by an isolated run, never by a full-workspace one.
 
 Red, and pre-existing or owned by other work — verified one by one, each by
 finding the commit that last touched the mechanism:

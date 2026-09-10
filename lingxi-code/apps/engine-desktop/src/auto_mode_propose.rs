@@ -523,8 +523,14 @@ mod tests {
                         aliases: vec![],
                         description: None,
                         metadata: Default::default(),
+                        // `stream_json_schema` sets `response_format`, which the
+                        // client refuses with `unsupported capability:
+                        // structured_output` unless the profile declares it —
+                        // before ever calling the transport, so the fixture
+                        // below would never see its stream open.
                         capabilities: Capabilities {
                             streaming: true,
+                            structured_output: true,
                             ..Default::default()
                         },
                     }],

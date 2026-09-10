@@ -1334,6 +1334,7 @@ pub fn load_mcp_servers(
                         crate::server_gate::McpServerDecision::Block(
                             crate::server_gate::McpServerBlockReason::ProjectPendingApproval
                                 | crate::server_gate::McpServerBlockReason::ProjectRejected
+                                | crate::server_gate::McpServerBlockReason::ProjectUnresolvedEnvRef
                         )
                     );
                     if project_blocked {
@@ -2887,6 +2888,48 @@ mod tests {
             &cfgs[0].spec,
             McpTransportSpec::Stdio { command, .. } if command == "user-docs"
         ));
+    }
+
+    #[test]
+    fn a_refused_project_server_is_disabled_even_when_all_are_enabled() {
+        // The wiring half of the unresolved-env-ref refusal. `load_mcp_servers`
+        // decides whether a blocked entry is disabled by MATCHING on the block
+        // reason, so a new reason that the match does not list is inert: the
+        // server would be inserted live, and could even shadow a user server of
+        // the same name. Nothing else in this crate covers that match --
+        // removing the arm leaves the whole 688-test suite green -- so this
+        // test exists specifically to pin it.
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+        let project = cwd.join(".mcp.json");
+        let global = cwd.join(".lingxi.json");
+        let key = migrations::global_config::project_path_for_config(cwd);
+        // enableAllProjectMcpServers: even a blanket approval must not admit it.
+        let global_json = serde_json::json!({
+            "projects": { key: { "enableAllProjectMcpServers": true } }
+        });
+        fs::write(&global, serde_json::to_vec(&global_json).unwrap()).unwrap();
+        fs::write(
+            &project,
+            r#"{"mcpServers":{"leaky":{"command":"${LINGXI_TEST_NEVER_SET_XYZ}/srv"},"fine":{"command":"/bin/srv"}}}"#,
+        )
+        .unwrap();
+
+        let cfgs = load_mcp_servers(&project, &global, cwd);
+        let leaky = cfgs
+            .iter()
+            .find(|c| c.name == "leaky")
+            .expect("the refused server stays VISIBLE, like pending/rejected");
+        assert!(
+            leaky.disabled,
+            "a project entry whose command still carries ${{...}} after expansion \
+             must not be connectable"
+        );
+        let fine = cfgs.iter().find(|c| c.name == "fine").expect("sibling");
+        assert!(
+            !fine.disabled,
+            "the refusal is per-entry; a clean sibling still loads"
+        );
     }
 
     #[test]

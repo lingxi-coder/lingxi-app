@@ -64,6 +64,10 @@ pub enum McpServerBlockReason {
     ProjectPendingApproval,
     /// A project `.mcp.json` entry was explicitly rejected.
     ProjectRejected,
+    /// A project `.mcp.json` entry still references an environment variable
+    /// after expansion, so connecting it would run a repo-authored command or
+    /// URL assembled from something the repo does not control.
+    ProjectUnresolvedEnvRef,
 }
 
 /// Result of applying the final, scope-aware MCP policy to one candidate.
@@ -161,6 +165,13 @@ impl McpPolicyContext {
             {
                 return McpServerDecision::Block(McpServerBlockReason::ProjectRejected);
             }
+            // Refused outright, ahead of any approval bookkeeping — upstream
+            // returns `{refused}` from the builder rather than offering the
+            // entry for approval, so `enable_all_project_servers` must not be
+            // able to wave it through either.
+            if project_entry_has_unresolved_env_ref(&server.spec) {
+                return McpServerDecision::Block(McpServerBlockReason::ProjectUnresolvedEnvRef);
+            }
             let approved = self.enable_all_project_servers
                 || self
                     .approved_project_servers
@@ -171,6 +182,56 @@ impl McpPolicyContext {
             }
         }
         McpServerDecision::Allow
+    }
+}
+
+/// The refusal copy upstream returns for this case, kept verbatim.
+pub const PROJECT_UNRESOLVED_ENV_REF_REFUSAL: &str = "Its url, command or args reference an environment variable; on connect Claude Code would expand it into a repo-authored command or url. Add it manually with `claude mcp add` if you trust this repo.";
+
+/// Whether a project entry's url / command / args still carry a `${…}` AFTER
+/// expansion.
+///
+/// Upstream (2.1.267 `src_175313539.js` @26576) builds the EXPANDED config
+/// first and tests that:
+///
+/// ```js
+/// let a = {...n, command:u(n.command), url:u(n.url), args:n.args?.map((b)=>Te(b,e)), …};
+/// if (r === "project") {
+///   if ([a.url, a.command, ...a.args??[]].some((S)=> S!==void 0 && S.includes("${")))
+///     return { refused: "Its url, command or args reference an environment variable; …" };
+/// ```
+///
+/// Two properties come from that shape and are easy to lose:
+///
+/// * The test runs on the **expanded** value, so a `${VAR}` that RESOLVED is
+///   fine. Testing the raw config would refuse every project server that uses a
+///   variable at all — stricter than upstream, and it would break configs that
+///   work today. [`crate::env_expansion`] leaves the literal `${…}` in place
+///   exactly when a name resolved nowhere, which is what makes this test
+///   equivalent.
+/// * It is **project scope only**. The same shape from a user-scoped config is
+///   allowed, because the user wrote it; the threat here is a repo-authored
+///   `.mcp.json` assembling a command line out of something unset.
+///
+/// `env` and `headers` are deliberately NOT tested — upstream counts those
+/// separately, for the approval prompt, and never refuses on them.
+fn project_entry_has_unresolved_env_ref(spec: &platform_api::McpTransportSpec) -> bool {
+    let unresolved = |value: &str| {
+        crate::env_expansion::expand_env_vars_in_string(value)
+            .expanded
+            .contains("${")
+    };
+    match spec {
+        platform_api::McpTransportSpec::Stdio { command, args, .. } => {
+            unresolved(command) || args.iter().any(|a| unresolved(a))
+        }
+        platform_api::McpTransportSpec::Sse { url, .. }
+        | platform_api::McpTransportSpec::Http { url, .. }
+        | platform_api::McpTransportSpec::WebSocket { url, .. }
+        | platform_api::McpTransportSpec::SseIde { url, .. }
+        | platform_api::McpTransportSpec::WsIde { url, .. } => unresolved(url),
+        // No url/command/args to smuggle anything through.
+        _ => false,
     }
 }
 
@@ -321,6 +382,103 @@ pub fn apply_project_server_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stdio(name: &str, scope: ConfigScope, command: &str, args: &[&str]) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            spec: platform_api::McpTransportSpec::Stdio {
+                command: command.to_string(),
+                args: args.iter().map(|a| (*a).to_string()).collect(),
+                env: Default::default(),
+            },
+            scope,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
+            config_error: None,
+            metadata: Default::default(),
+        }
+    }
+
+    /// A project `.mcp.json` entry whose command line still carries a `${…}`
+    /// after expansion must be refused, not offered for approval.
+    ///
+    /// The variable is deliberately one nothing sets, so the reference survives
+    /// expansion — [`crate::env_expansion`] leaves the literal in place exactly
+    /// when a name resolved nowhere. No test here touches the process
+    /// environment: the "it resolved" case uses a `${VAR:-default}` default, so
+    /// these stay hermetic under parallel execution.
+    #[test]
+    fn a_project_entry_with_an_unresolved_env_ref_is_refused() {
+        let policy = McpPolicyContext {
+            enable_all_project_servers: true,
+            ..Default::default()
+        };
+
+        // Unresolved in the COMMAND.
+        assert_eq!(
+            policy.decide(&stdio(
+                "a",
+                ConfigScope::Project,
+                "${LINGXI_TEST_NEVER_SET_XYZ}/bin/srv",
+                &[]
+            )),
+            McpServerDecision::Block(McpServerBlockReason::ProjectUnresolvedEnvRef),
+            "an unresolved ref in the command must be refused even with \
+             enable_all_project_servers — upstream refuses before approval"
+        );
+
+        // Unresolved in an ARG.
+        assert_eq!(
+            policy.decide(&stdio(
+                "b",
+                ConfigScope::Project,
+                "/bin/srv",
+                &["--token", "${LINGXI_TEST_NEVER_SET_XYZ}"]
+            )),
+            McpServerDecision::Block(McpServerBlockReason::ProjectUnresolvedEnvRef),
+        );
+
+        // RESOLVED (via a default) ⇒ not this refusal. Upstream tests the
+        // EXPANDED value, so a variable that resolved is fine; testing the raw
+        // config would refuse every project server that uses one at all.
+        assert_eq!(
+            policy.decide(&stdio(
+                "c",
+                ConfigScope::Project,
+                "${LINGXI_TEST_NEVER_SET_XYZ:-/bin/srv}",
+                &[]
+            )),
+            McpServerDecision::Allow,
+            "a reference that expanded is not a refusal"
+        );
+
+        // No reference at all.
+        assert_eq!(
+            policy.decide(&stdio("d", ConfigScope::Project, "/bin/srv", &[])),
+            McpServerDecision::Allow
+        );
+    }
+
+    /// The refusal is PROJECT-scope only: a user-scoped config was written by
+    /// the user, and the threat this guards is a repo-authored `.mcp.json`.
+    #[test]
+    fn a_user_scoped_entry_may_carry_an_unresolved_env_ref() {
+        let policy = McpPolicyContext::default();
+        assert_eq!(
+            policy.decide(&stdio(
+                "u",
+                ConfigScope::User,
+                "${LINGXI_TEST_NEVER_SET_XYZ}/bin/srv",
+                &[]
+            )),
+            McpServerDecision::Allow,
+            "user scope is the author's own config"
+        );
+    }
 
     #[test]
     fn eqn_tolerates_non_arrays() {

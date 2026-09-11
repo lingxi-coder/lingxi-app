@@ -9,7 +9,7 @@
   },
 
   "gate_defaults": {
-    "comment": "These carry the campaign's 'not a gap' rulings. If one flips upstream, the matching classification in lingxi-accepted-divergences becomes wrong and nothing else would notice.",
+    "comment": "These carry the campaign's 'not a gap' rulings. If one flips upstream, the matching classification in accepted_divergences.json becomes wrong and nothing else would notice.",
     "tengu_mcp_legacy_sse_fallback": { "default": true, "from": "H(\"tengu_mcp_legacy_sse_fallback\",!0)", "meaning": "the legacy HTTP+SSE rescue is LIVE upstream" },
     "tengu_surface_failed_mcp_servers": { "default": true, "from": "I(\"tengu_surface_failed_mcp_servers\",!0)", "meaning": "failed MCP servers surface in the ToolSearch note" },
     "tengu_lively_waffle": { "default": false, "from": "H(\"tengu_lively_waffle\",!1)", "meaning": "SubagentHandback is DORMANT upstream; absence here is alignment" },

@@ -8,7 +8,8 @@
 //! behaviour on.
 //!
 //! 🚨 Why this file exists at all: four of those facts are gate DEFAULTS, and
-//! three "this is not a gap" rulings in `lingxi-accepted-divergences` rest on
+//! three "this is not a gap" rulings in `src/parity/fixtures/accepted_divergences.json`
+//! rest on
 //! them. If upstream flips `tengu_lively_waffle` to true, the SubagentHandback
 //! ruling silently becomes wrong. This file cannot detect that on its own — the
 //! oracle binary is not in the repo — but it keeps the recorded value, its

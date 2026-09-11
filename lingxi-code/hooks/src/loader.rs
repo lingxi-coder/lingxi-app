@@ -651,6 +651,7 @@ pub(crate) fn parse_event_type(name: &str) -> Option<HookEventType> {
 
 pub(crate) fn event_type_name(event_type: &HookEventType) -> &'static str {
     match event_type {
+        HookEventType::AgentSpawn => "AgentSpawn",
         HookEventType::PreToolUse => "PreToolUse",
         HookEventType::PostToolUse => "PostToolUse",
         HookEventType::PostToolUseFailure => "PostToolUseFailure",

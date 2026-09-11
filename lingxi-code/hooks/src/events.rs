@@ -34,6 +34,13 @@ pub enum HookEventType {
     Stop,
     /// Agent / session stop attempt failed.
     StopFailure,
+    /// A subagent is ABOUT to be spawned — the hook may deny it or rewrite
+    /// the agent type, model, cwd or background flag (claude-code `agent.spawn`,
+    /// `_Bo` @2955987).
+    ///
+    /// ⚠️ Distinct from [`Self::SubagentStart`], which fires AFTER the spawn
+    /// decision and cannot change it.
+    AgentSpawn,
     /// A subagent (forked agent) has just been spawned.
     SubagentStart,
     /// A subagent has finished or been cancelled.

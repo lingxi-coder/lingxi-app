@@ -196,6 +196,19 @@ pub enum HookExecutor {
         /// Request timeout enforced by the executor.
         timeout: Duration,
     },
+    /// Run plugin-supplied JavaScript in the deny-by-default sandbox
+    /// (claude-code function hooks; upstream runs these in a bundled worker).
+    ///
+    /// The body receives the event payload as `input` and returns a JSON value.
+    /// ⛔ It gets NO host capabilities — see [`crate::function_hook`] for the
+    /// threat model and why nothing may be bound into that context.
+    Function {
+        /// The hook body. Evaluated as a function body, so it `return`s.
+        source: String,
+        /// Per-hook wall-clock budget (upstream `budgetMs`). `None` uses
+        /// [`crate::function_hook::DEFAULT_FUNCTION_HOOK_BUDGET`].
+        budget_ms: Option<u64>,
+    },
     /// Fork an agent of the named type, running the supplied prompt. The
     /// agent's tool result becomes the hook response.
     Agent {

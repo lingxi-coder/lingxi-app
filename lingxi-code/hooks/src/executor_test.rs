@@ -4865,6 +4865,76 @@ mod prompt_dispatch_tests {
         assert!(matches!(r.outcome, HookOutcome::Success));
     }
 
+    fn function_hook(source: &str) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: "fn-hook".into(),
+            events: vec![HookEventType::Stop],
+            if_condition: None,
+            executor: DefHookExecutor::Function {
+                source: source.into(),
+                budget_ms: Some(500),
+            },
+            source: HookSource::Project,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        }
+    }
+
+    async fn run_function_hook(source: &str) -> crate::AggregateHookResult {
+        let mut registry = HookRegistry::new();
+        registry.register(function_hook(source));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.execute(
+            stop_event(),
+            HookContext {
+                session_id: SessionId::new(),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// A function hook sees the event payload and its decision flows through
+    /// the SAME aggregation every other executor arm uses — no private dialect.
+    #[tokio::test]
+    async fn a_function_hook_reads_the_payload_and_decides() {
+        let agg = run_function_hook(
+            "return {decision: input.hook_event_name === 'Stop' ? 'block' : 'approve', \
+             reason: 'saw ' + input.hook_event_name};",
+        )
+        .await;
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(agg.reason.as_deref(), Some("saw Stop"));
+    }
+
+    /// 🚨 A hook that throws must produce NO decision. If a crash read as an
+    /// allow, any plugin could wave a decision through by throwing — the
+    /// cheapest possible bypass. Asserting the aggregate, because that is what
+    /// the engine acts on.
+    #[tokio::test]
+    async fn a_throwing_function_hook_yields_no_decision() {
+        let agg = run_function_hook("throw new Error('boom');").await;
+        assert_eq!(agg.decision, None, "a throw must not decide anything");
+    }
+
+    /// Same for exhausting the budget: a hook cannot buy an outcome by hanging.
+    #[tokio::test]
+    async fn a_hanging_function_hook_yields_no_decision() {
+        let agg = run_function_hook("while (true) {}").await;
+        assert_eq!(agg.decision, None);
+    }
+
     #[tokio::test]
     async fn prompt_hook_supports_stop_event() {
         let runner = Arc::new(RecordingRunner {

@@ -74,6 +74,11 @@ pub const HOOK_COMMAND_TIMEOUT_MS: u64 = 600_000;
 /// `claude-code/src/utils/hooks/execAgentHook.ts:75` fall-through default).
 pub const HOOK_AGENT_TIMEOUT_MS: u64 = 60_000;
 
+/// Backstop timeout for a function hook. The real cap is the sandbox's own
+/// budget (`function_hook::Sandbox::budget`); this only bounds the surrounding
+/// machinery so a wedged executor cannot outlive it.
+pub const HOOK_FUNCTION_TIMEOUT_MS: u64 = 5_000;
+
 /// Process-env override for the `SessionEnd` hook *batch* shutdown deadline
 /// (claude-code `Wqt`, BIN off 205715763:
 /// `process.env.LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS`). When this parses as a
@@ -1417,6 +1422,73 @@ impl Dispatcher {
         progress_id: Option<&str>,
     ) -> HookResult {
         match &hook.executor {
+            HookExecutor::Function { source, budget_ms } => {
+                let Some((expected_event, body)) = build_envelope_body(event, ctx) else {
+                    return HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Hook {} failed: no payload shape for this event",
+                            hook.id
+                        ),
+                        exit_code: None,
+                        response: None,
+                    };
+                };
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&body) else {
+                    return HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!("Hook {} failed: payload is not JSON", hook.id),
+                        exit_code: None,
+                        response: None,
+                    };
+                };
+                let sandbox = crate::function_hook::Sandbox {
+                    budget: budget_ms.map_or(
+                        crate::function_hook::DEFAULT_FUNCTION_HOOK_BUDGET,
+                        std::time::Duration::from_millis,
+                    ),
+                    ..crate::function_hook::Sandbox::default()
+                };
+                // Evaluated on a blocking thread: QuickJS is synchronous and a
+                // hook may burn its whole budget, which must not stall the
+                // async runtime the turn is running on.
+                let source = source.clone();
+                let evaluated = tokio::task::spawn_blocking(move || sandbox.eval(&source, &payload))
+                    .await
+                    .unwrap_or_else(|join| {
+                        Err(crate::function_hook::FunctionHookError::EngineUnavailable(
+                            join.to_string(),
+                        ))
+                    });
+                match evaluated {
+                    Ok(value) => {
+                        let stdout = serde_json::to_string(&value).unwrap_or_default();
+                        // Reuse the SAME response parser every other arm uses:
+                        // a function hook must not get a private decision
+                        // dialect the rest of the system does not understand.
+                        let response = parse_response(&stdout, expected_event).ok();
+                        HookResult {
+                            outcome: HookOutcome::Success,
+                            stdout,
+                            stderr: String::new(),
+                            exit_code: Some(0),
+                            response,
+                        }
+                    }
+                    // ⛔ A hook that throws, times out or runs out of memory is
+                    // an ERROR, never a silent allow: a plugin must not be able
+                    // to wave a spawn through by crashing.
+                    Err(error) => HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!("Hook {} failed: {error}", hook.id),
+                        exit_code: None,
+                        response: None,
+                    },
+                }
+            }
             HookExecutor::Builtin { handler_id } => {
                 if let Some(h) = self.builtin_handlers.get(handler_id) {
                     return h.handle(event, ctx).await;
@@ -3943,6 +4015,10 @@ fn attachment_timeout_ms(hook: &HookDefinition) -> u64 {
         HookExecutor::Http { .. } => HOOK_HTTP_TIMEOUT_MS,
         HookExecutor::Agent { .. } => HOOK_AGENT_TIMEOUT_MS,
         HookExecutor::Prompt { .. } => HOOK_PROMPT_TIMEOUT_MS,
+        // A function hook enforces its own budget inside the sandbox
+        // (`function_hook::Sandbox::budget`), so the outer hook timeout is a
+        // backstop rather than the live cap.
+        HookExecutor::Function { .. } => HOOK_FUNCTION_TIMEOUT_MS,
         // `mcp_tool` carries only a per-hook `timeout` in the oracle schema
         // ("Timeout in seconds for this specific tool call") with no arm-specific
         // default, so an entry that omits it falls back to the generic hook

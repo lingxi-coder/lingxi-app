@@ -622,6 +622,13 @@ pub enum SubagentSpawnError {
     /// The runtime rejected the spawn.
     #[error("SubagentSpawner: runtime error: {0}")]
     Runtime(String),
+    /// An `agent.spawn` function hook denied the spawn.
+    ///
+    /// Distinct from [`Self::Runtime`] so callers can tell "a plugin said no"
+    /// from "the runtime broke" — they warrant different messages to the user
+    /// and only one of them is a bug.
+    #[error("SubagentSpawner: spawn denied by an agent.spawn hook: {0}")]
+    DeniedByHook(String),
     /// Any other internal failure.
     #[error("SubagentSpawner: internal error: {0}")]
     Internal(String),

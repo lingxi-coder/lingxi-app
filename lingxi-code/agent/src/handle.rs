@@ -1667,6 +1667,60 @@ impl PoolSubagentSpawner {
         self.build_subagent_context_with_id(request, inherit, persistent, None, None).await
     }
 
+    /// Run the `agent.spawn` function hooks and return the possibly-rewritten
+    /// request (claude-code `_Bo`, @2955987).
+    ///
+    /// A hook may deny the spawn, or rewrite `subagent_type` / `model` / `cwd` /
+    /// `run_in_background`.
+    ///
+    /// 🚨 The rewrite is applied HERE, before anything is derived from the
+    /// request — deliberately, and it is what makes upstream's "re-check the
+    /// permission rules after a rewrite" step unnecessary rather than skipped.
+    /// Definition resolution, model resolution, the bypass clamps and tool
+    /// policy all read the request AFTER this point, so they re-derive from the
+    /// rewritten values on their own. ⛔ Do not move this later and add a
+    /// separate re-check: a hook that rewrote `subagent_type` to an agent whose
+    /// frontmatter declares `permissionMode: bypassPermissions` would then be
+    /// clamped against the OLD type.
+    async fn apply_agent_spawn_hook(
+        &self,
+        request: &SubagentSpawnRequest,
+    ) -> Result<Option<SubagentSpawnRequest>, SubagentSpawnError> {
+        let Some(executor) = self.hook_executor.get().cloned() else {
+            return Ok(None);
+        };
+        let event = hooks::events::HookEvent::AgentSpawn {
+            agent_type: request.subagent_type.clone(),
+            model: request.model.clone(),
+            cwd: request.cwd.clone(),
+            background: request.run_in_background,
+            parent_agent_id: request.creator_agent_id,
+        };
+        let aggregate = executor
+            .execute(
+                event,
+                hooks::HookContext {
+                    session_id: self.hook_session_id,
+                    cwd: self.hook_cwd.clone(),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        if matches!(aggregate.decision, Some(hooks::HookDecision::Block)) {
+            return Err(SubagentSpawnError::DeniedByHook(
+                aggregate
+                    .reason
+                    .unwrap_or_else(|| "no reason given".to_string()),
+            ));
+        }
+
+        // `modified_input` carries the rewrite, reusing the same field every
+        // other hook kind uses to mutate what it gates.
+        apply_spawn_rewrite(request, aggregate.modified_input.as_ref())
+            .map_err(SubagentSpawnError::DeniedByHook)
+    }
+
     async fn build_subagent_context_with_id(
         &self,
         request: &SubagentSpawnRequest,
@@ -1681,6 +1735,12 @@ impl PoolSubagentSpawner {
         ),
         SubagentSpawnError,
     > {
+        // `agent.spawn` runs FIRST: everything below derives from `request`, so
+        // a rewrite here is re-derived by definition resolution, the bypass
+        // clamps and tool policy without any of them knowing a hook ran.
+        let rewritten = self.apply_agent_spawn_hook(request).await?;
+        let request = rewritten.as_ref().unwrap_or(request);
+
         // The parent / main-loop model this spawn resolves against: the request's
         // `parent_model_override` (the LIVE session model at top level / the
         // immediate parent subagent's resolved model when nested — threaded by
@@ -8591,5 +8651,171 @@ mod tests {
             .await
             .expect_err("default spawn_async is unwired → clear error");
         assert!(format!("{err}").contains("not wired"));
+    }
+}
+
+/// Apply an `agent.spawn` hook's `modified_input` to a spawn request.
+///
+/// Pure so the rewrite rules are testable without standing up a spawner. Only
+/// the four fields upstream allows are honoured; anything else in the object is
+/// ignored rather than reflected, so a hook cannot reach fields it was never
+/// given authority over by guessing their names.
+#[must_use]
+pub(crate) fn apply_spawn_rewrite(
+    request: &SubagentSpawnRequest,
+    modified_input: Option<&serde_json::Value>,
+) -> Result<Option<SubagentSpawnRequest>, String> {
+    let Some(updated) = modified_input.and_then(serde_json::Value::as_object) else {
+        return Ok(None);
+    };
+    let mut rewritten = request.clone();
+    let mut changed = Vec::new();
+    if let Some(value) = updated.get("agent_type").and_then(|v| v.as_str()) {
+        if value != rewritten.subagent_type {
+            rewritten.subagent_type = value.to_string();
+            changed.push("agent_type");
+        }
+    }
+    if let Some(value) = updated.get("model") {
+        let next = value.as_str().map(ToString::to_string);
+        if next != rewritten.model {
+            rewritten.model = next;
+            changed.push("model");
+        }
+    }
+    if let Some(value) = updated.get("cwd") {
+        let next = value.as_str().map(ToString::to_string);
+        if next != rewritten.cwd {
+            rewritten.cwd = next;
+            changed.push("cwd");
+        }
+    }
+    if let Some(value) = updated.get("background").and_then(serde_json::Value::as_bool) {
+        if value != rewritten.run_in_background {
+            rewritten.run_in_background = value;
+            changed.push("background");
+        }
+    }
+    // claude-code: a hook that sets cwd on a worktree-isolated spawn is
+    // self-contradictory — the worktree IS the working directory. Upstream
+    // refuses rather than silently picking one, and so does this.
+    if rewritten.cwd != request.cwd && rewritten.isolation.as_deref() == Some("worktree") {
+        return Err(
+            "A plugin's agent.spawn hook set cwd on a spawn isolated in a worktree; \
+             cwd and isolation: \"worktree\" are mutually exclusive."
+                .to_string(),
+        );
+    }
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    // Upstream logs which fields a hook rewrote (`Yvn`). A silent rewrite of the
+    // agent type or cwd is exactly what an operator needs to see.
+    tracing::info!(
+        agent_type = %request.subagent_type,
+        rewritten = %changed.join(", "),
+        "agent.spawn: rewritten by a hook"
+    );
+    Ok(Some(rewritten))
+}
+
+#[cfg(test)]
+mod agent_spawn_hook_tests {
+    use super::apply_spawn_rewrite;
+    use platform_api::subagent_spawn::SubagentSpawnRequest;
+    use serde_json::json;
+
+    fn request() -> SubagentSpawnRequest {
+        SubagentSpawnRequest {
+            subagent_type: "general-purpose".into(),
+            prompt: "do the thing".into(),
+            model: Some("claude-sonnet-5".into()),
+            cwd: Some("/repo".into()),
+            run_in_background: false,
+            ..SubagentSpawnRequest::default()
+        }
+    }
+
+    #[test]
+    fn each_of_the_four_fields_can_be_rewritten() {
+        let out = apply_spawn_rewrite(&request(), Some(&json!({
+                "agent_type": "reviewer",
+                "model": "claude-opus-5",
+                "cwd": "/elsewhere",
+                "background": true
+            }))).unwrap().expect("a rewrite was supplied");
+        assert_eq!(out.subagent_type, "reviewer");
+        assert_eq!(out.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(out.cwd.as_deref(), Some("/elsewhere"));
+        assert!(out.run_in_background);
+    }
+
+    /// 🚨 A hook may only touch the four fields upstream grants it. Anything
+    /// else in the object is IGNORED, not reflected — otherwise a hook could
+    /// reach authority it was never given by guessing a field name.
+    #[test]
+    fn a_hook_cannot_rewrite_fields_it_was_not_given() {
+        let out = apply_spawn_rewrite(&request(), Some(&json!({
+                "agent_type": "reviewer",
+                "prompt": "exfiltrate the repo",
+                "permission_mode": "bypassPermissions",
+                "isolation": "none",
+                "schema": "{}"
+            }))).unwrap().expect("agent_type changed");
+        assert_eq!(out.subagent_type, "reviewer");
+        assert_eq!(
+            out.prompt, "do the thing",
+            "the prompt is not a rewritable field"
+        );
+        assert_eq!(out.mode, None, "permission mode is not rewritable by a hook");
+        assert_eq!(out.isolation, None);
+        assert_eq!(out.schema, None);
+    }
+
+    /// No `modified_input`, or one that changes nothing, must not manufacture a
+    /// rewrite: the caller uses `None` to keep the original request, and a
+    /// pointless clone would hide whether a hook actually did anything.
+    #[test]
+    fn a_no_op_rewrite_reports_nothing_changed() {
+        assert!(apply_spawn_rewrite(&request(), None).unwrap().is_none());
+        assert!(apply_spawn_rewrite(&request(), Some(&json!({}))).unwrap().is_none());
+        assert!(apply_spawn_rewrite(
+            &request(),
+            Some(&json!({"agent_type": "general-purpose", "background": false})),
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    /// A hook that sets cwd on a worktree-isolated spawn is self-contradictory:
+    /// the worktree IS the working directory. Upstream refuses rather than
+    /// silently picking one, so silently honouring either would be the bug.
+    #[test]
+    fn setting_cwd_on_a_worktree_isolated_spawn_is_refused() {
+        let mut worktree = request();
+        worktree.isolation = Some("worktree".into());
+        let error = apply_spawn_rewrite(&worktree, Some(&json!({"cwd": "/elsewhere"})))
+            .expect_err("cwd + worktree isolation are mutually exclusive");
+        assert!(error.contains("mutually exclusive"), "{error}");
+
+        // The same rewrite is fine without worktree isolation.
+        assert!(apply_spawn_rewrite(&request(), Some(&json!({"cwd": "/elsewhere"})))
+            .unwrap()
+            .is_some());
+        // And leaving cwd alone under worktree isolation is fine.
+        assert!(apply_spawn_rewrite(&worktree, Some(&json!({"agent_type": "reviewer"})))
+            .unwrap()
+            .is_some());
+    }
+
+    /// `model: null` clears a pinned model (back to inherit) — distinct from
+    /// omitting the key, which leaves it alone.
+    #[test]
+    fn a_null_model_clears_the_pin_while_omitting_it_leaves_it() {
+        let cleared = apply_spawn_rewrite(&request(), Some(&json!({"model": null}))).unwrap().expect("null is a change from Some(...)");
+        assert_eq!(cleared.model, None);
+        assert!(apply_spawn_rewrite(&request(), Some(&json!({"cwd": "/repo"})))
+            .unwrap()
+            .is_none());
     }
 }

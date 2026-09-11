@@ -3194,6 +3194,27 @@ fn build_lifecycle_envelope_body(
             };
             Some(("Setup", serde_json::to_string(&payload).ok()?))
         }
+        HookEvent::AgentSpawn {
+            agent_type,
+            model,
+            cwd,
+            background,
+            parent_agent_id,
+        } => {
+            let payload = crate::hook_payload::AgentSpawnPayload {
+                hook_event_name: crate::hook_payload::HookEventNameAgentSpawn,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: cwd.clone().unwrap_or(b.cwd),
+                prompt_id: b.prompt_id,
+                permission_mode: b.permission_mode,
+                agent_type: agent_type.clone(),
+                model: model.clone(),
+                background: *background,
+                parent_agent_id: parent_agent_id.as_ref().map(ToString::to_string),
+            };
+            Some(("AgentSpawn", serde_json::to_string(&payload).ok()?))
+        }
         HookEvent::SubagentStart {
             agent_id,
             agent_type,

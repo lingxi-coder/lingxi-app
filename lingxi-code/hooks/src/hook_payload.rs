@@ -108,6 +108,7 @@ hook_event_name_marker!(HookEventNamePermissionRequest, "PermissionRequest");
 hook_event_name_marker!(HookEventNamePermissionDenied, "PermissionDenied");
 hook_event_name_marker!(HookEventNameSetup, "Setup");
 hook_event_name_marker!(HookEventNameSubagentStart, "SubagentStart");
+hook_event_name_marker!(HookEventNameAgentSpawn, "AgentSpawn");
 hook_event_name_marker!(HookEventNameCwdChanged, "CwdChanged");
 hook_event_name_marker!(HookEventNameDirectoryAdded, "DirectoryAdded");
 hook_event_name_marker!(HookEventNameFileChanged, "FileChanged");
@@ -856,6 +857,33 @@ pub struct SubagentStartPayload {
     pub agent_type: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
+}
+
+/// Wire-format `AgentSpawn` payload — what a function hook inspects before a
+/// subagent is spawned (claude-code `agent.spawn`).
+///
+/// Carries the four fields upstream lets a hook rewrite, so the hook can read
+/// what it is about to change. ⛔ The spawn PROMPT is deliberately absent: it
+/// can be long and carries the parent's task text, and no rewrite rule needs it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSpawnPayload {
+    pub hook_event_name: HookEventNameAgentSpawn,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    /// The requested subagent type.
+    pub agent_type: String,
+    /// The requested model, when the spawn pinned one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model: Option<String>,
+    /// Whether the spawn was requested as a background run.
+    pub background: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent_agent_id: Option<String>,
 }
 
 /// Wire-format `CwdChanged` payload (1:1 with `coreSchemas.ts:727-735`

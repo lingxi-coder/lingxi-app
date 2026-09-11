@@ -24,7 +24,7 @@ test('only live thinking remains in its original position; it never splits tools
   const live = { ...thought, done: false };
   assert.deepEqual(transcriptRows([tool('a'), live, tool('b')], true).map((row) => row.type), ['tool-group', 'thinking']);
   assert.equal(transcriptRows([live], false).length, 0);
-  assert.equal(transcriptRows([thought], true).length, 0);
+  assert.equal(transcriptRows([thought], true)[0]?.id, 'thinking:pending');
 });
 test('tool group identity survives status updates and additional calls', () => {
   assert.equal(transcriptRows([tool('a', 'running')], true)[0]?.id, transcriptRows([tool('a'), thought, tool('b')], true)[0]?.id);
@@ -49,4 +49,17 @@ test('settled groups collapse to one row, expose failures and expand summaries',
   assert.match(opened, /Summary a/);
   assert.match(opened, /Summary b/);
   assert.doesNotMatch(opened, /Output a|Output b/);
+});
+
+test('waiting turns show thinking even before any reasoning delta arrives', () => {
+  const rows = transcriptRows([], true);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.type, 'thinking');
+  assert.equal(transcriptRows([], false).length, 0);
+});
+
+test('thinking resumes after tools settle without competing with active tools or compaction', () => {
+  assert.equal(transcriptRows([tool('a', 'running')], true).filter((row) => row.type === 'thinking').length, 0);
+  assert.equal(transcriptRows([tool('a')], true).filter((row) => row.type === 'thinking').length, 1);
+  assert.equal(transcriptRows([{ type: 'compaction', id: 'compact', status: 'running' }], true).filter((row) => row.type === 'thinking').length, 0);
 });

@@ -36,5 +36,11 @@ export function transcriptRows(items: readonly RunItem[], running: boolean): Tra
     group = undefined;
     rows.push(item);
   }
+  // Some providers never emit reasoning deltas. The turn still owes the user
+  // a waiting indicator until it finishes, unless another activity owns it.
+  if (running && !activeThinking && !items.some((item) =>
+    (item.type === 'tool' || item.type === 'compaction') && item.status === 'running')) {
+    rows.push({ type: 'thinking', id: 'thinking:pending', text: '', streamed: true });
+  }
   return rows;
 }

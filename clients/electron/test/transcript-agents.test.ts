@@ -18,6 +18,18 @@ test('agent updates preserve row order, deduplicate ids, and render current stat
   assert.deepEqual(orderedTranscriptAgents(['first'], [agent('second')]).map((row) => row.agent_id), ['second']);
 });
 
+test('main conversation agent is omitted while background agents keep their rows', () => {
+  const main = { ...agent('main'), name: 'Main agent', agent_type: 'main' };
+  const child = { ...agent('agent:child'), name: 'Main agent' };
+  const rows = orderedTranscriptAgents(['main', 'agent:child'], [main, child, agent('agent:review', 'completed')]);
+  assert.deepEqual(rows.map((row) => row.agent_id), ['agent:child', 'agent:review']);
+  assert.equal(render([main]), '');
+  const html = render([main, child]);
+  assert.doesNotMatch(html, /data-agent-id="main"/);
+  assert.match(html, /data-agent-id="agent:child"/);
+  assert.equal((html.match(/data-agent-id=/g) ?? []).length, 1);
+});
+
 test('running and finished agents remain visible with distinct states and detail controls', () => {
   const html = render([agent('Search'), { ...agent('Review', 'completed'), latest_activity: 'Checked 5 files' }, agent('Build', 'failed')]);
   assert.equal((html.match(/data-agent-id=/g) ?? []).length, 3);

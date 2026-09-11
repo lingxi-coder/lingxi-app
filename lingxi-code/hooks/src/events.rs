@@ -274,6 +274,21 @@ pub enum HookEvent {
         error: String,
     },
     /// A subagent was spawned.
+    /// A subagent is about to be spawned; the hook may deny it or rewrite the
+    /// spawn (claude-code `agent.spawn`). Fires BEFORE the decision, unlike
+    /// [`Self::SubagentStart`].
+    AgentSpawn {
+        /// The subagent type the parent asked for.
+        agent_type: String,
+        /// Resolved model, when the request pinned one.
+        model: Option<String>,
+        /// Working directory the subagent would run in.
+        cwd: Option<String>,
+        /// Whether the spawn was requested as a background run.
+        background: bool,
+        /// Parent agent that is spawning, if any.
+        parent_agent_id: Option<AgentId>,
+    },
     SubagentStart {
         /// Newly assigned agent ID.
         agent_id: AgentId,
@@ -649,6 +664,7 @@ impl HookEvent {
             Self::UserPromptSubmit { .. } => HookEventType::UserPromptSubmit,
             Self::Stop { .. } => HookEventType::Stop,
             Self::StopFailure { .. } => HookEventType::StopFailure,
+            Self::AgentSpawn { .. } => HookEventType::AgentSpawn,
             Self::SubagentStart { .. } => HookEventType::SubagentStart,
             Self::SubagentStop { .. } => HookEventType::SubagentStop,
             Self::PreCompact { .. } => HookEventType::PreCompact,

@@ -287,7 +287,7 @@ test('tool rows use compact adjacency hooks and a Codex-like transcript type sca
     sessionKey: 'session-a',
   }));
   const runTypes = [...html.matchAll(/data-run-type="([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(runTypes, ['thinking', 'tool', 'thinking']);
+  assert.deepEqual(runTypes, ['tool']);
 
   const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
   assert.match(css, /\.transcript-run-item \+ \.transcript-run-item\s*\{[^}]*margin-top:\s*18px;/s);
@@ -743,24 +743,33 @@ test('a multi-key permission payload is labelled, redacted, and never dropped', 
 });
 
 
-test('Thought bodies default to collapsed for live and historical blocks', () => {
-  for (const streamed of [true, undefined]) {
-    for (const done of [true, false]) {
-      const html = render(React.createElement(Stage, { liveItems: [{ type: 'thinking', id: 'thought-default', text: 'Reasoning body', streamed, done }] }));
-      assert.match(html, /aria-expanded="false"/);
-      assert.doesNotMatch(html, /Reasoning body/);
-      assert.match(html, done ? /Thought/ : /Thinking/);
-    }
-  }
+test('thinking is an in-place live status without reasoning content or a disclosure', () => {
+  const html = render(React.createElement(Stage, {
+    running: true,
+    liveItems: [
+      { type: 'thinking', id: 'thought-live', text: 'Reasoning body', streamed: true, done: false },
+      { type: 'narration', id: 'after-thinking', role: 'assistant', text: 'Following message' },
+    ],
+  }));
+  assert.match(html, /Thinking/);
+  assert.match(html, /running-sweep/);
+  assert.doesNotMatch(html, /Reasoning body|aria-expanded/);
+  assert.ok(html.indexOf('Thinking') < html.indexOf('Following message'));
 });
 
-test('disabling default Thought collapse expands live and historical content', () => {
-  for (const streamed of [true, undefined]) {
-    const html = render(React.createElement(Stage, {
-      collapseThoughtsByDefault: false,
-      liveItems: [{ type: 'thinking', id: 'thought-expanded', text: 'Reasoning body', streamed, done: true }],
-    }));
-    assert.match(html, /aria-expanded="true"/);
-    assert.match(html, /Reasoning body/);
+test('completed, historical and stopped thinking is hidden regardless of legacy preference', () => {
+  for (const collapseThoughtsByDefault of [true, false, undefined]) {
+    for (const state of [
+      { running: true, streamed: true, done: true },
+      { running: true, streamed: undefined, done: true },
+      { running: false, streamed: true, done: false },
+    ]) {
+      const html = render(React.createElement(Stage, {
+        running: state.running,
+        collapseThoughtsByDefault,
+        liveItems: [{ type: 'thinking', id: 'thought-hidden', text: 'Reasoning body', streamed: state.streamed, done: state.done }],
+      }));
+      assert.doesNotMatch(html, /Reasoning body|data-run-type="thinking"|aria-expanded/);
+    }
   }
 });

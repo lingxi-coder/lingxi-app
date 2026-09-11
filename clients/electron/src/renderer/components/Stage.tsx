@@ -10,11 +10,13 @@ import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './colla
 import { CommandOutput } from './CommandOutput';
 import { CompactionStatus } from './CompactionStatus';
 import { Icon } from './Icon';
-import { Disclosure } from './Disclosure';
+import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
+import { TranscriptAgents } from './TranscriptAgents';
+import { transcriptRows } from './transcriptRows';
+import { ToolGroup } from './ToolGroup';
 import { MarkdownContent } from './MarkdownContent';
 import { commandPaletteIcon } from './commandPaletteIcons';
 import { parseSlashCommandMessage } from './slashCommandMessage';
-import { ToolCall } from './ToolCall';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
 const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
@@ -110,64 +112,17 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   );
 });
 
-// ─── THINKING BLOCK (collapsible, dim/italic reasoning stream) ──────
-//
-// The open/closed state lives in the Stage's store, keyed by the block's stable
-// id — NOT in this component. It used to auto-collapse the instant the block
-// sealed, which fought a user who had deliberately opened it to read along; the
-// default comes from the device preference, and an explicit user choice wins
-// over that default for the lifetime of this session view.
-const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
-  item: Extract<RunItem, { type: 'thinking' }>;
-  open: boolean;
-  onSetOpen(id: string, next: boolean): void;
-}) {
-  const t = useT();
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: '100%' }}>
-      <Disclosure
-        id={item.id}
-        open={open}
-        onToggle={() => onSetOpen(item.id, !open)}
-        buttonStyle={{ minHeight: 28, padding: '4px 6px 4px 0', borderRadius: 6, fontSize: 12, fontWeight: 500, letterSpacing: 0 }}
-        summary={
-          <span
-            className={item.done ? undefined : 'running-sweep'}
-            style={item.done ? undefined : {
-              '--sweep-base': t.text3,
-              '--sweep-highlight': t.text,
-            } as CSSProperties}
-          >
-            {item.done ? 'Thought' : 'Thinking…'}
-          </span>
-        }
-      >
-        <div
-          style={{
-            borderLeft: `1px solid ${t.border}`, paddingLeft: 16, marginLeft: 3,
-            fontSize: 13.5, lineHeight: 1.65, letterSpacing: 0, color: t.text2,
-            whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
-          }}
-        >
-          {item.text}
-          {!item.done && (
-            <span style={{ animation: 'cursor-blink 1.1s step-end infinite' }}>▍</span>
-          )}
-        </div>
-      </Disclosure>
-    </div>
-  );
-});
-
 import { visibleRows } from './loopFold';
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
   /** The real conversation accumulated from the bridge. */
   liveItems?: RunItem[];
-  /** Default for untouched Thought blocks, including live streams and history. */
+  agents?: readonly SessionAgentSummaryDto[];
+  onOpenAgent?: (agentId: string) => void;
+  /** @deprecated Thinking is now an ephemeral status, never a disclosure. */
   collapseThoughtsByDefault?: boolean;
-  /** True while a turn is streaming — shows the thinking affordance at the tail. */
+  /** True while a turn is streaming — allows its live thinking status. */
   running?: boolean;
   /** Truthful empty/onboarding copy supplied by the host state. */
   emptyMessage?: string;
@@ -185,9 +140,11 @@ interface StageProps {
   foldedItemIds?: readonly string[];
 }
 
-export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', collapseThoughtsByDefault = true, foldedItemIds = [] }: StageProps) {
+export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', agents, onOpenAgent, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const tailRef = useRef<HTMLDivElement>(null);
+  const followTail = useRef(true);
+  const scrollSession = useRef(sessionKey);
 
   /**
    * Explicit open/closed choices, keyed by the item's STABLE id WITHIN a
@@ -224,13 +181,22 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
     [liveItems, foldedItemIds, visible, sessionKey],
   );
 
-  // Keep the newest content in view as deltas stream in.
+  const rows = useMemo(() => transcriptRows(items, running), [items, running]);
+
+  // Follow streaming only while the reader is already near the tail.
   useEffect(() => {
-    tailRef.current?.scrollIntoView({ block: 'end' });
-  }, [items.length, running]);
+    if (scrollSession.current !== sessionKey) {
+      followTail.current = true;
+      scrollSession.current = sessionKey;
+    }
+    if (followTail.current) tailRef.current?.scrollIntoView({ block: 'end' });
+  }, [items, running, agents, sessionKey]);
 
   return (
-    <div className="desktop-stage" style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingInline: 'var(--conversation-gutter, 24px)', background: t.transcriptBg, position: 'relative' }}>
+    <div className="desktop-stage" onScroll={(event) => {
+      const node = event.currentTarget;
+      followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+    }} style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingInline: 'var(--conversation-gutter, 24px)', background: t.transcriptBg, position: 'relative' }}>
       <div
         className="desktop-stage-feed"
         style={{
@@ -239,7 +205,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >
-        {items.length === 0 && !running && (
+        {rows.length === 0 && !running && !agents?.length && (
           <div
             className="desktop-empty-state-wrap"
             role="status"
@@ -277,7 +243,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           silently reassigns every row's collapse state the moment an item is
           inserted, which is exactly what a streaming transcript does.
         */}
-        {items.map((item) => {
+        {rows.map((item) => {
           if (item.type === 'narration') {
             return (
               <div className="transcript-run-item" data-run-type="narration" key={item.id} style={{ display: 'flex', justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start', gap: 10, width: '100%', animation: 'fade-in 0.3s ease' }}>
@@ -291,23 +257,16 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           }
           if (item.type === 'thinking') {
             return (
-              <div className="transcript-run-item" data-run-type="thinking" key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <ThinkingBlock
-                    item={item}
-                    open={collapseOpen(visible, sessionKey, item.id) ?? !collapseThoughtsByDefault}
-                    onSetOpen={setOpen}
-                  />
-                </div>
+              <div className="transcript-run-item transcript-thinking" data-run-type="thinking" key={item.id} role="status">
+                <span className="running-sweep" style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>Thinking…</span>
               </div>
             );
           }
-          if (item.type === 'tool') {
+          if (item.type === 'tool-group') {
             return (
-              <div className="transcript-run-item" data-run-type="tool" key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <ToolCall item={item} open={collapseOpen(visible, sessionKey, item.id)} onSetOpen={setOpen} />
-                </div>
+              <div className="transcript-run-item" data-run-type="tool" key={item.id}>
+                <ToolGroup group={item} open={collapseOpen(visible, sessionKey, item.id) ?? false}
+                  toolOpen={(id) => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} />
               </div>
             );
           }
@@ -333,6 +292,8 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           }
           return null;
         })}
+
+        {agents && <TranscriptAgents key={sessionKey} agents={agents} onOpenAgent={onOpenAgent} />}
 
         {/* Scroll anchor — keeps the newest content in view as deltas arrive. */}
         <div ref={tailRef} />

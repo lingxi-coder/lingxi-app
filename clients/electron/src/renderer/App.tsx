@@ -17,6 +17,7 @@ import { Theme } from './theme/ThemeContext';
 import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
 import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/RuntimeCenter';
 import './components/RuntimeCenter.css';
+import './components/TranscriptAgents.css';
 
 export function App() {
   const [page, setPage] = useState<'chat' | 'scheduled'>('chat');
@@ -94,6 +95,8 @@ export function App() {
               <Stage
                 liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
                 running={!bridge.sessionLoading && bridge.running}
+                agents={bridge.sessionLoading ? [] : Object.values(bridge.runtimeCenter.agents)}
+                onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
                 collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                 emptyMessage={emptyMessage}
                 // Item ids restart at `i1` in every session; the Stage's

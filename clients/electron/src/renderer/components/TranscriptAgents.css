@@ -3,11 +3,11 @@
 .transcript-agent-row:hover:not(:disabled) { background: var(--agent-hover); }
 .transcript-agent-row:focus-visible { outline: 2px solid var(--agent-focus); outline-offset: 2px; }
 .transcript-agent-row:disabled { cursor: default; opacity: 1; }
-.transcript-agent-icon { display: flex; flex: 0 0 16px; }
+.transcript-agent-icon { display: flex; flex: 0 0 18px; }
 .transcript-agent-name { max-width: 35%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transcript-agent-status { flex-shrink: 0; font-size: 12px; }
 .transcript-agent-activity { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .transcript-agent-row > svg:last-child { margin-left: auto; flex-shrink: 0; }
 .transcript-agent-row[data-agent-running] .transcript-agent-icon { animation: transcript-agent-pulse 1.5s ease-in-out infinite; }
-@keyframes transcript-agent-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes transcript-agent-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .65; } }
 @media (prefers-reduced-motion: reduce) { .transcript-agent-row[data-agent-running] .transcript-agent-icon { animation: none; } }

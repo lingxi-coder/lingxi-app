@@ -14,6 +14,7 @@ import {
 } from '../bridge/runtimeCenterState';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
+import { AgentAvatar } from './AgentAvatar';
 import { Stage } from './Stage';
 import { MarkdownContent } from './MarkdownContent';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
@@ -138,6 +139,7 @@ function OverviewRow({
   title,
   subtitle,
   thumbnail,
+  agentId,
   status,
   onClick,
 }: {
@@ -145,6 +147,7 @@ function OverviewRow({
   title: string;
   subtitle?: string;
   thumbnail?: string;
+  agentId?: string;
   status?: string;
   onClick(): void;
 }) {
@@ -162,7 +165,7 @@ function OverviewRow({
       onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; }}
     >
       <span style={{ width: 23, height: 23, display: 'grid', placeItems: 'center', flexShrink: 0, color: icon === 'subagent' ? t.accent : t.text3 }}>
-        <>{thumbnail ? <img src={thumbnail} alt="" style={{ width: 23, height: 23, objectFit: 'cover', borderRadius: 4 }} /> : <Icon name={icon} size={16} stroke={1.8} />}</>
+        <>{agentId !== undefined ? <AgentAvatar agentId={agentId} size={23} /> : thumbnail ? <img src={thumbnail} alt="" style={{ width: 23, height: 23, objectFit: 'cover', borderRadius: 4 }} /> : <Icon name={icon} size={16} stroke={1.8} />}</>
       </span>
       <span style={{ minWidth: 0, flex: 1 }}>
         <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 14, fontWeight: 400 }}>{title}</span>
@@ -343,7 +346,7 @@ function InspectorTabs({ bridge }: { bridge: UseBridge }) {
         const key = runtimeCenterItemKey(item);
         return (
           <div key={`${item.kind}:${item.id}`} role="presentation" style={{ display: 'flex', alignItems: 'center', flexShrink: 0, height: 32, borderRadius: 12, background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text3 }}>
-            <button type="button" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => bridge.openRuntimeItem(item)} onKeyDown={(event) => selectFromKeyboard(event, index)} style={{ maxWidth: 180, minWidth: 0, height: 32, display: 'flex', alignItems: 'center', gap: 8, padding: '0 7px 0 11px', border: 0, background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 13, fontWeight: 400, cursor: 'pointer' }}><Icon name={tabIcon(item)} size={16} /><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tabLabel(item, bridge)}</span></button>
+            <button type="button" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => bridge.openRuntimeItem(item)} onKeyDown={(event) => selectFromKeyboard(event, index)} style={{ maxWidth: 180, minWidth: 0, height: 32, display: 'flex', alignItems: 'center', gap: 8, padding: '0 7px 0 11px', border: 0, background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 13, fontWeight: 400, cursor: 'pointer' }}>{item.kind === 'agent' ? <AgentAvatar agentId={item.id} size={16} /> : <Icon name={tabIcon(item)} size={16} />}<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tabLabel(item, bridge)}</span></button>
             <button type="button" aria-label={`Close ${tabLabel(item, bridge)}`} onClick={() => { bridge.closeRuntimeItem(item); window.requestAnimationFrame(() => (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]') ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button') ?? document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]'))?.focus()); }} style={{ display: 'grid', placeItems: 'center', width: 22, height: 22, marginRight: 2, border: 0, borderRadius: 5, background: 'transparent', color: 'inherit', cursor: 'pointer' }}><Icon name="x" size={11} /></button>
           </div>
         );
@@ -534,7 +537,7 @@ function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bri
     {section === 'todos' && (todos.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : todos.map((todo, index) => <OverviewRow key={planRuntimeItemId(todo, index, todos)} icon={todo.state === 'completed' ? 'check' : 'goal'} title={todo.subject} status={todo.state} onClick={() => bridge.openRuntimeItem({ kind: 'todo', id: planRuntimeItemId(todo, index, todos) })} />))}
     {section === 'agents' && <>
       {agents.length === 0 && tasks.length === 0 && <EmptyRow>No subagents or background tasks.</EmptyRow>}
-      {agents.map((agent) => <OverviewRow key={agent.agent_id} icon="subagent" title={agent.name || agent.agent_type} subtitle={`Subagent · ${agent.latest_activity ?? agent.agent_type}`} status={agent.status} onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })} />)}
+      {agents.map((agent) => <OverviewRow key={agent.agent_id} icon="subagent" agentId={agent.agent_id} title={agent.name || agent.agent_type} subtitle={`Subagent · ${agent.latest_activity ?? agent.agent_type}`} status={agent.status} onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })} />)}
       {tasks.map((task) => <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={`Background task · ${shorten(task.status.type === 'running' && task.stage ? task.stage : task.description)}`} status={taskDisplayStatus(task)} onClick={() => bridge.openRuntimeItem({ kind: 'task', id: task.task_id })} />)}
     </>}
     {section === 'resources' && (center.resources.length === 0 ? <EmptyRow>No input resources in this session.</EmptyRow> : center.resources.map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : 'file'} title={resource.name} subtitle={resource.path ?? resource.detail} onClick={() => bridge.openRuntimeItem({ kind: 'resource', id: resource.id })} />))}

@@ -366,12 +366,43 @@ impl tool_api::Tool for PromptAgentTool {
 /// Only `claude-fable-5-1` (10_204 -> 10_445) and `claude-mythos-5-1`
 /// (10_206 -> 10_447) moved.
 ///
-/// Nothing outside `main` contributed: the only non-test edit under
-/// `orchestrator/src/prompt/` that is not on `main` is `task_notification.rs`,
-/// a module `assemble_system_prompt` (prompt/mod.rs) never calls. When a future
-/// re-bless is needed, extend this note the same way — a bare number change with
-/// no named cause is indistinguishable from the unintended drift these locks
-/// exist to catch.
+/// FOURTH MOVE, 2026-09-10 — two separate `main` alignments, neither of which
+/// re-blessed these numbers at the time. They are recorded together because
+/// they were found together, not because they are related.
+///
+/// 1. −9 on the **`claude-opus-5` profile only**: `3537e08cf` (2.1.263) rewrote
+///    `body_sections::OPUS_5_TERMINAL_RESTRICTIONS` from the two-line
+///    `"Do not call the AgentTool …\nDo not use workflows or deep-research …"`
+///    (121 bytes) to the single-line `"Do not use the Agent tool, workflows, or
+///    deep-research unless the user, a LINGXI.md file, or a skill asks for it"`
+///    (112 bytes). This reaches three cases, and all three for the same reason:
+///    `claude-opus-5` itself, and BOTH output styles, which
+///    `production_output_style_bodies_match_normalized_2_1_238_manifests`
+///    renders with `prompt_context("claude-opus-5", …)`.
+///
+///    ⚠️ This one had been stale since `b09e21789`, the commit that recorded
+///    the THIRD MOVE above: building that commit's own tree produces 9_304 for
+///    `claude-opus-5` against the 9_313 it wrote down. The Fable/Mythos halves
+///    of that re-bless were correct; `claude-opus-5` was simply not re-measured.
+///    Measured, not inferred — the tree was extracted and built.
+///
+/// 2. −3 on **every** case: `972ca7f33` (2.1.267) re-based the memory
+///    frontmatter separator, `description: <one-line summary — used to decide
+///    relevance…>` to `<one-line summary, used to decide relevance…>`. The
+///    em-dash is U+2014, three bytes, and each assembled body renders the line
+///    exactly once (counted, per model, on the normalized body).
+///
+/// So `claude-opus-5`, `Explanatory` and `Learning` moved −12 and every other
+/// case moved −3. `live_orchestrator_prompt_uses_production_context` did NOT
+/// move: its normalized prompt contains neither changed string, and its 14_602
+/// byte lock is unchanged.
+///
+/// Nothing outside `main` contributed: `orchestrator/src/prompt/` is
+/// byte-identical to `main` on this branch (`git diff main HEAD --` is empty
+/// for that directory), so every byte above is `main`'s own output. When a
+/// future re-bless is needed, extend this note the same way — a bare number
+/// change with no named cause is indistinguishable from the unintended drift
+/// these locks exist to catch.
 ///
 /// Claude emits one extra first block carrying a private
 /// `x-anthropic-billing-header` attestation. LingXi deliberately does not
@@ -385,53 +416,53 @@ fn production_prompt_bodies_match_normalized_2_1_238_manifests() {
     let cases = [
         (
             "claude-fable-5-1",
-            10_445,
-            "7e1b337d4a2d3ca13eaaba084a0a6a3b68e5dc1801d203c0ba5c5df5d5af0601",
+            10_442,
+            "321a0dc5abedf4c99a2a63a39f8a950c87ed21f66ed62bc93098dfe6a9bca5bc",
         ),
         (
             "claude-haiku-4-5-20251001",
-            27_534,
-            "9a1b989ee609c655734dc08cccdd827ba9f3cd0c744755f8f3dee3f3c12d2beb",
+            27_531,
+            "ca95b52c17e71163fe111875d5ce17693faf00c186775f3f09ad1ae2240d7c09",
         ),
         (
             "claude-mythos-5-1",
-            10_447,
-            "c59056333e9ccbbe6547a8e9cd9bc51bf33a479d5aae7f603c6841abfc0d8d63",
+            10_444,
+            "59edba1d7761f0ff71eb0f629664d9e2d968beb30134e72f2c0aeda4a8572951",
         ),
         (
             "claude-opus-4-5",
-            27_518,
-            "3f3e136c3b3b9cf436272f9c8fa466aaffd747a88968cc9b96c6df3d112d44c0",
+            27_515,
+            "9d2bd6aa81cccd4678f9466acab5919bb41bb1e6193586b2115d9ba3c2d95148",
         ),
         (
             "claude-opus-4-6",
-            27_518,
-            "a91a49f61250a5f2615da21b720bba08799082801302757bcc776f64c6bf21d1",
+            27_515,
+            "7e171ab72e680671dea567ccf1d0ccac8bf9819cc43e7c14a59efe04914ce15f",
         ),
         (
             "claude-opus-4-7",
-            27_522,
-            "58ec2a8d3225884c5e4db49f0bed65c7031dade24412a8cc55350117745aa924",
+            27_519,
+            "50845105872aff4f4b83ef915563282748f1f61e4195f044c69197a0b107825a",
         ),
         (
             "claude-opus-4-8",
-            5_974,
-            "691b46144c6863808f1b0e2e8622aadd5caeaa906f1164a0e3a1b066e622a680",
+            5_971,
+            "5970d3bf23bf4e9a4363900e51ca5303ada519fd961441095992955d0465e0e1",
         ),
         (
             "claude-opus-5",
-            9_313,
-            "0ad0b8229d23dca7c0df4b9b05eb8b60a4beda0f34fbf519dc6dfb06e0348bc5",
+            9_301,
+            "b89957b3af9694a5bb371527e60dd963bf69913fe37456bb97afcff13a8c7438",
         ),
         (
             "claude-sonnet-4-6",
-            27_525,
-            "f650c78c8c31ebbefd261414917b0a321d86ab1cc906fb32c9e9302c4388f1e1",
+            27_522,
+            "c7c420b349e953a0ae832f675e98bf022300d2227f4e4a187de71f265da3dfeb",
         ),
         (
             "claude-sonnet-5",
-            27_522,
-            "ed97f8736e8d575ad31d77aa6b764bc315e7f6fdaac97bb1b0cf7dee32e17bd5",
+            27_519,
+            "3555fdf60684429183e0c2cd372f194e63db4e4cae28b24e95878a157b835a5d",
         ),
     ];
 
@@ -589,13 +620,13 @@ fn production_output_style_bodies_match_normalized_2_1_238_manifests() {
     let cases = [
         (
             "Explanatory",
-            10_324,
-            "74522c48054038c5dfbd1b82f9a2e9f2d5d54e9f8ff0ed78adbc18e26aea8de3",
+            10_312,
+            "3064865b24b6bf0f1e93efc45997b4ae5193b59828e40ea0c79bbc0445879b8c",
         ),
         (
             "Learning",
-            14_200,
-            "cd524867f55a13362a7e95caf0fa7d9932a07c37bc47a78cccbfd26e9069e6ad",
+            14_188,
+            "3b8cf74ef28ee660139815cee4aab374fe71af5549b9e932b6a6b39a17a48913",
         ),
     ];
 

@@ -73,7 +73,6 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "synthetic_output.rs" => Some("ui/src/synthetic_output.rs"),
         "skill.rs" => Some("skill/src/skill.rs"),
         "worktree.rs" => Some("worktree/src/worktree.rs"),
-        "team.rs" => Some("team/src/team.rs"),
         "lsp.rs" => Some("lsp/src/lsp_tool.rs"),
         "mcp.rs" => Some("mcp/src/mcp_tool.rs"),
         "agent.rs" => Some("agent/src/agent.rs"),
@@ -105,7 +104,6 @@ fn tool_files() -> Vec<&'static str> {
         "agent.rs",
         "task.rs", // 6 task tools
         "send_message.rs",
-        "team.rs",
         "mcp.rs", // MCP + McpAuth + ListMcpResources + ReadMcpResource
         "lsp.rs",
         "ask_user_question.rs",
@@ -119,6 +117,28 @@ fn tool_files() -> Vec<&'static str> {
         "remote_trigger.rs",
         "synthetic_output.rs",
     ]
+}
+
+/// Every path `tool_files()` names must still be on disk. Without this the
+/// list rots silently: `tools/team/src/team.rs` was deleted upstream and the
+/// suites below kept reading it, so both failed with a bare `read … No such
+/// file` that names the harness rather than the list that went stale.
+#[test]
+fn every_listed_tool_source_exists() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let missing: Vec<String> = tool_files()
+        .into_iter()
+        .filter(|file| !resolve_tool_src(&root, file).exists())
+        .map(|file| format!("{file} -> {}", resolve_tool_src(&root, file).display()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "tool_files() names sources that no longer exist; drop them or repoint the mapping:\n{}",
+        missing.join("\n")
+    );
 }
 
 #[test]

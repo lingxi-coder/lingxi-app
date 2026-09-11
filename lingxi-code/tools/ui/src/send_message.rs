@@ -448,14 +448,25 @@ impl SendMessageTool {
             let message = platform_api::live_sessions::outbound_peer_message(
                 &from_name, &from_sid, content, summary,
             );
-            // Keep the discovered session as the destination across remounts.
-            // The file inbox's polling latency avoids unacknowledged socket
-            // loss; sending through only this transport also prevents duplicates.
+            // See `coordinator::tool_send_message::route_live_session` for the
+            // two-transport contract: the inbox is the delivery of record and
+            // is keyed by the session discovery resolved; the socket is the
+            // best-effort wake-up that an idle peer actually hears. Both
+            // copies carry one `msg_id`, so the peer sees the message once.
             dir.send_inbox(peer.sid(), &message).map_err(|e| {
                 ToolError::Internal(format!(
                     "SendMessage: failed to deliver to live session inbox: {e}"
                 ))
             })?;
+            if let Some(sock) = peer
+                .messaging_socket_path
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+                .filter(|p| platform_api::uds_inbox::is_canonical_inbox_sock(p))
+            {
+                let _ = platform_api::uds_inbox::send_peer_message(&sock, &message, peer.sid());
+            }
             let subscribed = if notify_when_idle {
                 dir.append_idle_subscription(
                     peer.sid(),
@@ -1657,6 +1668,80 @@ mod tests {
         assert_eq!(queued[0].from, "lead");
         assert_eq!(queued[0].from_session_id, "self-session");
         assert_eq!(queued[0].summary.as_deref(), Some("later"));
+    }
+
+    /// Mirror of `coordinator::tool_send_message`'s live-socket case, for the
+    /// second production sender. `session_uuid_routes_to_live_session_inbox`
+    /// advertises a socket nobody answers, so it stays green with the socket
+    /// leg deleted; an idle peer would then never hear the message at all.
+    #[tokio::test]
+    async fn a_live_socket_wakes_the_peer_and_the_inbox_still_keeps_its_copy() {
+        let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let peer_session_id = "11111111-2222-3333-4444-555555555555";
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        platform_api::live_sessions::set_process_dir(dir.clone());
+        platform_api::live_sessions::set_process_session_id("self-session");
+        platform_api::live_sessions::set_process_name("lead");
+        std::fs::create_dir_all(dir.root()).unwrap();
+
+        // Stand in for the peer's listener, so the tool's canonical-socket gate
+        // admits it and the accept loop is actually running.
+        let socket = platform_api::uds_inbox::default_socket_path(std::process::id());
+        platform_api::uds_inbox::stop_process_inbox();
+        platform_api::uds_inbox::start_process_inbox_for_session(&socket, peer_session_id).unwrap();
+        std::fs::write(
+            dir.root().join(format!("{}.json", std::process::id())),
+            serde_json::to_vec(&serde_json::json!({
+                "pid": std::process::id(),
+                "sessionId": peer_session_id,
+                "name": "peer",
+                "kind": "interactive",
+                "startedAt": 0,
+                "status": "idle",
+                "messagingSocketPath": socket.to_string_lossy()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        tool.call(
+            json!({
+                "to": format!("session:{peer_session_id}"),
+                "summary": "wake up",
+                "message": "hello over the socket"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("session-id send succeeds");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut woken = Vec::new();
+        while std::time::Instant::now() < deadline {
+            woken = platform_api::uds_inbox::take_accepted_peer_reminders(false);
+            if !woken.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let inbox = dir.drain_inbox(peer_session_id).unwrap();
+        platform_api::uds_inbox::stop_process_inbox();
+
+        assert_eq!(woken.len(), 1, "an idle peer must be woken: {woken:?}");
+        assert!(woken[0].contains("hello over the socket"), "{woken:?}");
+        assert_eq!(
+            inbox.len(),
+            1,
+            "the durable copy must be written even when the socket answered"
+        );
+        assert_eq!(
+            platform_api::live_sessions::extract_cross_session_inner(&inbox[0].content),
+            "hello over the socket"
+        );
     }
 
     #[tokio::test]

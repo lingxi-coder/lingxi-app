@@ -1299,13 +1299,33 @@ pub fn send_to_live_peer(
 }
 
 /// Deliver a pre-built message over UDS without changing its stable id.
-pub fn send_peer_message(sock: &Path, message: &PeerMessage) -> io::Result<()> {
+///
+/// `discovered_session_id` is the session the CALLER resolved, which is not
+/// necessarily whoever owns `sock` by the time this runs: the inbox key is
+/// rewritten with a new `sessionId` on every remount. Stamping the caller's
+/// destination is what lets the receiver's fence refuse a payload aimed at a
+/// session that has since been replaced, instead of handing it to the new
+/// tenant. A generation that advertises no session binding predates the fence
+/// and refuses anything stamped, so leave the stamp off for one.
+///
+/// Delivery is not implied by `Ok`: the wire is one-way, so a fenced-out
+/// payload is dropped by the receiver with nothing reported back. Callers
+/// treat this as a wake-up on top of a durable transport, never as the
+/// delivery itself.
+pub fn send_peer_message(
+    sock: &Path,
+    message: &PeerMessage,
+    discovered_session_id: &str,
+) -> io::Result<()> {
     if !is_inbox_sock_path(sock) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "refusing to send on a non-inbox socket path",
         ));
     }
+    let peer_is_fenced = lookup_peer_key(sock)
+        .and_then(|key| key.session_id)
+        .is_some();
     let payload = UdsUserPayload {
         msg_v: MSG_V,
         msg_id: message
@@ -1323,7 +1343,7 @@ pub fn send_peer_message(sock: &Path, message: &PeerMessage) -> io::Result<()> {
             .clone()
             .or_else(process_uds_address)
             .unwrap_or_else(|| uds_address(Path::new("/"))),
-        to_session_id: lookup_peer_key(sock).and_then(|key| key.session_id),
+        to_session_id: peer_is_fenced.then(|| discovered_session_id.to_string()),
     };
     send_uds(sock, &payload)
 }
@@ -1690,8 +1710,11 @@ mod tests {
         let sender = std::thread::spawn(move || {
             // The real discovery result is retained across this scheduling gap.
             resume_rx.recv().unwrap();
-            // Both discovered-recipient production routes use this sole
-            // transport, retaining the destination from their discovery result.
+            // Both production senders write this transport unconditionally and
+            // key it by their discovery result, which is what keeps a remount
+            // from re-routing the message. Their socket leg is a separate
+            // best-effort wake-up, covered by
+            // `one_message_on_both_transports_is_delivered_once`.
             sender_dir.send_inbox(peer.sid(), &message).unwrap();
         });
         retarget_process_inbox("session-b").unwrap();
@@ -1713,6 +1736,110 @@ mod tests {
         assert_eq!(original.len(), 1);
         assert!(original[0].content.contains("for A"));
         stop_process_inbox();
+    }
+
+    /// The two production senders write both transports for one message, so
+    /// the peer must still see it once. Receive-time de-duplication keys on
+    /// `msg_id`, which the socket payload and the inbox row carry unchanged.
+    #[test]
+    fn one_message_on_both_transports_is_delivered_once() {
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        crate::live_sessions::set_process_dir(dir.clone());
+        crate::live_sessions::set_process_session_id("session-a");
+        let socket = temp.path().join("inbox.sock");
+        start_process_inbox_for_session(&socket, "session-a").unwrap();
+
+        let mut message =
+            crate::live_sessions::outbound_peer_message("sender", "source", "exactly once", None);
+        message.msg_id = Some("both-transports".into());
+
+        // The order the senders use: the durable copy first, then the wake-up.
+        dir.send_inbox("session-a", &message).unwrap();
+        send_peer_message(&socket, &message, "session-a").unwrap();
+
+        // This entry drains the file inbox into the same receive-time path the
+        // socket feeds, so a second copy would surface right here.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut got = Vec::new();
+        while Instant::now() < deadline {
+            got.extend(crate::live_sessions::take_accepted_peer_reminders(false));
+            if !got.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Whichever leg landed first, give the other one room to follow.
+        std::thread::sleep(Duration::from_millis(250));
+        got.extend(crate::live_sessions::take_accepted_peer_reminders(false));
+        let leftover = dir.drain_inbox("session-a").unwrap();
+        stop_process_inbox();
+        clean_env();
+        assert_eq!(got.len(), 1, "one message must arrive once: {got:?}");
+        assert!(got[0].contains("exactly once"), "{got:?}");
+        assert!(leftover.is_empty(), "the drain must consume the inbox row");
+    }
+
+    /// A payload stamped for the session the SENDER discovered is refused by a
+    /// generation that has since remounted, rather than handed to the new
+    /// tenant. The stamp has to come from the caller's discovery result: the
+    /// inbox key on disk is rewritten with the new `sessionId` at remount, so
+    /// reading the destination back off the key would address whoever owns the
+    /// socket now — exactly the mis-delivery this fence exists to stop.
+    #[test]
+    fn a_remounted_peer_refuses_a_payload_stamped_for_the_replaced_session() {
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        crate::live_sessions::set_process_dir(dir.clone());
+        crate::live_sessions::set_process_session_id("session-a");
+        let socket = temp.path().join("inbox.sock");
+        start_process_inbox_for_session(&socket, "session-a").unwrap();
+
+        // The peer remounts; its key on disk now advertises the new session.
+        retarget_process_inbox("session-b").unwrap();
+        crate::live_sessions::set_process_session_id("session-b");
+
+        let mut stale =
+            crate::live_sessions::outbound_peer_message("sender", "source", "meant for A", None);
+        stale.msg_id = Some("stamped-for-a".into());
+        send_peer_message(&socket, &stale, "session-a").unwrap();
+
+        // `Ok` above only says the bytes were written. Hold the assertion open
+        // well past the point an accepted payload would have surfaced.
+        let deadline = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < deadline {
+            let leaked = take_accepted_peer_reminders(false);
+            assert!(
+                leaked.is_empty(),
+                "a payload stamped for the replaced session reached the new one: {leaked:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Prove that emptiness is the fence and not a socket nobody is reading.
+        let mut fresh =
+            crate::live_sessions::outbound_peer_message("sender", "source", "meant for B", None);
+        fresh.msg_id = Some("stamped-for-b".into());
+        send_peer_message(&socket, &fresh, "session-b").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut got = Vec::new();
+        while Instant::now() < deadline {
+            got = take_accepted_peer_reminders(false);
+            if !got.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop_process_inbox();
+        clean_env();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("meant for B"), "{got:?}");
     }
 
     #[test]

@@ -10,6 +10,7 @@ enum VoiceHoldGesturePolicy {
 
 // MARK: - Composer (pill text field + model chip + attach + send/mic)
 struct Composer: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.theme) private var t
     @FocusState.Binding var inputFocused: Bool
     @Binding var model: ModelOption
@@ -211,7 +212,7 @@ struct Composer: View {
                 }
 
                 TextField("", text: $draft, prompt: Text("composer_placeholder").foregroundColor(t.text4), axis: .vertical)
-                    .font(.system(size: 15.5))
+                    .font(.scaledSystem(15.5, relativeTo: .body))
                     .foregroundStyle(t.text)
                     .lineLimit(1...5)
                     .focused($inputFocused)
@@ -227,6 +228,13 @@ struct Composer: View {
                         }
                     }
 
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 0) {
+                        modelChip
+                        controlsChip
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 HStack(spacing: 4) {
                     // Attach / camera: drives a real on-device capture through the
                     // same CameraImpl the engine bridges onto `traits::CameraControl`;
@@ -237,8 +245,10 @@ struct Composer: View {
                     }
                     .buttonStyle(ComposerActionButtonStyle())
                     .accessibilityLabel("composer_add_attachment")
-                    modelChip
-                    controlsChip
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        modelChip
+                        controlsChip
+                    }
                     Spacer()
                     if isCancelling || slashCommandPending {
                         ProgressView()
@@ -366,7 +376,7 @@ struct Composer: View {
         // raises the keyboard over exactly the space a popover above the
         // composer would occupy, and the system sizes a sheet against the
         // keyboard for us.
-        .sheet(isPresented: $modelOpen) {
+        .fullScreenCover(isPresented: $modelOpen) {
             ModelPickerSheet(
                 availableModels: availableModels,
                 detailsByReference: availableModelDetails,
@@ -378,7 +388,7 @@ struct Composer: View {
                 },
                 onDismiss: { modelOpen = false })
         }
-        .sheet(isPresented: $controlsOpen) {
+        .fullScreenCover(isPresented: $controlsOpen) {
             ConversationControlsSheet(
                 reasoningSelection: reasoningSelection,
                 reasoningOptions: reasoningOptions,
@@ -498,7 +508,8 @@ struct Composer: View {
         Button { modelOpen = true } label: {
             HStack(spacing: 5) {
                 Circle().fill(chipColor).frame(width: 6, height: 6)
-                Text(chipLabel).font(.system(size: 12, weight: .medium))
+                Text(chipLabel).font(.scaledSystem(12, weight: .medium, relativeTo: .caption))
+                    .lineLimit(1)
                 LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 2)
             }
             .foregroundColor(t.text2)
@@ -509,6 +520,8 @@ struct Composer: View {
         }
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(availableModels.isEmpty)
+        .accessibilityLabel("composer_select_model")
+        .accessibilityValue(chipLabel)
         .accessibilityIdentifier("composer.model")
     }
 
@@ -519,7 +532,8 @@ struct Composer: View {
                 Text("·")
                 Text(effectivePermissionMode != permissionMode ? "\(permissionMode) → \(effectivePermissionMode)" : permissionMode)
             }
-            .font(.system(size: 11.5, weight: .medium))
+            .font(.scaledSystem(11.5, weight: .medium, relativeTo: .caption))
+            .lineLimit(1)
             .foregroundStyle(t.text2)
             .padding(.horizontal, 8)
             .frame(minHeight: 40)
@@ -528,7 +542,8 @@ struct Composer: View {
         }
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(controlsPending)
-        .accessibilityLabel("composer.controls")
+        .accessibilityLabel("Model, reasoning and permissions")
+        .accessibilityValue("\(reasoningSelection), \(effectivePermissionMode)")
         .accessibilityIdentifier("composer.controls")
     }
 
@@ -608,6 +623,8 @@ private struct ComposerActionButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(.rect)
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
             .opacity(configuration.isPressed ? 0.86 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)

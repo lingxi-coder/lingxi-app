@@ -3,6 +3,7 @@ import SwiftUI
 // MARK: - Settings page identity (the prototype's `stack` of `{id, ...}`)
 enum SettingsPage: Hashable {
     case main, account
+    case general, customProviders, fusion, permissions, toolsAgent, hooks, plugins, diagnostics, about, archivedChats, projectsTrust
     case providerList(ProviderKindBox)
     case providerPicker(ProviderKindBox)
     case providerEdit(ProviderKindBox, String)
@@ -36,6 +37,9 @@ struct SettingsHost: View {
     @Bindable var localAppsStore: LocalAppsStore
     /// Active project root used to read/write the engine's project `.mcp.json`.
     var projectCwd: String? = nil
+    var projectStore: ProjectStore? = nil
+    /// Supplied by the root only when it can rebuild an idle engine safely.
+    var onReconnectAfterSecretChange: (() async throws -> Void)? = nil
     @State private var providerRepository = ProviderRepository.shared
     /// Pull the real MCP listing from the engine (`RefreshListings(.mcp)`).
     var onRefreshMcp: () -> Void = {}
@@ -99,12 +103,24 @@ struct SettingsHost: View {
     }
 
     var body: some View {
-        NavigationStack(path: $navigation.settingsPath) {
-            navigationPage(for: .main)
-                .navigationDestination(for: SettingsPage.self) { page in
-                    navigationPage(for: page)
+        GeometryReader { geometry in
+            if geometry.size.width >= 840 {
+                HStack(spacing: 0) {
+                    NavigationStack {
+                        navigationPage(for: .main)
+                    }
+                    .frame(width: 280)
+                    Divider()
+                    NavigationStack {
+                        navigationPage(for: navigation.settingsPath.last ?? .general)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
+            } else {
+                compactNavigation
+            }
         }
+        .task { await DesktopSettingsRepository.shared.refresh() }
         .background(t.windowBg)
         // Settings controls draw their own cards and fills. Avoid the automatic
         // tinted capsule that newer iOS versions add around custom labels.
@@ -173,6 +189,16 @@ struct SettingsHost: View {
         .accessibilityIdentifier("settings.root")
     }
 
+
+    private var compactNavigation: some View {
+        NavigationStack(path: $navigation.settingsPath) {
+            navigationPage(for: .main)
+                .navigationDestination(for: SettingsPage.self) { page in
+                    navigationPage(for: page)
+                }
+        }
+    }
+
     private func syncMcpServers(_ servers: [MCPServer]) {
         let configured = Dictionary(
             uniqueKeysWithValues: mcpRepository.loadServers(projectCwd: projectCwd).map { ($0.id, $0) }
@@ -195,11 +221,25 @@ struct SettingsHost: View {
 
     private func pageContent(for page: SettingsPage) -> some View {
         ScrollView(showsIndicators: false) {
-            SettingsPages(store: store, host: self, page: page)
+            VStack(alignment: .leading, spacing: 16) {
+                if showsEngineApplyAction(page) {
+                    SettingsApplyChangesBanner(reconnect: onReconnectAfterSecretChange)
+                }
+                SettingsPages(store: store, host: self, page: page)
+            }
                 .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 28)
         }
         .id(pageKey(for: page))
         .transition(.opacity)
+    }
+
+    private func showsEngineApplyAction(_ page: SettingsPage) -> Bool {
+        switch page {
+        case .main, .customProviders, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .diagnostics, .projectsTrust, .account:
+            true
+        case .providerList(let kind): kind.kind == .llm
+        default: false
+        }
     }
 
     private func navigationPage(for page: SettingsPage) -> some View {
@@ -240,7 +280,7 @@ struct SettingsHost: View {
     }
 
     private func pageKey(for page: SettingsPage) -> String {
-        "\(navigation.settingsPath.count)-\(title(of: page))"
+        page == .main ? "main" : "\(navigation.settingsPath.count)-\(title(of: page))"
     }
 
     private func handleDone(for page: SettingsPage) {
@@ -334,6 +374,17 @@ struct SettingsHost: View {
         switch page {
         case .main: return String(localized: "settings_title_main")
         case .account: return String(localized: "settings_title_account")
+        case .general: return String(localized: "settings_parity_general")
+        case .customProviders: return String(localized: "settings_parity_custom_providers")
+        case .fusion: return String(localized: "settings_parity_fusion")
+        case .permissions: return String(localized: "settings_parity_permissions")
+        case .toolsAgent: return String(localized: "settings_parity_tools_agent")
+        case .hooks: return String(localized: "settings_parity_hooks")
+        case .plugins: return String(localized: "settings_parity_plugins")
+        case .diagnostics: return String(localized: "settings_parity_diagnostics")
+        case .about: return String(localized: "settings_section_about")
+        case .archivedChats: return String(localized: "settings_parity_archived")
+        case .projectsTrust: return String(localized: "settings_parity_projects_trust")
         case .providerList(let b): return b.kind.title
         case .providerPicker(let b):
             return b.kind == .llm ? String(localized: "settings_title_add_llm")
@@ -357,7 +408,7 @@ struct SettingsHost: View {
         case .privacy: return String(localized: "settings_data_privacy")
         case .permissionMode: return "权限模式"
         case .typescriptLsp: return "TypeScript LSP"
-        case .skills: return "Skills"
+        case .skills: return String(localized: "settings_title_skills")
         case .skillDetail(let id): return store.skills.first(where: { $0.id == id })?.name ?? "Skill"
         case .localAppPlugin: return String(localized: "local_apps_plugin_title")
         case .mcpList: return String(localized: "settings_mcp_servers")

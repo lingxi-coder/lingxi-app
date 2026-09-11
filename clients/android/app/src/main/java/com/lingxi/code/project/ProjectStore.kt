@@ -118,12 +118,21 @@ class ProjectStore private constructor(
         sessionId: String,
         title: String,
         mode: com.lingxi.code.model.SessionMode = com.lingxi.code.model.SessionMode.Code,
+        initialMessageCount: Int = 0,
     ) {
         withContext(Dispatchers.IO) {
             repositoryMutex.withLock {
                 publishRepositoryState(
-                    repository.recordStartedSession(projectId, sessionId, title, mode),
+                    repository.recordStartedSession(projectId, sessionId, title, mode, initialMessageCount),
                 )
+            }
+        }
+    }
+
+    suspend fun setSessionArchived(projectId: String?, sessionId: String, archived: Boolean) {
+        withContext(Dispatchers.IO) {
+            repositoryMutex.withLock {
+                publishRepositoryState(repository.setSessionArchived(projectId, sessionId, archived))
             }
         }
     }

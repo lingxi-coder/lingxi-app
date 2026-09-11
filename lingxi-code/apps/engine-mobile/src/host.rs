@@ -33,6 +33,9 @@
 //! `Platform` (`platform-ios` / `platform-android`) is `cfg(target_os)`-gated in
 //! `Cargo.toml`, so this module never names a device crate.
 
+mod settings_commands;
+mod configuration_admin;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -2431,6 +2434,64 @@ fn resolve_default_model_ref(
 
 const MOBILE_ENABLED_PROFILES_KEY: &str = "mobileEnabledProfiles";
 
+/// File-backed settings override legacy native launch defaults using the same
+/// field merge rules as desktop. Explicit file profiles remain selectable even
+/// when an older native launcher sends its own profile allowlist.
+fn mobile_provider_settings(
+    cfg: &MobileConfig,
+) -> Result<lingxi_core::settings::SettingsJson, lingxi_core::settings::SettingsError> {
+    use lingxi_core::settings::{
+        FileLayerScope, LoadInputs, Settings, SettingsJson, SupplementalLayers,
+    };
+
+    let env = std::env::vars().collect();
+    let layered = Settings::load_with_layers_from_user_path(
+        LoadInputs {
+            env: &env,
+            project_dir: &cfg.cwd,
+            defaults: SettingsJson::default(),
+        },
+        FileLayerScope::ALL,
+        SupplementalLayers::default(),
+        Some(&cfg.lingxi_home.join("settings.json")),
+    )?
+    .settings;
+    let explicit_allowlist = layered
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.get(MOBILE_ENABLED_PROFILES_KEY))
+        .is_some();
+    let file_profiles: Vec<String> = layered
+        .providers
+        .as_ref()
+        .map(|providers| providers.keys().cloned().collect())
+        .unwrap_or_default();
+    let mut merged = lingxi_core::settings::merger::merge(
+        SettingsJson {
+            providers: cfg.provider_profiles.clone(),
+            routing: cfg.routing.clone(),
+            ..SettingsJson::default()
+        },
+        layered,
+    );
+    if !explicit_allowlist {
+        if let Some(enabled) = merged
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.get_mut(MOBILE_ENABLED_PROFILES_KEY))
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for profile in file_profiles {
+                let value = serde_json::Value::String(profile);
+                if !enabled.contains(&value) {
+                    enabled.push(value);
+                }
+            }
+        }
+    }
+    Ok(merged)
+}
+
 /// Apply the mobile host's explicit provider profile allowlist after shared
 /// provider assembly and before any model catalog or client is constructed.
 ///
@@ -3003,6 +3064,8 @@ async fn build_mobile_inner_with_ask(
     ask_user_question_tx: Option<tokio::sync::mpsc::Sender<tool_ui::AskUserQuestionExchange>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let cwd = cfg.cwd.clone();
+    settings_commands::prepare_mobile_mcp_storage(&cfg.lingxi_home)
+        .map_err(|error| MobileBuildError::Orchestrator(format!("MCP settings migration: {error}")))?;
     // Resolve all platform handles before constructing or connecting the MCP
     // registry. This is intentionally a preflight boundary: an OAuth config
     // must be rejected before any remote dial (or plaintext credential access)
@@ -3076,7 +3139,7 @@ async fn build_mobile_inner_with_ask(
     let configured_mcp = mobile_mcp_preflight(
         mcp::load_mcp_servers(
             &cwd.join(".mcp.json"),
-            &cfg.lingxi_home.join("settings.json"),
+            &cfg.lingxi_home.join("mcp-config.json"),
             &cwd,
         ),
         oauth_supported,
@@ -3293,17 +3356,21 @@ async fn build_mobile_inner_with_ask(
     let stored_anthropic_key = credentials.get_anthropic_api_key().await.ok().flatten();
     let has_api_key = !cfg.api_key.trim().is_empty() || stored_anthropic_key.is_some();
     let has_anthropic_oauth = anthropic_oauth_state.is_some();
+    let provider_settings = mobile_provider_settings(&cfg)
+        .map_err(|error| MobileBuildError::Orchestrator(format!("provider settings: {error}")))?;
+    let vision_delegation_enabled = provider_settings.vision_delegation_enabled
+        .unwrap_or(cfg.vision_delegation_enabled);
     let mut assembled = provider_config::assemble(provider_config::AssembleInputs {
         anthropic_api_base: cfg.api_base.clone(),
         anthropic_models: anthropic_models(&cfg.default_model),
         anthropic_has_api_key: has_api_key,
         anthropic_has_oauth: has_anthropic_oauth,
-        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
-        routing: cfg.routing.clone(),
+        user_providers: provider_settings.providers.unwrap_or_default(),
+        routing: provider_settings.routing.clone(),
     });
     let full_provider_model_catalog =
         provider_model_catalog_from_listings(&model_listings(&assembled.client_config.providers));
-    apply_mobile_profile_allowlist(&mut assembled, cfg.routing.as_ref());
+    apply_mobile_profile_allowlist(&mut assembled, provider_settings.routing.as_ref());
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly (mobile)");
     }
@@ -3507,7 +3574,7 @@ async fn build_mobile_inner_with_ask(
             api_service.clone(),
             default_model_id.clone(),
             default_model_profile.clone(),
-            cfg.vision_delegation_enabled,
+            vision_delegation_enabled,
         )
         .with_cost_tracking(cost_tracker.clone(), api_calls_recorded.clone()),
     )));
@@ -3531,6 +3598,15 @@ async fn build_mobile_inner_with_ask(
         &cfg.lingxi_home.join("settings.json"),
     );
     let mut orch_cfg = OrchestratorConfig::default();
+    orch_cfg.output_style = provider_settings.output_style.clone();
+    orch_cfg.output_style_dirs = vec![
+        cfg.lingxi_home.join("output-styles"),
+        cfg.cwd.join(branding::DOT_DIR).join("output-styles"),
+    ];
+    platform_api::session_flags::set_show_thinking_summaries(
+        provider_settings.show_thinking_summaries.unwrap_or(false),
+    );
+    platform_api::session_flags::set_task_output_max_chars(provider_settings.task_output_max_chars);
     // Mobile is a transport host, not the CLI REPL. Keep main-query telemetry
     // on Claude Code's SDK source and never mark it as `--print`.
     orch_cfg.query_source = orchestrator::QUERY_SOURCE_SDK.to_string();
@@ -4637,6 +4713,17 @@ async fn build_mobile_inner_with_ask(
     // `wired_plugin_manager.enable(..)` to prove the registries are shared by
     // identity, not merely seeded with equal content — that property does not
     // depend on which plugin is registered.
+    // Share Desktop's canonical layer merge and userConfig/secure-secret resolver.
+    // File-backed plugin changes take effect when the native client reconnects.
+    let plugin_settings = mobile_provider_settings(&cfg)
+        .map_err(|error| MobileBuildError::Orchestrator(format!("plugin settings: {error}")))?;
+    let plugin_settings_value = serde_json::to_value(&plugin_settings)
+        .map_err(|error| MobileBuildError::Orchestrator(format!("plugin settings: {error}")))?;
+    let plugin_configs = plugin_settings_value.as_object()
+        .map(plugin::PluginUserConfig::from_settings_map).unwrap_or_default();
+    let enabled_plugins: std::collections::BTreeMap<String,bool> = plugin_settings.enabled_plugins
+        .as_ref().into_iter().flat_map(|values| values.iter())
+        .filter_map(|(name,value)| value.as_bool().map(|enabled| (name.clone(),enabled))).collect();
     let plugin_agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
         tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
     );
@@ -4658,6 +4745,10 @@ async fn build_mobile_inner_with_ask(
             Arc::new(RwLock::new(ToolRegistry::new())),
         )
         .with_agent_catalog(plugin_agent_catalog.clone())
+        .with_plugin_configs(plugin_configs)
+        .with_blocked_marketplaces(plugin_settings.blocked_marketplaces.clone().unwrap_or_default())
+        .with_project_dir(cwd.clone())
+        .with_task_registry(task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>)
         .with_plugin_workflows(plugin_workflow_registry.clone()),
     );
     // Audit fix (#14): wire the mobile Skill tool to the SAME live registry the
@@ -5000,7 +5091,7 @@ async fn build_mobile_inner_with_ask(
     // exposes it for inspection — mobile sibling of desktop's
     // `.with_hook_registry(hook_registry)`).
     .with_hook_registry(hook_registry)
-    .with_vision_delegation(cfg.vision_delegation_enabled)
+    .with_vision_delegation(vision_delegation_enabled)
     // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
     // carry a deterministically-computed `transcript_path` (claude-code
     // `getTranscriptPathForSession`) even though no `JsonlWriter` is wired —
@@ -5226,20 +5317,10 @@ async fn build_mobile_inner_with_ask(
     // compiled-in bundle. A disabled boot keeps its inventory/status available
     // from compiled metadata but performs no bundle filesystem work; enabling
     // later takes the existing verified materialization + registration path.
-    let settings_path = cfg.lingxi_home.join("settings.json");
-    let enabled = match mobile_builtin_plugin_enabled(
-        &settings_path,
+    let enabled = mobile_builtin_plugin_enabled_from_settings(
+        &plugin_settings,
         crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
-    ) {
-        Ok(enabled) => enabled,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "invalid mobile builtin plugin setting; using manifest default"
-            );
-            crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED
-        }
-    };
+    );
     if enabled {
         // The plugin manager writes into this shared Arc; registering earlier
         // would be overwritten by the composition-root assignment above and
@@ -5260,6 +5341,18 @@ async fn build_mobile_inner_with_ask(
         }
     } else {
         tracing::debug!("mobile builtin plugin disabled; deferring bundle materialization");
+    }
+    // Recorded installs are the same canonical manifests used by Desktop.
+    // Register after the command registry assignment so materialized commands
+    // and skills remain visible to the live dispatcher. Discovery resolves
+    // dependency order and manifest defaultEnabled, while explicit layer values win.
+    for (id, manifest, install_dir) in plugin::discover_effective_plugins(
+        &cfg.lingxi_home.join("plugins"), &enabled_plugins,
+    ).await {
+        if manifest.name == crate::MOBILE_BUILTIN_PLUGIN_NAME { continue; }
+        if let Err(error) = plugin_manager.enable(&id, manifest, install_dir).await {
+            tracing::warn!(%error,"installed mobile plugin could not be loaded");
+        }
     }
     // r2-critic-1 (coverage half): the agent-facing `LocalAppCreate` MCP tool
     // is a SECOND live create entry point — it never enters
@@ -5475,6 +5568,7 @@ pub enum MobileEngineError {
 /// commands and drives the turn on the owned runtime.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
+    settings: Option<::configuration_admin::settings_bridge::SettingsContext>,
     task_notification_watcher: tokio::task::AbortHandle,
     /// The handle-owned multi-thread tokio runtime. Owned (not borrowed) so the
     /// engine outlives any single FFI call and F3-05's `submit(SendPrompt)` can
@@ -5737,8 +5831,21 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Resolve the mobile builtin's persisted `enabledPlugins` override. Missing
-/// files, missing maps and a missing key all mean "use manifest default".
+/// Resolve activation from the same canonical layer snapshot used at mobile boot.
+fn mobile_builtin_plugin_enabled_from_settings(
+    settings: &lingxi_core::settings::SettingsJson,
+    manifest_default_enabled: bool,
+) -> bool {
+    settings
+        .enabled_plugins
+        .as_ref()
+        .and_then(|plugins| plugins.get(crate::MOBILE_BUILTIN_PLUGIN_NAME))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(manifest_default_enabled)
+}
+
+/// Legacy user-file parser retained to verify compatibility with existing payloads.
+#[cfg(test)]
 fn mobile_builtin_plugin_enabled(
     settings_path: &std::path::Path,
     manifest_default_enabled: bool,
@@ -7575,11 +7682,12 @@ impl MobileEngineHandle {
                 message: "mobile builtin plugin is not in a stable activation state".into(),
             }),
             None => {
-                let enabled = mobile_builtin_plugin_enabled(
-                    &self.lingxi_home.join("settings.json"),
+                let settings = mobile_provider_settings(&self.firer_cfg)
+                    .map_err(|error| ClientError::Internal { message: error.to_string() })?;
+                let enabled = mobile_builtin_plugin_enabled_from_settings(
+                    &settings,
                     crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
-                )
-                .map_err(|error| ClientError::Internal { message: error })?;
+                );
                 if enabled {
                     Err(ClientError::Internal {
                         message: "mobile builtin plugin bundle is unavailable".into(),
@@ -9072,6 +9180,47 @@ impl MobileEngineHandle {
                 }
                 let after = self.capture_slash_authority().await;
                 self.emit_slash_authority_changes(&before, &after).await;
+                Ok(())
+            }
+
+            ClientCommand::UpdateSettings { destination, patch_json } => {
+                self.apply_settings_patch(destination, &patch_json, self.connection_sink.as_ref()).await;
+                Ok(())
+            }
+            ClientCommand::UpdatePermissionRules { destination, behavior, add, remove } => {
+                self.apply_permission_rule_update(destination, behavior, add, remove, self.connection_sink.as_ref()).await;
+                Ok(())
+            }
+            ClientCommand::SetDefaultPermissionMode { destination, mode } => {
+                self.apply_default_permission_mode(destination, mode, self.connection_sink.as_ref()).await;
+                Ok(())
+            }
+            ClientCommand::UpdateWorkspaceDirectories { destination, add, remove } => {
+                self.apply_workspace_directories_update(destination, add, remove, self.connection_sink.as_ref()).await;
+                Ok(())
+            }
+            ClientCommand::UpsertMcpServer { scope, name, config_json } => {
+                self.apply_mobile_mcp_write(scope, &name, Some(&config_json)).await;
+                Ok(())
+            }
+            ClientCommand::RemoveMcpServer { scope, name } => {
+                self.apply_mobile_mcp_write(scope, &name, None).await;
+                Ok(())
+            }
+            ClientCommand::SkillAdmin { command } => {
+                self.apply_skill_admin(command, self.connection_sink.as_ref()).await;
+                Ok(())
+            }
+            ClientCommand::McpAdmin { command } => {
+                self.apply_mcp_admin(command, self.connection_sink.as_ref()).await;
+                Ok(())
+            }
+            ClientCommand::PluginAdmin { command } => {
+                self.apply_plugin_admin(command, self.connection_sink.as_ref()).await;
+                Ok(())
+            }
+            ClientCommand::HookAdmin { command } => {
+                self.apply_hook_admin(command, self.connection_sink.as_ref()).await;
                 Ok(())
             }
 
@@ -10743,6 +10892,7 @@ impl MobileEngineHandle {
         };
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
         match kind {
+            ProtocolListingKind::Settings => self.emit_settings_snapshot(self.connection_sink.as_ref()).await,
             ProtocolListingKind::Models => {
                 self.event_sink
                     .emit(ClientEvent::ProviderModelCatalog {
@@ -10870,7 +11020,7 @@ impl MobileEngineHandle {
         let configured = mobile_mcp_preflight(
             mcp::load_mcp_servers(
                 &cwd.join(".mcp.json"),
-                &self.lingxi_home.join("settings.json"),
+                &self.lingxi_home.join("mcp-config.json"),
                 &cwd,
             ),
             self.inner.oauth_supported,
@@ -12969,7 +13119,19 @@ pub fn build_mobile_engine_inner(
             })
             .abort_handle()
     };
+    let settings_paths = ::configuration_admin::settings_bridge::SettingsPaths {
+        lingxi_home: lingxi_home.clone(),
+        project_dir: std::path::PathBuf::from(&session_cwd),
+    };
+    let managed = std::collections::BTreeMap::new();
+    let active = ::configuration_admin::settings_bridge::active_settings_baseline(&settings_paths, &managed);
+    let settings = Some(::configuration_admin::settings_bridge::SettingsContext {
+        paths: settings_paths,
+        active: Arc::new(std::sync::RwLock::new(active)),
+        managed,
+    });
     let handle = Arc::new(MobileEngineHandle {
+        settings,
         task_notification_watcher,
         runtime,
         inner,
@@ -16963,7 +17125,7 @@ mod tests {
     fn mobile_mcp_reload_pending_generations_are_nonblocking_and_cas_guarded() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = test_config(tmp.path());
-        let settings_path = cfg.lingxi_home.join("settings.json");
+        let settings_path = cfg.lingxi_home.join("mcp-config.json");
         std::fs::create_dir_all(&cfg.lingxi_home).expect("create mobile home");
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
         let old_config = McpServerConfig {
@@ -22261,6 +22423,106 @@ mod mobile_provider_allowlist_tests {
     use serde_json::{json, Value};
 
     use super::{anthropic_models, apply_mobile_profile_allowlist};
+
+    #[test]
+    fn file_provider_settings_override_launch_defaults_and_enable_new_profiles() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("project");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            json!({
+                "providers": {"alpha": {"baseUrl": "https://user.example/v1"},
+                    "beta": {"type": "openai", "baseUrl": "https://beta.example/v1",
+                        "models": [{"id": "model-b"}]}},
+                "routing": {"aliases": {"selected": "beta/model-b"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            json!({
+                "providers": {"alpha": {"baseUrl": "https://project.example/v1"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            json!({
+                "providers": {"alpha": {"baseUrl": "https://local.example/v1"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let cfg = super::MobileConfig {
+            cwd,
+            lingxi_home: home,
+            provider_profiles: Some(BTreeMap::from([
+                (
+                    "alpha".into(),
+                    json!({"type":"openai", "baseUrl":"https://legacy.example/v1",
+                    "models":[{"id":"model-a"}]}),
+                ),
+                ("legacy".into(), json!({"type":"openai"})),
+            ])),
+            routing: Some(json!({"mobileEnabledProfiles":["alpha"],
+                "aliases":{"selected":"alpha/model-a", "retained":"alpha/model-a"}})),
+            ..Default::default()
+        };
+        let settings = super::mobile_provider_settings(&cfg).unwrap();
+        let profiles = settings.providers.unwrap();
+        assert_eq!(profiles["alpha"]["baseUrl"], "https://local.example/v1");
+        assert_eq!(profiles["alpha"]["models"][0]["id"], "model-a");
+        assert!(profiles.contains_key("legacy"));
+        let routing = settings.routing.unwrap();
+        assert_eq!(routing["aliases"]["selected"], "beta/model-b");
+        assert_eq!(routing["aliases"]["retained"], "alpha/model-a");
+        assert_eq!(routing["mobileEnabledProfiles"], json!(["alpha", "beta"]));
+        let mut assembled = provider_config::assemble(provider_config::AssembleInputs {
+            anthropic_api_base: cfg.api_base,
+            anthropic_models: anthropic_models(&cfg.default_model),
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers: profiles,
+            routing: Some(routing.clone()),
+        });
+        apply_mobile_profile_allowlist(&mut assembled, Some(&routing));
+        assert!(assembled
+            .client_config
+            .providers
+            .iter()
+            .any(|p| p.profile_name == "beta"));
+        assert_eq!(assembled.chains.aliases["selected"], "beta/model-b");
+    }
+
+    #[test]
+    fn explicit_file_allowlist_remains_authoritative() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("settings.json"),
+            json!({
+                "providers": {"new": {"type": "openai"}},
+                "routing": {"mobileEnabledProfiles": []}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let cfg = super::MobileConfig {
+            cwd: temp.path().join("project"),
+            lingxi_home: temp.path().to_path_buf(),
+            routing: Some(json!({"mobileEnabledProfiles": ["legacy"]})),
+            ..Default::default()
+        };
+        let settings = super::mobile_provider_settings(&cfg).unwrap();
+        assert_eq!(
+            settings.routing.unwrap()["mobileEnabledProfiles"],
+            json!([])
+        );
+    }
 
     fn assembled(routing: Option<Value>) -> provider_config::Assembled {
         let user_providers = BTreeMap::from([

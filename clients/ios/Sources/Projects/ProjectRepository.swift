@@ -151,15 +151,27 @@ final class ProjectRepository: @unchecked Sendable {
     }
 
     func updateSessions(projectId: String?, sessions: [ProjectSessionSummary]) throws -> ProjectRepositoryState {
-        let normalized = sessions
+        let existing = try projectId.map { try loadProject(id: $0).sessions } ?? load().globalSessions
+        let incoming = sessions
             .filter { !$0.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .map { row in
                 var row = row
                 row.sessionId = canonicalSessionID(row.sessionId)
+                let cached = existing.first(where: { $0.sessionId == row.sessionId })
+                if let cached, cached.pendingCatalogConfirmation, row.messageCount < cached.messageCount {
+                    return cached
+                }
+                row.isArchived = cached?.isArchived ?? false
+                row.pendingCatalogConfirmation = false
                 return row
             }
             .uniqued(on: \.sessionId)
             .sorted { $0.updatedAt > $1.updatedAt }
+        let incomingIDs = Set(incoming.map(\.sessionId))
+        // Keep unacknowledged starts and archive metadata across stale engine lists.
+        let normalized = (incoming + existing.filter {
+            !incomingIDs.contains($0.sessionId) && ($0.pendingCatalogConfirmation || $0.isArchived)
+        }).sorted { $0.updatedAt > $1.updatedAt }
         if let projectId {
             try validateProjectID(projectId)
             try writeSessions(projectId: projectId, sessions: normalized)
@@ -178,7 +190,8 @@ final class ProjectRepository: @unchecked Sendable {
         projectId: String?,
         sessionId: String,
         title: String,
-        mode: SessionMode = .code
+        mode: SessionMode = .code,
+        initialMessageCount: Int = 0
     ) throws -> ProjectRepositoryState {
         let canonicalID = canonicalSessionID(sessionId)
         guard !canonicalID.isEmpty else { throw ProjectRepositoryError.invalidSessionID }
@@ -189,10 +202,13 @@ final class ProjectRepository: @unchecked Sendable {
         let started = ProjectSessionSummary(
             sessionId: canonicalID,
             title: title.isEmpty ? (existing?.title ?? String(localized: "chat_new_conversation")) : title,
-            messageCount: existing?.messageCount ?? 0,
+            messageCount: max(existing?.messageCount ?? 0, initialMessageCount),
             relativeTime: String(localized: "project_relative_time_just_now"),
             updatedAt: timestamp,
-            mode: existing?.mode ?? mode
+            mode: existing?.mode ?? mode,
+            isArchived: existing?.isArchived ?? false,
+            pendingCatalogConfirmation: (existing?.pendingCatalogConfirmation ?? true) ||
+                initialMessageCount > (existing?.messageCount ?? 0)
         )
         let updated = ([started] + sessions.filter { $0.sessionId != canonicalID })
         if let projectId {
@@ -200,6 +216,28 @@ final class ProjectRepository: @unchecked Sendable {
             if let snapshot {
                 try writeProject(snapshot.record.with(updatedAt: timestamp, lastActiveSessionId: canonicalID))
             }
+        } else {
+            try writeSessionIndex(updated, to: projectsRoot.appendingPathComponent(globalSessionIndexFileName))
+        }
+        return load()
+    }
+
+    func setSessionArchived(projectId: String?, sessionId: String, archived: Bool) throws -> ProjectRepositoryState {
+        let canonicalID = canonicalSessionID(sessionId)
+        let sessions = try projectId.map { try loadProject(id: $0).sessions } ?? load().globalSessions
+        guard sessions.contains(where: { $0.sessionId == canonicalID }) else {
+            throw ProjectRepositoryError.sessionNotIndexed
+        }
+        let updated = sessions.map { row in
+            var row = row
+            if row.sessionId == canonicalID {
+                row.pendingCatalogConfirmation = row.pendingCatalogConfirmation || (row.isArchived && !archived)
+                row.isArchived = archived
+            }
+            return row
+        }
+        if let projectId {
+            try writeSessions(projectId: projectId, sessions: updated)
         } else {
             try writeSessionIndex(updated, to: projectsRoot.appendingPathComponent(globalSessionIndexFileName))
         }
@@ -441,10 +479,10 @@ func isSafeRelativePath(_ value: String) -> Bool {
 }
 
 func canonicalSessionID(_ value: String) -> String {
-    if value.hasPrefix("sess:") {
-        return String(value.dropFirst("sess:".count))
-    }
-    return value
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    let candidate = trimmed.hasPrefix("sess:") ? String(trimmed.dropFirst("sess:".count)) : trimmed
+    if let uuid = UUID(uuidString: candidate) { return uuid.uuidString.lowercased() }
+    return candidate
 }
 
 func requireCanonicalDirectory(_ url: URL) throws -> URL {

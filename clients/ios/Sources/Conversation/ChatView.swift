@@ -80,12 +80,6 @@ struct ChatView: View {
         let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
         ZStack {
             t.windowBg.ignoresSafeArea()
-            // Ambient radial glow at the top.
-            RadialGradient(colors: [t.ambient.top, t.ambient.bottom],
-                           center: .init(x: 0.5, y: 0), startRadius: 0, endRadius: 360)
-                .allowsHitTesting(false)
-                .ignoresSafeArea()
-
             VStack(spacing: 0) {
                 // Offline banner: shown only while the device is offline. Sits
                 // above the transcript so it's visible without obscuring the
@@ -338,6 +332,8 @@ struct ChatView: View {
                 if visibleRenderItems.isEmpty, !convo.streaming, convo.isNew { emptyState }
                 ConversationTimelineView(
                     groups: groups,
+                    liveToolIDs: convo.liveTranscriptToolIDs,
+                    hasLiveOwner: convo.hasLiveTranscriptOwner,
                     messageDetails: visibleMessageDetails,
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
@@ -352,6 +348,8 @@ struct ChatView: View {
             } else if !visibleRenderItems.isEmpty {
                 ConversationTimelineView(
                     groups: groups,
+                    liveToolIDs: convo.liveTranscriptToolIDs,
+                    hasLiveOwner: convo.hasLiveTranscriptOwner,
                     messageDetails: visibleMessageDetails,
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
@@ -749,11 +747,7 @@ struct ChatView: View {
     /// row: this list recycles its rows, so row-local state is lost on scroll
     /// and would then reappear on whichever row reused the storage.
     private func toggleToolCall(_ id: String) {
-        if convo.expandedToolCalls.contains(id) {
-            convo.expandedToolCalls.remove(id)
-        } else {
-            convo.expandedToolCalls.insert(id)
-        }
+        convo.toggleTranscriptDisclosure(id)
     }
 
     private func newChat() {

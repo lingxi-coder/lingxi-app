@@ -57,6 +57,8 @@ data class ProjectSessionSummary(
     val relativeTime: String,
     val updatedAtEpochMillis: Long,
     val mode: SessionMode = SessionMode.Code,
+    val isArchived: Boolean = false,
+    val pendingCatalogConfirmation: Boolean = false,
 )
 
 data class ProjectSyncFile(

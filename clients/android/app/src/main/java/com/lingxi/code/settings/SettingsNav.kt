@@ -2,28 +2,32 @@ package com.lingxi.code.settings
 
 import com.lingxi.code.R
 
-/**
- * Settings nav-graph routes — the Android analog of the iOS `SettingsPage` enum.
- * Each entry is a Navigation-Compose route string; pages that take an argument
- * (provider kind / id, skill id, mcp id) format it into the route and read it
- * back from the `NavBackStackEntry` arguments.
- *
- * A6 wires the account/appearance/language/notifications/input/privacy
- * destinations; the 智能 / 能力扩展 provider, voice, skill, MCP and Dream
- * destinations are routed to a placeholder seam until A7/A8 replace them
- * with the real editors.
- */
+/** Stable routes retain old deep links while new entries mirror desktop settings. */
 object SettingsRoutes {
+    const val CREDENTIALS = "settings/provider-credentials"
+    const val GENERAL = "settings/general"
+    const val CUSTOM_PROVIDERS = "settings/custom-providers"
+    const val FUSION = "settings/fusion"
+    const val ENGINE_PERMISSIONS = "settings/permissions"
+    const val TOOLS_AGENT = "settings/tools-agent"
+    const val ENGINE_SKILLS = "settings/engine-skills"
+    const val ENGINE_MCP = "settings/engine-mcp"
+    const val HOOKS = "settings/hooks"
+    const val PLUGINS = "settings/plugins"
+    const val DIAGNOSTICS = "settings/diagnostics"
+    const val ABOUT = "settings/about"
+    const val ARCHIVED = "settings/archived"
+    const val PROJECTS = "settings/projects"
     const val MAIN = "settings/main"
     const val ACCOUNT = "settings/account"
 
-    // 智能 (A7)
+    // Providers and audio
     const val PROVIDER_LIST = "settings/providers/{kind}"
     const val PROVIDER_PICKER = "settings/providers/{kind}/add"
     const val PROVIDER_EDIT = "settings/providers/{kind}/edit/{id}"
     const val VOICE = "settings/voice"
 
-    // 能力扩展 (A8 — placeholder for now)
+    // Mobile capabilities and legacy routes
     const val SKILLS = "settings/skills"
     const val SKILL_DETAIL = "settings/skills/{id}"
     const val MCP_LIST = "settings/mcp"
@@ -36,13 +40,13 @@ object SettingsRoutes {
     const val CRON_TASK = "settings/cron/task/{task}"
     const val CRON_RUN = "settings/cron/run/{run}"
 
-    // 应用 (A6)
+    // Device settings
     const val APPEARANCE = "settings/appearance"
     const val LANGUAGE = "settings/language"
     const val NOTIFICATIONS = "settings/notifications"
     const val INPUT = "settings/input"
 
-    // 隐私与安全 (A6)
+    // Privacy and permissions
     const val PRIVACY = "settings/privacy"
     const val PERMISSION_MODE = "settings/permission-mode"
     const val OPEN_SOURCE = "settings/open-source"

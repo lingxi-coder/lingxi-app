@@ -238,4 +238,34 @@ class MarkdownParserTest {
     fun emptyInput_yieldsNoBlocks() {
         assertEquals(emptyList<MdBlock>(), parseMarkdownBlocks(""))
     }
+
+    @Test fun headingsAndQuotesKeepTheirBlockBoundaries() {
+        val blocks = parseMarkdownBlocks("Before\n## **Title**\n> Quoted\n> continuation\nAfter")
+        assertEquals(4, blocks.size)
+        assertEquals(2, (blocks[1] as MdBlock.Heading).level)
+        assertEquals(listOf(MdInline.Bold("Title")), (blocks[1] as MdBlock.Heading).spans)
+        assertEquals(listOf(MdInline.Text("Quoted\ncontinuation")), (blocks[2] as MdBlock.Quote).spans)
+    }
+
+    @Test fun fencedMarkdownStaysLiteral() {
+        assertEquals(listOf(MdBlock.CodeBlock("md", "# Title\n> quote")),
+            parseMarkdownBlocks("```md\n# Title\n> quote\n```"))
+    }
+
+    @Test fun tablesParseAlignmentAndProtectPipesInsideCode() {
+        val table = parseMarkdownBlocks("| Name | Value |\n| :--- | ---: |\n| **A** | `x|y` |")
+            .single() as MdBlock.Table
+        assertEquals(listOf(TableAlignment.Left, TableAlignment.Right), table.alignment)
+        assertEquals(listOf(MdInline.Bold("A")), table.rows[0][0])
+        assertEquals(listOf(MdInline.Code("x|y")), table.rows[0][1])
+    }
+
+    @Test fun nestedEmphasisPreservesInnerMarkersAndCode() {
+        assertEquals(listOf(MdInline.Bold("bold *italic*")), parseInline("**bold *italic***"))
+        assertEquals(listOf(MdInline.Italic("outer **bold**")), parseInline("*outer **bold***"))
+        assertEquals(listOf(MdInline.BoldItalic("both")), parseInline("***both***"))
+        assertEquals(listOf(MdInline.Strike("removed")), parseInline("~~removed~~"))
+        assertEquals(listOf(MdInline.Bold("a `**` b")), parseInline("**a `**` b**"))
+        assertEquals(listOf(MdInline.Text("snake_case_name")), parseInline("snake_case_name"))
+    }
 }

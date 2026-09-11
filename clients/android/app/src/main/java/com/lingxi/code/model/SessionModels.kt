@@ -99,10 +99,12 @@ data class EngineSessionState(
  * Once the engine returns that row, the live version wins and the repository's
  * authoritative sync removes stale cached rows.
  */
-fun EngineSessionState.withCachedRows(cachedRows: List<SessionRow>): EngineSessionState {
+fun EngineSessionState.withCachedRows(cachedRows: List<SessionRow>, pendingSessionIds: Set<String> = emptySet()): EngineSessionState {
     if (cachedRows.isEmpty()) return this
     val liveIds = rows.mapTo(mutableSetOf()) { it.uuid }
-    val merged = rows + cachedRows.filterNot { it.uuid in liveIds }
+    val merged = rows.map { row ->
+        cachedRows.firstOrNull { it.uuid == row.uuid && it.uuid in pendingSessionIds && it.messageCount > row.messageCount } ?: row
+    } + cachedRows.filterNot { it.uuid in liveIds }
     return EngineSessionState.ready(merged)
 }
 

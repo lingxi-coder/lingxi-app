@@ -266,8 +266,8 @@ class SessionStateTest {
         assertEquals(com.lingxi.code.model.Role.User, restored.transcript[0].role)
         assertEquals("第一条问题", restored.transcript[0].text)
         assertEquals(com.lingxi.code.model.Role.Ai, restored.transcript[1].role)
-        // The assistant body folds thinking + text into one block-joined string.
-        assertTrue(restored.transcript[1].text.contains("推理…"))
+        // Settled reasoning is presentation-only and must not enter scrollback.
+        assertFalse(restored.transcript[1].text.contains("推理…"))
         assertTrue(restored.transcript[1].text.contains("第一条回答"))
     }
 
@@ -389,6 +389,47 @@ class SessionStateTest {
         assertEquals("uuid-99", vm.state.value.session.id)
         assertFalse(vm.state.value.isNew)
         assertFalse(vm.state.value.streaming)
+    }
+
+    @Test
+    fun recreatedModelRestoresDisclosurePreferencesWithoutCrossSessionLeakage() {
+        val handle = androidx.lifecycle.SavedStateHandle()
+        fun source() = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        fun activate(vm: ChatViewModel, id: String) = vm.applyActivatedSession(
+            ActivatedSession(id, emptyList(), SessionActivationKind.Resumed))
+        val first = ChatViewModel(source(), handle)
+        activate(first, "session-a")
+        first.toggleToolCall("tool-group:shared-id")
+        activate(first, "session-b")
+        first.toggleToolCall("tool-group:other-id")
+
+        val restoredHandle = androidx.lifecycle.SavedStateHandle(handle.keys().associateWith { handle.get<Any?>(it) })
+        val recreated = ChatViewModel(source(), restoredHandle)
+        activate(recreated, "session-b")
+        assertEquals(setOf("tool-group:other-id"), recreated.state.value.expandedToolCalls)
+        activate(recreated, "session-a")
+        assertEquals(setOf("tool-group:shared-id"), recreated.state.value.expandedToolCalls)
+        recreated.toggleToolCall("tool-group:shared-id")
+        val closed = ChatViewModel(source(), androidx.lifecycle.SavedStateHandle(
+            restoredHandle.keys().associateWith { restoredHandle.get<Any?>(it) }))
+        activate(closed, "session-a")
+        assertTrue(closed.state.value.expandedToolCalls.isEmpty())
+        activate(closed, "session-b")
+        assertEquals(setOf("tool-group:other-id"), closed.state.value.expandedToolCalls)
+    }
+
+    @Test
+    fun toolDisclosureRestoresPerSessionWithoutLeakingAcrossSessions() {
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())))
+        fun activate(id: String) = vm.applyActivatedSession(
+            ActivatedSession(id, emptyList(), SessionActivationKind.Resumed))
+        activate("session-a")
+        vm.toggleToolCall("tool-group:first")
+        activate("session-b")
+        assertTrue(vm.state.value.expandedToolCalls.isEmpty())
+        vm.toggleToolCall("other")
+        activate("session-a")
+        assertEquals(setOf("tool-group:first"), vm.state.value.expandedToolCalls)
     }
 
     @Test

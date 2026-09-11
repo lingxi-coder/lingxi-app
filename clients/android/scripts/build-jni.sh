@@ -60,9 +60,11 @@ VOICE_MANIFEST="${ANDROID_DIR}/../voice/models.json"
 # Build into a gitignored staging directory, then atomically replace only this
 # script's three owned files after every ABI and binding step succeeds. A Rust
 # compile failure must not erase the last known-good app binaries.
-FINAL_JNILIBS_DIR="${ANDROID_DIR}/app/src/${VARIANT}/jniLibs"
+# Optional output roots keep a complete JNI/bindings refresh isolated from
+# concurrent Gradle builds until the caller promotes the verified pair.
+FINAL_JNILIBS_DIR="${LINGXI_ANDROID_JNILIBS_DIR:-${ANDROID_DIR}/app/src/${VARIANT}/jniLibs}"
 JNILIBS_DIR="${ANDROID_DIR}/app/build/nativeStaging/${VARIANT}/jniLibs"
-KOTLIN_OUT="${ANDROID_DIR}/app/src/main/java"   # bindgen writes <pkg-path>/*.kt under here
+KOTLIN_OUT="${LINGXI_KOTLIN_OUT:-${ANDROID_DIR}/app/src/main/java}"   # bindgen writes <pkg-path>/*.kt under here
 
 PROFILE="release"
 PROFILE_DIR="release"

@@ -96,7 +96,8 @@ class AgentRunToolRetentionTest {
             agentRunsByMessageId = settled.agentRunsByMessageId,
         )
         val rows = buildChatRenderItems(next)
-        assertEquals(listOf("message", "agent_run"), rows.map { it.contentType })
+        assertEquals(listOf("message", "tool_group", "agent_run"), rows.map { it.contentType })
+        assertEquals(listOf("t1", "t2", "t3"), (rows[1] as ChatRenderItem.Tools).calls.map { it.id })
         assertTrue(rows.last() is ChatRenderItem.AgentRun)
     }
 

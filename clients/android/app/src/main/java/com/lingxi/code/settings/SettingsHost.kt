@@ -4,6 +4,10 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.remember
+import com.lingxi.code.conversation.ConversationSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -53,26 +58,12 @@ import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.VoiceModelDownloader
 import kotlinx.coroutines.launch
 
-/**
- * Settings surface host.
- *
- * Mirrors the iOS `SettingsHost` push-navigation stack with idiomatic
- * Navigation-Compose: a nested [NavHost] is the page stack; each destination is
- * pushed/popped on the [NavHostController]. A brand top bar shows the current
- * page title, a chevron-back affordance that pops the stack (or [onClose] at the
- * root), and a 完成 / close action. System back is bridged: at the root it calls
- * [onClose] (return to the conversation); deeper it pops one page.
- *
- * Theme + accent are owned by the DataStore-backed [appearanceStore] so the
- * Appearance page mutates the live, persisted source of truth. The mutable mock
- * settings (providers / skills / notifications / …) live in the hoisted
- * [store]; A7/A8 build the deeper editors on the same NavHost + store.
- *
- * @param onClose return to the conversation (root system-back + close button).
- */
+/** Native settings navigation shares device repositories and the active engine connection. */
 @Composable
 fun SettingsHost(
     appearanceStore: AppearanceStore,
+    engineSource: ConversationSource? = null,
+    projectStore: com.lingxi.code.project.ProjectStore? = null,
     isDark: Boolean,
     accentId: String,
     modifier: Modifier = Modifier,
@@ -87,6 +78,14 @@ fun SettingsHost(
     onTypescriptLspModeChanged: suspend (String) -> Unit = {},
     onSetLocalAppPluginEnabled: suspend (String, Boolean) -> Unit = { _, _ -> },
 ) {
+    val engineBridge = remember { SettingsEngineBridge() }
+    val draftRegistry = remember(engineSource) { SettingsDraftRegistry() }
+    val engineSettingsState by engineBridge.state.collectAsStateWithLifecycle()
+    val reconnectSafely: () -> Unit = {
+        if (draftRegistry.hasUnsavedDrafts || engineSettingsState.savingSettings || engineSettingsState.pending != null) draftRegistry.reconnectBlocked = true
+        else onReconnectEngine()
+    }
+    LaunchedEffect(engineSource) { engineBridge.bind(engineSource) }
     val context = LocalContext.current
     val resolvedStore: SettingsStore =
         store ?: viewModel(factory = SettingsStore.factory(context))
@@ -125,12 +124,14 @@ fun SettingsHost(
         if (!navController.popBackStack()) onClose()
     }
 
-    Box(
+    androidx.compose.material3.Surface(
+        color = t.windowBg,
+        contentColor = t.text,
         modifier = modifier
             .fillMaxSize()
-            .background(t.windowBg)
             .windowInsetsPadding(WindowInsets.systemBars),
     ) {
+        androidx.compose.runtime.CompositionLocalProvider(LocalSettingsDraftRegistry provides draftRegistry) {
         Column(Modifier.fillMaxSize()) {
             SettingsTopBar(
                 title = titleFor(backEntry, state),
@@ -140,18 +141,77 @@ fun SettingsHost(
                 onReset = { navController.popBackStack(SettingsRoutes.MAIN, inclusive = false) },
             )
 
+            SettingsConnectionBanner(engineSettingsState, reconnectSafely)
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+            val wide = maxWidth >= 840.dp
+            Row(Modifier.fillMaxSize()) {
+            if (wide) Box(Modifier.width(280.dp).verticalScroll(rememberScrollState()).padding(16.dp)) {
+                DesktopSettingsNavigation(onNavigate = { navController.navigate(it) { launchSingleTop = true } }, selected = route)
+            }
             NavHost(
                 navController = navController,
                 startDestination = SettingsRoutes.MAIN,
                 modifier = Modifier.fillMaxSize(),
             ) {
                 page(SettingsRoutes.MAIN) {
-                    MainSettingsPage(state = state, isDark = isDark, navController = navController,
-                        onReplayOnboarding = onReplayOnboarding)
+                    if (wide) GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding)
+                    else DesktopSettingsNavigation(onNavigate = { navController.navigate(it) })
                 }
-                page(SettingsRoutes.ACCOUNT) { AccountPage() }
+                page(SettingsRoutes.FUSION) { Text(stringResource(R.string.settings_parity_fusion_unavailable)) }
+                page(SettingsRoutes.GENERAL) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
+                page(SettingsRoutes.ACCOUNT) { NativeAccountPage(state, onCredentials = { navController.navigate(SettingsRoutes.CREDENTIALS) }) }
+                page(SettingsRoutes.CREDENTIALS) { EngineCredentialsPage(engineBridge, onMobileProfiles = { navController.navigate(SettingsRoutes.providerList(ProviderKind.Llm.name)) }) }
+                page(SettingsRoutes.ABOUT) { NativeAboutPage(onLicenses = { navController.navigate(SettingsRoutes.OPEN_SOURCE) }) }
+                composable(SettingsRoutes.ARCHIVED) {
+                    if (projectStore != null) {
+                        val projects by projectStore.state.collectAsStateWithLifecycle()
+                        var archiveError by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+                        val archiveScope = androidx.compose.runtime.rememberCoroutineScope()
+                        Column {
+                            archiveError?.let { Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error) }
+                            Box(Modifier.weight(1f)) {
+                                com.lingxi.code.project.ArchivedSettingsPage(
+                                    state = projects,
+                                    onRestore = { projectId, sessionId ->
+                                        archiveScope.launch {
+                                            runCatching { projectStore.setSessionArchived(projectId, sessionId, false) }
+                                                .onSuccess { archiveError = null }
+                                                .onFailure { archiveError = "Could not restore the conversation. Please retry." }
+                                        }
+                                    },
+                                    onArchive = { projectId, sessionId ->
+                                        archiveScope.launch {
+                                            runCatching { projectStore.setSessionArchived(projectId, sessionId, true) }
+                                                .onSuccess { archiveError = null }
+                                                .onFailure { archiveError = "Could not archive the conversation. Please retry." }
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    } else Text(settingsLabel("Project storage is unavailable. Reopen settings after the application finishes loading."))
+                }
+                page(SettingsRoutes.PROJECTS) {
+                    Column {
+                        if (projectStore != null) {
+                            val projects by projectStore.state.collectAsStateWithLifecycle()
+                            if (projects.projects.isEmpty()) Text(settingsLabel("No projects saved on this device."))
+                            projects.projects.forEach { project ->
+                                SettingsSection(label = project.record.name) {
+                                    Text(project.workspace.hostPath)
+                                    Text(settingsLabel("${project.sessions.size} conversations · ${project.record.syncState.label}"))
+                                }
+                            }
+                        }
+                        EngineSettingsPage(SettingsRoutes.PROJECTS, engineBridge)
+                    }
+                }
+                page(SettingsRoutes.ENGINE_MCP) { McpConfigurationPage(engineBridge) }
+                (layeredPageKeys.keys.filter { it != SettingsRoutes.PROJECTS } + SettingsRoutes.DIAGNOSTICS).forEach { engineRoute ->
+                    page(engineRoute) { EngineSettingsPage(engineRoute, engineBridge, reconnectSafely) }
+                }
 
-                // 应用 (A6)
+                // Device settings
                 page(SettingsRoutes.APPEARANCE) {
                     AppearancePage(store = appearanceStore, isDark = isDark, accentId = accentId)
                 }
@@ -159,12 +219,12 @@ fun SettingsHost(
                     LanguagePage(language = state.language, onSelect = resolvedStore::setLanguage)
                 }
                 page(SettingsRoutes.NOTIFICATIONS) {
-                    NotificationsPage(notifs = state.notifs, onChange = resolvedStore::setNotifs)
+                    NativeNotificationsPage()
                 }
-                page(SettingsRoutes.INPUT) { InputPage() }
+                page(SettingsRoutes.INPUT) { NativeSystemSettingsPage(input = true) }
 
-                // 隐私与安全 (A6)
-                page(SettingsRoutes.PRIVACY) { PrivacyPage() }
+                // Security and runtime preferences
+                page(SettingsRoutes.PRIVACY) { NativeSystemSettingsPage(input = false) }
                 page(SettingsRoutes.PERMISSION_MODE) {
                     PermissionModePage(
                         selected = state.permissionMode,
@@ -188,7 +248,7 @@ fun SettingsHost(
                 }
                 page(SettingsRoutes.OPEN_SOURCE) { OpenSourceLicensesPage() }
 
-                // 智能 — providers (A7) + voice TTS editor
+                // Providers and voice
                 page(SettingsRoutes.VOICE) {
                     VoicePage(
                         voice = state.voice,
@@ -204,7 +264,7 @@ fun SettingsHost(
                         store = resolvedStore,
                         onEdit = { id -> navController.navigate(SettingsRoutes.providerEdit(kind.name, id)) },
                         onAdd = { navController.navigate(SettingsRoutes.providerPicker(kind.name)) },
-                        onReconnectEngine = onReconnectEngine,
+                        onReconnectEngine = reconnectSafely,
                     )
                 }
                 page(SettingsRoutes.PROVIDER_PICKER) {
@@ -230,11 +290,11 @@ fun SettingsHost(
                         providerId = id,
                         state = state,
                         store = resolvedStore,
-                        onReconnectEngine = onReconnectEngine,
+                        onReconnectEngine = reconnectSafely,
                         onPop = { navController.popBackStack() },
                     )
                 }
-                // 能力扩展 — Skills / MCP / Dream (A8)
+                // Mobile capability routes
                 page(SettingsRoutes.SKILLS) {
                     SkillsPage(
                         state = state,
@@ -256,13 +316,8 @@ fun SettingsHost(
                         onPop = { navController.popBackStack() },
                     )
                 }
-                page(SettingsRoutes.MCP_LIST) {
-                    MCPListPage(
-                        state = state,
-                        store = resolvedStore,
-                        onEdit = { id -> navController.navigate(SettingsRoutes.mcpEdit(id)) },
-                    )
-                }
+                // Preserve the legacy route while directing it to authoritative configuration.
+                page(SettingsRoutes.MCP_LIST) { McpConfigurationPage(engineBridge) }
                 page(SettingsRoutes.LINUX_RUNTIME) {
                     LinuxRuntimePage(
                         state = state,
@@ -279,16 +334,8 @@ fun SettingsHost(
                         },
                     )
                 }
-                page(SettingsRoutes.MCP_EDIT) {
-                    val id = it.arguments?.getString("id") ?: ""
-                    MCPEditPage(
-                        mcpId = id,
-                        state = state,
-                        store = resolvedStore,
-                        onPop = { navController.popBackStack() },
-                    )
-                }
-                page(SettingsRoutes.DREAM) { DreamPage(state = state, store = resolvedStore) }
+                page(SettingsRoutes.MCP_EDIT) { McpConfigurationPage(engineBridge) }
+                page(SettingsRoutes.DREAM) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
                 page(SettingsRoutes.CRON) {
                     com.lingxi.code.cron.CronScreen()
                 }
@@ -303,6 +350,9 @@ fun SettingsHost(
                     )
                 }
             }
+            }
+            }
+        }
         }
     }
 }
@@ -332,7 +382,9 @@ private fun providerKindArg(entry: androidx.navigation.NavBackStackEntry): Provi
 @Composable
 private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: SettingsUiState): String =
     when (val route = entry?.destination?.route) {
+        in desktopSettingsEntries.map { it.route }.filter { it != SettingsRoutes.ACCOUNT && it != SettingsRoutes.APPEARANCE && it != SettingsRoutes.VOICE } -> settingsLabel(desktopSettingsEntries.first { it.route == route }.title)
         null, SettingsRoutes.MAIN -> stringResource(SettingsTitles.MAIN)
+        SettingsRoutes.FUSION -> stringResource(R.string.settings_parity_fusion)
         SettingsRoutes.ACCOUNT -> stringResource(SettingsTitles.ACCOUNT)
         SettingsRoutes.VOICE -> stringResource(SettingsTitles.VOICE)
         SettingsRoutes.APPEARANCE -> stringResource(SettingsTitles.APPEARANCE)

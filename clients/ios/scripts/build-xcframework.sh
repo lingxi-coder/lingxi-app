@@ -49,12 +49,14 @@ PROFILE_DIR="release"               # `--release` → target/<triple>/release
 # ___chkstk_darwin.
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 
-GEN_DIR="${IOS_DIR}/Generated"
-FRAMEWORKS_DIR="${IOS_DIR}/Frameworks"
+# Stage a complete matching bindings/framework pair without disrupting a live
+# Xcode build; callers can promote both outputs after verification succeeds.
+GEN_DIR="${LINGXI_GENERATED_DIR:-${IOS_DIR}/Generated}"
+FRAMEWORKS_DIR="${LINGXI_FRAMEWORKS_DIR:-${IOS_DIR}/Frameworks}"
 XCFRAMEWORK="${FRAMEWORKS_DIR}/LingxiCodeFFI.xcframework"
 
 # Scratch area for the lipo'd fat-sim archive + assembled header dirs.
-BUILD_DIR="${IOS_DIR}/build/xcframework"
+BUILD_DIR="${LINGXI_XCFRAMEWORK_BUILD_DIR:-${IOS_DIR}/build/xcframework}"
 
 DEVICE_TARGET="aarch64-apple-ios"
 SIM_TARGETS=("aarch64-apple-ios-sim" "x86_64-apple-ios")

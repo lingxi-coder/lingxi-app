@@ -4,7 +4,6 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.navigation.compose.rememberNavController
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.drawer.DrawerContent
@@ -71,11 +70,7 @@ class UnimplementedFeaturesUiTest {
     fun settingsDoesNotExposeUnimplementedMemoryKnowledgeOrWorkflowSection() {
         rule.setContent {
             LingXiTheme {
-                MainSettingsPage(
-                    state = SettingsUiState(),
-                    isDark = true,
-                    navController = rememberNavController(),
-                )
+                DesktopSettingsNavigation(onNavigate = {})
             }
         }
 

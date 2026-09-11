@@ -845,6 +845,8 @@ enum ConversationToolStatus: Equatable {
     case completed
     case failed
     case cancelled
+    /// History did not persist a result; neither success nor failure is known.
+    case unknown
 
     var label: String {
         switch self {
@@ -852,6 +854,7 @@ enum ConversationToolStatus: Equatable {
         case .completed: return String(localized: "chat_status_completed")
         case .failed: return String(localized: "chat_status_failed")
         case .cancelled: return String(localized: "chat_status_cancelled")
+        case .unknown: return String(localized: "Unknown")
         }
     }
 }

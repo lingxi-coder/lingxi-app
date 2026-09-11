@@ -11,13 +11,17 @@ package com.lingxi.code.conversation
  * plain JVM (see `MarkdownParserTest`). The Compose renderer lives in
  * `MessageBubble.kt` and consumes [MdBlock] / [MdInline].
  *
- * Non-goals: headings, blockquotes, tables, nested lists, emphasis with
- * `_underscores_`. Anything unrecognized degrades to literal paragraph text, so
+ * Nested list indentation currently retains the flat list layout. Anything unrecognized degrades to literal paragraph text, so
  * the renderer is never wrong — only less rich.
  */
 
 /** A block-level element. The document is a flat list of these. */
 sealed interface MdBlock {
+    data class Table(val header: List<List<MdInline>>, val rows: List<List<List<MdInline>>>,
+        val alignment: List<TableAlignment>) : MdBlock
+    data class Heading(val level: Int, val spans: List<MdInline>) : MdBlock
+    data class Quote(val spans: List<MdInline>) : MdBlock
+
     /** A run of inline content (one logical paragraph; may span source lines). */
     data class Paragraph(val spans: List<MdInline>) : MdBlock
 
@@ -35,7 +39,12 @@ sealed interface MdBlock {
 data class NumberedItem(val marker: String, val spans: List<MdInline>)
 
 /** An inline span within a paragraph or list item. */
+enum class TableAlignment { Left, Center, Right }
+
 sealed interface MdInline {
+    data class Italic(val text: String) : MdInline
+    data class BoldItalic(val text: String) : MdInline
+    data class Strike(val text: String) : MdInline
     /** Plain text. */
     data class Text(val text: String) : MdInline
 
@@ -49,6 +58,8 @@ sealed interface MdInline {
     data class Link(val label: String, val url: String) : MdInline
 }
 
+private val HEADING_RE = Regex("""^ {0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$""")
+private val QUOTE_RE = Regex("""^ {0,3}> ?(.*)$""")
 private val BULLET_RE = Regex("""^\s*[-*+]\s+(.*)$""")
 private val NUMBERED_RE = Regex("""^\s*(\d+)[.)]\s+(.*)$""")
 private val FENCE_RE = Regex("""^\s*```(.*)$""")
@@ -92,6 +103,37 @@ fun parseMarkdownBlocks(src: String): List<MdBlock> {
                 }
                 if (i < lines.size) i++ // skip the closing ```
                 blocks += MdBlock.CodeBlock(language = language, code = code.toString())
+            }
+
+            i + 1 < lines.size && tableAlignment(lines[i + 1]) != null &&
+                line.contains('|') && tableCells(line).size == tableAlignment(lines[i + 1])!!.size -> {
+                flushParagraph()
+                val header = tableCells(line).map(::parseInline)
+                val alignment = tableAlignment(lines[i + 1])!!
+                val rows = mutableListOf<List<List<MdInline>>>()
+                i += 2
+                while (i < lines.size && lines[i].isNotBlank() && lines[i].contains('|')) {
+                    val cells = tableCells(lines[i])
+                    rows += List(header.size) { column -> parseInline(cells.getOrElse(column) { "" }) }
+                    i++
+                }
+                blocks += MdBlock.Table(header, rows, alignment)
+            }
+            HEADING_RE.matchEntire(line) != null -> {
+                flushParagraph()
+                val heading = HEADING_RE.matchEntire(line)!!
+                blocks += MdBlock.Heading(heading.groupValues[1].length, parseInline(heading.groupValues[2]))
+                i++
+            }
+            QUOTE_RE.matchEntire(line) != null -> {
+                flushParagraph()
+                val quote = mutableListOf<String>()
+                while (i < lines.size) {
+                    val match = QUOTE_RE.matchEntire(lines[i]) ?: break
+                    quote += match.groupValues[1]
+                    i++
+                }
+                blocks += MdBlock.Quote(parseInline(quote.joinToString("\n")))
             }
 
             // --- bullet list --------------------------------------------
@@ -190,15 +232,25 @@ fun parseInline(text: String): List<MdInline> {
                 i = close + 1
             }
 
-            // bold — **…**
-            c == '*' && i + 1 < text.length && text[i + 1] == '*' -> {
-                val close = text.indexOf("**", i + 2)
-                if (close < 0) {
-                    plain.append(text.substring(i)); break
+            c == '\\' && i + 1 < text.length -> { plain.append(text[i + 1]); i += 2 }
+            c == '*' || c == '_' || (c == '~' && text.getOrNull(i + 1) == '~') -> {
+                val count = text.substring(i).takeWhile { it == c }.length
+                val width = if (c == '~') 2 else count.coerceAtMost(3)
+                val intraword = c == '_' && i > 0 && text[i - 1].isLetterOrDigit()
+                val close = if (intraword || text.getOrNull(i + width)?.isWhitespace() != false) -1
+                    else closingEmphasis(text, i + width, c, width)
+                if (close < 0) { plain.append(text.substring(i, i + width)); i += width }
+                else {
+                    flushPlain()
+                    val body = text.substring(i + width, close)
+                    out += when {
+                        c == '~' -> MdInline.Strike(body)
+                        width == 3 -> MdInline.BoldItalic(body)
+                        width == 2 -> MdInline.Bold(body)
+                        else -> MdInline.Italic(body)
+                    }
+                    i = close + width
                 }
-                flushPlain()
-                out += MdInline.Bold(text.substring(i + 2, close))
-                i = close + 2
             }
 
             else -> {
@@ -209,4 +261,55 @@ fun parseInline(text: String): List<MdInline> {
     flushPlain()
     // An empty run still yields one empty Text so callers never face an empty list.
     return if (out.isEmpty()) listOf(MdInline.Text("")) else out
+}
+
+/** Skip escaped delimiters and code spans, preserving nested marker runs. */
+private fun closingEmphasis(text: String, start: Int, marker: Char, width: Int): Int {
+    var index = start
+    while (index < text.length) {
+        if (text[index] == '\\') { index += 2; continue }
+        if (text[index] == '`') {
+            val end = text.indexOf('`', index + 1)
+            if (end >= 0) { index = end + 1; continue }
+        }
+        if (text[index] == marker) {
+            var end = index
+            while (end < text.length && text[end] == marker) end++
+            val length = end - index
+            if (length >= width && (width != 1 || length % 2 == 1) &&
+                index > start && !text[index - 1].isWhitespace()) return end - width
+            index = end
+        } else index++
+    }
+    return -1
+}
+
+internal fun tableCells(line: String): List<String> {
+    val trimmed = line.trim().removePrefix("|").removeSuffix("|")
+    val cells = mutableListOf<String>()
+    val cell = StringBuilder()
+    var code = false
+    var index = 0
+    while (index < trimmed.length) {
+        val char = trimmed[index]
+        if (char == '\\' && trimmed.getOrNull(index + 1) == '|') {
+            cell.append('|'); index += 2; continue
+        }
+        if (char == '`') code = !code
+        if (char == '|' && !code) { cells += cell.toString().trim(); cell.clear() }
+        else cell.append(char)
+        index++
+    }
+    cells += cell.toString().trim()
+    return cells
+}
+
+private fun tableAlignment(line: String): List<TableAlignment>? {
+    val cells = tableCells(line)
+    if (cells.isEmpty() || cells.any { !it.matches(Regex(":?-{3,}:?")) }) return null
+    return cells.map { when {
+        it.startsWith(':') && it.endsWith(':') -> TableAlignment.Center
+        it.endsWith(':') -> TableAlignment.Right
+        else -> TableAlignment.Left
+    } }
 }

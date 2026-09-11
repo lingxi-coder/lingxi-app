@@ -1,5 +1,11 @@
 package com.lingxi.code.conversation
 
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,6 +43,9 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.layout.width
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
@@ -56,7 +65,7 @@ import com.lingxi.code.theme.LingXiTheme
 /**
  * A single conversation turn — ported from the iOS `MessageBubble`.
  *
- * User turns are right-aligned in a surface bubble with one sharpened corner;
+ * User turns are right-aligned in a uniformly rounded surface bubble;
  * assistant turns are left-aligned next to the gradient [AssistantAvatar], with
  * an optional "思考了 N 秒" thinking [Pill] above the (bold-markdown) text.
  *
@@ -93,7 +102,7 @@ fun MessageBubble(
             }
             Row(horizontalArrangement = Arrangement.End) {
                 Spacer(Modifier.weight(1f))
-                val shape = BubbleShape(topRightSharp = true)
+                val shape = RoundedCornerShape(18.dp)
                 if (message.text.isNotBlank()) {
                     Text(
                         text = message.text,
@@ -160,12 +169,11 @@ fun MessageBubble(
             horizontalArrangement = Arrangement.spacedBy(11.dp),
             verticalAlignment = Alignment.Top,
         ) {
-            AssistantAvatar()
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                message.tag?.let { Pill(text = it, color = t.accent) }
+
                 // A message the engine supplied structure for renders its blocks
                 // IN ORDER — prose as Markdown, tool calls as their derived
                 // header + `⎿` result. Everything else (a user turn, a message
@@ -181,15 +189,10 @@ fun MessageBubble(
                     if (message.blocks.isEmpty()) {
                         AIText(markdown = message.text, onOpenLink = onOpenLink)
                     } else {
-                        message.blocks.forEach { block ->
+                        transcriptBlocks(message.blocks).forEach { block ->
                             when (block) {
-                                is MessageContent.Text ->
-                                    AIText(markdown = block.text, onOpenLink = onOpenLink)
-                                is MessageContent.Tool -> ToolCallView(
-                                    call = block.call,
-                                    expanded = block.call.id in expandedToolCalls,
-                                    onToggleExpanded = { onToggleToolCall(block.call.id) },
-                                )
+                                is TranscriptBlock.Prose -> AIText(block.text, onOpenLink = onOpenLink)
+                                is TranscriptBlock.Tools -> ToolGroupView(block, expandedToolCalls, onToggleToolCall)
                             }
                         }
                     }
@@ -254,12 +257,13 @@ fun MessageBubble(
 }
 
 /** Render user media before the prompt, matching the CLI's UserImage → UserText order. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AttachedImages(images: List<ImageRefDto>) {
     val t = LingXiTheme.palette
-    Row(
+    FlowRow(
         horizontalArrangement = Arrangement.spacedBy(7.dp),
-        verticalAlignment = Alignment.Bottom,
+        verticalArrangement = Arrangement.spacedBy(7.dp),
         modifier = Modifier.widthIn(max = 300.dp),
     ) {
         images.forEachIndexed { index, image ->
@@ -293,22 +297,6 @@ private fun AttachedImages(images: List<ImageRefDto>) {
             }
         }
     }
-}
-
-/**
- * The AI bubble corner geometry: 18dp rounding with the top-right corner
- * sharpened to 6dp when [topRightSharp] (mirrors the iOS `BubbleShape`).
- */
-@Suppress("FunctionName")
-private fun BubbleShape(topRightSharp: Boolean): RoundedCornerShape {
-    val big = 18.dp
-    val small = 6.dp
-    return RoundedCornerShape(
-        topStart = big,
-        topEnd = if (topRightSharp) small else big,
-        bottomEnd = big,
-        bottomStart = big,
-    )
 }
 
 /** Gradient sparkle avatar shown beside every assistant turn. */
@@ -374,6 +362,18 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
             )
         }
 
+        is MdBlock.Table -> MarkdownTable(block, onOpenLink)
+        is MdBlock.Heading -> Text(
+            inlineSpans(block.spans, t.surfaceHover, t.text2, t.accent),
+            color = t.text, fontWeight = FontWeight.SemiBold,
+            fontSize = when (block.level) { 1 -> 25.sp; 2 -> 21.sp; else -> 18.sp },
+            modifier = Modifier.padding(top = 8.dp, bottom = 3.dp),
+        )
+        is MdBlock.Quote -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.size(width = 3.dp, height = 24.dp).background(t.border))
+            Text(inlineSpans(block.spans, t.surfaceHover, t.text2, t.accent),
+                color = t.text3, fontSize = 15.sp, lineHeight = 23.sp)
+        }
         is MdBlock.CodeBlock -> CodeBlockView(block)
 
         is MdBlock.BulletList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -427,6 +427,7 @@ private fun ListRow(
 /** A fenced code block: a monospace surface with a subtle border + optional language label. */
 @Composable
 private fun CodeBlockView(block: MdBlock.CodeBlock) {
+    val clipboard = LocalClipboardManager.current
     val t = LingXiTheme.palette
     Column(
         modifier = Modifier
@@ -437,16 +438,22 @@ private fun CodeBlockView(block: MdBlock.CodeBlock) {
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        if (block.language.isNotEmpty()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = block.language,
+                text = block.language.ifBlank { "text" },
+                modifier = Modifier.weight(1f),
                 color = t.text4,
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
             )
+            Box(Modifier.size(40.dp).clickable { clipboard.setText(AnnotatedString(block.code)) },
+                contentAlignment = Alignment.Center) {
+                LXIcon(LXIconName.Copy, size = 16.dp, color = t.text3, contentDescription = stringResource(R.string.terminal_copy_button))
+            }
         }
         Text(
             text = block.code,
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
             color = t.text2,
             fontSize = 13.5f.sp,
             lineHeight = (13.5f * 1.5f).sp,
@@ -464,13 +471,22 @@ private fun inlineSpans(
     codeBg: Color,
     codeColor: Color,
     linkColor: Color,
-) =
+): androidx.compose.ui.text.AnnotatedString =
     buildAnnotatedString {
         spans.forEach { span ->
             when (span) {
                 is MdInline.Text -> append(span.text)
                 is MdInline.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
-                    append(span.text)
+                    append(inlineSpans(parseInline(span.text), codeBg, codeColor, linkColor))
+                }
+                is MdInline.Italic -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
+                    append(inlineSpans(parseInline(span.text), codeBg, codeColor, linkColor))
+                }
+                is MdInline.BoldItalic -> withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, fontStyle = FontStyle.Italic)) {
+                    append(inlineSpans(parseInline(span.text), codeBg, codeColor, linkColor))
+                }
+                is MdInline.Strike -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
+                    append(inlineSpans(parseInline(span.text), codeBg, codeColor, linkColor))
                 }
                 is MdInline.Code -> withStyle(
                     SpanStyle(
@@ -497,3 +513,30 @@ private fun inlineSpans(
             }
         }
     }
+
+@Composable
+private fun MarkdownTable(table: MdBlock.Table, onOpenLink: (String) -> Unit) {
+    val palette = LingXiTheme.palette
+    Column(Modifier.horizontalScroll(rememberScrollState()).border(0.5.dp, palette.border)) {
+        (listOf(table.header) + table.rows).forEachIndexed { rowIndex, cells ->
+            Row(Modifier.background(if (rowIndex == 0) palette.surfaceHover else Color.Transparent)) {
+                cells.forEachIndexed { column, spans ->
+                    val text = inlineSpans(spans, palette.surfaceHover, palette.text2, palette.accent)
+                    ClickableText(text,
+                        modifier = Modifier.width(180.dp).border(0.5.dp, palette.border).padding(10.dp),
+                        style = androidx.compose.ui.text.TextStyle(
+                            color = palette.text, fontSize = 14.sp, lineHeight = 22.sp,
+                            fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal,
+                            textAlign = when (table.alignment[column]) {
+                                TableAlignment.Left -> TextAlign.Start
+                                TableAlignment.Center -> TextAlign.Center
+                                TableAlignment.Right -> TextAlign.End
+                            }),
+                        onClick = { offset -> text.getStringAnnotations("url", offset, offset)
+                            .firstOrNull()?.let { onOpenLink(it.item) } },
+                    )
+                }
+            }
+        }
+    }
+}

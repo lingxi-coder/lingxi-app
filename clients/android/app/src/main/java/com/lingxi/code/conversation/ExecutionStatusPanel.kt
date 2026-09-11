@@ -1,5 +1,13 @@
 package com.lingxi.code.conversation
 
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -181,7 +189,18 @@ private fun SectionLabel(text: String) {
 @Composable
 private fun AgentSummaryRow(agent: SessionAgentUi) {
     val palette = LingXiTheme.palette
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    val detailHost = LocalConversationDetail.current
+    var details by remember(agent.agentId) { mutableStateOf(false) }
+    if (details) RuntimeDetails(
+        title = agent.name.ifBlank { agent.agentId },
+        body = listOfNotNull(agent.agentId, agent.agentType, agent.model, agent.status, agent.latestActivity)
+            .filter(String::isNotBlank).joinToString("\n\n"),
+        onClose = { details = false },
+    )
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable {
+        if (detailHost != null) detailHost("agent:${agent.agentId}") else details = true
+    }, verticalAlignment = Alignment.CenterVertically) {
+        com.lingxi.code.theme.AgentAvatar(agentId = agent.agentId, modifier = Modifier.size(28.dp))
         BoxStatusDot(agent.status)
         Column(Modifier.padding(start = 7.dp).weight(1f)) {
             Text(agent.name.ifBlank { agent.agentId }, color = palette.text2, fontSize = 11.5f.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -210,7 +229,17 @@ private fun TaskSummaryRow(
     resuming: Boolean,
 ) {
     val palette = LingXiTheme.palette
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    val detailHost = LocalConversationDetail.current
+    var details by remember(task.taskId) { mutableStateOf(false) }
+    if (details) RuntimeDetails(
+        title = task.description.ifBlank { task.taskId },
+        body = listOfNotNull(task.taskId, taskStatusText(task.status), workflow?.currentPhaseTitle,
+            workflow?.latestLog, task.error).joinToString("\n\n"),
+        onClose = { details = false },
+    )
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable {
+        if (detailHost != null) detailHost("task:${task.taskId}") else details = true
+    }, verticalAlignment = Alignment.CenterVertically) {
         BoxStatusDot(task.status.name)
         Column(Modifier.padding(start = 7.dp).weight(1f)) {
             Text(task.description.ifBlank { workflow?.currentPhaseTitle ?: task.taskId }, color = palette.text2, fontSize = 11.5f.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -266,11 +295,36 @@ private fun TaskStatusDto.isTerminal(): Boolean = when (this) {
 }
 
 @Composable
-private fun taskStatusText(status: TaskStatusDto): String = when (status) {
+internal fun taskStatusText(status: TaskStatusDto): String = when (status) {
     TaskStatusDto.PENDING -> stringResource(R.string.settings_linux_task_queued)
     TaskStatusDto.RUNNING -> stringResource(R.string.chat_run_status_running)
     TaskStatusDto.PAUSED -> stringResource(R.string.chat_status_paused)
     TaskStatusDto.COMPLETED -> stringResource(R.string.chat_run_status_completed)
     TaskStatusDto.FAILED -> stringResource(R.string.chat_run_status_failed)
     TaskStatusDto.CANCELLED -> stringResource(R.string.chat_run_status_cancelled)
+}
+
+/** Long runtime descriptions remain readable without growing the composer panel. */
+@Composable
+private fun RuntimeDetails(title: String, body: String, onClose: () -> Unit) {
+    val palette = LingXiTheme.palette
+    val compact = LocalConfiguration.current.screenWidthDp < 840
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = !compact)) {
+        Column(
+            (if (compact) Modifier.fillMaxSize() else Modifier.heightIn(max = 720.dp))
+                .background(palette.surface).safeDrawingPadding().padding(20.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, Modifier.weight(1f), color = palette.text, fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold)
+                IconButton(onClick = onClose) {
+                    com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.X,
+                        color = palette.text3, contentDescription = stringResource(R.string.chat_run_collapse))
+                }
+            }
+            Text(body, color = palette.text2, fontSize = 15.sp, lineHeight = 24.sp)
+        }
+    }
 }

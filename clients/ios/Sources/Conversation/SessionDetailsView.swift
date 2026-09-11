@@ -14,6 +14,7 @@ struct SessionDetailsView: View {
     let workspacePath: String
     let onOpenTerminal: () -> Void
 
+    @State private var selectedTask: SessionTaskRow?
     @ObservedObject private var convo: ConversationModel
 
     init(
@@ -46,7 +47,9 @@ struct SessionDetailsView: View {
                 SessionTaskRow(
                     id: "tool:\(run.id):\(tool.id)",
                     title: tool.tool,
-                    detail: tool.inputSummary ?? tool.outputSummary,
+                    detail: [tool.header.map(ToolDisplayText.title), tool.inputSummary,
+                             tool.display?.body ?? tool.outputSummary]
+                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n"),
                     status: tool.status.label,
                     accent: taskColor(tool.status)
                 )
@@ -104,7 +107,9 @@ struct SessionDetailsView: View {
                         )
                     } else {
                         ForEach(tasks) { task in
-                            taskRow(task)
+                            Button { selectedTask = task } label: { taskRow(task) }
+                                .buttonStyle(.plain)
+                                .accessibilityHint("Open task details")
                         }
                     }
                 }
@@ -145,6 +150,29 @@ struct SessionDetailsView: View {
             t.windowBg.ignoresSafeArea()
         }
         .navigationTitle("session_details_title")
+        .fullScreenCover(item: $selectedTask) { task in
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Label(task.status, systemImage: "circle.fill")
+                            .foregroundStyle(task.accent)
+                        Text(task.title).font(.headline)
+                        if let detail = task.detail { Text(detail).font(.system(.body, design: .monospaced)) }
+                    }
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                }
+                .background(t.windowBg)
+                .navigationTitle("session_details_tasks")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("common_close") { selectedTask = nil }
+                    }
+                }
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -299,10 +327,7 @@ struct SessionDetailsView: View {
 
     private func workerRow(_ worker: ConversationCoordinatorWorker) -> some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(t.accent2.opacity(0.18))
-                .frame(width: 32, height: 32)
-                .overlay(Image(systemName: "person.fill").foregroundStyle(t.accent2))
+            AgentAvatar(agentID: worker.id, size: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text(worker.name)
                     .font(.system(size: 13, weight: .semibold))
@@ -361,7 +386,7 @@ struct SessionDetailsView: View {
         case .running: return t.accent
         case .completed: return t.ok
         case .failed: return t.danger
-        case .cancelled: return t.text3
+        case .cancelled, .unknown: return t.text3
         }
     }
 

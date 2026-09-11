@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -55,6 +56,7 @@ fun ComputerUseSettingsPage(
     onOpenAudioSettings: () -> Unit,
 ) {
     val context = LocalContext.current
+    val resources = LocalResources.current
     val feature = ComputerUseFeatureProvider
     val state by feature.state.collectAsState()
     val configuration by feature.configuration.collectAsState()
@@ -92,10 +94,10 @@ fun ComputerUseSettingsPage(
                 projectionResultCode = result.resultCode,
                 projectionData = result.data,
             ).onFailure { error ->
-                startFeedback = error.message ?: context.getString(R.string.settings_cu_start_failed)
+                startFeedback = error.message ?: resources.getString(R.string.settings_cu_start_failed)
             }
         } else {
-            startFeedback = context.getString(R.string.settings_cu_capture_cancelled)
+            startFeedback = resources.getString(R.string.settings_cu_capture_cancelled)
         }
     }
     val notificationLauncher = rememberLauncherForActivityResult(
@@ -105,7 +107,7 @@ fun ComputerUseSettingsPage(
         if (!granted || grants == null) {
             pendingStart = null
             if (!granted) {
-                startFeedback = context.getString(R.string.settings_cu_notification_required)
+                startFeedback = resources.getString(R.string.settings_cu_notification_required)
             }
         } else {
             val projection = feature.mediaProjectionRequest(context)
@@ -118,7 +120,7 @@ fun ComputerUseSettingsPage(
                     grants = grants,
                     includeSystemUi = grants.any { it.systemUi },
                 ).onFailure { error ->
-                    startFeedback = error.message ?: context.getString(R.string.settings_cu_start_failed)
+                    startFeedback = error.message ?: resources.getString(R.string.settings_cu_start_failed)
                 }
             }
         }
@@ -428,7 +430,7 @@ fun ComputerUseSettingsPage(
                             grants,
                             includeSystemUi = grants.any { it.systemUi },
                         ).onFailure { error ->
-                            startFeedback = error.message ?: context.getString(R.string.settings_cu_start_failed)
+                            startFeedback = error.message ?: resources.getString(R.string.settings_cu_start_failed)
                         }
                     }
                 },

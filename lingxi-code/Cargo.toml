@@ -5,6 +5,7 @@ members = [
     "protocol",
     "client-protocol",
     "client-adapter",
+    "configuration-admin",
     "tool-api",
     "tools/file",
     "tools/shell",

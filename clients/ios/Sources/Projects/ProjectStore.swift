@@ -140,7 +140,8 @@ final class ProjectStore {
         projectId: String?,
         sessionId: String,
         title: String,
-        mode: SessionMode = .code
+        mode: SessionMode = .code,
+        initialMessageCount: Int = 0
     ) async throws {
         let repository = repository
         let next = try await executionDomain.async {
@@ -148,8 +149,17 @@ final class ProjectStore {
                 projectId: projectId,
                 sessionId: sessionId,
                 title: title,
-                mode: mode
+                mode: mode,
+                initialMessageCount: initialMessageCount
             )
+        }
+        publish(next, preservingConflicts: true)
+    }
+
+    func setSessionArchived(projectId: String?, sessionId: String, archived: Bool) async throws {
+        let repository = repository
+        let next = try await executionDomain.async {
+            try repository.setSessionArchived(projectId: projectId, sessionId: sessionId, archived: archived)
         }
         publish(next, preservingConflicts: true)
     }

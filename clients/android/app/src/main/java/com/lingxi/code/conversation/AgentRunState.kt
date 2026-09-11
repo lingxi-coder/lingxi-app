@@ -5,6 +5,8 @@ enum class AgentToolStatus {
     Completed,
     Failed,
     Cancelled,
+    /** Historical invocation with no recorded result or authoritative live execution. */
+    Unknown,
 }
 
 enum class AgentRunOutcome {

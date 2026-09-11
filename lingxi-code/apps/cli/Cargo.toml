@@ -14,6 +14,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+configuration-admin = { path = "../../configuration-admin" }
 # Single source of truth for the product namespace (config dir/file names, env
 # var names, memory filenames, plugin manifest dir). The CLI routes its runtime
 # `.claude*` / `CLAUDE_CONFIG_DIR` literals through these constants.

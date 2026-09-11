@@ -6,6 +6,8 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.test.platform.app.InstrumentationRegistry
+import com.lingxi.code.R
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.theme.LingXiTheme
 import org.junit.Assert.assertTrue
@@ -35,7 +37,11 @@ class ComputerUseSetupUiTest {
         }
 
         rule.onNodeWithTag(UiTags.COMPUTER_USE_SETUP_BANNER).assertIsDisplayed()
-        rule.onNodeWithText("请启用 LingXi 无障碍服务、授权 Chrome、启动控制会话")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val steps = listOf(R.string.chat_computer_use_missing_accessibility,
+            R.string.chat_computer_use_missing_browser, R.string.settings_cu_start_session)
+            .joinToString("、") { context.getString(it) }
+        rule.onNodeWithText(context.getString(R.string.chat_computer_use_unavailable_detail, steps))
             .assertIsDisplayed()
         rule.onNodeWithTag(UiTags.COMPUTER_USE_SETUP_ACTION).performClick()
         rule.runOnIdle { assertTrue(opened) }

@@ -176,20 +176,8 @@ fun ChatScreen(
         if (renderItems.isNotEmpty()) listState.scrollToItem(renderItems.size - 1)
     }
 
+    ConversationDetailHost(state) {
     Box(modifier = modifier.fillMaxSize().background(t.windowBg)) {
-        // Ambient radial glow at the top (non-interactive).
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 360.dp)
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(t.ambient.top, t.ambient.bottom),
-                        radius = 900f,
-                    ),
-                ),
-        )
-
         Column(modifier = Modifier.fillMaxSize()) {
             TopBar(
                 title = state.session.title,
@@ -275,6 +263,8 @@ fun ChatScreen(
                 onDiscardRecovery = onDiscardRecoveredTurn,
             )
         }
+    }
+
     }
 
     pendingQuestionForSheet(state)?.let { request ->
@@ -430,6 +420,7 @@ private fun MessageList(
     val stableOnShare = remember { { text: String -> currentOnShare(text) } }
     val currentOnOpenTerminal by rememberUpdatedState(onOpenTerminal)
     val currentSessionId by rememberUpdatedState(state.session.id)
+    val currentUriHandler by rememberUpdatedState(androidx.compose.ui.platform.LocalUriHandler.current)
     val stableOnOpenLink = remember {
         { link: String ->
             val uri = runCatching { android.net.Uri.parse(link) }.getOrNull()
@@ -440,6 +431,8 @@ private fun MessageList(
                         ?: currentSessionId,
                     uri.getQueryParameter("initCommand").orEmpty(),
                 )
+            } else if (uri?.scheme?.lowercase() in setOf("https", "http", "mailto")) {
+                runCatching { currentUriHandler.openUri(link) }
             }
         }
     }
@@ -463,6 +456,9 @@ private fun MessageList(
         ) { item ->
             when (item) {
                 ChatRenderItem.Empty -> EmptyState()
+                is ChatRenderItem.Tools -> ToolGroupView(
+                    TranscriptBlock.Tools(item.calls), state.expandedToolCalls, stableOnToggleToolCall,
+                )
                 is ChatRenderItem.Message -> MessageBubble(
                     message = item.message,
                     onShare = stableOnShare,

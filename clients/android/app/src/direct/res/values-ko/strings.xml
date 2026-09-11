@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="computer_use_service_name">LingXi 앱 제어 서비스</string>
+    <string name="computer_use_service_description">사용자가 시작한 LingXi 세션에서 명시적으로 승인한 앱만 확인하고 조작할 수 있도록 허용합니다.</string>
+</resources>

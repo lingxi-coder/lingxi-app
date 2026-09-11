@@ -4,14 +4,39 @@ import UIKit
 private struct MessageImages: View {
     @Environment(\.theme) private var t
     let images: [MessageImage]
+    @State private var selectedImage: MessageImage?
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 7) {
-            ForEach(images) { image in
-                imageView(image)
+        ScrollView(.horizontal) {
+            HStack(alignment: .bottom, spacing: 7) {
+                ForEach(images) { image in
+                    Button { selectedImage = image } label: { imageView(image) }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Preview attached image")
+                }
             }
         }
+        .scrollIndicators(.hidden)
         .frame(maxWidth: 320, alignment: .trailing)
+        .fullScreenCover(item: $selectedImage) { image in
+            NavigationStack {
+                Group {
+                    if let decoded = decodedImage(image.url) {
+                        Image(uiImage: decoded).resizable().scaledToFit()
+                    } else if let url = URL(string: image.url) {
+                        AsyncImage(url: url) { content in content.resizable().scaledToFit() }
+                            placeholder: { ProgressView() }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(t.windowBg)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("common_close") { selectedImage = nil }
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -66,7 +91,7 @@ private struct MessageImages: View {
 // MARK: - Message bubble (user right-aligned, AI left)
 struct MessageBubble: View, Equatable {
     @Environment(\.theme) private var t
-    @State private var assistantExpanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let message: Message
     var detail: ConversationMessageDetail? = nil
     var expandedToolBlocks: Set<String> = []
@@ -81,6 +106,8 @@ struct MessageBubble: View, Equatable {
     /// off-screen row, silently re-collapsing a prompt the user expanded.
     var isUserExpanded: Bool = false
     var onToggleUserExpanded: () -> Void = {}
+    var isAssistantExpanded: Bool = false
+    var onToggleAssistantExpanded: () -> Void = {}
 
     static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
         lhs.message == rhs.message &&
@@ -89,6 +116,7 @@ struct MessageBubble: View, Equatable {
             // Without this the fold toggle would change no observed property
             // and SwiftUI would skip the re-render entirely.
             lhs.isUserExpanded == rhs.isUserExpanded &&
+            lhs.isAssistantExpanded == rhs.isAssistantExpanded &&
             lhs.dimmed == rhs.dimmed
     }
 
@@ -101,7 +129,7 @@ struct MessageBubble: View, Equatable {
                 HStack(alignment: .top, spacing: 0) {
                     Spacer(minLength: 0)
                     if !message.text.isEmpty {
-                        Text(message.text)
+                        userContent
                         // Dynamic Type: scale the body relative to .body so the
                         // transcript honors the user's text-size setting while
                         // keeping the design's 15.5pt baseline.
@@ -112,15 +140,13 @@ struct MessageBubble: View, Equatable {
                         // a `BubbleShape`, so a height clip would square off the
                         // rounded bottom corners. `lineLimit` also gives a
                         // trailing ellipsis for free.
-                        .lineLimit(userIsCollapsed
-                            ? AssistantMessageCollapsePolicy.collapsedLineLimit
-                            : nil)
+                        .frame(maxHeight: userIsCollapsed ? 260 : nil, alignment: .top)
+                        .clipped()
                         .foregroundColor(t.text)
                         .padding(.horizontal, 16).padding(.vertical, 12)
                         .background(t.surface)
-                        .clipShape(BubbleShape(topRightSharp: true))
-                        .overlay(BubbleShape(topRightSharp: true).stroke(t.border, lineWidth: 0.5))
-                        .frame(maxWidth: 320, alignment: .trailing)
+                        .clipShape(.rect(cornerRadius: 18))
+                        .frame(maxWidth: 700, alignment: .trailing)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -130,7 +156,7 @@ struct MessageBubble: View, Equatable {
                 // same policy, and the same two strings as the assistant side.
                 if userIsCollapsible {
                     Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                             onToggleUserExpanded()
                         }
                     } label: {
@@ -158,6 +184,7 @@ struct MessageBubble: View, Equatable {
             HStack(alignment: .top, spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let tag = message.tag { Pill(text: tag, color: t.accent) }
+                    if !message.images.isEmpty { MessageImages(images: message.images) }
                     assistantContent
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(
@@ -172,14 +199,14 @@ struct MessageBubble: View, Equatable {
                     HStack(spacing: 4) {
                         if assistantIsCollapsible {
                             Button {
-                                withAnimation(.easeInOut(duration: 0.18)) {
-                                    assistantExpanded.toggle()
+                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                                    onToggleAssistantExpanded()
                                 }
                             } label: {
                                 HStack(spacing: 4) {
                                     LXIcon(name: .chevron, size: 11, color: t.accent, stroke: 2)
-                                        .rotationEffect(.degrees(assistantExpanded ? 180 : 0))
-                                    Text(assistantExpanded
+                                        .rotationEffect(.degrees(isAssistantExpanded ? 180 : 0))
+                                    Text(isAssistantExpanded
                                         ? String(localized: "chat_run_collapse")
                                         : String(localized: "chat_run_expand"))
                                         .font(.system(size: 11.5, weight: .medium))
@@ -212,6 +239,16 @@ struct MessageBubble: View, Equatable {
     }
 
     @ViewBuilder
+    private var userContent: some View {
+        if message.text.contains("\n") {
+            AIText(markdown: message.text)
+        } else {
+            Text(AIText.parseInline(message.text, size: 15.5))
+                .textSelection(.enabled)
+        }
+    }
+
+    @ViewBuilder
     private var assistantContent: some View {
         if let detail, !detail.blocks.isEmpty {
             StructuredAIBlocks(
@@ -239,7 +276,7 @@ struct MessageBubble: View, Equatable {
     }
 
     private var assistantIsCollapsed: Bool {
-        assistantIsCollapsible && !assistantExpanded
+        assistantIsCollapsible && !isAssistantExpanded
     }
 }
 
@@ -275,10 +312,10 @@ private struct StructuredAIBlocks: View {
                 case let .text(text):
                     AIText(markdown: text)
                         .equatable()
-                case let .thinking(text, _):
-                    panel(title: String(localized: "chat_thinking"), body: text, icon: .brain)
-                case .redactedThinking:
-                    panel(title: String(localized: "chat_thinking"), body: String(localized: "chat_redacted_thinking"), icon: .brain)
+                case .thinking, .redactedThinking:
+                    // The timeline owns the ephemeral Thinking indicator.
+                    // Restored reasoning remains in the model, never in a bubble.
+                    EmptyView()
                 case let .compactBoundary(messagesBefore, messagesAfter, _):
                     compactBoundary(before: messagesBefore, after: messagesAfter)
                 case let .toolUse(id, tool, inputSummary, inputJson, header):
@@ -325,26 +362,6 @@ private struct StructuredAIBlocks: View {
                     .equatable()
             }
         }
-    }
-
-    private func panel(title: String, body: String, icon: LXIconName) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                LXIcon(name: icon, size: 12, color: t.text3, stroke: 1.7)
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(t.text3)
-            }
-            Text(body)
-                .font(.system(size: 12.5))
-                .foregroundColor(t.text2)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-        }
-        .padding(10)
-        .background(t.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
     }
 
     private func compactBoundary(before: Int, after: Int) -> some View {
@@ -408,7 +425,7 @@ private struct StructuredToolBlock: View {
                     if reduceMotion {
                         onToggle()
                     } else {
-                        withAnimation(.easeInOut(duration: 0.18)) {
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                             onToggle()
                         }
                     }
@@ -525,6 +542,11 @@ enum MDLine: Equatable {
     case paragraph(String)
     case bullet(String)
     case numbered(marker: String, String)
+    case heading(level: Int, String)
+    case quote(String)
+    case task(checked: Bool, String)
+    case nestedList(indent: Int, marker: String, String)
+    case rule
 }
 
 struct MDTable: Equatable {
@@ -555,8 +577,8 @@ private struct MDBlockView: View, Equatable {
 
     var body: some View {
         switch block {
-        case let .code(code, _):
-            codeBlock(code)
+        case let .code(code, language):
+            codeBlock(code, language: language)
         case let .text(lines):
             textBlock(lines)
         case let .table(table):
@@ -566,16 +588,39 @@ private struct MDBlockView: View, Equatable {
     }
 
     // A fenced code block: monospaced, in a tinted rounded panel.
-    private func codeBlock(_ code: String) -> some View {
-        Text(code)
-            .font(.system(size: 13.5, design: .monospaced))
-            .foregroundColor(t.text)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(t.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+    private func codeBlock(_ code: String, language: String?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(language.flatMap { $0.isEmpty ? nil : $0 } ?? "Code")
+                    .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(t.text3)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = code
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                        .font(.system(size: 11.5))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(t.text3)
+                .accessibilityLabel("Copy code")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            Divider().overlay(t.border)
+            ScrollView(.horizontal) {
+                Text(code)
+                    .font(.system(size: 13.5, design: .monospaced))
+                    .foregroundStyle(t.text)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+        }
+        .background(t.surface)
+        .clipShape(.rect(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
     }
 
     // A text block: paragraphs and list items, each with inline spans.
@@ -759,6 +804,29 @@ private struct MDLineView: View, Equatable {
             listRow(marker: "•", s)
         case let .numbered(marker, s):
             listRow(marker: marker, s)
+        case let .heading(level, s):
+            Text(AIText.parseInline(s, size: Self.bodySize))
+                .font(.system(size: max(16, 25 - CGFloat(level) * 2), weight: .semibold))
+                .foregroundStyle(t.text)
+                .padding(.top, 8)
+                .accessibilityAddTraits(.isHeader)
+        case let .quote(s):
+            HStack(spacing: 10) {
+                Rectangle().fill(t.border).frame(width: 3)
+                inlineText(s)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 4)
+        case let .task(checked, s):
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: checked ? "checkmark.square" : "square")
+                    .foregroundStyle(t.text3)
+                inlineText(s)
+            }
+        case let .nestedList(indent, marker, s):
+            listRow(marker: marker, s).padding(.leading, CGFloat(min(indent, 12)) * 8)
+        case .rule:
+            Divider().padding(.vertical, 8)
         }
     }
 
@@ -1009,9 +1077,23 @@ struct AIText: View, Equatable {
     /// Classify one text line as a paragraph, bullet, or numbered item.
     fileprivate static func parseLine(_ raw: String) -> MDLine {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        let indent = raw.prefix(while: { $0 == " " || $0 == "\t" }).reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+        let hashes = trimmed.prefix(while: { $0 == "#" }).count
+        if (1...6).contains(hashes), trimmed.dropFirst(hashes).hasPrefix(" ") {
+            return .heading(level: hashes, String(trimmed.dropFirst(hashes + 1)))
+        }
+        if trimmed.hasPrefix("> ") { return .quote(String(trimmed.dropFirst(2))) }
+        let markerText = trimmed.filter { !$0.isWhitespace }
+        if markerText.count >= 3, let marker = markerText.first, "-_*".contains(marker), markerText.allSatisfy({ $0 == marker }) {
+            return .rule
+        }
+        for marker in ["- [x] ", "- [X] ", "- [ ] "] where trimmed.hasPrefix(marker) {
+            return .task(checked: marker != "- [ ] ", String(trimmed.dropFirst(marker.count)))
+        }
         // Bullets: -, *, or • followed by a space.
         for marker in ["- ", "* ", "• "] where trimmed.hasPrefix(marker) {
-            return .bullet(String(trimmed.dropFirst(marker.count)))
+            let text = String(trimmed.dropFirst(marker.count))
+            return indent > 0 ? .nestedList(indent: indent, marker: "•", text) : .bullet(text)
         }
         // Numbered: `1.` / `1)` followed by a space.
         if let dot = trimmed.firstIndex(where: { $0 == "." || $0 == ")" }) {
@@ -1020,86 +1102,24 @@ struct AIText: View, Equatable {
             if !head.isEmpty, head.allSatisfy(\.isNumber),
                afterIdx < trimmed.endIndex, trimmed[afterIdx] == " " {
                 let body = String(trimmed[trimmed.index(after: afterIdx)...])
-                return .numbered(marker: "\(head).", body)
+                return indent > 0 ? .nestedList(indent: indent, marker: "\(head).", body) : .numbered(marker: "\(head).", body)
             }
         }
         return .paragraph(trimmed)
     }
 
-    // MARK: inline parsing (**bold** + `code` + links)
-
-    /// Parse inline `**bold**`, `` `inline code` `` and `[label](url)` spans.
-    /// SwiftUI routes attributed links through the scene's `openURL` action, so
-    /// Android-compatible `lingxi://open_terminal` links reach RootView too.
+    // Foundation's CommonMark parser preserves nested emphasis, links, escaping
+    // and inline code; the native Text renderer applies their presentation intents.
     static func parseInline(_ s: String, size: CGFloat) -> AttributedString {
-        var result = AttributedString()
-        let chars = Array(s)
-        var idx = 0
-        var plain = ""
-
-        func flushPlain() {
-            if !plain.isEmpty { result += AttributedString(plain); plain = "" }
+        guard var result = try? AttributedString(markdown: s, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )) else { return AttributedString(s) }
+        for run in result.runs {
+            if run.inlinePresentationIntent?.contains(.code) == true {
+                result[run.range].font = .system(size: size - 1, design: .monospaced)
+            }
         }
-
-        while idx < chars.count {
-            // Link: [label](url). A malformed or non-URL target remains text.
-            if chars[idx] == "[",
-               let labelEnd = nextIndex(of: "]", in: chars, from: idx + 1),
-               labelEnd + 1 < chars.count,
-               chars[labelEnd + 1] == "(",
-               let targetEnd = nextIndex(of: ")", in: chars, from: labelEnd + 2) {
-                let label = String(chars[(idx + 1)..<labelEnd])
-                let target = String(chars[(labelEnd + 2)..<targetEnd])
-                if !label.isEmpty, let url = URL(string: target) {
-                    flushPlain()
-                    var link = parseInline(label, size: size)
-                    link.link = url
-                    result += link
-                    idx = targetEnd + 1
-                    continue
-                }
-            }
-            // Inline code: `…` (single backtick, no nesting).
-            if chars[idx] == "`" {
-                if let close = nextIndex(of: "`", in: chars, from: idx + 1) {
-                    flushPlain()
-                    var code = AttributedString(String(chars[(idx + 1)..<close]))
-                    code.font = .system(size: size - 1, design: .monospaced)
-                    result += code
-                    idx = close + 1
-                    continue
-                }
-            }
-            // Bold: **…**
-            if chars[idx] == "*", idx + 1 < chars.count, chars[idx + 1] == "*" {
-                if let close = nextDoubleStar(in: chars, from: idx + 2) {
-                    flushPlain()
-                    var bold = AttributedString(String(chars[(idx + 2)..<close]))
-                    bold.font = .system(size: size, weight: .semibold)
-                    result += bold
-                    idx = close + 2
-                    continue
-                }
-            }
-            plain.append(chars[idx])
-            idx += 1
-        }
-        flushPlain()
         return result
-    }
-
-    private static func nextIndex(of ch: Character, in chars: [Character], from start: Int) -> Int? {
-        var i = start
-        while i < chars.count { if chars[i] == ch { return i }; i += 1 }
-        return nil
-    }
-
-    private static func nextDoubleStar(in chars: [Character], from start: Int) -> Int? {
-        var i = start
-        while i + 1 < chars.count {
-            if chars[i] == "*", chars[i + 1] == "*" { return i }
-            i += 1
-        }
-        return nil
     }
 }

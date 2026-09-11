@@ -6,6 +6,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.lingxi.code.R
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.SessionRef
@@ -48,7 +50,7 @@ class ModelSetupUiTest {
         }
 
         rule.onNodeWithTag(UiTags.MODEL_SETUP_BANNER).assertIsDisplayed()
-        rule.onNodeWithText("尚未设置模型").assertIsDisplayed()
+        rule.onNodeWithText(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.chat_model_not_configured_title)).assertIsDisplayed()
         rule.onNodeWithTag(UiTags.CHAT_ERROR).assertDoesNotExist()
         rule.onNodeWithTag(UiTags.MODEL_SETUP_ACTION).performClick()
 

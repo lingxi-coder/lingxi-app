@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="mobile_linux_distribution_channel">full</string>
+    <string name="mobile_linux_distribution_channel" translatable="false">full</string>
     <bool name="mobile_linux_full_distribution">true</bool>
     <bool name="high_risk_native_offloads_available">true</bool>
-    <string name="computer_use_service_name">LingXi Computer Use</string>
-    <string name="computer_use_service_description">Allows a user-started LingXi session to observe and operate only the apps you explicitly approve.</string>
+    <string name="computer_use_service_name">灵犀应用操作服务</string>
+    <string name="computer_use_service_description">允许用户主动启动的灵犀会话仅查看和操作您明确批准的应用。</string>
 </resources>

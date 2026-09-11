@@ -7,10 +7,8 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,32 +17,26 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
-import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.components.tint
-import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.VoiceConfig
 import com.lingxi.code.theme.AppLanguage
 import com.lingxi.code.theme.AppLanguageStore
@@ -54,120 +46,10 @@ import com.lingxi.code.voice.offline.VoiceModelDownloader
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-/**
- * The "simple" settings pages owned by A6 — account, notifications, input,
- * privacy, and language. Each is a thin composition of [SettingsSection] /
- * [SettingsRow] / [RadioList], ported from the iOS `SimplePages.swift`.
- * Toggles that the iOS code held as local `@State` stay local here too; the
- * language radio + notifications bind to the hoisted store so the main-list
- * summary stays in sync.
- */
-
-// MARK: - Account -----------------------------------------------------------
-@Composable
-fun AccountPage() {
-    val t = LingXiTheme.palette
-    Column(Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 18.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(76.dp)
-                    .clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(t.accent, t.accent2))),
-            ) {
-                Text("Y", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
-            }
-            Text("Yuxin Yang", color = t.text, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 12.dp))
-            Text("yuxin@axielix.com", color = t.text4, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
-            Text(
-                stringResource(R.string.settings_account_pro_renewal),
-                color = t.accent,
-                fontSize = 11.5f.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
-                    .padding(top = 10.dp)
-                    .clip(CircleShape)
-                    .background(t.accent.tint(0.18f))
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-            )
-        }
-
-        SettingsSection(label = stringResource(R.string.settings_section_monthly_usage)) {
-            SettingsRow(label = stringResource(R.string.settings_conversation_count), value = "247 / 1000", chevron = false)
-            SettingsRow(label = stringResource(R.string.settings_inference_duration), value = stringResource(R.string.settings_inference_duration_value), chevron = false)
-            SettingsRow(label = stringResource(R.string.settings_storage), value = "1.2 / 10 GB", chevron = false, isLast = true)
-        }
-        SettingsSection {
-            SettingsRow(icon = LXIconName.Brain, label = stringResource(R.string.settings_manage_subscription), onTap = {})
-            SettingsRow(icon = LXIconName.Link, label = stringResource(R.string.settings_sync_devices), sub = stringResource(R.string.settings_sync_devices_sub), onTap = {})
-            SettingsRow(icon = LXIconName.X, label = stringResource(R.string.settings_logout), danger = true, isLast = true, onTap = {})
-        }
-    }
-}
-
-// MARK: - Notifications -----------------------------------------------------
-@Composable
-fun NotificationsPage(notifs: NotifConfig, onChange: (NotifConfig) -> Unit) {
-    SettingsSection(
-        label = stringResource(R.string.settings_section_notification_type),
-        footer = stringResource(R.string.settings_notifications_footer),
-    ) {
-        SettingsRow(label = stringResource(R.string.settings_notif_workflow_complete), sub = stringResource(R.string.settings_notif_workflow_complete_sub), chevron = false) {
-            LXToggle(checked = notifs.workflows, onCheckedChange = { onChange(notifs.copy(workflows = it)) })
-        }
-        SettingsRow(label = stringResource(R.string.settings_notif_mention), sub = stringResource(R.string.settings_notif_mention_sub), chevron = false) {
-            LXToggle(checked = notifs.mentions, onCheckedChange = { onChange(notifs.copy(mentions = it)) })
-        }
-        SettingsRow(label = stringResource(R.string.settings_notif_cron_report), sub = stringResource(R.string.settings_notif_cron_report_sub), chevron = false) {
-            LXToggle(checked = notifs.crons, onCheckedChange = { onChange(notifs.copy(crons = it)) })
-        }
-        SettingsRow(label = stringResource(R.string.settings_notif_product_update), sub = stringResource(R.string.settings_notif_product_update_sub), chevron = false, isLast = true) {
-            LXToggle(checked = notifs.marketing, onCheckedChange = { onChange(notifs.copy(marketing = it)) })
-        }
-    }
-}
-
-// MARK: - Input -------------------------------------------------------------
-@Composable
-fun InputPage() {
-    var smartSugg by remember { mutableStateOf(true) }
-    var fromHistory by remember { mutableStateOf(true) }
-    Column(Modifier.fillMaxWidth()) {
-        SettingsSection(label = stringResource(R.string.settings_section_suggestions)) {
-            SettingsRow(label = stringResource(R.string.settings_smart_suggestions), chevron = false) { LXToggle(checked = smartSugg, onCheckedChange = { smartSugg = it }) }
-            SettingsRow(label = stringResource(R.string.settings_suggestions_history), chevron = false, isLast = true) { LXToggle(checked = fromHistory, onCheckedChange = { fromHistory = it }) }
-        }
-    }
-}
-
-// MARK: - Privacy -----------------------------------------------------------
-@Composable
-fun PrivacyPage() {
-    var contribute by remember { mutableStateOf(false) }
-    var crash by remember { mutableStateOf(true) }
-    Column(Modifier.fillMaxWidth()) {
-        SettingsSection(label = stringResource(R.string.settings_section_data)) {
-            SettingsRow(icon = LXIconName.Brain, label = stringResource(R.string.settings_export_data), onTap = {})
-            SettingsRow(icon = LXIconName.X, label = stringResource(R.string.settings_delete_account), danger = true, isLast = true, onTap = {})
-        }
-        SettingsSection(
-            label = stringResource(R.string.settings_section_visibility),
-            footer = stringResource(R.string.settings_privacy_footer),
-        ) {
-            SettingsRow(label = stringResource(R.string.settings_contribute_training), chevron = false) { LXToggle(checked = contribute, onCheckedChange = { contribute = it }) }
-            SettingsRow(label = stringResource(R.string.settings_crash_report), chevron = false, isLast = true) { LXToggle(checked = crash, onCheckedChange = { crash = it }) }
-        }
-    }
-}
-
+/** Persisted language and native voice controls. */
 // MARK: - Language ----------------------------------------------------------
 @Composable
 fun LanguagePage(language: String, onSelect: (String) -> Unit) {
-    var follow by remember { mutableStateOf(true) }
     val context = LocalContext.current
     val store = remember { AppLanguageStore(context.applicationContext) }
     val current by store.language.collectAsState()
@@ -188,14 +70,6 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
                     }
                 },
             )
-        }
-        SettingsSection(label = stringResource(R.string.settings_section_region)) {
-            SettingsRow(label = stringResource(R.string.settings_date_format), value = "2026/5/14", isLast = true, onTap = {})
-        }
-        SettingsSection(label = stringResource(R.string.settings_section_ai_reply_language)) {
-            SettingsRow(label = stringResource(R.string.settings_follow_interface), sub = stringResource(R.string.settings_follow_interface_sub), chevron = false, isLast = true) {
-                LXToggle(checked = follow, onCheckedChange = { follow = it })
-            }
         }
     }
 }
@@ -529,35 +403,4 @@ private fun availabilityLabel(available: Boolean): String =
 private fun cancelVoicePack(language: String) {
     com.lingxi.code.voice.offline.OfflineModelCatalog.packFor(language)
         .forEach(VoiceModelDownloader::cancel)
-}
-
-// MARK: - Placeholder (A7/A8 seam) ------------------------------------------
-/**
- * A clean placeholder for the 智能 / 能力扩展 surfaces that A7/A8 will build
- * (providers, voice, skills, MCP, Dream). Renders a centered card so the
- * navigation, top bar and back behavior are fully exercisable today without
- * faking those editors.
- */
-@Composable
-fun PlaceholderPage(title: String, note: String) {
-    val t = LingXiTheme.palette
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(t.surface)
-                .border(0.5.dp, t.border, RoundedCornerShape(12.dp))
-                .padding(20.dp),
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(title, color = t.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                Text(note, color = t.text3, fontSize = 12.5f.sp, lineHeight = 18.sp)
-            }
-        }
-    }
 }

@@ -30,12 +30,25 @@ struct ToolCallView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            headerRow
-            if let sub = trace.header?.subLine, !sub.text.isEmpty {
+            if compact {
+                if isCollapsible {
+                    Button(action: onToggle) { compactHeader }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(ConversationDesktopTimeline.summary([trace]))
+                        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+                } else {
+                    compactHeader
+                }
+            } else {
+                headerRow
+            }
+            if !compact, let sub = trace.header?.subLine, !sub.text.isEmpty {
                 subLineRow(sub)
             }
-            resultBlock
-            legacyFallback
+            if !compact || isExpanded {
+                resultBlock
+                legacyFallback
+            }
         }
         .padding(.horizontal, compact ? 10 : 10)
         .padding(.vertical, compact ? 5 : 8)
@@ -58,6 +71,36 @@ struct ToolCallView: View {
         .accessibilityElement(children: .contain)
         .accessibilityValue(trace.status.label)
         .accessibilityIdentifier("conversation.tool-call.\(trace.id)")
+    }
+
+    private var compactHeader: some View {
+        HStack(spacing: 8) {
+            LXIcon(name: ToolDisplayText.icon(header: trace.header, tool: trace.tool), size: 18,
+                   color: trace.status == .failed ? t.danger : (trace.status == .running ? t.accent : t.text3), stroke: 1.8)
+                .accessibilityIdentifier("conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)")
+            Text(compactSummary)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(trace.status == .failed ? t.danger : t.text3)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.accent)
+            Spacer(minLength: 0)
+            if isCollapsible {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(t.text3)
+            }
+        }
+        .frame(minHeight: 32)
+        .contentShape(.rect)
+    }
+
+    private var compactSummary: String {
+        var summary = ConversationDesktopTimeline.summary([trace])
+        if let display = trace.display, let headline = ToolDisplayText.headline(display) {
+            summary += " · " + headline
+        }
+        return summary
     }
 
     // MARK: header
@@ -183,7 +226,7 @@ struct ToolCallView: View {
                                 .foregroundColor(t.text4)
                         }
                     }
-                    if isCollapsible { disclosure(display) }
+                    if isCollapsible && !compact { disclosure(display) }
                 }
                 Spacer(minLength: 0)
             }
@@ -212,7 +255,9 @@ struct ToolCallView: View {
     /// The engine's `collapsed` hint is still useful metadata, but the client
     /// keeps the interaction consistent for short and long outputs alike.
     private var isCollapsible: Bool {
-        guard let display = trace.display else { return false }
+        guard let display = trace.display else {
+            return !(trace.outputSummary ?? "").isEmpty || !(trace.inputSummary ?? "").isEmpty
+        }
         return display.diff != nil
             || !(display.body ?? "").isEmpty
             || display.bodyTruncated
@@ -225,7 +270,7 @@ struct ToolCallView: View {
         case .running: return t.accent
         case .completed: return t.ok
         case .failed: return t.danger
-        case .cancelled: return t.text3
+        case .cancelled, .unknown: return t.text3
         }
     }
 

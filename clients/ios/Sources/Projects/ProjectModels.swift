@@ -87,6 +87,8 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
     var relativeTime: String
     var updatedAt: Date
     var mode: SessionMode
+    var isArchived: Bool
+    var pendingCatalogConfirmation: Bool
 
     init(
         sessionId: String,
@@ -94,7 +96,9 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         messageCount: Int,
         relativeTime: String,
         updatedAt: Date,
-        mode: SessionMode = .code
+        mode: SessionMode = .code,
+        isArchived: Bool = false,
+        pendingCatalogConfirmation: Bool = false
     ) {
         self.sessionId = sessionId
         self.title = title
@@ -102,6 +106,8 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         self.relativeTime = relativeTime
         self.updatedAt = updatedAt
         self.mode = mode
+        self.isArchived = isArchived
+        self.pendingCatalogConfirmation = pendingCatalogConfirmation
     }
 
     enum CodingKeys: String, CodingKey {
@@ -111,6 +117,8 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         case relativeTime
         case updatedAt
         case mode
+        case isArchived
+        case pendingCatalogConfirmation
     }
 
     init(from decoder: any Decoder) throws {
@@ -121,6 +129,8 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         relativeTime = try container.decode(String.self, forKey: .relativeTime)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         mode = try container.decodeIfPresent(SessionMode.self, forKey: .mode) ?? .code
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+        pendingCatalogConfirmation = try container.decodeIfPresent(Bool.self, forKey: .pendingCatalogConfirmation) ?? false
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -131,6 +141,8 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         try container.encode(relativeTime, forKey: .relativeTime)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encode(mode, forKey: .mode)
+        try container.encode(isArchived, forKey: .isArchived)
+        try container.encode(pendingCatalogConfirmation, forKey: .pendingCatalogConfirmation)
     }
 
     var id: String { sessionId }

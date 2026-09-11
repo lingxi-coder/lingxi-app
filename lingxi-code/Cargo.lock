@@ -800,6 +800,7 @@ dependencies = [
  "client-protocol",
  "command-api",
  "command-core",
+ "configuration-admin",
  "core",
  "dirs",
  "engine-desktop",
@@ -1088,6 +1089,7 @@ dependencies = [
  "client-protocol",
  "command-api",
  "command-core",
+ "configuration-admin",
  "core",
  "cost",
  "crossterm",
@@ -1302,6 +1304,36 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "configuration-admin"
+version = "0.1.0"
+dependencies = [
+ "branding",
+ "chrono",
+ "client-adapter",
+ "client-protocol",
+ "core",
+ "futures",
+ "hooks",
+ "mcp",
+ "migrations",
+ "permission",
+ "platform-api",
+ "plugin",
+ "regex",
+ "reqwest",
+ "secret",
+ "serde",
+ "serde_json",
+ "skill-api",
+ "telemetry",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]
@@ -1890,6 +1922,8 @@ dependencies = [
  "command-api",
  "command-core",
  "compaction",
+ "configuration-admin",
+ "core",
  "cost",
  "cron",
  "futures-util",
@@ -1901,6 +1935,7 @@ dependencies = [
  "lsp",
  "lsp-types",
  "mcp",
+ "migrations",
  "msgqueue",
  "orchestrator",
  "outputstyles",

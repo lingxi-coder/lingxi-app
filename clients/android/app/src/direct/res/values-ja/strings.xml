@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="computer_use_service_name">LingXi アプリ操作サービス</string>
+    <string name="computer_use_service_description">ユーザーが開始した LingXi セッションで、明示的に承認したアプリのみを確認・操作できるようにします。</string>
+</resources>

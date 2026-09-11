@@ -1,5 +1,7 @@
 package com.lingxi.code
 
+import com.lingxi.code.conversation.blocksEngineReconnect
+
 import android.content.pm.PackageManager
 import android.util.Base64
 import androidx.compose.foundation.layout.Box
@@ -269,6 +271,7 @@ fun RootScreen(
     reconnectToken: Int = 0,
     settingsStore: SettingsStore? = null,
     onConversationSourceChanged: (ConversationSource) -> Unit = {},
+    onConversationBusyChanged: (Boolean) -> Unit = {},
     viewModel: ChatViewModel? = null,
     requestedConversationLaunch: ConversationLaunchRequest? = null,
     onConversationLaunchHandled: () -> Unit = {},
@@ -278,6 +281,7 @@ fun RootScreen(
     onOpenLocalAppsHandled: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val resources by rememberUpdatedState(androidx.compose.ui.platform.LocalResources.current)
     val voiceSpeechPlayer = remember(context) { VoiceSpeechPlayer(context) }
     DisposableEffect(voiceSpeechPlayer) {
         onDispose { voiceSpeechPlayer.stop() }
@@ -402,6 +406,9 @@ fun RootScreen(
         }
     }
     val state by chatViewModel.state.collectAsState()
+    val pendingPermission by chatViewModel.pendingPermission.collectAsState()
+    val hasActiveEngineWork = state.blocksEngineReconnect(hasPendingPermission = pendingPermission != null)
+    LaunchedEffect(hasActiveEngineWork) { onConversationBusyChanged(hasActiveEngineWork) }
     val localAppsViewModel: LocalAppsViewModel = viewModel(
         key = "local-apps",
         factory = LocalAppsViewModel.factory(
@@ -503,11 +510,11 @@ fun RootScreen(
     }
 
     fun localAppWorkspaceStatus(workflow: LocalAppWorkflow): String = when (workflow) {
-        LocalAppWorkflow.Draft -> context.getString(R.string.local_apps_workflow_draft)
+        LocalAppWorkflow.Draft -> resources.getString(R.string.local_apps_workflow_draft)
         LocalAppWorkflow.PublishedUnverified ->
-            context.getString(R.string.local_apps_verification_status_unverified)
+            resources.getString(R.string.local_apps_verification_status_unverified)
         LocalAppWorkflow.PublishedVerified ->
-            context.getString(R.string.local_apps_verification_status_passed)
+            resources.getString(R.string.local_apps_verification_status_passed)
     }
 
     var showingApps by rememberSaveable { mutableStateOf(false) }
@@ -517,7 +524,7 @@ fun RootScreen(
                 if (!LocalAppWidgetPinRequester.request(context, appId)) {
                     Toast.makeText(
                         context,
-                        context.getString(R.string.local_apps_widget_pin_unavailable),
+                        resources.getString(R.string.local_apps_widget_pin_unavailable),
                         Toast.LENGTH_LONG,
                     ).show()
                 }
@@ -618,7 +625,6 @@ fun RootScreen(
     val computerUseSetup = computerUseReadiness?.takeIf {
         shouldShowComputerUseSetup(it, computerUseSetupDismissed)
     }
-    val pendingPermission by chatViewModel.pendingPermission.collectAsState()
     // The engine's REAL resumable-session catalog (out-of-band, sibling of the
     // model catalog). The drawer renders its loading / empty / error states
     // directly and never falls back to mock sessions.
@@ -952,7 +958,7 @@ fun RootScreen(
         allowInactiveWaitingRecovery: Boolean = false,
         sessionModeOverride: SessionMode = activeSessionMode,
     ): Boolean {
-        val destination = target ?: SessionRef("new", context.getString(R.string.chat_new_conversation))
+        val destination = target ?: SessionRef("new", resources.getString(R.string.chat_new_conversation))
         var persisted: ProjectStoreState? = null
         return chatViewModel.switchWorkspaceSource(
             projectId = (engineScope as? ConversationScope.Project)?.projectId,
@@ -1096,7 +1102,7 @@ fun RootScreen(
             sourceSessionTitle = row.title,
         )
         if (pendingForkRequest != null) {
-            chatViewModel.reportHostError(context.getString(R.string.drawer_continue_session_in_progress))
+            chatViewModel.reportHostError(resources.getString(R.string.drawer_continue_session_in_progress))
             return
         }
         val activeSourceMatchesScope =
@@ -1124,7 +1130,7 @@ fun RootScreen(
                     val event = awaitEvent.await()
                     if (event == null) {
                         pendingForkRequest = null
-                        chatViewModel.reportHostError(context.getString(R.string.drawer_continue_session_timeout))
+                        chatViewModel.reportHostError(resources.getString(R.string.drawer_continue_session_timeout))
                     } else {
                         completeForkTransition(request, event.sessionId)
                     }
@@ -1170,7 +1176,7 @@ fun RootScreen(
                 val event = awaitEvent.await()
                 if (event == null) {
                     pendingForkRequest = null
-                    chatViewModel.reportHostError(context.getString(R.string.drawer_continue_session_timeout))
+                    chatViewModel.reportHostError(resources.getString(R.string.drawer_continue_session_timeout))
                     return@coroutineScope
                 }
                 completeForkTransition(request, event.sessionId)
@@ -1312,7 +1318,7 @@ fun RootScreen(
                             // interpolate, and the old text told the agent the
                             // shape and the name were "already fixed", which is
                             // exactly what the conversation now exists to decide.
-                            chatViewModel.send(context.getString(R.string.local_apps_kickoff))
+                            chatViewModel.send(resources.getString(R.string.local_apps_kickoff))
                         }
                     } else {
                         // The scope switch itself succeeded, but the session
@@ -1380,7 +1386,7 @@ fun RootScreen(
                 // be empty.
                 localAppsViewModel.clearPendingAppKickoff(appId)
                 if (fired != null) {
-                    chatViewModel.send(context.getString(R.string.local_apps_kickoff))
+                    chatViewModel.send(resources.getString(R.string.local_apps_kickoff))
                 } else {
                     // Same "known imprecision" banner the switch-exhausted
                     // path uses; see the comment at `armPendingAppKickoff`'s
@@ -1519,7 +1525,7 @@ fun RootScreen(
                 ?.let {
                     localAppDisplayName(
                         it,
-                        draftTitle = context.getString(R.string.local_apps_draft_card_title),
+                        draftTitle = resources.getString(R.string.local_apps_draft_card_title),
                         fallback = persistedScope.appId,
                     )
                 }
@@ -1527,7 +1533,7 @@ fun RootScreen(
                 engineScope = persistedScope,
                 project = null,
                 target = lastSessionId?.let {
-                    SessionRef(it, appName ?: context.getString(R.string.chat_new_conversation))
+                    SessionRef(it, appName ?: resources.getString(R.string.chat_new_conversation))
                 },
                 newSession = lastSessionId == null,
                 replacePendingTransition = true,
@@ -1568,7 +1574,7 @@ fun RootScreen(
         sessionState.rows,
         state.session.id,
         state.sessionReady,
-        state.isNew,
+        state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User },
         sourceScope,
     ) {
         if (
@@ -1583,19 +1589,17 @@ fun RootScreen(
                         )
             if (!provisionalSessionMayNotBeListed) {
                 runCatching { projectStore.syncEngineSessions(sourceProjectId, sessionState.rows) }
-                    .onFailure { chatViewModel.reportHostError(context.getString(R.string.session_index_save_failed_fmt, it.message.orEmpty())) }
+                    .onFailure { chatViewModel.reportHostError(resources.getString(R.string.session_index_save_failed_fmt, it.message.orEmpty())) }
             }
         }
     }
-    // SessionStarted is emitted before an empty session necessarily has a
-    // file-backed SessionList row. Persist that confirmed id immediately, then
-    // wait until the first turn finishes before asking the authoritative catalog
-    // to replace the provisional row.
+    // Publish the confirmed session as soon as the first local user message exists.
+    // Pending rows survive catalog refresh until the engine persists them.
     LaunchedEffect(
         sourceProjectId,
         state.session.id,
         state.sessionReady,
-        state.isNew,
+        state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User }?.id,
         sourceScope,
         currentEngineSource,
     ) {
@@ -1603,19 +1607,26 @@ fun RootScreen(
         if (
             engineMode == activeSessionMode &&
             state.sessionReady &&
-            state.isNew &&
+            state.messages.any { it.role == com.lingxi.code.model.Role.User } &&
             state.session.id != "new" &&
+            (if (sourceProjectId == null) projectState.globalSessions else projectState.projects.firstOrNull { it.record.id == sourceProjectId }?.sessions.orEmpty()).none { it.sessionId == state.session.id && it.messageCount > 0 } &&
             sourceScope !is ConversationScope.LocalApp
         ) {
             runCatching {
                 projectStore.recordStartedSession(
                     projectId = sourceProjectId,
                     sessionId = state.session.id,
-                    title = state.session.title,
+                    title = state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User }?.text?.take(120) ?: state.session.title,
                     mode = activeSessionMode,
+                    initialMessageCount = 1,
                 )
+                val key = sourceScope.persistenceKey()
+                if (drawerUi.isWorkspaceCollapsed(activeSessionMode, key)) {
+                    drawerUi.toggleWorkspaceCollapsed(activeSessionMode, key)
+                    scopeStore.persistWorkspaceCollapsed("${activeSessionMode.wireKey}:$key", false)
+                }
             }.onFailure {
-                chatViewModel.reportHostError(context.getString(R.string.session_index_save_new_failed_fmt, it.message.orEmpty()))
+                chatViewModel.reportHostError(resources.getString(R.string.session_index_save_new_failed_fmt, it.message.orEmpty()))
             }
         }
     }
@@ -1652,7 +1663,7 @@ fun RootScreen(
         }
     }
 
-    val cachedGlobalRows = projectState.globalSessions.map { cached ->
+    val cachedGlobalRows = projectState.globalSessions.filterNot { it.isArchived }.map { cached ->
         SessionRow(
             uuid = cached.sessionId,
             title = cached.title,
@@ -1663,7 +1674,10 @@ fun RootScreen(
         )
     }
     val globalDrawerSessions = if (sourceScope == ConversationScope.Global) {
-        sessionState.withCachedRows(cachedGlobalRows)
+        sessionState.withCachedRows(cachedGlobalRows, projectState.globalSessions.filter { it.pendingCatalogConfirmation }.map { it.sessionId }.toSet()).let { catalog ->
+            val archivedIds = projectState.globalSessions.filter { it.isArchived }.map { it.sessionId }.toSet()
+            catalog.copy(rows = catalog.rows.filterNot { it.uuid in archivedIds })
+        }
     } else {
         EngineSessionState.ready(cachedGlobalRows)
     }
@@ -1772,7 +1786,7 @@ fun RootScreen(
                 appId = app.id,
                 name = localAppDisplayName(
                     app,
-                    draftTitle = context.getString(R.string.local_apps_draft_card_title),
+                    draftTitle = resources.getString(R.string.local_apps_draft_card_title),
                     fallback = app.id,
                 ),
                 status = localAppWorkspaceStatus(app.workflow),
@@ -1791,18 +1805,18 @@ fun RootScreen(
                     ?: cron.task.id,
                 cron = cron.task.cron,
                 next = cron.task.nextFireMs?.toLong()?.let(::formatCronTime)
-                    ?: context.getString(R.string.cron_no_next_fire),
+                    ?: resources.getString(R.string.cron_no_next_fire),
                 desc = buildString {
                     append(cron.scope.projectName)
                     append(" · ")
                     append(
                         when {
                             cron.schedulingMode == CronSchedulingMode.Unsupported ->
-                                cron.unsupportedReason ?: context.getString(R.string.cron_unsupported_period_fallback)
+                                cron.unsupportedReason ?: resources.getString(R.string.cron_unsupported_period_fallback)
                             status != null -> cronStatusLabel(status, context)
                             cron.schedulingMode == CronSchedulingMode.FifteenMinuteFallback ->
-                                context.getString(R.string.cron_fifteen_minute_patrol_short)
-                            else -> context.getString(R.string.cron_exact_alarm_short)
+                                resources.getString(R.string.cron_fifteen_minute_patrol_short)
+                            else -> resources.getString(R.string.cron_exact_alarm_short)
                         },
                     )
                 },
@@ -1830,7 +1844,7 @@ fun RootScreen(
         } == true
     fun runConversationAction(action: () -> Unit) {
         if (activeProjectSyncing) {
-            chatViewModel.reportHostError(context.getString(R.string.project_sync_in_progress_notice))
+            chatViewModel.reportHostError(resources.getString(R.string.project_sync_in_progress_notice))
         } else {
             action()
         }
@@ -1839,7 +1853,7 @@ fun RootScreen(
         val activeProjectIsExecuting =
             projectId == sourceProjectId && (state.streaming || state.sessionTransitioning)
         if (activeProjectIsExecuting) {
-            chatViewModel.reportHostError(context.getString(R.string.project_sync_stop_task_first_notice))
+            chatViewModel.reportHostError(resources.getString(R.string.project_sync_stop_task_first_notice))
             return false
         }
         action()
@@ -1879,7 +1893,7 @@ fun RootScreen(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
-        ModalNavigationDrawer(
+        AdaptiveConversationDrawer(
             modifier = Modifier.fillMaxSize(),
             drawerState = drawerState,
             scrimColor = Color.Black.copy(alpha = 0.4f),
@@ -1985,7 +1999,7 @@ fun RootScreen(
                                 appId = active.appId,
                                 appName = localAppDisplayName(
                                     localAppsState.apps.firstOrNull { it.id == active.appId },
-                                    draftTitle = context.getString(R.string.local_apps_draft_card_title),
+                                    draftTitle = resources.getString(R.string.local_apps_draft_card_title),
                                     fallback = active.appId,
                                 ),
                                 sessions = localAppsState.appSessions[active.appId]?.rows.orEmpty().map { row ->

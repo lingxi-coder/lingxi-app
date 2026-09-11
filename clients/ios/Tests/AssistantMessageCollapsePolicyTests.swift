@@ -62,6 +62,20 @@ final class AssistantMessageCollapsePolicyTests: XCTestCase {
         XCTAssertTrue(AssistantMessageCollapsePolicy.shouldCollapse(reply))
     }
 
+    func testMarkdownSupportsNestedEmphasisAndNativeLinks() {
+        let parsed = AIText.parseInline("**bold *nested*** and ~~removed~~ [site](https://example.com)", size: 15)
+        XCTAssertEqual(String(parsed.characters), "bold nested and removed site")
+        XCTAssertTrue(parsed.runs.contains { $0.inlinePresentationIntent?.contains(.emphasized) == true })
+        XCTAssertTrue(parsed.runs.contains { $0.link?.absoluteString == "https://example.com" })
+    }
+
+    func testMarkdownSupportsHeadingsQuotesTasksAndIndentedLists() {
+        XCTAssertEqual(AIText.parseBlocks("## Heading\n> Quote\n- [x] Done\n  - nested"), [
+            .text([.heading(level: 2, "Heading"), .quote("Quote"), .task(checked: true, "Done"),
+                   .nestedList(indent: 2, marker: "•", "nested")])
+        ])
+    }
+
     func testAssistantMarkdownParsesPipeTableAndColumnAlignment() {
         let markdown = """
         | 阶段 | 状态 | Owner |
@@ -118,7 +132,7 @@ final class AssistantMessageCollapsePolicyTests: XCTestCase {
                     alignments: [.leading, .leading],
                     rows: [["single cell", ""]]
                 )),
-                .text([.paragraph("> quote | outside table")])
+                .text([.quote("quote | outside table")])
             ]
         )
     }

@@ -1,6 +1,12 @@
 package com.lingxi.code.conversation
 
 import androidx.annotation.StringRes
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -71,15 +77,17 @@ internal fun ToolCallView(
     trailing: String? = null,
 ) {
     val t = LingXiTheme.palette
+    val detailHost = LocalConversationDetail.current
+    val openDetail = { if (detailHost != null) detailHost("tool:${call.id}") else onToggleExpanded() }
     val display = call.display
     val title = toolCallTitle(call)
     val statusLabel = toolCallStatusLabel(call.status)
-    // `collapsed` is the ENGINE's verdict that the body exceeds the inline
-    // budget. A body it did not mark collapsed renders inline with no toggle.
-    val collapsible = display != null && display.collapsed && display.hasExpandableContent
+    // Desktop parity: every result starts collapsed; the engine still owns
+    // body/diff truncation and the client owns disclosure presentation.
+    val collapsible = display != null && display.hasExpandableContent
     val showsContent = display != null &&
         display.hasExpandableContent &&
-        (!display.collapsed || expanded)
+        expanded
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -90,17 +98,21 @@ internal fun ToolCallView(
             // so the row announces the status word alongside the title.
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .then(if (collapsible) Modifier.clickable(onClick = openDetail) else Modifier)
                 .semantics(mergeDescendants = true) {
                     contentDescription = "$statusLabel $title"
                 },
             verticalAlignment = Alignment.Top,
         ) {
-            Box(
-                modifier = Modifier
-                    .padding(top = 6.dp)
-                    .size(7.dp)
-                    .background(toolCallStatusColor(call.status), CircleShape),
-            )
+            if (call.status == AgentToolStatus.Running) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp), color = t.text3, strokeWidth = 1.5.dp,
+                )
+            } else {
+                com.lingxi.code.components.LXIcon(toolIconName(call.header?.verb),
+                    size = 18.dp, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3)
+            }
             Spacer(Modifier.width(9.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -165,37 +177,30 @@ internal fun ToolCallView(
             }
         }
 
-        if (showsContent && display != null) {
-            Column(
-                modifier = Modifier.padding(start = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                display.diff?.takeIf { it.rows.isNotEmpty() }?.let { DiffView(diff = it) }
-                display.body?.takeIf { it.isNotEmpty() }?.let { body ->
-                    Text(
-                        text = body,
-                        color = t.text2,
-                        fontSize = 12.sp,
-                        lineHeight = 17.sp,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(t.diffSurface)
-                            .padding(horizontal = 10.dp, vertical = 7.dp),
-                    )
-                }
-                if (display.bodyTruncated) {
-                    Text(
-                        text = stringResource(R.string.chat_tool_body_truncated),
-                        color = t.text4,
-                        fontSize = 11.5f.sp,
-                    )
+        if (showsContent && detailHost == null) {
+            val compact = LocalConfiguration.current.screenWidthDp < 840
+            Dialog(onDismissRequest = onToggleExpanded,
+                properties = DialogProperties(usePlatformDefaultWidth = !compact)) {
+                Column(
+                    modifier = (if (compact) Modifier.fillMaxSize() else Modifier.heightIn(max = 720.dp))
+                        .background(t.surface).padding(20.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(title, modifier = Modifier.weight(1f), color = t.text, fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold)
+                        Box(Modifier.size(44.dp).clickable(onClick = onToggleExpanded),
+                            contentAlignment = Alignment.Center) {
+                            com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.X,
+                                color = t.text3, contentDescription = stringResource(R.string.chat_tool_show_less))
+                        }
+                    }
+                    ToolResultContent(call)
                 }
             }
         }
 
-        if (collapsible && display != null) {
+        if (collapsible) {
             // `bodyLines` is the count BEFORE clamping, so the affordance can say
             // how much is hidden without this side measuring anything.
             val hiddenLines = when {
@@ -213,10 +218,10 @@ internal fun ToolCallView(
                 modifier = Modifier
                     .padding(start = 16.dp)
                     .clip(RoundedCornerShape(6.dp))
-                    .clickable(onClick = onToggleExpanded)
+                    .clickable(onClick = openDetail)
                     .semantics { role = Role.Button }
                     .testTag(UiTags.TOOL_CALL_TOGGLE)
-                    .heightIn(min = 32.dp)
+                    .heightIn(min = 44.dp)
                     .padding(horizontal = 6.dp, vertical = 7.dp),
             )
         }
@@ -380,6 +385,7 @@ internal fun resultHeadline(display: ToolResultDisplayUi): String? {
 /** The spoken status word — the colored dot alone tells a screen reader nothing. */
 @Composable
 internal fun toolCallStatusLabel(status: AgentToolStatus): String = when (status) {
+    AgentToolStatus.Unknown -> stringResource(R.string.voice_permission_unknown_label)
     AgentToolStatus.Running -> stringResource(R.string.chat_status_running)
     AgentToolStatus.Completed -> stringResource(R.string.chat_tool_status_completed)
     AgentToolStatus.Failed -> stringResource(R.string.chat_status_failed)
@@ -390,9 +396,43 @@ internal fun toolCallStatusLabel(status: AgentToolStatus): String = when (status
 internal fun toolCallStatusColor(status: AgentToolStatus): Color {
     val t = LingXiTheme.palette
     return when (status) {
+        AgentToolStatus.Unknown -> t.text4
         AgentToolStatus.Running -> t.accent
         AgentToolStatus.Completed -> t.ok
         AgentToolStatus.Failed -> t.danger
         AgentToolStatus.Cancelled -> t.text4
+    }
+}
+
+@Composable
+internal fun ToolResultContent(call: ToolCallUi) {
+    val display = call.display ?: return
+    val t = LingXiTheme.palette
+    Column(
+        modifier = Modifier.padding(start = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        display.diff?.takeIf { it.rows.isNotEmpty() }?.let { DiffView(diff = it) }
+        display.body?.takeIf { it.isNotEmpty() }?.let { body ->
+            Text(
+                text = body,
+                color = t.text2,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(t.diffSurface)
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+            )
+        }
+        if (display.bodyTruncated) {
+            Text(
+                text = stringResource(R.string.chat_tool_body_truncated),
+                color = t.text4,
+                fontSize = 11.5f.sp,
+            )
+        }
     }
 }

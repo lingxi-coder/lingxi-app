@@ -41,6 +41,13 @@ sealed interface ChatRenderItem {
         override val contentType: String get() = "message"
     }
 
+    /** Consecutive tools can span provider message envelopes within a turn. */
+    @Immutable
+    data class Tools(val calls: List<ToolCallUi>) : ChatRenderItem {
+        override val key get() = "tool-group:${calls.first().id}"
+        override val contentType get() = "tool_group"
+    }
+
     /** A terminal Agent result anchored after the assistant message it produced. */
     @Immutable
     data class AgentRun(val run: AgentRunState) : ChatRenderItem {
@@ -75,13 +82,62 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList {
     if (state.isNew && state.messages.isEmpty() && !state.streaming) {
         add(ChatRenderItem.Empty)
     }
-    state.messages.forEach { message ->
-        if (message.text.isNotBlank() || message.blocks.isNotEmpty()) {
+    // A persisted ToolUse is not proof of current execution. Live/recovery
+    // trace events are authoritative; incomplete historical records stay neutral.
+    val authoritativeTools = buildMap<String, ToolCallUi> {
+        val runs = state.agentRunsByMessageId.values + listOfNotNull(state.agentRun)
+        runs.forEach { run ->
+            run.tools.forEach { tool ->
+                if (tool.status != AgentToolStatus.Running || run.active || run.activeWorkers > 0) {
+                    put(tool.id, tool.toToolCall())
+                }
+            }
+        }
+    }
+    var canMergeTools = true
+    fun appendTools(calls: List<ToolCallUi>) {
+        val previous = if (canMergeTools) lastOrNull() as? ChatRenderItem.Tools else null
+        if (previous == null) add(ChatRenderItem.Tools(calls))
+        else { removeAt(lastIndex); add(ChatRenderItem.Tools(previous.calls + calls)) }
+        canMergeTools = true
+    }
+    state.messages.forEachIndexed { messageIndex, message ->
+        if (message.role == com.lingxi.code.model.Role.Ai && message.blocks.isNotEmpty()) {
+            val projectedBlocks = message.blocks.map { block ->
+                if (block !is MessageContent.Tool) block else {
+                    val call = block.call
+                    val live = authoritativeTools[call.id]
+                    MessageContent.Tool(when {
+                        live != null -> call.copy(status = live.status, header = live.header ?: call.header,
+                            display = live.display ?: call.display)
+                        call.status == AgentToolStatus.Running -> call.copy(status = AgentToolStatus.Unknown)
+                        else -> call
+                    })
+                }
+            }
+            transcriptBlocks(projectedBlocks).forEachIndexed { index, block ->
+                when (block) {
+                    is TranscriptBlock.Tools -> appendTools(block.calls)
+                    is TranscriptBlock.Prose -> add(ChatRenderItem.Message(message.copy(
+                        id = if (index == 0) message.id else "${message.id}:prose:$index",
+                        text = block.text, blocks = listOf(MessageContent.Text(block.text)),
+                    )))
+                }
+            }
+        } else if (message.text.isNotBlank() || message.images.isNotEmpty() || message.blocks.isNotEmpty()) {
             add(ChatRenderItem.Message(message))
         }
-        state.agentRunsByMessageId[message.id]
-            ?.takeUnless { it.turnId == pinnedTurnId }
-            ?.let { add(ChatRenderItem.AgentRun(it)) }
+        val run = state.agentRunsByMessageId[message.id]
+        // Resumed JSONL has no turn IDs; Finished traces are reconstructed per
+        // envelope. Only the final assistant envelope owns that synthetic footer.
+        val syntheticInterior = run?.outcome == AgentRunOutcome.Finished &&
+            state.messages.getOrNull(messageIndex + 1)?.role == com.lingxi.code.model.Role.Ai
+        if (!syntheticInterior) {
+            run?.takeUnless { it.turnId == pinnedTurnId }?.let { add(ChatRenderItem.AgentRun(it)) }
+        }
+        if (message.role == com.lingxi.code.model.Role.User || (run != null && !syntheticInterior)) {
+            canMergeTools = false
+        }
     }
     state.streamingMessage?.let { add(ChatRenderItem.Streaming(it)) }
     state.shellTools.forEach { add(ChatRenderItem.Shell(it)) }

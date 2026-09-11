@@ -1,0 +1,342 @@
+{
+  "version": 1,
+  "description": "Shared native presentation snapshots and ordered permission/workflow events. Consumers run production projection/reducer helpers; this is not a transport or screenshot replay.",
+  "scenarios": [
+    {
+      "id": "tools_running",
+      "events": [
+        {
+          "kind": "tool",
+          "id": "read",
+          "name": "Read",
+          "status": "completed",
+          "input_json": "{\"file_path\":\"src/main.rs\"}",
+          "expected_preview": "src/main.rs"
+        },
+        {
+          "kind": "tool",
+          "id": "shell",
+          "name": "Bash",
+          "status": "running",
+          "input_json": "{\"command\":\"pwd\"}",
+          "expected_preview": "pwd"
+        }
+      ],
+      "expected_groups": [
+        {
+          "ids": [
+            "read",
+            "shell"
+          ],
+          "active_ids": [
+            "shell"
+          ],
+          "summary": "Bash",
+          "statuses": [
+            "completed",
+            "running"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tools_settled",
+      "events": [
+        {
+          "kind": "tool",
+          "id": "read",
+          "name": "Read",
+          "status": "completed",
+          "input_json": "{\"file_path\":\"src/main.rs\"}",
+          "expected_preview": "src/main.rs"
+        },
+        {
+          "kind": "tool",
+          "id": "shell",
+          "name": "Bash",
+          "status": "completed",
+          "input_json": "{\"command\":\"pwd\"}",
+          "expected_preview": "pwd"
+        }
+      ],
+      "expected_groups": [
+        {
+          "ids": [
+            "read",
+            "shell"
+          ],
+          "active_ids": [],
+          "summary": "Bash",
+          "statuses": [
+            "completed",
+            "completed"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tools_error",
+      "events": [
+        {
+          "kind": "tool",
+          "id": "read",
+          "name": "Read",
+          "status": "completed",
+          "input_json": "{\"file_path\":\"src/main.rs\"}",
+          "expected_preview": "src/main.rs"
+        },
+        {
+          "kind": "tool",
+          "id": "shell",
+          "name": "Bash",
+          "status": "failed",
+          "input_json": "{\"command\":\"pwd\"}",
+          "expected_preview": "pwd"
+        }
+      ],
+      "expected_groups": [
+        {
+          "ids": [
+            "read",
+            "shell"
+          ],
+          "active_ids": [],
+          "summary": "Bash",
+          "statuses": [
+            "completed",
+            "failed"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tools_cancel",
+      "events": [
+        {
+          "kind": "tool",
+          "id": "read",
+          "name": "Read",
+          "status": "completed",
+          "input_json": "{\"file_path\":\"src/main.rs\"}",
+          "expected_preview": "src/main.rs"
+        },
+        {
+          "kind": "tool",
+          "id": "shell",
+          "name": "Bash",
+          "status": "cancelled",
+          "input_json": "{\"command\":\"pwd\"}",
+          "expected_preview": "pwd"
+        }
+      ],
+      "expected_groups": [
+        {
+          "ids": [
+            "read",
+            "shell"
+          ],
+          "active_ids": [],
+          "summary": "Bash",
+          "statuses": [
+            "completed",
+            "cancelled"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "hidden_reasoning_grouping",
+      "events": [
+        {
+          "kind": "tool",
+          "id": "before",
+          "name": "Read",
+          "status": "completed",
+          "input_json": "{\"file_path\":\"src/main.rs\"}",
+          "expected_preview": "src/main.rs"
+        },
+        {
+          "kind": "reasoning",
+          "id": "thought",
+          "text": "historical reasoning must stay hidden"
+        },
+        {
+          "kind": "tool",
+          "id": "after",
+          "name": "Read",
+          "status": "completed",
+          "input_json": "{\"file_path\":\"src/main.rs\"}",
+          "expected_preview": "src/main.rs"
+        }
+      ],
+      "expected_groups": [
+        {
+          "ids": [
+            "before",
+            "after"
+          ],
+          "active_ids": [],
+          "summary": "Read",
+          "statuses": [
+            "completed",
+            "completed"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "permission",
+      "events": [
+        {
+          "kind": "tool",
+          "id": "waiting",
+          "name": "Bash",
+          "status": "running",
+          "input_json": "{\"command\":\"pwd\"}",
+          "expected_preview": "pwd"
+        }
+      ],
+      "expected_groups": [
+        {
+          "ids": [
+            "waiting"
+          ],
+          "active_ids": [
+            "waiting"
+          ],
+          "summary": "Bash",
+          "statuses": [
+            "running"
+          ]
+        }
+      ],
+      "permission": {
+        "request_id": 42,
+        "tool": "Bash",
+        "input_json": "{\"command\":\"pwd\"}",
+        "expected_detail": "pwd",
+        "suppress_always_allow": true
+      }
+    },
+    {
+      "id": "agent_updates",
+      "events": [
+        {
+          "kind": "tool",
+          "id": "workflow",
+          "name": "Workflow",
+          "status": "running",
+          "input_json": "{\"description\":\"Inspect project\"}",
+          "expected_preview": "Inspect project"
+        }
+      ],
+      "expected_groups": [
+        {
+          "ids": [
+            "workflow"
+          ],
+          "active_ids": [
+            "workflow"
+          ],
+          "summary": "Workflow",
+          "statuses": [
+            "running"
+          ]
+        }
+      ],
+      "active_session": "session-a",
+      "workflow_updates": [
+        {
+          "origin": "session-a",
+          "run": "run-a",
+          "state": "progress",
+          "time": 10,
+          "message": "Working"
+        },
+        {
+          "origin": "session-a",
+          "run": "run-a",
+          "state": "done",
+          "time": 20,
+          "message": "Complete"
+        },
+        {
+          "origin": "session-a",
+          "run": "run-a",
+          "state": "progress",
+          "time": 15,
+          "message": "Late update"
+        }
+      ],
+      "expected_workflow": {
+        "run": "run-a",
+        "state": "done",
+        "message": "Complete"
+      }
+    },
+    {
+      "id": "history_session_switch",
+      "events": [
+        {
+          "kind": "tool",
+          "id": "restored-first",
+          "name": "Read",
+          "status": "completed",
+          "input_json": "{\"file_path\":\"src/main.rs\"}",
+          "expected_preview": "src/main.rs"
+        },
+        {
+          "kind": "reasoning",
+          "id": "restored-reasoning",
+          "text": "restored hidden reasoning"
+        },
+        {
+          "kind": "tool",
+          "id": "restored-last",
+          "name": "Read",
+          "status": "completed",
+          "input_json": "{\"file_path\":\"src/main.rs\"}",
+          "expected_preview": "src/main.rs"
+        }
+      ],
+      "expected_groups": [
+        {
+          "ids": [
+            "restored-first",
+            "restored-last"
+          ],
+          "active_ids": [],
+          "summary": "Read",
+          "statuses": [
+            "completed",
+            "completed"
+          ]
+        }
+      ],
+      "restored": true,
+      "previous_session": "session-a",
+      "active_session": "session-b",
+      "workflow_updates": [
+        {
+          "origin": "session-a",
+          "run": "old-run",
+          "state": "progress",
+          "time": 10,
+          "message": "Stale session"
+        },
+        {
+          "origin": "session-b",
+          "run": "new-run",
+          "state": "progress",
+          "time": 20,
+          "message": "Current session"
+        }
+      ],
+      "expected_workflow": {
+        "run": "new-run",
+        "state": "progress",
+        "message": "Current session"
+      }
+    }
+  ]
+}

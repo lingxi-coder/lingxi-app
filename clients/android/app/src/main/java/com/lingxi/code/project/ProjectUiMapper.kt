@@ -35,7 +35,7 @@ fun ProjectSnapshot.toDrawerProject(): Project {
         storageKind = record.storageKind.wireName,
         syncState = record.syncState.label,
         updatedAtEpochMillis = record.updatedAtEpochMillis,
-        sessions = sessions.map { session ->
+        sessions = sessions.filterNot { it.isArchived }.map { session ->
             ProjectSession(
                 id = session.sessionId,
                 title = session.title,

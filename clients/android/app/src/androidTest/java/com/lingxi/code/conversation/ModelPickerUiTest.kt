@@ -8,11 +8,15 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.lingxi.code.R
+import com.lingxi.code.model.ModelMetadata
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.EngineModelCatalog
@@ -35,7 +39,11 @@ class ModelPickerUiTest {
             "deepseek/deepseek-flash",
             "anthropic/claude-sonnet-5",
         ),
-    )
+    ).map { model ->
+        if (model.providerId == "deepseek") model.copy(metadata = ModelMetadata(
+            thinking = "Thinking", capabilities = "Tools", contextWindow = "1M context",
+        )) else model
+    }
 
     private val statuses = listOf(
         ModelProviderStatus(
@@ -77,13 +85,13 @@ class ModelPickerUiTest {
         rule.onNodeWithTag(UiTags.MODEL_PICKER_SEARCH).assertIsDisplayed()
         rule.onNodeWithText("连接失败").assertIsDisplayed()
         rule.onNodeWithText("已连接").assertIsDisplayed()
-        rule.onNodeWithText("Thinking · 1M 上下文 · 284B / 13B 激活").assertIsDisplayed()
+        rule.onNodeWithText("Thinking · Tools · 1M context").assertIsDisplayed()
 
         rule.onNodeWithTag(UiTags.MODEL_PICKER_SEARCH).performTextInput("sonnet")
-        rule.onNode(
+        rule.onAllNodes(
             hasText("Claude Sonnet 5", substring = true) and
-                hasContentDescription("当前模型"),
-        ).assertIsDisplayed()
+                hasContentDescription(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.composer_current_model)),
+        ).onFirst().assertIsDisplayed()
         rule.onNodeWithText("DeepSeek Flash").assertDoesNotExist()
     }
 
@@ -112,10 +120,10 @@ class ModelPickerUiTest {
         assertEquals(null, selectedModel.get())
 
         rule.onNodeWithTag(UiTags.MODEL_PICKER_CHIP).performClick()
-        rule.onNode(
+        rule.onAllNodes(
             hasText("Claude Sonnet 5", substring = true) and
-                hasContentDescription("当前模型"),
-        ).performClick()
+                hasContentDescription(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.composer_current_model)),
+        ).onFirst().performClick()
         assertEquals("anthropic/claude-sonnet-5", selectedModel.get())
     }
 }

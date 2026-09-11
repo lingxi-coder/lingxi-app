@@ -34,7 +34,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -153,7 +152,7 @@ internal fun AgentRunTimeline(
 
             AnimatedVisibility(expanded) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (state.reasoning.isNotBlank() || state.reasoningActive) {
+                    if (state.active && state.reasoningActive) {
                         val reasoningTitle = if (state.reasoningActive) {
                             stringResource(R.string.chat_run_reasoning_active)
                         } else {
@@ -195,22 +194,11 @@ internal fun AgentRunTimeline(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    state.toolDisplayWindow().forEach { tool ->
-                        if (tool.header != null || tool.display != null) {
-                            // The engine derived this row's presentation already —
-                            // header, `⎿` headline, diff/body, collapse verdict.
-                            ToolCallView(
-                                call = tool.toToolCall(),
-                                expanded = tool.id in expandedToolCalls,
-                                onToggleExpanded = { onToggleToolCall(tool.id) },
-                                // Liveness only matters on the RUNNING trace; the
-                                // settled transcript has no elapsed column.
-                                trailing = tool.elapsedMs?.let(::formatElapsed),
-                            )
-                        } else {
-                            // Older engine: the pre-derivation row.
-                            ToolTraceRow(tool)
-                        }
+                    val activeTools = state.tools.filter { it.status == AgentToolStatus.Running }
+                    val tools = activeTools.ifEmpty { state.toolDisplayWindow() }.map { it.toToolCall() }
+                    if (tools.isNotEmpty()) {
+                        ToolGroupView(TranscriptBlock.Tools(tools, state.tools.first().id),
+                            expandedToolCalls, onToggleToolCall)
                     }
 
                     state.notices.forEach { notice ->
@@ -249,55 +237,6 @@ private fun TraceSection(
             fontWeight = FontWeight.SemiBold,
         )
         content()
-    }
-}
-
-@Composable
-private fun ToolTraceRow(tool: AgentToolRunState) {
-    val statusLabel = when (tool.status) {
-        AgentToolStatus.Running -> stringResource(R.string.chat_status_running)
-        AgentToolStatus.Completed -> stringResource(R.string.chat_tool_status_completed)
-        AgentToolStatus.Failed -> stringResource(R.string.chat_status_failed)
-        AgentToolStatus.Cancelled -> stringResource(R.string.chat_status_cancelled)
-    }
-    val color = toolStatusColor(tool.status)
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Box(
-            modifier = Modifier
-                .padding(top = 5.dp)
-                .size(7.dp)
-                .background(color, CircleShape),
-        )
-        Spacer(Modifier.width(9.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = tool.tool,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-            )
-            tool.summary?.let {
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = buildString {
-                append(statusLabel)
-                tool.elapsedMs?.let { append(" · ${formatElapsed(it)}") }
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-        )
     }
 }
 
@@ -344,18 +283,4 @@ private fun runStatusColor(outcome: AgentRunOutcome): Color = when (outcome) {
     AgentRunOutcome.Failed -> LingXiTheme.palette.danger
     AgentRunOutcome.Cancelled -> LingXiTheme.palette.statusTesting
     AgentRunOutcome.Finished -> MaterialTheme.colorScheme.onSurfaceVariant
-}
-
-@Composable
-private fun toolStatusColor(status: AgentToolStatus): Color = when (status) {
-    AgentToolStatus.Running -> MaterialTheme.colorScheme.primary
-    AgentToolStatus.Completed -> MaterialTheme.colorScheme.tertiary
-    AgentToolStatus.Failed -> MaterialTheme.colorScheme.error
-    AgentToolStatus.Cancelled -> MaterialTheme.colorScheme.onSurfaceVariant
-}
-
-private fun formatElapsed(elapsedMs: Long): String {
-    if (elapsedMs < 1_000) return "${elapsedMs}ms"
-    val tenths = (elapsedMs + 50) / 100
-    return "${tenths / 10}.${tenths % 10}s"
 }

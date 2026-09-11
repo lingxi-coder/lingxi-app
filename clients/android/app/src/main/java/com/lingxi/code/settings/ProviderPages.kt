@@ -33,6 +33,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -419,14 +420,15 @@ fun ProviderEditPage(
     var connectionMessage by remember(providerId) { mutableStateOf<String?>(null) }
     var selectedModelDetails by remember(providerId) { mutableStateOf<CatalogModelDetails?>(null) }
     val context = LocalContext.current
+    val resources = LocalResources.current
     var credentialMessage by remember(providerId, editing.credentialConfigured) {
         mutableStateOf(
             when {
-                kind != ProviderKind.Llm -> context.getString(R.string.settings_provider_credential_llm_only)
+                kind != ProviderKind.Llm -> resources.getString(R.string.settings_provider_credential_llm_only)
                 !store.state.value.providers(kind).any { it.id == providerId } -> ""
                 !store.state.value.providers(kind).first { it.id == providerId }.credentialConfigured ->
-                    context.getString(R.string.settings_provider_credential_not_saved)
-                else -> context.getString(R.string.settings_provider_credential_saved_unverified)
+                    resources.getString(R.string.settings_provider_credential_not_saved)
+                else -> resources.getString(R.string.settings_provider_credential_saved_unverified)
             },
         )
     }
@@ -457,17 +459,17 @@ fun ProviderEditPage(
         ) {
             val testedDraft = keyDraft.trim()
             connectionBusy = true
-            connectionMessage = context.getString(R.string.settings_provider_connecting)
+            connectionMessage = resources.getString(R.string.settings_provider_connecting)
             store.testProviderConnection(kind, providerId, testedDraft.takeIf { it.isNotEmpty() }) { result ->
                 if (keyDraft.trim() == testedDraft) {
                     connectionMessage = result.message + if (result.connected && !result.usedStoredCredential) {
-                        context.getString(R.string.settings_provider_key_unsaved_suffix)
+                        resources.getString(R.string.settings_provider_key_unsaved_suffix)
                     } else {
                         ""
                     }
                 } else {
                     store.markProviderConnectionUnverified(kind, providerId)
-                    connectionMessage = context.getString(R.string.settings_provider_key_changed_retest)
+                    connectionMessage = resources.getString(R.string.settings_provider_key_changed_retest)
                 }
                 connectionBusy = false
             }
@@ -713,14 +715,14 @@ fun ProviderEditPage(
                             onClick = {
                                 applying = true
                                 if (applyState.saveCredential) {
-                                    credentialMessage = context.getString(R.string.settings_provider_saving_applying)
+                                    credentialMessage = resources.getString(R.string.settings_provider_saving_applying)
                                     store.saveProviderCredential(kind, providerId, keyDraft) { error ->
                                         if (error != null) {
-                                            credentialMessage = context.getString(R.string.settings_provider_save_failed_fmt, error)
+                                            credentialMessage = resources.getString(R.string.settings_provider_save_failed_fmt, error)
                                             applying = false
                                         } else {
                                             keyDraft = ""
-                                            credentialMessage = context.getString(R.string.settings_provider_saved_applied)
+                                            credentialMessage = resources.getString(R.string.settings_provider_saved_applied)
                                             onReconnectEngine()
                                             store.markLlmConfigurationApplied()
                                             applying = false
@@ -763,7 +765,7 @@ fun ProviderEditPage(
                                     credentialBusy = true
                                     store.saveProviderCredential(kind, providerId, keyDraft) { error ->
                                         credentialMessage =
-                                            error?.let { context.getString(R.string.settings_provider_save_failed_fmt, it) } ?: context.getString(R.string.settings_provider_credential_saved_secure)
+                                            error?.let { resources.getString(R.string.settings_provider_save_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_saved_secure)
                                         if (error == null) {
                                             keyDraft = ""
                                             onReconnectEngine()
@@ -799,7 +801,7 @@ fun ProviderEditPage(
                                     credentialBusy = true
                                     store.clearProviderCredential(kind, providerId) { error ->
                                         credentialMessage =
-                                            error?.let { context.getString(R.string.settings_provider_clear_failed_fmt, it) } ?: context.getString(R.string.settings_provider_credential_cleared)
+                                            error?.let { resources.getString(R.string.settings_provider_clear_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_cleared)
                                         if (error == null) {
                                             onReconnectEngine()
                                             store.markLlmConfigurationApplied()

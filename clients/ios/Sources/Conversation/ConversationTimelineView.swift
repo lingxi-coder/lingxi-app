@@ -1,29 +1,18 @@
 import SwiftUI
 
-/// Codex-style compact transcript timeline.  Execution runs are represented by
-/// their reasoning and tool rows; the old bordered Agent Run card is never
-/// rendered here.  State for expandable rows is owned by this list, keyed by
-/// the stable run/tool identifiers supplied by the engine projection.
+/// Desktop-style compact transcript. Disclosure state is owned by the session
+/// model so recycled rows retain the user's choices. Historical reasoning stays
+/// in the execution ledger; only its current Thinking status enters this view.
 struct ConversationTimelineView: View {
     @Environment(\.theme) private var t
 
     let groups: [ConversationTimelineGroup]
+    var liveToolIDs: Set<String>? = nil
+    var hasLiveOwner: Bool = true
     let messageDetails: [UUID: ConversationMessageDetail]
     let expandedToolCalls: Set<String>
     let onToggleToolCall: (String) -> Void
     let onShareMessage: (String) -> Void
-
-    @State private var expandedReasoningIDs: Set<String> = []
-    /// Folded user bubbles, keyed by the engine-supplied row id.
-    ///
-    /// Owned by the LIST, not the row: `MessageBubble` lives in a `LazyVStack`,
-    /// which releases off-screen rows and takes their `@State` with them — a
-    /// prompt the user expanded would silently re-collapse after scrolling
-    /// past it. Android keeps the same fold in `rememberSaveable(message.id)`,
-    /// so row-local state would also make the two platforms disagree about how
-    /// long the user's action lasts.
-    @State private var expandedUserMessageIDs: Set<String> = []
-    @State private var expandedBatchIDs: Set<String> = []
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 0) {
@@ -34,7 +23,7 @@ struct ConversationTimelineView: View {
     }
 
     private var timelineSegments: [Segment] {
-        groups.flatMap(Self.segments(in:))
+        ConversationDesktopTimeline.groups(groups, liveToolIDs: liveToolIDs, hasLiveOwner: hasLiveOwner).flatMap(Self.segments(in:))
     }
 
     @ViewBuilder
@@ -57,36 +46,26 @@ struct ConversationTimelineView: View {
                     )
                 },
                 onShare: onShareMessage,
-                isUserExpanded: expandedUserMessageIDs.contains(rowID),
-                onToggleUserExpanded: { toggleUserMessage(rowID) }
+                isUserExpanded: expandedToolCalls.contains("user:\(rowID)"),
+                onToggleUserExpanded: { onToggleToolCall("user:\(rowID)") },
+                isAssistantExpanded: expandedToolCalls.contains("assistant:\(rowID)"),
+                onToggleAssistantExpanded: { onToggleToolCall("assistant:\(rowID)") }
             )
             .id(rowID)
         case let .commandOutput(rowID, output):
             SlashCommandOutputCard(output: output)
                 .id(rowID)
-        case let .reasoning(id, text, isRunning):
+        case let .reasoning(_, _, isRunning):
             ConversationThoughtRow(
-                id: id,
-                text: text,
-                isRunning: isRunning,
-                isExpanded: expandedReasoningIDs.contains(id),
-                onToggle: { toggleReasoning(id) }
+                isRunning: isRunning
             )
-        case let .tool(id, trace):
-            ToolCallView(
-                trace: trace,
-                isExpanded: expandedToolCalls.contains(trace.id),
-                compact: true,
-                onToggle: { onToggleToolCall(trace.id) }
-            )
-            .id(id)
         case let .toolBatch(id, tools):
             ConversationToolBatchRow(
                 id: id,
                 tools: tools,
                 expandedToolCalls: expandedToolCalls,
-                isExpanded: expandedBatchIDs.contains(id),
-                onToggleBatch: { toggleBatch(id) },
+                isExpanded: expandedToolCalls.contains(id),
+                onToggleBatch: { onToggleToolCall(id) },
                 onToggleTool: onToggleToolCall
             )
         case let .notice(id, notice):
@@ -96,8 +75,8 @@ struct ConversationTimelineView: View {
     }
 
     /// The `ForEach` id a tool group projects to, whatever its tool count.
-    static func toolSegmentID(groupID: String) -> String {
-        "timeline-tools:\(groupID)"
+    static func toolSegmentID(firstToolID: String) -> String {
+        "timeline-tools:\(firstToolID)"
     }
 
     /// The row ids a group projects to. `Segment` is private, so this is the
@@ -111,13 +90,12 @@ struct ConversationTimelineView: View {
         case message(id: String, message: Message)
         case commandOutput(id: String, output: ConversationCommandOutput)
         case reasoning(id: String, text: String, isRunning: Bool)
-        case tool(id: String, trace: ConversationToolTrace)
         case toolBatch(id: String, tools: [ConversationToolTrace])
         case notice(id: String, notice: ConversationExecutionNotice)
 
         var id: String {
             switch self {
-            case let .message(id, _), let .commandOutput(id, _), let .reasoning(id, _, _), let .tool(id, _),
+            case let .message(id, _), let .commandOutput(id, _), let .reasoning(id, _, _),
                  let .toolBatch(id, _), let .notice(id, _):
                 return id
             }
@@ -136,12 +114,8 @@ struct ConversationTimelineView: View {
             // row" and the subtree is rebuilt under the reader. The group id
             // is keyed on the group's FIRST tool, so it is stable as more
             // tools are appended.
-            let id = Self.toolSegmentID(groupID: group.id)
-            if pendingTools.count >= 2 {
-                result.append(.toolBatch(id: id, tools: pendingTools))
-            } else if let one = pendingTools.first {
-                result.append(.tool(id: id, trace: one))
-            }
+            let id = Self.toolSegmentID(firstToolID: pendingTools[0].id)
+            result.append(.toolBatch(id: id, tools: pendingTools))
             pendingTools.removeAll(keepingCapacity: true)
         }
 
@@ -172,100 +146,20 @@ struct ConversationTimelineView: View {
         return result
     }
 
-    private func toggleUserMessage(_ id: String) {
-        if expandedUserMessageIDs.contains(id) {
-            expandedUserMessageIDs.remove(id)
-        } else {
-            expandedUserMessageIDs.insert(id)
-        }
-    }
-
-    private func toggleReasoning(_ id: String) {
-        if expandedReasoningIDs.contains(id) {
-            expandedReasoningIDs.remove(id)
-        } else {
-            expandedReasoningIDs.insert(id)
-        }
-    }
-
-    private func toggleBatch(_ id: String) {
-        if expandedBatchIDs.contains(id) {
-            expandedBatchIDs.remove(id)
-        } else {
-            expandedBatchIDs.insert(id)
-        }
-    }
 }
 
 private struct ConversationThoughtRow: View {
     @Environment(\.theme) private var t
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @FocusState private var isFocused: Bool
-    @State private var isHovering = false
-
-    let id: String
-    let text: String
     let isRunning: Bool
-    let isExpanded: Bool
-    let onToggle: () -> Void
 
     var body: some View {
-        Button(action: onToggle) {
-            HStack(alignment: .top, spacing: 8) {
-                LXIcon(name: .brain, size: 14, color: t.text3, stroke: 1.7)
-                    .padding(.top, 2)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        Text(thoughtLabel)
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(t.text2)
-                            .runtimeTextSweep(isActive: isRunning, highlightColor: t.text)
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(t.text4)
-                            .timelineChevron(
-                                isHighlighted: isFocused || isHovering,
-                                reduceMotion: reduceMotion
-                            )
-                    }
-                    if !isExpanded, let preview = firstLine, !preview.isEmpty {
-                        Text(preview)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(t.text4)
-                            .lineLimit(1)
-                    }
-                    if isExpanded {
-                        Text(text)
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(t.text3)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
+        Text("chat_thinking")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(t.text3)
+            .runtimeTextSweep(isActive: isRunning, highlightColor: t.text)
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .focused($isFocused)
-        .onHover { isHovering = $0 }
-        .accessibilityLabel(thoughtLabel)
-        .accessibilityValue(isExpanded
-            ? String(localized: "chat_agent_details_collapse")
-            : String(localized: "chat_agent_details_expand"))
-        .accessibilityIdentifier("conversation.timeline.thought.\(id)")
-    }
-
-    private var firstLine: String? {
-        text.split(whereSeparator: { $0.isNewline }).first.map(String.init)
-    }
-
-    private var thoughtLabel: String {
-        isRunning
-            ? String(localized: "chat_thinking")
-            : String(localized: "chat_thought")
+            .accessibilityIdentifier("conversation.timeline.thinking")
     }
 }
 
@@ -284,13 +178,16 @@ private struct ConversationToolBatchRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if !activeTools.isEmpty {
+                ForEach(activeTools) { trace in
+                    ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
+                                 onToggle: { onToggleTool(trace.id) })
+                }
+            } else {
             Button(action: onToggleBatch) {
                 HStack(spacing: 8) {
                     LXIcon(name: batchIcon, size: 14, color: t.text3, stroke: 1.6)
                     HStack(spacing: 8) {
-                        Text(String(localized: "chat_tool_batch_count \(tools.count)"))
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(t.text2)
                         Text(summary)
                             .font(.system(size: 11.5))
                             .foregroundStyle(t.text4)
@@ -334,13 +231,16 @@ private struct ConversationToolBatchRow: View {
                     )
                     .id("\(id):\(trace.id)")
                 }
+                .padding(.leading, 12)
+            }
             }
         }
     }
 
+    private var activeTools: [ConversationToolTrace] { ConversationDesktopTimeline.activeTools(tools) }
+
     private var summary: String {
-        tools.compactMap { $0.header.map { ToolDisplayText.verbLabel($0) } ?? $0.tool }
-            .joined(separator: " · ")
+        ConversationDesktopTimeline.summary(tools)
     }
 
     private var terminalStatus: ConversationToolStatus? {
@@ -354,13 +254,8 @@ private struct ConversationToolBatchRow: View {
     }
 
     private var batchIcon: LXIconName {
-        guard let first = tools.first.map({ ToolDisplayText.icon(header: $0.header, tool: $0.tool) }) else {
-            return .workflow
-        }
-        let isUniform = tools.dropFirst().allSatisfy {
-            ToolDisplayText.icon(header: $0.header, tool: $0.tool).rawValue == first.rawValue
-        }
-        return isUniform ? first : .workflow
+        guard let last = tools.last else { return .workflow }
+        return ToolDisplayText.icon(header: last.header, tool: last.tool)
     }
 }
 
@@ -417,5 +312,58 @@ private struct ConversationTimelineNoticeRow: View {
         case .warning: return t.text3
         case .error: return t.danger
         }
+    }
+}
+
+/// Desktop display projection keeps the durable activity ledger intact.
+enum ConversationDesktopTimeline {
+    static func groups(_ sourceGroups: [ConversationTimelineGroup], liveToolIDs: Set<String>? = nil,
+                       hasLiveOwner: Bool = true) -> [ConversationTimelineGroup] {
+        let groups = sourceGroups.map { group in
+            ConversationTimelineGroup(id: group.id, runID: group.runID, rows: group.rows.map { row in
+                guard case let .tool(runID, trace) = row, trace.status == .running,
+                      let liveToolIDs, !liveToolIDs.contains(trace.id) else { return row }
+                var settled = trace
+                settled.status = .unknown
+                return .tool(runID: runID, trace: settled)
+            }, status: group.status)
+        }
+        var result: [ConversationTimelineGroup] = []
+        let hasActiveTools = groups.contains { group in
+            group.rows.contains { row in
+                if case let .tool(_, trace) = row { return trace.status == .running }
+                return false
+            }
+        }
+        for (index, group) in groups.enumerated() {
+            let rows = group.rows.filter { row in
+                if case .reasoning = row {
+                    return index == groups.count - 1 && group.status == .running && hasLiveOwner && !hasActiveTools
+                }
+                return true
+            }
+            guard !rows.isEmpty else { continue }
+            let visible = ConversationTimelineGroup(id: group.id, runID: group.runID, rows: rows, status: group.status)
+            if visible.isToolGroup, let previous = result.last, previous.isToolGroup,
+               previous.runID == visible.runID {
+                result[result.count - 1] = ConversationTimelineGroup(
+                    id: previous.id, runID: previous.runID,
+                    rows: previous.rows + visible.rows, status: visible.status)
+            } else {
+                result.append(visible)
+            }
+        }
+        return result
+    }
+
+    static func activeTools(_ tools: [ConversationToolTrace]) -> [ConversationToolTrace] {
+        tools.filter { $0.status == .running }
+    }
+
+    static func summary(_ tools: [ConversationToolTrace]) -> String {
+        guard let last = tools.last else { return "" }
+        let title = last.header.map(ToolDisplayText.title) ?? last.tool
+        guard let detail = last.header?.subLine, !detail.text.isEmpty else { return title }
+        return "\(title) · \(detail.prefix)\(detail.text)"
     }
 }

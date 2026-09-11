@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="computer_use_service_name">靈犀應用程式操作服務</string>
+    <string name="computer_use_service_description">允許使用者主動啟動的靈犀工作階段僅查看及操作您明確核准的應用程式。</string>
+</resources>

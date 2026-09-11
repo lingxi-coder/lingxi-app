@@ -69,6 +69,19 @@ struct WorkspaceGroupSeed: Equatable, Sendable {
 }
 
 enum WorkspaceGroupBuilder {
+    static func mergedSessionRows(live: [EngineSession], cached: [ProjectSessionSummary]) -> [WorkspaceSessionRow] {
+        let archived = Set(cached.filter(\.isArchived).map(\.sessionId))
+        let liveRows = live.filter { !archived.contains($0.id) }.map { row in
+            if let submitted = cached.first(where: { $0.sessionId == row.id && $0.pendingCatalogConfirmation && $0.messageCount > row.messageCount }) {
+                return projectRow(submitted)
+            }
+            return engineRow(row)
+        }
+        let liveIDs = Set(liveRows.map(\.id))
+        let pending = cached.filter { !$0.isArchived && !liveIDs.contains($0.sessionId) }
+        return pending.map(projectRow) + liveRows
+    }
+
     static func seededConversationGroups(
         section: DrawerSection,
         query: String,
@@ -111,7 +124,7 @@ enum WorkspaceGroupBuilder {
             title: String(localized: "common_global"),
             subtitle: nil,
             updatedAt: nil,
-            sessions: (activeScope == .global && !liveSessions.isEmpty ? liveSessions.map(engineRow) : globalSessions.map(projectRow))
+            sessions: mergedSessionRows(live: activeScope == .global ? liveSessions : [], cached: globalSessions)
         )
         let projectSeeds = projects.map { project in
             let scope = ConversationScope.project(project.id)
@@ -121,7 +134,7 @@ enum WorkspaceGroupBuilder {
                 title: project.record.name,
                 subtitle: project.record.syncState.label,
                 updatedAt: project.record.updatedAt,
-                sessions: (activeScope == scope && !liveSessions.isEmpty ? liveSessions.map(engineRow) : project.sessions.map(projectRow))
+                sessions: mergedSessionRows(live: activeScope == scope ? liveSessions : [], cached: project.sessions)
             )
         }
         let appSeeds = localApps.map { app in

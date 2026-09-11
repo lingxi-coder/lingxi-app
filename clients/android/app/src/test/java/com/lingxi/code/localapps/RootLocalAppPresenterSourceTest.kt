@@ -23,18 +23,24 @@ class RootLocalAppPresenterSourceTest {
     @Test
     fun `phase8 surfaces do not keep raw placeholder copy`() {
         val skillsPage = File("src/main/java/com/lingxi/code/settings/SkillsPages.kt").readText()
-        val mcpPages = File("src/main/java/com/lingxi/code/settings/MCPPages.kt").readText()
+        val managers = File("src/main/java/com/lingxi/code/settings/ConfigurationManagers.kt").readText()
+        val mcpStart = managers.indexOf("fun McpConfigurationPage(")
+        val mcpEnd = managers.indexOf("fun SkillManager(", mcpStart)
+        assertTrue("canonical MCP editor must still exist", mcpStart >= 0 && mcpEnd > mcpStart)
+        val mcpPage = managers.substring(mcpStart, mcpEnd)
 
         assertTrue("skills page must use generated plugin title", "R.string.local_apps_plugin_title" in skillsPage)
         assertTrue("skills page must not keep raw plugin section label", "SettingsSection(label = \"Plugin\")" !in skillsPage)
-        assertTrue("MCP pages must use generated managed-source title", "R.string.local_apps_plugin_managed_mcp_source" in mcpPages)
-        assertTrue("MCP pages must not keep the raw managed-source warning", "Managed source cannot edit transport or remove this server." !in mcpPages)
+        assertTrue("canonical MCP labels must use the generated localization adapter", "Text(settingsLabel(" in mcpPage)
+        assertTrue("plugin-managed sources must not become writable storage scopes",
+            "SingleChoiceRow(listOf(\"user\", \"project\", \"local\")" in mcpPage)
+        assertTrue("MCP editor must not keep the raw managed-source warning", "Managed source cannot edit transport or remove this server." !in mcpPage)
     }
 
     // Kept as its OWN @Test rather than sharing a method with the settings-page
     // assertions above: the slice guards below are vacuity checks on
     // LocalAppsScreen.kt, and JUnit's assertTrue throws, so a renamed `when`
-    // arm here would have silently stopped the SkillsPages.kt / MCPPages.kt
+    // arm here would have silently stopped the SkillsPages.kt / canonical MCP editor
     // assertions from ever running while naming only the create arm.
     @Test
     fun `the approval sheet title block and create arm carry no raw copy`() {

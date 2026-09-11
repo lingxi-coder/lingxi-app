@@ -202,10 +202,26 @@ internal class ProjectRepository(
         projectId: String?,
         sessions: List<ProjectSessionSummary>,
     ): ProjectStoreState {
-        val normalized = sessions
+        val existing = projectId?.let { loadProject(it).sessions } ?: load().globalSessions
+        val incoming = sessions.map { it.copy(sessionId = canonicalSessionId(it.sessionId)) }
             .filter { it.sessionId.isNotBlank() }
             .distinctBy { it.sessionId }
-            .sortedByDescending { it.updatedAtEpochMillis }
+            .map { row ->
+                val cached = existing.firstOrNull { it.sessionId == row.sessionId }
+                if (cached?.pendingCatalogConfirmation == true && row.messageCount < cached.messageCount) {
+                    return@map cached
+                }
+                row.copy(
+                    isArchived = cached?.isArchived ?: false,
+                    pendingCatalogConfirmation = false,
+                )
+            }
+        val incomingIds = incoming.mapTo(mutableSetOf()) { it.sessionId }
+        // Retain only local rows that the file-backed engine has not acknowledged,
+        // plus archived metadata; normal confirmed rows remain authoritative.
+        val normalized = (incoming + existing.filter {
+            it.sessionId !in incomingIds && (it.pendingCatalogConfirmation || it.isArchived)
+        }).sortedByDescending { it.updatedAtEpochMillis }
         if (projectId == null) {
             writeSessionFile(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE), normalized)
         } else {
@@ -226,14 +242,15 @@ internal class ProjectRepository(
      * The engine's SessionList is file-backed, so a SessionStarted event can
      * precede the new empty session appearing in that listing. Keeping this
      * small, idempotent row makes the Project or global conversation recoverable
-     * immediately; the next authoritative SessionList replaces it after the
-     * first turn is persisted.
+     * immediately. Omitted provisional rows survive stale lists until the
+     * engine includes the id, at which point catalog data replaces the row.
      */
     fun recordStartedSession(
         projectId: String?,
         sessionId: String,
         title: String,
         mode: SessionMode = SessionMode.Code,
+        initialMessageCount: Int = 0,
     ): ProjectStoreState {
         val canonicalId = canonicalSessionId(sessionId)
         require(canonicalId.isNotBlank()) { "session id cannot be blank" }
@@ -249,10 +266,13 @@ internal class ProjectRepository(
             title = title.ifBlank {
                 existing?.title ?: strings.resolve(R.string.chat_new_conversation, "新对话")
             },
-            messageCount = existing?.messageCount ?: 0,
+            messageCount = maxOf(existing?.messageCount ?: 0, initialMessageCount.coerceAtLeast(0)),
             relativeTime = strings.resolve(R.string.project_relative_time_just_now, "刚刚"),
             updatedAtEpochMillis = timestamp,
-            mode = mode,
+            mode = existing?.mode ?: mode,
+            isArchived = existing?.isArchived ?: false,
+            pendingCatalogConfirmation = (existing?.pendingCatalogConfirmation ?: true) ||
+                initialMessageCount > (existing?.messageCount ?: 0),
         )
         val updated = listOf(started) + sessions.filterNot { it.sessionId == canonicalId }
         if (projectId == null) {
@@ -265,6 +285,25 @@ internal class ProjectRepository(
                     lastActiveSessionId = canonicalId,
                 ),
             )
+        }
+        return load()
+    }
+
+    fun setSessionArchived(projectId: String?, sessionId: String, archived: Boolean): ProjectStoreState {
+        val canonicalId = canonicalSessionId(sessionId)
+        val snapshot = projectId?.let { loadProject(it) }
+        val sessions = snapshot?.sessions ?: load().globalSessions
+        require(sessions.any { it.sessionId == canonicalId }) { "session is not indexed" }
+        val updated = sessions.map {
+            if (it.sessionId == canonicalId) it.copy(
+                isArchived = archived,
+                pendingCatalogConfirmation = it.pendingCatalogConfirmation || (it.isArchived && !archived),
+            ) else it
+        }
+        if (projectId == null) {
+            writeSessionFile(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE), updated)
+        } else {
+            writeSessions(projectId, updated)
         }
         return load()
     }
@@ -433,7 +472,9 @@ internal class ProjectRepository(
                             .put("messageCount", session.messageCount)
                             .put("relativeTime", session.relativeTime)
                             .put("updatedAtEpochMillis", session.updatedAtEpochMillis)
-                            .put("mode", session.mode.wireValue),
+                            .put("mode", session.mode.wireValue)
+                            .put("isArchived", session.isArchived)
+                            .put("pendingCatalogConfirmation", session.pendingCatalogConfirmation),
                     )
                 }
             },
@@ -445,6 +486,8 @@ internal class ProjectRepository(
         require(json.getInt("version") == 1)
         return json.getJSONArray("sessions").objectList().map { row ->
             ProjectSessionSummary(
+                isArchived = row.optBoolean("isArchived", false),
+                pendingCatalogConfirmation = row.optBoolean("pendingCatalogConfirmation", false),
                 sessionId = canonicalSessionId(row.getString("sessionId")),
                 title = row.getString("title"),
                 messageCount = row.getInt("messageCount"),

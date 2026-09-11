@@ -91,7 +91,7 @@ internal class DurableConversationTurnClientStore(
 ) {
     init {
         val handledAt = preferences.getLong("handled_exit_timestamp", 0L)
-        if (latestExit != null && latestExit.timestamp > handledAt) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && latestExit != null && latestExit.timestamp > handledAt) {
             if (latestExit.reason == ApplicationExitInfo.REASON_USER_REQUESTED) {
                 clearRecord()
             }
@@ -961,9 +961,9 @@ private class MessageBuild(
     ) {
         when (block) {
             is MessageBlockDto.Text -> addText(block.text)
-            is MessageBlockDto.Thinking -> addText(block.thinking)
-            is MessageBlockDto.RedactedThinking ->
-                addText(strings.resolve(R.string.chat_redacted_thinking, "[已折叠的思考]"))
+            // Only live reasoning has a Thinking row. Ignoring these blocks
+            // also keeps tool groups contiguous across historical reasoning.
+            is MessageBlockDto.Thinking, is MessageBlockDto.RedactedThinking -> Unit
             is MessageBlockDto.CompactBoundary ->
                 addText(strings.resolve(R.string.chat_compacted_label, "对话已压缩"))
             is MessageBlockDto.ToolUse -> {

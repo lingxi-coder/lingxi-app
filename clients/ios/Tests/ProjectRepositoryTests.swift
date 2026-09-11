@@ -104,6 +104,80 @@ final class ProjectRepositoryTests: XCTestCase {
         XCTAssertTrue(reloaded.errorMessage?.contains("已隔离") == true)
     }
 
+
+    func testPendingSessionSurvivesStaleCatalogUntilAcknowledged() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Project")
+        _ = try repository.recordStartedSession(projectId: project.record.id, sessionId: "sess:20000000-0000-4000-8000-0000000000AA", title: "First prompt", mode: .chat)
+        _ = try repository.updateSessions(projectId: project.record.id, sessions: [])
+        let restored = try ProjectRepository(projectsRoot: root).project(projectId: project.record.id)
+        XCTAssertEqual(restored.sessions.map(\.sessionId), ["20000000-0000-4000-8000-0000000000aa"])
+        XCTAssertEqual(restored.record.lastActiveSessionId, "20000000-0000-4000-8000-0000000000aa")
+        XCTAssertTrue(restored.sessions[0].pendingCatalogConfirmation)
+        var confirmed = restored.sessions[0]
+        confirmed.messageCount = 2
+        _ = try repository.updateSessions(projectId: project.record.id, sessions: [confirmed, confirmed])
+        XCTAssertFalse(try repository.project(projectId: project.record.id).sessions[0].pendingCatalogConfirmation)
+        _ = try repository.updateSessions(projectId: project.record.id, sessions: [])
+        XCTAssertTrue(try repository.project(projectId: project.record.id).sessions.isEmpty)
+    }
+
+    func testArchiveSurvivesCatalogAndReloadAndRestoresData() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let row = session("session-a", at: Date())
+        _ = try repository.updateSessions(projectId: nil, sessions: [row])
+        _ = try repository.setSessionArchived(projectId: nil, sessionId: row.sessionId, archived: true)
+        _ = try repository.updateSessions(projectId: nil, sessions: [row])
+        XCTAssertTrue(ProjectRepository(projectsRoot: root).load().globalSessions[0].isArchived)
+        _ = try repository.updateSessions(projectId: nil, sessions: [])
+        XCTAssertEqual(repository.load().globalSessions.count, 1)
+        _ = try repository.setSessionArchived(projectId: nil, sessionId: row.sessionId, archived: false)
+        _ = try repository.updateSessions(projectId: nil, sessions: [])
+        XCTAssertFalse(ProjectRepository(projectsRoot: root).load().globalSessions[0].isArchived)
+        XCTAssertEqual(repository.load().globalSessions[0].messageCount, row.messageCount)
+    }
+
+    func testArchiveIsIsolatedByProjectAndPreservedWhenSessionStartsAgain() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Project")
+        let row = session("same-id", at: Date())
+        _ = try repository.updateSessions(projectId: nil, sessions: [row])
+        _ = try repository.updateSessions(projectId: project.record.id, sessions: [row])
+        _ = try repository.setSessionArchived(projectId: project.record.id, sessionId: row.sessionId, archived: true)
+        XCTAssertFalse(repository.load().globalSessions[0].isArchived)
+        _ = try repository.recordStartedSession(projectId: project.record.id, sessionId: row.sessionId, title: row.title)
+        XCTAssertTrue(try repository.project(projectId: project.record.id).sessions[0].isArchived)
+    }
+
+    func testFirstSubmissionCountDoesNotRegressOrUnarchiveExistingSession() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "Prompt", initialMessageCount: 1)
+        XCTAssertEqual(repository.load().globalSessions[0].messageCount, 1)
+        _ = try repository.setSessionArchived(projectId: nil, sessionId: "first", archived: true)
+        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "Prompt", initialMessageCount: 0)
+        XCTAssertEqual(repository.load().globalSessions[0].messageCount, 1)
+        XCTAssertTrue(repository.load().globalSessions[0].isArchived)
+    }
+
+    func testStaleZeroMessageCatalogDoesNotAcknowledgeFirstSubmission() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        var incoming = ProjectSessionSummary(sessionId: "first", title: "New conversation", messageCount: 0,
+                                             relativeTime: "Before", updatedAt: Date(timeIntervalSince1970: 900))
+        _ = try repository.updateSessions(projectId: nil, sessions: [incoming])
+        _ = try repository.recordStartedSession(projectId: nil, sessionId: "first", title: "First prompt", initialMessageCount: 1)
+        _ = try repository.updateSessions(projectId: nil, sessions: [incoming])
+        let pending = ProjectRepository(projectsRoot: root).load().globalSessions[0]
+        XCTAssertEqual(pending.title, "First prompt")
+        XCTAssertEqual(pending.messageCount, 1)
+        XCTAssertTrue(pending.pendingCatalogConfirmation)
+        incoming.title = "Confirmed"
+        incoming.messageCount = 1
+        _ = try repository.updateSessions(projectId: nil, sessions: [incoming])
+        let confirmed = repository.load().globalSessions[0]
+        XCTAssertEqual(confirmed.title, "Confirmed")
+        XCTAssertFalse(confirmed.pendingCatalogConfirmation)
+    }
+
     private func session(_ id: String, at date: Date) -> ProjectSessionSummary {
         ProjectSessionSummary(
             sessionId: id,

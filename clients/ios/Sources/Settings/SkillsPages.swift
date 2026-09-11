@@ -1,48 +1,5 @@
 import SwiftUI
 
-// MARK: - Skills (grouped by author)
-struct SkillsPage: View {
-    @Environment(\.theme) private var t
-    @Bindable var store: SettingsStore
-    let host: SettingsHost
-
-    private let sourceOrder = ["builtin", "bundled", "managed", "user", "project", "local", "plugin", "mcp"]
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Text("skills_description_blurb")
-                .font(.system(size: 11.5)).foregroundColor(t.text3).lineSpacing(4)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 14)
-
-            ForEach(sourceOrder, id: \.self) { source in
-                let arr = store.skills.filter { $0.source == source }
-                if !arr.isEmpty {
-                    SettingsSection(label: arr[0].sourceLabel) {
-                        ForEach(Array(arr.enumerated()), id: \.element.id) { i, s in
-                            SettingsRow(icon: .skill,
-                                        iconColor: s.builtin ? Color(srgb: 0,0.7601,0.7664) : Color(srgb: 0.896,0.6013,0),
-                                        label: s.name,
-                                        sub: s.desc + " · " + s.triggers.joined(separator: " / "),
-                                        chevron: false, isLast: i == arr.count - 1,
-                                        onTap: { host.push(.skillDetail(s.id)) })
-                        }
-                    }
-                }
-            }
-
-            if store.skills.isEmpty {
-                Text(store.skillsLoaded
-                    ? String(localized: "skills_empty_state")
-                    : String(localized: "skills_loading_state"))
-                    .font(.system(size: 12)).foregroundColor(t.text4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 12)
-            }
-            DashedAddButton(title: String(localized: "skills_refresh_catalog"), action: host.refreshSkills)
-        }
-    }
-}
-
 // MARK: - Skill detail
 struct SkillDetailPage: View {
     @Environment(\.theme) private var t

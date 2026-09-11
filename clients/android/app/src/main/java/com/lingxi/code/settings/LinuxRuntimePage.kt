@@ -14,6 +14,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -32,6 +33,7 @@ fun LinuxRuntimePage(
     onOpenTerminal: ((LinuxRuntimeTerminalLaunchRequest) -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val resources = LocalResources.current
     val scope = rememberCoroutineScope()
     val runtime = state.linuxRuntime
 
@@ -237,7 +239,7 @@ fun LinuxRuntimePage(
                     stringResource(runtime.mountDraft.pickerSummaryRes)
                 } else {
                     runtime.mounts.joinToString(limit = 2, truncated = "…") {
-                        "${it.guestPath} ${context.getString(it.access.labelRes)}"
+                        "${it.guestPath} ${resources.getString(it.access.labelRes)}"
                     }
                 },
                 value = stringResource(R.string.settings_linux_mounts_count_fmt, runtime.mounts.size),

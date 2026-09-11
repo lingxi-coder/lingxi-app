@@ -320,6 +320,7 @@ struct ConversationAgentTranscript: Equatable {
 @MainActor
 final class ConversationModel: ObservableObject {
     static let mainAgentID = "main"
+    private let disclosureStore: ConversationDisclosureStore
 
     /// The full visible transcript (user + assistant turns).
     @Published var messages: [Message] {
@@ -552,7 +553,9 @@ final class ConversationModel: ObservableObject {
     @Published var engineSessionsLoaded: Bool = false
     /// The engine session id currently driving the connection — set by
     /// `SessionStarted` / `SessionResumed`. Empty until the engine reports one.
-    @Published var activeSessionId: String = ""
+    @Published var activeSessionId: String = "" {
+        didSet { restoreTranscriptDisclosures() }
+    }
     /// A NewSession / ResumeSession command has been issued but has not yet been
     /// confirmed by SessionStarted / SessionResumed. While true, an older
     /// SessionList must not replace the persisted project index.
@@ -616,8 +619,9 @@ final class ConversationModel: ObservableObject {
     /// list and an empty list clears it. Drives `PlanTasksPanel`, pinned closest
     /// to the composer. Distinct from `backgroundTasks`, which are engine jobs.
     @Published var planTasks: [ConversationPlanTask] = []
-    /// Stable keys whose tool body/diff the user expanded. Standalone rows use
-    /// their tool-use id; structured message blocks use message id + tool id.
+    /// Session-owned transcript disclosures: tool bodies, tool groups, and long
+    /// messages. Standalone tools use their tool-use id; other rows use namespaced
+    /// stable ids so lazy recycling never resets the user's choices.
     ///
     /// This lives HERE and not in the row: every transcript list recycles its
     /// rows, so row-local `@State` is dropped on scroll and then reappears on
@@ -634,7 +638,9 @@ final class ConversationModel: ObservableObject {
     #endif
 
     init(messages: [Message] = [],
-         model: ModelOption = MockData.models[0]) {
+         model: ModelOption = MockData.models[0],
+         disclosureDefaults: UserDefaults = .standard) {
+        self.disclosureStore = ConversationDisclosureStore(defaults: disclosureDefaults)
         self.messages = messages
         self.items = messages.map(ConversationRenderItem.message)
         self.model = model
@@ -650,6 +656,32 @@ final class ConversationModel: ObservableObject {
         ].map { ConversationPermissionOption(id: $0, available: true, disabledReason: nil) }
         rebuildMessageIndex()
         rebuildItemIndex()
+    }
+
+    func toggleTranscriptDisclosure(_ id: String) {
+        if expandedToolCalls.contains(id) { expandedToolCalls.remove(id) }
+        else { expandedToolCalls.insert(id) }
+        disclosureStore.save(expandedToolCalls, sessionID: activeSessionId)
+    }
+
+    func restoreTranscriptDisclosures() {
+        expandedToolCalls = disclosureStore.load(sessionID: activeSessionId)
+    }
+
+    var hasLiveTranscriptOwner: Bool {
+        if selectedAgentID != Self.mainAgentID {
+            return selectedAgentSummary.map { AgentStatusPresentation(rawValue: $0.status) == .running } ?? false
+        }
+        return streaming || hasUnresolvedTurnRecovery
+    }
+
+    var liveTranscriptToolIDs: Set<String> {
+        let visibleItems = selectedAgentID == Self.mainAgentID ? items : selectedAgentItems
+        return Set(visibleItems.flatMap { item -> [String] in
+            guard case let .run(run) = item,
+                  (run.status == .running && hasLiveTranscriptOwner) || run.activeWorkers > 0 else { return [] }
+            return run.tools.filter { $0.status == .running }.map(\.id)
+        })
     }
 
     /// Replace the agent roster while retaining the selected row when it is
@@ -991,6 +1023,8 @@ protocol ConversationSource: AnyObject {
     /// (`ModelList`) populates before the first send (SHIP-BLOCKER #2). A no-op on
     /// the mock; idempotent on the engine.
     func warmUp()
+    /// Only the root-selected source may serve global settings pages.
+    func setSettingsActive(_ active: Bool)
     /// Build the backing engine and surface construction failures to callers.
     /// Project switching uses this before committing the new workspace so a
     /// failed engine rebuild can roll back atomically.
@@ -1071,6 +1105,7 @@ extension ConversationSource {
     }
 
     func warmUp() {}
+    func setSettingsActive(_ active: Bool) {}
     func prepare() async throws {}
     func cancelAndWait() async throws { cancel() }
     func handleBackground() {}
@@ -1378,6 +1413,8 @@ final class MockConversationSource: ConversationSource {
             source.model.messageDetails = [:]
             source.model.isNew = false
             source.model.activeSessionId = "ui-session"
+            // Fixture launches start closed; persistence has isolated model tests.
+            source.model.expandedToolCalls = []
             if multiAgent {
                 // The prompt a subagent is DISPATCHED with arrives as the first
                 // user bubble of its child transcript, and real ones run to
@@ -1860,6 +1897,8 @@ final class MockConversationSource: ConversationSource {
         /// approval.
         private var permissionSink: EnginePermissionSink?
         private var externalEventHandler: ((ClientEvent) -> Void)?
+        private static weak var settingsOwner: EngineConversationSource?
+        private var settingsGeneration: UInt64 = 0
         private var providerCatalogEntries: [ProviderCatalogEntry] = []
         private var providerCatalogLoaded = false
         private var providerCatalogWaiters: [CheckedContinuation<[ProviderCatalogEntry], Error>] = []
@@ -3239,6 +3278,34 @@ final class MockConversationSource: ConversationSource {
             externalEventHandler = handler
         }
 
+        func setSettingsActive(_ active: Bool) {
+            if active {
+                guard Self.settingsOwner !== self else { return }
+                Self.settingsOwner?.settingsGeneration &+= 1
+                Self.settingsOwner = self
+                settingsGeneration &+= 1
+                let generation = settingsGeneration
+                DesktopSettingsRepository.shared.configure(submitter: nil)
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        let handle = try await self.ensureHandle()
+                        guard Self.settingsOwner === self, generation == self.settingsGeneration else { return }
+                        DesktopSettingsRepository.shared.configure(submitter: { command in
+                            try await handle.submit(command: command)
+                        })
+                    } catch {
+                        guard Self.settingsOwner === self, generation == self.settingsGeneration else { return }
+                        DesktopSettingsRepository.shared.configure(submitter: nil)
+                    }
+                }
+            } else if Self.settingsOwner === self {
+                settingsGeneration &+= 1
+                Self.settingsOwner = nil
+                DesktopSettingsRepository.shared.configure(submitter: nil)
+            }
+        }
+
         // MARK: handle construction
 
         /// Build the engine handle once (lazily). Registers the listener so the
@@ -4411,6 +4478,9 @@ final class MockConversationSource: ConversationSource {
 
         /// Map one inbound `ClientEvent` onto the published state.
         fileprivate func apply(_ event: ClientEvent) {
+            if Self.settingsOwner === self {
+                DesktopSettingsRepository.shared.consume(event)
+            }
             externalEventHandler?(event)
             switch event {
             case .turnStarted:
@@ -5442,7 +5512,7 @@ final class MockConversationSource: ConversationSource {
                 model.messages = restored.messages
                 model.items = restored.items
                 model.messageDetails = restored.details
-                model.expandedToolCalls = []
+                model.restoreTranscriptDisclosures()
                 model.backgroundTasks = []
                 model.planTasks = []
                 model.workflowResumeState = .idle
@@ -6135,7 +6205,7 @@ final class MockConversationSource: ConversationSource {
                 // this process.
                 if finalizeOrphans && run.tools.contains(where: { $0.status == .running }) {
                     for index in run.tools.indices where run.tools[index].status == .running {
-                        run.tools[index].status = .failed
+                        run.tools[index].status = .unknown
                     }
                 }
                 // MessageDto does not carry the turn outcome. Do not promote a

@@ -1517,6 +1517,23 @@ class ChatViewModelReducerTest {
     }
 
     @Test
+    fun reconnectRemainsBlockedUntilCancellationIsAcknowledged() = runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        val source = SessionControlSource(cancelGate = gate)
+        val vm = ChatViewModel(source)
+        vm.send("work")
+        vm.cancel()
+        runCurrent()
+        assertFalse(vm.state.value.streaming)
+        assertTrue(vm.state.value.cancellationInFlight)
+        assertTrue(vm.state.value.blocksEngineReconnect(hasPendingPermission = false))
+        gate.complete(Unit)
+        runCurrent()
+        assertFalse(vm.state.value.cancellationInFlight)
+        assertFalse(vm.state.value.blocksEngineReconnect(hasPendingPermission = false))
+    }
+
+    @Test
     fun newChat_cancelsEngineTurnBeforeSubmittingNewSession() = runTest(dispatcher) {
         val gate = CompletableDeferred<Unit>()
         val src = SessionControlSource(cancelGate = gate)

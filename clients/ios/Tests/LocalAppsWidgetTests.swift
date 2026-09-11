@@ -170,11 +170,12 @@ final class LocalAppsWidgetTests: XCTestCase {
     func testMcpPagesKeepsGenericEditorAlongsideManagedLocalAppRestrictions() throws {
         let source = try clientSource("Sources/Settings/MCPPages.swift")
 
-        XCTAssertTrue(source.contains("struct MCPListPage"))
+        let active = try clientSource("Sources/Settings/DesktopAdminPages.swift")
+        XCTAssertTrue(active.contains("struct DesktopMCPAdminPage"))
+        XCTAssertTrue(active.contains("managedMcpInventory(serverName:"))
         XCTAssertTrue(source.contains("struct MCPEditPage"))
         XCTAssertTrue(source.contains("struct ManagedLocalAppMCPEditPage"))
         XCTAssertTrue(source.contains("allowsMcpConfigurationEditing"))
-        XCTAssertTrue(source.contains("managedServerRow(server:"))
     }
 
     func testSnapshotWriteFailsClosedWhenAppGroupIsMissing() {

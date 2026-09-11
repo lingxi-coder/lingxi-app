@@ -31,13 +31,14 @@ final class LingxiCodeUITests: XCTestCase {
         let thought = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.thought.")
         ).firstMatch
-        XCTAssertTrue(thought.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(thought.exists, app.debugDescription)
+        let shellGroup = app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-shell"]
+        XCTAssertTrue(shellGroup.waitForExistence(timeout: 5), app.debugDescription)
+        shellGroup.tap()
         let tool = app.descendants(matching: .any)["conversation.tool-call.ui-shell"]
         XCTAssertTrue(tool.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-shell.icon.terminal"].exists)
-        let batch = app.buttons.matching(
-            NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.tool-batch.")
-        ).firstMatch
+        let batch = app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-read"]
         XCTAssertTrue(batch.exists, app.debugDescription)
         XCTAssertFalse(app.descendants(matching: .any)["conversation.tool-call.ui-read"].exists)
         batch.tap()

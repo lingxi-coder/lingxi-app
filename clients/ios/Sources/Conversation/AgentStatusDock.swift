@@ -93,9 +93,13 @@ struct AgentStatusDock: View {
             onSelect(selectionID)
         } label: {
             HStack(spacing: 9) {
-                Circle()
-                    .fill(AgentStatusPresentation(rawValue: agent.status).color(using: theme))
-                    .frame(width: 8, height: 8)
+                AgentAvatar(agentID: agent.id, size: 30)
+                    .overlay(alignment: .bottomTrailing) {
+                        Circle()
+                            .fill(AgentStatusPresentation(rawValue: agent.status).color(using: theme))
+                            .frame(width: 8, height: 8)
+                            .overlay(Circle().stroke(theme.windowBg, lineWidth: 1.5))
+                    }
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(agent.name)

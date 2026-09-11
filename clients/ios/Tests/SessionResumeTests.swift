@@ -46,6 +46,20 @@ visionDelegationEnabled: true)
         /// the same array after the event is an authoritative empty catalog.
         /// Persisting code relies on this distinction to avoid erasing a cached
         /// project index when engine startup or listing has not completed yet.
+        func testUnmatchedHistoricalToolUseHasNeutralUnknownOutcome() {
+            let source = makeSource()
+            source.expectSessionResumeForTesting(uuid())
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [
+                MessageDto(role: "assistant", blocks: [.toolUse(id: "missing-result", tool: "Read", inputJson: "{}", header: nil)])
+            ]))
+            let runs = source.model.items.compactMap { item -> ConversationExecutionRun? in
+                if case let .run(run) = item { return run }; return nil
+            }
+            XCTAssertEqual(runs.flatMap(\.tools).map(\.status), [.unknown])
+            XCTAssertTrue(source.model.liveTranscriptToolIDs.isEmpty)
+            XCTAssertFalse(source.model.requiresBackgroundExecution)
+        }
+
         func testSessionListMarksAuthoritativeEmptyCatalogAsLoaded() {
             let source = makeSource()
             XCTAssertTrue(source.model.engineSessions.isEmpty)

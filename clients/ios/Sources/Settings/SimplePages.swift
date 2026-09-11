@@ -1,39 +1,5 @@
 import SwiftUI
 
-// MARK: - Account
-struct AccountPage: View {
-    @Environment(\.theme) private var t
-    var body: some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 0) {
-                Circle().fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 76, height: 76)
-                    .overlay(Text("Y").font(.system(size: 30, weight: .semibold)).foregroundColor(.white))
-                    .padding(.bottom, 12)
-                Text("Yuxin Yang").font(.system(size: 18, weight: .bold)).foregroundColor(t.text)
-                Text("yuxin@axielix.com").font(.system(size: 13)).foregroundColor(t.text4).padding(.top, 4)
-                Text("settings_account_pro_renewal")
-                    .font(.system(size: 11.5, weight: .semibold)).foregroundColor(t.accent)
-                    .padding(.horizontal, 12).padding(.vertical, 4)
-                    .background(t.accent.tint(0.18)).clipShape(Capsule()).padding(.top, 10)
-            }
-            .padding(.top, 8).padding(.bottom, 18)
-
-            SettingsSection(label: String(localized: "settings_section_monthly_usage")) {
-                SettingsRow(label: String(localized: "settings_conversation_count"), value: "247 / 1000", chevron: false)
-                SettingsRow(label: String(localized: "settings_inference_duration"), value: String(localized: "settings_inference_duration_value"), chevron: false)
-                SettingsRow(label: String(localized: "settings_storage"), value: "1.2 / 10 GB", chevron: false, isLast: true)
-            }
-            SettingsSection {
-                SettingsRow(icon: .brain, label: String(localized: "settings_manage_subscription"), onTap: {})
-                SettingsRow(icon: .link, label: String(localized: "settings_sync_devices"),
-                            sub: String(localized: "settings_sync_devices_sub"), onTap: {})
-                SettingsRow(icon: .x, label: String(localized: "settings_logout"), danger: true, isLast: true, onTap: {})
-            }
-        }
-    }
-}
-
 // MARK: - Knowledge
 struct KnowledgePage: View {
     @Environment(\.theme) private var t

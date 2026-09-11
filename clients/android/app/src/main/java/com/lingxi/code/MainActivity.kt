@@ -236,6 +236,8 @@ class MainActivity : ComponentActivity() {
             // Monotonic across configuration changes: rotation must not turn a
             // prior reconnect generation back into zero and rebuild a live engine.
             var engineReconnect by rememberSaveable { mutableIntStateOf(0) }
+            val desktopProjectStore: com.lingxi.code.project.ProjectStore = viewModel(key = "projects", factory = com.lingxi.code.project.ProjectStore.factory(applicationContext))
+            var activeConversationBusy by remember { mutableStateOf(false) }
             var activeConversationSource by remember { mutableStateOf<com.lingxi.code.conversation.ConversationSource?>(null) }
             var engineRuntimeMode by rememberSaveable {
                 mutableStateOf(settingsState.linuxRuntime.selectedMode.name)
@@ -335,6 +337,7 @@ class MainActivity : ComponentActivity() {
                         reconnectToken = engineReconnect,
                         settingsStore = settingsStore,
                         onConversationSourceChanged = { activeConversationSource = it },
+                        onConversationBusyChanged = { activeConversationBusy = it },
                         requestedConversationLaunch = requestedConversationLaunch,
                         onConversationLaunchHandled = { pendingConversationLaunch.value = null },
                         requestedLocalAppLaunch = requestedLocalAppLaunch,
@@ -348,6 +351,8 @@ class MainActivity : ComponentActivity() {
                         exit = slideOutVertically(targetOffsetY = { it }),
                     ) {
                         SettingsHost(
+                            engineSource = activeConversationSource,
+                            projectStore = desktopProjectStore,
                             appearanceStore = store,
                             isDark = darkTheme,
                             accentId = prefs.accentId,
@@ -386,8 +391,12 @@ class MainActivity : ComponentActivity() {
                             // 重新连接引擎: rebuild the engine against the just-saved key
                             // and drop back to the (now-real) conversation.
                             onReconnectEngine = {
-                                engineReconnect += 1
-                                settingsOpen = false
+                                if (activeConversationBusy) {
+                                    android.widget.Toast.makeText(applicationContext, getString(R.string.voice_session_busy_retry), android.widget.Toast.LENGTH_SHORT).show()
+                                } else {
+                                    engineReconnect += 1
+                                    settingsOpen = false
+                                }
                             },
                             onOpenTerminal = {
                                 openTerminal(it.sessionId, it.initCommand)

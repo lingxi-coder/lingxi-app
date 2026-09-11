@@ -136,6 +136,8 @@ struct RootView: View {
     @State private var clientEventCenter: ClientEventCenter
     @State private var source: any ConversationSource
     @State private var sourceGeneration = UUID()
+    @State private var workspaceWidth: CGFloat = 0
+    @State private var sessionInspectorOpen = false
     @State private var providerCatalogBootstrapped = false
     /// The workspace the conversation currently runs in: global, a managed
     /// project, or a local app (v3 — each app is a conversation scope whose
@@ -355,11 +357,14 @@ struct RootView: View {
         // the build fails outright with "unable to type-check this
         // expression in reasonable time".
         withPresentations(withLifecycleObservers(rootStack))
+            .onAppear { source.setSettingsActive(true) }
+
     }
 
     private var rootStack: some View {
         @Bindable var navigation = navigation
-        return ZStack {
+        return GeometryReader { geometry in
+          ZStack {
             // Sidebar + chat. In compact width this collapses to a stack whose
             // root is the sidebar: the system back button/back-swipe opens it,
             // while Drawer closes it through the preferred-column binding.
@@ -371,11 +376,32 @@ struct RootView: View {
                     .id(localization.language)
             } detail: {
                 NavigationStack(path: $navigation.path) {
-                    detailSurface
+                    HStack(spacing: 0) {
+                        detailSurface.frame(maxWidth: .infinity)
+                        if workspaceWidth >= 840 && sessionInspectorOpen {
+                            Divider()
+                            VStack(spacing: 0) {
+                                HStack {
+                                    Text("session_details_title").font(.headline)
+                                    Spacer()
+                                    Button("common_close", systemImage: "xmark") { sessionInspectorOpen = false }
+                                        .labelStyle(.iconOnly)
+                                        .accessibilityIdentifier("session-inspector-close")
+                                }.padding()
+                                SessionDetailsView(session: session, source: source,
+                                    workspacePath: currentWorkspaceGuestPath,
+                                    onOpenTerminal: openCurrentWorkspaceTerminal)
+                            }
+                            .frame(width: min(360, workspaceWidth * 0.35))
+                            .background(theme.windowBg)
+                        }
+                    }
                         .navigationDestination(for: AppRoute.self, destination: destination)
                         .id(localization.language)
                 }
             }
+
+            .environment(\.horizontalSizeClass, geometry.size.width >= 840 ? .regular : .compact)
 
             // Onboarding owns the whole window, sidebar and navigation bars
             // included, so it sits outside the split view rather than in a column.
@@ -398,6 +424,15 @@ struct RootView: View {
                     onDeny: { source.denyPermission($0) }
                 )
             #endif
+          }
+          .onAppear { workspaceWidth = geometry.size.width }
+          .onChange(of: geometry.size.width) { _, width in
+              workspaceWidth = width
+              if width < 840 && sessionInspectorOpen {
+                  sessionInspectorOpen = false
+                  navigation.openSessionDetails(sessionID: session.id)
+              }
+          }
         }
     }
 
@@ -613,7 +648,7 @@ struct RootView: View {
 
     private func withPresentations(_ content: some View) -> some View {
         content
-            .sheet(
+            .fullScreenCover(
                 isPresented: Binding(
                     get: { navigation.settingsOpen },
                     set: { if !$0 { navigation.closeSettings() } }
@@ -625,6 +660,21 @@ struct RootView: View {
                     convo: source.model,
                     localAppsStore: localAppsStore,
                     projectCwd: projectStore.activeProject?.workspace.hostURL.path,
+                    projectStore: projectStore,
+                    onReconnectAfterSecretChange: {
+                        #if canImport(engine_mobileFFI)
+                            let hasPendingPermission = !source.model.pendingPermissions.isEmpty
+                        #else
+                            let hasPendingPermission = false
+                        #endif
+                        guard !hasPendingPermission, source.model.pendingQuestions.isEmpty,
+                              !source.model.streaming, !source.model.sessionTransitionPending,
+                              !source.model.isCancelling,
+                              !source.model.backgroundTasks.contains(where: { !$0.status.isTerminal }),
+                              !source.model.agentSummaries.contains(where: { ["running", "working"].contains($0.status.lowercased()) })
+                        else { throw NSError(domain: "LingXi.Settings", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "voice_session_busy_retry")]) }
+                        try await rebuildSource(snapshot: providerRepository.makeLaunchSnapshot())
+                    },
                     onRefreshMcp: { source.refreshMcpServers() },
                     onRefreshSkills: {
                         #if canImport(engine_mobileFFI)
@@ -914,7 +964,8 @@ struct RootView: View {
                 source: source,
                 onOpenVoiceSettings: { navigation.showSettings(.voice) },
                 onOpenSessionDetails: {
-                    navigation.openSessionDetails(sessionID: session.id)
+                    if workspaceWidth >= 840 { sessionInspectorOpen = true }
+                    else { navigation.openSessionDetails(sessionID: session.id) }
                 },
                 onOpenShellTask: { request in
                     navigation.openTerminal(
@@ -933,6 +984,7 @@ struct RootView: View {
                 sessionMode: activeMode,
                 pendingRestoreID: pendingSessionRestoreID,
                 onSessionChanged: adoptEngineSession,
+                onFirstMessageRecorded: { setWorkspaceCollapsed(false, workspaceKey: activeScope.workspaceKey) },
                 onUnavailableSession: clearUnavailableSession,
                 onSessionTransitionFailed: rollbackFailedSession,
                 onRefreshSessions: { source.listSessions() }
@@ -1458,7 +1510,9 @@ struct RootView: View {
         try await old.cancelAndWait()
         activeSession = confirmedSession
         pendingSessionRestoreID = confirmedSession.isEmpty ? nil : confirmedSession
+        source.setSettingsActive(false)
         source = replacement
+        source.setSettingsActive(true)
         // The catalog belongs to the engine build, not to a single source
         // instance. Keep it across normal reconnects so changing a provider
         // cannot trigger a second catalog bootstrap/rebuild loop.
@@ -1722,7 +1776,9 @@ struct RootView: View {
                 confirmedSession = restoredSession
                 activeSession = resumeSessionID ?? restoredSession
                 pendingSessionRestoreID = activeSession.isEmpty ? nil : activeSession
+                source.setSettingsActive(false)
                 source = replacement
+                source.setSettingsActive(true)
                 sourceGeneration = UUID()
                 if startNew {
                     pendingSessionRestoreID = nil
@@ -2470,6 +2526,7 @@ private struct ConversationProjectBridge: View {
     let sessionMode: SessionMode
     let pendingRestoreID: String?
     let onSessionChanged: (String) -> Bool
+    let onFirstMessageRecorded: () -> Void
     let onUnavailableSession: (String) -> Bool
     let onSessionTransitionFailed: (String) -> Bool
     let onRefreshSessions: () -> Void
@@ -2519,6 +2576,9 @@ private struct ConversationProjectBridge: View {
             .onChange(of: model.activeSessionId) { _, sessionID in
                 handleActiveSession(sessionID)
             }
+            .onChange(of: model.messages.first(where: { $0.role == .user })?.id) { _, _ in
+                handleActiveSession(model.activeSessionId)
+            }
     }
 
     private func handleActiveSession(_ sessionID: String) {
@@ -2532,23 +2592,34 @@ private struct ConversationProjectBridge: View {
         // App-scope sessions are adopted (above) but never recorded into the
         // project session index.
         guard !scope.isLocalApp else { return }
-        let isIndexed: Bool
+        let indexedRow: ProjectSessionSummary?
         if let projectID {
-            isIndexed = projectStore.projects
-                .first(where: { $0.record.id == projectID })?
-                .sessions.contains(where: { $0.sessionId == sessionID }) == true
+            indexedRow = projectStore.projects.first(where: { $0.record.id == projectID })?
+                .sessions.first(where: { $0.sessionId == sessionID })
         } else {
-            isIndexed = projectStore.globalSessions.contains(where: { $0.sessionId == sessionID })
+            indexedRow = projectStore.globalSessions.first(where: { $0.sessionId == sessionID })
         }
+        let firstMessage = model.messages.first(where: { $0.role == .user })
         Task { @MainActor in
-            if !isIndexed {
-                try? await projectStore.recordStartedSession(
-                    projectId: projectID,
-                    sessionId: sessionID,
-                    title: String(localized: "chat_new_conversation"),
-                    mode: sessionMode
-                )
+            guard model.activeSessionId == sessionID, !model.sessionTransitionPending else { return }
+            if (indexedRow?.messageCount ?? 0) == 0, let firstMessage {
+                do {
+                    try await projectStore.recordStartedSession(
+                        projectId: projectID,
+                        sessionId: sessionID,
+                        title: String(firstMessage.text.prefix(120)),
+                        mode: sessionMode,
+                        initialMessageCount: 1
+                    )
+                    if model.activeSessionId == sessionID { onFirstMessageRecorded() }
+                } catch {
+                    if model.activeSessionId == sessionID {
+                        model.error = ConversationError(kind: .host, message: String(format: String(localized: "session_index_save_new_failed_fmt"), error.localizedDescription))
+                    }
+                    return
+                }
             }
+            guard model.activeSessionId == sessionID, !model.sessionTransitionPending else { return }
             if let projectID {
                 try? await projectStore.markActiveSession(projectId: projectID, sessionId: sessionID)
             }

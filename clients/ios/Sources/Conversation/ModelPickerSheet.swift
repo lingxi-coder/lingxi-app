@@ -76,7 +76,7 @@ struct ModelPickerSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .sheet(item: $selectedDetails) { details in
+        .fullScreenCover(item: $selectedDetails) { details in
             ModelDetailsSheet(
                 details: details,
                 accent: ModelDisplay.color(for: details.reference)
@@ -142,15 +142,15 @@ struct ModelPickerSheet: View {
                     Circle().fill(item.color).frame(width: 8, height: 8)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(item.name)
-                            .font(.system(size: 15, weight: .medium))
+                            .font(.scaledSystem(15, weight: .medium, relativeTo: .body))
                             .foregroundStyle(t.text)
                         Text(item.details?.description ?? item.modelId)
-                            .font(.system(size: 12))
+                            .font(.scaledSystem(12, relativeTo: .caption))
                             .foregroundStyle(t.text3)
                             .lineLimit(1)
                         if let summary = item.details?.summaryItems, !summary.isEmpty {
                             Text(summary.joined(separator: " · "))
-                                .font(.system(size: 11))
+                                .font(.scaledSystem(11, relativeTo: .caption))
                                 .foregroundStyle(t.text3)
                                 .lineLimit(2)
                         }
@@ -170,9 +170,9 @@ struct ModelPickerSheet: View {
                     selectedDetails = item.details
                 } label: {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.scaledSystem(15, weight: .medium, relativeTo: .body))
                         .foregroundStyle(t.text3)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 44, height: 44)
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)

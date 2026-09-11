@@ -68,6 +68,8 @@ data class ChatState(
     val streaming: Boolean = false,
     /** True while ResumeSession/NewSession is awaiting engine confirmation. */
     val sessionTransitioning: Boolean = false,
+    /** Cancel has stopped UI streaming but the engine has not acknowledged it yet. */
+    val cancellationInFlight: Boolean = false,
     /**
      * False when the visible session has not been confirmed by the engine.
      * Sending is rejected in that state so a cached transcript can never be
@@ -251,7 +253,7 @@ private fun formatByteCount(bytes: Long): String = when {
  * changes here beyond the constructor argument.
  *
  * The optional [savedState] persists only lightweight navigation state: session
- * id/title, composer draft, and the new-chat flag. Transcripts remain in the
+ * id/title, composer draft, the new-chat flag, and bounded disclosure preferences. Transcripts remain in the
  * engine's session store and are restored exclusively through ResumeSession.
  * This keeps Android's saved-state Bundle small and prevents cached UI messages
  * from impersonating engine context after process death.
@@ -370,6 +372,7 @@ class ChatViewModel(
     private var sourceBindingJob: Job? = null
 
     /** Structured runs remain partitioned by their immutable origin session. */
+    private val disclosureBySession = decodeDisclosures(savedState?.get<String>(KEY_DISCLOSURES))
     private val workflowRunsBySession = mutableMapOf<String, Map<String, WorkflowRunUi>>()
     /** Task status can arrive before the first workflow callback on a separate bridge. */
     private val workflowStatusesBySession = mutableMapOf<String, Map<String, TaskStatusDto>>()
@@ -1379,6 +1382,7 @@ class ChatViewModel(
         abandonLocalTurn()?.cancel()
         explicitCancellation?.cancel()
         explicitCancellation = null
+        _state.update { it.copy(cancellationInFlight = false) }
         sessionTransitionJob?.cancel()
         sessionTransitionJob = null
         sourceBindingJob?.cancel()
@@ -1678,7 +1682,7 @@ class ChatViewModel(
                 // session's checklist to another.
                 planTasks = emptyList(),
                 planExpanded = false,
-                expandedToolCalls = emptySet(),
+                expandedToolCalls = disclosureBySession[canonicalSessionId(restored.sessionId)].orEmpty(),
                 workflowRuns = workflowRunsBySession[canonicalSessionId(restored.sessionId)].orEmpty(),
             )
         }
@@ -1878,7 +1882,7 @@ class ChatViewModel(
                 error = null,
                 planTasks = emptyList(),
                 planExpanded = false,
-                expandedToolCalls = emptySet(),
+                expandedToolCalls = if (newSession) emptySet() else disclosureBySession[canonicalSessionId(target.id)].orEmpty(),
                 workflowRuns = workflowRunsBySession[canonicalSessionId(target.id)].orEmpty(),
             )
         }
@@ -1886,6 +1890,7 @@ class ChatViewModel(
             try {
                 explicitCancellation?.await()?.getOrThrow()
                 explicitCancellation = null
+                _state.update { it.copy(cancellationInFlight = false) }
                 cancelEngineTurn(detachedTurn)
                 when {
                     newSession -> source.newSession()
@@ -2132,6 +2137,7 @@ class ChatViewModel(
             )
             it.copy(
                 streaming = false,
+                cancellationInFlight = true,
                 liveTurnWaitingForUser = false,
                 messages = settled.messages,
                 streamingMessage = null,
@@ -2147,7 +2153,10 @@ class ChatViewModel(
         explicitCancellation = cancellation
         viewModelScope.launch {
             val result = cancellation.await()
-            if (explicitCancellation === cancellation) explicitCancellation = null
+            if (explicitCancellation === cancellation) {
+                explicitCancellation = null
+                _state.update { it.copy(cancellationInFlight = false) }
+            }
             result.fold(
                 onSuccess = {
                     if (!_state.value.sessionTransitioning) {
@@ -2197,6 +2206,12 @@ class ChatViewModel(
                     s.expandedToolCalls + id
                 },
             )
+        }
+        val sessionId = canonicalSessionId(_state.value.session.id)
+        if (sessionId.isNotBlank() && sessionId != "new") {
+            disclosureBySession.remove(sessionId)
+            disclosureBySession[sessionId] = _state.value.expandedToolCalls
+            savedState?.set(KEY_DISCLOSURES, encodeDisclosures(disclosureBySession))
         }
     }
 
@@ -2782,6 +2797,7 @@ class ChatViewModel(
         const val KEY_SESSION_ID = "chat.session.id" // String
         const val KEY_SESSION_TITLE = "chat.session.title" // String
         const val KEY_IS_NEW = "chat.isNew" // Boolean — empty-state hero vs list
+        const val KEY_DISCLOSURES = "chat.disclosures" // bounded JSON of session -> stable item ids
 
         /**
          * How long a submitted discard may wait for its terminal

@@ -137,6 +137,10 @@ uniffi = [
 ]
 
 [dependencies]
+# Reuse the canonical file-layer provider/routing merge at mobile bootstrap.
+core = { path = "../../core" }
+configuration-admin = { path = "../../configuration-admin" }
+migrations = { path = "../../migrations" }
 # Single source of truth for the product namespace (config-dir / memory-file /
 # config-dir env-var names). The host + test-support modules route their
 # `.claude` / `CLAUDE.md` literals through these constants (still the Claude

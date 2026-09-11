@@ -6279,7 +6279,10 @@ impl McpRegistry {
             .await
             .get(name)
             .is_some_and(|state| Self::same_config_snapshot(state.config(), expected));
-        if !matches {
+        // Reading the snapshot can suspend behind a catalog writer after the
+        // lifecycle guard passed. Recheck intent before starting teardown so
+        // a reverted reload cannot delete the still-current configuration.
+        if !matches || operation_guard.is_some_and(|guard| !guard()) {
             return Ok(false);
         }
         self.disconnect_locked_inner(name, false, true).await?;
@@ -9315,6 +9318,55 @@ mod tests {
             .expect("guarded removal task")
             .expect("guarded removal result"));
         assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+        assert!(registry.connections.read().await.contains_key("srv"));
+    }
+
+    #[tokio::test]
+    async fn guarded_conditional_remove_rechecks_generation_after_snapshot_wait() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = Arc::new(McpRegistry::new(mock as Arc<dyn McpTransport>));
+        let expected = http_cfg("srv", "https://mcp.example.com/v1");
+        let mut held = registry.connections.write().await;
+        held.insert(
+            "srv".into(),
+            McpConnectionState::Disconnected {
+                config: expected.clone(),
+                last_error: None,
+            },
+        );
+        let current = Arc::new(AtomicBool::new(true));
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let guard = {
+            let current = current.clone();
+            let guard_calls = guard_calls.clone();
+            Arc::new(move || {
+                guard_calls.fetch_add(1, Ordering::SeqCst);
+                current.load(Ordering::SeqCst)
+            }) as Arc<McpOperationGuard>
+        };
+        let removal = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry
+                    .remove_without_revoking_auth_if_config_guarded("srv", &expected, guard)
+                    .await
+            })
+        };
+        // Wait for the guard to pass under the lifecycle lock, then revoke
+        // intent while its config snapshot is blocked by our state writer.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while guard_calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removal reached the snapshot wait");
+        current.store(false, Ordering::SeqCst);
+        drop(held);
+        assert!(!removal
+            .await
+            .expect("removal task")
+            .expect("removal result"));
         assert!(registry.connections.read().await.contains_key("srv"));
     }
 

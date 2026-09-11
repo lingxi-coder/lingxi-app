@@ -179,6 +179,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
         onClick={onClick}
         disabled={opening}
         aria-busy={opening || undefined}
+        data-session-id={session.uuid}
         aria-current={active ? 'page' : undefined}
         title={session.title || 'Untitled session'}
         style={{
@@ -240,6 +241,26 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
     () => new Set(selectedProject ? [selectedProject] : []),
   );
   const [showAllSessions, setShowAllSessions] = useState<Record<string, boolean>>({});
+  const activeCatalogRows = visibleSession ? bridge.bootstrap?.projectCatalogs?.[visibleSession.projectPath]?.sessions : undefined;
+  const activeRowIndex = activeCatalogRows?.findIndex((row) => row.uuid === visibleSession?.sessionId) ?? -1;
+  const revealedSessionKey = !scheduled && visibleSession && activeRowIndex >= 0
+    ? `${visibleSession.projectPath}\0${visibleSession.sessionId}` : null;
+  const focusedSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!revealedSessionKey || !visibleSession) return;
+    const projectPath = visibleSession.projectPath;
+    setExpandedProjects((current) => current.has(projectPath) ? current : new Set([...current, projectPath]));
+    if (activeRowIndex >= 5) setShowAllSessions((current) => current[projectPath] ? current : { ...current, [projectPath]: true });
+  }, [revealedSessionKey, activeRowIndex, visibleSession?.projectPath]);
+  useEffect(() => {
+    if (!revealedSessionKey) { focusedSessionRef.current = null; return; }
+    if (focusedSessionRef.current === revealedSessionKey) return;
+    const row = asideRef.current?.querySelector<HTMLButtonElement>('[data-session-id][aria-current="page"]');
+    if (!row) return;
+    focusedSessionRef.current = revealedSessionKey;
+    row.focus({ preventScroll: true });
+    row.scrollIntoView({ block: 'nearest' });
+  }, [revealedSessionKey, expandedProjects, showAllSessions]);
   const [menuProject, setMenuProject] = useState<string | null>(null);
   const [openingSessionKey, setOpeningSessionKey] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<string | null>(null);
@@ -561,7 +582,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
 
                 {open ? (
                   <div id={`project-sessions-${encodeURIComponent(projectPath)}`}>
-                    {catalog?.error ? (
+                    {catalog?.error && allSessions.length === 0 ? (
                       <div style={{ padding: '8px 10px 8px 30px', color: t.danger, fontSize: 10.5 }}>{catalog.error}</div>
                     ) : !catalog ? (
                       <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>Loading sessions…</div>

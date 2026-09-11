@@ -1,6 +1,7 @@
+import { submittedSessionCatalogs, type SubmittedSession } from './submittedSessionCatalog';
 import { saveProviderSettings } from './providerSettingsSave';
 import { requestCronManagement } from './cronManagement';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CronJobDto,
   CronRequestDto,
@@ -667,6 +668,7 @@ export function displayedSession(
 }
 
 interface RuntimeState {
+  submittedSession?: SubmittedSession;
   connection: ConnectionState;
   conversation: ConversationState;
   desktop: DesktopState;
@@ -1547,8 +1549,20 @@ export function useBridge(): UseBridge {
     enqueueTrackedTurn(pendingTrackedTurns.current, token);
     const sendToken = `${sessionId}:${runtimeResourceSendSequence.current}`;
     const resources = promptRuntimeResources(sessionId, sendToken, images, imageNames, filePaths);
+    const sessionRef = bootstrapRef.current?.runtimes.find((entry) => entry.sessionId === sessionId)
+      ?? activeSession;
+    const saved = sessionRef && bootstrapRef.current?.projectCatalogs[sessionRef.projectPath]?.sessions.find((entry) => entry.uuid === sessionId);
+    const submittedSession: SubmittedSession | undefined = sessionRef && (!saved || saved.message_count === 0) ? {
+      projectPath: sessionRef.projectPath,
+      row: {
+        uuid: sessionId, title: trimmed.replace(/\s+/g, ' ').slice(0, 120),
+        modified_rfc3339: new Date().toISOString(), message_count: 1,
+        mode: saved?.mode ?? 'code', path: saved?.path ?? '',
+      },
+    } : undefined;
     updateRuntime(sessionId, (state) => ({
       ...state,
+      submittedSession: state.submittedSession ?? submittedSession,
       conversation: appendPendingUserPrompt(state.conversation, trimmed, images),
       runtimeCenter: addRuntimeResources(state.runtimeCenter, resources),
     }));
@@ -1578,7 +1592,7 @@ export function useBridge(): UseBridge {
       throw cause;
     });
     return { token, queued };
-  }, [capture, host, updateRuntime]);
+  }, [activeSession, capture, host, updateRuntime]);
 
   const sendPrompt = useCallback(async (
     text: string,
@@ -2339,11 +2353,20 @@ export function useBridge(): UseBridge {
     [runConfigurationAdmin],
   );
 
+  const presentedBootstrap = useMemo(() => bootstrap ? {
+    ...bootstrap,
+    projectCatalogs: submittedSessionCatalogs(
+      bootstrap.projectCatalogs,
+      [...runtimeStates.values()].flatMap((state) => state.submittedSession ? [state.submittedSession] : []),
+      bootstrap.settings.archivedSessions ?? [],
+    ),
+  } : null, [bootstrap, runtimeStates]);
+
   return {
     manageCron,
     hosted,
     loading,
-    bootstrap,
+    bootstrap: presentedBootstrap,
     settingsSnapshotEvent,
     audioSnapshot,
     mcpServersEvent,

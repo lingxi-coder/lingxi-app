@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod function_hook;
 mod agent_executor;
 pub mod async_registry;
 pub mod attachment;

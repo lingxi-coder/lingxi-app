@@ -2647,6 +2647,7 @@ dependencies = [
  "platform-api",
  "protocol",
  "regex",
+ "rquickjs",
  "serde",
  "serde_json",
  "telemetry",

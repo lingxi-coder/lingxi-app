@@ -388,10 +388,10 @@ mod tests {
             Ok(HttpResponse {
                 status: 200,
                 headers: Vec::new(),
-                body: r#"{"data":[{"id":"deepseek-v4-flash"}]}"#.to_string(),
+                body: r#"{"data":[{"id":"deepseek-flash"}]}"#.to_string(),
                 body_bytes: Vec::new(),
             }),
-            &probe("deepseek", "https://api.deepseek.com", "deepseek-v4-flash"),
+            &probe("deepseek", "https://api.deepseek.com", "deepseek-flash"),
             24,
             true,
         );

@@ -278,7 +278,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             // reference either with no profile or with the matching profile
             // persisted beside the still-qualified model (an older engine,
             // another client, or a partially migrated session). Adopting that
-            // verbatim ships `"deepseek/deepseek-v4-flash"` as the wire id and
+            // verbatim ships `"deepseek/deepseek-flash"` as the wire id and
             // the provider rejects every message of the resumed session.
             // Re-split it exactly as `SetModel` does, so the resumed session
             // lands on the same (model, profile) pair a fresh pick produces.
@@ -2267,18 +2267,18 @@ mod tests {
     /// A transcript can carry a PROVIDER-QUALIFIED model reference with no
     /// `modelProfile` alongside it — written by an older engine, by another
     /// client, or by any session whose profile was never persisted. Adopting it
-    /// verbatim makes `session.model` the whole `"deepseek/deepseek-v4-flash"`
+    /// verbatim makes `session.model` the whole `"deepseek/deepseek-flash"`
     /// string, which is then sent as the WIRE model id: the provider 404s and
     /// the turn reports `model unavailable: the provider does not serve
-    /// 'deepseek/deepseek-v4-flash'` for every message, with no way out of that
+    /// 'deepseek/deepseek-flash'` for every message, with no way out of that
     /// session short of re-picking a model.
     #[tokio::test]
     async fn hot_resume_splits_a_qualified_model_ref_with_no_profile() {
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let api = Arc::new(MockApiClient::new(Vec::new()));
         api.set_model_listings(vec![platform_api::ModelListing {
-            display_model: "deepseek-v4-flash".to_string(),
-            request_model: "deepseek-v4-flash".to_string(),
+            display_model: "deepseek-flash".to_string(),
+            request_model: "deepseek-flash".to_string(),
             provider_id: "deepseek".to_string(),
             provider_label: "DeepSeek".to_string(),
             description: None,
@@ -2305,7 +2305,7 @@ mod tests {
             None,
             None,
             platform_api::ResumeRuntimeSnapshot {
-                model: "deepseek/deepseek-v4-flash".to_string(),
+                model: "deepseek/deepseek-flash".to_string(),
                 model_profile: None,
                 ..Default::default()
             },
@@ -2315,7 +2315,7 @@ mod tests {
 
         let session = orch.session.lock().await;
         assert_eq!(
-            session.model, "deepseek-v4-flash",
+            session.model, "deepseek-flash",
             "the resumed model must be the BARE wire id, never the qualified ref"
         );
         assert_eq!(session.model_profile.as_deref(), Some("deepseek"));
@@ -2323,7 +2323,7 @@ mod tests {
 
     /// A persisted profile does not make a qualified model reference safe to
     /// use as the wire id. Some older/mobile session paths recorded BOTH
-    /// `model = "deepseek/deepseek-v4-flash"` and
+    /// `model = "deepseek/deepseek-flash"` and
     /// `modelProfile = "deepseek"`; trusting the latter left the qualified
     /// UI reference in `session.model` and every subsequent request failed
     /// model resolution. Normalize this shape exactly like the profile-less
@@ -2332,8 +2332,8 @@ mod tests {
     async fn hot_resume_splits_a_qualified_model_ref_with_matching_profile() {
         let api = Arc::new(MockApiClient::new(Vec::new()));
         api.set_model_listings(vec![platform_api::ModelListing {
-            display_model: "deepseek-v4-flash".to_string(),
-            request_model: "deepseek-v4-flash".to_string(),
+            display_model: "deepseek-flash".to_string(),
+            request_model: "deepseek-flash".to_string(),
             provider_id: "deepseek".to_string(),
             provider_label: "DeepSeek".to_string(),
             description: None,
@@ -2360,7 +2360,7 @@ mod tests {
             None,
             None,
             platform_api::ResumeRuntimeSnapshot {
-                model: "deepseek/deepseek-v4-flash".to_string(),
+                model: "deepseek/deepseek-flash".to_string(),
                 model_profile: Some("deepseek".to_string()),
                 ..Default::default()
             },
@@ -2369,7 +2369,7 @@ mod tests {
         .expect("hot resume");
 
         let session = orch.session.lock().await;
-        assert_eq!(session.model, "deepseek-v4-flash");
+        assert_eq!(session.model, "deepseek-flash");
         assert_eq!(session.model_profile.as_deref(), Some("deepseek"));
         drop(session);
 
@@ -2378,13 +2378,13 @@ mod tests {
         // the UI reference and explicit profile together.
         platform_api::OrchestratorHandle::switch_model(
             &orch,
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-flash",
             Some("deepseek"),
         )
         .await
         .expect("switch model");
         let session = orch.session.lock().await;
-        assert_eq!(session.model, "deepseek-v4-flash");
+        assert_eq!(session.model, "deepseek-flash");
         assert_eq!(session.model_profile.as_deref(), Some("deepseek"));
     }
 

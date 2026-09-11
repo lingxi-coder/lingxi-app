@@ -7603,9 +7603,9 @@ fn anthropic_models_for(
     //
     // The remainder must additionally be a BARE id. `split_profile_model` only
     // splits on the FIRST slash, so a DOUBLE-qualified ref
-    // (`anthropic/deepseek/deepseek-v4-flash` — what a client that re-qualified
+    // (`anthropic/deepseek/deepseek-flash` — what a client that re-qualified
     // an already-qualified id sends) yields `("anthropic",
-    // "deepseek/deepseek-v4-flash")` and used to register a DeepSeek model
+    // "deepseek/deepseek-flash")` and used to register a DeepSeek model
     // inside the Anthropic profile, which is the same "DeepSeek V4 Flash under
     // the ANTHROPIC header" defect `engine_mobile::anthropic_models` guards. A
     // bare `anthropic/` likewise fails `split_profile_model`'s own non-empty

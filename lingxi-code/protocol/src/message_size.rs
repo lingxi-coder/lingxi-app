@@ -120,7 +120,7 @@ mod tests {
         let analysis = crate::MediaAnalysis {
             question_key: "msg-123".to_string(),
             media_fingerprints: vec!["fp-a".to_string()],
-            model: "deepseek-v4-flash-vision-exp".to_string(),
+            model: "deepseek-flash".to_string(),
             prompt_version: 1,
             created_at: std::time::UNIX_EPOCH,
             task_findings: vec!["receipt total is visible".to_string()],

@@ -3348,14 +3348,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         let tool = AgentTool::new(bctx);
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
-        ctx.options.main_loop_model = "deepseek-v4-flash".to_string();
+        ctx.options.main_loop_model = "deepseek-flash".to_string();
         ctx.options.model_profile = Some("deepseek".to_string());
         let input = serde_json::json!({ "description": "do it", "prompt": "go" });
         tool.call(input, ctx, fresh_tx()).await.expect("spawn ok");
         let inv = spawner.invocations();
         assert_eq!(
             inv[0].request.parent_model_override.as_deref(),
-            Some("deepseek-v4-flash"),
+            Some("deepseek-flash"),
             "the live/parent main_loop_model is threaded as the spawn's parent override"
         );
         assert_eq!(inv[0].request.model_profile.as_deref(), Some("deepseek"));

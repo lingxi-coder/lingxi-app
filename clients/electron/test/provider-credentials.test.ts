@@ -56,10 +56,10 @@ test('credential persistence clears the secret before applying a deferred model 
     'sk-test-secret',
     async () => { events.push('persist'); },
     () => { events.push('clear'); },
-    'deepseek/deepseek-v4-flash',
+    'deepseek/deepseek-flash',
     async (reference) => { events.push(`apply:${reference}`); },
   );
-  assert.deepEqual(events, ['persist', 'clear', 'apply:deepseek/deepseek-v4-flash']);
+  assert.deepEqual(events, ['persist', 'clear', 'apply:deepseek/deepseek-flash']);
 });
 
 test('credential persistence does not clear or apply when the host rejects the write', async () => {
@@ -70,7 +70,7 @@ test('credential persistence does not clear or apply when the host rejects the w
       'sk-test-secret',
       async () => { events.push('persist'); throw new Error('host unavailable'); },
       () => { events.push('clear'); },
-      'deepseek/deepseek-v4-flash',
+      'deepseek/deepseek-flash',
       async () => { events.push('apply'); },
     ),
     /host unavailable/,
@@ -86,7 +86,7 @@ test('model application failure happens after the persisted secret leaves render
       'sk-test-secret',
       async () => { events.push('persist'); },
       () => { events.push('clear'); },
-      'deepseek/deepseek-v4-flash',
+      'deepseek/deepseek-flash',
       async () => { events.push('apply'); throw new Error('model switch failed'); },
     ),
     /model switch failed/,

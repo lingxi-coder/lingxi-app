@@ -6087,14 +6087,14 @@ mod tests {
             .with_session_provider_first_party(true)
             .with_default_model_selection_provider(Arc::new(|| {
                 Some(DefaultModelSelection {
-                    model: "deepseek-v4-flash".to_string(),
+                    model: "deepseek-flash".to_string(),
                     model_profile: Some("deepseek".to_string()),
                     provider_first_party: false,
                 })
             }));
 
         let selected = spawner.resolve_selection("Explore", None).await;
-        assert_eq!(selected.resolved_model, "deepseek-v4-flash");
+        assert_eq!(selected.resolved_model, "deepseek-flash");
 
         let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
             "subagent_type": "Explore",
@@ -6113,7 +6113,7 @@ mod tests {
             .await
             .expect("provider-qualified context")
             .0;
-        assert_eq!(crate::runner::resolve_model(&context), "deepseek-v4-flash");
+        assert_eq!(crate::runner::resolve_model(&context), "deepseek-flash");
         assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
     }
 
@@ -6163,7 +6163,7 @@ mod tests {
             .with_session_provider_first_party(false)
             .with_default_model_selection_provider(Arc::new(|| {
                 Some(DefaultModelSelection {
-                    model: "deepseek-v4-flash".to_string(),
+                    model: "deepseek-flash".to_string(),
                     model_profile: Some("deepseek".to_string()),
                     provider_first_party: false,
                 })
@@ -6205,7 +6205,7 @@ mod tests {
         let spawner =
             PoolSubagentSpawner::new(pool).with_default_model_selection_provider(Arc::new(|| {
                 Some(DefaultModelSelection {
-                    model: "deepseek-v4-flash".to_string(),
+                    model: "deepseek-flash".to_string(),
                     model_profile: Some("deepseek".to_string()),
                     provider_first_party: false,
                 })
@@ -6213,7 +6213,7 @@ mod tests {
         let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
             "subagent_type": "statusline-setup",
             "prompt": "configure status line",
-            "parent_model_override": "deepseek-v4-flash",
+            "parent_model_override": "deepseek-flash",
             "model_profile": "deepseek"
         }))
         .expect("provider-qualified parent request");
@@ -6279,7 +6279,7 @@ mod tests {
         let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
             "subagent_type": "workflow-subagent",
             "prompt": "design the app",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "model_profile": "deepseek"
         }))
         .expect("provider-qualified workflow request");
@@ -6297,7 +6297,7 @@ mod tests {
             .expect("explicit provider-qualified spawn is self-contained")
             .0;
 
-        assert_eq!(crate::runner::resolve_model(&context), "deepseek-v4-flash");
+        assert_eq!(crate::runner::resolve_model(&context), "deepseek-flash");
         assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
     }
 
@@ -6314,7 +6314,7 @@ mod tests {
                 enforcement,
                 vec![
                     "claude-opus-4-7".to_string(),
-                    "deepseek-v4-flash".to_string(),
+                    "deepseek-flash".to_string(),
                 ],
             )))
             .with_default_model_selection_provider(Arc::new(|| {
@@ -6327,7 +6327,7 @@ mod tests {
         let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
             "subagent_type": "workflow-subagent",
             "prompt": "design the app",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "model_profile": "deepseek"
         }))
         .expect("provider-qualified workflow request");

@@ -1543,7 +1543,7 @@ pub fn reasoning_control_spec_for_model(
                 }
             } else if matches!(
                 model.as_str(),
-                "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-chat"
+                "deepseek-flash" | "deepseek-v4-pro" | "deepseek-chat"
             ) {
                 ReasoningControlSpec {
                     available: vec![
@@ -1691,7 +1691,7 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
         ),
         "deepseek" => matches!(
             request_model,
-            "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "deepseek-v4-pro"
+            "deepseek-flash" | "deepseek-v4-pro"
         ),
         "kimi" => request_model == "kimi-k3",
         "kimi-code" => request_model == "k3",
@@ -1797,7 +1797,7 @@ pub fn provider_default_model(provider_id: &str) -> Option<&'static str> {
         "anthropic" | "builtin" => "claude-sonnet-5",
         "openai" => "gpt-5.6-sol",
         "openai-chatgpt" => "gpt-5.6-sol",
-        "deepseek" => "deepseek-v4-flash",
+        "deepseek" => "deepseek-flash",
         "kimi" => "kimi-k3",
         "kimi-code" => "k3",
         "gemini" => "gemini-3.7-flash",

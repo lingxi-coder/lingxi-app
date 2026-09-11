@@ -1194,7 +1194,7 @@ fn resume_merges_per_block_assistant_rows_sharing_one_inner_message_id() {
             "sessionId": sid.to_string(), "timestamp": "2026-08-18T00:00:00.000Z",
             "cwd": "/tmp", "version": "0.12.0", "isSidechain": false,
             "message": {
-                "id": inner_id, "role": "assistant", "model": "deepseek-v4-flash",
+                "id": inner_id, "role": "assistant", "model": "deepseek-flash",
                 "content": [{"type": "thinking", "thinking": "let me think", "signature": null}]
             }
         }))
@@ -1204,7 +1204,7 @@ fn resume_merges_per_block_assistant_rows_sharing_one_inner_message_id() {
             "sessionId": sid.to_string(), "timestamp": "2026-08-18T00:00:01.000Z",
             "cwd": "/tmp", "version": "0.12.0", "isSidechain": false,
             "message": {
-                "id": inner_id, "role": "assistant", "model": "deepseek-v4-flash",
+                "id": inner_id, "role": "assistant", "model": "deepseek-flash",
                 "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}]
             }
         }))

@@ -150,11 +150,11 @@ fn model_list_and_changed_round_trip() {
 #[test]
 fn rich_model_details_round_trip_and_legacy_event_default() {
     let detail = ModelDetailsDto {
-        reference: "deepseek/deepseek-v4-flash-vision-exp".into(),
+        reference: "deepseek/deepseek-flash".into(),
         provider_id: "deepseek".into(),
         provider_label: "DeepSeek".into(),
-        display_name: "DeepSeek V4 Flash Vision Exp".into(),
-        model_id: "deepseek-v4-flash-vision-exp".into(),
+        display_name: "DeepSeek V4.1 Flash".into(),
+        model_id: "deepseek-flash".into(),
         description: None,
         family: Some("deepseek-flash".into()),
         status: Some("beta".into()),
@@ -171,11 +171,11 @@ fn rich_model_details_round_trip_and_legacy_event_default() {
         temperature_control: None,
         pricing: Some(ModelPricingDto {
             billing_mode: ModelBillingModeDto::PerToken,
-            input_per_million: Some(0.14),
-            output_per_million: Some(0.28),
-            cache_read_per_million: Some(0.0028),
+            input_per_million: Some(0.3),
+            output_per_million: Some(1.2),
+            cache_read_per_million: Some(0.006),
             cache_write_per_million: None,
-            reasoning_per_million: Some(0.28),
+            reasoning_per_million: Some(1.2),
             tiers: Vec::new(),
             source: Some("modelsDev".into()),
         }),

@@ -538,9 +538,9 @@ mod provider_boot_default_tests {
     fn deepseek_defaults_to_current_v4_flash_and_hides_retired_ids() {
         assert_eq!(
             provider_default_model("deepseek"),
-            Some("deepseek-v4-flash")
+            Some("deepseek-flash")
         );
-        assert!(is_curated_model("deepseek", "deepseek-v4-flash"));
+        assert!(is_curated_model("deepseek", "deepseek-flash"));
         assert!(is_curated_model("deepseek", "deepseek-v4-pro"));
         assert!(!is_curated_model("deepseek", "deepseek-chat"));
         assert!(!is_curated_model("deepseek", "deepseek-reasoner"));
@@ -970,12 +970,12 @@ mod curated_model_tests {
     #[test]
     fn current_ref_infers_an_unambiguous_provider() {
         let listings = vec![
-            listing("deepseek", "deepseek-v4-flash", "DeepSeek V4 Flash"),
+            listing("deepseek", "deepseek-flash", "DeepSeek V4.1 Flash"),
             listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol"),
         ];
 
-        let refs = curated_model_refs(&listings, &[], "deepseek-v4-flash", None);
+        let refs = curated_model_refs(&listings, &[], "deepseek-flash", None);
 
-        assert_eq!(refs[0], "deepseek/deepseek-v4-flash");
+        assert_eq!(refs[0], "deepseek/deepseek-flash");
     }
 }

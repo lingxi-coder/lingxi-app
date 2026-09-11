@@ -100,9 +100,9 @@ async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encodi
             auth: AuthStrategy::Bearer,
             credential: CredentialConfig::None,
             models: vec![ModelProfile {
-                display_model: "deepseek-v4-flash".to_string(),
-                request_model: "deepseek-v4-flash".to_string(),
-                billing_model: "deepseek-v4-flash".to_string(),
+                display_model: "deepseek-flash".to_string(),
+                request_model: "deepseek-flash".to_string(),
+                billing_model: "deepseek-flash".to_string(),
                 aliases: vec![],
                 description: None,
                 metadata: Default::default(),
@@ -125,7 +125,7 @@ async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encodi
     .unwrap();
 
     for profile in [None, Some("deepseek")] {
-        let mut request = LlmRequest::new("deepseek/deepseek-v4-flash");
+        let mut request = LlmRequest::new("deepseek/deepseek-flash");
         if let Some(profile) = profile {
             request = request.with_profile(profile);
         }
@@ -135,7 +135,7 @@ async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encodi
             .expect("a known provider-qualified UI ref must remain routable");
         assert_eq!(prepared.route.resolved_route.profile_name, "deepseek");
         assert_eq!(
-            prepared.provider_request.body_json["model"], "deepseek-v4-flash",
+            prepared.provider_request.body_json["model"], "deepseek-flash",
             "only the provider-native model id may reach the wire"
         );
     }

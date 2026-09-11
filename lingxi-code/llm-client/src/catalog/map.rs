@@ -145,7 +145,7 @@ mod tests {
         let slice = deepseek();
         let vision = slice
             .models
-            .get("deepseek-v4-flash-vision-exp")
+            .get("deepseek-flash")
             .expect("current DeepSeek vision model");
         let profile = to_model_profile(vision);
         assert!(profile.capabilities.vision);
@@ -153,7 +153,7 @@ mod tests {
 
         let text_only = slice
             .models
-            .get("deepseek-v4-flash")
+            .get("deepseek-v4-pro")
             .expect("current DeepSeek text model");
         assert!(!to_capabilities(text_only).vision);
     }
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn priced_model_maps_cost_per_million() {
         let slice = deepseek();
-        let model = slice.models.get("deepseek-v4-flash").unwrap();
+        let model = slice.models.get("deepseek-flash").unwrap();
         let pricing = to_pricing(model).expect("deepseek model is priced");
         let cost = model.cost.as_ref().unwrap();
         assert!((pricing.input_per_million - cost.input).abs() < f64::EPSILON);
@@ -216,28 +216,28 @@ mod tests {
     #[test]
     fn vision_model_maps_catalog_pricing() {
         let slice = deepseek();
-        let model = slice.models.get("deepseek-v4-flash-vision-exp").unwrap();
+        let model = slice.models.get("deepseek-flash").unwrap();
         let pricing = to_pricing(model).expect("current vision model is priced");
-        assert!((pricing.input_per_million - 0.14).abs() < f64::EPSILON);
-        assert!((pricing.output_per_million - 0.28).abs() < f64::EPSILON);
+        assert!((pricing.input_per_million - 0.3).abs() < f64::EPSILON);
+        assert!((pricing.output_per_million - 1.2).abs() < f64::EPSILON);
     }
 
     #[test]
     fn rich_metadata_preserves_limits_modalities_and_reasoning_price() {
         let slice = deepseek();
-        let model = slice.models.get("deepseek-v4-flash-vision-exp").unwrap();
+        let model = slice.models.get("deepseek-flash").unwrap();
         let metadata = to_metadata(model);
-        assert_eq!(metadata.status.as_deref(), Some("beta"));
+        assert_eq!(metadata.status, None);
         assert_eq!(metadata.context_window_tokens, Some(1_000_000));
         assert_eq!(metadata.max_input_tokens, None);
         assert_eq!(metadata.max_output_tokens, Some(384_000));
         assert!(metadata.input_modalities.iter().any(|item| item == "image"));
         let published = metadata.pricing.expect("published price");
-        assert_eq!(published.reasoning_per_million, Some(0.28));
-        assert_eq!(published.cache_read_per_million, Some(0.0028));
+        assert_eq!(published.reasoning_per_million, Some(1.2));
+        assert_eq!(published.cache_read_per_million, Some(0.006));
 
         let effective = to_pricing(model).expect("billable price");
-        assert!((effective.reasoning_per_million - 0.28).abs() < f64::EPSILON);
+        assert!((effective.reasoning_per_million - 1.2).abs() < f64::EPSILON);
     }
 
     #[test]

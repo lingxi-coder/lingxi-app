@@ -32,7 +32,7 @@ class ProviderModelVisibilityTest {
         val models = listOf(
             option("openai/gpt-5.6-sol", "openai", "gpt-5.6-sol"),
             option("openai/gpt-5.7-preview", "openai", "gpt-5.7-preview"),
-            option("deepseek/deepseek-v4-flash", "deepseek", "deepseek-v4-flash"),
+            option("deepseek/deepseek-flash", "deepseek", "deepseek-flash"),
             option("community/custom-model", "community", "custom-model"),
         )
 
@@ -77,11 +77,11 @@ class ProviderModelVisibilityTest {
         val models = listOf(
             option("openai/gpt-5.6-sol", "openai", "gpt-5.6-sol"),
             option("openai/gpt-5.7-preview", "openai", "gpt-5.7-preview"),
-            option("deepseek/deepseek-v4-flash", "deepseek", "deepseek-v4-flash"),
+            option("deepseek/deepseek-flash", "deepseek", "deepseek-flash"),
         )
 
         assertEquals(
-            listOf("openai/gpt-5.6-sol", "deepseek/deepseek-v4-flash"),
+            listOf("openai/gpt-5.6-sol", "deepseek/deepseek-flash"),
             ProviderModelVisibilityRules.visibleConversationModels(
                 models,
                 mapOf(
@@ -91,7 +91,7 @@ class ProviderModelVisibilityTest {
                         visibleModelIds = null,
                     ),
                     "deepseek" to ProviderModelVisibility(
-                        catalogModelIds = listOf("deepseek-v4-flash"),
+                        catalogModelIds = listOf("deepseek-flash"),
                         showInModelPicker = true,
                         visibleModelIds = null,
                     ),

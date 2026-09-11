@@ -63,7 +63,7 @@ fn session_agent_events_round_trip() {
         agent_id: "agent:00000000-0000-0000-0000-000000000001".into(),
         name: "researcher".into(),
         agent_type: "explorer".into(),
-        model: Some("deepseek-v4-flash".into()),
+        model: Some("deepseek-flash".into()),
         model_profile: Some("deepseek".into()),
         status: "running".into(),
         latest_activity: Some("Reading protocol files".into()),

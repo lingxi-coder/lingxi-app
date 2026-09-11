@@ -8,12 +8,12 @@
   "name": "DeepSeek",
   "doc": "https://api-docs.deepseek.com/quick_start/pricing",
   "models": {
-    "deepseek-v4-flash": {
-      "id": "deepseek-v4-flash",
-      "name": "DeepSeek V4 Flash",
-      "description": "Official DeepSeek V4 Flash release with enhanced agentic capabilities and integrated DSpark speculative decoding",
+    "deepseek-flash": {
+      "id": "deepseek-flash",
+      "name": "DeepSeek V4.1 Flash",
+      "description": "DeepSeek V4.1 Flash model for reasoning and agentic coding",
       "family": "deepseek-flash",
-      "attachment": false,
+      "attachment": true,
       "reasoning": true,
       "reasoning_options": [
         {
@@ -35,11 +35,12 @@
       "structured_output": true,
       "temperature": true,
       "knowledge": "2025-05",
-      "release_date": "2026-07-31",
-      "last_updated": "2026-07-31",
+      "release_date": "2026-09-10",
+      "last_updated": "2026-09-10",
       "modalities": {
         "input": [
-          "text"
+          "text",
+          "image"
         ],
         "output": [
           "text"
@@ -51,10 +52,10 @@
         "output": 384000
       },
       "cost": {
-        "input": 0.14,
-        "output": 0.28,
-        "reasoning": 0.28,
-        "cache_read": 0.0028
+        "input": 0.3,
+        "output": 1.2,
+        "reasoning": 1.2,
+        "cache_read": 0.006
       }
     },
     "deepseek-v4-pro": {
@@ -98,60 +99,10 @@
         "output": 384000
       },
       "cost": {
-        "input": 0.435,
-        "output": 0.87,
-        "reasoning": 0.87,
-        "cache_read": 0.003625
-      }
-    },
-    "deepseek-v4-flash-vision-exp": {
-      "id": "deepseek-v4-flash-vision-exp",
-      "name": "DeepSeek V4 Flash Vision Exp",
-      "description": "Experimental multimodal DeepSeek V4 Flash model for image understanding, coding, and agentic work",
-      "family": "deepseek-flash",
-      "attachment": true,
-      "reasoning": true,
-      "reasoning_options": [
-        {
-          "type": "toggle"
-        },
-        {
-          "type": "effort",
-          "values": [
-            "low",
-            "high",
-            "max"
-          ]
-        }
-      ],
-      "tool_call": true,
-      "interleaved": {
-        "field": "reasoning_content"
-      },
-      "structured_output": true,
-      "temperature": true,
-      "release_date": "2026-08-21",
-      "last_updated": "2026-08-21",
-      "modalities": {
-        "input": [
-          "text",
-          "image"
-        ],
-        "output": [
-          "text"
-        ]
-      },
-      "open_weights": false,
-      "limit": {
-        "context": 1000000,
-        "output": 384000
-      },
-      "status": "beta",
-      "cost": {
-        "input": 0.14,
-        "output": 0.28,
-        "reasoning": 0.28,
-        "cache_read": 0.0028
+        "input": 1.32,
+        "output": 3.96,
+        "reasoning": 3.96,
+        "cache_read": 0.044
       }
     }
   }

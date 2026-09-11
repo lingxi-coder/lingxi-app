@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn deepseek_and_kimi_specs_only_expose_verified_controls() {
-        let deepseek = deepseek_spec("deepseek-v4-flash");
+        let deepseek = deepseek_spec("deepseek-flash");
         assert_eq!(deepseek.levels, vec!["low", "high", "max"]);
         assert!(deepseek.can_disable);
         assert!(!deepseek.can_enable);

@@ -307,8 +307,10 @@ pub fn builtin_presets() -> BuiltinCatalog {
             supports_websockets: matches!(preset.profile_name, "openai" | "openai-chatgpt"),
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            // DeepSeek V4.1 Flash understands images natively, so it is its own
+            // vision route; the delegate only fires for the text-only V4 Pro.
             vision_delegate: (preset.profile_name == "deepseek")
-                .then_some("deepseek-v4-flash-vision-exp".to_string()),
+                .then_some("deepseek-flash".to_string()),
         });
     }
 
@@ -326,16 +328,51 @@ mod tests {
         let _ = builtin_presets();
         // DeepSeek V4: real 1,000,000 / 384,000 — NOT the Claude 200k / 32k.
         assert_eq!(
-            context_window_for_model("deepseek-v4-flash", &[]),
+            context_window_for_model("deepseek-flash", &[]),
             1_000_000
         );
-        assert_eq!(max_output_tokens_for_model("deepseek-v4-flash"), 384_000);
+        assert_eq!(max_output_tokens_for_model("deepseek-flash"), 384_000);
         // gpt-4.1: real 1,047,576 / 32,768.
         assert_eq!(context_window_for_model("gpt-4.1", &[]), 1_047_576);
         assert_eq!(max_output_tokens_for_model("gpt-4.1"), 32_768);
         // gemini-2.5-pro: real 1,048,576 / 65,536 (M6 — Gemini slice vendored).
         assert_eq!(context_window_for_model("gemini-2.5-pro", &[]), 1_048_576);
         assert_eq!(max_output_tokens_for_model("gemini-2.5-pro"), 65_536);
+    }
+
+    /// The DeepSeek profile's vision route changed with V4.1 Flash: Flash now
+    /// understands images itself, so it is the delegate rather than the model
+    /// that needs one, and the text-only V4 Pro is what actually delegates.
+    /// Registry construction also validates the delegate (declared on the same
+    /// profile, more than one model, advertises vision), so a delegate left
+    /// pointing at a removed id would fail here rather than at the first image.
+    #[test]
+    fn deepseek_text_only_pro_delegates_images_to_flash() {
+        let registry = crate::ModelRegistry::from_config(crate::ClientConfig {
+            providers: builtin_presets().providers,
+        })
+        .expect("builtin catalog validates, delegate included");
+
+        let pro = registry
+            .resolve_media_route_in("deepseek-v4-pro", Some("deepseek"))
+            .expect("V4 Pro resolves");
+        assert!(!pro.main.capabilities.vision, "V4 Pro is text-only");
+        assert_eq!(
+            pro.vision_delegate
+                .as_ref()
+                .map(|route| route.request_model.as_str()),
+            Some("deepseek-flash"),
+            "images on V4 Pro must route to Flash"
+        );
+
+        let flash = registry
+            .resolve_media_route_in("deepseek-flash", Some("deepseek"))
+            .expect("V4.1 Flash resolves");
+        assert!(flash.main.capabilities.vision, "V4.1 Flash sees images");
+        assert_eq!(
+            flash.vision_delegate, None,
+            "Flash is its own vision route, so nothing is delegated"
+        );
     }
 
     #[test]
@@ -351,7 +388,7 @@ mod tests {
         };
         // Exact counts guard against a truncated/partial re-vendor of a slice.
         assert_eq!(count("openrouter"), 421);
-        assert_eq!(count("deepseek"), 3);
+        assert_eq!(count("deepseek"), 2);
         let deepseek = catalog
             .providers
             .iter()

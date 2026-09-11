@@ -446,7 +446,7 @@ mod tests {
             "agent_id": id.to_string(),
             "timestamp": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
             "message": message,
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "model_profile": "deepseek"
         });
         tokio::fs::write(
@@ -462,7 +462,7 @@ mod tests {
         assert_eq!(outcomes[0].1, RestoreOutcome::Restored(id));
         let seen = spawner.seen.lock().unwrap();
         let restored = seen.first().expect("restored request");
-        assert_eq!(restored.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(restored.model.as_deref(), Some("deepseek-flash"));
         assert_eq!(restored.model_profile.as_deref(), Some("deepseek"));
     }
 

@@ -783,7 +783,7 @@ test('openSession deduplicates concurrent opens by UUID and rejects a different 
   });
   try {
     const first = manager.openSession(ref, false, resumeModel);
-    const second = manager.openSession(ref, false, 'deepseek/deepseek-v4-flash');
+    const second = manager.openSession(ref, false, 'deepseek/deepseek-flash');
     assert.strictEqual(first, second);
     assert.throws(
       () => manager.openSession(
@@ -1557,7 +1557,7 @@ test('provider connection test keeps stored credentials engine-side and correlat
   const pending = manager.testProviderConnection(
     'deepseek',
     'https://api.deepseek.com',
-    'deepseek-v4-flash',
+    'deepseek-flash',
   );
   const command = commands[0]!;
   assert.deepEqual(command, {
@@ -1565,7 +1565,7 @@ test('provider connection test keeps stored credentials engine-side and correlat
     operation_id: command['operation_id'],
     provider_id: 'deepseek',
     api_base: 'https://api.deepseek.com',
-    model: 'deepseek-v4-flash',
+    model: 'deepseek-flash',
   });
   assert.equal(command['credential_override'], undefined);
 

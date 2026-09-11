@@ -2319,7 +2319,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
     name: 'Demo',
     origin: 'chat',
     brief: 'Demo app',
-    workflow_model: 'deepseek/deepseek-v4-flash',
+    workflow_model: 'deepseek/deepseek-flash',
     mode: 'scaffolded',
   });
   // The "+" button's shape: an empty shell, no surface, correlated by a
@@ -2336,7 +2336,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
     agent_id: 'design',
     name: 'design',
     agent_type: 'design',
-    model: 'deepseek-v4-flash',
+    model: 'deepseek-flash',
     model_profile: 'deepseek',
     status: 'running',
   });

@@ -2131,15 +2131,15 @@ fn make_request_maps_provider_qualified_model_opts() {
     let request = make_request(
         "general-purpose",
         "p",
-        r#"{"model":"deepseek-v4-flash","modelProfile":"deepseek"}"#,
+        r#"{"model":"deepseek-flash","modelProfile":"deepseek"}"#,
     );
-    assert_eq!(request.model.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(request.model.as_deref(), Some("deepseek-flash"));
     assert_eq!(request.model_profile.as_deref(), Some("deepseek"));
 
     let snake_case = make_request(
         "general-purpose",
         "p",
-        r#"{"model":"deepseek-v4-flash","model_profile":"deepseek"}"#,
+        r#"{"model":"deepseek-flash","model_profile":"deepseek"}"#,
     );
     assert_eq!(snake_case.model_profile.as_deref(), Some("deepseek"));
 }
@@ -2148,7 +2148,7 @@ fn make_request_maps_provider_qualified_model_opts() {
 async fn workflow_agent_progress_keeps_provider_qualified_model() {
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     run_workflow_script_with_live_updates(
-        r#"await agent('design', {model:'deepseek-v4-flash', modelProfile:'deepseek'});"#,
+        r#"await agent('design', {model:'deepseek-flash', modelProfile:'deepseek'});"#,
         DEFAULT_WORKFLOW_SUBAGENT,
         "",
         Arc::new(EchoSpawner::default()),
@@ -2179,8 +2179,8 @@ async fn workflow_agent_progress_keeps_provider_qualified_model() {
     assert_eq!(
         models,
         vec![
-            Some("deepseek/deepseek-v4-flash".to_string()),
-            Some("deepseek/deepseek-v4-flash".to_string()),
+            Some("deepseek/deepseek-flash".to_string()),
+            Some("deepseek/deepseek-flash".to_string()),
         ]
     );
 }
@@ -3713,7 +3713,7 @@ async fn workflow_isolation_spawner_forwards_live_observer_and_watchdog() {
     let request = make_request(
         DEFAULT_WORKFLOW_SUBAGENT,
         "design the app",
-        r#"{"model":"deepseek-v4-flash","modelProfile":"deepseek"}"#,
+        r#"{"model":"deepseek-flash","modelProfile":"deepseek"}"#,
     );
 
     spawner
@@ -4893,8 +4893,8 @@ fn chain_key_differs_on_model_profile_change() {
 
 #[test]
 fn chain_key_canonicalizes_model_profile_alias() {
-    let camel = r#"{"model":"deepseek-v4-flash","modelProfile":"deepseek"}"#;
-    let snake = r#"{"model":"deepseek-v4-flash","model_profile":"deepseek"}"#;
+    let camel = r#"{"model":"deepseek-flash","modelProfile":"deepseek"}"#;
+    let snake = r#"{"model":"deepseek-flash","model_profile":"deepseek"}"#;
     let camel_key = chain_key(
         "",
         "do something",
@@ -6079,7 +6079,7 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
             agent_id,
             agent_type: "designer".to_string(),
             name: Some("Design agent".to_string()),
-            model: "deepseek-v4-flash".to_string(),
+            model: "deepseek-flash".to_string(),
             model_profile: Some("deepseek".to_string()),
             persistent: false,
             initial_message_index: 0,
@@ -6095,7 +6095,7 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
     assert_eq!(allocated.agent_type.as_deref(), Some("designer"));
     assert_eq!(
         allocated.model.as_deref(),
-        Some("deepseek/deepseek-v4-flash")
+        Some("deepseek/deepseek-flash")
     );
 
     platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
@@ -6128,7 +6128,7 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
         "Design the flow",
         Some(2),
         Some("Implementation".to_string()),
-        Some("deepseek/deepseek-v4-flash".to_string()),
+        Some("deepseek/deepseek-flash".to_string()),
         100,
     );
     let queued_line = spool_rx.recv().await.expect("queued spool line");
@@ -6154,7 +6154,7 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
             phase_title: Some("Implementation".to_string()),
             agent_id: None,
             agent_type: Some("designer".to_string()),
-            model: Some("deepseek/deepseek-v4-flash".to_string()),
+            model: Some("deepseek/deepseek-flash".to_string()),
             fallback_model: None,
             state: Some("start".to_string()),
             error: None,
@@ -6181,7 +6181,7 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
             agent_id,
             agent_type: "designer".to_string(),
             name: Some("Design agent".to_string()),
-            model: "deepseek-v4-flash".to_string(),
+            model: "deepseek-flash".to_string(),
             model_profile: Some("deepseek".to_string()),
             persistent: false,
             initial_message_index: 0,

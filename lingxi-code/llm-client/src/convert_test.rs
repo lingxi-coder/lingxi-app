@@ -214,7 +214,7 @@ mod tests {
                 analysis: MediaAnalysis {
                     question_key: "msg-123".into(),
                     media_fingerprints: vec!["fp-a".into()],
-                    model: "deepseek-v4-flash-vision-exp".into(),
+                    model: "deepseek-flash".into(),
                     prompt_version: 1,
                     created_at: std::time::UNIX_EPOCH,
                     task_findings: vec!["shows a receipt".into()],

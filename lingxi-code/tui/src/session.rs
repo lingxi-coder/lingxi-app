@@ -362,7 +362,7 @@ mod tests {
                 false,
             ), // shared curated alias — kept (the whole `~` alias namespace)
             row("OR GPT passthrough", "openai/gpt-4o", "openrouter", false), // paid non-alias — HIDDEN
-            row("DeepSeek V4 Flash", "deepseek-v4-flash", "deepseek", false), // curated but UNCONNECTED
+            row("DeepSeek V4.1 Flash", "deepseek-flash", "deepseek", false), // curated but UNCONNECTED
         ];
         // Only anthropic + openrouter are connected.
         let mut avail = BTreeMap::new();
@@ -413,7 +413,7 @@ mod tests {
         );
         // DeepSeek is unconnected → hidden entirely, even though curated.
         assert!(
-            !ids.contains(&"deepseek-v4-flash"),
+            !ids.contains(&"deepseek-flash"),
             "unconnected provider hidden"
         );
     }

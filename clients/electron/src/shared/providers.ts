@@ -60,11 +60,11 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
     transcriptionCapable: true,
   },
   {
-    id: 'deepseek', label: 'DeepSeek', description: 'V4 text and vision models', popular: true,
+    id: 'deepseek', label: 'DeepSeek', description: 'V4.1 Flash and V4 Pro', popular: true,
     authMethod: 'api_key', keyLabel: 'DeepSeek API key', keyPlaceholder: 'sk-…',
     defaultApiBase: 'https://api.deepseek.com',
     credentialManagementUrl: 'https://platform.deepseek.com/api_keys',
-    defaultModel: 'deepseek/deepseek-v4-flash', available: true,
+    defaultModel: 'deepseek/deepseek-flash', available: true,
     // DeepSeek's hosted API is text (and vision) chat completions only; it
     // has no audio-input or transcription endpoint. Every DeepSeek voice-app
     // guide pairs it with a third-party STT service for exactly this reason.

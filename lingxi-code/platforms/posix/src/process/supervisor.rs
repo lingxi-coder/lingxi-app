@@ -271,6 +271,21 @@ mod tests {
     fn factory(path: &Path) -> Arc<dyn BackgroundExitSink> {
         Arc::new(Sink::new(path.to_owned()))
     }
+    /// How long a cross-process poll may wait before the test gives up.
+    ///
+    /// 🚨 This is a SAFETY NET, not a performance assertion. Every use below is
+    /// a `while !condition { sleep }` loop that exits the instant the condition
+    /// holds, so a larger bound costs a passing run nothing and only changes
+    /// how long a genuinely stuck test takes to fail.
+    ///
+    /// It was 3s, and that flaked under a loaded `cargo test --workspace`:
+    /// these tests fork helper processes and wait for them to register, while
+    /// 500+ other test binaries compete for the machine. The failure reads as
+    /// `Elapsed(())` with nothing named — indistinguishable from a real
+    /// regression, which is the expensive part. ⛔ Do not tighten this back to
+    /// shave seconds off a run that is already passing.
+    const CROSS_PROCESS_WAIT: Duration = Duration::from_secs(30);
+
     #[tokio::test]
     async fn supervisor_cross_process_helper() {
         let Ok(role) = std::env::var("LXS_TEST_ROLE") else {
@@ -321,7 +336,7 @@ mod tests {
                     .run_foreground_with_output_limit(&command, Some(10))
                     .await
             });
-            tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while !directory.join("gate.pid").exists() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -352,7 +367,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .is_err());
-            tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while platform_api::live_sessions::process_start_identity(child).is_some() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
@@ -372,7 +387,7 @@ mod tests {
                     .run_foreground_with_output_limit(&command, Some(10))
                     .await
             });
-            tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while platform_api::agent_processes::snapshot("fg-crash").is_empty() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -396,14 +411,14 @@ mod tests {
             } else {
                 assert!(run.await.unwrap().is_err());
             }
-            tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while platform_api::live_sessions::process_start_identity(child).is_some() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
             .await
             .unwrap();
-            tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while !std::fs::read_to_string(&path)
                     .unwrap_or_default()
                     .contains("[supervisor lost; task failed]")
@@ -515,7 +530,7 @@ mod tests {
                 .run_foreground_with_output_limit(&b, None)
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(CROSS_PROCESS_WAIT, async {
             while platform_api::agent_processes::snapshot("owner-a").is_empty()
                 || platform_api::agent_processes::snapshot("owner-b").is_empty()
             {
@@ -795,7 +810,7 @@ mod tests {
             &std::fs::read(directory.path().join("native-handle.json")).unwrap(),
         )
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(CROSS_PROCESS_WAIT, async {
             while platform_api::live_sessions::process_start_identity(handle.pid).is_some() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }

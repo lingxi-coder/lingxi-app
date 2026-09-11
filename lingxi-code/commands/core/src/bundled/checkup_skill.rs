@@ -107,6 +107,42 @@ impl BundledPromptFn for CheckupPromptFn {
 mod tests {
     use super::*;
 
+    /// 🚨 Rebranding a path can turn a TRUE statement about the upstream repo
+    /// into a FALSE one about this one. `readOnlyValidation.ts` was rewritten to
+    /// say those files "live in the LingXi repo" — they do not exist here, and
+    /// that bullet gates permission-rule minting. Any repo-relative source path
+    /// the body names must actually exist.
+    #[test]
+    fn every_repo_path_the_body_names_exists() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("commands/core -> lingxi-code");
+        let mut missing = Vec::new();
+        for token in CHECKUP_BODY.split('`') {
+            let candidate = token.trim();
+            let looks_like_source = candidate.ends_with(".ts")
+                || candidate.ends_with(".rs")
+                || candidate.starts_with("src/");
+            if looks_like_source && !root.join(candidate).exists() {
+                missing.push(candidate.to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "the body names source paths that do not exist in this repo: {missing:?}"
+        );
+    }
+
+    /// The local memory file this port actually loads is `LINGXI.local.md`
+    /// (`branding::MEMORY_LOCAL_FILE`). Naming the upstream one sends checks 2
+    /// and 3 hunting for a file that is never loaded here.
+    #[test]
+    fn the_body_names_the_local_memory_file_this_port_loads() {
+        assert!(!CHECKUP_BODY.contains("CLAUDE.local.md"));
+        assert!(CHECKUP_BODY.contains(branding::MEMORY_LOCAL_FILE));
+    }
+
     #[test]
     fn the_body_is_branded() {
         for stale in ["Claude Code", "CLAUDE.md", "~/.claude", ".claude/", "claude doctor"] {
@@ -145,9 +181,28 @@ mod tests {
             ["0", "1", "2", "3", "4", "5", "6", "8", "9"],
             "check 7 is Anthropic-distribution-only and must stay removed"
         );
+        // 🚨 Asserting the absence of ONE spelling is how the first version of
+        // this test missed a live one: the body still said "checks 0-4 and 7",
+        // which contains neither "check 7" nor "Check 7". Match the NUMBER in
+        // any check-listing context instead.
+        for stale in [
+            "check 7", "Check 7", "checks 0-4 and 7", "0, 1, 2, 3, 4, 7",
+            "and 7:", "4 and 7",
+        ] {
+            assert!(
+                !CHECKUP_BODY.contains(stale),
+                "{stale:?} references the removed check 7"
+            );
+        }
+        // Every check number the body mentions in a list must be one that exists.
+        let listed: std::collections::BTreeSet<&str> = CHECKUP_BODY
+            .match_indices("checks ")
+            .map(|(i, _)| &CHECKUP_BODY[i..(i + 24).min(CHECKUP_BODY.len())])
+            .filter(|window| window.contains('7'))
+            .collect();
         assert!(
-            !CHECKUP_BODY.contains("check 7") && !CHECKUP_BODY.contains("Check 7"),
-            "a cross-reference to the removed check survived"
+            listed.is_empty(),
+            "a `checks …` listing still names 7: {listed:?}"
         );
         // The actionable-checks list must name exactly the non-warning checks.
         assert!(

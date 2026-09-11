@@ -611,7 +611,7 @@ pub(crate) fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)
             match other {
                 Some(kind) => tracing::warn!(
                     "Ignoring hook entry with unsupported type {kind:?} (supported: \
-                     command, http, agent, prompt, mcp_tool)"
+                     command, http, agent, prompt, function, mcp_tool)"
                 ),
                 None => tracing::warn!("Ignoring hook entry with no \"type\" field"),
             }

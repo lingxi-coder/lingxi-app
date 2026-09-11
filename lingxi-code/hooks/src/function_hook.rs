@@ -42,11 +42,24 @@
 //! per-capability opt-in in the plugin manifest, reviewed on its own terms —
 //! not added to this context because one hook found it convenient.
 //!
-//! # What this deliberately does NOT do
+//! # 🚨 What the in-engine budget does NOT cover
 //!
-//! Denial of service beyond the budget/memory caps is out of scope: a hook that
-//! burns its whole budget every time is a slow session, not a compromised one.
-//! The budget exists so a hook cannot hang a turn forever.
+//! QuickJS polls the interrupt handler only from its BYTECODE INTERPRETER.
+//! `libregexp.c` has no timeout callback at all — its only host hook is a
+//! stack-overflow check. So a catastrophic-backtracking regexp runs to
+//! completion no matter what [`Sandbox::budget`] says, and because it allocates
+//! almost nothing, [`Sandbox::memory_limit`] does not catch it either.
+//! Measured: `/^(a+)+$/.test('a'.repeat(30)+'!')` ran 50s under a 100ms budget
+//! and returned `Ok`, never `TimedOut`.
+//!
+//! That is why [`Sandbox::eval_abandonable`] exists and why the executor uses
+//! it: the in-engine budget is a cooperative cap, and the OUTER deadline is the
+//! real one. ⛔ Do not "simplify" the executor back to a plain `eval` on a
+//! blocking-pool thread — roughly sixty bytes of plugin JS would then hang the
+//! turn forever and consume a pool thread other work needs.
+//!
+//! Denial of service within those bounds is out of scope: a hook that burns its
+//! whole budget every time is a slow session, not a compromised one.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -61,6 +74,14 @@ pub const DEFAULT_FUNCTION_HOOK_BUDGET: Duration = Duration::from_millis(1_000);
 
 /// Default heap cap for one function-hook invocation (8 MiB).
 pub const DEFAULT_FUNCTION_HOOK_MEMORY: usize = 8 * 1024 * 1024;
+
+/// Hard ceiling on a hook's wall-clock budget.
+///
+/// 🚨 `budgetMs` comes from PLUGIN-supplied config. Without this clamp it is a
+/// knob FOR the plugin rather than a cap ON it: `{"budgetMs": 86400000}` would
+/// block every matching event for a day. Clamped, not rejected, so a generous
+/// value degrades to the ceiling instead of dropping the hook.
+pub const MAX_FUNCTION_HOOK_BUDGET: Duration = Duration::from_secs(5);
 
 /// Why a function hook did not produce a value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +135,49 @@ impl Default for Sandbox {
 }
 
 impl Sandbox {
+    /// Clamp this sandbox's budget to [`MAX_FUNCTION_HOOK_BUDGET`].
+    #[must_use]
+    pub fn clamped(mut self) -> Self {
+        self.budget = self.budget.min(MAX_FUNCTION_HOOK_BUDGET);
+        self
+    }
+
+    /// Evaluate on a DEDICATED thread and give up on it after the budget.
+    ///
+    /// The in-engine interrupt cannot stop a runaway regexp (see the module
+    /// doc), so this is the deadline that actually holds. When it fires, the
+    /// worker thread is ABANDONED — it keeps running until the regexp finishes,
+    /// which may be never.
+    ///
+    /// ⛔ A dedicated thread, not `spawn_blocking`: an abandoned blocking-pool
+    /// thread is one fewer for every other blocking task in the process, so a
+    /// hostile plugin firing on a frequent event could starve the pool. Leaking
+    /// an OS thread is the lesser harm, and it is bounded by how often the hook
+    /// fires rather than by a fixed pool size.
+    pub fn eval_abandonable(
+        self,
+        source: &str,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, FunctionHookError> {
+        let sandbox = self.clamped();
+        // A small grace so the in-engine interrupt gets to report `TimedOut`
+        // (with its cheaper cleanup) before the outer deadline gives up.
+        let deadline = sandbox.budget + Duration::from_millis(250);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let source = source.to_string();
+        let input = input.clone();
+        std::thread::Builder::new()
+            .name("function-hook".into())
+            .spawn(move || {
+                // The receiver is gone on the timeout path; dropping the result
+                // is the intended outcome, not an error.
+                let _ = tx.send(sandbox.eval(&source, &input));
+            })
+            .map_err(|error| FunctionHookError::EngineUnavailable(error.to_string()))?;
+        rx.recv_timeout(deadline)
+            .unwrap_or(Err(FunctionHookError::TimedOut))
+    }
+
     /// Evaluate `source` with `input` bound, and return its completion value.
     ///
     /// The body is evaluated as an expression-producing script: the last
@@ -257,6 +321,65 @@ mod tests {
         ));
     }
 
+    /// 🚨 The finding the whole `eval_abandonable` path exists for.
+    ///
+    /// QuickJS polls the interrupt handler only from its bytecode interpreter;
+    /// `libregexp.c` has no timeout callback. So catastrophic backtracking
+    /// ignores `budget` entirely, allocates almost nothing (so `memory_limit`
+    /// misses it too), and returns `Ok` rather than `TimedOut`. Measured on the
+    /// plain `eval`: ~50s under a 100ms budget at n=30, unbounded at n=40.
+    ///
+    /// ⛔ If this test starts taking tens of seconds, someone routed the
+    /// executor back through `eval` — in production that is the turn hanging
+    /// forever, not a slow test.
+    #[test]
+    fn a_runaway_regexp_cannot_outlive_the_outer_deadline() {
+        let sandbox = Sandbox {
+            budget: Duration::from_millis(100),
+            ..Sandbox::default()
+        };
+        let started = Instant::now();
+        let result =
+            sandbox.eval_abandonable("return /^(a+)+$/.test('a'.repeat(40) + '!');", &json!({}));
+        assert_eq!(result, Err(FunctionHookError::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the outer deadline must fire; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 🚨 `budgetMs` is PLUGIN-supplied. Unclamped it is a knob FOR the plugin
+    /// rather than a cap ON it: `{"budgetMs": 86400000}` blocks every matching
+    /// event for a day.
+    #[test]
+    fn a_plugin_cannot_grant_itself_an_unbounded_budget() {
+        let greedy = Sandbox {
+            budget: Duration::from_secs(86_400),
+            ..Sandbox::default()
+        };
+        assert_eq!(greedy.clamped().budget, MAX_FUNCTION_HOOK_BUDGET);
+
+        let started = Instant::now();
+        let result = greedy.eval_abandonable("while (true) {}", &json!({}));
+        assert_eq!(result, Err(FunctionHookError::TimedOut));
+        assert!(
+            started.elapsed() < MAX_FUNCTION_HOOK_BUDGET + Duration::from_secs(2),
+            "a 24h budget must be clamped, not honoured; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The clamp is a ceiling, not a floor — a modest budget is left alone.
+    #[test]
+    fn a_budget_under_the_ceiling_is_left_alone() {
+        let modest = Sandbox {
+            budget: Duration::from_millis(250),
+            ..Sandbox::default()
+        };
+        assert_eq!(modest.clamped().budget, Duration::from_millis(250));
+    }
+
     /// A hook that loops forever ends its own invocation, not the turn.
     #[test]
     fn an_infinite_loop_hits_the_budget_instead_of_hanging() {
@@ -285,7 +408,15 @@ mod tests {
             "const a = []; while (true) { a.push('x'.repeat(4096)); } ",
             &json!({}),
         );
-        assert!(result.is_err(), "an unbounded allocation must not succeed");
+        // ⚠️ `is_err()` is NOT enough and used to be all this asserted: the
+        // test also sets a budget, so it passed identically when the memory
+        // limit was ignored entirely (audited with a 200 MiB override). Name
+        // the variant, or this proves only "something went wrong".
+        assert_eq!(
+            result,
+            Err(FunctionHookError::OutOfMemory),
+            "the MEMORY limit must be what stops this, not the clock"
+        );
     }
 
     /// Each invocation gets a fresh runtime: one hook cannot leave state for
@@ -320,16 +451,28 @@ mod tests {
         }
     }
 
-    /// 🚨 U+2028/U+2029 are legal in JSON but illegal raw inside a JS string
-    /// literal. Without re-escaping, a payload containing one makes the
-    /// generated program fail to parse — a payload-driven break, which is
-    /// exactly the shape an attacker would look for.
+    /// U+2028/U+2029 in a payload must survive intact.
+    ///
+    /// ⚠️ This does NOT test the re-escaping in `json_string_literal`, and an
+    /// earlier version of this comment claimed it did. A mutation audit deleted
+    /// both `.replace` calls and this test stayed green: QuickJS is ES2019+,
+    /// where raw U+2028/U+2029 are LEGAL inside a string literal, so the
+    /// re-escaping is unobservable here. The escaping is kept because it costs
+    /// nothing and the guarantee is engine-independent, but ⛔ do not read this
+    /// test as covering it — nothing does.
+    ///
+    /// What it does cover is real: a payload carrying these characters round
+    /// trips without corrupting the generated program.
     #[test]
-    fn a_line_separator_in_the_payload_does_not_break_the_program() {
+    fn a_line_separator_in_the_payload_survives() {
         let out = Sandbox::default()
             .eval("return input.text.length;", &json!({"text": "a\u{2028}b\u{2029}c"}))
             .unwrap();
         assert_eq!(out, json!(5));
+        let round_tripped = Sandbox::default()
+            .eval("return input.text;", &json!({"text": "a\u{2028}b"}))
+            .unwrap();
+        assert_eq!(round_tripped, json!("a\u{2028}b"), "the separator must survive verbatim");
     }
 
     /// A payload that looks like source must not become source.

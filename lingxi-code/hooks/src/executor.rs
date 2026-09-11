@@ -79,6 +79,13 @@ pub const HOOK_AGENT_TIMEOUT_MS: u64 = 60_000;
 /// machinery so a wedged executor cannot outlive it.
 pub const HOOK_FUNCTION_TIMEOUT_MS: u64 = 5_000;
 
+/// Cap on the error text a failing function hook may put in the transcript.
+///
+/// The message is plugin-authored and unbounded; the attachment layer stores
+/// `stderr` verbatim (`persist_large_hook_output` covers only stdout), so
+/// without this a hook pushes megabytes into the transcript on every event.
+const FUNCTION_HOOK_STDERR_CAP: usize = 4_096;
+
 /// Process-env override for the `SessionEnd` hook *batch* shutdown deadline
 /// (claude-code `Wqt`, BIN off 205715763:
 /// `process.env.LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS`). When this parses as a
@@ -1455,7 +1462,13 @@ impl Dispatcher {
                 // hook may burn its whole budget, which must not stall the
                 // async runtime the turn is running on.
                 let source = source.clone();
-                let evaluated = tokio::task::spawn_blocking(move || sandbox.eval(&source, &payload))
+                // `eval_abandonable`, NOT a plain `eval`: a runaway regexp
+                // cannot be interrupted in-engine, so the deadline has to live
+                // outside the engine, and the thread it gives up on must not be
+                // one the blocking pool needs.
+                let evaluated = tokio::task::spawn_blocking(move || {
+                    sandbox.eval_abandonable(&source, &payload)
+                })
                     .await
                     .unwrap_or_else(|join| {
                         Err(crate::function_hook::FunctionHookError::EngineUnavailable(
@@ -1483,7 +1496,14 @@ impl Dispatcher {
                     Err(error) => HookResult {
                         outcome: HookOutcome::Error,
                         stdout: String::new(),
-                        stderr: format!("Hook {} failed: {error}", hook.id),
+                        // ⛔ Truncate: the message is plugin-authored and
+                        // unbounded (`throw new Error('A'.repeat(4e6))` measured
+                        // at 4 MB), and `stderr` reaches the transcript verbatim
+                        // — `persist_large_hook_output` covers only stdout.
+                        stderr: crate::response::truncate_utf16(
+                            &format!("Hook {} failed: {error}", hook.id),
+                            FUNCTION_HOOK_STDERR_CAP,
+                        ),
                         exit_code: None,
                         response: None,
                     },

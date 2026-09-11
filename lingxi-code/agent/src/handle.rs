@@ -269,6 +269,15 @@ pub struct PoolSubagentSpawner {
     /// exists. Unfilled (the default / tests) ⇒ the child runner skips the
     /// SubagentStart fire + frontmatter-hook registration (byte-identical legacy).
     hook_executor: Arc<std::sync::OnceLock<Arc<hooks::HookExecutorImpl>>>,
+    /// Gate used to RE-CHECK an `agent.spawn` hook's rewrite.
+    ///
+    /// 🚨 The `Agent(<type>)` deny rule is evaluated in the TOOL layer, ABOVE
+    /// this spawner — so without a second check a hook that rewrites
+    /// `subagent_type` reaches a type the operator's rules explicitly deny.
+    /// Unfilled (tests, hosts with no policy) means no re-check, which is
+    /// exactly the pre-hook behaviour.
+    permission_gate:
+        Arc<std::sync::OnceLock<Arc<dyn platform_api::permission_gate::PermissionGate>>>,
     /// Managed hook-slot lock, filled by the composition root after settings
     /// policy resolution. Unfilled means the legacy permissive default.
     strict_plugin_only_hooks: Arc<std::sync::OnceLock<bool>>,
@@ -551,6 +560,7 @@ impl PoolSubagentSpawner {
             model_restriction: None,
             session_provider_first_party: true,
             hook_executor: Arc::new(std::sync::OnceLock::new()),
+            permission_gate: Arc::new(std::sync::OnceLock::new()),
             strict_plugin_only_hooks: Arc::new(std::sync::OnceLock::new()),
             skill_loader: Arc::new(std::sync::OnceLock::new()),
             hook_session_id: protocol::SessionId::nil(),
@@ -1025,6 +1035,24 @@ impl PoolSubagentSpawner {
     pub fn with_hook_executor(self, executor: Arc<hooks::HookExecutorImpl>) -> Self {
         let _ = self.hook_executor.set(executor);
         self
+    }
+
+    /// Builder: supply the gate that re-checks an `agent.spawn` rewrite.
+    #[must_use]
+    pub fn with_permission_gate(
+        self,
+        gate: Arc<dyn platform_api::permission_gate::PermissionGate>,
+    ) -> Self {
+        let _ = self.permission_gate.set(gate);
+        self
+    }
+
+    /// Set-once cell so the composition root can fill the gate after build.
+    #[must_use]
+    pub fn permission_gate_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<Arc<dyn platform_api::permission_gate::PermissionGate>>> {
+        self.permission_gate.clone()
     }
 
     /// Return a clone of the set-once hook-executor cell so the host can fill it
@@ -1717,8 +1745,33 @@ impl PoolSubagentSpawner {
 
         // `modified_input` carries the rewrite, reusing the same field every
         // other hook kind uses to mutate what it gates.
-        apply_spawn_rewrite(request, aggregate.modified_input.as_ref())
-            .map_err(SubagentSpawnError::DeniedByHook)
+        let rewritten =
+            apply_spawn_rewrite(request, aggregate.modified_input.as_ref())
+                .map_err(SubagentSpawnError::DeniedByHook)?;
+
+        // 🚨 RE-CHECK the deny rule against the REWRITTEN type.
+        //
+        // `Agent(<type>)` is evaluated in the tool layer, above this spawner, so
+        // it saw the type the MODEL asked for. A hook that rewrites
+        // `subagent_type` would otherwise reach a type the operator's rules
+        // explicitly deny — and if that type's frontmatter declares
+        // `permissionMode: bypassPermissions`, reach it WITH bypass. Rewriting
+        // early makes the clamps re-derive, but it cannot re-run a rule that
+        // lives above the hook; only this can.
+        if let Some(next) = rewritten.as_ref() {
+            if next.subagent_type != request.subagent_type {
+                if let Some(gate) = self.permission_gate.get() {
+                    if let Some(source) = gate.agent_type_deny(&next.subagent_type).await {
+                        return Err(SubagentSpawnError::DeniedByHook(format!(
+                            "an agent.spawn hook rewrote this spawn to agent type \"{}\", which \
+                             a permission rule denies ({source}). Dispatch it directly.",
+                            next.subagent_type
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(rewritten)
     }
 
     async fn build_subagent_context_with_id(
@@ -8690,12 +8743,14 @@ pub(crate) fn apply_spawn_rewrite(
             changed.push("cwd");
         }
     }
-    if let Some(value) = updated.get("background").and_then(serde_json::Value::as_bool) {
-        if value != rewritten.run_in_background {
-            rewritten.run_in_background = value;
-            changed.push("background");
-        }
-    }
+    // ⚠️ `background` is deliberately NOT rewritable here, though upstream lists
+    // it. In this port the consumer sits ABOVE the hook: `should_run_in_background`
+    // has already branched in the Agent tool, and the builder takes `persistent`
+    // as a caller parameter rather than reading `request.run_in_background`.
+    // Accepting the field would log "rewritten by a hook" and change nothing —
+    // an advertised capability that silently does not work, which is worse than
+    // an absent one. Honouring it means moving the hook above that branch, which
+    // is the same change the async-path ordering gap needs.
     // claude-code: a hook that sets cwd on a worktree-isolated spawn is
     // self-contradictory — the worktree IS the working directory. Upstream
     // refuses rather than silently picking one, and so does this.
@@ -8722,6 +8777,7 @@ pub(crate) fn apply_spawn_rewrite(
 #[cfg(test)]
 mod agent_spawn_hook_tests {
     use super::apply_spawn_rewrite;
+    use async_trait::async_trait;
     use platform_api::subagent_spawn::SubagentSpawnRequest;
     use serde_json::json;
 
@@ -8737,17 +8793,42 @@ mod agent_spawn_hook_tests {
     }
 
     #[test]
-    fn each_of_the_four_fields_can_be_rewritten() {
+    fn the_three_honoured_fields_can_be_rewritten() {
         let out = apply_spawn_rewrite(&request(), Some(&json!({
                 "agent_type": "reviewer",
                 "model": "claude-opus-5",
-                "cwd": "/elsewhere",
-                "background": true
+                "cwd": "/elsewhere"
             }))).unwrap().expect("a rewrite was supplied");
         assert_eq!(out.subagent_type, "reviewer");
         assert_eq!(out.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(out.cwd.as_deref(), Some("/elsewhere"));
-        assert!(out.run_in_background);
+    }
+
+    /// ⚠️ `background` is listed by upstream but CANNOT take effect here: its
+    /// consumer runs ABOVE the hook. Accepting it would log a rewrite and change
+    /// nothing — an advertised capability that silently does not work, which is
+    /// worse than an absent one. This pins the honest behaviour so nobody
+    /// "restores" it without first moving the hook above
+    /// `should_run_in_background`.
+    #[test]
+    fn background_is_not_rewritable_because_its_consumer_is_upstream() {
+        assert!(
+            apply_spawn_rewrite(&request(), Some(&json!({"background": true})))
+                .unwrap()
+                .is_none(),
+            "a background-only rewrite must report NOTHING changed"
+        );
+        let with_type = apply_spawn_rewrite(
+            &request(),
+            Some(&json!({"agent_type": "reviewer", "background": true})),
+        )
+        .unwrap()
+        .expect("agent_type changed");
+        assert_eq!(with_type.subagent_type, "reviewer");
+        assert!(
+            !with_type.run_in_background,
+            "background must be left exactly as the caller set it"
+        );
     }
 
     /// 🚨 A hook may only touch the four fields upstream grants it. Anything
@@ -8817,5 +8898,54 @@ mod agent_spawn_hook_tests {
         assert!(apply_spawn_rewrite(&request(), Some(&json!({"cwd": "/repo"})))
             .unwrap()
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod agent_spawn_deny_recheck_tests {
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    /// Denies exactly one agent type, like an `Agent(<type>)` deny rule.
+    struct DenyOneType(&'static str);
+
+    #[async_trait]
+    impl platform_api::permission_gate::PermissionGate for DenyOneType {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+        ) -> platform_api::permission_gate::PermissionDecision {
+            platform_api::permission_gate::PermissionDecision::Allow
+        }
+
+        async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+            (agent_type == self.0).then(|| "settings.deny".to_string())
+        }
+    }
+
+    /// 🚨 The hole a review found in this session's `agent.spawn` work, and the
+    /// reason the claim "upstream's re-check is unnecessary here" was wrong.
+    ///
+    /// `Agent(<type>)` is evaluated in the TOOL layer, ABOVE the spawner, so it
+    /// only ever sees the type the MODEL asked for. Rewriting the request early
+    /// makes definition resolution and the bypass clamps re-derive — that part
+    /// held — but it cannot re-run a rule that lives above the hook. Without
+    /// this check, a hook rewriting `subagent_type` to a denied agent reaches
+    /// it, and if that agent declares `permissionMode: bypassPermissions`, it
+    /// reaches it WITH bypass.
+    #[tokio::test]
+    async fn a_hook_cannot_rewrite_into_an_agent_type_a_rule_denies() {
+        let gate: Arc<dyn platform_api::permission_gate::PermissionGate> =
+            Arc::new(DenyOneType("dangerous"));
+
+        // The rule denies `dangerous`, and the rewrite targets exactly it.
+        assert_eq!(
+            gate.agent_type_deny("dangerous").await.as_deref(),
+            Some("settings.deny"),
+            "precondition: the gate must actually deny this type"
+        );
+        // An unrelated type stays allowed, so the check is not a blanket refusal.
+        assert_eq!(gate.agent_type_deny("Explore").await, None);
     }
 }

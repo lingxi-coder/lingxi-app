@@ -1308,10 +1308,10 @@ async fn list_models_curates_and_preserves_provider_identity() {
 #[tokio::test]
 async fn list_models_uses_full_provider_catalog_when_provided() {
     let handle = Arc::new(MockOrchestratorHandle::new());
-    handle.set_available_models(vec!["deepseek-v4-flash".into()]);
+    handle.set_available_models(vec!["deepseek-flash".into()]);
     handle.set_model_listings(vec![platform_api::ModelListing {
         display_model: "DeepSeek V4 Flash".into(),
-        request_model: "deepseek-v4-flash".into(),
+        request_model: "deepseek-flash".into(),
         provider_id: "deepseek".into(),
         provider_label: "DeepSeek".into(),
         description: None,
@@ -1324,7 +1324,7 @@ async fn list_models_uses_full_provider_catalog_when_provided() {
         supports_reasoning: true,
     }]);
     handle.set_status_snapshot(StatusSnapshot {
-        model: "deepseek-v4-flash".into(),
+        model: "deepseek-flash".into(),
         model_profile: Some("deepseek".into()),
         ..StatusSnapshot::default()
     });
@@ -2368,7 +2368,6 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
         4,
         "the UI transcript keeps pre-compaction messages while the engine history stays compacted"
     );
-    // Assert the fold HAPPENED rather than the row simply being dropped —
     assert!(messages.iter().any(|message| message.blocks.iter().any(|block| matches!(
         block,
         client_protocol::message::MessageBlockDto::Text { text } if text == "pre-compaction question"
@@ -2377,6 +2376,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
         block,
         client_protocol::message::MessageBlockDto::Text { text } if text == "pre-compaction answer"
     ))));
+    // Assert the fold HAPPENED rather than the row simply being dropped —
     // a count alone cannot tell those two apart.
     assert!(
         messages.iter().flat_map(|m| &m.blocks).any(|b| matches!(

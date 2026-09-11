@@ -104,6 +104,12 @@ pub fn rebuild_messages(history: &[ConversationMessage]) -> Vec<RenderedMessage>
 pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<RenderedMessage> {
     let mut acc = ReplayAcc::default();
     for m in messages {
+        // The full routed transcript also contains subagent/sidechain rows.
+        // They belong to their own transcript and must never appear in the
+        // main session's scrollback.
+        if m.is_sidechain {
+            continue;
+        }
         let blocks = decode_content_blocks(&m.message);
         match m.message_type.as_str() {
             "user" => {
@@ -611,6 +617,22 @@ mod tests {
         assert!(matches!(
             &out[0],
             RenderedMessage::UserText { body, .. } if body == "hi from jsonl"
+        ));
+    }
+
+    #[test]
+    fn jsonl_sidechain_rows_are_not_replayed_into_main_scrollback() {
+        let mut sidechain_user = jsonl("user", &serde_json::json!("subagent prompt"));
+        sidechain_user.is_sidechain = true;
+        let mut sidechain_assistant = jsonl("assistant", &serde_json::json!("subagent answer"));
+        sidechain_assistant.is_sidechain = true;
+        let main = jsonl("user", &serde_json::json!("main prompt"));
+
+        let out = rebuild_from_jsonl(&[sidechain_user, sidechain_assistant, main]);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            RenderedMessage::UserText { body, .. } if body == "main prompt"
         ));
     }
 

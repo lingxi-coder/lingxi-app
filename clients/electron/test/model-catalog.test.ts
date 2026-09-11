@@ -160,8 +160,8 @@ test('defaults Kimi Code to the model available on every membership tier', () =>
 
 test('routes an unconfigured known provider to its settings while preserving the model', () => {
   assert.deepEqual(
-    resolveModelSelection('deepseek/deepseek-v4-flash', [{ providerId: 'deepseek', configured: false }]),
-    { kind: 'connect', providerId: 'deepseek', reference: 'deepseek/deepseek-v4-flash' },
+    resolveModelSelection('deepseek/deepseek-flash', [{ providerId: 'deepseek', configured: false }]),
+    { kind: 'connect', providerId: 'deepseek', reference: 'deepseek/deepseek-flash' },
   );
 });
 
@@ -180,14 +180,14 @@ test('keeps unknown and unqualified engine models directly selectable', () => {
 });
 
 test('model confirmation requires the authoritative model_changed value', () => {
-  assert.equal(modelSelectionConfirmed('openai/gpt-5.6-sol', 'deepseek/deepseek-v4-flash'), false);
-  assert.equal(modelSelectionConfirmed('deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-flash'), true);
+  assert.equal(modelSelectionConfirmed('openai/gpt-5.6-sol', 'deepseek/deepseek-flash'), false);
+  assert.equal(modelSelectionConfirmed('deepseek/deepseek-flash', 'deepseek/deepseek-flash'), true);
 });
 
 test('waits for authoritative model confirmation and times out deterministically', async () => {
   let current: string | null = 'anthropic/claude-sonnet-5';
-  setTimeout(() => { current = 'deepseek/deepseek-v4-flash'; }, 5);
-  await waitForModelSelection('deepseek/deepseek-v4-flash', () => current, { timeoutMs: 1_000, pollMs: 1 });
+  setTimeout(() => { current = 'deepseek/deepseek-flash'; }, 5);
+  await waitForModelSelection('deepseek/deepseek-flash', () => current, { timeoutMs: 1_000, pollMs: 1 });
   await assert.rejects(
     waitForModelSelection('never/confirmed', () => current, { timeoutMs: 5, pollMs: 1 }),
     /did not confirm model/,
@@ -215,7 +215,7 @@ test('provider visibility hides whole providers and keeps explicit allowlists cl
       provider_id: 'deepseek',
       provider_label: 'DeepSeek',
       models: [
-        { reference: 'deepseek/deepseek-v4-flash', model_id: 'deepseek-v4-flash' },
+        { reference: 'deepseek/deepseek-flash', model_id: 'deepseek-flash' },
       ],
     },
   ];
@@ -237,7 +237,7 @@ test('visible reference filtering preserves unknown providers and drops explicit
   const references = [
     'openai/gpt-5.6-sol',
     'openai/gpt-5.7-preview',
-    'deepseek/deepseek-v4-flash',
+    'deepseek/deepseek-flash',
     'community/custom-model',
   ];
   const providers = [{

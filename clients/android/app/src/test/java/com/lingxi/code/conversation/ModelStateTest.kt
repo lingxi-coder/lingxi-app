@@ -204,15 +204,15 @@ class ModelStateTest {
     fun curatedModelMetadata_exposesThinkingContextAndPublishedSize() {
         val options = EngineModelCatalog.options(
             listOf(
-                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-flash",
                 "anthropic/claude-sonnet-5",
                 "openrouter/openrouter/auto",
             ),
             detailsByReference = mapOf(
-                "deepseek/deepseek-v4-flash" to testDetails(
-                    reference = "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-flash" to testDetails(
+                    reference = "deepseek/deepseek-flash",
                     providerId = "deepseek",
-                    displayName = "DeepSeek V4 Flash",
+                    displayName = "DeepSeek V4.1 Flash",
                     thinking = "Thinking",
                     contextWindow = "1M 上下文",
                     capabilities = "工具",
@@ -238,7 +238,7 @@ class ModelStateTest {
 
         assertEquals("Thinking", options[0].metadata.thinking)
         assertEquals("1M 上下文", options[0].metadata.contextWindow)
-        assertEquals("DeepSeek V4 Flash", options[0].name)
+        assertEquals("DeepSeek V4.1 Flash", options[0].name)
 
         assertEquals("自适应 Thinking", options[1].metadata.thinking)
         assertEquals("1M 上下文", options[1].metadata.contextWindow)
@@ -253,15 +253,15 @@ class ModelStateTest {
     fun filter_matchesModelProviderWireIdAndMetadata() {
         val options = EngineModelCatalog.options(
             listOf(
-                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-flash",
                 "anthropic/claude-sonnet-5",
                 "openrouter/openrouter/auto",
             ),
             detailsByReference = mapOf(
-                "deepseek/deepseek-v4-flash" to testDetails(
-                    reference = "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-flash" to testDetails(
+                    reference = "deepseek/deepseek-flash",
                     providerId = "deepseek",
-                    displayName = "DeepSeek V4 Flash",
+                    displayName = "DeepSeek V4.1 Flash",
                     providerLabel = "DeepSeek",
                     description = "Current DeepSeek fast model",
                     thinking = "Thinking",
@@ -287,7 +287,7 @@ class ModelStateTest {
         )
 
         assertEquals(
-            listOf("deepseek/deepseek-v4-flash"),
+            listOf("deepseek/deepseek-flash"),
             EngineModelCatalog.filter(options, "1M 上下文").map { it.id },
         )
         assertEquals(
@@ -295,7 +295,7 @@ class ModelStateTest {
             EngineModelCatalog.filter(options, "Anthropic").map { it.id },
         )
         assertEquals(
-            listOf("deepseek/deepseek-v4-flash", "anthropic/claude-sonnet-5"),
+            listOf("deepseek/deepseek-flash", "anthropic/claude-sonnet-5"),
             EngineModelCatalog.filter(options, "thinking").map { it.id },
         )
         assertEquals(options, EngineModelCatalog.filter(options, "  "))
@@ -305,7 +305,7 @@ class ModelStateTest {
     fun recents_returnRememberedModelsInRecencyOrder_droppingOnesTheEngineNoLongerOffers() {
         val options = EngineModelCatalog.options(
             listOf(
-                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-flash",
                 "anthropic/claude-sonnet-5",
                 "openrouter/openrouter/auto",
             ),
@@ -313,10 +313,10 @@ class ModelStateTest {
 
         // Recency order wins over catalog order.
         assertEquals(
-            listOf("anthropic/claude-sonnet-5", "deepseek/deepseek-v4-flash"),
+            listOf("anthropic/claude-sonnet-5", "deepseek/deepseek-flash"),
             EngineModelCatalog.recents(
                 options,
-                listOf("anthropic/claude-sonnet-5", "deepseek/deepseek-v4-flash"),
+                listOf("anthropic/claude-sonnet-5", "deepseek/deepseek-flash"),
             ).map { it.id },
         )
         // A remembered model whose provider is gone must not become a row that
@@ -340,9 +340,9 @@ class ModelStateTest {
     @Test
     fun recents_areBuiltFromTheFilteredList_soSearchHidesThemToo() {
         val options = EngineModelCatalog.options(
-            listOf("deepseek/deepseek-v4-flash", "anthropic/claude-sonnet-5"),
+            listOf("deepseek/deepseek-flash", "anthropic/claude-sonnet-5"),
         )
-        val remembered = listOf("deepseek/deepseek-v4-flash", "anthropic/claude-sonnet-5")
+        val remembered = listOf("deepseek/deepseek-flash", "anthropic/claude-sonnet-5")
 
         val filtered = EngineModelCatalog.filter(options, "sonnet")
         assertEquals(

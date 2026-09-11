@@ -1778,7 +1778,7 @@ mod tests {
             "modelProfile": "deepseek",
             "message": {
                 "role": "assistant",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "content": [{"type": "text", "text": "off branch"}]
             },
         });

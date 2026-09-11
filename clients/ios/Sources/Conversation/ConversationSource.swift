@@ -1507,7 +1507,7 @@ final class MockConversationSource: ConversationSource {
             "anthropic/claude-fable-5-1",
             "openai/gpt-5.5",
             "openai/gpt-5.4",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-flash",
             "deepseek/deepseek-v4-pro",
             "kimi/kimi-k3",
             "gemini/gemini-3.5-flash",

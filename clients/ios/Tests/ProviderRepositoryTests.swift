@@ -176,15 +176,15 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(
             repository.visibleModelIDs(
                 for: deepseekProfile,
-                from: ["deepseek-v4-flash"]
+                from: ["deepseek-flash"]
             ),
-            ["deepseek-v4-flash"]
+            ["deepseek-flash"]
         )
         XCTAssertEqual(
             repository.visibleModelReferences([
                 "openai/gpt-5.6-sol",
                 "openai/gpt-5.7-preview",
-                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-flash",
                 "community/custom-model",
             ]),
             ["openai/gpt-5.6-sol", "community/custom-model"]
@@ -322,13 +322,13 @@ final class ProviderRepositoryTests: XCTestCase {
         let preset = try XCTUnwrap(Presets.llm.first(where: { $0.id == "deepseek" }))
 
         XCTAssertEqual(preset.defaultUrl, "https://api.deepseek.com")
-        XCTAssertEqual(preset.models, ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro"])
+        XCTAssertEqual(preset.models, ["deepseek-flash", "deepseek-v4-pro"])
 
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let deepSeek = repository.addProfile(presetID: "deepseek")
         let profile = try XCTUnwrap(repository.state(for: deepSeek)?.profile)
         XCTAssertEqual(profile.baseURL, "https://api.deepseek.com")
-        XCTAssertEqual(profile.modelID, "deepseek-v4-flash")
+        XCTAssertEqual(profile.modelID, "deepseek-flash")
     }
 
     func testDeepSeekOfficialEndpointDoesNotDuplicateBuiltInEngineProfile() throws {
@@ -338,7 +338,7 @@ final class ProviderRepositoryTests: XCTestCase {
 
         let snapshot = repository.makeLaunchSnapshot()
 
-        XCTAssertEqual(snapshot.defaultModelID, "deepseek/deepseek-v4-flash")
+        XCTAssertEqual(snapshot.defaultModelID, "deepseek/deepseek-flash")
         XCTAssertEqual(snapshot.enabledProfileIDs, ["deepseek"])
         XCTAssertEqual(try jsonObject(from: snapshot.providerProfilesJSON)?.count, 0)
     }
@@ -382,7 +382,7 @@ final class ProviderRepositoryTests: XCTestCase {
             presetID: "deepseek",
             name: "DeepSeek",
             baseURL: "https://api.deepseek.com",
-            modelID: "deepseek-v4-flash",
+            modelID: "deepseek-flash",
             enabled: true,
             isDefault: true
         )
@@ -450,7 +450,7 @@ final class ProviderRepositoryTests: XCTestCase {
         let profile = try XCTUnwrap(repository.state(for: "deepseek")?.profile)
 
         XCTAssertEqual(profile.baseURL, "https://api.deepseek.com")
-        XCTAssertEqual(profile.modelID, "deepseek-v4-flash")
+        XCTAssertEqual(profile.modelID, "deepseek-flash")
 
         let persisted = try String(contentsOf: persistenceURL, encoding: .utf8)
         XCTAssertFalse(persisted.contains("api.deepseek.com/v1"))
@@ -469,7 +469,7 @@ final class ProviderRepositoryTests: XCTestCase {
             $0.enabled = true
         }
         repository.updateProfile(deepseek) {
-            $0.modelID = "deepseek-v4-flash"
+            $0.modelID = "deepseek-flash"
             $0.enabled = true
         }
         repository.setRetryMaxAttempts(4)
@@ -486,7 +486,7 @@ final class ProviderRepositoryTests: XCTestCase {
 
         XCTAssertEqual(retry["maxAttempts"] as? Int, 4)
         XCTAssertEqual(retry["backoffMs"] as? Int, 1200)
-        XCTAssertEqual(targets, ["deepseek/deepseek-v4-flash", "kimi/kimi-k3"])
+        XCTAssertEqual(targets, ["deepseek/deepseek-flash", "kimi/kimi-k3"])
     }
 
     func testNewDraftIsNotPublishedUntilApply() async throws {
@@ -747,7 +747,7 @@ final class ProviderRepositoryTests: XCTestCase {
         _ = repository.addProfile(presetID: "openai")
         repository.setDefaultProfile(first)
         repository.updateRuntimeSnapshot(
-            models: ["deepseek/deepseek-v4-flash"],
+            models: ["deepseek/deepseek-flash"],
             activeModelID: "openai/gpt-4o",
             activeProfileID: "openai",
             error: "runtime fallback"
@@ -755,7 +755,7 @@ final class ProviderRepositoryTests: XCTestCase {
 
         let summary = repository.settingsSummary
         XCTAssertEqual(summary.defaultProfile?.id, first)
-        XCTAssertEqual(summary.defaultModelID, "deepseek-v4-flash")
+        XCTAssertEqual(summary.defaultModelID, "deepseek-flash")
         XCTAssertEqual(summary.enabledCount, 2)
         XCTAssertEqual(summary.runtime.activeModelID, "openai/gpt-4o")
         XCTAssertEqual(summary.runtime.lastError, "runtime fallback")
@@ -1378,7 +1378,7 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertNil(ProviderRepository.legacyAnthropicProfile(
             legacyKey: nil,
             legacyBase: nil,
-            legacyModel: "deepseek/deepseek-v4-flash"
+            legacyModel: "deepseek/deepseek-flash"
         ))
         XCTAssertNil(ProviderRepository.legacyAnthropicProfile(
             legacyKey: nil,
@@ -1425,22 +1425,22 @@ final class ProviderRepositoryTests: XCTestCase {
     /// Regression (the iOS "DeepSeek V4 Flash under ANTHROPIC" chip): a stored
     /// model belonging to ANOTHER provider must not be smuggled into the
     /// Anthropic profile — `qualifiedModelID` would double-qualify it into
-    /// `anthropic/deepseek/deepseek-v4-flash`, which the engine registered under
+    /// `anthropic/deepseek/deepseek-flash`, which the engine registered under
     /// the Anthropic profile and the picker rendered in Anthropic's section.
     func testLegacyMigrationRejectsAForeignProviderModel() throws {
         for foreign in [
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-flash",
             "openrouter/openrouter/auto",
-            "anthropic/deepseek/deepseek-v4-flash",
+            "anthropic/deepseek/deepseek-flash",
             // BARE foreign ids too: `ClientEvent::ModelList.current` is emitted
             // UNQUALIFIED whenever the session carries no `model_profile`, so
             // this is the shape `Keychain.model` actually ends up holding.
-            // `anthropic/` + `deepseek-v4-flash` clears the engine's "the
+            // `anthropic/` + `deepseek-flash` clears the engine's "the
             // remainder must be a bare id" guard, so nothing downstream catches
             // it — the rejection has to happen here. Coverage is bounded by what
             // `Presets.llm` knows: a bare id no preset lists is indistinguishable
             // from a custom Anthropic-compatible proxy model and is adopted.
-            "deepseek-v4-flash",
+            "deepseek-flash",
             "gpt-5.6-sol",
             "gemini-3.7-flash",
             "kimi-k3",

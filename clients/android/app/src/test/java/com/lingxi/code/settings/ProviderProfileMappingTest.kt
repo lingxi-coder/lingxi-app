@@ -101,12 +101,12 @@ class ProviderProfileMappingTest {
         assertEquals(
             legacyChat.copy(
                 url = "https://api.deepseek.com",
-                model = "deepseek-v4-flash",
+                model = "deepseek-flash",
             ),
             ProviderSettingsRepository.migrateLegacyDeepSeek(legacyChat),
         )
         assertEquals(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             ProviderSettingsRepository.migrateLegacyDeepSeek(legacyReasoner).model,
         )
     }

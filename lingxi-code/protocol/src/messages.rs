@@ -1246,7 +1246,7 @@ mod tests {
         let analysis = MediaAnalysis {
             question_key: "msg-123".into(),
             media_fingerprints: vec!["fp-a".into(), "fp-b".into()],
-            model: "deepseek-v4-flash-vision-exp".into(),
+            model: "deepseek-flash".into(),
             prompt_version: 1,
             created_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
             task_findings: vec!["figure shows a chart".into()],
@@ -1277,7 +1277,7 @@ mod tests {
             MediaAnalysis {
                 question_key: "msg-123".into(),
                 media_fingerprints: vec!["fp-a".into()],
-                model: "deepseek-v4-flash-vision-exp".into(),
+                model: "deepseek-flash".into(),
                 prompt_version: 1,
                 created_at: std::time::UNIX_EPOCH,
                 task_findings: vec!["contains a receipt".into()],

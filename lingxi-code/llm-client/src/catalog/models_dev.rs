@@ -221,7 +221,7 @@ mod tests {
     fn parses_deepseek_slice() {
         let slice: ProviderSlice = serde_json::from_str(DEEPSEEK).expect("deepseek slice parses");
         assert_eq!(slice.name, "DeepSeek");
-        assert_eq!(slice.models.len(), 3);
+        assert_eq!(slice.models.len(), 2);
         // Every model carries an id + name.
         for (key, model) in &slice.models {
             assert_eq!(key, &model.id);

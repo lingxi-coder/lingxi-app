@@ -256,8 +256,8 @@ mod tests {
     async fn list_mode_uses_inferred_provider_for_current_model() {
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_model_listings(vec![ModelListing {
-            display_model: "DeepSeek V4 Flash".into(),
-            request_model: "deepseek-v4-flash".into(),
+            display_model: "DeepSeek V4.1 Flash".into(),
+            request_model: "deepseek-flash".into(),
             provider_id: "deepseek".into(),
             provider_label: "DeepSeek".into(),
             description: None,
@@ -267,7 +267,7 @@ mod tests {
             supports_reasoning: true,
         }]);
         mock.set_status_snapshot(platform_api::StatusSnapshot {
-            model: "deepseek-v4-flash".into(),
+            model: "deepseek-flash".into(),
             model_profile: None,
             ..platform_api::StatusSnapshot::default()
         });
@@ -276,8 +276,8 @@ mod tests {
         let CommandResult::Done { display: Some(s) } = h.handle(&args("")).await else {
             panic!();
         };
-        assert!(s.starts_with("Current model: deepseek/deepseek-v4-flash\n"));
-        assert!(s.contains("  - deepseek/deepseek-v4-flash"));
+        assert!(s.starts_with("Current model: deepseek/deepseek-flash\n"));
+        assert!(s.contains("  - deepseek/deepseek-flash"));
     }
 
     #[tokio::test]

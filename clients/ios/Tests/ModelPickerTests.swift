@@ -10,7 +10,7 @@ final class ModelPickerTests: XCTestCase {
         "anthropic/claude-sonnet-5",
         "anthropic/claude-opus-4-8",
         "openai/gpt-5.5",
-        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-flash",
         "openrouter/openrouter/auto",
     ]
 
@@ -80,7 +80,7 @@ final class ModelPickerTests: XCTestCase {
         // "deepseek", and matching it must pull in that provider's models.
         XCTAssertEqual(
             ModelDisplay.filter(catalog, matching: "DeepSeek"),
-            ["deepseek/deepseek-v4-flash"])
+            ["deepseek/deepseek-flash"])
     }
 
     func testFilterIsCaseInsensitiveAndPreservesOrder() {
@@ -198,7 +198,7 @@ final class ModelPickerTests: XCTestCase {
         let (recents, defaults, suite) = try makeRecents()
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        recents.record("deepseek/deepseek-v4-flash")
+        recents.record("deepseek/deepseek-flash")
         recents.record("anthropic/claude-sonnet-5")
 
         XCTAssertEqual(
@@ -213,10 +213,10 @@ final class ModelPickerTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         recents.record("openai/gpt-5.5")
-        recents.record("deepseek/deepseek-v4-flash")
+        recents.record("deepseek/deepseek-flash")
 
         XCTAssertEqual(
             recents.resolved(against: catalog),
-            ["deepseek/deepseek-v4-flash", "openai/gpt-5.5"])
+            ["deepseek/deepseek-flash", "openai/gpt-5.5"])
     }
 }

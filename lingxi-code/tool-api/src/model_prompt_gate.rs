@@ -312,7 +312,7 @@ mod tests {
     fn non_claude_models_keep_long_tool_prompts() {
         for model in [
             "gpt-5.5",
-            "deepseek-v4-flash",
+            "deepseek-flash",
             "gemini-3.5-flash",
             "glm-5.1",
         ] {

@@ -676,7 +676,7 @@ fn create_app_round_trips() {
         origin: AppCreateOriginDto::Chat,
         brief: "Track daily habits with streaks".to_string(),
         git_enabled: true,
-        workflow_model: Some("deepseek/deepseek-v4-flash".to_string()),
+        workflow_model: Some("deepseek/deepseek-flash".to_string()),
         conversation_id: Some("conv-42".to_string()),
         surface: Some(AppSurfaceDto::Canvas),
         mode: AppCreateModeDto::Scaffolded,
@@ -687,7 +687,7 @@ fn create_app_round_trips() {
     assert_eq!(json["name"], "Habits");
     assert_eq!(json["origin"], "chat");
     assert_eq!(json["brief"], "Track daily habits with streaks");
-    assert_eq!(json["workflow_model"], "deepseek/deepseek-v4-flash");
+    assert_eq!(json["workflow_model"], "deepseek/deepseek-flash");
     assert_eq!(json["conversation_id"], "conv-42");
     assert_eq!(
         json["surface"], "canvas",

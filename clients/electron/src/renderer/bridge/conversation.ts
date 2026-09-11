@@ -202,8 +202,8 @@ function settleRunningTools(items: RunItem[], status: 'done' | 'error'): boolean
 
 /** A user message immediately echoed when the composer submits (optimistic). */
 export function appendUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = []): ConversationState {
-  const trimmed = stripInvisibleText(text).trim();
-  if (!trimmed) return state;
+  const trimmed = text.trim();
+  if (!hasVisibleText(trimmed)) return state;
   const items = state.items.slice();
   // A new user turn closes any previously-open streaming lines.
   closeThinking(items, state.openThinkingIndex);
@@ -796,12 +796,11 @@ export function conversationFromMessages(
       switch (block.type) {
         case 'text':
           {
-            const displayText = stripInvisibleText(block.text);
-            if (!displayText.trim()) break;
+            if (!hasVisibleText(block.text)) break;
             items.push({
               type: 'narration',
               id: itemId(nextId++),
-              text: displayText,
+              text: block.text,
               strong: message.role === 'user',
               role: message.role === 'user' ? 'user' : 'assistant',
               ...(!attachedImages && images.length ? { images } : {}),
@@ -921,7 +920,12 @@ function isRenderableMessageImage(image: MessageImageDto): boolean {
   return isSupportedImageMediaType(image.media_type) && image.url.trim().length > 0;
 }
 
-/** Remove invisible format characters before deciding whether a row is empty. */
+/** Return whether text contains anything visible after format characters are ignored. */
+function hasVisibleText(text: string): boolean {
+  return stripInvisibleText(text).trim().length > 0;
+}
+
+/** Remove invisible format characters for visibility checks only. */
 function stripInvisibleText(text: string): string {
   return text.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
 }

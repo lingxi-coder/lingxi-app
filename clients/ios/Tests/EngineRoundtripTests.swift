@@ -226,7 +226,7 @@ import XCTest
                 "openai/gpt-5.5",
                 "openai/gpt-5.4-mini",
                 "github-copilot/gpt-5.5",
-                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-flash",
             ]
 
             let sections = ModelDisplay.sections(for: references)
@@ -235,7 +235,7 @@ import XCTest
             XCTAssertEqual(sections.map(\.name), ["OpenAI", "GitHub Copilot", "DeepSeek"])
             XCTAssertEqual(sections.flatMap(\.models).map(\.reference), references)
             XCTAssertEqual(sections[0].models.map(\.name), ["GPT-5.5", "GPT-5.4 Mini"])
-            XCTAssertEqual(sections[2].models.first?.name, "DeepSeek V4 Flash")
+            XCTAssertEqual(sections[2].models.first?.name, "DeepSeek Flash")
         }
 
         func testModelDisplayKeepsSameWireModelDistinctAcrossProviders() {

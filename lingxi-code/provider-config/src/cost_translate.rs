@@ -5,7 +5,8 @@
 //! pricing catalog). Only a model with no reference tier AND no models.dev price
 //! falls back to the default-unknown ($5/$25) row so the turn is priced, not
 //! errored — instead of mis-billing every non-Anthropic model at the Claude
-//! Opus tier (which over-charged e.g. deepseek-chat ~36×/~89×).
+//! Opus tier (which over-charges e.g. deepseek-chat ~17×/~21× at V4.1
+//! Flash's $0.3/$1.2 rates).
 
 use std::collections::HashMap;
 
@@ -207,7 +208,7 @@ mod tests {
     #[test]
     fn preset_model_uses_real_models_dev_price_not_default_unknown() {
         // Feed the real bundled presets through pricing_for; the current
-        // DeepSeek V4 Flash route must bill at its true $0.14/$0.28 rate, NOT
+        // DeepSeek V4.1 Flash route must bill at its true $0.3/$1.2 rate, NOT
         // the $5/$25 Claude default. The deprecated deepseek-chat route is no
         // longer part of the bundled catalog.
         let providers = llm_client::builtin_presets().providers;
@@ -216,16 +217,16 @@ mod tests {
             provider: CostProviderId::OpenAICompatible {
                 name: "deepseek".to_string(),
             },
-            model: "deepseek-v4-flash".to_string(),
+            model: "deepseek-flash".to_string(),
         };
         let (p, _res) = cat.resolve(&mr).expect("priced");
         assert_eq!(
             p.token_rates[&cost::pricing::TokenClass::Input].nano_usd_per_token,
-            140
+            300
         );
         assert_eq!(
             p.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token,
-            280
+            1200
         );
     }
 
@@ -327,7 +328,7 @@ mod tests {
     /// output rate. Uses an explicit override (like
     /// `explicit_override_prices_a_subscription_profile` above) rather than
     /// a bundled models.dev row, since real rows can coincidentally price
-    /// reasoning == output (e.g. deepseek-v4-flash: both $0.28/Mtok) which
+    /// reasoning == output (e.g. deepseek-flash: both $1.2/Mtok) which
     /// would make this assertion pass either way and prove nothing.
     #[test]
     fn model_with_a_real_reasoning_price_keeps_its_own_rate() {

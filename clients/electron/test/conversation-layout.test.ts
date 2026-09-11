@@ -46,4 +46,15 @@ test('resumed user rows made only of invisible format characters are omitted', (
   ]);
   const narrations = state.items.filter((item) => item.type === 'narration');
   assert.deepEqual(narrations.map((item) => item.type === 'narration' ? item.text : ''), ['visible prompt']);
+  assert.equal(appendUserPrompt(emptyConversation(), '\u200B\u200C\uFEFF').items.length, 0);
+});
+
+test('resumed text preserves zero-width joiners inside visible content', () => {
+  const text = '👩‍💻';
+  const state = conversationFromMessages([{ role: 'user', blocks: [{ type: 'text', text }] }]);
+  const item = state.items[0];
+  assert.equal(item.type === 'narration' ? item.text : undefined, text);
+
+  const optimistic = appendUserPrompt(emptyConversation(), text).items[0];
+  assert.equal(optimistic.type === 'narration' ? optimistic.text : undefined, text);
 });

@@ -449,7 +449,7 @@ private enum ProviderRepositoryDefaults {
         "anthropic": "claude-sonnet-5",
         "openai": "gpt-5.6-sol",
         "openai-chatgpt": "gpt-5.6-sol",
-        "deepseek": "deepseek-v4-flash",
+        "deepseek": "deepseek-flash",
         "kimi": "kimi-k3",
         "kimi-code": "k3",
         "glm-coding": "glm-5.3",
@@ -2453,7 +2453,7 @@ final class ProviderRepository {
             migrated.baseURL = "https://api.deepseek.com"
         }
         if ["deepseek-chat", "deepseek-reasoner"].contains(profile.modelID) {
-            migrated.modelID = "deepseek-v4-flash"
+            migrated.modelID = "deepseek-flash"
         }
         return migrated
     }
@@ -2477,7 +2477,7 @@ final class ProviderRepository {
     /// provider still has that slot filled. Treating it as evidence fabricated
     /// an enabled, default Anthropic profile out of thin air, and because that
     /// slot now holds a provider-QUALIFIED reference, the fabricated profile
-    /// re-qualified it (`anthropic/` + `deepseek/deepseek-v4-flash`) and the
+    /// re-qualified it (`anthropic/` + `deepseek/deepseek-flash`) and the
     /// composer's picker rendered "DeepSeek V4 Flash" under the ANTHROPIC
     /// header in Anthropic's colour.
     ///
@@ -2525,9 +2525,9 @@ final class ProviderRepository {
             // An UNQUALIFIED id is not automatically Anthropic's. `ModelList`'s
             // `current` is emitted bare whenever the session carries no
             // `model_profile`, so `Keychain.model` can hold a bare foreign id
-            // like `deepseek-v4-flash`; adopting it here produced exactly the
+            // like `deepseek-flash`; adopting it here produced exactly the
             // reported symptom one qualifier shorter — `anthropic/` +
-            // `deepseek-v4-flash` clears the engine's "bare id" guard and the
+            // `deepseek-flash` clears the engine's "bare id" guard and the
             // picker rendered "DeepSeek V4 Flash" under the ANTHROPIC header.
             // An id no other preset claims is still adopted: that is how a
             // custom Anthropic-compatible proxy model survives the migration.

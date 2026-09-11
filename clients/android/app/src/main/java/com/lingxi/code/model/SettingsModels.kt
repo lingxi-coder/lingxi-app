@@ -243,7 +243,7 @@ object Presets {
         ProviderPreset("anthropic", "Anthropic", "Claude API", Color(red = 0.9351f, green = 0.5079f, blue = 0.4015f), "https://api.anthropic.com", "sk-ant-", listOf("claude-opus-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5")),
         ProviderPreset("openai", "OpenAI", "ChatGPT API", Color(red = 0.1326f, green = 0.7261f, blue = 0.5350f), "https://api.openai.com/v1", "sk-proj-", listOf("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")),
         ProviderPreset("google", "Google", "Gemini API", Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f), "https://generativelanguage.googleapis.com/v1", "AIza", listOf("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview")),
-        ProviderPreset("deepseek", "DeepSeek", "DeepSeek API", Color(red = 0.6451f, green = 0.5662f, blue = 1.0000f), "https://api.deepseek.com", "sk-", listOf("deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro")),
+        ProviderPreset("deepseek", "DeepSeek", "DeepSeek API", Color(red = 0.6451f, green = 0.5662f, blue = 1.0000f), "https://api.deepseek.com", "sk-", listOf("deepseek-flash", "deepseek-v4-pro")),
         ProviderPreset("kimi", "Kimi", "Moonshot AI", Color(red = 0.4340f, green = 0.5865f, blue = 1.0000f), "https://api.moonshot.cn/v1", "sk-", listOf("kimi-k3")),
         ProviderPreset("kimi-code", "Kimi Code", "编程会员套餐", Color(red = 0.2784f, green = 0.6980f, blue = 0.9490f), "https://api.kimi.com/coding/v1", "sk-", listOf("k3")),
         ProviderPreset("qwen", "通义千问", "DashScope", Color(red = 0.8826f, green = 0.6256f, blue = 0.2074f), "https://dashscope.aliyuncs.com/v1", "sk-", listOf("qwen-max", "qwen-plus", "qwen-turbo")),
@@ -323,7 +323,7 @@ object SettingsMock {
     val llmProviders: List<GenericProvider> = listOf(
         GenericProvider("p_ant", "anthropic", "Anthropic", "https://api.anthropic.com", "sk-ant-api03-••••••••7Hq2", "claude-sonnet-4-5", status = ConnStatus.Connected, isDefault = true, enabled = true),
         GenericProvider("p_oai", "openai", "OpenAI", "https://api.openai.com/v1", "sk-proj-••••••••4nQ8", "gpt-4o", status = ConnStatus.Idle, enabled = true),
-        GenericProvider("p_dsk", "deepseek", "DeepSeek", "https://api.deepseek.com", "", "deepseek-v4-flash", status = ConnStatus.Idle, enabled = false),
+        GenericProvider("p_dsk", "deepseek", "DeepSeek", "https://api.deepseek.com", "", "deepseek-flash", status = ConnStatus.Idle, enabled = false),
     )
 
     val searchProviders: List<GenericProvider> = listOf(

@@ -114,7 +114,7 @@ const TABLE: &[(&str, &str, FusionModelHints)] = &[
     ),
     (
         "deepseek",
-        "deepseek-v4-flash",
+        "deepseek-flash",
         q(75, FusionLatencyClass::Fast, FusionCostClass::Low, true),
     ),
     // Kimi

@@ -1704,18 +1704,15 @@ message with multiple tool uses so they run concurrently."
     fn has_visible_prefetch_text(text: &str) -> bool {
         text.chars().any(|ch| {
             !ch.is_whitespace()
-                && !matches!(ch, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}')
+                && !matches!(
+                    ch,
+                    '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}'
+                )
         })
     }
 
     fn latest_prefetch_query(history: &[ConversationMessage]) -> String {
-        Self::latest_prefetch_query_and_tools(history).0
-    }
-
-    fn latest_prefetch_query_and_tools(
-        history: &[ConversationMessage],
-    ) -> (String, Vec<String>) {
-        let query = history
+        history
             .iter()
             .rev()
             .find_map(|message| match message {
@@ -1738,7 +1735,11 @@ message with multiple tool uses so they run concurrently."
                 }
                 _ => None,
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn latest_prefetch_query_and_tools(history: &[ConversationMessage]) -> (String, Vec<String>) {
+        let query = Self::latest_prefetch_query(history);
         let last_assistant_tools = history
             .iter()
             .rev()
@@ -1782,7 +1783,10 @@ message with multiple tool uses so they run concurrently."
             // the UI history, but they are not a valid user query and must not
             // move the selector's starting point.
             let history = s.model_context_history();
-            (Self::latest_prefetch_query(&history), s.session_id.to_string())
+            (
+                Self::latest_prefetch_query(&history),
+                s.session_id.to_string(),
+            )
         };
         // Task 5 (worktree 206 session-cwd plumbing): the live cwd, so a future
         // non-stub prefetch derives the memdir from the post-swap worktree, not

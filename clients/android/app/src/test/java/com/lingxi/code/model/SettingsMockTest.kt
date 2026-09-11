@@ -142,7 +142,7 @@ class SettingsMockTest {
 
         assertEquals("https://api.deepseek.com", deepSeek.defaultUrl)
         assertEquals(
-            listOf("deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro"),
+            listOf("deepseek-flash", "deepseek-v4-pro"),
             deepSeek.models,
         )
     }

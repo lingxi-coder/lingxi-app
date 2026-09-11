@@ -681,14 +681,14 @@ mod tests {
         // these — misattributing cost + the tengu_api_success provider tag.
 
         // DeepSeek V4 bare id → deepseek, NOT anthropic.
-        let mr = model_ref_from_string("deepseek-v4-flash", Some("deepseek"));
+        let mr = model_ref_from_string("deepseek-flash", Some("deepseek"));
         assert_eq!(
             mr.provider,
             ProviderId::OpenAICompatible {
                 name: "deepseek".to_string()
             }
         );
-        assert_eq!(mr.model, "deepseek-v4-flash");
+        assert_eq!(mr.model, "deepseek-flash");
 
         // Provider-shared claude id served by Copilot → copilot, NOT anthropic.
         let mr = model_ref_from_string("claude-opus-4-8", Some("github-copilot"));
@@ -719,7 +719,7 @@ mod tests {
         // Bug fix: after a cross-provider `--resume` clears model_profile, a bare
         // non-claude id must still attribute to its REAL provider (resolved from
         // the catalog), NOT default to Anthropic via split_profile_model.
-        let mr = model_ref_from_string("deepseek-v4-flash", None);
+        let mr = model_ref_from_string("deepseek-flash", None);
         assert_eq!(
             mr.provider,
             ProviderId::OpenAICompatible {

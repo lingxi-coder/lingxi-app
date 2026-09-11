@@ -64,7 +64,7 @@ visionDelegationEnabled: true)
                 agentId: "agent:child-1",
                 name: "researcher",
                 agentType: "explorer",
-                model: "deepseek-v4-flash",
+                model: "deepseek-flash",
                 modelProfile: "deepseek",
                 status: "running",
                 latestActivity: "搜索代码",
@@ -77,7 +77,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [summary]))
             XCTAssertEqual(source.model.agentSummaries.map(\.id), [ConversationModel.mainAgentID, "agent:child-1"])
             let child = source.model.agentSummaries.first { $0.id == "agent:child-1" }
-            XCTAssertEqual(child?.model, "deepseek-v4-flash")
+            XCTAssertEqual(child?.model, "deepseek-flash")
             XCTAssertEqual(child?.modelProfile, "deepseek")
             XCTAssertEqual(
                 source.model.agentSummaries.first?.name,
@@ -122,7 +122,7 @@ visionDelegationEnabled: true)
                     agentId: agentID,
                     name: "designer",
                     agentType: "workflow-subagent",
-                    model: "deepseek-v4-flash",
+                    model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "completed",
                     latestActivity: "Design complete",
@@ -146,7 +146,7 @@ visionDelegationEnabled: true)
             let child = source.model.agentSummaries.first { $0.id == agentID }
             XCTAssertEqual(child?.status, "completed")
             XCTAssertEqual(child?.latestActivity, "Design complete")
-            XCTAssertEqual(child?.model, "deepseek-v4-flash")
+            XCTAssertEqual(child?.model, "deepseek-flash")
             XCTAssertEqual(child?.modelProfile, "deepseek")
             XCTAssertEqual(child?.updatedAtMs, 2_000)
         }
@@ -960,7 +960,7 @@ visionDelegationEnabled: true)
                     agentId: agentID,
                     name: "design",
                     agentType: "designer",
-                    model: "deepseek-v4-flash",
+                    model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "running",
                     latestActivity: "Inspecting layout",

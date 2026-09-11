@@ -959,7 +959,7 @@ final class LingxiCodeUITests: XCTestCase {
         // from it rather than merely undrawn.
         for _ in 0..<4 { sheet.swipeUp() }
         XCTAssertFalse(
-            providerRow("deepseek/deepseek-v4-flash").exists,
+            providerRow("deepseek/deepseek-flash").exists,
             app.debugDescription)
 
         // A query matching nothing shows the empty state rather than a blank list.
@@ -976,7 +976,7 @@ final class LingxiCodeUITests: XCTestCase {
 
         // Search for a model and pick it straight out of the filtered list —
         // no scrolling needed, which is the point of having search at all.
-        let flash = providerRow("deepseek/deepseek-v4-flash")
+        let flash = providerRow("deepseek/deepseek-flash")
         search.typeText("flash")
         XCTAssertTrue(flash.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(flash, timeout: 3), app.debugDescription)
@@ -988,7 +988,7 @@ final class LingxiCodeUITests: XCTestCase {
         // the same model, distinct from the one under its provider.
         chip.tap()
         XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
-        let recent = app.buttons["composer.model.recent.row.deepseek/deepseek-v4-flash"]
+        let recent = app.buttons["composer.model.recent.row.deepseek/deepseek-flash"]
         XCTAssertTrue(recent.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(recent, timeout: 3), app.debugDescription)
         XCTAssertTrue(app.staticTexts["最近使用"].exists, app.debugDescription)

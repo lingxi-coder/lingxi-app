@@ -2894,13 +2894,13 @@ mod tests {
                 "Track daily habits",
                 None,
                 true,
-                Some("deepseek/deepseek-v4-flash"),
+                Some("deepseek/deepseek-flash"),
             )
             .await
             .unwrap();
         assert_eq!(
             record.workflow_model.as_deref(),
-            Some("deepseek/deepseek-v4-flash")
+            Some("deepseek/deepseek-flash")
         );
 
         let metadata = std::fs::read_to_string(
@@ -2914,7 +2914,7 @@ mod tests {
             metadata
                 .pointer("/app/workflowModel")
                 .and_then(serde_json::Value::as_str),
-            Some("deepseek/deepseek-v4-flash")
+            Some("deepseek/deepseek-flash")
         );
 
         drop(h);
@@ -2927,7 +2927,7 @@ mod tests {
                 .unwrap()
                 .workflow_model
                 .as_deref(),
-            Some("deepseek/deepseek-v4-flash")
+            Some("deepseek/deepseek-flash")
         );
     }
 

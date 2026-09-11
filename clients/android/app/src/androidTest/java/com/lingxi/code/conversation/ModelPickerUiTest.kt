@@ -32,7 +32,7 @@ class ModelPickerUiTest {
 
     private val models = EngineModelCatalog.options(
         listOf(
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-flash",
             "anthropic/claude-sonnet-5",
         ),
     )
@@ -84,7 +84,7 @@ class ModelPickerUiTest {
             hasText("Claude Sonnet 5", substring = true) and
                 hasContentDescription("当前模型"),
         ).assertIsDisplayed()
-        rule.onNodeWithText("DeepSeek V4 Flash").assertDoesNotExist()
+        rule.onNodeWithText("DeepSeek Flash").assertDoesNotExist()
     }
 
     @Test
@@ -107,7 +107,7 @@ class ModelPickerUiTest {
         }
 
         rule.onNodeWithTag(UiTags.MODEL_PICKER_CHIP).performClick()
-        rule.onNodeWithText("DeepSeek V4 Flash").performClick()
+        rule.onNodeWithText("DeepSeek Flash").performClick()
         assertEquals("p_dsk", openedProvider.get())
         assertEquals(null, selectedModel.get())
 

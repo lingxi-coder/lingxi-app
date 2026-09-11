@@ -137,7 +137,6 @@ jq --arg source "$openrouter_source_url" '
 while IFS=$'\t' read -r provider_id output_name; do
   jq --arg id "$provider_id" -e '.[$id]' "$models_dev_snapshot" > "$data_dir/$output_name.json"
 done <<'EOF'
-deepseek	deepseek
 moonshotai-cn	kimi
 kimi-for-coding	kimi-code
 zhipuai-coding-plan	zhipuai-coding-plan
@@ -146,6 +145,27 @@ openai	openai
 github-copilot	github-copilot
 google	gemini
 EOF
+
+# DeepSeek is vendored through a filter rather than dumped verbatim. Upstream
+# still lists the retired `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
+# ids (api.deepseek.com only advertises `deepseek-flash` and `deepseek-v4-pro`,
+# and routes the old names to Flash), and it mirrors DeepSeek's OFF-PEAK column,
+# which is exactly half the list price -- vendoring that verbatim would halve
+# every cost estimate during peak hours. Keep the two live ids and restate the
+# peak list prices from https://api-docs.deepseek.com/quick_start/pricing.
+jq -e '
+  .deepseek
+  | .models |= {
+      "deepseek-flash": (
+        .["deepseek-flash"]
+        + { cost: { input: 0.3, output: 1.2, reasoning: 1.2, cache_read: 0.006 } }
+      ),
+      "deepseek-v4-pro": (
+        .["deepseek-v4-pro"]
+        + { cost: { input: 1.32, output: 3.96, reasoning: 3.96, cache_read: 0.044 } }
+      )
+    }
+' "$models_dev_snapshot" > "$data_dir/deepseek.json"
 
 for file in "$data_dir"/*.json; do
   jq -e '.id and .name and (.models | type == "object")' "$file" >/dev/null
@@ -189,8 +209,7 @@ openrouter	poolside/laguna-s-2.1:free
 openrouter	inclusionai/ling-3.0-flash-fin:free
 openrouter	nvidia/nemotron-3.5-lightning:free
 openrouter	nvidia/nemotron-3-ultra-550b-a55b:free
-deepseek	deepseek-v4-flash
-deepseek	deepseek-v4-flash-vision-exp
+deepseek	deepseek-flash
 deepseek	deepseek-v4-pro
 kimi	kimi-k3
 kimi-code	k3

@@ -463,7 +463,7 @@ mod tests {
     fn prompt_profile_keeps_non_claude_models_on_the_full_harness() {
         for id in [
             "gpt-5.5",
-            "deepseek-v4-flash",
+            "deepseek-flash",
             "gemini-3.5-flash",
             "glm-5.1",
             "openrouter/qwen/qwen3-coder",

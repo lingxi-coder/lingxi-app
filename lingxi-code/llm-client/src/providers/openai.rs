@@ -56,7 +56,7 @@ impl OpenAiChatCodec {
         self.is_deepseek_profile()
             && matches!(
                 model,
-                "deepseek-reasoner" | "deepseek-v4-flash" | "deepseek-v4-pro"
+                "deepseek-reasoner" | "deepseek-flash" | "deepseek-v4-pro"
             )
     }
 
@@ -92,8 +92,8 @@ impl OpenAiChatCodec {
             return None;
         }
         match model {
-            "deepseek-chat" => Some(("deepseek-v4-flash", "disabled")),
-            "deepseek-reasoner" => Some(("deepseek-v4-flash", "enabled")),
+            "deepseek-chat" => Some(("deepseek-flash", "disabled")),
+            "deepseek-reasoner" => Some(("deepseek-flash", "enabled")),
             _ => None,
         }
     }
@@ -363,7 +363,7 @@ impl WireCodec for OpenAiChatCodec {
 
         // DeepSeek thinking mode requires a `reasoning_content` key on EVERY
         // assistant message positioned after the LAST `user` message. Verified
-        // against the live API (api.deepseek.com, deepseek-v4-flash):
+        // against the live API (api.deepseek.com, deepseek-flash):
         //   - an empty string satisfies the check;
         //   - assistant messages BEFORE the last user message are exempt;
         //   - `role: "tool"` does NOT reset the window, so in an agentic tool
@@ -1268,7 +1268,7 @@ mod tests {
             OpenAiChatCodec::new("https://deepseek-proxy.example/v1").with_profile_name("deepseek"),
         ] {
             let encoded = codec
-                .encode_request(&request_with_named_tool_choice("deepseek-v4-flash"))
+                .encode_request(&request_with_named_tool_choice("deepseek-flash"))
                 .expect("encode DeepSeek V4 structured-output request");
             let body = body_of(&encoded);
 
@@ -1307,7 +1307,7 @@ mod tests {
     /// Every assistant message after the LAST `user` message must carry a
     /// `reasoning_content` key when DeepSeek thinking is active.
     ///
-    /// Verified against the live api.deepseek.com on `deepseek-v4-flash`: the
+    /// Verified against the live api.deepseek.com on `deepseek-flash`: the
     /// exact wire array this encoder used to produce for a
     /// `[Reasoning, Text, ToolCall]` turn returns
     /// `400 "The reasoning_content in the thinking mode must be passed back to
@@ -1325,7 +1325,7 @@ mod tests {
         // then the tool result, then a second tool-calling turn that carried NO
         // reasoning trace at all (the `E`/`G5` shapes, which 400 independently
         // of the split).
-        let mut request = LlmRequest::new("deepseek-v4-flash");
+        let mut request = LlmRequest::new("deepseek-flash");
         request.messages.push(Message {
             role: "user".to_string(),
             content: vec![ContentBlock::Text {
@@ -1447,7 +1447,7 @@ mod tests {
 
     #[test]
     fn deepseek_tool_history_preserves_reasoning_and_non_null_assistant_content() {
-        let mut request = LlmRequest::new("deepseek-v4-flash");
+        let mut request = LlmRequest::new("deepseek-flash");
         request.messages.push(Message {
             role: "assistant".to_string(),
             content: vec![
@@ -1498,7 +1498,7 @@ mod tests {
     /// chat-completions body has no reasoning/budget field (there is no wire slot).
     #[test]
     fn reasoning_budget_is_dropped_not_rejected() {
-        let mut request = LlmRequest::new("deepseek-v4-flash");
+        let mut request = LlmRequest::new("deepseek-flash");
         request.reasoning = Some(ReasoningConfig::Enabled {
             budget_tokens: 4096,
         });
@@ -1539,13 +1539,13 @@ mod tests {
         let chat = codec
             .encode_request(&LlmRequest::new("deepseek-chat"))
             .expect("legacy chat request");
-        assert_eq!(body_of(&chat)["model"], "deepseek-v4-flash");
+        assert_eq!(body_of(&chat)["model"], "deepseek-flash");
         assert_eq!(body_of(&chat)["thinking"]["type"], "disabled");
 
         let reasoner = codec
             .encode_request(&LlmRequest::new("deepseek-reasoner"))
             .expect("legacy reasoner request");
-        assert_eq!(body_of(&reasoner)["model"], "deepseek-v4-flash");
+        assert_eq!(body_of(&reasoner)["model"], "deepseek-flash");
         assert_eq!(body_of(&reasoner)["thinking"]["type"], "enabled");
     }
 
@@ -1599,7 +1599,7 @@ mod tests {
 
     #[test]
     fn deepseek_text_history_preserves_reasoning_content() {
-        let mut request = LlmRequest::new("deepseek-v4-flash");
+        let mut request = LlmRequest::new("deepseek-flash");
         request.messages.push(Message {
             role: "assistant".to_string(),
             content: vec![

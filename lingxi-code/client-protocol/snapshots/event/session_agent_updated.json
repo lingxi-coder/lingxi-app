@@ -5,7 +5,7 @@
     "agent_id": "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     "name": "Researcher",
     "agent_type": "general-purpose",
-    "model": "deepseek-v4-flash",
+    "model": "deepseek-flash",
     "model_profile": "deepseek",
     "status": "completed",
     "latest_activity": "Finished source review",

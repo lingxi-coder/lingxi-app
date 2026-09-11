@@ -2330,7 +2330,7 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
 /// or an `anthropic/…` ref) AND the remainder must be a BARE model id. A ref
 /// qualified for another provider must never land here — a client that stored a
 /// qualified id and re-qualified it on the way back in
-/// (`anthropic/deepseek/deepseek-v4-flash`) otherwise registered a `deepseek`
+/// (`anthropic/deepseek/deepseek-flash`) otherwise registered a `deepseek`
 /// model inside the Anthropic profile, and the picker then rendered that
 /// model's name under the ANTHROPIC header in Anthropic's colour.
 fn anthropic_route_id(model_ref: &str) -> Option<String> {
@@ -13330,7 +13330,7 @@ mod tests {
                 agent_id,
                 agent_type: "researcher".to_string(),
                 name: Some("Design".to_string()),
-                model: "deepseek-v4-flash".to_string(),
+                model: "deepseek-flash".to_string(),
                 model_profile: Some("deepseek".to_string()),
                 persistent: false,
                 initial_message_index: 0,
@@ -13415,7 +13415,7 @@ mod tests {
                     agent_id,
                     agent_type: "design".to_string(),
                     name: Some("Design".to_string()),
-                    model: "deepseek-v4-flash".to_string(),
+                    model: "deepseek-flash".to_string(),
                     model_profile: Some("deepseek".to_string()),
                     persistent: false,
                     initial_message_index: 0,
@@ -13437,7 +13437,7 @@ mod tests {
         let path = temp.path().join("agent-agent:test.jsonl");
         tokio::fs::write(
             &path,
-            r#"{"agent_type":"researcher","model":"deepseek-v4-flash","model_profile":"deepseek","status":"running"}
+            r#"{"agent_type":"researcher","model":"deepseek-flash","model_profile":"deepseek","status":"running"}
 "#,
         )
         .await
@@ -13448,7 +13448,7 @@ mod tests {
             .expect("summary");
         assert_eq!(summary.agent_type, "researcher");
         assert_eq!(summary.name, "researcher");
-        assert_eq!(summary.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(summary.model.as_deref(), Some("deepseek-flash"));
         assert_eq!(summary.model_profile.as_deref(), Some("deepseek"));
     }
 
@@ -13504,10 +13504,10 @@ mod tests {
             Ok(protocol::HttpResponse {
                 status: 200,
                 headers: Vec::new(),
-                body: r#"{"object":"list","data":[{"id":"deepseek-v4-flash"}]}"#.to_string(),
+                body: r#"{"object":"list","data":[{"id":"deepseek-flash"}]}"#.to_string(),
                 body_bytes: Vec::new(),
             }),
-            "deepseek-v4-flash",
+            "deepseek-flash",
             42,
             true,
         );
@@ -13541,7 +13541,7 @@ mod tests {
                 status: 401,
                 body: "secret-bearing upstream response".to_string(),
             }),
-            "deepseek-v4-flash",
+            "deepseek-flash",
             18,
             true,
         );
@@ -17778,7 +17778,7 @@ mod tests {
             cwd: tmp.path().to_path_buf(),
             lingxi_home: tmp.path().join(branding::DOT_DIR),
             routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["deepseek"] })),
-            default_model: "deepseek/deepseek-v4-flash".to_string(),
+            default_model: "deepseek/deepseek-flash".to_string(),
             ..MobileConfig::default()
         };
         let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
@@ -17809,7 +17809,7 @@ mod tests {
                 "allowlisted-out providers leaked into the picker: {models:?}"
             );
             assert!(
-                models.iter().any(|m| m == "deepseek/deepseek-v4-flash"),
+                models.iter().any(|m| m == "deepseek/deepseek-flash"),
                 "the allowlisted provider's curated models must still be offered: {models:?}"
             );
             assert!(
@@ -17844,7 +17844,7 @@ mod tests {
 
             let result = handle
                 .submit(ClientCommand::SetModel {
-                    model: "deepseek/deepseek-v4-flash".into(),
+                    model: "deepseek/deepseek-flash".into(),
                 })
                 .await;
             assert!(
@@ -17883,7 +17883,7 @@ mod tests {
             let result = handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: Some("deepseek/deepseek-v4-flash".into()),
+                    model: Some("deepseek/deepseek-flash".into()),
                 })
                 .await;
             assert!(result.is_err(), "expected rejection, got {result:?}");
@@ -21253,7 +21253,7 @@ mod tests {
                     origin: AppCreateOriginDto::Library,
                     brief: BRIEF.into(),
                     git_enabled: true,
-                    workflow_model: Some("deepseek/deepseek-v4-flash".into()),
+                    workflow_model: Some("deepseek/deepseek-flash".into()),
                     conversation_id: None,
                     surface: None,
                     mode: AppCreateModeDto::Shell,
@@ -21278,7 +21278,7 @@ mod tests {
             );
             assert_eq!(
                 record.workflow_model.as_deref(),
-                Some("deepseek/deepseek-v4-flash"),
+                Some("deepseek/deepseek-flash"),
                 "CreateApp must persist the selected workflow model as structured metadata"
             );
         });
@@ -22413,10 +22413,10 @@ mod anthropic_model_registry_tests {
         // slash" left `github-copilot/claude-opus-4.8` inert — its bare form has
         // no slash, so that row passed even against the pre-fix code.
         for (foreign, leaked) in [
-            ("deepseek/deepseek-v4-flash", "deepseek-v4-flash"),
+            ("deepseek/deepseek-flash", "deepseek-flash"),
             (
-                "anthropic/deepseek/deepseek-v4-flash",
-                "deepseek/deepseek-v4-flash",
+                "anthropic/deepseek/deepseek-flash",
+                "deepseek/deepseek-flash",
             ),
             ("openrouter/openrouter/auto", "openrouter/auto"),
             ("github-copilot/claude-opus-4.8", "claude-opus-4.8"),
@@ -22461,8 +22461,8 @@ mod anthropic_model_registry_tests {
             "",
             "   ",
             "anthropic/",
-            "deepseek/deepseek-v4-flash",
-            "anthropic/deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-flash",
+            "anthropic/deepseek/deepseek-flash",
             "openrouter/openrouter/auto",
             "github-copilot/claude-opus-4.8",
         ] {
@@ -22506,9 +22506,9 @@ mod default_model_resolution_tests {
             ("claude-sonnet-5".to_string(), Some("anthropic".to_string()))
         );
         assert_eq!(
-            resolve_default_model_ref("deepseek/deepseek-v4-flash", &listings),
+            resolve_default_model_ref("deepseek/deepseek-flash", &listings),
             (
-                "deepseek-v4-flash".to_string(),
+                "deepseek-flash".to_string(),
                 Some("deepseek".to_string())
             )
         );
@@ -22552,7 +22552,7 @@ mod default_model_resolution_tests {
     fn double_qualified_ref_falls_back_to_the_anthropic_boot_default() {
         let listings = listings();
         let (model, profile) =
-            resolve_default_model_ref("anthropic/deepseek/deepseek-v4-flash", &listings);
+            resolve_default_model_ref("anthropic/deepseek/deepseek-flash", &listings);
         assert_eq!(model, "claude-sonnet-5");
         // The PROFILE must come back too: `curated_model_refs` emits
         // provider-qualified rows, so a bare `current` matches none of them and
@@ -22577,8 +22577,8 @@ mod default_model_resolution_tests {
     #[test]
     fn fallback_is_taken_from_the_listings_when_anthropic_is_not_registered() {
         let listings = vec![platform_api::ModelListing {
-            display_model: "deepseek-v4-flash".to_string(),
-            request_model: "deepseek-v4-flash".to_string(),
+            display_model: "deepseek-flash".to_string(),
+            request_model: "deepseek-flash".to_string(),
             provider_id: "deepseek".to_string(),
             provider_label: "deepseek".to_string(),
             description: None,
@@ -22590,7 +22590,7 @@ mod default_model_resolution_tests {
         assert_eq!(
             resolve_default_model_ref("anthropic/claude-sonnet-5", &listings),
             (
-                "deepseek-v4-flash".to_string(),
+                "deepseek-flash".to_string(),
                 Some("deepseek".to_string())
             )
         );
@@ -22600,8 +22600,8 @@ mod default_model_resolution_tests {
     #[test]
     fn empty_listings_preserve_the_configured_ref() {
         assert_eq!(
-            resolve_default_model_ref("anthropic/deepseek/deepseek-v4-flash", &[]),
-            ("anthropic/deepseek/deepseek-v4-flash".to_string(), None)
+            resolve_default_model_ref("anthropic/deepseek/deepseek-flash", &[]),
+            ("anthropic/deepseek/deepseek-flash".to_string(), None)
         );
     }
 }

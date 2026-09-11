@@ -381,7 +381,7 @@ class ProviderSettingsRepository(
                 else -> provider.url
             }
             val migratedModel = when (provider.model) {
-                "deepseek-chat", "deepseek-reasoner" -> "deepseek-v4-flash"
+                "deepseek-chat", "deepseek-reasoner" -> "deepseek-flash"
                 else -> provider.model
             }
             return provider.copy(url = migratedUrl, model = migratedModel)

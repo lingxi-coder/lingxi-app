@@ -5385,6 +5385,15 @@ mod desktop_fusion_executor_boot_test {
     /// exactly as `DesktopFusionExecutor`'s doc comment now promises.
     #[test]
     fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
+        // `desktop_fusion_runtime_config` reads the managed tier at the call
+        // boundary, and a managed tier outranks the user settings this test
+        // fixes. Siblings in this binary set `MANAGED_DIR_ENV` process-wide, so
+        // without the lock a neighbour's managed directory can be live here and
+        // the "fixed" config stays invalid — the exact failure this asserts
+        // against, arriving from somewhere else.
+        let _guard = crate::tests::MANAGED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().join("project");
         let lingxi_home = tmp.path().join("home");

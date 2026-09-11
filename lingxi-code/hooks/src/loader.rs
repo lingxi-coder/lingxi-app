@@ -28,7 +28,7 @@
 //!
 //! ## Per-hook fields
 //!
-//! All five of the oracle's settings hook types — `"command"`, `"http"`,
+//! The oracle's settings hook types plus `"function"` — `"command"`, `"http"`,
 //! `"agent"`, `"prompt"`, and `"mcp_tool"` — are parsed (mapping onto
 //! [`HookExecutor::Command`] / [`HookExecutor::Http`] / [`HookExecutor::Agent`] /
 //! [`HookExecutor::Prompt`] / [`HookExecutor::McpTool`] respectively; the
@@ -301,6 +301,13 @@ pub struct HookEntry {
         skip_serializing_if = "Option::is_none"
     )]
     pub continue_on_block: Option<bool>,
+    /// `function` hook body — plugin-supplied JavaScript, run in the
+    /// deny-by-default sandbox (`crate::function_hook`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// `function` hook wall-clock budget in milliseconds (upstream `budgetMs`).
+    #[serde(default, rename = "budgetMs", skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
     /// `timeout` in seconds, shared by all hook types
     /// (`schemas/hooks.ts:42-46` / `75-79` / `101-105` / `144-148`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -546,6 +553,20 @@ pub(crate) fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)
             // The hook name mirrors the command-hook convention of naming the
             // hook after its primary user-supplied field — here the agent type.
             Some((DEFAULT_AGENT_TYPE.to_string(), executor))
+        }
+        Some("function") => {
+            // `function` hook: plugin-supplied JS evaluated in
+            // `crate::function_hook::Sandbox`. An entry with no `source` is
+            // skipped exactly like a `command` entry with no `command` —
+            // silently dropping is the established shape for a malformed entry.
+            let source = entry.source.clone()?;
+            let executor = HookExecutor::Function {
+                source,
+                budget_ms: entry.budget_ms,
+            };
+            // Named after its type, like `prompt`: the body is the primary
+            // field and is far too long to name a hook after.
+            Some(("function".to_string(), executor))
         }
         Some("prompt") => {
             // `prompt` hook (`schemas/hooks.ts:67-95`): the inline single-turn

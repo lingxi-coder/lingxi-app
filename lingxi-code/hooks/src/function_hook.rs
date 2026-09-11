@@ -342,3 +342,42 @@ mod tests {
         assert_eq!(out, json!("undefined"));
     }
 }
+
+#[cfg(test)]
+mod config_tests {
+    use crate::definition::HookExecutor;
+
+    /// 🚨 The reachability check for this whole feature. A plugin declares a
+    /// function hook in config; if that config does not parse into
+    /// `HookExecutor::Function`, every part of AG-15 is code nobody can invoke.
+    #[test]
+    fn a_function_hook_declared_in_config_becomes_a_function_executor() {
+        let json = serde_json::json!({
+            "type": "function",
+            "source": "return {decision: 'block', reason: 'no'};",
+            "budgetMs": 250
+        });
+        let entry: crate::loader::HookEntry =
+            serde_json::from_value(json).expect("a function entry must deserialize");
+        let (name, executor) =
+            crate::loader::build_executor(&entry).expect("it must map to an executor");
+        assert_eq!(name, "function");
+        match executor {
+            HookExecutor::Function { source, budget_ms } => {
+                assert!(source.contains("decision"));
+                assert_eq!(budget_ms, Some(250));
+            }
+            other => panic!("expected a Function executor, got {other:?}"),
+        }
+    }
+
+    /// A `function` entry with no body is dropped, matching how a `command`
+    /// entry with no command is dropped — not defaulted to an empty script that
+    /// would run and return nothing on every event.
+    #[test]
+    fn a_function_hook_without_a_body_is_skipped() {
+        let entry: crate::loader::HookEntry =
+            serde_json::from_value(serde_json::json!({"type": "function"})).unwrap();
+        assert!(crate::loader::build_executor(&entry).is_none());
+    }
+}

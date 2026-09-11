@@ -16,6 +16,7 @@ import { Hooks } from './pages/Hooks';
 import { McpServers } from './pages/McpServers';
 import { Permissions } from './pages/Permissions';
 import { Plugins } from './pages/Plugins';
+import { ArchivedChats } from './pages/ArchivedChats';
 import { Projects } from './pages/Projects';
 import { ProviderCredentials } from './pages/ProviderCredentials';
 import { RawJson } from './pages/RawJson';
@@ -177,6 +178,7 @@ export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps
   appearance: Appearance,
   voice: Voice,
   projects: Projects,
+  'archived-chats': ArchivedChats,
   diagnostics: Diagnostics,
   about: About,
   'provider-credentials': ProviderCredentials,

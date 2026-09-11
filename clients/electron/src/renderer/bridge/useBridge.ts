@@ -328,6 +328,7 @@ export interface UseBridge {
 }
 
 export interface SessionRuntimeStatus {
+  readonly backgroundAgentsRunning?: boolean;
   readonly connection: ConnectionState;
   readonly turnActive: boolean;
   readonly pendingInteractions: number;
@@ -1869,6 +1870,7 @@ export function useBridge(): UseBridge {
     const state = runtimeStates.get(sessionId);
     if (!summary && !state) return undefined;
     return {
+      backgroundAgentsRunning: Object.values(state?.runtimeCenter.agents ?? {}).some((agent) => agent.agent_id !== 'main' && ['running', 'working', 'in_progress'].includes(agent.status)),
       connection: state?.connection ?? summary?.connection ?? { status: 'idle' },
       turnActive: turnActiveRefs.current.get(sessionId) ?? summary?.turnActive ?? false,
       pendingInteractions: state?.pendingInteractionsOverride

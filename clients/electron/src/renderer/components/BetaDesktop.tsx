@@ -145,6 +145,12 @@ function Button({ children, onClick, disabled = false, primary = false, success 
   );
 }
 
+function SidebarSessionProgress({ label }: { label: string }) {
+  const t = useT();
+  return <span className="sidebar-session-progress" role="progressbar" aria-label={label}
+    style={{ color: t.accent, background: t.accentBg }}><span /></span>;
+}
+
 function SessionRow({ session, active, pinned, opening, status, onClick, onPin, onArchive }: {
   session: SessionRowDto;
   active: boolean;
@@ -163,7 +169,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
     ? { label: 'Session error', color: t.danger }
     : status?.pendingInteractions
       ? { label: 'Waiting for input', color: t.warn }
-      : status?.turnActive
+      : (status?.turnActive || status?.backgroundAgentsRunning)
         ? { label: 'Running', color: t.ok }
         : undefined;
   return (
@@ -186,8 +192,8 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
         <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.title || 'Untitled session'}</span>
           {opening
-            ? <span className="beta-spinner" role="status" aria-label="Opening session" title="Opening session" style={{ marginLeft: 7, color: t.accent }} />
-            : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+            ? <SidebarSessionProgress label="Opening session" />
+            : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" /> : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
         </span>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
           {formatSessionMetadata(session.modified_rfc3339, session.message_count)}
@@ -411,7 +417,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                 ? { label: 'Session error', color: t.danger }
                 : status?.pendingInteractions
                   ? { label: 'Waiting for input', color: t.warn }
-                  : status?.turnActive
+                  : (status?.turnActive || status?.backgroundAgentsRunning)
                     ? { label: 'Running', color: t.ok }
                     : undefined;
               return (
@@ -432,8 +438,8 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                     <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 600 : 500 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
                       {opening
-                        ? <span className="beta-spinner" role="status" aria-label="Opening session" title="Opening session" style={{ marginLeft: 7, color: t.accent }} />
-                        : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+                        ? <SidebarSessionProgress label="Opening session" />
+                        : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" /> : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
                     </span>
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
                       {basename(pinned.projectPath)} · {metadata}
@@ -630,7 +636,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
         style={{ color: t.accent }}
       />
     </aside>
-    {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} />}
+    {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title)} />}
     </>
   );
 }
@@ -2674,7 +2680,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             )}
           </div>
           <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
-          <button
+          {!bridge.running && !hasPrompt && <button
             type="button"
             disabled={!ready}
             className="composer-icon-action"
@@ -2685,8 +2691,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             style={{ ...composerPrimaryActionStyle(t, ready), color: flowMode ? t.accent : t.text }}
           >
             <Icon name="waveform" size={18} color="currentColor" stroke={2.15} />
-          </button>
-          <div className="composer-submit-actions" data-pending={bridge.running && hasPrompt}>
+          </button>}
+          <div className="composer-submit-actions" style={!bridge.running && !hasPrompt ? { display: 'none' } : undefined} data-pending={bridge.running && hasPrompt}>
             <span className="composer-stop-presence" data-visible={bridge.running} aria-hidden={!bridge.running}>
               {stopTurnButton}
             </span>

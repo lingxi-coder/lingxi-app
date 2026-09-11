@@ -25,6 +25,7 @@ export const SETTINGS_NAV: NavPage[] = [
   { id: 'account', label: '账户', group: '个人', icon: 'key', needsEngine: false, layered: false, searchKeys: ['account', 'auth', 'login', 'logout', 'credential', '凭据', 'secure storage'], implemented: true },
   { id: 'appearance', label: '外观', group: '个人', icon: 'sun', needsEngine: false, layered: false, searchKeys: ['theme', '主题', '外观', 'appearance', 'dark', 'light', 'system'], implemented: true },
   { id: 'voice', label: '语音', group: '个人', icon: 'mic', needsEngine: false, layered: false, searchKeys: ['voice', '语音', 'tts', 'stt', 'rate'], implemented: true },
+  { id: 'archived-chats', label: '已归档会话', group: '个人', icon: 'archive', needsEngine: false, layered: false, searchKeys: ['archived', 'chats', '归档', '会话', 'restore', '恢复'], implemented: true },
   { id: 'projects', label: '项目与信任', group: '个人', icon: 'folder', needsEngine: false, layered: false, searchKeys: ['project', '项目', 'trust', '信任', 'pinned'], implemented: true },
 
   { id: 'provider-credentials', label: 'Provider 凭据', group: '模型与服务', icon: 'key', needsEngine: false, layered: false, searchKeys: ['provider', 'credential', '凭据', 'API Key', 'keychain'], implemented: true },

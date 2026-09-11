@@ -3,9 +3,9 @@ import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './Desk
 import { scheduledTaskFromJob, type ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
 
-export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, onConfirm }: {
+export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, onConfirm, onRetry }: {
   title: string; jobs: ScheduledCronJob[]; loading: boolean; busy: boolean; error: string;
-  onClose(): void; onConfirm(): void;
+  onClose(): void; onConfirm(): void; onRetry?(): void;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -32,10 +32,11 @@ export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, 
       This chat has scheduled tasks: <strong>{jobs.map((job) => scheduledTaskFromJob(job).title).join(', ')}</strong>.
       Archiving “{title}” will also remove these tasks and stop future runs. The chat history will be kept.
     </p> : <p style={{ color: 'var(--dialog-text-2)', lineHeight: 1.7 }}>“{title}” will move to Archived chats. You can restore it later.</p>}
+    {busy && <p role="status">Archiving chat and updating the sidebar…</p>}
     {error && <p role="alert" style={{ color: 'var(--dialog-danger)', lineHeight: 1.6 }}>{error}</p>}
     <DesktopDialogActions>
       <DesktopDialogButton variant="cancel" disabled={busy} onClick={onClose}>Cancel</DesktopDialogButton>
-      <DesktopDialogButton variant="primary" disabled={busy || loading || !!error} onClick={onConfirm}>{busy ? 'Archiving…' : jobs.length ? 'Archive and remove' : 'Archive chat'}</DesktopDialogButton>
+      <DesktopDialogButton variant="primary" disabled={busy || loading || (!!error && !onRetry)} onClick={error ? onRetry : onConfirm}>{error && !busy ? 'Try again' : busy ? 'Archiving…' : jobs.length ? 'Archive and remove' : 'Archive chat'}</DesktopDialogButton>
     </DesktopDialogActions>
   </DesktopDialog>;
 }

@@ -84,7 +84,7 @@ test('runtime archive lock rejects active work and blocks racing new prompts and
   (runtime as any).activeTurn = true;
   assert.throws(() => runtime.beginArchive(), /active work/);
   (runtime as any).activeTurn = false;
-  (runtime as any).pendingPermissionIds.add(1);
+  (runtime as any).pendingPermissionIds.set(1, { request_id: 1 });
   assert.throws(() => runtime.beginArchive(), /active work/);
   (runtime as any).pendingPermissionIds.clear();
   const release = runtime.beginArchive();

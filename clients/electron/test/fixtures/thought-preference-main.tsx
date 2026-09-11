@@ -19,7 +19,8 @@ function Fixture() {
   Object.assign(window, { thoughtFixture: {
     setDark(value: boolean) { flushSync(() => setDark(value)); },
     finishTools() { flushSync(() => setToolsDone(true)); },
-    finish() { flushSync(() => setDone(true)); },
+    finish() { flushSync(() => { setDone(true); setRunning(false); }); },
+    waitWithoutReasoning() { flushSync(() => { setDone(true); setRunning(true); }); },
     switchSession() { flushSync(() => { setSessionKey('b'); setRunning(false); setDone(false); }); },
     stop() { flushSync(() => setRunning(false)); },
     restart() { flushSync(() => { setRunning(true); setDone(false); }); },

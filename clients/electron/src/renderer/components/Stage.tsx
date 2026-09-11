@@ -205,7 +205,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >
-        {rows.length === 0 && !running && !agents?.length && (
+        {rows.length === 0 && !running && !agents?.some((agent) => agent.agent_id !== 'main') && (
           <div
             className="desktop-empty-state-wrap"
             role="status"

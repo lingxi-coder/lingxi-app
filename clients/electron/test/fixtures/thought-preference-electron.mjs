@@ -67,6 +67,9 @@ async function main() {
     assert.equal((await state()).thinking, false, 'history never renders unfinished reasoning as active');
     assert.equal(await evaluate(`document.querySelector('.tool-group-trigger').getAttribute('aria-expanded')`), 'false', 'new session resets tool group expansion');
     await evaluate('window.thoughtFixture.restart()'); await wait();
+    await evaluate('window.thoughtFixture.waitWithoutReasoning()'); await wait();
+    assert.equal((await state()).thinking, true, 'waiting indicator works without reasoning deltas');
+    assert.doesNotMatch((await state()).text, /Finished reasoning/);
     const screenshotBase = process.env.LINGXI_THOUGHT_SCREENSHOT;
     const capture = async (suffix) => {
       if (!screenshotBase) return;

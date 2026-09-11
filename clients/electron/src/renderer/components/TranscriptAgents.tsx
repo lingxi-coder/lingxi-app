@@ -8,9 +8,11 @@ export interface TranscriptAgentsProps {
   onOpenAgent?: (agentId: string) => void;
 }
 
-/** Keep rows in their first-seen order as listing refreshes arrive. */
+/** Keep background agents in first-seen order as listing refreshes arrive. */
 export function orderedTranscriptAgents(previousIds: readonly string[], agents: readonly SessionAgentSummaryDto[]): SessionAgentSummaryDto[] {
   const byId = new Map(agents.map((agent) => [agent.agent_id, agent]));
+  // SessionAgentList reserves this ID for the main conversation, not a background worker.
+  byId.delete('main');
   const ids = new Set([...previousIds, ...byId.keys()]);
   return [...ids].flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
 }

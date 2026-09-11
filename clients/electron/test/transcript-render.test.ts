@@ -769,7 +769,18 @@ test('completed, historical and stopped thinking is hidden regardless of legacy 
         collapseThoughtsByDefault,
         liveItems: [{ type: 'thinking', id: 'thought-hidden', text: 'Reasoning body', streamed: state.streamed, done: state.done }],
       }));
-      assert.doesNotMatch(html, /Reasoning body|data-run-type="thinking"|aria-expanded/);
+      assert.doesNotMatch(html, /Reasoning body|aria-expanded/);
+      assert.equal(html.includes('data-run-type="thinking"'), state.running);
     }
   }
+});
+
+
+test('a main-only roster does not suppress the empty conversation', () => {
+  const html = render(React.createElement(Stage, {
+    agents: [{ agent_id: 'main', name: 'Main agent', agent_type: 'main', status: 'idle' }],
+    emptyMessage: 'Ready for a new prompt',
+  }));
+  assert.match(html, /Ready for a new prompt/);
+  assert.doesNotMatch(html, /data-agent-id="main"/);
 });

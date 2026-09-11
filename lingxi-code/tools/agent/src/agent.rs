@@ -3297,6 +3297,9 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
+                if let platform_api::subagent_spawn::SubagentSpawnError::DeniedByHook(reason) = &e {
+                    return Err(ToolError::InvalidInput(format!("Agent: {reason}")));
+                }
                 Err(ToolError::Internal(format!(
                     "Agent: async spawn failed: {e}"
                 )))
@@ -4916,6 +4919,22 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
                     platform_api::subagent_spawn::max_concurrent_subagents(),
                 )))
+            }
+            // A plugin hook saying "no" is a POLICY outcome, not a crash.
+            // Folding it into `Internal` told the user the runtime broke and
+            // filed it under `spawn_error` — the variant existed for exactly
+            // this distinction and nothing was matching on it.
+            Err(platform_api::subagent_spawn::SubagentSpawnError::DeniedByHook(reason)) => {
+                // 🚨 Give the lifetime slot back. The 200-per-session cap is
+                // reserved BEFORE the spawn, and only the pool-full arms
+                // released it — so a plugin denying a common spawn would walk
+                // the session to "Subagent spawn limit reached" without a
+                // single agent ever running. Pre-existing for Runtime/Internal,
+                // but this is the first spawn error a plugin raises on purpose
+                // and repeatedly.
+                self.release_spawn_reservation();
+                Self::emit_failed(&bus, &invocation_id, "spawn_denied_by_hook", duration_ms).await;
+                Err(ToolError::InvalidInput(format!("Agent: {reason}")))
             }
             Err(e) => {
                 Self::emit_failed(&bus, &invocation_id, "spawn_error", duration_ms).await;

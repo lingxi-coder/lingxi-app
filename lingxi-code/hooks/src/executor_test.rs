@@ -4926,13 +4926,41 @@ mod prompt_dispatch_tests {
     async fn a_throwing_function_hook_yields_no_decision() {
         let agg = run_function_hook("throw new Error('boom');").await;
         assert_eq!(agg.decision, None, "a throw must not decide anything");
+        // ⚠️ `decision == None` ALONE is vacuous: it is equally what "the arm
+        // never ran" and "errors were swallowed as null" produce. An audit
+        // confirmed both breakages left the old version of this test green.
+        // Pin that the hook RAN and that its outcome was an error.
+        let (_, result) = agg
+            .all_results
+            .first()
+            .expect("the function hook must actually have been dispatched");
+        assert_eq!(result.outcome, HookOutcome::Error, "a throw is an error");
+        assert!(result.stderr.contains("boom"), "{}", result.stderr);
     }
 
     /// Same for exhausting the budget: a hook cannot buy an outcome by hanging.
     #[tokio::test]
     async fn a_hanging_function_hook_yields_no_decision() {
+        let started = std::time::Instant::now();
         let agg = run_function_hook("while (true) {}").await;
         assert_eq!(agg.decision, None);
+        let (_, result) = agg
+            .all_results
+            .first()
+            .expect("the function hook must actually have been dispatched");
+        assert_eq!(result.outcome, HookOutcome::Error);
+        assert!(
+            result.stderr.contains("time budget"),
+            "the failure must be the BUDGET, not some other error: {}",
+            result.stderr
+        );
+        // It must have actually waited — a hook that returned instantly would
+        // satisfy every assertion above while proving the budget never ran.
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(400),
+            "the 500ms budget must have been spent; took {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

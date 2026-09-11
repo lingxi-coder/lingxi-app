@@ -94,6 +94,27 @@ fn open_debug_log_in(dir: &std::path::Path) -> Option<FileSink> {
 /// Initialise the global tracing subscriber. Idempotent — subsequent calls
 /// (e.g. from a second test in the same process) are silent no-ops.
 pub fn init(debug: bool, suppress_terminal: bool) {
+    init_with_sink(debug, suppress_terminal, &open_debug_log);
+}
+
+/// The testable half of [`init`]: everything except resolving the sink.
+///
+/// ⚠️ Exists because `init` installs a PROCESS-GLOBAL subscriber exactly once,
+/// so a test cannot call it twice and observe anything. An audit unwired the
+/// file sink in BOTH branches of `init` — i.e. `--debug` wrote nothing, the
+/// exact defect this module exists to fix — and every test stayed green,
+/// because they all called `open_debug_log_in` directly and never reached here.
+fn init_with_sink(
+    debug: bool,
+    suppress_terminal: bool,
+    resolve_sink: &dyn Fn() -> Option<FileSink>,
+) {
+    // The `debug` gate lives HERE and only here. Splitting it between caller
+    // and callee is what let the first version of the wiring test catch a
+    // resolver being consulted with `--debug` off.
+    let file_layer_for = |resolve: &dyn Fn() -> Option<FileSink>| {
+        if debug { resolve() } else { None }
+    };
     // The fullscreen TUI reconciler owns the terminal, so routing tracing to
     // stderr corrupts the rendered frame (stray WARN lines drawn over the input
     // box / borders). When the interactive TUI is about to mount, install an
@@ -104,7 +125,7 @@ pub fn init(debug: bool, suppress_terminal: bool) {
     // afterwards, so the FILE sink still runs here — previously this branch
     // discarded everything and left nothing to diagnose with.
     if suppress_terminal {
-        let file_layer = debug.then(open_debug_log).flatten().map(|sink| {
+        let file_layer = file_layer_for(resolve_sink).map(|sink| {
             fmt::layer()
                 .with_writer(sink)
                 .with_ansi(false)
@@ -130,7 +151,7 @@ pub fn init(debug: bool, suppress_terminal: bool) {
     // The file sink is additive: stderr keeps its existing behaviour, and
     // `--debug` additionally leaves a log behind for the `debug` skill and for
     // after-the-fact diagnosis.
-    let file_layer = debug.then(open_debug_log).flatten().map(|sink| {
+    let file_layer = file_layer_for(resolve_sink).map(|sink| {
         fmt::layer()
             .with_writer(sink)
             .with_ansi(false)
@@ -203,6 +224,45 @@ mod tests {
             .collect();
         assert_eq!(logs.len(), 1, "one log per run");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 🚨 The wiring test the audit found missing. Every other test here calls
+    /// `open_debug_log_in` directly, so unwiring the sink inside `init` — which
+    /// is the ONLY caller in production (`apps/cli/src/lib.rs`) — left them all
+    /// green while `--debug` wrote nothing at all.
+    ///
+    /// Asserts the sink is CONSULTED, in both branches, exactly when `debug` is
+    /// on. It cannot assert the subscriber itself: that is process-global and
+    /// installed once, which is why the sink is injected here.
+    #[test]
+    fn init_consults_the_file_sink_exactly_when_debug_is_on() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for suppress_terminal in [false, true] {
+            let calls = AtomicUsize::new(0);
+            let probe = || -> Option<FileSink> {
+                calls.fetch_add(1, Ordering::SeqCst);
+                None
+            };
+            init_with_sink(true, suppress_terminal, &probe);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "`--debug` must reach the file sink (suppress_terminal={suppress_terminal}) — \
+                 the TUI branch especially, since it is where stderr is discarded"
+            );
+
+            let quiet = AtomicUsize::new(0);
+            let never = || -> Option<FileSink> {
+                quiet.fetch_add(1, Ordering::SeqCst);
+                None
+            };
+            init_with_sink(false, suppress_terminal, &never);
+            assert_eq!(
+                quiet.load(Ordering::SeqCst),
+                0,
+                "without `--debug` nothing may be written"
+            );
+        }
     }
 
     /// An unwritable directory must not stop the session: the log is a

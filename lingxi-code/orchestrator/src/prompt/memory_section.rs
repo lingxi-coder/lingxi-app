@@ -261,7 +261,6 @@ mod tests {
         assert!(!s.ends_with('\n'));
     }
 
-    #[test]
     /// 2.1.267 separates the `description:` frontmatter line with a COMMA, in
     /// BOTH profiles. The em-dash spelling was 2.1.220's and has zero hits in
     /// 2.1.267 — checked escaped (`\\u2014`) AND raw, because the binary stores
@@ -287,6 +286,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn index_name_is_memory_md() {
         assert_eq!(MEMORY_INDEX_NAME, "MEMORY.md");
     }

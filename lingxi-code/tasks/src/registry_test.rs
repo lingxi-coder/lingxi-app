@@ -1526,6 +1526,89 @@ async fn spawn_invokes_handler_and_returns_handler_task_id() {
     );
 }
 
+/// A Fusion row goes terminal BEFORE its `<fusion-result>` append resolves —
+/// `finish_fusion_terminal` flips the status, then the handler awaits
+/// `FusionCompletionSink::publish`. Print mode's waiter
+/// (`apps/cli/src/run.rs::fusion_result_ready`) is built on exactly that: it
+/// keeps polling while `publication_status` is `Pending`.
+///
+/// The notification sweep has per-type retention for `LocalAgent`,
+/// `LocalWorkflow` and `McpTask`, and `_ => true` for everything else. Fusion
+/// lands in the catch-all and is dropped on the first pass after it is
+/// notified, consulting no deadline at all — so the row the waiter is polling
+/// disappears and a `/fusion` run that actually succeeded reports a runtime
+/// error instead.
+#[tokio::test]
+async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
+    let (_d, mut registry) = make_registry();
+    registry.register_handler(
+        TaskType::LocalFusion,
+        RecordingHandler::new(TaskType::LocalFusion, "fsweep1"),
+    );
+    let request = platform_api::FusionRequest {
+        schema_version: 1,
+        origin: platform_api::FusionOrigin::Slash,
+        prompt: "review this".into(),
+        preset: platform_api::FusionPreset::Quality,
+        models: None,
+        dimensions: vec!["coverage".into()],
+        partial_ok: true,
+        max_panel: None,
+        cross_provider: false,
+        parent_profile: "openai".into(),
+        parent_model: "gpt-5.4".into(),
+        workflow_run_id: None,
+    };
+    let id = registry
+        .spawn(
+            TaskType::LocalFusion,
+            TaskSpawnInput::LocalFusion {
+                request,
+                conversation_id: "11111111-2222-4333-8444-555555555555".into(),
+            },
+            "Fusion quality same-provider: review this".into(),
+        )
+        .await
+        .expect("spawn");
+
+    registry
+        .finish_fusion_terminal(&id, "fu_sweep".into(), "the answer".into(), TaskStatus::Completed)
+        .await
+        .expect("terminal");
+    registry.mark_notified(&id).await.expect("notified");
+
+    let pending = match registry.get(&id).await.expect("row present") {
+        TaskState::LocalFusion(fusion) => fusion.publication_status,
+        other => panic!("expected LocalFusion, got {other:?}"),
+    };
+    assert_eq!(
+        pending,
+        platform_api::FusionPublicationStatus::Pending,
+        "precondition: the append has not resolved yet"
+    );
+
+    // The sweep runs on the notification-drain pass, evicting what an earlier
+    // pass already announced. Two passes is the window a waiter sits in.
+    let _ = registry.take_pending_task_notifications().await;
+    let _ = registry.take_pending_task_notifications().await;
+
+    assert!(
+        registry.get(&id).await.is_some(),
+        "the row a print-mode waiter is still polling must not be swept while its publication is Pending"
+    );
+
+    // Once the append settles, retention has nothing left to protect.
+    registry
+        .set_fusion_publication(&id, platform_api::FusionPublicationReceipt::published())
+        .await;
+    let _ = registry.take_pending_task_notifications().await;
+    let _ = registry.take_pending_task_notifications().await;
+    assert!(
+        registry.get(&id).await.is_none(),
+        "a settled Fusion row is evictable like any other terminal row"
+    );
+}
+
 #[tokio::test]
 async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state() {
     const TIMEOUT_MS: u64 = 3_600_250;

@@ -4766,6 +4766,17 @@ impl TaskRegistry {
                     TaskState::McpTask(_) => {
                         base.end_time.is_none_or(|end| end + EVICT_AFTER <= now)
                     }
+                    // A Fusion run reaches a terminal STATUS before its
+                    // `<fusion-result>` append resolves — `finish_fusion_terminal`
+                    // flips the row, then the handler awaits the completion
+                    // sink. Print mode's waiter is built on that gap
+                    // (`apps/cli/src/run.rs::fusion_result_ready` polls while
+                    // the receipt is `Pending`), so evicting here would delete
+                    // the row it is watching and turn a successful run into a
+                    // runtime error. Every other receipt state — published,
+                    // durably queued, or a definite failure — is settled and
+                    // has nothing left to protect.
+                    TaskState::LocalFusion(fusion) => fusion.publication_status.is_terminal(),
                     _ => true,
                 }
             })

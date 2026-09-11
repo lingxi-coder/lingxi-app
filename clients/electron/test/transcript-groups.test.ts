@@ -1,0 +1,52 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import * as React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { transcriptRows } from '../src/renderer/components/transcriptRows';
+import { ToolGroup } from '../src/renderer/components/ToolGroup';
+import { Theme } from '../src/renderer/theme/ThemeContext';
+import { tokens } from '../src/renderer/theme/tokens';
+import type { RunItem, ToolRunItem } from '../src/renderer/model/runItem';
+(globalThis as { React?: typeof React }).React = React;
+const tool = (id: string, status: ToolRunItem['status'] = 'done'): ToolRunItem => ({
+  type: 'tool', id, tool: 'Read', status, view: { verb: 'read', label: 'Read', title: `Read ${id}` },
+  result: { headline: `Summary ${id}`, body: `Output ${id}`, body_lines: 1, body_truncated: false },
+});
+const thought: RunItem = { type: 'thinking', id: 'thought', text: 'Never render reasoning', done: true, streamed: true };
+test('tools join across thoughts but stop at messages and turn boundaries', () => {
+  const items: RunItem[] = [tool('a'), thought, tool('b'), { type: 'narration', id: 'm', role: 'assistant', text: 'Update' }, tool('c'), { type: 'meta', id: 'end', dur: '', tokens: '' }, tool('d')];
+  const rows = transcriptRows(items, false);
+  assert.deepEqual(rows.map((row) => row.type), ['tool-group', 'narration', 'tool-group', 'meta', 'tool-group']);
+  assert.deepEqual(rows[0]?.type === 'tool-group' && rows[0].tools.map((t) => t.id), ['a', 'b']);
+  assert.equal(items.length, 7);
+});
+test('only live thinking remains in its original position; it never splits tools', () => {
+  const live = { ...thought, done: false };
+  assert.deepEqual(transcriptRows([tool('a'), live, tool('b')], true).map((row) => row.type), ['tool-group', 'thinking']);
+  assert.equal(transcriptRows([live], false).length, 0);
+  assert.equal(transcriptRows([thought], true).length, 0);
+});
+test('tool group identity survives status updates and additional calls', () => {
+  assert.equal(transcriptRows([tool('a', 'running')], true)[0]?.id, transcriptRows([tool('a'), thought, tool('b')], true)[0]?.id);
+});
+function renderGroup(tools: ToolRunItem[], open = false) {
+  return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(ToolGroup, {
+    group: { type: 'tool-group', id: 'group', tools }, open, toolOpen: () => undefined, onSetOpen: () => {},
+  })));
+}
+test('running groups show only active calls, even when disclosure was open', () => {
+  const html = renderGroup([tool('finished'), tool('active', 'running')], true);
+  assert.match(html, /Read active/);
+  assert.doesNotMatch(html, /Read finished|Used 2 tools|Output/);
+});
+test('settled groups collapse to one row, expose failures and expand summaries', () => {
+  const tools = [tool('a'), tool('b', 'error')];
+  const closed = renderGroup(tools);
+  assert.match(closed, /Used 2 tools · 1 failed/);
+  assert.match(closed, /aria-expanded="false"/);
+  assert.doesNotMatch(closed, /Summary a|Summary b/);
+  const opened = renderGroup(tools, true);
+  assert.match(opened, /Summary a/);
+  assert.match(opened, /Summary b/);
+  assert.doesNotMatch(opened, /Output a|Output b/);
+});

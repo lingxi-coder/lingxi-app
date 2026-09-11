@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'thought-preference-electron.mjs');
 
-test('Thought defaults follow settings while manual choices survive streaming and stay session scoped', async () => {
+test('Thinking stays in place while live, hides content and disappears on completion or session switch', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-thought-preference-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-thought-preference-electron-'));
   const vite = await createServer({

@@ -1660,3 +1660,12 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
   .composer-icon-action,
   .composer-submit-button { transition: none; }
 }
+
+/* Compact activity rows share the transcript's existing type and color scale. */
+.transcript-thinking { min-height: 28px; display: flex; align-items: center; font-size: 13px; }
+.transcript-tool-group { min-width: 0; }
+.transcript-tool-group .tool-disclosure-trigger { min-height: 32px !important; }
+.tool-group-trigger:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .desktop-stage .running-sweep { animation: none; background: none; color: var(--sweep-base, inherit); -webkit-text-fill-color: currentColor; }
+}

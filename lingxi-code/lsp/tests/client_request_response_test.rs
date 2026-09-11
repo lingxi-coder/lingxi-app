@@ -87,7 +87,13 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
         let params = &req["params"];
         assert!(params["processId"].is_number());
         assert_eq!(params["clientInfo"]["name"], "Claude Code");
-        assert_eq!(params["clientInfo"]["version"], "2.1.252");
+        // Derived, not spelled: the oracle reads this from the same build
+        // VERSION as the User-Agent and `AI_AGENT` stamps, and a literal here
+        // is how the LSP copy drifted behind the constant before 2026-09-10.
+        assert_eq!(
+            params["clientInfo"]["version"],
+            platform_api::CLAUDE_CODE_VERSION
+        );
         assert_eq!(
             params["initializationOptions"],
             json!({ "checkOnSave": true })

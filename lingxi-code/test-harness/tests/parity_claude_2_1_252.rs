@@ -1,46 +1,12 @@
-//! Live version-facing identifier pins for the Claude Code 2.1.252 oracle.
+//! What the Claude Code 2.1.252 release said, captured from that binary.
 //!
-//! Everything below derives from one constant so the advertised version, child
-//! process identity, and WebFetch user agent cannot drift independently.
+//! The live version-facing identifier pins moved to
+//! `parity_version_identifiers.rs` when the constant was raised to 2.1.267:
+//! they were never about 2.1.252, they were about the derivation, and a version
+//! in the file name made them look like a release capture. What stays here is
+//! one — the `claude agents` help text as 2.1.252 printed it.
 
 const AGENTS_HELP: &str = include_str!("../src/parity/fixtures/cc_2_1_252_agents_help.txt");
-
-#[test]
-fn version_const_is_2_1_252() {
-    assert_eq!(platform_api::CLAUDE_CODE_VERSION, "2.1.252");
-}
-
-#[test]
-fn ai_agent_env_value_is_2_1_252() {
-    let derived = format!(
-        "claude-code_{}_agent",
-        platform_api::CLAUDE_CODE_VERSION.replace('.', "-")
-    );
-    assert_eq!(derived, "claude-code_2-1-252_agent");
-}
-
-#[test]
-fn web_fetch_user_agent_is_2_1_252() {
-    let derived = format!(
-        "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-        platform_api::CLAUDE_CODE_VERSION
-    );
-    assert_eq!(
-        derived,
-        "Claude-User (claude-code/2.1.252; +https://support.anthropic.com/)"
-    );
-}
-
-#[test]
-fn version_facing_identifiers_share_one_source() {
-    let version = platform_api::CLAUDE_CODE_VERSION;
-    assert!(format!("claude-code_{}_agent", version.replace('.', "-"))
-        .contains(&version.replace('.', "-")));
-    assert!(
-        format!("Claude-User (claude-code/{version}; +https://support.anthropic.com/)")
-            .contains(version)
-    );
-}
 
 #[test]
 fn agents_help_fixture_pins_restricted_dispatch_surface() {

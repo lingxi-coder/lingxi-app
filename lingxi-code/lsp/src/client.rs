@@ -25,7 +25,10 @@ use tracing::{debug, warn};
 const CONTENT_MODIFIED: i32 = -32801;
 const CONTENT_MODIFIED_RETRIES: u32 = 3;
 const CONTENT_MODIFIED_BASE_DELAY_MS: u64 = 500;
-const LSP_CLIENT_VERSION: &str = "2.1.252";
+/// Oracle `clientInfo:{name:"Claude Code",version:{…}.VERSION}` — the same
+/// build VERSION the User-Agent and `AI_AGENT` stamps read, so it tracks the
+/// one constant instead of keeping a copy that has to be remembered.
+const LSP_CLIENT_VERSION: &str = platform_api::CLAUDE_CODE_VERSION;
 
 /// Typed client over a JSON-RPC connection to one LSP server.
 pub struct LspClient {

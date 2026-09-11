@@ -15,21 +15,32 @@
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
-/// (`claude-code_2-1-252_agent`) and the WebFetch `User-Agent`
-/// (`claude-code/2.1.252`). LingXi is a 1:1 copy, so it presents the same string.
+/// (`claude-code_2-1-267_agent`) and the WebFetch `User-Agent`
+/// (`claude-code/2.1.267`). LingXi is a 1:1 copy, so it presents the same string.
 /// Single source of truth (R-V1) so the AI_AGENT and User-Agent stamps never drift.
 ///
 /// Raised 2.1.241 → 2.1.245 on 2026-08-25, once the main query-loop identity
 /// (`querySource` / `print` vs non-interactive) matched the 2.1.245 binary.
 /// Raised 2.1.246 → 2.1.252 on 2026-08-30 after the mcp/plugin byte-alignment
 /// backlog was implemented against the newer oracle.
+/// Raised 2.1.252 → 2.1.267 on 2026-09-10, after the 2.1.267 sweep: the oracle's
+/// own `VERSION:"2.1.267"` sits in the metadata object that `Ma()` (User-Agent)
+/// and `RMn()` (AI_AGENT) both read, and both templates are unchanged —
+/// `claude-code/${…VERSION}` and `claude-code_${…VERSION.replace(/\./g,"-")}_${e}`
+/// — so only the number moves. What the bump does NOT claim: the gaps the sweep
+/// found are classified, not closed. Plugin surface modules and the JSX render
+/// runtime are unbuilt, and `SubagentHandback` is gated FALSE upstream so its
+/// absence is alignment. Those are registered divergences, not behaviour this
+/// number overstates.
 ///
 /// The bump is deliberately LAST. It is what this session tells servers and child
 /// processes it is, so raising it before the behaviour matched would overstate
 /// the port — and the port has been burned by the opposite error too (it once
-/// advertised 2.1.217 while implementing 2.1.220), which is why all three
-/// identifiers derive from this one constant.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.252";
+/// advertised 2.1.217 while implementing 2.1.220), which is why every outward
+/// identifier derives from this one constant — including the LSP `clientInfo`,
+/// which kept its own copy until this bump and would have been the next thing to
+/// drift (oracle: `clientInfo:{name:"Claude Code",version:{…}.VERSION}`).
+pub const CLAUDE_CODE_VERSION: &str = "2.1.267";
 
 pub mod agent_name_registry;
 pub mod agent_view;

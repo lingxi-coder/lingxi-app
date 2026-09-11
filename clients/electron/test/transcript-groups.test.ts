@@ -42,7 +42,8 @@ test('running groups show only active calls, even when disclosure was open', () 
 test('settled groups collapse to one row, expose failures and expand summaries', () => {
   const tools = [tool('a'), tool('b', 'error')];
   const closed = renderGroup(tools);
-  assert.match(closed, /Used 2 tools · 1 failed/);
+  assert.match(closed, /Read b · 1 failed · 2 tools/);
+  assert.doesNotMatch(closed, /Used 2 tools|Read a/);
   assert.match(closed, /aria-expanded="false"/);
   assert.doesNotMatch(closed, /Summary a|Summary b/);
   const opened = renderGroup(tools, true);
@@ -62,4 +63,22 @@ test('thinking resumes after tools settle without competing with active tools or
   assert.equal(transcriptRows([tool('a', 'running')], true).filter((row) => row.type === 'thinking').length, 0);
   assert.equal(transcriptRows([tool('a')], true).filter((row) => row.type === 'thinking').length, 1);
   assert.equal(transcriptRows([{ type: 'compaction', id: 'compact', status: 'running' }], true).filter((row) => row.type === 'thinking').length, 0);
+});
+
+test('summary uses the last tool icon and argument detail, not the first tool or generic count', () => {
+  const last = { ...tool('last'), view: { verb: 'exec', label: 'Run', title: 'Run tests', sub_line: { prefix: '$ ', text: 'npm test' } } };
+  const html = renderGroup([tool('first'), last]);
+  const single = renderGroup([last]);
+  assert.match(html, /Run tests · \$ npm test/);
+  assert.doesNotMatch(html, /Read first|Used 2 tools/);
+  assert.equal(html.match(/<svg.*?<\/svg>/s)?.[0], single.match(/<svg.*?<\/svg>/s)?.[0]);
+  assert.notEqual(html.match(/<svg.*?<\/svg>/s)?.[0], renderGroup([tool('read')]).match(/<svg.*?<\/svg>/s)?.[0]);
+  assert.equal(renderGroup([]), '');
+});
+
+test('summary follows the last call primary argument rather than its fallback title', () => {
+  const last = { ...tool('last'), view: { verb: 'exec', label: 'Run', title: 'Check TypeScript', primary: 'npm run typecheck', qualifier: ' in desktop' } };
+  const html = renderGroup([last]);
+  assert.match(html, /Run\(npm run typecheck\) in desktop/);
+  assert.doesNotMatch(html, /Check TypeScript/);
 });

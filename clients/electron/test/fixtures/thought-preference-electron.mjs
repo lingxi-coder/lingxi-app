@@ -50,8 +50,9 @@ async function main() {
     assert.equal((await state()).thinking, true);
     assert.doesNotMatch((await state()).text, /Streaming reasoning/);
     await evaluate('window.thoughtFixture.finishTools()'); await wait();
-    assert.match((await state()).text, /Used 2 tools/);
-    assert.doesNotMatch((await state()).text, /Stage.tsx|npm run typecheck/);
+    assert.match((await state()).text, /npm run typecheck/);
+    assert.doesNotMatch((await state()).text, /Used 2 tools/);
+    assert.doesNotMatch((await state()).text, /Stage.tsx/);
     await evaluate(`document.querySelector('.tool-group-trigger').click()`); await wait();
     assert.match((await state()).text, /Stage.tsx/);
     assert.match((await state()).text, /npm run typecheck/);

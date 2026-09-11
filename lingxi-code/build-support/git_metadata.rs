@@ -55,7 +55,14 @@ pub fn emit() {
     let cwd = std::env::current_dir().expect("build script requires its crate directory");
     let sha =
         git_output(&cwd, &["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
-    println!("cargo:rustc-env=LINGXI_GIT_SHA_SHORT={sha}");
+    // The name is assembled from `branding::ENV_PREFIX` rather than spelled
+    // out: the brand-leak gate tracks every hardcoded brand token, and the
+    // reading end (`option_env!` in commands/core/src/version.rs) already
+    // has to carry one literal that a macro cannot compute.
+    println!(
+        "cargo:rustc-env={}GIT_SHA_SHORT={sha}",
+        branding::ENV_PREFIX
+    );
     for path in watch_paths(&cwd) {
         println!("cargo:rerun-if-changed={}", path.display());
     }

@@ -1810,7 +1810,9 @@ impl PoolSubagentSpawner {
         &self,
         request: &SubagentSpawnRequest,
     ) -> Result<Option<SubagentSpawnRequest>, SubagentSpawnError> {
-        let Some(executor) = self.hook_executor.get().cloned() else {
+        // `RuntimeLink::get` already hands back an owned `Arc`; the
+        // `OnceLock` this arrived on borrows and needs a `.cloned()`.
+        let Some(executor) = self.hook_executor.get() else {
             return Ok(None);
         };
         let event = hooks::events::HookEvent::AgentSpawn {

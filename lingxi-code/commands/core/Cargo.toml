@@ -62,5 +62,10 @@ compaction = { path = "../../compaction" }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 
+[build-dependencies]
+# The build script assembles env-var names from the branding constants
+# instead of spelling the brand out; see build-support/git_metadata.rs.
+branding.workspace = true
+
 [lints]
 workspace = true

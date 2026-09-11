@@ -296,7 +296,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
 
     handle.fail.store(false, std::sync::atomic::Ordering::SeqCst);
     let cwd = root.path().to_string_lossy().into_owned();
-    let lingxi_home = root.path().join(".lingxi");
+    let lingxi_home = root.path().join(branding::DOT_DIR);
     let resume_path = session::jsonl::path::session_path(
         &lingxi_home,
         &cwd,

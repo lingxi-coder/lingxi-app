@@ -11269,7 +11269,7 @@ mod legacy_opening_balance_test {
     #[test]
     fn imports_the_cli_written_pair_for_a_matching_session() {
         let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join(".lingxi.json");
+        let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
         let session = protocol::SessionId::new();
         // Exactly what `save_session_cost` writes: `session_id.to_string()`.
@@ -11284,7 +11284,7 @@ mod legacy_opening_balance_test {
     #[test]
     fn refuses_another_session_another_project_and_a_missing_file() {
         let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join(".lingxi.json");
+        let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
         let session = protocol::SessionId::new();
         write(&config, cwd, entries(&session.to_string(), serde_json::json!(0.0175)));
@@ -11327,7 +11327,7 @@ mod legacy_opening_balance_test {
     #[test]
     fn refuses_an_unparseable_session_id() {
         let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join(".lingxi.json");
+        let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
         write(&config, cwd, entries("not-a-uuid", serde_json::json!(0.0175)));
 
@@ -11341,7 +11341,7 @@ mod legacy_opening_balance_test {
     #[test]
     fn saturates_instead_of_wrapping_on_an_absurd_amount() {
         let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join(".lingxi.json");
+        let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
         let session = protocol::SessionId::new();
         write(

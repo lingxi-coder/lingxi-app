@@ -1669,3 +1669,18 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
 @media (prefers-reduced-motion: reduce) {
   .desktop-stage .running-sweep { animation: none; background: none; color: var(--sweep-base, inherit); -webkit-text-fill-color: currentColor; }
 }
+
+.sidebar-session-progress {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 4px; border-radius: 99px; overflow: hidden; pointer-events: none;
+}
+.sidebar-session-progress > span {
+  display: block; width: 45%; height: 100%; background: currentColor; border-radius: inherit;
+  animation: sidebar-session-progress 1.2s ease-in-out infinite alternate;
+}
+.sidebar-tree-row:hover .sidebar-session-progress,
+.sidebar-tree-row:focus-within .sidebar-session-progress { opacity: 0; }
+@keyframes sidebar-session-progress { from { transform: translateX(-100%); } to { transform: translateX(225%); } }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-session-progress > span { animation: none; transform: translateX(60%); }
+}

@@ -505,3 +505,14 @@ test('session interaction prompts are scoped to the main panel instead of coveri
     assert.ok(promptIndex > mainStart && promptIndex < mainEnd, `${prompt} must stay inside the session panel`);
   }
 });
+
+test('sidebar uses indeterminate progress for main turns and background agents', () => {
+  for (const turnActive of [true, false]) {
+    const bridge = bridgeFixture();
+    bridge.sessionRuntimeStatus = () => ({ connection: { status: 'connected' }, turnActive, backgroundAgentsRunning: !turnActive, pendingInteractions: 0, pendingAskUserQuestions: 0 });
+    const markup = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(BetaSidebar, { bridge: bridge as any, onOpenSettings() {} })));
+    assert.match(markup, /class="sidebar-session-progress" role="progressbar" aria-label="Running"/);
+    assert.doesNotMatch(markup, /role="progressbar"[^>]*aria-valuenow/);
+    assert.doesNotMatch(markup, /aria-label="Running" title="Running"/);
+  }
+});

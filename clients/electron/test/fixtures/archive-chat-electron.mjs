@@ -55,9 +55,25 @@ async function main() {
     await configure({ error: 'Unable to check scheduled tasks' });
     result.errorDisabled = await run(`${confirm}.disabled`);
     await configure({});
-    await run(`${confirm}.click()`);
+    const point = await run(`(() => { const rect = ${confirm}.getBoundingClientRect(); return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) }; })()`);
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
     await wait(`!${dialog}`);
     result.afterConfirm = await state();
+    await run(`document.querySelector('[aria-label="Archive Sidebar chat"]').click()`);
+    await wait(`Boolean(${dialog}) && !${confirm}.disabled`);
+    await delay(250);
+    result.sidebarHitTarget = await run(`(() => { const rect = ${confirm}.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.closest('button') === ${confirm}; })()`);
+    const sidebarPoint = await run(`(() => { const rect = ${confirm}.getBoundingClientRect(); return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) }; })()`);
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...sidebarPoint, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', ...sidebarPoint, button: 'left', clickCount: 1 });
+    await wait(`Boolean(${dialog}?.querySelector('[role=alert]'))`);
+    result.retryEnabled = await run(`!${confirm}.disabled && ${confirm}.textContent === 'Try again'`);
+    await run(`${confirm}.click()`);
+    await wait(`${confirm}.textContent === 'Archive chat' && !${confirm}.disabled`);
+    await run(`${confirm}.click()`);
+    await wait(`!${dialog}`);
+    result.sidebarCalls = (await state()).sidebarCalls;
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { window.destroy(); app.quit(); }
 }

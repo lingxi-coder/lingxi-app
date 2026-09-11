@@ -66,6 +66,8 @@ async function main() {
       };
     })()`);
     assert.deepEqual(emptyState, { placeholderPosition: 'absolute', sendVisibility: 'hidden', disabled: true, tabIndex: -1, offset: 0 });
+    const flowBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').getBoundingClientRect().toJSON()`);
+    assert.equal(await webContents.executeJavaScript(`getComputedStyle(document.querySelector('.composer-submit-actions')).display`), 'none');
     await webContents.insertText('Hello');
     await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
     const typedState = await webContents.executeJavaScript(`(() => {
@@ -82,6 +84,8 @@ async function main() {
       await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.filled.png', (await webContents.capturePage()).toPNG());
     }
     const sendBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').getBoundingClientRect().toJSON()`);
+    assert.equal(sendBounds.x, flowBounds.x, 'flow and send share the same trailing slot');
+    assert.equal(await webContents.executeJavaScript(`Boolean(document.querySelector('[aria-label="开启心流模式"]'))`), false);
     await setPrompt(webContents, '');
     await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).visibility === 'hidden'`);
     await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(true)`);
@@ -117,10 +121,13 @@ async function main() {
     await setPrompt(webContents, '');
     await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(false)`);
 
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).visibility === 'hidden'`);
     await setPrompt(webContents, '   ');
     assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').disabled`), true);
     await setPrompt(webContents, '');
 
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-stop-presence')).visibility === 'hidden' && getComputedStyle(document.querySelector('.composer-submit-actions')).display === 'none'`);
+    await webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
     const composerScreenshotPath = process.env.LINGXI_COMPOSER_SCREENSHOT;
     if (composerScreenshotPath) {
       const bounds = await webContents.executeJavaScript(`(() => {
@@ -207,6 +214,10 @@ async function main() {
       await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === 'dictated text'`);
       const dictatedText = await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`);
 
+      await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
+      await setPrompt(webContents, '');
+      await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(false)`);
+      await waitFor(webContents, `Boolean(document.querySelector('[aria-label="开启心流模式"]'))`);
       await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
       await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').click()`);
       await waitFor(webContents, `Boolean(document.querySelector('[role="group"][aria-label="心流模式"]'))`);

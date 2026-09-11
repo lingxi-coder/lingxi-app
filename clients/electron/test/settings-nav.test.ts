@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { SETTINGS_NAV, searchNav } from '../src/renderer/components/settings/nav';
 import { PAGE_CONTENT } from '../src/renderer/components/settings/SettingsScreen';
 
-test('the nav declares all sixteen pages across four groups', () => {
-  assert.equal(SETTINGS_NAV.length, 16);
+test('the nav declares all seventeen pages across four groups', () => {
+  assert.equal(SETTINGS_NAV.length, 17);
   assert.deepEqual(
     [...new Set(SETTINGS_NAV.map((p) => p.group))],
     ['个人', '模型与服务', '编码', '高级'],

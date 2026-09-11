@@ -24,6 +24,7 @@ pub mod update_config_skill;
 pub mod verify_skill;
 pub mod workflow_authoring_skill;
 pub mod checkup_skill;
+pub mod debug_skill;
 
 /// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
 /// `bundledSkills.ts`).
@@ -41,6 +42,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_simplify_skill(reg);
     register_workflow_authoring_skill(reg);
     register_checkup_skill(reg);
+    register_debug_skill(reg);
     register_run_skill_generator_skill(reg);
     register_fewer_permission_prompts_skill(reg);
     register_code_review_skill(reg);
@@ -248,6 +250,32 @@ fn register_run_skill_generator_skill(reg: &mut CommandRegistry) {
 /// reference (registrar `eVp`, `userInvocable:!0`, `argumentHint:"[<target>]"`,
 /// no `isEnabled` gate). Its `getPromptForCommand` PREPENDS a `Review target:`
 /// line (see [`simplify_skill`]).
+/// `Ao()` — the `/debug` skill. See `debug_skill`'s module doc for the two
+/// deliberate adaptations (no mid-session enable; the removed guide agent).
+fn register_debug_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "debug".into(),
+        description: debug_skill::DEBUG_DESCRIPTION.into(),
+        menu_description: Some(debug_skill::DEBUG_MENU_DESCRIPTION.into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                allowed_tools: Some(
+                    ["Read", "Grep", "Glob"].map(str::to_string).to_vec(),
+                ),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(debug_skill::DebugPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        disable_model_invocation: true,
+        has_user_specified_description: true,
+        argument_hint: Some(debug_skill::DEBUG_ARGUMENT_HINT.into()),
+        ..SlashCommand::default()
+    });
+}
+
 /// `No()` — upstream's `doctor` skill, registered here under its own upstream
 /// alias `checkup` because this port's `/doctor` is a different, deterministic
 /// command with a client-rendered DTO. See `checkup_skill`'s module doc.
@@ -474,6 +502,8 @@ mod tests {
             "code-review".to_string(),
             "cron".to_string(),
             "dataviz".to_string(),
+            // Ported 2026-09-10, once the session debug log it reads existed.
+            "debug".to_string(),
             "deep-research".to_string(),
             // Ported 2026-09-10.
             "explain-usage".to_string(),

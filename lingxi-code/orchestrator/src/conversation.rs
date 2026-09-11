@@ -1014,6 +1014,11 @@ struct WireToolSchemaCacheKey {
     tool_names: Vec<String>,
     model: String,
     model_profile: Option<String>,
+    /// Whether the `workflow-authoring` skill was loadable when this entry was
+    /// built. The Workflow description swaps 17 KB of hook documentation for a
+    /// pointer based on it, so an entry cached before the skill registered must
+    /// not be reused after — the tool names are identical either side of that.
+    workflow_authoring_skill_reachable: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -420,6 +420,7 @@ pub fn workflow_subagent_disallowed() -> Vec<String> {
 #[must_use]
 pub fn workflow_subagent_definition() -> AgentDefinition {
     AgentDefinition {
+        cache_ttl: None,
         agent_type: WORKFLOW_SUBAGENT_TYPE.to_string(),
         when_to_use: "Internal subagent for workflow script orchestration.".to_string(),
         tools: AgentToolPolicy::All {
@@ -570,6 +571,7 @@ fn def(
     system_prompt: &str,
 ) -> AgentDefinition {
     AgentDefinition {
+        cache_ttl: None,
         agent_type: agent_type.to_string(),
         when_to_use: when_to_use.to_string(),
         tools,
@@ -774,6 +776,7 @@ pub fn builtin_agent_definitions_with_gates(
 #[must_use]
 pub fn fork_agent_definition() -> AgentDefinition {
     AgentDefinition {
+        cache_ttl: None,
         agent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
         when_to_use:
             "Implicit fork — inherits full conversation context. Not selectable via subagent_type; triggered by omitting subagent_type when the fork experiment is active.".to_string(),
@@ -814,6 +817,7 @@ pub fn fork_agent_definition() -> AgentDefinition {
 #[must_use]
 pub fn fusion_panel_definition() -> AgentDefinition {
     AgentDefinition {
+        cache_ttl: None,
         agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
         when_to_use:
             "Hidden Fusion panel — independent read-only deliberation. Not selectable via subagent_type."

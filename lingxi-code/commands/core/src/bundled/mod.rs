@@ -13,12 +13,17 @@ pub mod code_review_skill;
 pub mod cron_skill;
 pub mod dataviz_skill;
 pub mod deep_research_skill;
+pub mod explain_usage_skill;
 pub mod fewer_permission_prompts_skill;
+pub mod keybindings_help_skill;
 pub mod loop_skill;
 pub mod run_skill;
 pub mod run_skill_generator_skill;
 pub mod simplify_skill;
+pub mod update_config_skill;
 pub mod verify_skill;
+pub mod workflow_authoring_skill;
+pub mod checkup_skill;
 
 /// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
 /// `bundledSkills.ts`).
@@ -34,12 +39,17 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_verify_skill(reg);
     register_run_skill(reg);
     register_simplify_skill(reg);
+    register_workflow_authoring_skill(reg);
+    register_checkup_skill(reg);
     register_run_skill_generator_skill(reg);
     register_fewer_permission_prompts_skill(reg);
     register_code_review_skill(reg);
     register_deep_research_skill(reg);
     register_batch_skill(reg);
     register_dataviz_skill(reg);
+    register_update_config_skill(reg);
+    register_keybindings_help_skill(reg);
+    register_explain_usage_skill(reg);
 }
 
 /// Register the user-facing `/cron` scheduler command.
@@ -238,6 +248,62 @@ fn register_run_skill_generator_skill(reg: &mut CommandRegistry) {
 /// reference (registrar `eVp`, `userInvocable:!0`, `argumentHint:"[<target>]"`,
 /// no `isEnabled` gate). Its `getPromptForCommand` PREPENDS a `Review target:`
 /// line (see [`simplify_skill`]).
+/// `No()` — upstream's `doctor` skill, registered here under its own upstream
+/// alias `checkup` because this port's `/doctor` is a different, deterministic
+/// command with a client-rendered DTO. See `checkup_skill`'s module doc.
+fn register_checkup_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "checkup".into(),
+        description: checkup_skill::CHECKUP_DESCRIPTION.into(),
+        menu_description: Some(checkup_skill::CHECKUP_MENU_DESCRIPTION.into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(checkup_skill::CheckupPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        // Upstream `disableModelInvocation:!0` — the user asks for a checkup;
+        // the model does not start one on its own.
+        disable_model_invocation: true,
+        has_user_specified_description: true,
+        // ⚠️ Upstream also sets `progressMessage:"running checkup"`.
+        // `SlashCommand` has no such field in this port, so the spinner keeps
+        // its generic text. Recorded rather than dropped silently: the constant
+        // stays in `checkup_skill` so the copy is not lost if the field lands.
+        ..SlashCommand::default()
+    });
+}
+
+/// `dCr()` — the `workflow-authoring` skill.
+///
+/// Registered unconditionally; see the module doc for why this port does not
+/// mirror upstream's `isEnabled: () => qc()`.
+fn register_workflow_authoring_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "workflow-authoring".into(),
+        description: workflow_authoring_skill::WORKFLOW_AUTHORING_DESCRIPTION.into(),
+        menu_description: Some(
+            workflow_authoring_skill::WORKFLOW_AUTHORING_MENU_DESCRIPTION.into(),
+        ),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(
+                workflow_authoring_skill::WorkflowAuthoringPromptFn,
+            )),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+    // The Workflow tool description trades 17 KB of hook documentation for a
+    // pointer to this skill. It may only do that once the skill actually
+    // exists, so the registrar is what says so.
+    platform_api::session_flags::set_workflow_authoring_skill_registered(true);
+}
+
 fn register_simplify_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "simplify".into(),
@@ -370,7 +436,7 @@ mod tests {
     ///
     /// | in both | LingXi-only | upstream-only |
     /// |---|---|---|
-    /// | batch, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator | cron, deep-research, simplify, verify | the remaining 13 |
+    /// | batch, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator, workflow-authoring | cron, deep-research, simplify, verify | the remaining 12 |
     ///
     /// ⚠️ The upstream-only 13 are NOT automatically a backlog. Most ride
     /// surfaces this port does not have (artifact-components / whiteboard /
@@ -401,16 +467,33 @@ mod tests {
 
         let want = vec![
             "batch".to_string(),
+            // Ported 2026-09-10 as `checkup`, upstream's own alias for it:
+            // upstream registers `doctor` (aliases ["checkup"]), but this
+            // port's `/doctor` is a deterministic client-rendered report.
+            "checkup".to_string(),
             "code-review".to_string(),
             "cron".to_string(),
             "dataviz".to_string(),
             "deep-research".to_string(),
+            // Ported 2026-09-10.
+            "explain-usage".to_string(),
             "fewer-permission-prompts".to_string(),
+            // Ported 2026-09-10: model-invocable only (`userInvocable:!1`), so
+            // it never shows in the slash menu; the user route is /keybindings.
+            "keybindings-help".to_string(),
             "loop".to_string(),
             "run".to_string(),
             "run-skill-generator".to_string(),
             "simplify".to_string(),
+            // Ported 2026-09-10: settings.json / hooks authoring. Its prompt
+            // carries the LIVE `SettingsJson` schema, so it cannot describe a
+            // key the loader would reject.
+            "update-config".to_string(),
             "verify".to_string(),
+            // Ported 2026-09-10 with the 2.1.267 Workflow description split:
+            // this skill IS the 17 KB script-writing reference that the tool
+            // description no longer inlines on every request.
+            "workflow-authoring".to_string(),
         ];
         assert_eq!(
             got, want,
@@ -746,4 +829,73 @@ mod tests {
             other => panic!("expected Bundled kind, got {other:?}"),
         }
     }
+}
+
+/// Register the `/update-config` bundled skill (reference registrar `cn`).
+///
+/// `allowedTools:["Read"]` and `userInvocable:!0`, both verbatim. The skill is
+/// model-invocable — its whole purpose is to be reached when the user asks for
+/// an automated behaviour that only a hook can deliver.
+fn register_update_config_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "update-config".into(),
+        description: update_config_skill::UPDATE_CONFIG_DESCRIPTION.into(),
+        menu_description: Some("Change settings: hooks, permissions, environment variables".into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                allowed_tools: Some(vec!["Read".to_string()]),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(update_config_skill::UpdateConfigPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
+/// Register the `keybindings-help` bundled skill (reference registrar `$o`).
+///
+/// `userInvocable:!1` — model-invocable ONLY. The user-facing route is the
+/// `/keybindings` command; this exists so a request like "rebind ctrl+s"
+/// reaches the model with the live tables attached.
+fn register_keybindings_help_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "keybindings-help".into(),
+        description: keybindings_help_skill::KEYBINDINGS_HELP_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                allowed_tools: Some(vec!["Read".to_string()]),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(keybindings_help_skill::KeybindingsHelpPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(false),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
+/// Register the `/explain-usage` bundled skill (reference registrar `Mo`).
+fn register_explain_usage_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "explain-usage".into(),
+        description: explain_usage_skill::EXPLAIN_USAGE_DESCRIPTION.into(),
+        menu_description: Some(
+            "See where this session\u{2019}s tokens went, in plain words".into(),
+        ),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(explain_usage_skill::ExplainUsagePromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
 }

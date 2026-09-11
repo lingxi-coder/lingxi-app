@@ -294,14 +294,93 @@ system 消息一起被滤）全部点名变红。含控制组：没 hop 过的 r
 agent 类型 / model / cwd / background，改写后再对权限规则复核。六条错误文案
 （@3585420–3587034）端口全无。
 
-**⛔ 阻塞**：这不是 agent 子系统的缺口。oracle 把 function hook 跑在打包好的 JS worker 里
+**⛔ 阻塞（2026-09-10 复核：仍然零命中）**：`functionHooks` / `hooks-worker` /
+`FunctionHook` 在端口全树 `--include='*.rs'` 下 **0 命中**。这不是 agent 子系统的缺口。oracle 把 function hook 跑在打包好的 JS worker 里
 （`HOOKS_WORKER_URL: "/$bunfs/root/src/plugins/functionHooks/hooks-worker/hooks-worker.js"`），
 端口**整个 function-hook runtime 不存在**（`functionHooks` / `hooks-worker` 零命中），
 `HookEvent` 只有命令钩子那几个（`PreToolUse`/`PostToolUse`/`SubagentStart`/`SubagentStop`…）。
 
 **下一步**：等 function-hook 子系统本身立项，那是独立的一次移植。
 
-### 3.4 AG-16 — `cacheTtl`（P3，**明确不做**）
+#### 2026-09-10 复核：把「阻塞」换成可执行的清单
+
+三条独立证据确认阻塞成立（不是从旧记录继承的）：
+
+1. `HookExecutor` 只有 **3 个** variant —— `Command` / `Http` / `Agent`
+   （`hooks/src/definition.rs:157`）。**没有** function/JS 变体。
+2. `rquickjs` 只在 **`workflow` 一个 crate** 的 Cargo.toml 里；`hooks` 拿不到 JS 引擎。
+3. `plugin/src/manifest.rs:310` 的 `hooks: Vec<HookDefinition>` 是**命令钩子**，
+   复用的就是上面那个只有 3 个变体的类型。
+
+⚠️ 「端口有 rquickjs 所以离得不远」是**错的判断**，我自己先这么想过：
+`workflow` 里的 JS 跑的是**用户自己写、且明确授权运行**的 workflow 脚本；
+function hook 跑的是**插件提供、每次 spawn 自动执行**的代码。信任语境不同，
+上游正因此把它隔离在打包好的 worker 里（`HOOKS_WORKER_URL`）。
+⛔ 别为了省事把插件 JS 塞进 workflow 的引擎里跑。
+
+**真要做，最小清单（按依赖顺序）：**
+
+| # | 要做的 | 为什么不能跳 |
+|---|---|---|
+| 1 | **安全模型先定**：插件 JS 以什么权限跑、能不能碰 fs/net/env、超时与取消 | 这是唯一不能事后补的一条；其余都是接线 |
+| 2 | 一个 `hooks` 能依赖的 JS 执行 seam（新 crate，或把引擎从 `workflow` 抽出来） | §8.1 分层：`hooks` 是 engine 层，不能依赖 tool 层的 `tools/workflow` |
+| 3 | `HookExecutor::Function{...}` + plugin manifest 里声明 function hook 的 schema | 没有声明面就没人能注册 |
+| 4 | `agent.spawn` 事件 + payload/response 契约（deny / 改写 type·model·cwd·background） | 上游 `_Bo` @2955987 |
+| 5 | 改写后**重新**过一遍权限规则 | 上游明确有这一步；漏掉 = 插件可绕过权限 |
+| 6 | 六条错误文案 @3585420–3587034 | 有了产出点才有意义 |
+
+**判据**：第 1 条没有书面结论之前，2-6 都不要动。
+
+#### 🚨 规模复核：`agent.spawn` 是 **17 个** function-hook 事件里的一个
+
+`src_163219561.js @2127769` 的 `Akn` 表列全了 function-hook 的事件面：
+
+```
+tool.call        tool.describe     command.run     command.describe
+prompt.submit    prompt.section    prompt.context
+agent.offer      agent.spawn
+skill.prompt     attribution.text
+session.start    session.receive   session.compact
+turn.start       turn.step         turn.complete
+```
+
+而且每个 site 都带一个 `core` 伪钩子（`{name:"core",isCore:!0,budgetMs:0,run}`），
+每个钩子有 **`budgetMs` 预算**，`agent.spawn` 还有自己的结算规则
+（`Vvn="agent.spawn: a hook answered with neither model nor deny"`，
+`Yvn` 逐字段 diff 出「哪些字段被钩子改写了」并记日志）。
+
+**结论：AG-15 不是「加一个钩子」，是移植一个带调度/预算/17 个接入点的子系统。**
+把它当成 agent 子系统的一条待办去估工期一定会低估——我自己先按「一个钩子」估过一次。
+真要立项，范围是 function-hook 子系统本身，`agent.spawn` 只是其中一个 site，
+且它依赖前面那张表里的第 1 条（安全模型）和第 2 条（JS 执行 seam）。
+
+⚠️ 别被 `HOOKS_WORKER_URL` / `functionHooks` 在 60 个 chunk 里的高命中数误导：
+那是 Bun 打包的常量表在每个 chunk 里重复，不是 60 处逻辑。真正的逻辑集中在
+`src_163219561.js` 和 `src_180269027.js`。
+
+#### 🚨 第 1 条（安全模型）**无法照抄上游** —— 2026-09-10 实测
+
+想「照抄上游的隔离模型」这条路已经走到头了，结论是走不通，记下来免得再走一遍：
+
+- `HOOKS_WORKER_URL` 指向 `/$bunfs/root/src/plugins/functionHooks/hooks-worker/hooks-worker.js`，
+  是一个**独立的内嵌资源**，不在我抽出来的 1657 个 chunk 里
+  （chunk 是主 bundle；worker 另打一份）。
+- 直接在 200MB 二进制里搜：`self.postMessage` 只有 **2** 处，**两处都是打包进去的
+  node-forge 加密库**，不是 worker。
+- 那条路径字符串出现在 @70371141，紧跟其后的是**字符串表**
+  （`darwin`、`transport`、`timeout`… 带哈希的 interned 串），**不是资源正文**——
+  worker 是编译成 bytecode 的，拿不到源码。
+
+**能拿到的**：调度面。`budgetMs`(39)、`hookTimeout`(7)、`isCore`(20)、`agent.spawn`(55)
+在二进制里都有，所以**预算/超时/core 伪钩子的契约**是可以还原的。
+**拿不到的**：沙箱语义本身——worker 里暴露了哪些 global、插件 JS 能不能碰
+fs/net/env/进程、取消是怎么实现的。
+
+⇒ **第 1 条只能自己设计，不能移植。** 而「自动执行第三方插件代码」的沙箱是
+本仓库最不该临时拍脑袋的一类决定。⛔ 别因为「上游有 worker」就假设照着 worker 写就安全——
+上游 worker 的权限面我们**从未看到过**。
+
+### 3.4 AG-16 — `cacheTtl`（P3，**明确不做，2026-09-10 复核仍成立**）
 
 `sKt(e)` 读 `frontmatter.experimental.cacheTtl`（key 归一化成 `cachettl`，值域 `k_e`）
 挂到定义上。
@@ -313,6 +392,69 @@ agent 类型 / model / cwd / background，改写后再对权限规则复核。�
 不该自己造一个。
 
 **重新评估的时机**：请求路径上出现 cache-TTL seam 的那一刻。
+
+#### 🚨 2026-09-10 推翻：那个 seam **早就在了**，这条不再是「已关闭的决定」
+
+上面写的「端口根本没有 prompt-cache TTL 这个概念」**是错的**。实测，请求侧有一条完整的活链路：
+
+```
+apps/engine-desktop/src/lib.rs:4442  prompt_cache_write_ttl_1h_enabled()   env 门
+  → llm-client/src/service.rs:1095   should_1h_cache_ttl()                 ENABLE_PROMPT_CACHING_1H
+  → llm-client/src/service.rs:1219   SplitOptions{ ttl_1h }
+  → llm-client/src/prompt_format.rs:111/121  CacheControl::EphemeralScoped{ ttl_1h }
+  → llm-client/src/providers/anthropic.rs:359  上线 `ttl:"1h"`
+```
+
+⚠️ 原记录取证只看了 `stream_accumulator.rs`（**响应**解析）和 `convert.rs`，
+**漏了 `prompt_format.rs` 这个真正的请求侧格式化器**——正是
+[[divergence-reason-enumerated-one-setter]] 那个形状：找到第一个点就当成全部。
+
+**上游契约**（`src_163219561.js` @1339284 / @3483567）：
+`experimental.cacheTtl: "5m" | "1h"`，**仅当** `subagentPromptCacheTtl` 设置/env 都没设时生效；
+订阅处于 overage 时 `"1h"` 被忽略。消费点是 `agentCacheTtlOverride: e.cacheTtl`。
+端口的 `ttl_1h: bool` 正好能表达（`"5m"` = 普通 Ephemeral，`"1h"` = ttl_1h）。
+
+**所以这条现在是「未做」，不是「不该做」。真实成本（实测，不是估的）：**
+
+| | 数量 | 说明 |
+|---|---|---|
+| `AgentDefinition {` **构造点** | **~17** | 没有 `Default` derive，没有一处用 `..Default::default()` ⇒ 加字段必须全改 |
+| `build_request(` 调用点 | **58** | 分布在 llm-client(18) / service_test(31) / tool-api(6) / web / sidequery / test-harness |
+
+⛔ **不能用「在 service 上加个字段」偷懒**：`ApiService` 是
+`Arc<llm_client::ApiService>` 共享的（`orchestrator/src/provider_adapter.rs:27`），
+并发子代理会互相踩。必须按请求传参 —— 干净的做法是把 `build_request` 的位置参数
+收进一个 options struct（顺带解决它已经 8 个参数的问题）。
+
+**两条可选实现路径（先选一条再动手）：**
+
+- **A. options struct**：把 `build_request` 的 8 个位置参数收进一个结构体，
+  加 `agent_cache_ttl` 字段。干净、显式，但要动 **58** 个调用点。
+- **B. `tokio::task_local!`**：runner 在自己那一轮外面套一层 scope，
+  `should_1h_cache_ttl()` 在 env 没设时读它。调用点 **0** 处改动。
+  本仓库已有先例：`tasks/src/handlers/local_workflow.rs:2736` 就是这么用的。
+
+🚨 **选 B 之前必须先验一件事**：LLM 请求是不是**在 runner 自己那个 tokio task 里**发出的。
+如果请求是丢给另一个 task（channel / spawn）去发，task-local **传不过去**，
+结果是一个恒为 None 的读点 —— 测试照绿、线上无效，正是本审计要抓的
+「named, computed, never wired」换了个马甲。判据：在 `should_1h_cache_ttl()` 里
+读到的值必须能在一个**真的走完 runner→请求**的测试里断言到，而不是单测里手动 set 一遍。
+
+⚠️ **「75」是我数错的，实测是 ~17。** `grep -c 'AgentDefinition {'` 把**模式匹配和类型标注**
+也算进去了；真正需要补字段的**构造点**，靠编译器 `E0063` 迭代收敛，两轮就到 0
+（7 + 10）。⇒ 引用「N 处调用点」当成本理由之前，**用编译器数，别用 grep 数**。
+同一个错误形状：[[divergence-reason-enumerated-one-setter]]。
+
+**结论**：范围是「选一条实现路径 + ~17 处字段修改 + 优先级/overage 语义 + 端到端断言」，
+不是「加一个没人读的字段」。字段本身**已实测可加、两轮收敛**；真正的工作量在
+task-local 传播验证 + 优先级/overage 语义 + 那条端到端断言。
+⛔ 别再引用「没有消费者」当理由——那个理由已经被推翻。
+
+**2026-09-10 复核**（因为这一整轮里「N 个调用点」这类估算我错过两次，所以实测）：
+`llm-client/src/convert.rs` 里出往 wire 的 `cache_control` **恒为 `None`**（589/597 行，
+外加文档表格里两行），没有断点选择、没有 TTL 字段；`AgentDefinition {` 字面量现在是
+**75** 个（原记 74）。结论不变，而且现在有据：加上去就是改 75 处去产出一个
+**没有任何消费者**的值。这是一个**已关闭的决定**，不是待办。
 
 ---
 

@@ -395,6 +395,7 @@ pub struct DefaultTeammateDefinition;
 impl TeammateDefinitionResolver for DefaultTeammateDefinition {
     async fn resolve(&self, _agent_id: &protocol::AgentId, name: &str) -> Option<AgentDefinition> {
         Some(AgentDefinition {
+            cache_ttl: None,
             agent_type: name.to_string(),
             when_to_use: String::new(),
             tools: AgentToolPolicy::All {

@@ -302,6 +302,7 @@ mod tests {
 
     fn definition(name: &str, observer: Option<ObserverSpec>) -> AgentDefinition {
         AgentDefinition {
+            cache_ttl: None,
             agent_type: name.into(),
             when_to_use: String::new(),
             tools: AgentToolPolicy::All {

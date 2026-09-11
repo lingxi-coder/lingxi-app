@@ -65,6 +65,42 @@ impl ConditionalSkills {
         self.activated.contains(name)
     }
 
+    /// Availability for a listing built from records that are not [`Skill`]s —
+    /// the model-facing listing comes from command records, which carry the same
+    /// `paths` patterns but not the skill type.
+    ///
+    /// Returns whether `name` may be listed now, activating it if one of
+    /// `touched` matches. Empty `patterns` means unconditional. The activation
+    /// is recorded, so it survives a later turn whose touched set no longer
+    /// contains the matching file — the model has already been shown the skill.
+    pub fn is_available_named(
+        &mut self,
+        name: &str,
+        patterns: &[String],
+        touched: &[PathBuf],
+        root: &Path,
+    ) -> bool {
+        if patterns.is_empty() || self.activated.contains(name) {
+            return true;
+        }
+        let matcher = build_matcher(root, patterns);
+        for path in touched {
+            let Some(rel) = relative_within(root, path) else {
+                continue;
+            };
+            if matcher.matched_path_or_any_parents(&rel, false).is_ignore() {
+                self.activated.insert(name.to_string());
+                tracing::info!(
+                    "[skills] Activated conditional skill '{}' (matched path: {})",
+                    name,
+                    rel.display()
+                );
+                return true;
+            }
+        }
+        false
+    }
+
     /// Offer `touched` paths to every still-dormant conditional skill in
     /// `skills`, returning the names activated by this call (in the order they
     /// matched), so the caller can log and count them.
@@ -245,6 +281,33 @@ mod tests {
             )
             .is_empty());
         assert!(!state.is_available(&s));
+    }
+
+    /// The listing-facing entry point: the same rules, keyed by name for
+    /// records that are commands rather than `Skill`s.
+    #[test]
+    fn the_named_form_withholds_then_remembers() {
+        let mut state = ConditionalSkills::new();
+        let root = Path::new("/work/repo");
+        let patterns = vec!["*.rs".to_string()];
+
+        assert!(
+            state.is_available_named("rust", &[], &[], root),
+            "no patterns ⇒ unconditional"
+        );
+        assert!(!state.is_available_named("rust", &patterns, &[], root));
+        assert!(state.is_available_named(
+            "rust",
+            &patterns,
+            &[PathBuf::from("/work/repo/src/a.rs")],
+            root
+        ));
+        // The read-state map is an LRU, so the matching path can age out of the
+        // touched set. The skill must stay listed anyway.
+        assert!(
+            state.is_available_named("rust", &patterns, &[], root),
+            "activation is remembered, not recomputed from the current touched set"
+        );
     }
 
     /// Gitignore semantics, not plain globbing: a directory pattern matches

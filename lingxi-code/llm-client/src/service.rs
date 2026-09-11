@@ -35,6 +35,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use crate::agent_cache_ttl_1h_override;
 
 /// Mirror claude-code `getPromptCachingEnabled` (services/api/claude.ts:333).
 ///
@@ -1193,7 +1194,14 @@ impl ApiService {
     /// env `ENABLE_PROMPT_CACHING_1H` (default off), since LingXi has no
     /// querySource allowlist to consult. Folded into the emitted cache_control.
     fn should_1h_cache_ttl(&self) -> bool {
-        cache_env_truthy("ENABLE_PROMPT_CACHING_1H")
+        if cache_env_truthy("ENABLE_PROMPT_CACHING_1H") {
+            return true;
+        }
+        // claude-code `agentCacheTtlOverride`: an agent's
+        // `experimental.cacheTtl` applies only when no setting/env asked for a
+        // TTL, so the env check above wins. `"5m"` resolves to `false` here —
+        // it is Anthropic's default lifetime and emits no `ttl` key.
+        agent_cache_ttl_1h_override()
     }
 
     /// 1P experimental cache-EDITING gate — parity `useCachedMC`

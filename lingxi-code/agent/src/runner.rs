@@ -308,11 +308,21 @@ pub async fn run_subagent(
     let non_interactive = ctx
         .session_interactive
         .map_or(ctx.is_async, |interactive| !interactive || ctx.is_async);
-    llm_client::thinking_scope::scope_thinking_recovery(
-        llm_client::thinking_scope::ThinkingRecoveryScope::default(),
-        platform_api::session_flags::scope_non_interactive_session(
-            non_interactive,
-            run_subagent_inner(ctx, event_rx, out_tx),
+    // claude-code `agentCacheTtlOverride`: the definition's
+    // `experimental.cacheTtl` rides the whole run, so every round-trip this
+    // agent makes sees it. Read before `ctx` moves into the inner future.
+    let wants_1h_cache = ctx
+        .agent_definition
+        .cache_ttl
+        .is_some_and(crate::definition::AgentCacheTtl::wants_1h);
+    llm_client::scope_agent_cache_ttl(
+        wants_1h_cache,
+        llm_client::thinking_scope::scope_thinking_recovery(
+            llm_client::thinking_scope::ThinkingRecoveryScope::default(),
+            platform_api::session_flags::scope_non_interactive_session(
+                non_interactive,
+                run_subagent_inner(ctx, event_rx, out_tx),
+            ),
         ),
     )
     .await;

@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 
 fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
     AgentDefinition {
+        cache_ttl: None,
         agent_type: name.into(),
         when_to_use: desc.into(),
         tools: AgentToolPolicy::Explicit(tools.clone()),

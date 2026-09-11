@@ -4022,6 +4022,8 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
                 worktree_path: Some("/repo/.lingxi/worktrees/agent-1".into()),
                 worktree_branch: Some("worktree-agent-1".into()),
                 max_turns_reached: None,
+                agent_depth: None,
+                is_built_in: None,
             },
         )
         .await;
@@ -7737,4 +7739,265 @@ async fn cached_shell_exit_survives_registration_cancel_and_preserves_hook_order
     assert_eq!(text.matches("[exited with code 0]").count(), 1, "the detached lifecycle job must finish its terminal marker");
     assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
     assert!(registry.take_pending_task_notifications().await.is_empty());
+}
+
+// ── AUDIT-04: the sink-flipped shell still gets its `[killed]` trailer ──────
+//
+// Upstream writes `\n[killed]\n` inside the same `update` closure that flips the
+// row, gated on `r && !o && !r.isAdopted`. This port cannot: a handler's status
+// sink flips the row to `Killed` INSIDE `handler.kill(..)`, before `mark_killed`
+// runs, so `kill_backing_task` reconstructs the gate from `was_live`, captured
+// BEFORE the kill dispatch.
+//
+// The existing trailer test drives the Running→kill shape, where nothing flips
+// the row mid-dispatch — it is structurally blind to this path. The audit read
+// the code and concluded it was handled; this runs it.
+
+/// A handler whose `kill` flips the row terminal through the registry sink
+/// before returning — the shape `was_live` exists to survive.
+struct SinkFlippingBashHandler {
+    sink: Arc<crate::registry_status_sink::RegistryStatusSink>,
+    kills: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Task for SinkFlippingBashHandler {
+    fn name(&self) -> &str {
+        "sink-flipping-bash"
+    }
+    fn task_type(&self) -> TaskType {
+        TaskType::LocalBash
+    }
+    async fn spawn(
+        &self,
+        _input: TaskSpawnInput,
+        _ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        Ok(TaskHandle::new(protocol::AgentId::new().to_string(), None))
+    }
+    async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        use crate::handlers::TaskStatusSink;
+        self.kills.fetch_add(1, Ordering::SeqCst);
+        // The flip happens DURING the kill, exactly as every handler with a
+        // bound `RegistryStatusSink` does when its worker reports terminal.
+        self.sink.set_status(task_id, TaskStatus::Killed).await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_shell_whose_handler_flips_the_row_mid_kill_still_gets_the_trailer() {
+    let (_d, mut registry) = make_registry();
+    let sink = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
+    let kills = Arc::new(AtomicUsize::new(0));
+    registry.register_handler(
+        TaskType::LocalBash,
+        Arc::new(SinkFlippingBashHandler {
+            sink: sink.clone(),
+            kills: kills.clone(),
+        }),
+    );
+    let registry = Arc::new(registry);
+    sink.bind(registry.clone());
+
+    let id = registry
+        .spawn(
+            TaskType::LocalBash,
+            TaskSpawnInput::LocalBash {
+                command: "sleep 60".into(),
+                timeout: None,
+                tool_use_id: None,
+            },
+            "long one".into(),
+        )
+        .await
+        .unwrap();
+    let path = registry.get(&id).await.unwrap().base().output_file.clone();
+    registry
+        .output_manager
+        .append(&path, "partial output\n")
+        .await
+        .unwrap();
+
+    registry.kill(&id).await.unwrap();
+
+    assert_eq!(
+        kills.load(Ordering::SeqCst),
+        1,
+        "precondition: the kill must go THROUGH the handler, or this test is \
+         exercising the plain Running->kill path the other test already covers"
+    );
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Killed,
+        "premise: the handler's sink really did flip the row"
+    );
+    let written = registry
+        .output_manager
+        .read(
+            &path,
+            crate::output_manager::OutputOptions {
+                offset: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        written.content.contains("[killed]"),
+        "the row went terminal inside `handler.kill`, so only `was_live` \
+         (captured before the dispatch) can still authorize the trailer; got {:?}",
+        written.content
+    );
+}
+
+// ── AUDIT-02: `tengu_agent_tool_terminated`, async twin ─────────────────────
+//
+// Upstream (`src_163219561.js` @3558604) reports the origin from `killedBy`:
+// `"parent"` → `parent_kill_async`, `"system"` → `system_kill_async`, anything
+// else → `user_kill_async`. The event never fired here, so a killed background
+// agent was invisible to it — and had it fired from the tool side, where the
+// launch metadata lives, it could not have known WHO killed it.
+
+fn agent_row(id: &str) -> crate::state::LocalAgentTaskState {
+    crate::state::LocalAgentTaskState {
+        is_parked: false,
+        is_observer: false,
+        observed_agent_id: None,
+        base: crate::state::TaskStateBase {
+            id: id.to_string(),
+            task_type: TaskType::LocalAgent,
+            status: TaskStatus::Running,
+            description: "dig into it".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from("/tmp/tasks/agent-under-test.output"),
+            evict_after: None,
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        },
+        agent_id: protocol::AgentId::new(),
+        subagent_type: "researcher".into(),
+        prompt: String::new(),
+        error: None,
+        messages: vec![],
+        pending_messages: vec![],
+        is_backgrounded: true,
+        outcome: Default::default(),
+        forked_skill_name: None,
+    }
+}
+
+async fn terminated_reasons(sink: &telemetry::InMemorySink) -> Vec<String> {
+    sink.events()
+        .await
+        .iter()
+        .filter(|e| e.name == "tengu_agent_tool_terminated")
+        .map(|e| match e.metadata.get("reason") {
+            Some(telemetry::AnalyticsValue::String(r)) => r.clone(),
+            other => panic!("reason must be a string, got {other:?}"),
+        })
+        .collect()
+}
+
+async fn registry_with_bus(
+    sink: &Arc<telemetry::InMemorySink>,
+) -> (tempfile::TempDir, Arc<TaskRegistry>) {
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    bus.attach_sink(sink.clone()).await;
+    let registry = TaskRegistry::new(runtime, fs, out_mgr).with_analytics_bus(bus);
+    (dir, Arc::new(registry))
+}
+
+#[tokio::test]
+async fn killing_a_background_agent_reports_who_killed_it() {
+    for (killed_by, expected) in [
+        ("parent", "parent_kill_async"),
+        ("system", "system_kill_async"),
+        ("user", "user_kill_async"),
+    ] {
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let (_dir, registry) = registry_with_bus(&sink).await;
+        let id = "agent-under-test".to_string();
+        registry
+            .insert_state_for_test(TaskState::LocalAgent(agent_row(&id)))
+            .await;
+
+        registry.kill_with_reason(&id, killed_by).await.unwrap();
+
+        assert_eq!(
+            terminated_reasons(&sink).await,
+            vec![expected.to_string()],
+            "killedBy {killed_by:?} must map to {expected:?}"
+        );
+    }
+}
+
+/// The launch metadata reaches the event. `agent_depth` and `is_built_in` are
+/// stamped by the handler at spawn (the registry cannot know them) and read back
+/// at kill time (the handler cannot know `killed_by`) — the two halves meeting
+/// on the row is the whole mechanism, so a test that only checked `reason` would
+/// not notice it coming apart.
+#[tokio::test]
+async fn a_terminated_agent_reports_its_launch_metadata() {
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let (_dir, registry) = registry_with_bus(&sink).await;
+    let id = "agent-under-test".to_string();
+    let mut row = agent_row(&id);
+    row.outcome.agent_depth = Some(2);
+    row.outcome.is_built_in = Some(true);
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(row))
+        .await;
+
+    registry.kill_with_reason(&id, "parent").await.unwrap();
+
+    let event = sink
+        .events()
+        .await
+        .into_iter()
+        .find(|e| e.name == "tengu_agent_tool_terminated")
+        .expect("terminated event");
+    assert!(matches!(
+        event.metadata.get("agent_depth"),
+        Some(telemetry::AnalyticsValue::Int(2))
+    ));
+    assert!(matches!(
+        event.metadata.get("is_built_in_agent"),
+        Some(telemetry::AnalyticsValue::Bool(true))
+    ));
+}
+
+/// A task that had already finished on its own is not "terminated by" anyone —
+/// the same reverse-race guard the `killed_by` stamp uses.
+#[tokio::test]
+async fn a_kill_racing_a_finished_agent_reports_no_termination() {
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let (_dir, registry) = registry_with_bus(&sink).await;
+    let id = "agent-under-test".to_string();
+    let mut row = agent_row(&id);
+    // Already finished on its own before the kill lands.
+    row.base.status = TaskStatus::Completed;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(row))
+        .await;
+
+    registry.kill_with_reason(&id, "user").await.unwrap();
+
+    assert!(
+        terminated_reasons(&sink).await.is_empty(),
+        "an agent that finished on its own was not terminated by the kill"
+    );
 }

@@ -2906,6 +2906,7 @@ mod tests {
             std::env::temp_dir(),
         );
         let definition = agent::AgentDefinition {
+            cache_ttl: None,
             agent_type: "reviewer".to_string(),
             when_to_use: "review code".to_string(),
             tools: agent::AgentToolPolicy::Explicit(vec!["Read".to_string()]),
@@ -3014,6 +3015,7 @@ mod tests {
     #[cfg(test)]
     fn resume_definition_with_model(model: agent::AgentModel) -> agent::AgentDefinition {
         agent::AgentDefinition {
+            cache_ttl: None,
             agent_type: "modelful".to_string(),
             when_to_use: "does things".to_string(),
             tools: agent::AgentToolPolicy::Explicit(Vec::new()),

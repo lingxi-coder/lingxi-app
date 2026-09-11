@@ -39,8 +39,8 @@ sets; two of the three defects below were exactly that.
 | bundled | ✅ 21 | ⚠️ 11 + 1, see §3 |
 | plugin | ✅ | ✅ |
 | MCP-derived | ✅ | partial — resolves as `Other` and is rejected by the tool |
-| legacy `commands/`-as-skills | ❓ unverified | ❌ `LoadedFrom::CommandsDeprecated` declared, never constructed |
-| conditional / `paths:`-activated | ✅ **verified present** (see §2.1) | ❌ absent |
+| legacy `commands/`-as-skills | ✅ verified (§2.3) | ✅ **present** — via `command-api`, not `skill-api` |
+| conditional / `paths:`-activated | ✅ verified (§2.1) | ✅ **ported** (`4c7fb33bd` + `f790dc179`) |
 
 ### 2.1 ✅ Conditional (`paths:`) skills — verified, 2026-09-10
 
@@ -97,20 +97,44 @@ only tests the final component), and a path outside the workspace activated a
 repo-scoped skill because the first version fell back to the absolute path when
 it could not be made relative.
 
-**What is left is one plumbing layer, not the mechanism.** The model-facing
-listing is built at the composition roots from **`command_api` commands**
-(`LazySkillListingProvider`, desktop `lib.rs:8957` / mobile `host.rs:2515`), and
-a command record carries no `paths` — so the filter has nothing to key on yet.
-Upstream's command metadata DOES carry `paths` (it sits next to `whenToUse` in
-the command shape), so the step is to plumb the frontmatter field onto the
-command and then drop un-activated conditional skills in those two closures,
-calling `activate_for_paths` with `tool_api::read_file_state::keys()` — which is
-this port's version of the touched-path list `lhr` takes. ⚠️ The sibling
+**Wired end to end (`f790dc179`).** `paths` travels from skill frontmatter onto
+the command record (upstream carries it on the command metadata too, beside
+`whenToUse`), and both composition roots drop un-activated conditional skills
+from the model-facing listing.
+
+🚨 **Activation is remembered, not recomputed.** `read_file_state` is an LRU
+capped at 100 entries, so the file that revealed a skill can age OUT of the
+touched set. Recomputing availability per turn would make a skill the model has
+already been shown disappear again; the state lives with the listing provider for
+the session, and a test evicts the matching path and asserts the skill stays.
+
+⚠️ The read-state map is session-owned, not a module global — the first attempt
+reached for an accessor that does not exist. It has to be threaded from the root
+that creates it (`read_state_map`). ⚠️ The sibling
 `tengu_dynamic_skills_changed` `source: "file_operation"` belongs to DYNAMIC skill
 discovery (`Dynamically discovered {n} skills from {m} directories`) — a
 different mechanism that is also absent; do not conflate them.
 
-⛔ The remaining unverified row is `commands/`-as-skills. Their upstream identifiers
+### 2.3 ✅ `commands/`-as-skills — verified present, and the old row was misleading
+
+Upstream's loader is at `src_163219561.js` @4565355: it walks the commands dirs
+and builds skills with `loadedFrom: "commands_DEPRECATED"`, `paths: void 0`
+(so a legacy command is never conditional) and the default description
+`"Custom command"`, reporting through `skill_load_commands_dir` /
+`skill_load_commands_parse_failed`.
+
+**This port already does it.** `command-api/src/markdown_loader.rs` scans
+`.lingxi/commands/**.md` (`SUBDIR = "commands"`, plus the managed dir) and tags
+every command `loaded_from: Some("commands_DEPRECATED")`, and both listing
+closures admit that tag alongside `bundled` / `skills`.
+
+🚨 The old row said "`LoadedFrom::CommandsDeprecated` declared, never
+constructed" and marked the tier absent. The declaration it named is
+`skill_api::LoadedFrom`'s variant — a DEAD variant in a parallel type, while the
+tier itself lives on `command_api`'s string-valued `loaded_from`. Reading one
+type's unused variant as the feature's absence is the same mistake as reading a
+0-hit grep for a foreign symbol as proof: the behaviour was never checked. The
+dead variant is worth removing on its own, but it is not this feature. Their upstream identifiers
 (`loadSkillsFromCommandsDir`, `activateConditionalSkillsForPaths`,
 `getDynamicSkills`) are **0 hits in the binary — which proves nothing**, because
 minification erases source-level function names. They must be established by a
@@ -130,12 +154,32 @@ Upstream 2.1.267 registers **21** (`uo({name:…})`, variable names resolved):
 `run-skill-generator`, `setup-claude`, `update-config`, `whiteboard`,
 `workflow-authoring`, `workshop`.
 
-The port registers 11 through `register_bundled_skills`, plus `claude-api` as
-the `skill-api` compiled-in builtin.
+The port registers **16** through `register_bundled_skills` (11 + `update-config`,
+`keybindings-help`, `explain-usage`, `workflow-authoring` and `checkup`, added 2026-09-10), plus `claude-api` as the `skill-api`
+compiled-in builtin.
 
-| in both (8) | LingXi-only (4) | upstream-only (13) |
+| in both (10) | LingXi-only (4) | upstream-only (11) |
 |---|---|---|
-| batch, claude-api, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, doctor, explain-usage, keybindings-help, memory-types, setup-claude, update-config, whiteboard, workflow-authoring, workshop |
+| batch, claude-api, code-review, dataviz, doctor (as `checkup`), explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config, workflow-authoring | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, memory-types, setup-claude, whiteboard, workshop |
+
+### The remaining nine, adjudicated one by one (2026-09-10)
+
+Every row below was checked at the binary. **Two were misclassified** by the
+blanket "they ride surfaces this port does not have":
+
+| skill | verdict |
+|---|---|
+| `memory-types` | 🔒 **DORMANT upstream** — `var Jxn="memory-types"` sits next to `function Qxn(){return H("tengu_ochre_finch",!1)}`, its `isEnabled`. Flag defaults **false**, so absence here is ALIGNMENT, not a gap. Same shape as `melodic_wolf` / `lively_waffle`. |
+| `workflow-authoring` | ✅ **LANDED 2026-09-10** — see §2.4. The three reasons previously recorded for not landing it were all artefacts of a truncating extractor; 27 of 31 paragraphs survive byte-identical and both divergence anchors survive verbatim. |
+| `debug` | ⛔ needs a per-session debug LOG FILE it can enable (`WY()`) and read (`zY()` path, tail via `Po`). This port has `--debug` with categories but writes no session log file, so the skill would point at nothing. |
+| `setup-claude` | ⛔ `isEnabled:()=>a.CLAUDE_CODE_ENTRYPOINT==="remote_cowork"`，且正文是另一个 chunk 的 `SETUP_COWORK_PROMPT`。**2026-09-10 复核仍成立**：`remote_cowork` 在端口全树 0 命中，移植它等于注册一个**永远关着**的 cowork 引导流程。 |
+| `artifact-components` | ⛔ `files:()=>wt().then(e=>e.SKILL_FILES)` + `isEnabled:we`. **2026-09-10 复核，理由要更精确**：真正缺的是「**bundled 技能携带附件文件**」这个机制——端口有**磁盘**技能的多文件加载（`command-api/src/markdown_loader.rs`，`load_skill_dir` / `SkillMarkdownCommandFile`），但 bundled 技能只支持 `include_str!` 单体。这是一个比「缺 Artifact 面」**更小、可单独立项**的缺口；Artifact 面（register-but-disabled 骨架）是第二道门。 |
+| `whiteboard`, `workshop` | ⛔ same Artifact family — they sit in one name block with `artifact-design` / `artifact-diagramming` / `artifact-capabilities` / `prototype`. |
+| `design-sync` | ⛔ pushes a design system to claude.ai/design; `isEnabled:MF` plus a `policyGate`. No Design surface here, and the destination is a claude.ai service. |
+| `claude-in-chrome` | ⛔ needs the Chrome extension. |
+
+So of the original 13: **5 ported** (`workflow-authoring` landed 2026-09-10 — see
+§2.4), 1 dormant upstream, 7 blocked on surfaces this port does not ship.
 
 ⚠️ **The 13 are not a backlog.** Most ride surfaces this port does not have:
 `artifact-components` / `whiteboard` / `workshop` / `design-sync` need the
@@ -144,6 +188,70 @@ register-but-disabled skeleton pinned at 2.1.207), and `claude-in-chrome` needs
 the browser extension. Each needs adjudicating on its own substrate before
 anyone ports it. The ones with no obvious blocker and therefore worth triaging
 first are `update-config`, `keybindings-help`, `explain-usage` and `doctor`.
+
+### ✅ `update-config` (`29a8e64a4`) and `keybindings-help` (`f7fb8840a`) — ported
+
+Both were recorded as needing "dynamic-prompt plumbing plus a branding decision".
+**Neither blocker was real.** `SlashCommandKind::Bundled` already carries a
+`prompt_fn`, and the `branding` crate already fixes the product name, config dir
+and env prefix — there was nothing left to decide.
+
+What makes both worth having is the same property: their prompts carry LIVE data
+rather than prose.
+
+* `update-config` injects the settings schema generated from the very
+  `SettingsJson` the loader parses (`schemars::schema_for!`), so it cannot
+  describe a key the loader would reject. Both prompt shapes are ported,
+  including the `[hooks-only]` one that swaps the entire prompt and carries no
+  schema.
+* `keybindings-help` builds its contexts / actions / reserved tables from
+  `command_core::keybindings` — the same tables the validator uses. The action
+  column INVERTS the default-binding table, so a moved default shows its new key
+  with no prose to update. `userInvocable:!1` is kept verbatim: model-invocable
+  only, the user route stays `/keybindings`.
+
+⚠️ Both bodies are the binary's, rebranded (`Claude Code`→`LingXi`,
+`.claude/`→`.lingxi/`, `claude --debug`→`lingxi-cli --debug`), with a test per
+skill asserting none of those strings survive.
+
+🚨 The name-set lock caught BOTH additions, and caught `keybindings-help` going
+in out of alphabetical order (the list is compared sorted). Update it
+deliberately; do not re-bless it.
+
+### ✅ `explain-usage` (`724b9e52b`) — ported
+
+A single-prompt skill, so the only judgement in it is what NOT to rebrand:
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}` becomes the LingXi pair, but
+`mcp__claude-in-chrome__` stays **verbatim** — that is an MCP server id on the
+wire, not a product reference, and rewriting it would point the skill at a
+server that does not exist. A test pins each direction.
+
+Also pinned: the line telling the model to treat transcript contents as data
+rather than instructions. It is the skill's only defence against a transcript
+that contains instruction-shaped text.
+
+### ✅ `doctor` — RESOLVED 2026-09-10: landed as `/checkup` (see §2.5)
+
+Upstream's `doctor` is a bundled SKILL (`uo({name:"doctor",aliases:["checkup"],
+survivesBundledKillSwitch:!0,requires:{workspace:!0},terminalOriented:!0,…})`) —
+an LLM-driven health check that reads local data and proposes fixes.
+
+**This port already ships `/doctor`**, but as a deterministic builtin command
+handler (`commands/core/src/doctor.rs`) rendering a LOCKED report, plus the
+`lingxi-cli doctor` subcommand. Registering a bundled skill under the same name
+would collide with that builtin registration.
+
+The open question this section posed — "the deterministic report, the
+model-driven one, or both under distinct names" — was **decided by the user on
+2026-09-10: both, under distinct names.** Upstream's skill now ships as
+`/checkup`, which is upstream's OWN alias for it, so the port neither collides
+with the builtin `doctor` nor invents a name. Full write-up, including the two
+Anthropic-distribution checks that were cut, in §2.5.
+
+⛔ The original warning still stands and is why this landed as `checkup`: do not
+register a second `doctor`. Same shape as the `commands/`-as-skills row above —
+a feature judged absent because one mechanism was missing, when another already
+covers part of it.
 
 ⚠️ **A near miss worth recording.** `stuck` was reported out of this audit as a
 fourth portable name. It is not a bundled skill — it has ~50 occurrences in the
@@ -253,3 +361,116 @@ deliberately, not incidentally.
 | the 13 upstream-only bundled skills | most need a surface this port does not ship; triage `update-config` / `keybindings-help` / `explain-usage` / `doctor` first |
 | MCP-derived skills | resolve as `Other` and are rejected by the tool |
 | the seven unread keys (§5) | need a consumer before they need a parser |
+
+
+## 2.4 `workflow-authoring` — LANDED 2026-09-10
+
+Commits: `64ca3fc2e` (the split + machinery), `8568a51a9` (the skill),
+plus the reachability gate.
+
+**What shipped.** The tool description is now 2.1.267's 3,031-byte head; the
+17,141-byte authoring reference moved to `workflow_authoring_skill.txt`, served
+by the `workflow-authoring` bundled skill. `assemble_description` is upstream's
+`Epn`: it emits the head plus a one-line pointer when the skill is loadable, and
+the head plus the whole reference when it is not.
+
+### The three reasons recorded here for NOT landing it were all wrong
+
+They are left in place, because each was a plausible reading of bad evidence and
+the way each failed is the reusable part. **All three traced to one cause: the
+extractor scanned for a closing backtick and truncated at 3,500 chars.**
+
+**1. "It is a REWRITE — only 2 of 31 paragraphs survive."** The comparison was
+against the 3 KB HEAD alone. Against both halves, **27 of 31 survive
+byte-identical**. The four real deltas are three cross-references the split
+itself required (`"below"` → `"in the workflow authoring reference"`,
+`"above"` → `"in the Workflow tool description"`, `"(example below)"` →
+`"(the review-changes example)"`) and one added sentence about schemas.
+🚨 A fifth apparent delta, `×` vs `\xD7`, was the extractor: it unescaped
+`\uXXXX` but not `\xNN`, which the binary also uses. The byte-lock now rejects
+both spellings.
+
+**2. "The fusion anchor occurs 0 times in .267."** It occurs **exactly once** —
+past the truncation point. Both registered divergences survive verbatim, each in
+the correct half (`local-app-create-handoff` in the description, the fusion hook
+in the reference), and **neither needed re-anchoring**. The recommendation this
+section made — move `fusion()` inline into the trimmed description — would have
+separated it from the hook list it belongs to for no reason.
+
+The reachability invariant is real, but the fix is upstream's own: `Epn` keeps
+an inline branch, so a build that cannot load the skill still gets every hook.
+That is now asserted directly
+(`the_inline_branch_documents_every_script_body_hook`) rather than implied.
+
+**3. "The skill body is not a static string."** True, and it was the one finding
+that held — but it is three `${e?"":"…"}` fragments on
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, which this port already reads. Stored as the
+unforced text plus a subtraction list, each fragment required to match exactly
+once so a stale fragment cannot silently subtract nothing.
+
+⚠️ The generalisable error: **the conclusion "this is a rewrite" and the
+conclusion "the anchor is gone" were both produced by an instrument that had
+silently stopped reading.** Neither was re-checked against a second method. A
+truncating parser does not announce itself — it returns a shorter string that
+looks complete. See [[an-exit-code-is-not-evidence]]: the extractor exited 0.
+
+### How the gate is expressed
+
+Upstream's `nre(tools)` is six session conditions plus a per-call check that the
+`Skill` tool is advertised. This port has no substrate for three of them
+(`disableBundledSkills`, `skillOverrides`, the session skill allowlist), so it
+answers the question those conditions ask rather than reproducing them: the
+registrar publishes that the skill exists, the wire-schema build publishes
+whether this request advertises `Skill`, and both must hold. The
+wire-schema cache is keyed on the result, so an entry built before the registrar
+ran cannot outlive it.
+
+⚠️ Divergence: upstream gates registration on `isEnabled: () => qc()`.
+`register_bundled_skills` never receives the managed workflow-disable setting,
+and gating on a predicate the registration site cannot see risks the one state
+the invariant forbids — the skill absent while the description claims it is
+loadable. Registered unconditionally instead; a reference readable while
+workflows are off is inert.
+
+## 2.5 `doctor` — LANDED 2026-09-10 as `/checkup`
+
+Commit `e8da94ffa`. Upstream registers `doctor` with `aliases:["checkup"]`,
+`terminalOriented:!0`, `disableModelInvocation:!0`. This port already ships a
+`/doctor` that is a **different thing**: a deterministic command whose
+`DoctorReport` DTO the GUI clients render as a screen (`doctor_report_parity`
+in `client-adapter`). Both wanted the name; neither subsumes the other. User
+decision 2026-09-10: keep `/doctor`, land upstream's under its own alias.
+
+**Two of ten checks cut**, both Anthropic-DISTRIBUTION diagnostics already
+excluded by the accepted divergences:
+
+| cut | why |
+|---|---|
+| Check 7 (version currency), whole | `npm view @anthropic-ai/claude-code`, `downloads.claude.ai/claude-code-releases`, `claude-code` Homebrew casks, `claude update` — LingXi ships through none of them |
+| Check 0's first two bullets | enumerate `~/.local/bin/claude`, npm-global `@anthropic-ai/claude-code`, `installMethod` |
+
+Check 0's other three bullets (unparseable settings, broken/colliding agent
+definitions, malformed skill frontmatter) map exactly and are kept, as are
+checks 1-6 and 8-9.
+
+🚨 **Cutting a numbered check moves every cross-reference to it** — the report
+format's check list, the "checks 0 and 7" command note, the consolidated-cleanup
+gate, and the data-sources header, which advertised check 7 as the one permitted
+network call. Prose has no compiler, so
+`the_check_numbering_is_self_consistent` pins the heading set, the absence of
+any "check 7" reference, and the actionable-check list together.
+
+⛔ `mcp__claude_ai_<connector>__` is deliberately NOT rebranded — it is the wire
+prefix for claude.ai connectors. Rebranding it would stop the model matching
+real transcript entries **while every branding assertion still passed**, so it
+has its own test, red-proofed separately.
+
+**Substrate verified rather than rebranded on faith:** skill usage is
+`~/.lingxi/skill_usage.json` (a file, not a key in `~/.claude.json`); transcripts
+`~/.lingxi/projects/<cwd>[-<djb2>]/*.jsonl`; `MAX_MEMORY_CHARACTER_COUNT` in
+`memory/src/lib.rs`; `lingxi-cli plugin validate` / `mcp remove`.
+⚠️ `pluginUsage` has NO counterpart here — plugin guidance rests on transcript
+evidence, which is upstream's own fallback for zero-count plugins.
+⚠️ Upstream's `progressMessage:"running checkup"` is unwired: `SlashCommand`
+carries no such field.
+

@@ -506,6 +506,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         agent_name: None,
         team_name: None,
         agent_definition: AgentDefinition {
+            cache_ttl: None,
             agent_type: "test".into(),
             when_to_use: String::new(),
             tools: AgentToolPolicy::All {
@@ -596,6 +597,78 @@ impl platform_api::NewDiagnosticsSource for OneShotDiagnostics {
     async fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
     }
+}
+
+/// Records whether the agent 1h-cache-TTL override is visible AT THE MOMENT
+/// the round-trip is made — i.e. where the real request would be built.
+struct CacheTtlProbeClient {
+    seen: Mutex<Option<bool>>,
+}
+
+#[async_trait]
+impl crate::api::SubagentApiClient for CacheTtlProbeClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        *self.seen.lock().unwrap() = Some(llm_client::agent_cache_ttl_1h_override());
+        Ok(text_response("done", Some("end_turn")))
+    }
+}
+
+/// Drive ONE real subagent run and report what the request site saw.
+///
+/// One run per test: three in a single `#[tokio::test]` overflowed the stack —
+/// `run_subagent`'s future is large, and they compose.
+async fn cache_ttl_seen_at_request_site(
+    ttl: Option<crate::definition::AgentCacheTtl>,
+) -> bool {
+    let probe = Arc::new(CacheTtlProbeClient {
+        seen: Mutex::new(None),
+    });
+    let mut ctx = loop_ctx(probe.clone(), None, 2);
+    ctx.agent_definition.cache_ttl = ttl;
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    let seen = *probe.seen.lock().unwrap();
+    seen.expect("the runner must have made a round-trip, or this test proves nothing")
+}
+
+/// The acceptance criterion recorded for AG-16: the override must be readable
+/// through the REAL runner-to-request path, not set by hand beside the
+/// assertion. A task-local that failed to propagate — because the round-trip
+/// moved onto its own task — would read `false` here while every unit test that
+/// scopes it manually still passed.
+#[tokio::test]
+async fn agent_cache_ttl_1h_reaches_the_request_site() {
+    assert!(
+        cache_ttl_seen_at_request_site(Some(crate::definition::AgentCacheTtl::OneHour)).await,
+        "`cacheTtl: 1h` must be visible where the request is built"
+    );
+}
+
+/// `"5m"` is Anthropic's default lifetime: it must NOT ask for the 1h
+/// breakpoint. Without this, any non-None value would look like it worked.
+#[tokio::test]
+async fn agent_cache_ttl_5m_does_not_request_the_1h_breakpoint() {
+    assert!(
+        !cache_ttl_seen_at_request_site(Some(crate::definition::AgentCacheTtl::FiveMinutes)).await
+    );
+}
+
+/// No frontmatter TTL leaves the env/setting in charge, exactly as before the
+/// field existed.
+#[tokio::test]
+async fn no_agent_cache_ttl_leaves_the_default_alone() {
+    assert!(!cache_ttl_seen_at_request_site(None).await);
 }
 
 #[tokio::test]

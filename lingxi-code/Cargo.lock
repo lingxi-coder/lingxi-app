@@ -1221,6 +1221,7 @@ dependencies = [
  "branding",
  "command-api",
  "compaction",
+ "core",
  "cost",
  "cron",
  "indexmap 2.7.1",
@@ -1230,6 +1231,7 @@ dependencies = [
  "platform-api",
  "protocol",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1240,6 +1242,7 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
+ "workflow",
 ]
 
 [[package]]
@@ -4397,6 +4400,7 @@ dependencies = [
  "tokio-util",
  "tool-api",
  "tool-file",
+ "tool-skill",
  "tool-task",
  "tool-workflow",
  "tracing",
@@ -9086,7 +9090,10 @@ dependencies = [
 name = "workflow"
 version = "0.12.0"
 dependencies = [
+ "once_cell",
+ "platform-api",
  "rquickjs",
+ "serde",
  "serde_json",
  "tree-sitter",
  "tree-sitter-javascript",

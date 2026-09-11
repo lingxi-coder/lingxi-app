@@ -541,10 +541,20 @@ impl ConversationOrchestrator {
         self.tools
             .set_main_loop_model(canonical_main_loop_model(&model));
         let tools = self.filtered_available_tools().await;
+        // Upstream `nre`'s per-call conjunct: the Workflow description may only
+        // point at the `workflow-authoring` skill when this request actually
+        // offers the tool that loads it, and tool filtering can drop `Skill`.
+        // Name-or-alias, matching `Wt(e, o)`.
+        platform_api::session_flags::set_skill_tool_advertised(tools.iter().any(|tool| {
+            tool.name() == tool_skill::skill::SKILL_TOOL_NAME
+                || tool.aliases().contains(&tool_skill::skill::SKILL_TOOL_NAME)
+        }));
         let cache_key = WireToolSchemaCacheKey {
             tool_names: tools.iter().map(|t| t.name().to_string()).collect(),
             model: model.clone(),
             model_profile: model_profile.clone(),
+            workflow_authoring_skill_reachable:
+                platform_api::session_flags::workflow_authoring_skill_reachable(),
         };
         let mut wire = {
             let cached = self

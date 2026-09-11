@@ -101,6 +101,51 @@ pub struct AgentDefinition {
     /// invalidating older transcripts. `None` is the legacy/default behavior.
     #[serde(default)]
     pub observer: Option<ObserverSpec>,
+    /// `experimental.cacheTtl` — prompt-cache TTL for this agent's requests.
+    ///
+    /// claude-code 2.1.267 (`src_163219561.js` @1339284): *"Prompt cache TTL for
+    /// this agent's requests (\"5m\" or \"1h\") when no `subagentPromptCacheTtl`
+    /// setting or env var is set."* Consumed upstream as `agentCacheTtlOverride`
+    /// (@3483567); here it feeds `ApiService::should_1h_cache_ttl`.
+    ///
+    /// `None` means the frontmatter said nothing — env/setting decides, exactly
+    /// as before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ttl: Option<AgentCacheTtl>,
+}
+
+/// `experimental.cacheTtl` value domain: upstream accepts exactly `"5m"`/`"1h"`.
+///
+/// `FiveMinutes` is Anthropic's default ephemeral lifetime, so it maps to a
+/// plain breakpoint; `OneHour` is the one that changes the wire (`ttl:"1h"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentCacheTtl {
+    /// `"5m"` — default ephemeral lifetime; emits no `ttl` key.
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    /// `"1h"` — emits `ttl:"1h"` (claude-code `should1hCacheTTL`).
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl AgentCacheTtl {
+    /// Parse a frontmatter value. Unknown strings are REJECTED, not defaulted:
+    /// a typo'd `"60m"` silently reading as `"5m"` would look like the feature
+    /// working while doing nothing.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "5m" => Some(Self::FiveMinutes),
+            "1h" => Some(Self::OneHour),
+            _ => None,
+        }
+    }
+
+    /// Does this TTL ask for the 1-hour wire breakpoint?
+    #[must_use]
+    pub fn wants_1h(self) -> bool {
+        matches!(self, Self::OneHour)
+    }
 }
 
 /// Strategy the [`crate::tool_resolver::AgentToolResolver`] uses to project
@@ -353,5 +398,45 @@ impl AgentDefinition {
     #[must_use]
     pub fn is_fork(&self) -> bool {
         self.agent_type == "fork"
+    }
+}
+
+#[cfg(test)]
+mod cache_ttl_tests {
+    use super::AgentCacheTtl;
+
+    #[test]
+    fn only_the_two_upstream_values_parse() {
+        assert_eq!(AgentCacheTtl::parse("5m"), Some(AgentCacheTtl::FiveMinutes));
+        assert_eq!(AgentCacheTtl::parse("1h"), Some(AgentCacheTtl::OneHour));
+        assert_eq!(AgentCacheTtl::parse(" 1h "), Some(AgentCacheTtl::OneHour));
+    }
+
+    /// ⛔ Unknown values must be REJECTED, never defaulted. A `"60m"` that
+    /// quietly read as `"5m"` would look like the feature working while doing
+    /// nothing — and `"1h"`-looking typos are the likely mistake.
+    #[test]
+    fn unknown_values_are_rejected_not_defaulted() {
+        for raw in ["60m", "1hr", "1H", "3600", "", "true", "5 m"] {
+            assert_eq!(AgentCacheTtl::parse(raw), None, "{raw:?} must not parse");
+        }
+    }
+
+    /// Only `1h` changes the wire; `5m` is Anthropic's default lifetime.
+    #[test]
+    fn only_one_hour_requests_the_wire_breakpoint() {
+        assert!(AgentCacheTtl::OneHour.wants_1h());
+        assert!(!AgentCacheTtl::FiveMinutes.wants_1h());
+    }
+
+    /// The serde spellings are the frontmatter spellings, not the Rust names.
+    #[test]
+    fn serde_round_trips_the_upstream_spellings() {
+        let one = serde_json::to_string(&AgentCacheTtl::OneHour).unwrap();
+        assert_eq!(one, "\"1h\"");
+        assert_eq!(
+            serde_json::from_str::<AgentCacheTtl>("\"5m\"").unwrap(),
+            AgentCacheTtl::FiveMinutes
+        );
     }
 }

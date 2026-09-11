@@ -103,6 +103,8 @@ pub struct TaskRegistry {
     /// Mirrors the `TeamSpawnSeam` decoupling: the `tasks` leaf cannot reach a
     /// live hook executor, so it calls through this narrow trait instead.
     task_completed_firer: std::sync::Mutex<hooks::OptionalTaskCompletedFirer>,
+    /// Analytics sink for `tengu_agent_tool_terminated`; `None` ⇒ no emission.
+    analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
     /// Best-effort seam to fire the `TaskCreated` hook when a task is created.
     /// Counterpart to [`task_completed_firer`](Self::task_completed_firer):
     /// `None` (the default) => strict no-op; the orchestrator injects a real
@@ -394,6 +396,7 @@ impl TaskRegistry {
             fs,
             output_manager,
             task_completed_firer: std::sync::Mutex::new(None),
+            analytics_bus: None,
             task_created_firer: std::sync::Mutex::new(None),
             notification_revision: tokio::sync::watch::channel(0).0,
             stopping_shells: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -532,6 +535,74 @@ impl TaskRegistry {
     pub fn with_task_completed_firer(mut self, firer: Arc<dyn hooks::TaskCompletedFirer>) -> Self {
         self.task_completed_firer = std::sync::Mutex::new(Some(firer));
         self
+    }
+
+    /// Wire the analytics bus so a killed background agent can report
+    /// `tengu_agent_tool_terminated`.
+    ///
+    /// The event needs BOTH halves and neither side has both: the spawning tool
+    /// knows the model / depth / built-in-ness, the registry knows `killed_by`.
+    /// The tool stamps its half onto the task row at launch
+    /// (`AgentTerminalOutcome::agent_depth` / `is_built_in`); this is where the
+    /// two meet.
+    #[must_use]
+    pub fn with_analytics_bus(mut self, bus: Arc<telemetry::AnalyticsBus>) -> Self {
+        self.analytics_bus = Some(bus);
+        self
+    }
+
+    /// `tengu_agent_tool_terminated`, async twin (`src_163219561.js` @3558604).
+    ///
+    /// `reason` is derived from `killedBy` exactly as upstream does:
+    /// `"parent"` → `parent_kill_async`, `"system"` → `system_kill_async`,
+    /// anything else → `user_kill_async`.
+    async fn emit_agent_tool_terminated(&self, state: &TaskState, killed_by: &str) {
+        let (Some(bus), TaskState::LocalAgent(agent)) = (self.analytics_bus.as_ref(), state) else {
+            return;
+        };
+        let mut md = telemetry::LogEventMetadata::new();
+        md.insert(
+            "agent_type".into(),
+            telemetry::AnalyticsValue::String(agent.subagent_type.clone()),
+        );
+        md.insert(
+            "model".into(),
+            telemetry::AnalyticsValue::String(agent.outcome.model.clone().unwrap_or_default()),
+        );
+        md.insert(
+            "duration_ms".into(),
+            telemetry::AnalyticsValue::Int(
+                agent
+                    .base
+                    .start_time
+                    .elapsed()
+                    .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+                    .unwrap_or(0),
+            ),
+        );
+        md.insert("is_async".into(), telemetry::AnalyticsValue::Bool(true));
+        if let Some(is_built_in) = agent.outcome.is_built_in {
+            md.insert(
+                "is_built_in_agent".into(),
+                telemetry::AnalyticsValue::Bool(is_built_in),
+            );
+        }
+        if let Some(depth) = agent.outcome.agent_depth {
+            md.insert(
+                "agent_depth".into(),
+                telemetry::AnalyticsValue::Int(i64::from(depth)),
+            );
+        }
+        let reason = match killed_by {
+            "parent" => "parent_kill_async",
+            "system" => "system_kill_async",
+            _ => "user_kill_async",
+        };
+        md.insert(
+            "reason".into(),
+            telemetry::AnalyticsValue::String(reason.to_string()),
+        );
+        bus.log_event("tengu_agent_tool_terminated", md).await;
     }
 
     /// Inject the best-effort `TaskCreated` hook firer. Counterpart to
@@ -3496,6 +3567,7 @@ impl TaskRegistry {
             // this same gate, then old teardown completes before a new epoch runs.
             Some(self.invalidate_human_messages(&canonical).lock_owned().await)
         } else { None };
+        let mut was_live_agent = false;
         if let Some(TaskState::LocalAgent(agent)) = self.tasks.write().await.get_mut(&canonical) {
             // Same reverse-race guard `kill` applies to the status: a task that
             // already finished on its own is not "stopped by" anyone, and
@@ -3503,11 +3575,21 @@ impl TaskRegistry {
             // initiator.
             if !agent.base.status.is_terminal() || agent.is_parked {
                 agent.outcome.killed_by = Some(killed_by.to_string());
+                was_live_agent = true;
             }
         }
         // claude-code captures `ue = GS(I)` BEFORE the kill, because the kill
         // clears the keepalive reasons the gate reads. Same here: resolve the
         // cascade target while the task is still resting.
+        // `tengu_agent_tool_terminated` (async twin). Emitted only when this
+        // call is what stopped the agent — the same reverse-race guard the
+        // `killed_by` stamp uses, so a task that had already finished on its own
+        // is not reported as terminated by anyone.
+        if was_live_agent {
+            if let Some(state) = self.tasks.read().await.get(&canonical) {
+                self.emit_agent_tool_terminated(state, killed_by).await;
+            }
+        }
         let cascade_from = self.resting_agent_holding_children(&canonical).await;
         let result = self.kill(task_id).await;
         if let Some(agent_id) = cascade_from {

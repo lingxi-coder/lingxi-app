@@ -8,8 +8,23 @@
 //! 2.1.206 emits so the model actively writes memories the prefetch reads back.
 //!
 //! The compact [`render`] form remains byte-locked to the lean-profile
-//! protocol introduced in 2.1.206:
-//! - em-dashes are U+2014
+//! protocol introduced in 2.1.206, re-verified against 2.1.267 (`$o` /
+//! `zt` / `ia` in `src_161574736.js`):
+//! - em-dashes are U+2014 WHERE UPSTREAM USES ONE. ⚠️ The `description:`
+//!   frontmatter line is the exception: 2.1.267 separates it with a COMMA
+//!   ("one-line summary, used to decide relevance"), in both this template and
+//!   the compact form. The em-dash spelling was 2.1.220's and has ZERO hits in
+//!   2.1.267 (checked escaped AND raw — the binary stores non-ASCII escaped,
+//!   so grepping only one spelling proves nothing).
+//! - every other section was diffed line-by-line against 2.1.267 and is
+//!   unchanged: Types of memory, What NOT to save, How to save, When to access,
+//!   Before recommending from memory.
+//! - upstream's `## Citing memories` (`Et()`, `<cc-memory filenames=…>` tags) is
+//!   deliberately NOT emitted: this port has no `<cc-memory>` stripper
+//!   (`apps/cli/src/stream_json.rs:1439`), so the instruction would leak raw
+//!   tags into user-visible text. ⛔ Do not add it without the stripper.
+//! - upstream's `## Project skill upkeep` (`Nt()`) is gated on
+//!   `tengu_gorse_fathom`, which defaults FALSE — its absence is alignment.
 //! - `CLAUDE.md` -> `LINGXI.md` (the port's memory-instruction-file rebrand)
 //! - the single-directory intro (`XUe`); the team "Both directories already
 //!   exist" / `team/`-prefix variant is a frozen carve-out and NOT emitted.
@@ -121,7 +136,7 @@ Saving a memory is a two-step process:
 ```markdown
 ---
 name: {{short-kebab-case-slug}}
-description: {{one-line summary — used to decide relevance in future conversations, so be specific}}
+description: {{one-line summary, used to decide relevance in future conversations, so be specific}}
 metadata:
   type: {{user, feedback, project, reference}}
 ---
@@ -179,7 +194,7 @@ You have a persistent file-based memory at `{path}`. This directory already exis
 ```markdown\n\
 ---\n\
 name: <short-kebab-case-slug>\n\
-description: <one-line summary \u{2014} used to decide relevance during recall>\n\
+description: <one-line summary, used to decide relevance during recall>\n\
 metadata:\n  type: user | feedback | project | reference\n\
 ---\n\
 \n\
@@ -228,7 +243,7 @@ mod tests {
         ));
         // Frontmatter block (em-dash in the description hint is U+2014).
         assert!(s.contains(
-            "---\nname: <short-kebab-case-slug>\ndescription: <one-line summary \u{2014} used to decide relevance during recall>\nmetadata:\n  type: user | feedback | project | reference\n---"
+            "---\nname: <short-kebab-case-slug>\ndescription: <one-line summary, used to decide relevance during recall>\nmetadata:\n  type: user | feedback | project | reference\n---"
         ));
         // Body-linking + tier-glossary paragraphs.
         assert!(s.contains("Link liberally \u{2014} a `[[name]]` that doesn't match an existing memory yet is fine; it marks something worth writing later, not an error."));
@@ -247,6 +262,31 @@ mod tests {
     }
 
     #[test]
+    /// 2.1.267 separates the `description:` frontmatter line with a COMMA, in
+    /// BOTH profiles. The em-dash spelling was 2.1.220's and has zero hits in
+    /// 2.1.267 — checked escaped (`\\u2014`) AND raw, because the binary stores
+    /// non-ASCII escaped and grepping one spelling proves nothing.
+    ///
+    /// Pinned separately from the byte-lock above, which only covers the
+    /// compact form: nothing asserted this line in the FULL template, so the
+    /// re-base of it would have been silently revertible.
+    #[test]
+    fn the_description_frontmatter_line_uses_the_2_1_267_comma() {
+        for (label, rendered) in [
+            ("compact", render("/m")),
+            ("full", render_for_profile("/m", platform_api::model_capabilities::PromptProfile::FullHarness)),
+        ] {
+            assert!(
+                rendered.contains("one-line summary, used to decide relevance"),
+                "{label} profile must use 2.1.267's comma separator"
+            );
+            assert!(
+                !rendered.contains("one-line summary \u{2014} used to decide relevance"),
+                "{label} profile still carries the 2.1.220 em-dash separator"
+            );
+        }
+    }
+
     fn index_name_is_memory_md() {
         assert_eq!(MEMORY_INDEX_NAME, "MEMORY.md");
     }

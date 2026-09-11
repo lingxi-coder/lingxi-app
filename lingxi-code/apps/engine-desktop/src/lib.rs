@@ -9512,13 +9512,29 @@ impl orchestrator::prompt::async_hook_response::AsyncHookResponseProvider
 
 fn registry_skill_listing_provider(
     registry: Arc<RwLock<CommandRegistry>>,
+    read_file_state: tool_api::read_file_state::ReadFileStateMap,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
+    // Conditional-skill activation is SESSION state, not per-listing: once a
+    // touched file has revealed a skill, a later turn whose touched set no
+    // longer names that file must not hide it again.
+    let conditional = Arc::new(std::sync::Mutex::new(skill_api::ConditionalSkills::new()));
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
             let registry = registry.clone();
+            let conditional = conditional.clone();
+            let read_file_state = read_file_state.clone();
             async move {
                 use command_api::{CommandSource, SlashCommandKind};
                 let reg = registry.read().await;
+                // The read-state map is an LRU with a 100-entry cap, so a
+                // touched path can be evicted. That is exactly why activation is
+                // remembered rather than recomputed: a skill the model has been
+                // shown must not vanish because its file aged out.
+                let touched = read_file_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .keys();
+                let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
                     .into_iter()
                     // TS `cmd.type === 'prompt'` — markdown/plugin commands,
@@ -9534,6 +9550,17 @@ fn registry_skill_listing_provider(
                     })
                     // TS `cmd.source !== 'builtin'`.
                     .filter(|c| c.source != CommandSource::Builtin)
+                    // A CONDITIONAL skill (`paths:`) stays out of the listing
+                    // until the session has touched a matching file (claude-code
+                    // `lhr`). `read_file_state` is this port's record of what the
+                    // session touched.
+                    .filter(|c| match c.paths.as_deref() {
+                        None => true,
+                        Some(patterns) => conditional
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .is_available_named(&c.name, patterns, &touched, &root),
+                    })
                     // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
                     //    hasUserSpecifiedDescription || whenToUse.
                     .filter(|c| {
@@ -13303,6 +13330,9 @@ pub async fn build(
             Arc::new(PosixFileSystem::new(cwd.clone())),
         )),
     )
+    // `tengu_agent_tool_terminated` (async twin): the registry is where
+    // `killed_by` is known, so it is where the event can name its origin.
+    .with_analytics_bus(analytics_bus.clone())
     // Fire the `TaskCompleted` hook (claude-code `executeTaskCompletedHooks`)
     // when a task reaches a terminal status. The firer wraps the SAME
     // `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through, so
@@ -15173,6 +15203,7 @@ pub async fn build(
         // (populated below at (6), before any turn fires).
         .with_skill_listing(registry_skill_listing_provider(
             shared_command_registry.clone(),
+            read_state_map.clone(),
         ))
         // B5: fold completed background (`async`) hook responses back into the
         // next turn. Backed by the completion-channel drain buffer above.

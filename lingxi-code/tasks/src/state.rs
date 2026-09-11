@@ -304,6 +304,13 @@ pub struct AgentOutcomeState {
     /// Turn budget the run exhausted → the turn-limit `completed` summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns_reached: Option<u64>,
+    /// Launch metadata stamped by the spawning tool, so the KILL path (which
+    /// knows `killed_by` but not the launch context) can report it.
+    #[serde(default)]
+    pub agent_depth: Option<u32>,
+    /// See [`Self::agent_depth`].
+    #[serde(default)]
+    pub is_built_in: Option<bool>,
 }
 
 impl AgentOutcomeState {
@@ -318,6 +325,8 @@ impl AgentOutcomeState {
             worktree_path,
             worktree_branch,
             max_turns_reached,
+            agent_depth,
+            is_built_in,
         } = incoming;
         if result.is_some() {
             self.result = result;
@@ -333,6 +342,12 @@ impl AgentOutcomeState {
         }
         if max_turns_reached.is_some() {
             self.max_turns_reached = max_turns_reached;
+        }
+        if agent_depth.is_some() {
+            self.agent_depth = agent_depth;
+        }
+        if is_built_in.is_some() {
+            self.is_built_in = is_built_in;
         }
     }
 }

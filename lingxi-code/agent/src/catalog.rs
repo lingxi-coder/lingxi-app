@@ -20,7 +20,7 @@
 //! `tracing::warn!`). The exposed [`parse_agent_markdown`] returns a
 //! typed error so unit tests can assert on the failure mode.
 
-use crate::definition::{
+use crate::definition::{AgentCacheTtl, 
     parse_effort_value, AgentDefinition, AgentEffort, AgentIsolation, AgentMcpServerSpec,
     AgentMemoryScope, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy, ObserverSpec,
     EFFORT_LEVELS,
@@ -130,6 +130,8 @@ struct Frontmatter {
     color: Option<serde_yaml::Value>,
     #[serde(default, rename = "initialPrompt")]
     initial_prompt: Option<serde_yaml::Value>,
+    #[serde(default)]
+    experimental: Option<serde_yaml::Value>,
     #[serde(default)]
     observer: Option<serde_yaml::Value>,
     #[serde(default, rename = "observerMessage")]
@@ -419,7 +421,7 @@ pub fn parse_agent_markdown(
     let system_prompt = body.trim().to_string();
 
     Ok(AgentDefinition {
-        agent_type,
+                agent_type,
         when_to_use,
         tools: tools_policy,
         max_turns,
@@ -448,7 +450,38 @@ pub fn parse_agent_markdown(
         initial_prompt,
         color,
         observer,
+        cache_ttl: parse_cache_ttl_yaml(fm.experimental.as_ref()),
     })
+}
+
+/// `experimental.cacheTtl` from YAML frontmatter.
+///
+/// Upstream's schema is `.loose()` — unknown keys inside `experimental` are
+/// tolerated — so an unparseable `cacheTtl` yields `None` (env/setting decides)
+/// rather than dropping the whole agent. Both the documented `cacheTtl` spelling
+/// and upstream's normalized `cachettl` are accepted.
+fn parse_cache_ttl_yaml(experimental: Option<&serde_yaml::Value>) -> Option<AgentCacheTtl> {
+    let mapping = experimental?.as_mapping()?;
+    for key in ["cacheTtl", "cachettl"] {
+        if let Some(raw) = mapping
+            .get(serde_yaml::Value::String(key.to_string()))
+            .and_then(serde_yaml::Value::as_str)
+        {
+            return AgentCacheTtl::parse(raw);
+        }
+    }
+    None
+}
+
+/// `experimental.cacheTtl` from a JSON agent definition. Same tolerance.
+fn parse_cache_ttl_json(experimental: Option<&serde_json::Value>) -> Option<AgentCacheTtl> {
+    let object = experimental?.as_object()?;
+    for key in ["cacheTtl", "cachettl"] {
+        if let Some(raw) = object.get(key).and_then(serde_json::Value::as_str) {
+            return AgentCacheTtl::parse(raw);
+        }
+    }
+    None
 }
 
 fn parse_observer_frontmatter(
@@ -1204,6 +1237,7 @@ pub fn parse_agent_from_json(
         initial_prompt,
         color: None,
         observer,
+        cache_ttl: parse_cache_ttl_json(obj.get("experimental")),
     })
 }
 

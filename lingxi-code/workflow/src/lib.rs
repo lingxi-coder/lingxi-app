@@ -17,6 +17,7 @@
 //! `Workflow` tool (`tool-workflow`) is registered + wired at the desktop
 //! composition root.
 
+pub mod description;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;

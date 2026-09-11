@@ -330,7 +330,7 @@ export function SettingsScreen({
   const layerLocked = layerLockCount > 0;
 
   const panelRef = useRef<HTMLDivElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
   // A ref, not a dependency, so the mount effect below (which must run its
   // capture-focus/attach-listener logic exactly once) always calls the
   // LATEST `onClose` without needing to re-run when the prop identity changes.
@@ -370,7 +370,7 @@ export function SettingsScreen({
   // it while leaving focus (and Tab) free to wander the background would be
   // its own overclaim — assistive tech is told the background is inert while
   // Tab still walks it. This captures whatever had focus before mount,
-  // moves focus onto the close button, traps Tab inside `panelRef`'s
+  // moves focus onto the back button, traps Tab inside `panelRef`'s
   // focusable descendants (wrapping via the same `dialogFocusTarget` helper
   // the old settings modal used), and restores focus to whatever had it on unmount.
   // This is a DIFFERENT concern from `SettingsScreenProps.onClose` /
@@ -379,7 +379,7 @@ export function SettingsScreen({
   // it's open. Both are needed.
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    closeRef.current?.focus();
+    backRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -492,6 +492,14 @@ export function SettingsScreen({
           borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflowY: 'auto',
         }}>
           <div style={{ padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
+            <button ref={backRef} type="button" aria-label="Back to app" onClick={onClose}
+              className="settings-back-button"
+              style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
+                marginBottom: 8, padding: '7px 10px', border: 0, borderRadius: 8, background: t.surfaceActive,
+                color: t.text, font: 'inherit', fontSize: 14, textAlign: 'left', cursor: 'pointer' }}>
+              <Icon name="arrowLeft" size={17} stroke={1.8} />
+              <span>Back to app</span>
+            </button>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8,
               background: t.surface, border: `0.5px solid ${t.border}`,
@@ -559,19 +567,7 @@ export function SettingsScreen({
           {body}
         </div>
 
-        <button
-          ref={closeRef}
-          type="button"
-          aria-label="Close settings"
-          onClick={onClose}
-          style={{
-            position: 'absolute', top: 14, right: 18, width: 28, height: 28, borderRadius: 8,
-            border: `0.5px solid ${t.border}`, background: t.surface, color: t.text3,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
-          }}
-        >
-          <Icon name="x" size={14} stroke={1.8} />
-        </button>
+
       </div>
     </div>
   );

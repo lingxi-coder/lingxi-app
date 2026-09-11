@@ -83,7 +83,7 @@ export function toolIconName(verb: string): string {
   if (['bash', 'shell', 'terminal', 'command', 'exec'].some((part) => value.includes(part))) return 'terminal';
   // `TodoWrite` is a task tool even though it also contains "write".
   if (['todo', 'task', 'plan'].some((part) => value.includes(part))) return 'tasks';
-  if (['edit', 'write', 'update', 'create', 'patch'].some((part) => value.includes(part))) return 'code';
+  if (['edit', 'write', 'update', 'create', 'patch'].some((part) => value.includes(part))) return 'compose';
   if (['git', 'commit', 'branch'].some((part) => value.includes(part))) return 'git';
   if (['read', 'file', 'glob', 'directory', 'list'].some((part) => value.includes(part))) return 'file';
   return 'box';

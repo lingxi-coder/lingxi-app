@@ -257,14 +257,12 @@ async function runFocusTrapScenario(webContents) {
   await waitFor(webContents, 'window.__settingsScreenTest.state().dialogPresent');
   const onMount = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
 
-  // Forward Tab from the LAST focusable element (the close button — nothing
-  // in this shell renders after it) must wrap to the FIRST (the nav search
-  // input), not escape the dialog into the (inert, in the real app) background.
+  // Back is now first in the left panel; Tab moves to search.
   webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
   await delay(50);
   const afterForwardTab = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
 
-  // Shift+Tab from the FIRST focusable element must wrap back to the LAST.
+  // Shift+Tab from search returns to Back.
   webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab', modifiers: ['shift'] });
   await delay(50);
   const afterBackwardTab = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
@@ -272,7 +270,7 @@ async function runFocusTrapScenario(webContents) {
   // Closing restores focus to whatever had it before the dialog mounted —
   // the opener here, standing in for the gear icon / model picker button in
   // the real app.
-  await webContents.executeJavaScript('window.__settingsScreenTest.closeSettings()');
+  await webContents.executeJavaScript(`document.querySelector('[aria-label="Back to app"]').click()`);
   await delay(50);
   const afterClose = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   return { onMount, afterForwardTab, afterBackwardTab, afterClose };

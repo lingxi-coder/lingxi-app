@@ -28,7 +28,7 @@ async function runCloseScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsTransactionTest.startSave()');
   await waitFor(webContents, 'window.__settingsTransactionTest.state().persistencePending');
   const busyState = await webContents.executeJavaScript(`({
-    closeDisabled: document.querySelector('button[aria-label="Close settings"]')?.disabled ?? true,
+    closeDisabled: document.querySelector('button[aria-label="Back to app"]')?.disabled ?? true,
     state: window.__settingsTransactionTest.state(),
   })`);
   webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ESC' });

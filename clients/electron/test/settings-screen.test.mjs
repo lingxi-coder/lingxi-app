@@ -184,11 +184,11 @@ test('opening settings while the session is loading sends nothing, and the snaps
   assert.ok(afterReady.refreshCalls > whileLoading.refreshCalls, 'once loading finishes the effect must retry on its own, with no separate action');
 });
 
-test('the settings-focus trap moves focus in on mount, wraps Tab both directions, and restores focus to the opener on close', async () => {
+test('the settings-focus behavior starts at Back, traverses search, and restores the opener on return', async () => {
   const { onMount, afterForwardTab, afterBackwardTab, afterClose } = await runScenario('focus-trap');
-  assert.equal(onMount.activeElementAriaLabel, 'Close settings', 'mounting an aria-modal dialog must move focus INTO it, not leave it in the background');
-  assert.equal(afterForwardTab.activeElementAriaLabel, '搜索设置', 'forward Tab from the last focusable (close) must wrap to the first (search), not escape the dialog');
-  assert.equal(afterBackwardTab.activeElementAriaLabel, 'Close settings', 'shift+Tab from the first focusable (search) must wrap to the last (close)');
+  assert.equal(onMount.activeElementAriaLabel, 'Back to app', 'mounting an aria-modal dialog must move focus INTO it, not leave it in the background');
+  assert.equal(afterForwardTab.activeElementAriaLabel, '搜索设置', 'Tab from Back moves to search');
+  assert.equal(afterBackwardTab.activeElementAriaLabel, 'Back to app', 'Shift+Tab from search returns to Back');
   assert.equal(afterClose.activeElementId, 'opener', 'closing must restore focus to whatever had it before the dialog mounted');
 });
 

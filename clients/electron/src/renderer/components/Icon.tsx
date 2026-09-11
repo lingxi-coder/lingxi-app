@@ -39,6 +39,7 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'check': return <svg {...p}><path d="M20 6 9 17l-5-5" /></svg>;
     case 'chevron': return <svg {...p}><path d="m6 9 6 6 6-6" /></svg>;
     case 'chevronR': return <svg {...p}><path d="m9 18 6-6-6-6" /></svg>;
+    case 'arrowLeft': return <svg {...p}><path d="M19 12H5m7-7-7 7 7 7" /></svg>;
     case 'chevronL': return <svg {...p}><path d="m15 18-6-6 6-6" /></svg>;
     case 'code': return <svg {...p}><path d="m16 18 6-6-6-6M8 6l-6 6 6 6" /></svg>;
     case 'chat': return <svg {...p}><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" /></svg>;
@@ -76,11 +77,11 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'circle': return <svg {...p}><circle cx="12" cy="12" r="6" /></svg>;
     case 'goal': return <svg {...p}><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></svg>;
     case 'archive': return <svg {...p}><rect x="3" y="3" width="18" height="5" rx="1" /><path d="M5 8v12h14V8M10 12h4" /></svg>;
+    case 'pencil':
     case 'compose': return <svg {...p}><path d="M12 3H7a4 4 0 0 0-4 4v10a4 4 0 0 0 4 4h10a4 4 0 0 0 4-4v-5" /><path d="m10 14 1-4L18.5 2.5a2.12 2.12 0 0 1 3 3L14 13z" /></svg>;
     case 'bell': return <svg {...p}><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9 0 1 18 1 18 0 0-2-3-2-3-9M10 21h4" /></svg>;
     case 'notebook': return <svg {...p}><rect x="6" y="3" width="14" height="18" rx="3" /><path d="M3 7h5M3 12h5M3 17h5M11 8h5M11 12h3" /></svg>;
     case 'fileSearch': return <svg {...p}><path d="M11 21H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3h8l5 5v3M13 3v6h6" /><circle cx="16" cy="17" r="4" /><path d="m19 20 3 3" /></svg>;
-    case 'pencil': return <svg {...p}><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" /></svg>;
     case 'sliders': return <svg {...p}><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></svg>;
     case 'clock': return <svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></svg>;
     case 'bulb': return <svg {...p}><path d="M9 18h6M10 22h4" /><path d="M8.3 15.2A7 7 0 1 1 15.7 15.2C14.7 16 14 16.8 14 18h-4c0-1.2-.7-2-1.7-2.8Z" /></svg>;

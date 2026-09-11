@@ -1,4 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Icon } from '../../Icon';
 import type { ModelDetailsDto } from '@lingxi/bridge-client';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
@@ -84,7 +86,16 @@ export function candidatesFromCatalog(
   return rows;
 }
 
-function ChoiceSelect({
+/** Use the host's credential/configuration status, including custom profiles. */
+export function configuredCandidates(
+  rows: readonly CandidateRow[],
+  credentials: readonly { providerId: string; configured: boolean }[] = [],
+): CandidateRow[] {
+  const configured = new Set(credentials.filter((entry) => entry.configured).map((entry) => entry.providerId));
+  return rows.filter((row) => configured.has(row.choice.profile === 'builtin' ? 'anthropic' : row.choice.profile));
+}
+
+export function ChoiceSelect({
   value, rows, placeholder, onPick, disabled,
 }: {
   value: FusionModelChoice | null;
@@ -94,30 +105,98 @@ function ChoiceSelect({
   disabled: boolean;
 }) {
   const t = useT();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const id = useId();
+  const search = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState('');
+  const [position, setPosition] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const [active, setActive] = useState(0);
   const current = value ? routeOf(value) : '';
-  const known = rows.some((row) => routeOf(row.choice) === current);
-  return (
-    <select
-      value={current}
-      disabled={disabled}
-      aria-label={placeholder}
-      onChange={(event) => {
-        const picked = rows.find((row) => routeOf(row.choice) === event.target.value);
-        onPick(picked ? picked.choice : null);
+  const selected = rows.find((row) => routeOf(row.choice) === current);
+  const needle = query.trim().toLocaleLowerCase();
+  const options = [...(!needle ? [{ key: '', label: placeholder, choice: null as FusionModelChoice | null }] : []),
+    ...rows.filter((row) => !needle || `${row.label} ${row.providerLabel} ${routeOf(row.choice)}`.toLocaleLowerCase().includes(needle))
+      .map((row) => ({ key: routeOf(row.choice), label: `${row.label} · ${row.providerLabel}`, choice: row.choice }))];
+  const close = (focus = true) => { setPosition(null); if (focus) trigger.current?.focus(); };
+  const open = () => {
+    const rect = trigger.current?.getBoundingClientRect();
+    if (!rect) return;
+    const below = window.innerHeight - rect.bottom - 12;
+    const above = rect.top - 12;
+    const height = Math.max(0, Math.min(280, Math.max(below, above)));
+    const width = Math.min(Math.max(rect.width, 320), window.innerWidth - 24);
+    setQuery('');
+    setPosition({ left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
+      top: below >= Math.min(280, above) ? rect.bottom + 4 : Math.max(12, rect.top - height - 4), width, height });
+    setActive(Math.max(0, options.findIndex((option) => option.key === current)));
+  };
+  useEffect(() => {
+    if (!position) return;
+    search.current?.focus();
+    const dismiss = (event: Event) => {
+      const target = event.target as Node | null;
+      if (target && (list.current?.contains(target) || trigger.current?.contains(target))) return;
+      setPosition(null);
+    };
+    const resize = () => setPosition(null);
+    document.addEventListener('pointerdown', dismiss);
+    document.addEventListener('scroll', dismiss, true);
+    window.addEventListener('resize', resize);
+    return () => {
+      document.removeEventListener('pointerdown', dismiss);
+      document.removeEventListener('scroll', dismiss, true);
+      window.removeEventListener('resize', resize);
+    };
+  }, [position]);
+  useEffect(() => {
+    if (position) list.current?.querySelector(`[data-option-index="${active}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [active, position, query]);
+  useEffect(() => { setPosition(null); }, [disabled, rows]);
+  const pick = (index: number) => { const option = options[index]; if (option) onPick(option.choice); close(); };
+  return <>
+    <button ref={trigger} type="button" disabled={disabled} aria-label={placeholder}
+      aria-haspopup="dialog" aria-expanded={position !== null} aria-controls={position ? `${id}-popup` : undefined}
+      onClick={() => position ? close() : open()}
+      onKeyDown={(event) => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); open(); } }}
+      style={{ ...inputStyle(t), width: 280, maxWidth: '100%', display: 'flex', alignItems: 'center', gap: 8, textAlign: 'left' }}>
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {selected ? `${selected.label} · ${selected.providerLabel}` : current ? `${current} （当前不可达）` : placeholder}
+      </span><Icon name="chevron" size={13} />
+    </button>
+    {position && createPortal(<div ref={list} id={`${id}-popup`} role="dialog" aria-label={placeholder}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
+        else if (event.key === 'Tab') close();
+        else if (event.key === 'Enter' || (event.key === ' ' && event.target !== search.current)) { event.preventDefault(); pick(active); }
+        else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+          event.preventDefault();
+          setActive((index) => event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+            : Math.max(0, Math.min(options.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1))));
+        }
       }}
-      style={{ ...inputStyle(t), minWidth: 280 }}
-    >
-      <option value="">{placeholder}</option>
-      {/* 已配置但当前引擎的 catalog 里没有的路由仍然显示出来，并且标明原因 ——
-          悄悄把它换成空会让用户以为自己从没配过。 */}
-      {current && !known && <option value={current}>{current} （当前不可达）</option>}
-      {rows.map((row) => (
-        <option key={routeOf(row.choice)} value={routeOf(row.choice)}>
-          {row.label} · {row.providerLabel}
-        </option>
-      ))}
-    </select>
-  );
+      style={{ position: 'fixed', zIndex: 100, left: position.left, top: position.top, width: position.width,
+        maxHeight: position.height, display: 'flex', flexDirection: 'column', boxSizing: 'border-box',
+        padding: 4, borderRadius: 9, border: `1px solid ${t.border}`, background: t.surface, color: t.text,
+        boxShadow: '0 8px 28px rgba(0,0,0,.18)' }}>
+      <input ref={search} value={query} placeholder="搜索模型或 Provider…" aria-label="搜索模型"
+        role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={id}
+        aria-activedescendant={options.length ? `${id}-${Math.min(active, options.length - 1)}` : undefined}
+        onChange={(event) => { setQuery(event.target.value); setActive(0); }}
+        style={{ ...inputStyle(t), flexShrink: 0, marginBottom: 4, minWidth: 0 }} />
+      <div id={id} role="listbox" aria-label={placeholder} style={{ overflowY: 'auto', minHeight: 0, overscrollBehavior: 'contain' }}>
+      {!options.length && <div role="status" style={{ padding: 12, color: t.text3, fontSize: 13 }}>没有匹配的模型</div>}
+      {options.map((option, index) => <div key={option.key} id={`${id}-${index}`} role="option"
+        aria-selected={option.key === current} data-option-index={index}
+        onMouseDown={(event) => event.preventDefault()} onClick={() => pick(index)}
+        style={{ minHeight: 32, display: 'flex', alignItems: 'center', padding: '5px 8px', boxSizing: 'border-box',
+          fontSize: 13, borderRadius: 5, background: active === index ? t.surfaceActive : 'transparent', cursor: 'pointer' }}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{option.label}</span>
+      </div>)}
+      </div>
+    </div>, document.body)}
+  </>;
+
 }
 
 /**
@@ -144,14 +223,15 @@ export function Fusion({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
   const [pendingPanel, setPendingPanel] = useState<FusionModelChoice | null>(null);
 
   const candidates = useMemo(
-    () => candidatesFromCatalog(bridge.desktop.providerModelCatalog ?? []),
-    [bridge.desktop.providerModelCatalog],
+    () => configuredCandidates(candidatesFromCatalog(bridge.desktop.providerModelCatalog ?? []), bridge.bootstrap?.providerCredentials),
+    [bridge.desktop.providerModelCatalog, bridge.bootstrap?.providerCredentials],
   );
   const analystCandidates = useMemo(
     () => candidates.filter((row) => row.analystCapable),
     [candidates],
   );
   const missing = missingRoles(roles);
+  const pendingPanelAvailable = pendingPanel !== null && candidates.some((row) => routeOf(row.choice) === routeOf(pendingPanel));
 
   /** 浅合并进当前层自己的 `fusion` 对象后整键写回。 */
   const write = (patch: Record<string, unknown>, key: string) => {
@@ -247,13 +327,13 @@ export function Fusion({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
             />
             <button
               type="button"
-              disabled={saving !== null || !pendingPanel || roles.panels.length >= maxPanel}
+              disabled={saving !== null || !pendingPanelAvailable || roles.panels.length >= maxPanel}
               onClick={() => {
-                if (!pendingPanel) return;
+                if (!pendingPanel || !pendingPanelAvailable) return;
                 writePanels([...roles.panels, pendingPanel], 'panelModels');
                 setPendingPanel(null);
               }}
-              style={ghostButtonStyle(t, saving !== null || !pendingPanel || roles.panels.length >= maxPanel)}
+              style={ghostButtonStyle(t, saving !== null || !pendingPanelAvailable || roles.panels.length >= maxPanel)}
             >
               添加
             </button>

@@ -406,7 +406,9 @@ test('tool icon mapping covers the built-in tool families and has a fallback', (
   assert.equal(toolIconName('Read'), 'file');
   assert.equal(toolIconName('WebSearch'), 'search');
   assert.equal(toolIconName('Bash'), 'terminal');
-  assert.equal(toolIconName('UpdateFile'), 'code');
+  for (const verb of ['Edit', 'MultiEdit', 'Write', 'UpdateFile', 'ApplyPatch']) {
+    assert.equal(toolIconName(verb), 'compose');
+  }
   assert.equal(toolIconName('GitCommit'), 'git');
   assert.equal(toolIconName('TodoWrite'), 'tasks');
   assert.equal(toolIconName('mcp__unknown__call'), 'box');

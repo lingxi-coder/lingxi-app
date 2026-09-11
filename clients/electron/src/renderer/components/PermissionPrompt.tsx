@@ -135,7 +135,8 @@ function requestIcon(request: PermissionRequest): string {
   if (request.kind.type !== 'tool_use_confirm') return 'box';
   const name = request.kind.tool_name.toLowerCase();
   if (/(bash|shell|terminal|command|exec)/.test(name)) return 'terminal';
-  if (/(read|write|edit|file|folder)/.test(name)) return 'file';
+  if (/(write|edit|patch|update)/.test(name)) return 'compose';
+  if (/(read|file|folder)/.test(name)) return 'file';
   return 'box';
 }
 

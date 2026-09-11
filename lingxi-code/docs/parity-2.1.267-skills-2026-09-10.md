@@ -154,13 +154,13 @@ Upstream 2.1.267 registers **21** (`uo({name:…})`, variable names resolved):
 `run-skill-generator`, `setup-claude`, `update-config`, `whiteboard`,
 `workflow-authoring`, `workshop`.
 
-The port registers **16** through `register_bundled_skills` (11 + `update-config`,
+The port registers **17** through `register_bundled_skills` (11 + `update-config`,
 `keybindings-help`, `explain-usage`, `workflow-authoring` and `checkup`, added 2026-09-10), plus `claude-api` as the `skill-api`
 compiled-in builtin.
 
-| in both (10) | LingXi-only (4) | upstream-only (11) |
+| in both (11) | LingXi-only (4) | upstream-only (10) |
 |---|---|---|
-| batch, claude-api, code-review, dataviz, doctor (as `checkup`), explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config, workflow-authoring | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, debug, design-sync, memory-types, setup-claude, whiteboard, workshop |
+| batch, claude-api, code-review, dataviz, debug, doctor (as `checkup`), explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config, workflow-authoring | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, design-sync, memory-types, setup-claude, whiteboard, workshop |
 
 ### The remaining nine, adjudicated one by one (2026-09-10)
 
@@ -171,9 +171,9 @@ blanket "they ride surfaces this port does not have":
 |---|---|
 | `memory-types` | 🔒 **DORMANT upstream** — `var Jxn="memory-types"` sits next to `function Qxn(){return H("tengu_ochre_finch",!1)}`, its `isEnabled`. Flag defaults **false**, so absence here is ALIGNMENT, not a gap. Same shape as `melodic_wolf` / `lively_waffle`. |
 | `workflow-authoring` | ✅ **LANDED 2026-09-10** — see §2.4. The three reasons previously recorded for not landing it were all artefacts of a truncating extractor; 27 of 31 paragraphs survive byte-identical and both divergence anchors survive verbatim. |
-| `debug` | ⛔ needs a per-session debug LOG FILE it can enable (`WY()`) and read (`zY()` path, tail via `Po`). This port has `--debug` with categories but writes no session log file, so the skill would point at nothing. |
+| `debug` | ✅ **LANDED 2026-09-10.** 原阻塞成立但**可以修**：`memory::retention` 一直在清扫 `<config-home>/debug/` 并保留 `latest`，却从来没人写过那里。补上文件 sink（`apps/cli/src/logging.rs`）后技能就有真东西可读。⚠️ 两处适配：端口的 subscriber 在启动时装好，**不能中途开启**日志，所以提示直说「本次没开 `--debug`」而不是谎称刚刚启用（⛔ 否则模型会去找永远不会出现的条目）；上游第 3 步建议调 `claude-code-guide` 子代理，那是已记录的 divergence，整步删掉。 |
 | `setup-claude` | ⛔ `isEnabled:()=>a.CLAUDE_CODE_ENTRYPOINT==="remote_cowork"`，且正文是另一个 chunk 的 `SETUP_COWORK_PROMPT`。**2026-09-10 复核仍成立**：`remote_cowork` 在端口全树 0 命中，移植它等于注册一个**永远关着**的 cowork 引导流程。 |
-| `artifact-components` | ⛔ `files:()=>wt().then(e=>e.SKILL_FILES)` + `isEnabled:we`. **2026-09-10 复核，理由要更精确**：真正缺的是「**bundled 技能携带附件文件**」这个机制——端口有**磁盘**技能的多文件加载（`command-api/src/markdown_loader.rs`，`load_skill_dir` / `SkillMarkdownCommandFile`），但 bundled 技能只支持 `include_str!` 单体。这是一个比「缺 Artifact 面」**更小、可单独立项**的缺口；Artifact 面（register-but-disabled 骨架）是第二道门。 |
+| `artifact-components` | 🔒 **2026-09-10 三次复核，结论变了：这是「缺席即对齐」，不是缺口。** 门是 `tengu_cobalt_plinth`，**上游和端口都默认 `false`**（端口 `tool_api::artifact_gate::is_enabled` → `telemetry::flag_bool(COBALT_PLINTH_FLAG, false)`）。⇒ 上游用户也看不到这个技能，端口不注册它**对可见行为零影响**——和 [[memory-types]] 同一个形状。⚠️ 真要打开还差两层，且**第二层比第一层大得多**：(1) bundled 技能带附件文件的机制（端口只支持 `include_str!` 单体）；(2) Artifact 工具本身是 register-but-disabled 骨架，`call()` 返回如实的「not wired」，publish/list 管线是 Stage-2。⇒ 先动技能是本末倒置。 |
 | `whiteboard`, `workshop` | ⛔ same Artifact family — they sit in one name block with `artifact-design` / `artifact-diagramming` / `artifact-capabilities` / `prototype`. |
 | `design-sync` | ⛔ pushes a design system to claude.ai/design; `isEnabled:MF` plus a `policyGate`. No Design surface here, and the destination is a claude.ai service. |
 | `claude-in-chrome` | ⛔ needs the Chrome extension. |

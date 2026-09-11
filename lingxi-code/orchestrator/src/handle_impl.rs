@@ -2016,6 +2016,7 @@ fn is_mcp_wire_tool(value: &serde_json::Value) -> bool {
 fn event_str(et: &hooks::events::HookEventType) -> &'static str {
     use hooks::events::HookEventType as E;
     match et {
+        E::AgentSpawn => "AgentSpawn",
         E::PreToolUse => "PreToolUse",
         E::PostToolUse => "PostToolUse",
         E::PostToolUseFailure => "PostToolUseFailure",
@@ -2068,6 +2069,16 @@ fn hook_executor_type_and_content(executor: &hooks::HookExecutor) -> (String, St
             ("command".to_string(), content)
         }
         Ex::Http { url, .. } => ("http".to_string(), url.clone()),
+        // ⛔ Never surface the hook BODY here: this feeds user-facing hook
+        // listings, and a function hook's source is plugin-authored text of
+        // arbitrary size. The budget is the useful, safe detail.
+        Ex::Function { budget_ms, .. } => (
+            "function".to_string(),
+            budget_ms.map_or_else(
+                || "sandboxed JS".to_string(),
+                |ms| format!("sandboxed JS ({ms}ms budget)"),
+            ),
+        ),
         Ex::Agent { prompt, .. } => ("agent".to_string(), prompt.clone()),
         Ex::Prompt { prompt, .. } => ("prompt".to_string(), prompt.clone()),
         // claude-code's content field for an `mcp_tool` hook is server, slash,

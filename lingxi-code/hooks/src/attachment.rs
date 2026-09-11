@@ -566,6 +566,9 @@ pub fn attachment_command(hook: &HookDefinition) -> String {
         }
     }
     match &hook.executor {
+        // Never echo the hook BODY into a user-visible status line: it is
+        // plugin-authored text of arbitrary length and shape.
+        HookExecutor::Function { .. } => format!("function hook {}", hook.name),
         HookExecutor::Command { command, args, .. } => {
             if args.is_empty() {
                 command.clone()

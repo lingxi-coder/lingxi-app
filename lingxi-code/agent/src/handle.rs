@@ -137,6 +137,24 @@ impl<T> RuntimeLink<T> {
             .value
             .is_some()
     }
+
+    /// Whether the latch is closed with no live value — the host either
+    /// released this link or sealed it having never filled it.
+    ///
+    /// A [`std::sync::OnceLock`] has only one way to read empty, so a caller
+    /// could treat `None` as "the host never installed this" and carry on.
+    /// This type has two, and they mean opposite things: not-yet-filled is a
+    /// host that simply has no such seam, while sealed-and-empty is a host
+    /// that has drained. A gate whose absence means "allow" has to tell them
+    /// apart or it fails open on the way down.
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        let state = self
+            .state
+            .read()
+            .expect("runtime link lock poisoned while reading");
+        state.initialized && state.value.is_none()
+    }
 }
 
 impl<T: ?Sized> RuntimeLink<Arc<T>> {
@@ -1812,8 +1830,22 @@ impl PoolSubagentSpawner {
     ) -> Result<Option<SubagentSpawnRequest>, SubagentSpawnError> {
         // `RuntimeLink::get` already hands back an owned `Arc`; the
         // `OnceLock` this arrived on borrows and needs a `.cloned()`.
-        let Some(executor) = self.hook_executor.get() else {
-            return Ok(None);
+        let executor = match self.hook_executor.get() {
+            Some(executor) => executor,
+            // Sealed and empty: the host drained its children while this spawn
+            // was in flight. Reading that as "no hook is registered" is how a
+            // plugin's `HookDecision::Block` would turn into an allow, so the
+            // spawn is refused instead — the host is going away regardless.
+            None if self.hook_executor.is_sealed() => {
+                return Err(SubagentSpawnError::Runtime(
+                    "SubagentSpawner: the host released its hook executor; refusing to spawn \
+                     without consulting agent.spawn"
+                        .to_string(),
+                ));
+            }
+            // Never filled: this host has no hook executor at all, which is the
+            // same as upstream running with no `agent.spawn` hook registered.
+            None => return Ok(None),
         };
         let event = hooks::events::HookEvent::AgentSpawn {
             agent_type: request.subagent_type.clone(),
@@ -5491,6 +5523,68 @@ mod tests {
         ) -> Option<platform_api::skill_loader::SkillLoad> {
             None
         }
+    }
+
+    fn hook_executor_for(runtime: Arc<MockRuntimeSpawner>) -> Arc<hooks::HookExecutorImpl> {
+        Arc::new(hooks::HookExecutorImpl::new(
+            Arc::new(RwLock::new(hooks::HookRegistry::new())),
+            Arc::new(test_harness::mocks::MockHttpTransport::new()),
+            runtime as Arc<dyn RuntimeSpawner>,
+        ))
+    }
+
+    /// A host that never wired a hook executor is upstream running with no
+    /// `agent.spawn` hook registered: nothing to consult, so the spawn goes
+    /// ahead unchanged. This is the reading that must survive the fix below.
+    #[tokio::test]
+    async fn an_unwired_hook_link_lets_the_spawn_through() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+
+        let rewritten = spawner
+            .apply_agent_spawn_hook(&minimal_spawn_request("do the thing"))
+            .await
+            .expect("an unwired hook executor must not refuse the spawn");
+        assert!(rewritten.is_none(), "nothing rewrote the request");
+    }
+
+    /// …but a RELEASED link is a different thing wearing the same `None`.
+    /// `RuntimeLink::clear` runs when the host drains its children, and a gate
+    /// whose absence means "allow" then fails open: a plugin's
+    /// `HookDecision::Block` would never be consulted and the spawn would
+    /// proceed. The host is going away either way, so refusing is the only
+    /// reading that cannot silently widen what a plugin denied.
+    #[tokio::test]
+    async fn a_released_hook_link_refuses_the_spawn_rather_than_running_it_unhooked() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime.clone(), 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        assert!(spawner
+            .hook_executor_handle()
+            .set(hook_executor_for(runtime))
+            .is_ok());
+
+        // Wired: the hook runs, and this registry has nothing to say about it.
+        assert!(spawner
+            .apply_agent_spawn_hook(&minimal_spawn_request("before drain"))
+            .await
+            .expect("a wired executor with no matching hook allows the spawn")
+            .is_none());
+
+        spawner.release_runtime_links();
+        assert!(spawner.hook_executor_handle().is_sealed());
+
+        let refused = spawner
+            .apply_agent_spawn_hook(&minimal_spawn_request("after drain"))
+            .await;
+        let Err(SubagentSpawnError::Runtime(message)) = refused else {
+            panic!("a spawn after the host released the hook executor must be refused, not run unhooked: {refused:?}");
+        };
+        assert!(
+            message.contains("released its hook executor"),
+            "the refusal must name why: {message}"
+        );
     }
 
     #[test]

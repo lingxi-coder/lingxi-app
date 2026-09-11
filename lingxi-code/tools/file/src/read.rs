@@ -2734,8 +2734,7 @@ mod tests {
         assert_eq!(TOOL_NAME, "Read");
     }
 
-    #[test]
-        // ── Fix #2: short dedup string (jbi) ──────────────────────────────────────
+    // ── Fix #2: short dedup string (jbi) ──────────────────────────────────────
 
     #[test]
     fn file_unchanged_stub_is_byte_locked() {

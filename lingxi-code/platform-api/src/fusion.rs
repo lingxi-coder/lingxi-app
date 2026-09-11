@@ -1127,8 +1127,6 @@ impl FusionRunOutcome {
         }
     }
 
-    /// Consume the envelope for legacy callers.
-    #[must_use]
     /// Whether attempt receipts or the legacy aggregate own accounting.
     #[must_use]
     pub fn billing_mode(&self) -> crate::ModelAttemptBillingMode {

@@ -158,7 +158,7 @@ The port registers **17** through `register_bundled_skills` (11 + `update-config
 `keybindings-help`, `explain-usage`, `workflow-authoring` and `checkup`, added 2026-09-10), plus `claude-api` as the `skill-api`
 compiled-in builtin.
 
-| in both (11) | LingXi-only (4) | upstream-only (10) |
+| in both (14) | LingXi-only (4) | upstream-only (7) |
 |---|---|---|
 | batch, claude-api, code-review, dataviz, debug, doctor (as `checkup`), explain-usage, fewer-permission-prompts, keybindings-help, loop, run, run-skill-generator, update-config, workflow-authoring | cron, deep-research, simplify, verify | artifact-components, claude-in-chrome, design-sync, memory-types, setup-claude, whiteboard, workshop |
 
@@ -178,16 +178,42 @@ blanket "they ride surfaces this port does not have":
 | `design-sync` | ⛔ pushes a design system to claude.ai/design; `isEnabled:MF` plus a `policyGate`. No Design surface here, and the destination is a claude.ai service. |
 | `claude-in-chrome` | ⛔ needs the Chrome extension. |
 
-So of the original 13: **5 ported** (`workflow-authoring` landed 2026-09-10 — see
-§2.4), 1 dormant upstream, 7 blocked on surfaces this port does not ship.
+So of the original 13: **6 ported** (`update-config`, `keybindings-help`,
+`explain-usage`, `workflow-authoring` §2.4, `doctor`→`checkup` §2.5, `debug`),
+1 dormant upstream (`memory-types`), 1 alignment rather than a gap
+(`artifact-components` — its gate defaults false in BOTH builds), and
+**5 ACCEPTED DIVERGENCES, not backlog** (below). 6+1+1+5 = 13.
 
-⚠️ **The 13 are not a backlog.** Most ride surfaces this port does not have:
-`artifact-components` / `whiteboard` / `workshop` / `design-sync` need the
-Artifact and Design surfaces (the Artifact tool here is a deliberate
-register-but-disabled skeleton pinned at 2.1.207), and `claude-in-chrome` needs
-the browser extension. Each needs adjudicating on its own substrate before
-anyone ports it. The ones with no obvious blocker and therefore worth triaging
-first are `update-config`, `keybindings-help`, `explain-usage` and `doctor`.
+### ⛔ The last five are Anthropic-service divergences, not unbuilt features
+
+2026-09-10, user decision. These were carried as "blocked on a product surface",
+which reads as work owed. It is the wrong classification: every one of them
+terminates at an **Anthropic-operated service**, and LingXi is a multi-provider
+product whose service is not Anthropic. There is no version of "build the
+surface" that does not mean wiring this port into Anthropic's account system.
+
+| skill | terminates at |
+|---|---|
+| `whiteboard`, `workshop` | the **claude.ai** publish backend (`tools/ui/src/artifact.rs`: "a default-private claude.ai web page") |
+| `design-sync` | **claude.ai/design** — upstream's own menuDescription is "Push your design system components to claude.ai/design" |
+| `claude-in-chrome` | the **Claude** Chrome extension |
+| `setup-claude` | `CLAUDE_CODE_ENTRYPOINT === "remote_cowork"` — Anthropic's cowork product |
+
+This is the same standing decision already recorded for the Anthropic
+backend/remote surface generally. ⛔ Do not re-open these as parity gaps; they
+belong in `lingxi-accepted-divergences`, and a future audit that lists them as
+"missing" has mis-scoped, not found something.
+
+`artifact-components` is *not* one of the five — it is settled one row up by a
+gate that is false in both builds, which is a stronger disposition and does not
+depend on this decision. It shares the claude.ai backend all the same, so if the
+gate ever flips, it lands here.
+
+⚠️ **Superseded (kept for the trail).** This section used to close by saying
+the 13 "are not a backlog" and naming `update-config`, `keybindings-help`,
+`explain-usage` and `doctor` as the ones worth triaging first. All four have
+since landed, and the rest are adjudicated above — so the sentence is no longer
+a to-do list. ⛔ Do not read it as one.
 
 ### ✅ `update-config` (`29a8e64a4`) and `keybindings-help` (`f7fb8840a`) — ported
 

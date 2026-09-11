@@ -297,10 +297,16 @@ EXCLUDED_PREFIXES = (
 #                                 命中源，而重写它又会移动那些命中的行号，
 #                                 自扫描没有不动点，门永远无法收敛到绿。
 #   brand_frozen_identities.txt  frozen 清单，逐字写出标识符正是它的本职。
+#   accepted_divergences.json    同一形状的第四份：它逐条记录「上游用
+#                                 CLAUDE.md / ~/.claude，本端口用自己的」这类
+#                                 决定，而要写清楚一条 divergence 就必须把两边
+#                                 的拼写都写出来。这是 needle 的定义侧，不是
+#                                 泄漏侧；扫描它只会把这份清单变成下一轮的命中源。
 SELF_ARTIFACTS = frozenset({
     "lingxi-code/scripts/check_brand_leaks.py",
     "lingxi-code/scripts/brand_leak_baseline.txt",
     "lingxi-code/scripts/brand_frozen_identities.txt",
+    "lingxi-code/test-harness/src/parity/fixtures/accepted_divergences.json",
 })
 
 # 每种文件的行注释前导符。G1 只看代码行 —— oracle 出处引用只合法地存在于

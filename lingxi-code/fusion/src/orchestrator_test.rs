@@ -714,6 +714,23 @@ fn test_config() -> FusionRuntimeConfig {
     cfg.synthesizer_timeout_ms = 2_000;
     cfg.total_timeout_ms = 8_000;
     cfg.min_successful_panels = 2;
+    // Every model role is now explicit: there is no automatic selection to
+    // fall back on. These are the routes the pre-configuration resolver used
+    // to pick for `catalog()` + `request()`, so the assertions below still
+    // describe the same run.
+    cfg.panel_models = vec![
+        platform_api::FusionModelChoice::new("anthropic", "claude-sonnet-5"),
+        platform_api::FusionModelChoice::new("openai", "gpt-5.6-terra"),
+        platform_api::FusionModelChoice::new("deepseek", "deepseek-v4-pro"),
+    ];
+    cfg.analyst_model = Some(platform_api::FusionModelChoice::new(
+        "anthropic",
+        "claude-sonnet-5",
+    ));
+    cfg.synthesizer_model = Some(platform_api::FusionModelChoice::new(
+        "anthropic",
+        "claude-sonnet-5",
+    ));
     cfg
 }
 
@@ -2304,6 +2321,14 @@ async fn synth_failure_needs_parent_with_summary() {
         .any(|event| event.name == telemetry::tengu::fusion::COMPLETED));
 }
 
+/// A config whose synthesizer is a route of its own, so an egress assertion
+/// about the synthesizer cannot be satisfied by a panel or analyst entry.
+fn config_with_synthesizer(profile: &str, model: &str) -> FusionRuntimeConfig {
+    let mut config = test_config();
+    config.synthesizer_model = Some(platform_api::FusionModelChoice::new(profile, model));
+    config
+}
+
 /// `egress_profiles` must record the parent profile whenever `synthesize`
 /// actually sent it the prompt plus every panel's candidate answer — which
 /// happens on EVERY synthesizer attempt, not only a successful one. Uses a
@@ -2320,7 +2345,7 @@ async fn egress_includes_parent_profile_when_synthesis_failed_after_being_billed
     let orch = FusionOrchestrator::new(
         spawner,
         side.clone(),
-        Arc::new(test_config()),
+        Arc::new(config_with_synthesizer("parent-only", "parent-only-model")),
         Arc::new(catalog_with_route("parent-only", "parent-only-model")),
     );
     let mut req = request("task");
@@ -2355,7 +2380,7 @@ async fn egress_includes_parent_profile_when_synthesis_timed_out_after_being_bil
         started,
         dropped,
     });
-    let mut config = test_config();
+    let mut config = config_with_synthesizer("parent-only", "parent-only-model");
     config.total_timeout_ms = 100;
     let orch = FusionOrchestrator::new(
         FakeSpawner::new(three_ok()),
@@ -2946,6 +2971,13 @@ async fn blocked_post_analyst_analytics_respects_cancel_and_operational_deadline
         if !cancel_while_blocked {
             config.total_timeout_ms = 100;
         }
+        // The judge sits on its own profile so the egress assertion below
+        // cannot be satisfied by a panel entry. It used to be reached by the
+        // hint-ranked automatic pick; now it is named.
+        config.analyst_model = Some(platform_api::FusionModelChoice::new(
+            "judge-only",
+            "judge-model",
+        ));
         let mut analyst_catalog = catalog();
         analyst_catalog.push(CatalogModel {
             profile: "judge-only".into(),
@@ -3226,9 +3258,14 @@ async fn reserve_failure_makes_zero_panel_spawns() {
 
 /// F011 item 1/7: simulates the desktop's catalog filter (managed
 /// `enforceAvailableModels` + `provider_availability`) having already
-/// dropped every eligible model but one — `resolve()`'s preflight must fail
-/// BEFORE any panel spawn, with `TooFewModels` carrying the shrunk eligible
-/// count, never a bare provider-call failure after burning turns.
+/// dropped all but one of the configured roster's models — `resolve()`'s
+/// preflight must fail BEFORE any panel spawn, never as a bare provider-call
+/// failure after burning turns.
+///
+/// The error NAMES the route that went missing rather than reporting a count.
+/// Under automatic selection a count was all there was to report; with an
+/// explicit roster the operator can be told exactly which of their configured
+/// models this session cannot reach, which is the actionable half.
 #[tokio::test]
 async fn allowlist_shrunk_catalog_fails_preflight_with_zero_spawns() {
     let spawner = FakeSpawner::new(HashMap::new());
@@ -3251,12 +3288,22 @@ async fn allowlist_shrunk_catalog_fails_preflight_with_zero_spawns() {
         Arc::new(test_config()),
         Arc::new(filtered_catalog),
     );
-    let mut auto_request = request("task");
-    auto_request.models = None; // exercise the automatic preset path
-    let err = orch.run(auto_request, inherit(), None).await.unwrap_err();
+    let mut roster_request = request("task");
+    roster_request.models = None; // exercise the configured-roster path
+    let err = orch.run(roster_request, inherit(), None).await.unwrap_err();
+    let rendered = err.to_string();
     assert!(
-        matches!(err, FusionError::TooFewModels { eligible: 1, .. }),
+        matches!(err, FusionError::InvalidConfiguration(_)),
         "got {err:?}"
+    );
+    assert!(
+        rendered.contains("openai/gpt-5.6-terra"),
+        "the error must name the configured route the filtered catalog lost, \
+         got {rendered}"
+    );
+    assert!(
+        err.guarantees_zero_provider_calls(),
+        "this must stay a preflight variant so the spawn reservation is released"
     );
     assert!(
         spawner.prompts().is_empty(),
@@ -4981,6 +5028,44 @@ fn agent_surface_reloads_the_config_source_on_every_call() {
     );
 }
 
+/// The `fusion` subagent type is only advertised when it could actually RUN.
+///
+/// The master switch alone is not enough: with no models configured every
+/// spawn dies at preflight with `NotConfigured`, so advertising it puts a
+/// subagent in front of the model that costs a turn to discover is unusable.
+#[test]
+fn the_agent_surface_stays_off_until_every_model_role_is_configured() {
+    let shared = Arc::new(Mutex::new(test_config()));
+    shared.lock().unwrap().enabled = true;
+    let for_source = Arc::clone(&shared);
+    let config_source: Arc<dyn crate::config::FusionConfigSource> =
+        Arc::new(move || Ok(for_source.lock().unwrap().clone()));
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(HashMap::new()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        config_source,
+        Arc::new(catalog()),
+    );
+    assert!(
+        orch.agent_surface().enabled,
+        "test_config() configures all three roles"
+    );
+    for clear in [
+        (|cfg: &mut FusionRuntimeConfig| cfg.panel_models.clear()) as fn(&mut FusionRuntimeConfig),
+        |cfg: &mut FusionRuntimeConfig| cfg.analyst_model = None,
+        |cfg: &mut FusionRuntimeConfig| cfg.synthesizer_model = None,
+    ] {
+        let mut config = test_config();
+        config.enabled = true;
+        clear(&mut config);
+        *shared.lock().unwrap() = config;
+        assert!(
+            !orch.agent_surface().enabled,
+            "a missing role must take the agent out of the listing"
+        );
+    }
+}
+
 /// F007: the SAME behavior via `run()` — a `max_panel` lowered between two
 /// runs on the SAME orchestrator instance must be honored by the SECOND run
 /// without rebuilding the orchestrator. The first run (max_panel=8, the
@@ -5337,7 +5422,6 @@ async fn prepared_run_reserves_the_captured_quote_after_prices_change() {
     let expected_quote = crate::budget::quote(
         &config,
         &resolved,
-        &request,
         &catalog,
         prices.as_ref(),
         true,
@@ -6174,11 +6258,16 @@ async fn captured_prices_keep_analyst_facts_and_commit_barrier_after_source_revo
         // run must exclusively use its immutable captured table instead.
         panic_at: 1,
     });
+    let mut analyst_config = test_config();
+    analyst_config.analyst_model = Some(platform_api::FusionModelChoice::new(
+        "judge-only",
+        "judge-model",
+    ));
     let orchestrator = Arc::new(
         FusionOrchestrator::new(
             FakeSpawner::new(three_ok()),
             side,
-            Arc::new(test_config()),
+            Arc::new(analyst_config),
             Arc::new(analyst_catalog),
         )
         .with_price_book(prices.clone()),
@@ -6253,7 +6342,7 @@ async fn captured_prices_keep_synth_facts_after_live_source_revocation() {
         FusionOrchestrator::new(
             FakeSpawner::new(three_ok()),
             side,
-            Arc::new(test_config()),
+            Arc::new(config_with_synthesizer("parent-only", "parent-model")),
             Arc::new(catalog_with_route("parent-only", "parent-model")),
         )
         .with_price_book(Arc::new(TogglePanicPrices {

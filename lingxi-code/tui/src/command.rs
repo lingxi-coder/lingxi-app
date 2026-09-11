@@ -212,7 +212,14 @@ pub const BUILTIN: &[SlashCommand] = &[
         aliases: &[],
         description: "Run a multi-model Fusion deliberation",
         dynamic_description: None,
-        hint: "[--quality|--fast] [--same-provider|--cross-provider] PROMPT",
+        // A command that takes EITHER a literal subcommand or free-form
+        // arguments is written by claude-code 2.1.267 as ONE bracket group with
+        // `|` alternation — `argumentHint:"[open|<description>]"`,
+        // `"[auto|<tokens>]"`, `"[reconnect|enable|disable [<server>|all]]"` —
+        // never as two adjacent bracket groups. `/worktree` above already
+        // follows that shape. `/fusion` itself has no oracle (it is
+        // LingXi-specific), so only the FORMAT is borrowed.
+        hint: "[setup|[--quality|--fast] [--same-provider|--cross-provider] PROMPT]",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_fusion,
@@ -1207,9 +1214,12 @@ mod tests {
         assert_eq!(command.name, "/fusion");
         assert_eq!(args, "review the plan");
         assert!(command.advertised);
+        // The alternation shape is claude-code 2.1.267's own convention for a
+        // command that takes either a subcommand or free-form arguments
+        // (`argumentHint:"[open|<description>]"`); it is not a local invention.
         assert_eq!(
             command.hint,
-            "[--quality|--fast] [--same-provider|--cross-provider] PROMPT"
+            "[setup|[--quality|--fast] [--same-provider|--cross-provider] PROMPT]"
         );
     }
 

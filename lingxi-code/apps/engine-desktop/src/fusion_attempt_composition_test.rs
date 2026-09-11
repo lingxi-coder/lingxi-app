@@ -220,15 +220,31 @@ fn budget(tracker: Arc<cost::CostTracker>) -> Arc<cost::BudgetEnforcer> {
     ))
 }
 
+/// The three model roles every Fusion run now requires, over this file's own
+/// two-model catalog. Fusion has no automatic selection to fall back on, so a
+/// composition fixture that only flips `fusion.enabled` is refused at preflight
+/// with `NotConfigured` before any of the metering this file tests can run.
+fn fusion_settings(extra: serde_json::Value) -> lingxi_core::settings::SettingsJson {
+    let mut fusion = serde_json::json!({
+        "enabled": true,
+        "panelModels": [
+            {"profile": "anthropic", "model": MODELS[0]},
+            {"profile": "anthropic", "model": MODELS[1]},
+        ],
+        "analystModel": {"profile": "anthropic", "model": MODELS[0]},
+        "synthesizerModel": {"profile": "anthropic", "model": MODELS[0]},
+    });
+    let object = fusion.as_object_mut().expect("object literal");
+    for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+        object.insert(key, value);
+    }
+    serde_json::from_value(serde_json::json!({ "fusion": fusion })).expect("valid fusion settings")
+}
+
 #[tokio::test]
 async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare() {
     let (tmp, mut cfg) = tests::test_config(true);
-    cfg.flag_settings = Some(
-        serde_json::from_value(serde_json::json!({
-            "fusion": {"enabled": true}
-        }))
-        .unwrap(),
-    );
+    cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
     let session = protocol::SessionId::new();
     let lease = platform_api::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
         .claim_session_id(&session.to_string(), std::process::id())
@@ -269,12 +285,9 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
         "factory must install this exact host in ApiService"
     );
     let mut rollback = cfg.clone();
-    rollback.flag_settings = Some(
-        serde_json::from_value(serde_json::json!({
-            "fusion": {"enabled": true, "workflowConcurrency": 1}
-        }))
-        .unwrap(),
-    );
+    rollback.flag_settings = Some(fusion_settings(
+        serde_json::json!({"workflowConcurrency": 1}),
+    ));
     assert_eq!(
         executor(&rollback, host.clone(), pricing.clone()).workflow_batch_concurrency(),
         1
@@ -339,12 +352,9 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
     // No transcript, but the ledger below still lands under a real directory:
     // production roots it at a temporary `LINGXI_HOME` removed at shutdown.
     cfg.session_persistence = false;
-    cfg.flag_settings = Some(
-        serde_json::from_value(serde_json::json!({
-            "fusion": {"enabled": true, "workflowConcurrency": 2}
-        }))
-        .unwrap(),
-    );
+    cfg.flag_settings = Some(fusion_settings(
+        serde_json::json!({"workflowConcurrency": 2}),
+    ));
     let session = protocol::SessionId::new();
     let lease = platform_api::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
         .claim_session_id(&session.to_string(), std::process::id())
@@ -408,7 +418,12 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
 
 #[tokio::test]
 async fn desktop_fusion_composition_refuses_ephemeral_tracker_even_with_output_scope() {
-    let (_tmp, cfg) = tests::test_config(true);
+    let (_tmp, mut cfg) = tests::test_config(true);
+    // The models must be configured for this test to still reach its subject.
+    // Without them the run is refused earlier, with `NotConfigured`, and the
+    // assertion below would be checking a message about a gate it never got
+    // to — a green test proving nothing.
+    cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
     let session = protocol::SessionId::new();
     let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
     let (tx, _) = tokio::sync::mpsc::channel(1);

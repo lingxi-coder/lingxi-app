@@ -462,7 +462,8 @@ async fn desktop_attempt_registration_allows_pick_when_optional_synthesis_is_una
         request,
         resolved: fusion::ResolvedSet {
             panels: vec![panel.clone()],
-            analyst: panel,
+            analyst: panel.clone(),
+            synthesizer: panel,
         },
         snapshot: Arc::new(snapshot),
         live_policy: Arc::new(Live),
@@ -536,7 +537,8 @@ fn workflow_registration(
         request,
         resolved: fusion::ResolvedSet {
             panels: vec![panel.clone()],
-            analyst: panel,
+            analyst: panel.clone(),
+            synthesizer: panel,
         },
         snapshot: Arc::new(fusion::FusionRuntimeSnapshot::new(
             origin.snapshot.config.clone(),
@@ -1138,6 +1140,10 @@ async fn authority() -> Arc<RunAuthority> {
         resolved: fusion::ResolvedSet {
             panels: vec![],
             analyst: fusion::ResolvedPanel {
+                profile: "profile".into(),
+                model: "test".into(),
+            },
+            synthesizer: fusion::ResolvedPanel {
                 profile: "profile".into(),
                 model: "test".into(),
             },

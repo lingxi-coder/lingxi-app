@@ -196,6 +196,7 @@ fn rich_model_details_round_trip_and_legacy_event_default() {
             disabled_reason: None,
         },
         supports_fast_mode: true,
+        fusion_analyst_capable: true,
     };
     let event = ClientEvent::ModelList {
         models: vec![detail.reference.clone()],
@@ -259,6 +260,7 @@ fn provider_model_catalog_round_trips() {
             disabled_reason: None,
         },
         supports_fast_mode: false,
+        fusion_analyst_capable: false,
     };
     let event = ClientEvent::ProviderModelCatalog {
         providers: vec![ProviderModelCatalogEntryDto {

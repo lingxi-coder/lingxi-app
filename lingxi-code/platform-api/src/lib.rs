@@ -68,6 +68,7 @@ pub mod filesystem;
 pub mod fork_resume_gate;
 pub mod fork_subagent;
 pub mod fusion;
+pub mod fusion_setup;
 pub mod haptics;
 pub mod http;
 pub mod ide;
@@ -165,7 +166,8 @@ pub use fusion::{
     validate_panel_report, DurableFusionOutboxRecord, DurableFusionTerminalRecord, EvidenceKind,
     FusionActivation, FusionAgentSurface, FusionAnalysis, FusionAttemptSettlementStatus, FusionCompletionSink,
     FusionContradiction, FusionCostClass, FusionDecision, FusionError, FusionExecutor,
-    FusionInheritance, FusionLatencyClass, FusionModelHints, FusionModelRef,
+    FusionInheritance, FusionLatencyClass, FusionModelChoice, FusionModelHints, FusionModelRef,
+    FusionModelRole,
     FusionNeedsParentReason, FusionOrigin, FusionPreparedSummary, FusionPreset, FusionProgress,
     FusionPublicationReceipt, FusionPublicationState, FusionPublicationStatus,
     FusionRecommendation, FusionRequest, FusionResult, FusionRunControl, FusionRunFacts,

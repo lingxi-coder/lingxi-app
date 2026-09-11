@@ -196,7 +196,6 @@ pub fn mistaken_byte_input_tokens(panel_count: u8, panel_max_turns: u32) -> u64 
 pub fn quote(
     config: &FusionRuntimeConfig,
     resolved: &ResolvedSet,
-    request: &FusionRequest,
     catalog: &dyn ModelSource,
     prices: &dyn FusionPriceBook,
     session_has_max: bool,
@@ -219,12 +218,8 @@ pub fn quote(
     let analyst_output_cap = analyst_limits.output_cap(config.analyst_max_output_tokens);
     let analyst_output = u64::from(analyst_output_cap)
         .saturating_mul(1 + u64::from(config.analysis_protocol_retries));
-    let parent = ResolvedPanel {
-        profile: request.parent_profile.clone(),
-        model: request.parent_model.clone(),
-    };
-    let synth_output_cap =
-        route_limits(catalog, &parent).output_cap(config.synthesizer_max_output_tokens);
+    let synth_output_cap = route_limits(catalog, &resolved.synthesizer)
+        .output_cap(config.synthesizer_max_output_tokens);
     let synth_output = u64::from(synth_output_cap);
     let reserved_output_tokens = panel_output
         .saturating_add(analyst_output)
@@ -267,7 +262,7 @@ pub fn quote(
         analyst_calls,
     )?);
     reserved_usd = reserved_usd.saturating_add(model_peak(
-        &parent,
+        &resolved.synthesizer,
         catalog,
         prices,
         session_has_max,
@@ -504,7 +499,7 @@ pub async fn acquire(
     budget: Arc<dyn BudgetEnforcerHandle>,
 ) -> Result<ReservationLease, FusionError> {
     let session_has_max = budget.max_session_nano_usd().is_some();
-    let quote = quote(config, resolved, request, catalog, prices, session_has_max)?;
+    let quote = quote(config, resolved, catalog, prices, session_has_max)?;
     acquire_quoted(quote, budget).await
 }
 
@@ -649,6 +644,10 @@ comparator, not dead API surface and not a production fallback"
                 profile: "anthropic".into(),
                 model: "sonnet".into(),
             },
+            synthesizer: ResolvedPanel {
+                profile: "anthropic".into(),
+                model: "sonnet".into(),
+            },
         }
     }
 
@@ -681,14 +680,7 @@ comparator, not dead API surface and not a production fallback"
             hinted("openai", "terra", false),
             hinted("deepseek", "pro", false),
         ];
-        let q = quote(
-            &config,
-            &resolved_three(),
-            &request(),
-            &catalog,
-            &unit_prices(),
-            true,
-        )
+        let q = quote(&config, &resolved_three(), &catalog, &unit_prices(), true)
         .unwrap();
         let wrong_input = mistaken_byte_input_tokens(3, config.panel_max_turns);
         assert_eq!(
@@ -716,7 +708,7 @@ comparator, not dead API surface and not a production fallback"
             hinted("openai", "terra", true),
             hinted("deepseek", "pro", true),
         ];
-        let q = quote(&config, &resolved_three(), &request(), &catalog, &(), true).unwrap();
+        let q = quote(&config, &resolved_three(), &catalog, &(), true).unwrap();
         assert_eq!(q.reserved_nano_usd, 0);
     }
 
@@ -728,7 +720,7 @@ comparator, not dead API surface and not a production fallback"
             hinted("openai", "terra", false),
             hinted("deepseek", "pro", false),
         ];
-        let err = quote(&config, &resolved_three(), &request(), &catalog, &(), true).unwrap_err();
+        let err = quote(&config, &resolved_three(), &catalog, &(), true).unwrap_err();
         assert!(matches!(err, FusionError::InvalidConfiguration(_)));
     }
 
@@ -1051,14 +1043,7 @@ comparator, not dead API surface and not a production fallback"
             hinted("deepseek", "pro", false),
         ];
         let config = FusionRuntimeConfig::defaults();
-        let q = quote(
-            &config,
-            &resolved_three(),
-            &request(),
-            &catalog,
-            &unit_prices(),
-            true,
-        )
+        let q = quote(&config, &resolved_three(), &catalog, &unit_prices(), true)
         .unwrap();
         let budget = RecordingBudget::capped(q.reserved_nano_usd.saturating_mul(3) / 2);
         let a = acquire(

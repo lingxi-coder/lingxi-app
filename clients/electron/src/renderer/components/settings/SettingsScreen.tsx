@@ -9,6 +9,7 @@ import { About } from './pages/About';
 import { Account } from './pages/Account';
 import { Appearance } from './pages/Appearance';
 import { CustomProviders } from './pages/CustomProviders';
+import { Fusion } from './pages/Fusion';
 import { Diagnostics } from './pages/Diagnostics';
 import { General } from './pages/General';
 import { Hooks } from './pages/Hooks';
@@ -182,6 +183,7 @@ export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps
   'custom-providers': CustomProviders,
   permissions: Permissions,
   'tools-agent': ToolsAgent,
+  fusion: Fusion,
   skills: Skills,
   mcp: McpServers,
   hooks: Hooks,

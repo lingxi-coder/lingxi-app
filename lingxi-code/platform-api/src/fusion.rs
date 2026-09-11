@@ -118,6 +118,107 @@ impl std::str::FromStr for FusionPreset {
     }
 }
 
+/// Which of Fusion's three model roles a configured route fills.
+///
+/// Fusion runs three different kinds of call and they have genuinely different
+/// requirements, which is why they are configured separately rather than as one
+/// "fusion model" list: panels answer the prompt independently, the analyst must
+/// emit constrained JSON to score them, and the synthesizer writes the final
+/// answer the user reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FusionModelRole {
+    /// The panel roster, in priority order.
+    Panels,
+    /// The judge that scores the panel reports.
+    Analyst,
+    /// The merge model that writes the final answer.
+    Synthesizer,
+}
+
+impl FusionModelRole {
+    /// Every role, in the order the setup wizard asks for them.
+    pub const ALL: [Self; 3] = [Self::Panels, Self::Analyst, Self::Synthesizer];
+
+    /// The `settings.json` key that configures this role.
+    #[must_use]
+    pub const fn setting_key(self) -> &'static str {
+        match self {
+            Self::Panels => "fusion.panelModels",
+            Self::Analyst => "fusion.analystModel",
+            Self::Synthesizer => "fusion.synthesizerModel",
+        }
+    }
+
+    /// Short human label for pickers and error text.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Panels => "panel models",
+            Self::Analyst => "analyst model",
+            Self::Synthesizer => "synthesizer model",
+        }
+    }
+
+    /// One line explaining what this role does, shown above its picker.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Panels => {
+                "Answer the prompt independently, in parallel. Pick 2-8; different \
+                 model families disagree more usefully than two sizes of one family."
+            }
+            Self::Analyst => {
+                "Reads every panel report and scores it. Must support structured \
+                 output (JSON schema) on its provider."
+            }
+            Self::Synthesizer => {
+                "Merges the analysis into the answer you read. Usually the model \
+                 you already talk to."
+            }
+        }
+    }
+}
+
+/// One explicitly configured Fusion route: the provider profile that owns the
+/// model plus that profile's wire model id.
+///
+/// The settings-file mirror of this type is `FusionModelSelectionJson` in
+/// `lingxi_core::settings::schema` (the two crates cannot depend on each other;
+/// `fusion::config`'s `the_settings_reader_and_the_setup_writer_agree` pins the
+/// key spellings together).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FusionModelChoice {
+    /// Provider profile name.
+    pub profile: String,
+    /// Wire model id as that profile spells it.
+    pub model: String,
+}
+
+impl FusionModelChoice {
+    /// Build a choice from borrowed halves.
+    #[must_use]
+    pub fn new(profile: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            profile: profile.into(),
+            model: model.into(),
+        }
+    }
+
+    /// `profile/model`, the spelling used in pickers, logs and error text.
+    #[must_use]
+    pub fn route(&self) -> String {
+        format!("{}/{}", self.profile, self.model)
+    }
+}
+
+impl std::fmt::Display for FusionModelChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}/{}", self.profile, self.model)
+    }
+}
+
 /// One explicit panel / analyst model reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2160,6 +2261,20 @@ pub enum FusionError {
         /// Requesting session's parent provider profile.
         parent_profile: String,
     },
+    /// One or more model roles have not been configured. Fusion deliberately
+    /// does not choose models on the operator's behalf: which models a run
+    /// spends money on is a decision that belongs in the settings file, where
+    /// it is visible and reviewable, not in a checked-in ranking table that can
+    /// change under a working configuration.
+    #[error(
+        "fusion has no models configured for: {}; run `/fusion setup` or set {} in settings.json",
+        .missing.iter().map(|role| role.label()).collect::<Vec<_>>().join(", "),
+        .missing.iter().map(|role| role.setting_key()).collect::<Vec<_>>().join(", ")
+    )]
+    NotConfigured {
+        /// Roles with no usable configuration, in `FusionModelRole::ALL` order.
+        missing: Vec<FusionModelRole>,
+    },
     /// Explicit `models` list is unusable.
     #[error("invalid custom fusion models: {0}")]
     InvalidCustomModels(String),
@@ -2240,6 +2355,7 @@ impl FusionError {
                 | Self::InvalidConfiguration(_)
                 | Self::InvalidRequest(_)
                 | Self::TooFewModels { .. }
+                | Self::NotConfigured { .. }
                 | Self::InvalidCustomModels(_)
                 | Self::CrossProviderDenied
                 | Self::NoJudgeModel { .. }

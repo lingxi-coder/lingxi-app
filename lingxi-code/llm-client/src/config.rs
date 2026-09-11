@@ -141,6 +141,43 @@ pub enum ProtocolFamily {
     AzureOpenAi,
 }
 
+impl ProtocolFamily {
+    /// Whether this family's codec can put an `LlmRequest.response_format` on
+    /// the wire at all.
+    ///
+    /// `protocol::validate_capabilities` — the only pre-transport gate — checks
+    /// the MODEL's `structured_output` capability bit and nothing else, so a
+    /// request carrying a `response_format` reaches the codec whenever that bit
+    /// is true, and `GeminiCodec::encode_request` then hard-fails with
+    /// `InvalidRequest("GeminiCodec does not encode response_format yet")`. For
+    /// Fusion that failure lands in the analyst call AFTER every panel has
+    /// already spent real money, which is why the Fusion catalog row and the
+    /// `/fusion setup` analyst picker both AND this in.
+    ///
+    /// `VertexGemini` is in the same class: its codec delegates body
+    /// construction to the inner `GeminiCodec` and only rewrites the URL.
+    /// `VertexClaude`/`BedrockClaude`/`FoundryClaude` delegate to
+    /// `AnthropicMessagesCodec` and `AzureOpenAi` to `OpenAiChatCodec`, all of
+    /// which do encode it.
+    ///
+    /// Deliberately an exhaustive `match` rather than a `matches!`: a new
+    /// family must not silently default to "encodes it" and re-introduce this
+    /// defect for the next codec that does not.
+    #[must_use]
+    pub const fn encodes_response_format(&self) -> bool {
+        match self {
+            Self::GeminiGenerateContent | Self::VertexGemini => false,
+            Self::AnthropicMessages
+            | Self::OpenAiResponses
+            | Self::OpenAiChat
+            | Self::VertexClaude
+            | Self::BedrockClaude
+            | Self::FoundryClaude
+            | Self::AzureOpenAi => true,
+        }
+    }
+}
+
 /// Authenticator strategy for a resolved route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

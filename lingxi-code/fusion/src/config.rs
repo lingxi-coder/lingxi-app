@@ -2,7 +2,10 @@
 
 pub use lingxi_core::settings::schema::FusionCompletionPolicy;
 use lingxi_core::settings::schema::FusionSettingsJson;
-use platform_api::{FusionError, FusionPreset, FUSION_MAX_PANEL, FUSION_MIN_PANEL};
+use platform_api::{
+    FusionError, FusionModelChoice, FusionModelRole, FusionPreset, FUSION_MAX_PANEL,
+    FUSION_MIN_PANEL,
+};
 
 /// Resolved Fusion knobs. Invalid *present* settings fail construction;
 /// missing fields take the documented defaults.
@@ -65,6 +68,15 @@ pub struct FusionRuntimeConfig {
     /// Requested Fusion batch concurrency. Effective concurrency also requires
     /// the attempt host's atomic output-reservation capability.
     pub workflow_concurrency: u8,
+    /// Configured panel roster in the operator's priority order. A preset takes
+    /// the first `quality_panel_count` / `fast_panel_count` entries. Empty
+    /// means UNCONFIGURED — preflight fails with
+    /// [`FusionError::NotConfigured`] rather than choosing models itself.
+    pub panel_models: Vec<FusionModelChoice>,
+    /// Configured analyst. `None` means unconfigured.
+    pub analyst_model: Option<FusionModelChoice>,
+    /// Configured synthesizer. `None` means unconfigured.
+    pub synthesizer_model: Option<FusionModelChoice>,
 }
 
 impl FusionRuntimeConfig {
@@ -109,7 +121,31 @@ impl FusionRuntimeConfig {
             allowed_profiles: Vec::new(),
             workflow_fusion_call_cap: 20,
             workflow_concurrency: 2,
+            // Deliberately empty: there is no default model roster. Fusion
+            // spends real money on every panel, and a default would mean the
+            // set of models a run bills against could change under a working
+            // configuration whenever a checked-in table or the live catalog
+            // moved. `FusionError::NotConfigured` names the settings keys.
+            panel_models: Vec::new(),
+            analyst_model: None,
+            synthesizer_model: None,
         }
+    }
+
+    /// Roles that are still unconfigured, in [`FusionModelRole::ALL`] order.
+    #[must_use]
+    pub fn missing_model_roles(&self) -> Vec<FusionModelRole> {
+        let mut missing = Vec::new();
+        if self.panel_models.len() < usize::from(FUSION_MIN_PANEL) {
+            missing.push(FusionModelRole::Panels);
+        }
+        if self.analyst_model.is_none() {
+            missing.push(FusionModelRole::Analyst);
+        }
+        if self.synthesizer_model.is_none() {
+            missing.push(FusionModelRole::Synthesizer);
+        }
+        missing
     }
 
     /// Apply a settings snapshot on top of [`Self::defaults`].
@@ -203,6 +239,14 @@ impl FusionRuntimeConfig {
         if let Some(n) = settings.workflow_concurrency {
             cfg.workflow_concurrency = n;
         }
+        if let Some(ref panels) = settings.panel_models {
+            cfg.panel_models = panels.iter().map(choice_from_settings).collect();
+        }
+        cfg.analyst_model = settings.analyst_model.as_ref().map(choice_from_settings);
+        cfg.synthesizer_model = settings
+            .synthesizer_model
+            .as_ref()
+            .map(choice_from_settings);
 
         // F004 / F011 item 6 (round-3 review fix): `FusionSettingsJson::validate`
         // above only checked THIS settings snapshot's own fields — and, per its
@@ -232,6 +276,14 @@ impl FusionRuntimeConfig {
                 total = cfg.total_timeout_ms
             )));
         }
+        // No merged-view re-check for the roster bounds, unlike the two
+        // invariants below. Those need it because the value on one side of the
+        // comparison can come from a DEFAULT that no file states, which the
+        // per-file validator cannot see. The roster's two bounds
+        // (`minSuccessfulPanels`, `maxPanel`) are both plain fields of this
+        // same merged struct, and `validate()` above has already run on it, so
+        // a re-check here could never fire — and a branch that cannot fire
+        // reads like a guard while protecting nothing.
         let smallest_preset = cfg.quality_panel_count.min(cfg.fast_panel_count);
         if cfg.min_successful_panels > smallest_preset {
             return Err(FusionError::InvalidConfiguration(format!(
@@ -271,6 +323,15 @@ impl FusionRuntimeConfig {
 
         Ok(cfg)
     }
+}
+
+/// Cross the one seam `core` and `platform-api` cannot share a type across.
+/// Trimmed here so a settings file with stray whitespace around a model id
+/// cannot produce a route that matches no catalog row.
+fn choice_from_settings(
+    entry: &lingxi_core::settings::schema::FusionModelSelectionJson,
+) -> FusionModelChoice {
+    FusionModelChoice::new(entry.profile.trim(), entry.model.trim())
 }
 
 impl Default for FusionRuntimeConfig {
@@ -522,5 +583,156 @@ mod tests {
              merged DEFAULT panel_idle_timeout_ms (180_000) exceeds this file's own smaller \
              panelTotalTimeoutMs (60_000)",
         );
+    }
+
+    // ---- model roles ---------------------------------------------------
+
+    fn roles_json() -> FusionSettingsJson {
+        serde_json::from_str(
+            r#"{
+                "panelModels":[
+                    {"profile":"anthropic","model":" claude-opus-5 "},
+                    {"profile":"openai","model":"gpt-5.6-sol"}
+                ],
+                "analystModel":{"profile":"openai","model":"gpt-5.6-terra"},
+                "synthesizerModel":{"profile":"anthropic","model":"claude-sonnet-5"}
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn defaults_configure_no_models_at_all() {
+        let cfg = FusionRuntimeConfig::defaults();
+        assert!(cfg.panel_models.is_empty());
+        assert_eq!(cfg.analyst_model, None);
+        assert_eq!(cfg.synthesizer_model, None);
+        assert_eq!(cfg.missing_model_roles(), FusionModelRole::ALL.to_vec());
+    }
+
+    #[test]
+    fn from_settings_reads_every_role_and_trims_stray_whitespace() {
+        let cfg = FusionRuntimeConfig::from_settings(&roles_json()).unwrap();
+        assert_eq!(
+            cfg.panel_models,
+            vec![
+                FusionModelChoice::new("anthropic", "claude-opus-5"),
+                FusionModelChoice::new("openai", "gpt-5.6-sol"),
+            ],
+            "a padded model id would match no catalog row"
+        );
+        assert_eq!(
+            cfg.analyst_model,
+            Some(FusionModelChoice::new("openai", "gpt-5.6-terra"))
+        );
+        assert_eq!(
+            cfg.synthesizer_model,
+            Some(FusionModelChoice::new("anthropic", "claude-sonnet-5"))
+        );
+        assert!(cfg.missing_model_roles().is_empty());
+    }
+
+    /// Whichever tier the two halves came from, the MERGED struct is what
+    /// `from_settings` validates — so a roster that can never meet the bar is
+    /// refused at load rather than after spending on the panels it did start.
+    #[test]
+    fn a_roster_that_cannot_meet_the_merged_bar_never_builds_a_runtime_config() {
+        let mut settings = roles_json();
+        settings.min_successful_panels = Some(3);
+        settings.quality_panel_count = Some(3);
+        settings.fast_panel_count = Some(3);
+        let error = FusionRuntimeConfig::from_settings(&settings)
+            .expect_err("a two-model roster cannot satisfy a bar of three");
+        assert!(
+            error
+                .to_string()
+                .contains("fewer than fusion.minSuccessfulPanels"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_roster_above_the_merged_panel_cap_never_builds_a_runtime_config() {
+        let mut settings = roles_json();
+        settings.max_panel = Some(2);
+        settings.panel_models.as_mut().unwrap().push(
+            lingxi_core::settings::schema::FusionModelSelectionJson {
+                profile: "google".into(),
+                model: "gemini-3-pro".into(),
+            },
+        );
+        let error = FusionRuntimeConfig::from_settings(&settings)
+            .expect_err("a roster above the cap could never be spawned in full");
+        assert!(
+            error.to_string().contains("exceeding fusion.maxPanel"),
+            "{error}"
+        );
+    }
+
+    /// `core` and `platform-api` cannot depend on each other, so the settings
+    /// READER (`FusionSettingsJson`) and the settings WRITER the UIs use
+    /// (`platform_api::fusion_setup`) spell the same keys twice. This crate is
+    /// the one that sees both: it fails the moment either side is renamed.
+    #[test]
+    fn the_settings_reader_and_the_setup_writer_agree() {
+        use platform_api::fusion_setup::FusionModelRoles;
+
+        let roles = FusionModelRoles {
+            panels: vec![
+                FusionModelChoice::new("anthropic", "claude-opus-5"),
+                FusionModelChoice::new("openai", "gpt-5.6-sol"),
+            ],
+            analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
+            synthesizer: Some(FusionModelChoice::new("anthropic", "claude-sonnet-5")),
+        };
+        let mut written = serde_json::json!({});
+        roles.write_settings_json(&mut written);
+
+        // Read what the wizard wrote back through the ENGINE's own typed path,
+        // exactly as a settings load would.
+        let settings: lingxi_core::settings::schema::SettingsJson =
+            serde_json::from_value(written.clone()).expect("the written file parses");
+        settings
+            .validate()
+            .expect("what the wizard writes must pass the engine's validator");
+        let cfg = FusionRuntimeConfig::from_settings(
+            settings
+                .fusion
+                .as_ref()
+                .expect("the writer produced a `fusion` block"),
+        )
+        .expect("the written roles build a runtime config");
+
+        assert_eq!(cfg.panel_models, roles.panels);
+        assert_eq!(cfg.analyst_model, roles.analyst);
+        assert_eq!(cfg.synthesizer_model, roles.synthesizer);
+        assert!(
+            cfg.missing_model_roles().is_empty(),
+            "a file the wizard just completed must not still read as unconfigured"
+        );
+
+        // And the reverse direction: what the engine considers configured is
+        // what the wizard will show as configured.
+        assert!(FusionModelRoles::from_settings_json(&written).is_configured());
+    }
+
+    #[test]
+    fn the_enabled_switch_and_the_roles_are_independent_settings() {
+        use platform_api::fusion_setup;
+
+        let mut written = serde_json::json!({"fusion": {"enabled": true}});
+        fusion_setup::FusionModelRoles {
+            panels: vec![
+                FusionModelChoice::new("anthropic", "claude-opus-5"),
+                FusionModelChoice::new("openai", "gpt-5.6-sol"),
+            ],
+            analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
+            synthesizer: Some(FusionModelChoice::new("anthropic", "claude-sonnet-5")),
+        }
+        .write_settings_json(&mut written);
+        let settings: lingxi_core::settings::schema::SettingsJson =
+            serde_json::from_value(written).unwrap();
+        let cfg = FusionRuntimeConfig::from_settings(settings.fusion.as_ref().unwrap()).unwrap();
+        assert!(cfg.enabled, "configuring models must not clear the switch");
     }
 }

@@ -621,6 +621,7 @@ mod parse_model_ref_tests {
             capabilities: Default::default(),
             reasoning: Default::default(),
             supports_reasoning: false,
+            fusion_analyst_capable: false,
         }
     }
     fn fixture() -> Vec<ModelListing> {
@@ -748,6 +749,7 @@ mod curated_model_tests {
             capabilities: Default::default(),
             reasoning: Default::default(),
             supports_reasoning: false,
+            fusion_analyst_capable: false,
         }
     }
 

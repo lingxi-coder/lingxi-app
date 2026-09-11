@@ -982,6 +982,7 @@ mod tests {
             supports_reasoning: true,
             supports_multimodal: false,
             details: Vec::new(),
+            fusion_analyst_capable: false,
         };
         let lines = status_lines(&d, Some(&model), true, false, ThemeName::Dark, &[]);
         let text = text_of(&lines);

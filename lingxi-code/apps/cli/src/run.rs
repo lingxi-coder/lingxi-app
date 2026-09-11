@@ -6907,6 +6907,7 @@ mod tests {
             capabilities: Default::default(),
             reasoning: Default::default(),
             supports_reasoning: true,
+            fusion_analyst_capable: false,
         }];
         // A first-party Claude model on a managed-cloud provider: the catalog
         // says `anthropic`, `xn()` says otherwise, and `xn()` wins.
@@ -6944,6 +6945,7 @@ mod tests {
                 capabilities: Default::default(),
                 reasoning: Default::default(),
                 supports_reasoning: true,
+                fusion_analyst_capable: false,
             },
             platform_api::orchestrator::ModelListing {
                 display_model: "GPT-4o".to_string(),
@@ -6955,6 +6957,7 @@ mod tests {
                 capabilities: Default::default(),
                 reasoning: Default::default(),
                 supports_reasoning: false,
+                fusion_analyst_capable: false,
             },
         ];
         assert!(session_model_is_first_party(

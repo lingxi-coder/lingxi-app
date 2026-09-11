@@ -46,7 +46,7 @@ use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::theme_picker_view::ThemePickerView;
 use crate::bottom_pane::{
     BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction,
-    PermissionAction, PluginAction, TaskAction, WebAction,
+    FusionSetupAction, PermissionAction, PluginAction, TaskAction, WebAction,
 };
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
@@ -131,6 +131,10 @@ pub enum ChatOutcome {
     /// search. The caller runs it asynchronously and reports the result back
     /// through `TurnEvent::SystemNotice`.
     WebAction(WebAction),
+    /// The `/fusion setup` wizard finished: persist the chosen model roles to
+    /// `~/.lingxi/settings.json`. The caller runs the write asynchronously and
+    /// reports the result back through `TurnEvent::SystemNotice`.
+    FusionSetupAction(FusionSetupAction),
     /// A `/connect` view asked the caller to store an API key or kick off a
     /// Copilot/OAuth sign-in. The caller runs it asynchronously and reports
     /// the result back through `TurnEvent::SystemNotice`.
@@ -542,6 +546,13 @@ pub struct ChatWidget {
     /// closure (CLI `run_ratatui`) updates it in place after a save/test so
     /// the NEXT `/web` open reflects the latest persisted state.
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
+    /// Composition-root-shared `/fusion setup` settings snapshot (`None` until
+    /// the embedder wires one). Holds only the PERSISTED half — the candidate
+    /// models come from [`Self::session`] at open time so a provider connected
+    /// mid-session is offered without a relaunch.
+    fusion_settings: Option<
+        std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>>,
+    >,
     /// Composition-root-shared `/permissions` rule snapshot slot (`None` until
     /// the embedder wires one via [`Self::set_permission_snapshot`]). Preloaded
     /// at startup from the user/project/local settings files and kept current
@@ -706,6 +717,7 @@ impl ChatWidget {
             focus_projection: crate::bottom_pane::view::FocusProjection::default(),
             focus_active_assistant_lines: 0,
             web_snapshot: None,
+            fusion_settings: None,
             permission_snapshot: None,
             plugin_snapshot: None,
             resume_rows: Vec::new(),
@@ -2048,6 +2060,16 @@ impl ChatWidget {
         slot: std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>,
     ) {
         self.web_snapshot = Some(slot);
+    }
+
+    /// Wire the composition root's shared `/fusion setup` settings snapshot,
+    /// preloaded from `~/.lingxi/settings.json` at startup and updated in place
+    /// by the async save effect.
+    pub fn set_fusion_settings(
+        &mut self,
+        slot: std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>>,
+    ) {
+        self.fusion_settings = Some(slot);
     }
 
     /// Wire the composition root's shared `/permissions` rule snapshot slot,
@@ -3491,16 +3513,78 @@ impl ChatWidget {
         self.dispatch_registry_slash(&input)
     }
 
-    /// LingXi's project-specific `/fusion` UI entry. Execution stays off the
-    /// render loop: the desktop command registry owns the handler.
+    /// LingXi's project-specific `/fusion` UI entry.
+    ///
+    /// `setup` opens the model-configuration wizard IN the TUI; everything else
+    /// stays off the render loop, dispatched to the desktop command registry
+    /// that owns the handler.
+    ///
+    /// A run with no models configured also opens the wizard instead of being
+    /// dispatched: the engine would refuse it at preflight
+    /// (`FusionError::NotConfigured`), and an error the user cannot act on from
+    /// where they are standing is worse than the question that fixes it. The
+    /// typed prompt is NOT swallowed — it is echoed back so the operator can
+    /// resubmit it once the wizard closes.
     pub(crate) fn cmd_fusion(&mut self, args: &str) -> ChatOutcome {
         let args = args.trim();
+        if args.eq_ignore_ascii_case("setup") {
+            return self.open_fusion_setup();
+        }
+        if !args.is_empty() && !self.fusion_models_are_configured() {
+            self.show_system_text(
+                "Fusion has no models configured yet — opening /fusion setup. \
+                 Your prompt was not sent; run it again once setup is saved.",
+                false,
+            );
+            return self.open_fusion_setup();
+        }
         let input = if args.is_empty() {
             "/fusion".to_string()
         } else {
             format!("/fusion {args}")
         };
         self.dispatch_registry_slash(&input)
+    }
+
+    /// Whether every Fusion model role is configured. An unwired snapshot slot
+    /// (headless, tests) reads as CONFIGURED so the wizard cannot hijack a
+    /// dispatch on a host that simply never wired the settings read.
+    fn fusion_models_are_configured(&self) -> bool {
+        self.fusion_settings.as_ref().is_none_or(|slot| {
+            slot.lock()
+                .map(|snapshot| snapshot.roles.is_configured())
+                .unwrap_or(true)
+        })
+    }
+
+    /// Open the `/fusion setup` wizard over the live catalog plus the persisted
+    /// roles.
+    fn open_fusion_setup(&mut self) -> ChatOutcome {
+        let settings = self
+            .fusion_settings
+            .as_ref()
+            .and_then(|slot| slot.lock().ok().map(|snapshot| snapshot.clone()))
+            .unwrap_or_default();
+        // The SAME live filter `/model` applies, so the wizard can never offer
+        // a model the session could not actually route to.
+        let rows = crate::session::connected_model_rows_restricted(
+            &self.session.models,
+            &self.connect_availability,
+            self.session.model_allowlist.as_deref(),
+            Some(&self.session.model_overrides),
+        );
+        self.bottom_pane
+            .show_fusion_setup(crate::fusion::setup::FusionSetupSnapshot {
+                candidates: crate::fusion::setup::candidates_from_rows(&rows),
+                roles: settings.roles,
+                enabled: settings.enabled,
+                max_panel: if settings.max_panel == 0 {
+                    platform_api::FUSION_MAX_PANEL
+                } else {
+                    settings.max_panel
+                },
+            });
+        ChatOutcome::Continue
     }
 
     /// `/resume [term]` (alias `/continue`): open the interactive session
@@ -5349,6 +5433,9 @@ impl ChatWidget {
             BottomPaneOutcome::RunCommand(action) => self.run_command(action),
             BottomPaneOutcome::PastedImage(path) => self.push_image(&path),
             BottomPaneOutcome::RunWebAction(action) => ChatOutcome::WebAction(action),
+            BottomPaneOutcome::RunFusionSetupAction(action) => {
+                ChatOutcome::FusionSetupAction(action)
+            }
             BottomPaneOutcome::RunConnectAction(action) => ChatOutcome::ConnectAction(action),
             BottomPaneOutcome::RunPermissionAction(action) => ChatOutcome::PermissionAction(action),
             BottomPaneOutcome::RunTaskAction(action) => ChatOutcome::TaskAction(action),
@@ -8761,6 +8848,97 @@ mod tests {
         assert_eq!(shown, "/fusion --fast review locking");
     }
 
+    fn fusion_settings(
+        configured: bool,
+    ) -> std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>> {
+        let roles = if configured {
+            platform_api::fusion_setup::FusionModelRoles {
+                panels: vec![
+                    platform_api::FusionModelChoice::new("anthropic", "claude-opus-5"),
+                    platform_api::FusionModelChoice::new("openai", "gpt-5.6-sol"),
+                ],
+                analyst: Some(platform_api::FusionModelChoice::new("openai", "gpt-5.6-sol")),
+                synthesizer: Some(platform_api::FusionModelChoice::new(
+                    "anthropic",
+                    "claude-opus-5",
+                )),
+            }
+        } else {
+            platform_api::fusion_setup::FusionModelRoles::default()
+        };
+        std::sync::Arc::new(std::sync::Mutex::new(
+            crate::fusion::setup::FusionSettingsSnapshot {
+                roles,
+                enabled: false,
+                max_panel: 8,
+            },
+        ))
+    }
+
+    fn setup_view_is_open(widget: &ChatWidget) -> bool {
+        widget
+            .bottom_pane
+            .view_stack()
+            .contains::<crate::bottom_pane::fusion_setup_view::FusionSetupView>()
+    }
+
+    #[test]
+    fn fusion_setup_opens_the_wizard_instead_of_dispatching_a_turn() {
+        let mut widget = widget();
+        widget.set_fusion_settings(fusion_settings(true));
+        assert!(matches!(
+            widget.handle_slash("/fusion setup"),
+            Some(ChatOutcome::Continue)
+        ));
+        assert!(setup_view_is_open(&widget));
+        assert!(
+            cells(&widget).is_empty(),
+            "`setup` is a UI command, not a turn — it must not echo a prompt"
+        );
+    }
+
+    /// The engine would refuse this run at preflight with `NotConfigured`. An
+    /// error the operator cannot act on from where they are standing is worse
+    /// than the question that fixes it — but the typed prompt must not be
+    /// silently eaten either.
+    #[test]
+    fn an_unconfigured_fusion_run_opens_the_wizard_and_says_the_prompt_was_not_sent() {
+        let mut widget = widget();
+        widget.set_fusion_settings(fusion_settings(false));
+        assert!(matches!(
+            widget.handle_slash("/fusion review the locking"),
+            Some(ChatOutcome::Continue)
+        ));
+        assert!(setup_view_is_open(&widget));
+        let shown = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
+        assert!(shown.contains("not sent"), "{shown}");
+    }
+
+    #[test]
+    fn a_configured_fusion_run_still_dispatches_untouched() {
+        let mut widget = widget();
+        widget.set_fusion_settings(fusion_settings(true));
+        let Some(ChatOutcome::DispatchSlash(input, _)) =
+            widget.handle_slash("/fusion review the locking")
+        else {
+            panic!("a configured session must dispatch, not open the wizard");
+        };
+        assert_eq!(input, "/fusion review the locking");
+        assert!(!setup_view_is_open(&widget));
+    }
+
+    /// A host that never wired the settings read (headless, embedders, tests)
+    /// must not have its `/fusion` dispatch hijacked by a wizard that would be
+    /// reading nothing.
+    #[test]
+    fn an_unwired_settings_slot_never_hijacks_a_dispatch() {
+        let mut widget = widget();
+        assert!(matches!(
+            widget.handle_slash("/fusion review the locking"),
+            Some(ChatOutcome::DispatchSlash(..))
+        ));
+    }
+
     /// A fake shell-expansion provider for the TUI expansion smoke tests: the
     /// runner echoes a fixed marker for any command, and the gate allows or
     /// denies. Proves `run_core_command` actually invokes expansion on a
@@ -9020,6 +9198,7 @@ mod tests {
                         supports_reasoning: true,
                         supports_multimodal: false,
                         details: Vec::new(),
+                        fusion_analyst_capable: false,
                     },
                     ModelRow {
                         display: "Sonnet".into(),
@@ -9031,6 +9210,7 @@ mod tests {
                         supports_reasoning: true,
                         supports_multimodal: false,
                         details: Vec::new(),
+                        fusion_analyst_capable: false,
                     },
                 ],
                 ..Default::default()
@@ -10415,6 +10595,7 @@ mod tests {
                         supports_reasoning: true,
                         supports_multimodal: false,
                         details: Vec::new(),
+                        fusion_analyst_capable: false,
                     },
                     ModelRow {
                         display: "OR Auto".into(),
@@ -10426,6 +10607,7 @@ mod tests {
                         supports_reasoning: true,
                         supports_multimodal: false,
                         details: Vec::new(),
+                        fusion_analyst_capable: false,
                     },
                     ModelRow {
                         display: "OR GPT".into(),
@@ -10437,6 +10619,7 @@ mod tests {
                         supports_reasoning: true,
                         supports_multimodal: false,
                         details: Vec::new(),
+                        fusion_analyst_capable: false,
                     },
                 ],
                 ..Default::default()
@@ -10566,6 +10749,7 @@ mod tests {
                         supports_reasoning: true,
                         supports_multimodal: false,
                         details: Vec::new(),
+                        fusion_analyst_capable: false,
                     },
                     ModelRow {
                         display: "GPT-5.5".into(),
@@ -10577,6 +10761,7 @@ mod tests {
                         supports_reasoning: true,
                         supports_multimodal: false,
                         details: Vec::new(),
+                        fusion_analyst_capable: false,
                     },
                 ],
                 ..Default::default()

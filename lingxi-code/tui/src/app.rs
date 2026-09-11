@@ -31,7 +31,9 @@ use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
-use crate::bottom_pane::{ConnectAction, PermissionAction, PluginAction, TaskAction, WebAction};
+use crate::bottom_pane::{
+    ConnectAction, FusionSetupAction, PermissionAction, PluginAction, TaskAction, WebAction,
+};
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
@@ -93,6 +95,10 @@ pub struct AppCallbacks<'cb> {
     /// effect (persist a key/settings, or a test search) asynchronously and
     /// reports the result back via a [`TurnEvent::SystemNotice`].
     pub on_web_action: Box<dyn FnMut(WebAction) + 'cb>,
+    /// Executed on [`ChatOutcome::FusionSetupAction`]: the caller merges the
+    /// chosen Fusion model roles into `~/.lingxi/settings.json` asynchronously
+    /// and reports the result back via a [`TurnEvent::SystemNotice`].
+    pub on_fusion_setup_action: Box<dyn FnMut(FusionSetupAction) + 'cb>,
     /// Executed on [`ChatOutcome::ConnectAction`]: the caller runs the
     /// `/connect` effect (store an API key, or kick off a Copilot/OAuth
     /// sign-in) asynchronously and reports the result back via a
@@ -457,6 +463,11 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::WebAction(action) => {
                         (self.callbacks.on_web_action)(action);
                     }
+                    // A finished `/fusion setup`: persist the model roles
+                    // off-loop, same shape as `WebAction` above.
+                    ChatOutcome::FusionSetupAction(action) => {
+                        (self.callbacks.on_fusion_setup_action)(action);
+                    }
                     // A `/connect` effect: store a key or kick off a
                     // Copilot/OAuth sign-in off-loop, same shape as
                     // `WebAction` above.
@@ -756,6 +767,9 @@ pub fn run_app(
     subscription: Option<platform_api::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
+    fusion_settings: Option<
+        std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>>,
+    >,
     permission_snapshot: Option<std::sync::Arc<std::sync::Mutex<PermissionsSnapshot>>>,
     plugin_snapshot: Option<
         std::sync::Arc<std::sync::Mutex<crate::bottom_pane::plugins_view::PluginsSnapshot>>,
@@ -788,6 +802,7 @@ pub fn run_app(
     on_queue_prompt: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
+    on_fusion_setup_action: impl FnMut(FusionSetupAction),
     on_connect_action: impl FnMut(ConnectAction),
     on_permission_action: impl FnMut(PermissionAction),
     on_plugin_action: impl FnMut(PluginAction),
@@ -842,6 +857,7 @@ pub fn run_app(
             on_queue_prompt: Box::new(on_queue_prompt),
             on_switch_model: Box::new(on_switch_model),
             on_web_action: Box::new(on_web_action),
+            on_fusion_setup_action: Box::new(on_fusion_setup_action),
             on_connect_action: Box::new(on_connect_action),
             on_permission_action: Box::new(on_permission_action),
             on_plugin_action: Box::new(on_plugin_action),
@@ -885,6 +901,9 @@ pub fn run_app(
     }
     if let Some(slot) = web_snapshot {
         app.chat_widget.set_web_snapshot(slot);
+    }
+    if let Some(slot) = fusion_settings {
+        app.chat_widget.set_fusion_settings(slot);
     }
     if let Some(slot) = permission_snapshot {
         app.chat_widget.set_permission_snapshot(slot);
@@ -1017,6 +1036,7 @@ mod tests {
                 on_queue_prompt: Box::new(|_, _, _| {}),
                 on_switch_model: Box::new(|_, _| {}),
                 on_web_action: Box::new(|_| {}),
+                on_fusion_setup_action: Box::new(|_| {}),
                 on_connect_action: Box::new(|_| {}),
                 on_permission_action: Box::new(|_| {}),
                 on_plugin_action: Box::new(|_| {}),
@@ -1787,6 +1807,7 @@ mod tests {
                     supports_reasoning: true,
                     supports_multimodal: false,
                     details: Vec::new(),
+                    fusion_analyst_capable: false,
                 },
                 crate::session::ModelRow {
                     display: "Sonnet".into(),
@@ -1798,6 +1819,7 @@ mod tests {
                     supports_reasoning: true,
                     supports_multimodal: false,
                     details: Vec::new(),
+                    fusion_analyst_capable: false,
                 },
             ],
             ..Default::default()

@@ -215,6 +215,7 @@ mod tests {
                 capabilities: Default::default(),
                 reasoning: Default::default(),
                 supports_reasoning: true,
+                fusion_analyst_capable: false,
             }
         }
 
@@ -265,6 +266,7 @@ mod tests {
             capabilities: Default::default(),
             reasoning: Default::default(),
             supports_reasoning: true,
+            fusion_analyst_capable: false,
         }]);
         mock.set_status_snapshot(platform_api::StatusSnapshot {
             model: "deepseek-flash".into(),
@@ -346,6 +348,7 @@ mod tests {
                 capabilities: Default::default(),
                 reasoning: Default::default(),
                 supports_reasoning: false,
+                fusion_analyst_capable: false,
             }
         }
 

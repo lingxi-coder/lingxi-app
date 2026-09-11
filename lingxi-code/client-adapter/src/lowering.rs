@@ -181,6 +181,7 @@ pub fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetails
                 &listing.request_model,
                 platform_api::model_capabilities::ModelCapability::FastMode,
             ),
+        fusion_analyst_capable: listing.fusion_analyst_capable,
     }
 }
 

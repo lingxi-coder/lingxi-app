@@ -28,6 +28,7 @@ pub mod copy;
 pub mod diff;
 pub mod export;
 pub mod files;
+pub mod fusion;
 pub mod history_cell;
 pub mod image_view;
 pub mod message;

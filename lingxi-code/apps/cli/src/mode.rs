@@ -1118,6 +1118,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let carried_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
     let web_turn_tx = turn_tx.clone();
+    let fusion_turn_tx = turn_tx.clone();
     let teammate_turn_tx = turn_tx.clone();
     let set_mode_turn_tx = turn_tx.clone();
     let connect_turn_tx = turn_tx.clone();
@@ -1280,6 +1281,27 @@ pub(crate) async fn run_ratatui_with_initial_state(
             last_test: None,
         }))
     };
+    // (/fusion setup) Preload the configured Fusion model roles from the SAME
+    // `~/.lingxi/settings.json` the engine loads, mirroring the `/web` snapshot
+    // above. Shared between `ChatWidget::cmd_fusion` (sync read, to seed the
+    // wizard and to decide whether an unconfigured `/fusion RUN` should open it
+    // instead) and `run_fusion_setup_action` (async write-back after a save).
+    //
+    // Only the PERSISTED half lives here — the candidate models come from the
+    // session catalog at open time so a provider connected mid-session is
+    // offered without a relaunch.
+    let fusion_settings = {
+        let (roles, enabled) = tui::fusion::persist::fusion_settings_path()
+            .map(|path| tui::fusion::persist::load_fusion_settings_from(&path))
+            .unwrap_or_default();
+        std::sync::Arc::new(std::sync::Mutex::new(
+            tui::fusion::setup::FusionSettingsSnapshot {
+                roles,
+                enabled,
+                max_panel: fusion_max_panel_setting(),
+            },
+        ))
+    };
     // (/permissions) Preload the rule snapshot from the user/project/local
     // settings files into a shared slot, mirroring the `/web` snapshot above.
     // `ChatWidget::cmd_permissions` reads a clone to seed the editor; the async
@@ -1372,6 +1394,30 @@ pub(crate) async fn run_ratatui_with_initial_state(
             initial.push(msg);
         } else {
             initial.insert(0, msg);
+        }
+    }
+    // (/fusion setup) A one-line startup notice when Fusion has no models
+    // configured, rendered beside the announcement block above.
+    //
+    // Deliberately a NOTICE and not a prompt: a user who never runs Fusion
+    // should not have to dismiss anything to start working, and the wizard
+    // opens on its own the first time they actually try to use it
+    // (`ChatWidget::cmd_fusion`). It is also silent once configured, so a
+    // configured session never sees it. On a `--resume` it goes to the top of
+    // the feed, like the announcement, rather than below the replayed history
+    // where it would read as part of the old conversation.
+    if let Some(body) =
+        platform_api::fusion_setup::startup_notice(&fusion_settings.lock().unwrap().roles)
+    {
+        let notice = tui::RenderedMessage::SystemText {
+            body,
+            timestamp: 0,
+            is_error: false,
+        };
+        if fresh_launch {
+            initial.push(notice);
+        } else {
+            initial.insert(0, notice);
         }
     }
     // Resume parity: if the cost tracker was seeded from a restored session
@@ -1519,6 +1565,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
         web_handle.spawn(async move {
             run_web_action(action, key_store, http, tx, snapshot).await;
         });
+    };
+    // (/fusion setup async effect) Mirrors `on_web_action` above: the wizard
+    // returns a save, the settings merge happens off the render loop, and the
+    // result is reported into the transcript.
+    let fusion_settings_cb = fusion_settings.clone();
+    let on_fusion_setup_action = move |action: tui::bottom_pane::FusionSetupAction| {
+        run_fusion_setup_action(action, &fusion_turn_tx, &fusion_settings_cb);
     };
     // (/connect async effects) Mirrors `on_web_action` above: the picker/
     // method/key views return a `ConnectAction` synchronously from the
@@ -2322,6 +2375,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             Some(subscription),
             Some(status_line),
             Some(web_snapshot),
+            Some(fusion_settings),
             Some(permission_snapshot),
             Some(plugin_snapshot),
             resume_rows,
@@ -2343,6 +2397,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_queue_prompt,
             on_switch_model,
             on_web_action,
+            on_fusion_setup_action,
             on_connect_action,
             on_permission_action,
             on_plugin_action,
@@ -3283,6 +3338,86 @@ async fn run_permission_action(
 /// shape: `snapshot` is the composition root's shared `/web` config snapshot
 /// (read by the sync `ChatWidget::cmd_web` to seed the picker), updated here
 /// after a successful save so the NEXT `/web` open reflects it.
+/// `fusion.maxPanel` as the merged settings say it, for the wizard's roster
+/// ceiling. Reads the same layered settings the engine loads, so the wizard
+/// cannot let an operator build a roster the engine would then reject.
+///
+/// Falls back to the documented hard cap when settings cannot be read — the
+/// wizard would otherwise cap at zero and refuse every pick.
+fn fusion_max_panel_setting() -> u8 {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    lingxi_core::settings::Settings::load(lingxi_core::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: lingxi_core::settings::SettingsJson::default(),
+    })
+    .ok()
+    .and_then(|effective| {
+        effective
+            .settings
+            .fusion
+            .as_ref()
+            .and_then(|fusion| fusion.max_panel)
+    })
+    .unwrap_or(platform_api::FUSION_MAX_PANEL)
+}
+
+/// Persist one finished `/fusion setup` and report the result.
+///
+/// Synchronous on purpose: this is a single small settings-file merge, the same
+/// read-modify-write `/web`'s `SaveSettings` arm performs, and doing it inline
+/// keeps the "saved" notice ordered before anything the operator types next.
+fn run_fusion_setup_action(
+    action: tui::bottom_pane::FusionSetupAction,
+    turn_tx: &tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+    snapshot: &std::sync::Arc<std::sync::Mutex<tui::fusion::setup::FusionSettingsSnapshot>>,
+) {
+    use tui::bottom_pane::FusionSetupAction;
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    let FusionSetupAction::Save { roles, enable } = action;
+    let Some(path) = tui::fusion::persist::fusion_settings_path() else {
+        let _ = turn_tx.send(TurnEvent::SystemNotice {
+            body: "✗ Could not locate ~/.lingxi/settings.json to save the Fusion models."
+                .to_string(),
+            is_error: true,
+        });
+        return;
+    };
+    match tui::fusion::persist::save_fusion_settings_to(&path, &roles, Some(enable)) {
+        Ok(()) => {
+            let summary = roles
+                .panels
+                .iter()
+                .map(platform_api::FusionModelChoice::route)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if let Ok(mut guard) = snapshot.lock() {
+                guard.roles = roles;
+                guard.enabled = enable;
+            }
+            let _ = turn_tx.send(TurnEvent::SystemNotice {
+                body: format!(
+                    "✓ Fusion models saved to {}.\n  Panels: {summary}",
+                    path.display()
+                ),
+                is_error: false,
+            });
+        }
+        Err(error) => {
+            // The in-memory snapshot is deliberately NOT updated on a failed
+            // write: it is the thing `/fusion` consults to decide whether a run
+            // is configured, and claiming success here would let the next run
+            // dispatch straight into the engine's `NotConfigured` refusal.
+            let _ = turn_tx.send(TurnEvent::SystemNotice {
+                body: format!("✗ Could not save Fusion models to {}: {error}", path.display()),
+                is_error: true,
+            });
+        }
+    }
+}
+
 async fn run_web_action(
     action: tui::bottom_pane::WebAction,
     key_store: Arc<secret::CredentialManager>,
@@ -3974,6 +4109,7 @@ async fn build_session_info(
                 },
                 supports_reasoning: m.supports_reasoning,
                 supports_multimodal,
+                fusion_analyst_capable: m.fusion_analyst_capable,
                 details,
             }
         })

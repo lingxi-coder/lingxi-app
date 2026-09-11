@@ -31,7 +31,7 @@ test('groupedNav lists every group in a fixed order with no query', () => {
   const sections = groupedNav('');
   assert.deepEqual(sections.map((s) => s.group), ['个人', '模型与服务', '编码', '高级']);
   const allIds = sections.flatMap((s) => s.pages.map((p) => p.id));
-  assert.equal(allIds.length, 16);
+  assert.equal(allIds.length, 17);
 });
 
 test('groupedNav filters to matching pages and drops empty groups', () => {

@@ -982,6 +982,7 @@
   "ModelDetailsDto.description": "Option<String>",
   "ModelDetailsDto.display_name": "String",
   "ModelDetailsDto.family": "Option<String>",
+  "ModelDetailsDto.fusion_analyst_capable": "bool",
   "ModelDetailsDto.input_modalities": "Vec<String>",
   "ModelDetailsDto.knowledge_cutoff": "Option<String>",
   "ModelDetailsDto.last_updated": "Option<String>",

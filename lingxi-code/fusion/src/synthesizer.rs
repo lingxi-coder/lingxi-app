@@ -1,7 +1,9 @@
-//! Merge synthesizer: exactly one parent-model side query.
+//! Merge synthesizer: exactly one side query to the configured synthesizer
+//! route (`fusion.synthesizerModel`), which defaults to nothing — like every
+//! other Fusion role it must be named in settings before a run may start.
 
 use crate::config::FusionRuntimeConfig;
-use crate::model_resolver::ModelLimits;
+use crate::model_resolver::{ModelLimits, ResolvedPanel};
 use crate::packing::{self, PackingError};
 use crate::panel::PanelInternal;
 use platform_api::subagent_output_guard::sanitize_blocks;
@@ -32,23 +34,36 @@ pub enum SynthError {
     TimedOut,
 }
 
-/// Run the parent-model merge using the route limits captured at preparation.
+/// Run the merge using the route limits captured at preparation.
 #[cfg(test)]
 pub(crate) async fn synthesize_with_limits(
     client: Arc<dyn SideQueryClient>,
     config: &FusionRuntimeConfig,
     request: &FusionRequest,
+    synth_route: &ResolvedPanel,
     analysis: &FusionAnalysis,
     panels: &[PanelInternal],
     limits: ModelLimits,
 ) -> Result<(String, cost::Usage), (SynthError, cost::Usage)> {
-    synthesize_registered(client, config, request, analysis, panels, limits, None).await
+    synthesize_registered(
+        client,
+        config,
+        request,
+        synth_route,
+        analysis,
+        panels,
+        limits,
+        None,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn synthesize_registered(
     client: Arc<dyn SideQueryClient>,
     config: &FusionRuntimeConfig,
     request: &FusionRequest,
+    synth_route: &ResolvedPanel,
     analysis: &FusionAnalysis,
     panels: &[PanelInternal],
     limits: ModelLimits,
@@ -58,6 +73,7 @@ pub(crate) async fn synthesize_registered(
     let prepared = match packing::prepare_synth_request(
         client.as_ref(),
         request,
+        synth_route,
         analysis,
         panels,
         output_tokens,
@@ -119,6 +135,7 @@ pub(crate) fn preflight_request(
     client: &dyn SideQueryClient,
     config: &FusionRuntimeConfig,
     request: &FusionRequest,
+    synth_route: &ResolvedPanel,
     analysis: &FusionAnalysis,
     panels: &[PanelInternal],
     limits: ModelLimits,
@@ -126,6 +143,7 @@ pub(crate) fn preflight_request(
     packing::preflight_synth_request(
         client,
         request,
+        synth_route,
         analysis,
         panels,
         limits.output_cap(config.synthesizer_max_output_tokens),
@@ -137,6 +155,7 @@ pub(crate) fn estimate_input_tokens(
     client: &dyn SideQueryClient,
     config: &FusionRuntimeConfig,
     request: &FusionRequest,
+    synth_route: &ResolvedPanel,
     analysis: &FusionAnalysis,
     panels: &[PanelInternal],
     limits: ModelLimits,
@@ -144,6 +163,7 @@ pub(crate) fn estimate_input_tokens(
     packing::estimate_synth_request(
         client,
         request,
+        synth_route,
         analysis,
         panels,
         limits.output_cap(config.synthesizer_max_output_tokens),
@@ -166,10 +186,15 @@ mod tests {
         analysis: &FusionAnalysis,
         panels: &[PanelInternal],
     ) -> Result<(String, cost::Usage), (SynthError, cost::Usage)> {
+        let synth_route = ResolvedPanel {
+            profile: request.parent_profile.clone(),
+            model: request.parent_model.clone(),
+        };
         synthesize_with_limits(
             client,
             config,
             request,
+            &synth_route,
             analysis,
             panels,
             crate::model_resolver::known_test_limits(),

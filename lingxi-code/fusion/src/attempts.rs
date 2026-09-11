@@ -43,10 +43,6 @@ impl FusionAttemptLivePolicy for CapturedLivePolicy {
         if deadline <= tokio::time::Instant::now() {
             return Err(FusionError::TimedOutEmpty);
         }
-        let parent = crate::ResolvedPanel {
-            profile: self.request.parent_profile.clone(),
-            model: self.request.parent_model.clone(),
-        };
         let (route, label, limit, judge) = match (stage, slot) {
             (ModelAttemptStage::Panel, Some(slot)) => (
                 self.resolved
@@ -64,7 +60,7 @@ impl FusionAttemptLivePolicy for CapturedLivePolicy {
                 true,
             ),
             (ModelAttemptStage::Synthesis, None) => (
-                &parent,
+                &self.resolved.synthesizer,
                 "synthesizer",
                 self.snapshot.config.synthesizer_max_output_tokens,
                 false,

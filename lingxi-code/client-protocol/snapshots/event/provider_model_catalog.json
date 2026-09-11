@@ -61,7 +61,8 @@
             "forced_reasoning": false,
             "editable": true
           },
-          "supports_fast_mode": false
+          "supports_fast_mode": false,
+          "fusion_analyst_capable": false
         }
       ]
     }

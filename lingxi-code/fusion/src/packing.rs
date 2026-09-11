@@ -237,6 +237,7 @@ pub(crate) fn estimate_analyst_request(
 pub(crate) fn prepare_synth_request(
     client: &dyn SideQueryClient,
     request: &FusionRequest,
+    synth_route: &ResolvedPanel,
     analysis: &FusionAnalysis,
     panels: &[PanelInternal],
     output_tokens: u32,
@@ -245,7 +246,7 @@ pub(crate) fn prepare_synth_request(
     let input_cap = usable_input_cap(limits, output_tokens)?;
     let system_prompt = synth_system_prompt();
     let full = plain_request(
-        request,
+        synth_route,
         synth_user_message(request, analysis, panels),
         system_prompt.clone(),
         output_tokens,
@@ -275,7 +276,7 @@ pub(crate) fn prepare_synth_request(
 
     let sources = synth_packed_sources(panels);
     let mandatory = plain_request(
-        request,
+        synth_route,
         packed_synth_user_message(request, analysis, &sources, 0, OmissionMode::Actual),
         system_prompt.clone(),
         output_tokens,
@@ -293,7 +294,7 @@ pub(crate) fn prepare_synth_request(
     while low < high {
         let candidate_budget = low.saturating_add(high.saturating_sub(low).div_ceil(2));
         let candidate_request = plain_request(
-            request,
+            synth_route,
             packed_synth_user_message(
                 request,
                 analysis,
@@ -316,7 +317,7 @@ pub(crate) fn prepare_synth_request(
         }
     }
     let packed = plain_request(
-        request,
+        synth_route,
         packed_synth_user_message(request, analysis, &sources, low, OmissionMode::Actual),
         system_prompt,
         output_tokens,
@@ -348,23 +349,42 @@ pub(crate) fn prepare_synth_request(
 pub(crate) fn preflight_synth_request(
     client: &dyn SideQueryClient,
     request: &FusionRequest,
+    synth_route: &ResolvedPanel,
     analysis: &FusionAnalysis,
     panels: &[PanelInternal],
     output_tokens: u32,
     limits: ModelLimits,
 ) -> Result<(), PackingError> {
-    prepare_synth_request(client, request, analysis, panels, output_tokens, limits).map(|_| ())
+    prepare_synth_request(
+        client,
+        request,
+        synth_route,
+        analysis,
+        panels,
+        output_tokens,
+        limits,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn estimate_synth_request(
     client: &dyn SideQueryClient,
     request: &FusionRequest,
+    synth_route: &ResolvedPanel,
     analysis: &FusionAnalysis,
     panels: &[PanelInternal],
     output_tokens: u32,
     limits: ModelLimits,
 ) -> Result<sidequery::SideQueryEstimate, PackingError> {
-    let prepared = prepare_synth_request(client, request, analysis, panels, output_tokens, limits)?;
+    let prepared = prepare_synth_request(
+        client,
+        request,
+        synth_route,
+        analysis,
+        panels,
+        output_tokens,
+        limits,
+    )?;
     estimate(client, CanonicalSideQueryRequest::Plain(prepared.request))
 }
 
@@ -389,16 +409,19 @@ fn strict_request(
     }
 }
 
+/// The synthesizer's side query targets the CONFIGURED synthesizer route
+/// (`fusion.synthesizerModel`), which is not necessarily the session's own
+/// model — so the route is passed in rather than read off the request.
 fn plain_request(
-    request: &FusionRequest,
+    synth_route: &ResolvedPanel,
     user: String,
     system_prompt: String,
     output_tokens: u32,
 ) -> SideQueryRequest {
     SideQueryRequest {
         model_attempt: None,
-        model: request.parent_model.clone(),
-        profile: Some(request.parent_profile.clone()),
+        model: synth_route.model.clone(),
+        profile: Some(synth_route.profile.clone()),
         system_prompt: Some(system_prompt),
         messages: vec![ConversationMessage::user(MessageId::new(), user)],
         tools: Vec::new(),
@@ -1111,6 +1134,7 @@ mod tests {
         let prepared = prepare_synth_request(
             &DtoEstimator,
             &request(),
+            &synth_route(),
             &analysis,
             &panels,
             128,
@@ -1122,6 +1146,7 @@ mod tests {
         assert!(prepare_synth_request(
             &DtoEstimator,
             &request(),
+            &synth_route(),
             &analysis,
             &panels,
             128,
@@ -1167,6 +1192,16 @@ mod tests {
             .iter()
             .find(|source| source.panel_id == "P2")
             .is_some_and(|source| source.evidence.is_empty()));
+    }
+
+    /// The synth route the packing tests target. Production reads this from
+    /// `fusion.synthesizerModel`; here it mirrors the fixture request's own
+    /// session model so the payload assertions below are unaffected.
+    fn synth_route() -> ResolvedPanel {
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        }
     }
 
     fn first_user_text(messages: &[ConversationMessage]) -> &str {
@@ -1457,6 +1492,7 @@ mod tests {
         let error = prepare_synth_request(
             &DtoEstimator,
             &request(),
+            &synth_route(),
             &FusionAnalysis {
                 schema_version: 1,
                 consensus: vec![],

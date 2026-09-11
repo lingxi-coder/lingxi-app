@@ -50,6 +50,10 @@ pub struct ModelRow {
     pub supports_reasoning: bool,
     /// Whether the model natively accepts image or document input.
     pub supports_multimodal: bool,
+    /// Whether this route could serve as the Fusion analyst — the model claims
+    /// structured output AND its profile's codec can encode a `response_format`.
+    /// `/fusion setup`'s analyst step lists only these; `/model` ignores it.
+    pub fusion_analyst_capable: bool,
     /// Preformatted picker detail strings. The first line is the compact row
     /// summary (capabilities/context/price); later lines feed the selected-row
     /// detail panel and search index.
@@ -324,6 +328,7 @@ mod tests {
             is_current: current,
             supports_reasoning: true,
             supports_multimodal: false,
+            fusion_analyst_capable: false,
             details: Vec::new(),
         }
     }

@@ -1214,6 +1214,12 @@ pub struct ModelListing {
     /// The exact reasoning controls accepted by this provider/model route.
     #[serde(default)]
     pub reasoning: ReasoningControlSpec,
+    /// Whether this route could serve as the Fusion analyst — the model claims
+    /// structured output AND its profile's codec can encode a `response_format`.
+    /// The `/fusion setup` analyst picker gates on this so an operator cannot
+    /// name a judge that fails only after every panel has already spent.
+    #[serde(default)]
+    pub fusion_analyst_capable: bool,
 }
 
 /// One provider section in the shared client-side model directory.

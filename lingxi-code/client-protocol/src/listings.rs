@@ -195,6 +195,16 @@ pub struct ModelDetailsDto {
     /// Whether this model/provider route supports the first-party fast tier.
     #[serde(default)]
     pub supports_fast_mode: bool,
+    /// Whether this route could serve as the Fusion analyst: the model claims
+    /// structured output AND its profile's wire codec can actually encode a
+    /// `response_format`. Strictly stronger than
+    /// `capabilities.structured_output`, which is a property of the MODEL only
+    /// — a Gemini route claims the capability and then hard-fails at encode
+    /// time, after every Fusion panel has already spent. Settings UIs that let
+    /// an operator name the analyst must gate on THIS, not on the capability
+    /// bit.
+    #[serde(default)]
+    pub fusion_analyst_capable: bool,
 }
 
 /// One provider's settings-visible conversation model catalog.

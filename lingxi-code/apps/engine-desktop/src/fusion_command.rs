@@ -16,7 +16,17 @@ use std::sync::Arc;
 use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::Mutex;
 
-const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] PROMPT | --retry-publication fu_RUN_ID";
+const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] PROMPT | setup | --retry-publication fu_RUN_ID";
+
+/// What `/fusion setup` reports when it reaches THIS handler.
+///
+/// The TUI never gets here: `ChatWidget::cmd_fusion` opens the wizard in the
+/// bottom pane and returns without dispatching. Every other host routes the
+/// whole line to the command registry, and without this arm `setup` would be
+/// taken as the PROMPT — a real multi-model deliberation, billed, on the word
+/// "setup". Naming the surfaces that can actually configure it is the only
+/// honest answer a handler with no UI of its own can give.
+const FUSION_SETUP_ELSEWHERE: &str = "`/fusion setup` opens an interactive wizard, which this surface cannot show.\n     In the terminal UI run `/fusion setup`; on the desktop open Settings → Fusion 多模型合议.\n     Either way it writes fusion.panelModels / fusion.analystModel / fusion.synthesizerModel to settings.json, which you can also edit by hand.";
 const FUSION_PERSISTENCE_REQUIRED: &str =
     "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
 
@@ -394,6 +404,11 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
             };
             return CommandResult::Done {
                 display: Some(display),
+            };
+        }
+        if args.raw_args.trim().eq_ignore_ascii_case("setup") {
+            return CommandResult::Done {
+                display: Some(FUSION_SETUP_ELSEWHERE.to_string()),
             };
         }
         let parsed = match parse_fusion_slash(args) {

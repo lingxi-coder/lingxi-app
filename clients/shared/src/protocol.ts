@@ -731,6 +731,14 @@ export interface ModelDetailsDto {
   capabilities: ModelCapabilitiesDto;
   reasoning: ReasoningControlSpecDto;
   supports_fast_mode?: boolean;
+  /**
+   * 该路由能否担任 Fusion 的 analyst：模型自称支持结构化输出，**并且**它所属
+   * profile 的 wire codec 真的能编码 `response_format`。严格强于
+   * `capabilities.structured_output`（那只是模型自身的属性）——Gemini 路由会
+   * 声明该能力然后在编码时硬失败，而那时每个 Fusion panel 已经花完钱了。
+   * 让用户指定 analyst 的设置界面必须按这个字段过滤，不能按能力位。
+   */
+  fusion_analyst_capable?: boolean;
 }
 
 export interface ProviderModelCatalogEntryDto {

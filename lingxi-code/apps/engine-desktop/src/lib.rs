@@ -3240,45 +3240,8 @@ fn desktop_fusion_catalog_row(
         // THIS profile can actually put a `response_format` on the wire.
         // AND-ing the owning profile's codec in is what makes the two agree.
         structured_output: model.capabilities.structured_output
-            && protocol_encodes_response_format(protocol),
+            && protocol.encodes_response_format(),
         limits: fusion::ModelLimits::from_metadata(&model.metadata),
-    }
-}
-
-/// Round-5 review finding [3]: can a profile on this wire protocol encode an
-/// `LlmRequest.response_format` at all?
-///
-/// `llm_client::protocol::validate_capabilities` only checks the MODEL's
-/// `structured_output` capability bit, so a request with a `response_format`
-/// reaches the codec whenever that bit is true — and `GeminiCodec`
-/// (`llm-client/src/providers/gemini.rs`'s `reject_unsupported_request_intent`,
-/// called from `encode_request`) then hard-fails with `InvalidRequest("GeminiCodec
-/// does not encode response_format yet")`. For Fusion that failure lands in
-/// `analyst.rs`'s `query_json_schema` AFTER every panel has already spent
-/// real money, instead of in §4's zero-provider-call preflight. Gating the
-/// catalog row on this predicate moves it back to preflight
-/// (`FusionError::StructuredOutputUnsupported`).
-///
-/// `VertexGemini` is in the same class: `VertexGeminiCodec::encode_request`
-/// delegates body construction to the inner `GeminiCodec` and only rewrites
-/// the URL. `VertexClaude`/`BedrockClaude`/`FoundryClaude` delegate to
-/// `AnthropicMessagesCodec` and `AzureOpenAi` to `OpenAiChatCodec`, all of
-/// which do encode `response_format`.
-///
-/// Deliberately an exhaustive `match` rather than a `matches!`: a new
-/// `ProtocolFamily` must not silently default to "encodes it" and
-/// re-introduce this defect for the next codec that does not.
-fn protocol_encodes_response_format(protocol: &llm_client::ProtocolFamily) -> bool {
-    match protocol {
-        llm_client::ProtocolFamily::GeminiGenerateContent
-        | llm_client::ProtocolFamily::VertexGemini => false,
-        llm_client::ProtocolFamily::AnthropicMessages
-        | llm_client::ProtocolFamily::OpenAiResponses
-        | llm_client::ProtocolFamily::OpenAiChat
-        | llm_client::ProtocolFamily::VertexClaude
-        | llm_client::ProtocolFamily::BedrockClaude
-        | llm_client::ProtocolFamily::FoundryClaude
-        | llm_client::ProtocolFamily::AzureOpenAi => true,
     }
 }
 
@@ -5031,7 +4994,7 @@ rejects every response_format, so electing it analyst fails only AFTER the panel
                 );
                 if row.hints.judge_eligible
                     && row.structured_output
-                    && !protocol_encodes_response_format(&provider.protocol)
+                    && !provider.protocol.encodes_response_format()
                 {
                     offenders.push(format!(
                         "{}/{} ({:?})",
@@ -5075,7 +5038,7 @@ rejects every response_format, so electing it analyst fails only AFTER the panel
             llm_client::ProtocolFamily::VertexGemini,
         ] {
             assert!(
-                !protocol_encodes_response_format(&family),
+                !family.encodes_response_format(),
                 "{family:?} delegates to GeminiCodec, which rejects response_format"
             );
             assert!(
@@ -5099,7 +5062,7 @@ rejects every response_format, so electing it analyst fails only AFTER the panel
             llm_client::ProtocolFamily::AzureOpenAi,
         ] {
             assert!(
-                protocol_encodes_response_format(&family),
+                family.encodes_response_format(),
                 "{family:?} encodes response_format (directly or via the codec it delegates to)"
             );
             assert!(
@@ -10558,6 +10521,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                 capabilities: Default::default(),
                 reasoning: Default::default(),
                 supports_reasoning: m.capabilities.reasoning,
+                fusion_analyst_capable: false,
             })
         })
         .collect();
@@ -25226,6 +25190,7 @@ must be filtered out: got {after:?}"
                 capabilities: Default::default(),
                 reasoning: Default::default(),
                 supports_reasoning: false,
+                fusion_analyst_capable: false,
             },
             platform_api::ModelListing {
                 display_model: "gpt-4o".to_string(),
@@ -25237,6 +25202,7 @@ must be filtered out: got {after:?}"
                 capabilities: Default::default(),
                 reasoning: Default::default(),
                 supports_reasoning: false,
+                fusion_analyst_capable: false,
             },
             platform_api::ModelListing {
                 display_model: "claude-sonnet-4-6".to_string(),
@@ -25248,6 +25214,7 @@ must be filtered out: got {after:?}"
                 capabilities: Default::default(),
                 reasoning: Default::default(),
                 supports_reasoning: true,
+                fusion_analyst_capable: false,
             },
         ];
 
@@ -26861,6 +26828,7 @@ mod connected_fallback_tests {
             capabilities: Default::default(),
             reasoning: Default::default(),
             supports_reasoning: false,
+            fusion_analyst_capable: false,
         }
     }
 

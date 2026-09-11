@@ -27,6 +27,7 @@ pub mod focus_view;
 pub mod footer;
 pub mod held_peer_view;
 pub mod input_status;
+pub mod fusion_setup_view;
 pub mod model_picker_view;
 mod paste_burst;
 pub mod pending_input_preview;
@@ -76,8 +77,8 @@ use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
 pub use rewind_picker_view::RewindRow;
 pub use view::{
-    BottomPaneView, CommandAction, ConnectAction, PermissionAction, PluginAction, RewindScope,
-    TaskAction, ViewAction, ViewOutcome, WebAction,
+    BottomPaneView, CommandAction, ConnectAction, FusionSetupAction, PermissionAction,
+    PluginAction, RewindScope, TaskAction, ViewAction, ViewOutcome, WebAction,
 };
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
@@ -180,6 +181,9 @@ pub enum BottomPaneOutcome {
     /// A view asks the owner to run a `/plugin` effect (toggle the on-disk
     /// `enabledPlugins` allowlist). The manager stays OPEN, like a `/web` test.
     RunPluginAction(PluginAction),
+    /// The `/fusion setup` wizard finished: persist the chosen model roles.
+    /// The wizard has already been dismissed by [`ViewStack::apply`].
+    RunFusionSetupAction(FusionSetupAction),
     /// The `/rewind` picker resolved: unwind + re-mount (code rewound and/or
     /// conversation truncated). Surfaced up through `ChatOutcome::Rewind` →
     /// `AppExit::Rewind`; the picker stack is cleared by `ViewStack::apply`.
@@ -869,6 +873,13 @@ impl BottomPane {
 
     /// Open the `/web` provider picker over `snapshot` (the current
     /// configured/active web-search state).
+    /// Open the `/fusion setup` wizard over `snapshot` (the live model catalog
+    /// plus the currently configured roles, resolved by the CLI).
+    pub fn show_fusion_setup(&mut self, snapshot: crate::fusion::setup::FusionSetupSnapshot) {
+        self.view_stack
+            .push(Box::new(fusion_setup_view::FusionSetupView::new(snapshot)));
+    }
+
     pub fn show_web_picker(&mut self, snapshot: crate::web::picker::WebConfigSnapshot) {
         self.view_stack
             .push(Box::new(web_picker_view::WebPickerView::new(snapshot)));
@@ -1447,6 +1458,9 @@ impl BottomPane {
             },
             ViewOutcome::RunCommand(action) => BottomPaneOutcome::RunCommand(action),
             ViewOutcome::RunWebAction(action) => BottomPaneOutcome::RunWebAction(action),
+            ViewOutcome::RunFusionSetupAction(action) => {
+                BottomPaneOutcome::RunFusionSetupAction(action)
+            }
             ViewOutcome::RunConnectAction(action) => BottomPaneOutcome::RunConnectAction(action),
             ViewOutcome::RunPermissionAction(action) => {
                 BottomPaneOutcome::RunPermissionAction(action)
@@ -2441,6 +2455,14 @@ impl ViewStack {
             // persist result lands in the transcript, and the in-view buckets
             // already updated optimistically. Only `Esc` (→ `Cancelled`)
             // closes it.
+            // A finished `/fusion setup` CLOSES the wizard (like `/connect`,
+            // unlike a `/permissions` edit): the flow is over, and the wizard
+            // holds a snapshot cloned at construction, so leaving it open would
+            // show the state the operator just replaced.
+            ViewOutcome::RunFusionSetupAction(action) => {
+                self.views.clear();
+                ViewOutcome::RunFusionSetupAction(action)
+            }
             ViewOutcome::RunPermissionAction(action) => ViewOutcome::RunPermissionAction(action),
             // A `/tasks` stop keeps the picker OPEN (like `/permissions`) so
             // several tasks can be stopped in one visit; the row was already

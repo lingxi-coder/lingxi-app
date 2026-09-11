@@ -1387,6 +1387,7 @@ fn current_contract_index() -> ContractIndex {
     put("ModelDetailsDto.capabilities", "ModelCapabilitiesDto");
     put("ModelDetailsDto.reasoning", "ReasoningControlSpecDto");
     put("ModelDetailsDto.supports_fast_mode", "bool");
+    put("ModelDetailsDto.fusion_analyst_capable", "bool");
 
     put("ProviderModelCatalogEntryDto.provider_id", "String");
     put("ProviderModelCatalogEntryDto.provider_label", "String");

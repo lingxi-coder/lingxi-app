@@ -32,6 +32,11 @@ pub struct ModelListing {
     pub reasoning: ReasoningControlSpec,
     /// Optional Fusion panel/analyst hints.
     pub fusion_hints: Option<platform_api::FusionModelHints>,
+    /// Whether THIS ROUTE could serve as the Fusion analyst: the model claims
+    /// structured output AND the owning profile's codec can actually encode a
+    /// `response_format`. The two are different claims and the weaker one is
+    /// not enough — see [`crate::ProtocolFamily::encodes_response_format`].
+    pub fusion_analyst_capable: bool,
 }
 
 /// Resolved route identity for one requested model.
@@ -187,6 +192,8 @@ impl ModelRegistry {
                         &provider.profile_name,
                         &model.request_model,
                     ),
+                    fusion_analyst_capable: model.capabilities.structured_output
+                        && provider.protocol.encodes_response_format(),
                 })
             })
             .collect()

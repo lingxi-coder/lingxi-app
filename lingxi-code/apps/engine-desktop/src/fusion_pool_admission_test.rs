@@ -361,8 +361,25 @@ impl Fixture {
         let mut orchestrator = fusion_engine::FusionOrchestrator::new(
             probe,
             judge.clone(),
+            // Fusion has no automatic model selection: every role must be
+            // named or preflight refuses the run with `NotConfigured` before
+            // the admission behaviour this file tests can be reached. The
+            // request supplies the panels explicitly; the analyst and
+            // synthesizer are configuration.
             Arc::new(fusion_engine::FusionRuntimeConfig {
                 analysis_protocol_retries: 0,
+                panel_models: vec![
+                    platform_api::FusionModelChoice::new("anthropic", "claude-sonnet-5"),
+                    platform_api::FusionModelChoice::new("anthropic", "claude-opus-4-7"),
+                ],
+                analyst_model: Some(platform_api::FusionModelChoice::new(
+                    "anthropic",
+                    "claude-sonnet-5",
+                )),
+                synthesizer_model: Some(platform_api::FusionModelChoice::new(
+                    "anthropic",
+                    "claude-sonnet-5",
+                )),
                 ..fusion_engine::FusionRuntimeConfig::defaults()
             }),
             Arc::new(catalog),

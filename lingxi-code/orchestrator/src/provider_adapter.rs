@@ -538,6 +538,7 @@ pub fn lower_model_listing(listing: llm_client::ModelListing) -> platform_api::M
         metadata: listing.metadata,
         capabilities,
         reasoning: lower_reasoning_spec(listing.reasoning),
+        fusion_analyst_capable: listing.fusion_analyst_capable,
     }
 }
 
@@ -566,6 +567,12 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
                 ..platform_api::ModelCapabilities::default()
             },
             reasoning: platform_api::ReasoningControlSpec::default(),
+            // This fallback catalog carries no per-route capability or protocol
+            // facts (`ModelCapabilities::default()` above), so it cannot claim
+            // a route can judge. Fail closed: the `/fusion setup` analyst
+            // picker shows nothing here rather than offering a pick that only
+            // fails once every panel has spent.
+            fusion_analyst_capable: false,
         }
     };
 

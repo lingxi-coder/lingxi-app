@@ -114,6 +114,11 @@ pub enum ViewOutcome {
     /// several tasks; the async `TaskRegistryHandle::kill` result is reported
     /// through `TurnEvent::SystemNotice`.
     RunTaskAction(TaskAction),
+    /// The `/fusion setup` wizard finished: persist the chosen model roles.
+    /// Unlike [`Self::RunPermissionAction`] this CLOSES the wizard — the flow
+    /// is over, the result is reported into the transcript, and reopening
+    /// `/fusion setup` re-reads the file it just wrote.
+    RunFusionSetupAction(FusionSetupAction),
     /// A `/plugin` view asked the app to toggle the on-disk
     /// `settings.enabledPlugins` allowlist. The manager stays OPEN (like the
     /// `/permissions` editor); the async settings write is reported back
@@ -255,6 +260,22 @@ pub enum PluginAction {
     Disable {
         /// The plugin id (bare name or `name@marketplace`).
         id: String,
+    },
+}
+
+/// An app-level `/fusion setup` effect a view can request via
+/// [`ViewOutcome::RunFusionSetupAction`]. The owner merges the roles into
+/// `~/.lingxi/settings.json` off-loop and reports the result back through
+/// `TurnEvent::SystemNotice`. Model ids are not secret, so the derived `Debug`
+/// is fine (unlike [`WebAction`]/[`ConnectAction`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FusionSetupAction {
+    /// Write the three model roles, and `fusion.enabled` alongside them.
+    Save {
+        /// Panels (in order), analyst and synthesizer.
+        roles: platform_api::fusion_setup::FusionModelRoles,
+        /// Whether to also enable the Fusion agent and workflow `fusion()`.
+        enable: bool,
     },
 }
 

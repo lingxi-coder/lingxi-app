@@ -641,8 +641,8 @@ impl FusionOrchestrator {
             catalog: self.catalog.as_ref(),
             prices: self.prices.as_ref(),
             analyst: &resolved.analyst,
-            parent_profile: &request.parent_profile,
-            parent_model: &request.parent_model,
+            synth_profile: &resolved.synthesizer.profile,
+            synth_model: &resolved.synthesizer.model,
             request_prompt: &request.prompt,
             catalog_snapshot: Some(catalog_snapshot),
             reserved_max_nano_usd: facts
@@ -896,8 +896,7 @@ impl FusionOrchestrator {
             catalog_snapshot: &runtime_snapshot.catalog,
             prices: self.prices.as_ref(),
             analyst: &resolved.analyst,
-            parent_profile: &request.parent_profile,
-            parent_model: &request.parent_model,
+            synthesizer: &resolved.synthesizer,
             request_prompt: &request.prompt,
             request: Some(&request),
             config: Some(config),
@@ -964,8 +963,8 @@ impl FusionOrchestrator {
                 // here, so their missing usage must stay exact $0, never a
                 // fabricated estimate.
                 false,
-                &request.parent_profile,
-                &request.parent_model,
+                &resolved.synthesizer.profile,
+                &resolved.synthesizer.model,
                 None,
                 false,
                 &request.prompt,
@@ -1116,7 +1115,7 @@ impl FusionOrchestrator {
         // or timed out under-reports a provider that demonstrably received
         // every panel's answer.
         if synth_attempted {
-            egress.push(request.parent_profile.clone());
+            egress.push(resolved.synthesizer.profile.clone());
         }
         egress.sort();
         egress.dedup();
@@ -1142,8 +1141,8 @@ impl FusionOrchestrator {
             &resolved.analyst,
             priced_analyst.as_ref().map(|(u, calls)| (u, *calls)),
             analyst_attempted,
-            &request.parent_profile,
-            &request.parent_model,
+            &resolved.synthesizer.profile,
+            &resolved.synthesizer.model,
             priced_synth.as_ref(),
             synth_attempted,
             &request.prompt,
@@ -1934,16 +1933,12 @@ impl FusionOrchestrator {
                 0,
             );
         }
-        let parent_route = ResolvedPanel {
-            profile: request.parent_profile.clone(),
-            model: request.parent_model.clone(),
-        };
-        let parent_route_refs = [&parent_route];
+        let synth_route_refs = [stage_settlement.synthesizer];
         if Self::ensure_live_config(
             self.config_source.as_ref(),
             config,
             request,
-            &parent_route_refs,
+            &synth_route_refs,
             "synthesizer",
         )
         .is_err()
@@ -1974,8 +1969,8 @@ impl FusionOrchestrator {
             stage_settlement.live_catalog,
             stage_settlement.catalog_snapshot,
             &[(
-                request.parent_profile.as_str(),
-                request.parent_model.as_str(),
+                stage_settlement.synthesizer.profile.as_str(),
+                stage_settlement.synthesizer.model.as_str(),
                 false,
             )],
             config.synthesizer_max_output_tokens,
@@ -2005,17 +2000,21 @@ impl FusionOrchestrator {
                 0,
             );
         }
-        let parent_limits = stage_settlement
+        let synth_limits = stage_settlement
             .catalog_snapshot
-            .limits_for(&request.parent_profile, &request.parent_model)
+            .limits_for(
+                &stage_settlement.synthesizer.profile,
+                &stage_settlement.synthesizer.model,
+            )
             .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
         if crate::synthesizer::preflight_request(
             self.side_query.as_ref(),
             config,
             request,
+            stage_settlement.synthesizer,
             &analysis,
             panels,
-            parent_limits,
+            synth_limits,
         )
         .is_err()
         {
@@ -2087,9 +2086,10 @@ impl FusionOrchestrator {
                 Arc::clone(&self.side_query),
                 config,
                 request,
+                stage_settlement.synthesizer,
                 &analysis,
                 panels,
-                parent_limits,
+                synth_limits,
                 self.attempt_run.as_deref(),
             ) => outcome,
         };
@@ -2135,9 +2135,10 @@ impl FusionOrchestrator {
                         self.side_query.as_ref(),
                         config,
                         request,
+                        stage_settlement.synthesizer,
                         &analysis,
                         panels,
-                        parent_limits,
+                        synth_limits,
                     ) {
                         lost_usage.tokens.input = input_tokens;
                     }
@@ -2438,7 +2439,6 @@ impl FusionExecutor for FusionOrchestrator {
         let quote = if self.attempt_registrar.is_none() { Some(budget::quote(
             &config,
             &resolved,
-            &request,
             &catalog_snapshot,
             &captured_prices,
             inherit.budget().max_session_nano_usd().is_some(),
@@ -2541,7 +2541,14 @@ impl FusionExecutor for FusionOrchestrator {
             return FusionAgentSurface::default();
         };
         FusionAgentSurface {
-            enabled: config.enabled,
+            // Advertising the `fusion` agent while its models are unconfigured
+            // would put a subagent type in front of the model that cannot
+            // complete a single call: every spawn dies at preflight with
+            // `NotConfigured`, having spent a turn to learn it. The master
+            // switch and a complete configuration are both required, and the
+            // operator sees the reason on the `/fusion` path, which stays
+            // reachable either way and opens the setup wizard.
+            enabled: config.enabled && config.missing_model_roles().is_empty(),
             allow_cross_provider: config.allow_cross_provider_for_agent,
             default_preset: config.default_preset,
             default_partial_ok: config.partial_ok,
@@ -2869,8 +2876,10 @@ struct StageSettlement<'a> {
     catalog_snapshot: &'a CatalogSnapshot,
     prices: &'a dyn FusionPriceBook,
     analyst: &'a ResolvedPanel,
-    parent_profile: &'a str,
-    parent_model: &'a str,
+    /// The configured synthesizer route (`fusion.synthesizerModel`) — the one
+    /// the merge side query actually targets, which is NOT necessarily the
+    /// session's own model.
+    synthesizer: &'a ResolvedPanel,
     request_prompt: &'a str,
     request: Option<&'a FusionRequest>,
     config: Option<&'a FusionRuntimeConfig>,
@@ -2952,12 +2961,13 @@ impl StageSettlement<'_> {
         };
         let limits = self
             .catalog_snapshot
-            .limits_for(self.parent_profile, self.parent_model)
+            .limits_for(&self.synthesizer.profile, &self.synthesizer.model)
             .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
         let Ok(input) = crate::synthesizer::estimate_input_tokens(
             client,
             config,
             request,
+            self.synthesizer,
             analysis,
             self.panels,
             limits,
@@ -3063,10 +3073,10 @@ impl StageSettlement<'_> {
         }
         if synth_attempted {
             self.facts
-                .add_possible_egress(self.parent_profile.to_string());
+                .add_possible_egress(self.synthesizer.profile.clone());
             if synth_usage.is_some() {
                 self.facts
-                    .add_confirmed_egress(self.parent_profile.to_string());
+                    .add_confirmed_egress(self.synthesizer.profile.clone());
             }
         }
         self.facts.set_timing(FusionTiming {
@@ -3084,8 +3094,8 @@ impl StageSettlement<'_> {
             self.analyst,
             analyst_for_pricing,
             analyst_attempted,
-            self.parent_profile,
-            self.parent_model,
+            self.synthesizer.profile.as_str(),
+            self.synthesizer.model.as_str(),
             synth_for_pricing,
             synth_attempted,
             self.request_prompt,
@@ -3195,8 +3205,11 @@ pub(crate) fn price_realized_usage(
     // (estimate + price it) apart from "never ran" (real, exact $0) — the
     // two collapse to the same `analyst_usage: None` otherwise.
     analyst_attempted: bool,
-    parent_profile: &str,
-    parent_model: &str,
+    // The configured synthesizer route — what the merge call was billed on.
+    // NOT necessarily the session's own model any more: `fusion.synthesizerModel`
+    // names it explicitly.
+    synth_profile: &str,
+    synth_model: &str,
     synth_usage: Option<&cost::Usage>,
     // Same distinction as `analyst_attempted`, for the synthesizer — which,
     // unlike the analyst, legitimately has NO attempt on most decisions (it
@@ -3329,8 +3342,8 @@ pub(crate) fn price_realized_usage(
     }
     if let Some(usage) = synth_usage {
         match budget::price_component(
-            parent_profile,
-            parent_model,
+            synth_profile,
+            synth_model,
             catalog,
             prices,
             usage.tokens.input,
@@ -3346,8 +3359,8 @@ pub(crate) fn price_realized_usage(
         // Same TTL-approximation rule as the panel loop and the analyst arm.
         if usage.tokens.cache_write > 0
             && budget::cache_write_rate_is_ttl_approximated(
-                parent_profile,
-                parent_model,
+                synth_profile,
+                synth_model,
                 catalog,
                 prices,
             )
@@ -3364,8 +3377,8 @@ pub(crate) fn price_realized_usage(
         estimated = true;
         let estimated_input = judge_input_token_estimate(request_prompt, panels);
         if let Some(nano_usd) = budget::price_component(
-            parent_profile,
-            parent_model,
+            synth_profile,
+            synth_model,
             catalog,
             prices,
             estimated_input,
@@ -3712,6 +3725,7 @@ fn fusion_error_label(error: &FusionError) -> &'static str {
         FusionError::InvalidConfiguration(_) => "invalid_configuration",
         FusionError::InvalidRequest(_) => "invalid_request",
         FusionError::TooFewModels { .. } => "too_few_models",
+        FusionError::NotConfigured { .. } => "not_configured",
         FusionError::InvalidCustomModels(_) => "invalid_custom_models",
         FusionError::CrossProviderDenied => "cross_provider_denied",
         FusionError::NoJudgeModel { .. } => "no_judge_model",
@@ -3864,6 +3878,7 @@ mod record_failed_analyst_usage_tests {
         snapshot: CatalogSnapshot,
         prices: (),
         analyst: ResolvedPanel,
+        synthesizer: ResolvedPanel,
         facts: FusionRunFactsRecorder,
     }
 
@@ -3881,6 +3896,10 @@ mod record_failed_analyst_usage_tests {
                     profile: "profile".into(),
                     model: "model".into(),
                 },
+                synthesizer: ResolvedPanel {
+                    profile: "profile".into(),
+                    model: "model".into(),
+                },
                 facts: FusionRunFactsRecorder::default(),
             }
         }
@@ -3894,8 +3913,7 @@ mod record_failed_analyst_usage_tests {
                 catalog_snapshot: &self.snapshot,
                 prices: &self.prices,
                 analyst: &self.analyst,
-                parent_profile: "profile",
-                parent_model: "model",
+                synthesizer: &self.synthesizer,
                 request_prompt: "task",
                 request: None,
                 config: None,
@@ -4474,6 +4492,17 @@ mod outer_err_arm_realized_tokens_tests {
         cfg.synthesizer_timeout_ms = 5_000;
         cfg.total_timeout_ms = 5_000;
         cfg.min_successful_panels = 2;
+        // The panels come from this fixture's explicit `models` list; the
+        // analyst and synthesizer roles are configuration and have no
+        // automatic fallback.
+        cfg.analyst_model = Some(platform_api::FusionModelChoice::new(
+            "anthropic",
+            "claude-sonnet-5",
+        ));
+        cfg.synthesizer_model = Some(platform_api::FusionModelChoice::new(
+            "anthropic",
+            "claude-sonnet-5",
+        ));
         cfg
     }
 

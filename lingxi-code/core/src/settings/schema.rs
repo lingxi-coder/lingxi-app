@@ -772,6 +772,41 @@ pub enum FusionCompletionPolicy {
     QuorumAfterGrace,
 }
 
+/// One explicitly configured Fusion model, named by the provider profile that
+/// owns it plus that profile's wire model id — the same `(profile, model)` pair
+/// `/model` switches to and `fusion::CatalogModel` is keyed by.
+///
+/// Fusion has three model ROLES (panel, analyst, synthesizer) and every one of
+/// them must be named here before a run may start. There is deliberately no
+/// automatic ranking any more: a checked-in hint table used to pick panels and
+/// the analyst on the operator's behalf, which meant the set of models a run
+/// actually spent money on was invisible in the settings and changed whenever
+/// the table or the live catalog did. `llm_client::fusion_hints` survives only
+/// as the SUGGESTION source the `/fusion setup` wizard sorts its candidate list
+/// by; nothing reads it at run time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FusionModelSelectionJson {
+    /// Provider profile name (`anthropic`, `openai`, `openrouter`, ...).
+    pub profile: String,
+    /// Wire model id as that profile spells it.
+    pub model: String,
+}
+
+impl FusionModelSelectionJson {
+    /// Reject a half-written entry. `field` names the setting for the message.
+    fn validate(&self, field: &str) -> Result<(), crate::settings::SettingsError> {
+        use crate::settings::SettingsError::SchemaViolation;
+        if self.profile.trim().is_empty() {
+            return Err(SchemaViolation(format!("{field}.profile must not be empty")));
+        }
+        if self.model.trim().is_empty() {
+            return Err(SchemaViolation(format!("{field}.model must not be empty")));
+        }
+        Ok(())
+    }
+}
+
 /// Typed `settings.fusion` object. Every field is `Option` so a partial layer
 /// can set a subset. Runtime defaults are applied by the Fusion orchestrator;
 /// [`SettingsJson::validate`] rejects values that would be dangerous if used.
@@ -862,6 +897,21 @@ pub struct FusionSettingsJson {
     /// Hosts without atomic output reservations remain sequential either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_concurrency: Option<u8>,
+    /// The panel roster, in the operator's own priority order. A preset takes
+    /// the FIRST `qualityPanelCount` / `fastPanelCount` entries, so the order
+    /// is meaningful. Required: a run with no roster fails preflight with
+    /// `FusionError::NotConfigured` rather than picking models by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_models: Option<Vec<FusionModelSelectionJson>>,
+    /// The analyst (judge) that scores the panel reports. Required. It must be
+    /// able to emit constrained JSON on its own profile's wire codec; that is a
+    /// capability check made against the live catalog at preflight, not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyst_model: Option<FusionModelSelectionJson>,
+    /// The synthesizer that merges the analysis into the final answer.
+    /// Required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesizer_model: Option<FusionModelSelectionJson>,
 }
 
 impl FusionSettingsJson {
@@ -1113,6 +1163,78 @@ impl FusionSettingsJson {
                         "fusion.minSuccessfulPanels ({min_successful}) must not exceed min(fusion.qualityPanelCount, fusion.fastPanelCount) ({smallest_preset})"
                     )));
                 }
+            }
+        }
+        self.validate_model_roles(max_panel)?;
+        Ok(())
+    }
+
+    /// Shape checks for the three model-role settings.
+    ///
+    /// Deliberately NOT a liveness check: whether a named `(profile, model)`
+    /// exists, is reachable with the operator's credentials, has usable
+    /// capacity, or can emit constrained JSON are all facts about the live
+    /// catalog, and a settings file that names a model the current machine
+    /// cannot reach must still load (the same file syncs across machines).
+    /// Those checks run at Fusion preflight, where they can name the exact
+    /// route and cost nothing when Fusion is never used.
+    fn validate_model_roles(&self, max_panel: u8) -> Result<(), crate::settings::SettingsError> {
+        use crate::settings::SettingsError::SchemaViolation;
+        if let Some(analyst) = self.analyst_model.as_ref() {
+            analyst.validate("fusion.analystModel")?;
+        }
+        if let Some(synthesizer) = self.synthesizer_model.as_ref() {
+            synthesizer.validate("fusion.synthesizerModel")?;
+        }
+        let Some(panels) = self.panel_models.as_ref() else {
+            return Ok(());
+        };
+        for (index, entry) in panels.iter().enumerate() {
+            entry.validate(&format!("fusion.panelModels[{index}]"))?;
+        }
+        if panels.len() < 2 {
+            return Err(SchemaViolation(format!(
+                "fusion.panelModels must name at least 2 models (found {})",
+                panels.len()
+            )));
+        }
+        // `max_panel` is this file's own value or the 8 hard cap; either way a
+        // roster longer than it could never be spawned in full, and silently
+        // truncating it would hide models the operator believes are running.
+        if panels.len() > usize::from(max_panel) {
+            return Err(SchemaViolation(format!(
+                "fusion.panelModels has {} entries, exceeding fusion.maxPanel ({max_panel})",
+                panels.len()
+            )));
+        }
+        // Same-file only, for the per-file hazard the preset check above
+        // documents: a tier that sets only `minSuccessfulPanels` has no
+        // opinion on the roster, which may live in another tier.
+        // `FusionRuntimeConfig::from_settings` re-checks this on the merged
+        // view, where both sides are concrete.
+        if let Some(min_successful) = self.min_successful_panels {
+            if panels.len() < usize::from(min_successful) {
+                return Err(SchemaViolation(format!(
+                    "fusion.panelModels has {} entries, fewer than fusion.minSuccessfulPanels ({min_successful})",
+                    panels.len()
+                )));
+            }
+        }
+        // Exact-pair duplicates only. Two GATEWAY spellings of one underlying
+        // model (`openai/gpt-5.6-sol` behind openrouter and `gpt-5.6-sol`
+        // behind openai) are also a real defect — a two-model "ensemble" that
+        // is one model twice — but detecting that needs the canonical-key
+        // normaliser that lives with the resolver, so it is caught at
+        // preflight instead, where the error can name both routes.
+        for (index, entry) in panels.iter().enumerate() {
+            if panels[..index]
+                .iter()
+                .any(|earlier| earlier.profile == entry.profile && earlier.model == entry.model)
+            {
+                return Err(SchemaViolation(format!(
+                    "fusion.panelModels lists `{}/{}` twice",
+                    entry.profile, entry.model
+                )));
             }
         }
         Ok(())
@@ -1480,6 +1602,123 @@ mod tests {
         settings
             .validate()
             .expect("no panelTotalTimeoutMs present in this file — must not be rejected here");
+    }
+
+    #[test]
+    fn fusion_model_roles_round_trip_and_keep_roster_order() {
+        let settings: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{
+                "panelModels":[
+                    {"profile":"anthropic","model":"claude-opus-5"},
+                    {"profile":"openai","model":"gpt-5.6-sol"},
+                    {"profile":"google","model":"gemini-3-pro"}
+                ],
+                "analystModel":{"profile":"openai","model":"gpt-5.6-terra"},
+                "synthesizerModel":{"profile":"anthropic","model":"claude-sonnet-5"}
+            }}"#,
+        )
+        .unwrap();
+        settings.validate().expect("a complete role set is valid");
+        let fusion = settings.fusion.as_ref().unwrap();
+        let panels = fusion.panel_models.as_ref().unwrap();
+        // Order is load-bearing: a preset takes the first N entries, so a
+        // round-trip that sorted or set-ified the roster would silently change
+        // which models run.
+        assert_eq!(
+            panels
+                .iter()
+                .map(|entry| format!("{}/{}", entry.profile, entry.model))
+                .collect::<Vec<_>>(),
+            vec![
+                "anthropic/claude-opus-5".to_string(),
+                "openai/gpt-5.6-sol".to_string(),
+                "google/gemini-3-pro".to_string(),
+            ]
+        );
+        assert_eq!(fusion.analyst_model.as_ref().unwrap().model, "gpt-5.6-terra");
+        assert_eq!(
+            fusion.synthesizer_model.as_ref().unwrap().profile,
+            "anthropic"
+        );
+        // Absent roles serialize away rather than writing `null`, so a merge
+        // of this layer over another cannot shadow the lower layer's roles.
+        let written = serde_json::to_value(fusion).unwrap();
+        assert!(written.get("panelModels").is_some());
+        let empty = serde_json::to_value(FusionSettingsJson::default()).unwrap();
+        assert!(empty.get("panelModels").is_none());
+        assert!(empty.get("analystModel").is_none());
+        assert!(empty.get("synthesizerModel").is_none());
+    }
+
+    #[test]
+    fn fusion_panel_roster_shape_violations_each_name_the_offender() {
+        let reject = |body: &str| -> String {
+            let settings: SettingsJson = serde_json::from_str(body).unwrap();
+            settings
+                .validate()
+                .expect_err("this roster must be rejected")
+                .to_string()
+        };
+        assert!(reject(
+            r#"{"fusion":{"panelModels":[{"profile":"anthropic","model":"claude-opus-5"}]}}"#
+        )
+        .contains("at least 2 models"));
+        assert!(reject(
+            r#"{"fusion":{"panelModels":[
+                {"profile":"anthropic","model":"claude-opus-5"},
+                {"profile":"anthropic","model":"claude-opus-5"}
+            ]}}"#
+        )
+        .contains("lists `anthropic/claude-opus-5` twice"));
+        assert!(reject(
+            r#"{"fusion":{"panelModels":[
+                {"profile":"anthropic","model":"claude-opus-5"},
+                {"profile":"","model":"gpt-5.6-sol"}
+            ]}}"#
+        )
+        .contains("fusion.panelModels[1].profile must not be empty"));
+        assert!(reject(
+            r#"{"fusion":{"maxPanel":2,"panelModels":[
+                {"profile":"anthropic","model":"claude-opus-5"},
+                {"profile":"openai","model":"gpt-5.6-sol"},
+                {"profile":"google","model":"gemini-3-pro"}
+            ]}}"#
+        )
+        .contains("exceeding fusion.maxPanel (2)"));
+        assert!(reject(
+            r#"{"fusion":{"minSuccessfulPanels":3,"qualityPanelCount":3,"fastPanelCount":3,
+            "panelModels":[
+                {"profile":"anthropic","model":"claude-opus-5"},
+                {"profile":"openai","model":"gpt-5.6-sol"}
+            ]}}"#
+        )
+        .contains("fewer than fusion.minSuccessfulPanels (3)"));
+        assert!(
+            reject(r#"{"fusion":{"analystModel":{"profile":"openai","model":"  "}}}"#)
+                .contains("fusion.analystModel.model must not be empty")
+        );
+    }
+
+    #[test]
+    fn a_roster_in_one_tier_and_min_successful_in_another_is_not_rejected_per_file() {
+        // The same per-file hazard every other cross-field check here guards:
+        // a tier that raises `minSuccessfulPanels` has no opinion on a roster
+        // that lives in a different tier, and rejecting the file would make
+        // `read_layer_or_skip` drop its unrelated permissions/hooks/model too.
+        let roster_only: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"panelModels":[
+                {"profile":"anthropic","model":"claude-opus-5"},
+                {"profile":"openai","model":"gpt-5.6-sol"}
+            ]}}"#,
+        )
+        .unwrap();
+        roster_only.validate().expect("roster alone is a valid file");
+        let bar_only: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"minSuccessfulPanels":3,"qualityPanelCount":3}}"#)
+                .unwrap();
+        bar_only
+            .validate()
+            .expect("a bar with no roster in the same file is a valid file");
     }
 
     #[test]

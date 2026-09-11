@@ -441,6 +441,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "Sonnet".into(),
@@ -452,6 +453,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
         ]
     }
@@ -492,6 +494,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "GPT-5.5".into(),
@@ -503,6 +506,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             // Same (provider, display) as the first row — must be de-duped.
             ModelRow {
@@ -515,6 +519,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
         ];
         let p = ModelPickerView::new(rows);
@@ -548,6 +553,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "Shared Model".into(),
@@ -559,6 +565,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
         ];
         let mut picker = ModelPickerView::new(rows);
@@ -634,6 +641,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             })
             .collect()
     }
@@ -669,6 +677,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "Qwen3 Coder (free)".into(),
@@ -680,6 +689,7 @@ mod tests {
                 supports_reasoning: false,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
         ];
         let p = ModelPickerView::new(rows);
@@ -728,6 +738,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "User GPT".into(),
@@ -739,6 +750,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "Catalog Gemini".into(),
@@ -750,6 +762,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "Former Managed".into(),
@@ -761,6 +774,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
         ];
         let picker = ModelPickerView::new(rows);
@@ -802,6 +816,7 @@ mod tests {
             supports_reasoning: true,
             supports_multimodal: true,
             details: Vec::new(),
+            fusion_analyst_capable: false,
         }];
         assert!(rows[0].supports_multimodal);
         let p = ModelPickerView::new(rows);
@@ -819,6 +834,7 @@ mod tests {
             supports_reasoning: true,
             supports_multimodal: true,
             details: Vec::new(),
+            fusion_analyst_capable: false,
         };
         assert!(anthropic.supports_multimodal);
     }
@@ -905,6 +921,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             })
             .collect();
         // Caps at the 12-row scroll viewport + 1 Search row + 4 chrome.
@@ -953,6 +970,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "GPT-4o".into(),
@@ -964,6 +982,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
             ModelRow {
                 display: "Gemini Pro".into(),
@@ -975,6 +994,7 @@ mod tests {
                 supports_reasoning: true,
                 supports_multimodal: false,
                 details: Vec::new(),
+                fusion_analyst_capable: false,
             },
         ]);
         assert_eq!(p.rows().len(), 3, "all rows before filtering");

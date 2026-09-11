@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
 import type {
@@ -62,6 +62,7 @@ export interface PluginSecretMetadata {
 
 export const CH_BOOTSTRAP = 'lingxi:bootstrap';
 export const CH_SETTINGS_GET = 'lingxi:settings:get';
+export const CH_SETTINGS_FILE_OPEN = 'lingxi:settings:file:open';
 export const CH_SETTINGS_UPDATE = 'lingxi:settings:update';
 export const CH_WORKSPACE_PICK = 'lingxi:workspace:pick';
 export const CH_WORKSPACE_SET = 'lingxi:workspace:set';
@@ -284,6 +285,25 @@ const ipcMain = (typeof electronModule === 'string' ? undefined : electronModule
   removeHandler: () => undefined,
 };
 
+/** Open only existing LingXi configuration files, never arbitrary renderer paths. */
+export async function openSettingsFile(
+  path: unknown,
+  openPath: (path: string) => Promise<string> = (filePath) => shell.openPath(filePath),
+): Promise<void> {
+  if (typeof path !== 'string' || path.includes('\0') || !isAbsolute(path)) {
+    throw new Error('settings file path must be absolute');
+  }
+  const filePath = resolve(path);
+  const isSettingsPath = (candidate: string) => basename(dirname(candidate)) === '.lingxi'
+    && ['settings.json', 'settings.local.json'].includes(basename(candidate));
+  if (!isSettingsPath(filePath)) throw new Error('unsupported settings file path');
+  if (!lstatSync(filePath).isFile()) throw new Error('settings file must be a regular file');
+  const canonicalPath = realpathSync.native(filePath);
+  if (!isSettingsPath(canonicalPath)) throw new Error('unsupported settings file target');
+  const error = await openPath(canonicalPath);
+  if (error) throw new Error(error);
+}
+
 function workspaceRecovery(workspace: string, error: unknown): NonNullable<WorkspaceMetadata['recovery']> {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   const missing = code === 'ENOENT' || code === 'ENOTDIR' || /workspace path is not a directory/i.test(String(error));
@@ -359,6 +379,10 @@ export class HostController {
     this.ipc.handle(CH_BOOTSTRAP, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       return this.bootstrap();
+    });
+    this.ipc.handle(CH_SETTINGS_FILE_OPEN, async (event: IpcMainInvokeEvent, path: unknown) => {
+      this.assertSender(event);
+      await openSettingsFile(path);
     });
     this.ipc.handle(CH_SETTINGS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.settings.getPublic(); });
     this.ipc.handle(CH_SETTINGS_UPDATE, async (event: IpcMainInvokeEvent, patch: unknown) => {
@@ -1217,7 +1241,7 @@ export class HostController {
   dispose(): void {
     if (!this.registered) return;
     for (const channel of [
-      CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
+      CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_WORKSPACE_FILES_SEARCH,

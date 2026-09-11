@@ -4,26 +4,25 @@ import assert from 'node:assert/strict';
 import { SETTINGS_NAV, searchNav } from '../src/renderer/components/settings/nav';
 import { PAGE_CONTENT } from '../src/renderer/components/settings/SettingsScreen';
 
-test('the nav declares all eighteen pages across four groups', () => {
-  assert.equal(SETTINGS_NAV.length, 18);
+test('the nav declares all seventeen pages across four groups', () => {
+  assert.equal(SETTINGS_NAV.length, 17);
   assert.deepEqual(
     [...new Set(SETTINGS_NAV.map((p) => p.group))],
     ['个人', '模型与服务', '编码', '高级'],
   );
 });
 
-test('layered is a data property, not a group property — four pages break the correspondence', () => {
+test('layered is a data property, not a group property — three pages break the correspondence', () => {
   // layered means "this page's values live in the four settings layers and need
   // the layer switcher to pick a target". Group is a navigation concept and
   // does not determine this. Named here explicitly so a future edit that
   // "fixes" one of these back to match its group is caught, not shipped:
   //   - mcp: inside 编码, but NOT layered (its own three-scope storage, no layers).
   //   - custom-providers: outside 编码, but layered (writes settings.providers/routing).
-  //   - raw-json: outside 编码, but layered (its whole job is editing the current layer's file).
   //   - fusion: outside 编码, but layered (writes settings.fusion's model roles).
   const layeredIds = new Set([
     'permissions', 'tools-agent', 'skills', 'hooks', 'plugins',
-    'custom-providers', 'raw-json', 'fusion',
+    'custom-providers', 'fusion',
   ]);
   for (const page of SETTINGS_NAV) {
     assert.equal(
@@ -105,4 +104,10 @@ test('every implemented nav page has a real PAGE_CONTENT entry — not by coinci
       `${page.id} is implemented:true but has no PAGE_CONTENT component — it would silently fall back to the "not-wired" placeholder`,
     );
   }
+});
+
+test('configuration files are discoverable in diagnostics without a raw editor page', () => {
+  assert.equal(PAGE_CONTENT['raw-json'], undefined);
+  assert.equal(SETTINGS_NAV.some((page) => page.id === 'raw-json'), false);
+  assert.deepEqual(searchNav('settings.json').map((page) => page.id), ['diagnostics']);
 });

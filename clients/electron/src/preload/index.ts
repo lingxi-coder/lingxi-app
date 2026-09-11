@@ -56,6 +56,7 @@ const CH_OPEN_SYSTEM_SETTINGS = 'lingxi:openSystemSettings';
 const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
 const CH_BOOTSTRAP = 'lingxi:bootstrap';
 const CH_SETTINGS_GET = 'lingxi:settings:get';
+const CH_SETTINGS_FILE_OPEN = 'lingxi:settings:file:open';
 const CH_SETTINGS_UPDATE = 'lingxi:settings:update';
 const CH_WORKSPACE_PICK = 'lingxi:workspace:pick';
 const CH_WORKSPACE_SET = 'lingxi:workspace:set';
@@ -158,6 +159,7 @@ export interface LingxiApi {
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
+  openSettingsFile(path: string): Promise<void>;
   updateSettings(patch: {
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
@@ -244,6 +246,7 @@ const api: LingxiApi = {
   isElectron: true,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,
   settings: () => ipcRenderer.invoke(CH_SETTINGS_GET) as Promise<PublicSettings>,
+  openSettingsFile: (path) => ipcRenderer.invoke(CH_SETTINGS_FILE_OPEN, path) as Promise<void>,
   updateSettings: (patch) => ipcRenderer.invoke(CH_SETTINGS_UPDATE, patch) as Promise<PublicSettings>,
   pickWorkspace: () => ipcRenderer.invoke(CH_WORKSPACE_PICK) as Promise<WorkspaceMetadata | null>,
   setWorkspace: (path) => ipcRenderer.invoke(CH_WORKSPACE_SET, path) as Promise<WorkspaceMetadata>,

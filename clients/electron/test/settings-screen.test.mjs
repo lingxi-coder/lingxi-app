@@ -82,7 +82,7 @@ async function runScenario(scenario) {
 }
 
 test('the layer switcher appears only on layered pages', async () => {
-  const { permissions, diagnostics, mcp, customProviders, rawJson } = await runScenario('layer-switcher');
+  const { permissions, diagnostics, mcp, customProviders } = await runScenario('layer-switcher');
   assert.equal(permissions.hasLayerSwitcher, true, 'permissions is layered and must offer user/project/local');
   assert.equal(diagnostics.hasLayerSwitcher, false, 'diagnostics is client-owned and must not show a layer switcher');
   // `permissions` (编码, layered) vs `diagnostics` (高级, not layered) alone
@@ -91,7 +91,6 @@ test('the layer switcher appears only on layered pages', async () => {
   // three are the ones that actually separate the two rules.
   assert.equal(mcp.hasLayerSwitcher, false, 'mcp is inside 编码 but NOT layered — its own three-scope storage, no layer switcher');
   assert.equal(customProviders.hasLayerSwitcher, true, 'custom-providers is outside 编码 but IS layered');
-  assert.equal(rawJson.hasLayerSwitcher, true, 'raw-json is outside 编码 but IS layered');
 });
 
 test('the four configuration managers render without horizontal dialog overflow', async () => {
@@ -211,25 +210,18 @@ test('a malformed settings snapshot surfaces as an error banner instead of throw
   assert.equal(state.hasSnapshotError, true);
 });
 
-test('all six Task 18 pages plus Task 19\'s raw-json and Task 9\'s voice are actually registered in PAGE_CONTENT, not just declared in nav.ts', async () => {
-  // Task 18 fix round 1, Important: the older registration test only
-  // checked `nav.ts`'s `implemented` flag — true before Task 18's diff too,
-  // since `nav.ts` was untouched. This checks the thing Task 18 actually
-  // added: selecting each page renders real content (`placeholderKind ===
-  // null`), not the "not wired yet" placeholder a forgotten `PAGE_CONTENT`
-  // entry would silently fall back to. Task 19 extended the same check to
-  // `raw-json`; Task 9 of the desktop-audio-capability plan extends it to
-  // `voice` — the actual instrument (not just a source-text guard) that
-  // `Voice.tsx` is reachable and mounted, per that task's own warning that
-  // a wiring check can pass while the code it names stays dead.
-  const { placeholderKinds, afterHooksEscapeHatch } = await runScenario('page-content');
-  for (const id of ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'raw-json', 'voice']) {
+test('settings pages and the Hooks configuration-file shortcut render real content', async () => {
+  const { placeholderKinds, afterHooksEscapeHatch, hasFiles, fileActions } = await runScenario('page-content');
+  for (const id of ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'diagnostics', 'voice']) {
     assert.equal(placeholderKinds[id], null, `${id} must render real content, not a placeholder`);
   }
-  // hooksPageModel().escapeHatch actually drives the button's navigation
-  // target: clicking it must land on `raw-json`'s REAL content (Task 19
-  // registered it), not a no-op and not a placeholder.
-  assert.equal(afterHooksEscapeHatch.placeholderKind, null, 'the escape-hatch button must navigate to raw-json, which now renders real content');
+  assert.equal(hasFiles, true);
+  assert.equal(afterHooksEscapeHatch.placeholderKind, null);
+  assert.deepEqual(fileActions.opened, ['/test/home/.lingxi/settings.json', '/test/project/.lingxi/settings.local.json']);
+  assert.equal(fileActions.missingDisabled, true);
+  assert.equal(fileActions.brokenShown, true);
+  assert.equal(fileActions.error, 'test open failure');
+  assert.equal(fileActions.rawEditor, false);
 });
 
 test('switching layers re-seeds a dirty draft field instead of leaving stale text next to a different layer\'s data', async () => {

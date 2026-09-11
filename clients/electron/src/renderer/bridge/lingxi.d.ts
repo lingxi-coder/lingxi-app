@@ -115,6 +115,7 @@ export interface LingxiApi {
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
+  openSettingsFile(path: string): Promise<void>;
   updateSettings(patch: {
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;

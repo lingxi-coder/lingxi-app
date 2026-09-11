@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, Row } from '../rows';
+import { Card, Row, ProvenanceBadge, type Provenance } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
 import type { DiagnosticEntry } from '../../../bridge/lingxi';
@@ -26,10 +26,11 @@ function restartDisabledReason(running: boolean, hasSession: boolean): string | 
  * here per this task's brief, reusing `bridge.restartBridge` while keeping the
  * manual recovery action inside Diagnostics instead of the settings shell.
  */
-export function Diagnostics({ bridge }: PageContentProps) {
+export function Diagnostics({ bridge, snapshot }: PageContentProps) {
   const t = useT();
   const [restartError, setRestartError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
   const status = bridge.desktop.status;
   const doctor = bridge.desktop.doctor;
   const compaction = bridge.desktop.lastCompaction;
@@ -82,6 +83,35 @@ export function Diagnostics({ bridge }: PageContentProps) {
         >
           {null}
         </Row>
+      </Card>
+
+      <Card title="配置文件">
+        {!snapshot?.files.length && (
+          <Row title="配置文件位置" desc="连接引擎并打开会话后，可查看配置文件位置。">{null}</Row>
+        )}
+        {snapshot?.files.map((file) => (
+          <Row key={file.layer}
+            title={<span className="mono" style={{ fontSize: 12, overflowWrap: 'anywhere' }}>{file.path}</span>}
+            badge={<ProvenanceBadge destination={file.layer as Provenance} />}
+            desc={file.parse_error ? `解析失败：${file.parse_error}，请在文本编辑器中修复。` : file.exists ? '存在，可使用系统默认应用打开。' : '文件尚未创建；保存该层设置后会自动生成。'}
+            align="center"
+          >
+            <button type="button" data-testid={`settings-file-open-${file.layer}`} disabled={!file.exists}
+              style={ghostButtonStyle(t, !file.exists)}
+              onClick={async () => {
+                setFileError(null);
+                try {
+                  if (!window.lingxi?.openSettingsFile) throw new Error('当前环境无法打开配置文件。');
+                  await window.lingxi.openSettingsFile(file.path);
+                } catch (cause) {
+                  setFileError(cause instanceof Error ? cause.message : '无法打开配置文件。');
+                }
+              }}>打开配置文件</button>
+          </Row>
+        ))}
+        <Row title="策略（managed）" desc="管理员托管设置，只读，不对应可在此打开的本地文件。"
+          badge={<ProvenanceBadge destination="managed" />}>只读</Row>
+        {fileError && <div role="alert" data-testid="settings-file-error" style={{ padding: '12px 18px', color: t.danger, fontSize: 12.5 }}>{fileError}</div>}
       </Card>
 
       <Card title="Doctor">

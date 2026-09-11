@@ -29,15 +29,13 @@ async function runLayerSwitcherScenario(webContents) {
   // regression that reads `group === '编码'` instead of `page.layered` —
   // both pages agree on group AND layered. These three are the ones that
   // actually separate the two rules (see `nav.ts`'s own exception comments):
-  // `mcp` is IN 编码 but not layered; `custom-providers` and `raw-json` are
+  // `mcp` is IN 编码 but not layered; `custom-providers` is
   // OUTSIDE 编码 but layered.
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("mcp")');
   const mcp = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("custom-providers")');
   const customProviders = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("raw-json")');
-  const rawJson = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  return { permissions, diagnostics, mcp, customProviders, rawJson };
+  return { permissions, diagnostics, mcp, customProviders };
 }
 
 async function runProjectTabsScenario(webContents) {
@@ -105,7 +103,7 @@ async function runPageContentScenario(webContents) {
   // that placeholder kind with, so that scenario was retired; `voice` now
   // gets the same positive "renders real content" check as every other
   // page in this list instead.
-  const ids = ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'raw-json', 'voice'];
+  const ids = ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'diagnostics', 'voice'];
   const placeholderKinds = {};
   for (const id of ids) {
     await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(id)})`);
@@ -113,19 +111,40 @@ async function runPageContentScenario(webContents) {
     placeholderKinds[id] = state.placeholderKind;
   }
 
-  // Task 18 fix round 1, Important: `hooksPageModel().escapeHatch` must be
-  // what actually drives the "在 JSON 中编辑" button, not a hardcoded
-  // `'raw-json'` literal at the call site that happens to agree with it.
-  // Proven here by actually clicking the button and checking the shell
-  // navigated to `raw-json` — now (Task 19 registered it) observable as
-  // REAL content (`placeholderKind === null`), not the "not wired yet"
-  // placeholder this assertion used to see — rather than by reading the
-  // model's field in isolation.
+  // The Hooks shortcut must reach the diagnostics configuration files.
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("hooks")');
-  await webContents.executeJavaScript('document.querySelector(\'[data-testid="hooks-open-raw-json"]\')?.click()');
+  await webContents.executeJavaScript('document.querySelector(\'[data-testid="hooks-open-settings-files"]\')?.click()');
   const afterHooksEscapeHatch = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
 
-  return { placeholderKinds, afterHooksEscapeHatch };
+  const hasFiles = await webContents.executeJavaScript('document.body.textContent.includes("配置文件")');
+  await webContents.executeJavaScript(`window.__settingsScreenTest.setSettingsFiles([
+    { layer: 'user', path: '/test/home/.lingxi/settings.json', exists: true, parsed: true },
+    { layer: 'project', path: '/test/project/.lingxi/settings.json', exists: false, parsed: true },
+    { layer: 'local', path: '/test/project/.lingxi/settings.local.json', exists: true, parsed: false, parse_error: 'Invalid JSON' }
+  ])`);
+  await delay(50);
+  const fileActions = await webContents.executeJavaScript(`(async () => {
+    const opened = [];
+    window.lingxi = { openSettingsFile: async (path) => { opened.push(path); } };
+    const user = document.querySelector('[data-testid="settings-file-open-user"]');
+    const project = document.querySelector('[data-testid="settings-file-open-project"]');
+    const local = document.querySelector('[data-testid="settings-file-open-local"]');
+    user.click(); local.click();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const brokenShown = document.body.textContent.includes('解析失败：Invalid JSON');
+    window.lingxi.openSettingsFile = async () => { throw new Error('test open failure'); };
+    user.click();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    return { opened, missingDisabled: project.disabled, brokenShown,
+      error: document.querySelector('[data-testid="settings-file-error"]')?.textContent,
+      rawEditor: Boolean(document.querySelector('[data-testid="raw-json-textarea"]')) };
+  })()`);
+  const screenshotDir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+  if (screenshotDir) {
+    mkdirSync(screenshotDir, { recursive: true });
+    writeFileSync(join(screenshotDir, 'diagnostics-files.png'), (await webContents.capturePage()).toPNG());
+  }
+  return { placeholderKinds, afterHooksEscapeHatch, hasFiles, fileActions };
 }
 
 async function runLayerReseedScenario(webContents) {

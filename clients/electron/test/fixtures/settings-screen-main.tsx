@@ -311,6 +311,9 @@ function Fixture() {
         const el = document.querySelector(selector) as (Element & { __lingxiTestMarker?: string }) | null;
         return el ? (el.__lingxiTestMarker ?? null) : 'element-not-found';
       },
+      setSettingsFiles: (files: unknown[]) => {
+        setSettingsSnapshotEvent({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}', files_json: JSON.stringify(files) } as SettingsSnapshotEvent);
+      },
       setMalformedSnapshot: () => {
         setSettingsSnapshotEvent({
           type: 'settings_snapshot',

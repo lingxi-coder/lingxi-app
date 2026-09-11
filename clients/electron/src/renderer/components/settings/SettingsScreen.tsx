@@ -19,7 +19,6 @@ import { Plugins } from './pages/Plugins';
 import { ArchivedChats } from './pages/ArchivedChats';
 import { Projects } from './pages/Projects';
 import { ProviderCredentials } from './pages/ProviderCredentials';
-import { RawJson } from './pages/RawJson';
 import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
 import { Voice } from './pages/Voice';
@@ -151,15 +150,9 @@ export function parseSettingsSnapshot(
  * vision toggles via the generic patch), `skills` (directory-discovered
  * listing + the one layered row, `syncClaudeAiSkills`), `mcp` (its own
  * three-scope selector, NOT the shell's layer switcher — `nav.ts` marks it
- * `layered: false`), `hooks` (read-only listing + a jump to `raw-json`),
+ * `layered: false`), `hooks` (configuration editor + a jump to diagnostics),
  * and `plugins` (`enabledPlugins`/`pluginConfigs`/`additionalMarketplaces`
  * via the generic patch).
- *
- * Task 19 adds `raw-json`: the escape hatch for every field no dedicated
- * page covers, and the one sanctioned exception to `apply_patch` refusing
- * the `permissions` key (see `RawJson.tsx`'s own doc for what was actually
- * investigated there and what still cannot be done without an engine
- * change).
  *
  * Task 9 of the desktop-audio-capability plan adds `voice`: the one
  * `SETTINGS_NAV` entry this task's own predecessors (Tasks 15-19) left
@@ -190,7 +183,6 @@ export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps
   mcp: McpServers,
   hooks: Hooks,
   plugins: Plugins,
-  'raw-json': RawJson,
 };
 
 export interface PageContentProps {

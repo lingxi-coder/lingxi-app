@@ -49,7 +49,7 @@ export function hooksPageModel(input: { hooks?: unknown }) {
   const hooks = asRecord(input.hooks);
   return {
     editable: true as const,
-    escapeHatch: 'raw-json' as const,
+    escapeHatch: 'diagnostics' as const,
     events: Object.entries(hooks).map(([event, groups]) => ({
       event,
       count: Array.isArray(groups) ? groups.length : 0,
@@ -527,8 +527,8 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
           <button type="button" disabled={loading || !dirty} onClick={discardDraft} style={ghostButtonStyle(t, loading || !dirty, true)}>
             取消
           </button>
-          <button type="button" data-testid="hooks-open-raw-json" onClick={() => onNavigate('raw-json')} style={ghostButtonStyle(t)}>
-            打开原始 JSON
+          <button type="button" data-testid="hooks-open-settings-files" onClick={() => onNavigate(hooksPageModel({}).escapeHatch)} style={ghostButtonStyle(t)}>
+            查看配置文件
           </button>
         </div>
 

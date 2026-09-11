@@ -140,13 +140,13 @@ test('skillsPageModel carries through whatever skills list it is given, regardle
 });
 
 // ---------------------------------------------------------------------------
-// Hooks: read-only, with a raw-JSON escape hatch.
+// Hooks: read-only, with a configuration-file shortcut.
 // ---------------------------------------------------------------------------
 
-test('hooks expose the raw JSON escape hatch while the page itself is editable', () => {
+test('hooks expose the configuration-file shortcut while the page itself is editable', () => {
   const page = hooksPageModel({ hooks: { PreToolUse: [] } } as never);
   assert.equal(page.editable, true);
-  assert.equal(page.escapeHatch, 'raw-json');
+  assert.equal(page.escapeHatch, 'diagnostics');
 });
 
 test('hooksPageModel summarizes each event\'s rule count from the EFFECTIVE (merged) value', () => {

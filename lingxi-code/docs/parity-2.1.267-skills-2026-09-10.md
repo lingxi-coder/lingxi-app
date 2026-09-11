@@ -172,8 +172,8 @@ blanket "they ride surfaces this port does not have":
 | `memory-types` | 🔒 **DORMANT upstream** — `var Jxn="memory-types"` sits next to `function Qxn(){return H("tengu_ochre_finch",!1)}`, its `isEnabled`. Flag defaults **false**, so absence here is ALIGNMENT, not a gap. Same shape as `melodic_wolf` / `lively_waffle`. |
 | `workflow-authoring` | ✅ **LANDED 2026-09-10** — see §2.4. The three reasons previously recorded for not landing it were all artefacts of a truncating extractor; 27 of 31 paragraphs survive byte-identical and both divergence anchors survive verbatim. |
 | `debug` | ⛔ needs a per-session debug LOG FILE it can enable (`WY()`) and read (`zY()` path, tail via `Po`). This port has `--debug` with categories but writes no session log file, so the skill would point at nothing. |
-| `setup-claude` | ⛔ `isEnabled:()=>a.CLAUDE_CODE_ENTRYPOINT==="remote_cowork"` — inert without that entrypoint, which this port does not have. |
-| `artifact-components` | ⛔ `files:()=>wt().then(e=>e.SKILL_FILES)` + `isEnabled:we` — needs the Artifact surface (a deliberate register-but-disabled skeleton here) AND bundled skill files. |
+| `setup-claude` | ⛔ `isEnabled:()=>a.CLAUDE_CODE_ENTRYPOINT==="remote_cowork"`，且正文是另一个 chunk 的 `SETUP_COWORK_PROMPT`。**2026-09-10 复核仍成立**：`remote_cowork` 在端口全树 0 命中，移植它等于注册一个**永远关着**的 cowork 引导流程。 |
+| `artifact-components` | ⛔ `files:()=>wt().then(e=>e.SKILL_FILES)` + `isEnabled:we`. **2026-09-10 复核，理由要更精确**：真正缺的是「**bundled 技能携带附件文件**」这个机制——端口有**磁盘**技能的多文件加载（`command-api/src/markdown_loader.rs`，`load_skill_dir` / `SkillMarkdownCommandFile`），但 bundled 技能只支持 `include_str!` 单体。这是一个比「缺 Artifact 面」**更小、可单独立项**的缺口；Artifact 面（register-but-disabled 骨架）是第二道门。 |
 | `whiteboard`, `workshop` | ⛔ same Artifact family — they sit in one name block with `artifact-design` / `artifact-diagramming` / `artifact-capabilities` / `prototype`. |
 | `design-sync` | ⛔ pushes a design system to claude.ai/design; `isEnabled:MF` plus a `policyGate`. No Design surface here, and the destination is a claude.ai service. |
 | `claude-in-chrome` | ⛔ needs the Chrome extension. |

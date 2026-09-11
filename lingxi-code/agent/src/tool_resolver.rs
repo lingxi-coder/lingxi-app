@@ -586,6 +586,7 @@ mod tests {
     /// defaults.
     fn agent_def(tools: AgentToolPolicy) -> AgentDefinition {
         AgentDefinition {
+            cache_ttl: None,
             agent_type: "test".into(),
             when_to_use: String::new(),
             tools,

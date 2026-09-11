@@ -117,3 +117,37 @@ pub use transport::{
 };
 pub use transport_bridge::{from_http, LlmTransportBridge};
 pub use types::{CostEstimate, PricingModelRef, ProviderId, ServerToolUsage, TokenUsage, Usage};
+
+tokio::task_local! {
+    /// The running agent's `experimental.cacheTtl`, scoped by the agent runner
+    /// around its turn (claude-code `agentCacheTtlOverride`).
+    ///
+    /// A task-local rather than a `build_request` parameter because
+    /// `ApiService` is shared as an `Arc` across concurrent subagents — a field
+    /// on the service would race. The runner awaits its round-trip inline, so
+    /// the value propagates.
+    ///
+    /// ⛔ If a future change moves the request onto its own task, this silently
+    /// reads `false` again. `agent_cache_ttl_1h_applies_through_the_real_path`
+    /// is the assertion that would catch it.
+    pub static AGENT_CACHE_TTL_1H: bool;
+}
+
+/// Read the running agent's 1h-TTL override; `false` outside any agent scope.
+#[must_use]
+pub fn agent_cache_ttl_1h_override() -> bool {
+    AGENT_CACHE_TTL_1H.try_with(|v| *v).unwrap_or(false)
+}
+
+/// Run `future` with the agent's 1h-TTL override in scope.
+///
+/// Mirrors `thinking_scope::scope_thinking_recovery`'s shape so the runner
+/// composes them the same way.
+/// ⚠️ The inner future is BOXED. `run_subagent`'s future is already close to the
+/// stack limit in debug builds; wrapping it in a task-local scope inline pushed
+/// it over and overflowed the stack in existing runner tests. Boxing moves the
+/// scoped future to the heap and keeps the frame flat.
+pub async fn scope_agent_cache_ttl<F: std::future::Future>(wants_1h: bool, future: F) -> F::Output {
+    let future = Box::pin(future);
+    AGENT_CACHE_TTL_1H.scope(wants_1h, future).await
+}

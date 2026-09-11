@@ -323,6 +323,7 @@ mod tests {
             agent_name: None,
             team_name: None,
             agent_definition: AgentDefinition {
+                cache_ttl: None,
                 agent_type: "test".into(),
                 when_to_use: String::new(),
                 tools: AgentToolPolicy::All {

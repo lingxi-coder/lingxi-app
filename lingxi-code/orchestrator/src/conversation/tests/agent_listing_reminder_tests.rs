@@ -113,6 +113,7 @@ fn wait_for_mcp_servers_is_visible_only_without_tool_search() {
 
 fn agent_def(agent_type: &str, when_to_use: &str, tools: AgentToolPolicy) -> AgentDefinition {
     AgentDefinition {
+        cache_ttl: None,
         agent_type: agent_type.into(),
         when_to_use: when_to_use.into(),
         tools,

@@ -1365,6 +1365,7 @@ impl PoolSubagentSpawner {
     /// `max_turns: 1`, so a fallback agent can still run a tool-using loop.
     fn fallback_definition(subagent_type: &str) -> AgentDefinition {
         AgentDefinition {
+            cache_ttl: None,
             agent_type: subagent_type.into(),
             when_to_use: String::new(),
             tools: AgentToolPolicy::All {
@@ -5054,6 +5055,7 @@ mod tests {
     /// the spawn-path defaults).
     fn agent_def(tools: AgentToolPolicy) -> AgentDefinition {
         AgentDefinition {
+            cache_ttl: None,
             agent_type: "test".into(),
             when_to_use: String::new(),
             tools,

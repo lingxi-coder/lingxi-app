@@ -1672,15 +1672,17 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
 
 .sidebar-session-progress {
   position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
-  width: 24px; height: 4px; border-radius: 99px; overflow: hidden; pointer-events: none;
+  width: 16px; height: 16px; border-radius: 50%; pointer-events: none;
 }
 .sidebar-session-progress > span {
-  display: block; width: 45%; height: 100%; background: currentColor; border-radius: inherit;
-  animation: sidebar-session-progress 1.2s ease-in-out infinite alternate;
+  display: block; width: 100%; height: 100%; border-radius: inherit;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor; border-right-color: currentColor; border-bottom-color: currentColor;
+  animation: sidebar-session-progress 0.9s linear infinite;
 }
 .sidebar-tree-row:hover .sidebar-session-progress,
 .sidebar-tree-row:focus-within .sidebar-session-progress { opacity: 0; }
-@keyframes sidebar-session-progress { from { transform: translateX(-100%); } to { transform: translateX(225%); } }
+@keyframes sidebar-session-progress { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .sidebar-session-progress > span { animation: none; transform: translateX(60%); }
+  .sidebar-session-progress > span { animation: none; transform: rotate(-35deg); }
 }

@@ -148,7 +148,7 @@ function Button({ children, onClick, disabled = false, primary = false, success 
 function SidebarSessionProgress({ label }: { label: string }) {
   const t = useT();
   return <span className="sidebar-session-progress" role="progressbar" aria-label={label}
-    style={{ color: t.accent, background: t.accentBg }}><span /></span>;
+    style={{ color: t.text3 }}><span /></span>;
 }
 
 function SessionRow({ session, active, pinned, opening, status, onClick, onPin, onArchive }: {

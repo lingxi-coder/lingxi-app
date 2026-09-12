@@ -73,8 +73,8 @@ test('sidebar running progress stays right aligned and vertically centered', asy
     for (const bar of result.bars) {
       assert.ok(Math.abs(bar.rightGap - 8) < 1, JSON.stringify(bar));
       assert.ok(Math.abs(bar.centerOffset) < 1, JSON.stringify(bar));
-      assert.equal(bar.width, 24);
-      assert.equal(bar.height, 4);
+      assert.equal(bar.width, 16);
+      assert.equal(bar.height, 16);
       assert.notEqual(bar.animation, 'none');
     }
     assert.equal(result.pendingCount, 1);

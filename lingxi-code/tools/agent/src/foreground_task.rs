@@ -420,6 +420,7 @@ mod tests {
                     model_profile: None,
                     persistent: false,
                     initial_message_index: 0,
+                    origin_session_id: None,
                 })
                 .await?;
             self.ready.notify_one();

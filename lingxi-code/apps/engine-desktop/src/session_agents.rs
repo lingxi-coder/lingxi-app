@@ -246,7 +246,11 @@ impl DesktopSessionAgentObserver {
         }
     }
 
-    fn allocated_session_id(&self) -> String {
+    fn allocated_session_id(&self, origin_session_id: Option<protocol::SessionId>) -> String {
+        // Use the owner resolved with the actual transcript path at spawn time.
+        if let Some(session_id) = origin_session_id {
+            return session_id.as_uuid().to_string();
+        }
         // Workflow spawns write under the actual parent session's
         // `subagents/workflows/<run>` directory. Prefer that id so nested
         // workers remain fenced to the transcript the bridge opened.
@@ -274,8 +278,9 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                 model_profile,
                 persistent,
                 initial_message_index,
+                origin_session_id,
             } => {
-                let session_id = self.allocated_session_id();
+                let session_id = self.allocated_session_id(origin_session_id);
                 let name = name.unwrap_or_else(|| agent_type.clone());
                 self.bound_agents.lock().await.insert(
                     agent_id.to_string(),
@@ -457,6 +462,7 @@ mod tests {
                 model_profile: Some("test-profile".to_string()),
                 persistent,
                 initial_message_index,
+                origin_session_id: None,
             })
             .await;
     }
@@ -543,6 +549,46 @@ mod tests {
         let linked_root = root_parent.path().join("linked-subagents");
         symlink(outside.path(), &linked_root).unwrap();
         assert!(collect_transcript_paths(&linked_root).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn allocation_origin_routes_updates_independently_of_boot_session() {
+        let sink = client_adapter::MockSink::arc();
+        let observer = DesktopSessionAgentObserver::new(sink.clone(), "boot-session");
+        for owner in [protocol::SessionId::new(), protocol::SessionId::new()] {
+            let agent_id = protocol::AgentId::new();
+            observer
+                .on_event(SubagentObservation::Allocated {
+                    agent_id,
+                    agent_type: "reviewer".into(),
+                    name: None,
+                    model: "test-model".into(),
+                    model_profile: None,
+                    persistent: false,
+                    initial_message_index: 0,
+                    origin_session_id: Some(owner),
+                })
+                .await;
+            observer.on_event(completed(agent_id)).await;
+            let expected = owner.as_uuid().to_string();
+            let events = sink.events().await;
+            let updates: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    ClientEvent::SessionAgentUpdated { session_id, agent }
+                        if agent.agent_id == agent_id.to_string() =>
+                    {
+                        Some((session_id, &agent.status))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(updates.len(), 2);
+            assert!(updates
+                .iter()
+                .all(|(session_id, _)| *session_id == &expected));
+            assert_eq!(updates[1].1, "completed");
+        }
     }
 
     #[tokio::test]

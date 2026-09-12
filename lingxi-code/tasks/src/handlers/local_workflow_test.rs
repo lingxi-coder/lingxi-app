@@ -600,6 +600,7 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
                         model_profile: request.model_profile,
                         persistent: false,
                         initial_message_index: 0,
+                        origin_session_id: None,
                     },
                 )
                 .await;
@@ -3070,6 +3071,7 @@ async fn workflow_process_owners_use_allocation_receipts_without_async_progress(
                     model_profile: None,
                     persistent: false,
                     initial_message_index: 0,
+                    origin_session_id: None,
                 },
             );
             // No on_event, journal entry or progress callback is emitted.
@@ -6495,6 +6497,7 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
             model_profile: Some("deepseek".to_string()),
             persistent: false,
             initial_message_index: 0,
+            origin_session_id: None,
         },
     )
     .await;
@@ -6597,6 +6600,7 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
             model_profile: Some("deepseek".to_string()),
             persistent: false,
             initial_message_index: 0,
+            origin_session_id: None,
         },
     )
     .await;

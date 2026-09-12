@@ -453,6 +453,8 @@ pub enum SubagentObservation {
         /// children start at zero; restored persistent children start after
         /// the visible messages already present in their transcript.
         initial_message_index: u64,
+        /// Session pinned by the spawning context, independent of later UI switches.
+        origin_session_id: Option<protocol::SessionId>,
     },
     /// The child emitted a typed progress beacon while still running.
     Progress {

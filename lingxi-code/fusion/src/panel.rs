@@ -2892,6 +2892,7 @@ emitted — got {stages:?}"
                                     model_profile: Some("anthropic".into()),
                                     persistent: false,
                                     initial_message_index: 0,
+                                    origin_session_id: None,
                                 },
                             )
                             .await;
@@ -3153,6 +3154,7 @@ reservation is released for subagents that really exist — got {stages:?}"
                             model_profile: Some("anthropic".into()),
                             persistent: false,
                             initial_message_index: 0,
+                            origin_session_id: None,
                         },
                     );
                 }
@@ -3246,6 +3248,7 @@ reservation is released for subagents that really exist — got {stages:?}"
                             model_profile: Some("anthropic".into()),
                             persistent: false,
                             initial_message_index: 0,
+                            origin_session_id: None,
                         },
                     );
                 }
@@ -3337,6 +3340,7 @@ mod dispatch_flag_tests {
                 model_profile: Some("anthropic".into()),
                 persistent: false,
                 initial_message_index: 0,
+                origin_session_id: None,
             },
             _ => SubagentObservation::Progress {
                 agent_id: protocol::AgentId::new(),

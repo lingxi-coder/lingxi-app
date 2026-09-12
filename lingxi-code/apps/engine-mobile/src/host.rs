@@ -6126,6 +6126,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                 model_profile,
                 persistent,
                 initial_message_index,
+                ..
             } => {
                 let session_id = self.allocated_session_id();
                 let name = name.unwrap_or_else(|| agent_type.clone());
@@ -13496,6 +13497,7 @@ mod tests {
                 model_profile: Some("deepseek".to_string()),
                 persistent: false,
                 initial_message_index: 0,
+                origin_session_id: None,
             })
             .await;
         *session_uuid.lock().unwrap() = "session-b".to_string();
@@ -13581,6 +13583,7 @@ mod tests {
                     model_profile: Some("deepseek".to_string()),
                     persistent: false,
                     initial_message_index: 0,
+                    origin_session_id: None,
                 })
                 .await;
         })

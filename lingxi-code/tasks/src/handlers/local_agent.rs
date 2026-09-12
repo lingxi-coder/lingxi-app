@@ -1747,6 +1747,7 @@ mod tests {
             let id = AgentId::new();
             let event = platform_api::subagent_spawn::SubagentObservation::Allocated {
                 agent_id: id, agent_type: request.subagent_type.clone(), name: request.name.clone(), model: "mock".into(), model_profile: None, persistent: true, initial_message_index: 0,
+                origin_session_id: None,
             };
             observer.on_allocated(&event);
             observer.before_start(&event).await?;

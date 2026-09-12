@@ -436,6 +436,14 @@ pub struct PoolSubagentSpawner {
     /// spawn time keeps new child transcripts under the active session rather
     /// than the boot session. `None` preserves the static desktop/test path.
     subagents_dir_provider: Option<Arc<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>>,
+    /// Resolve an explicitly owned child independently of the active session.
+    subagents_dir_for_session_provider: Option<
+        Arc<dyn Fn(protocol::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError> + Send + Sync>,
+    >,
+    /// Allocation-pinned paths remain available after a runner exits, for resume.
+    allocated_transcript_paths: Arc<
+        std::sync::Mutex<HashMap<AgentId, (std::path::PathBuf, Option<protocol::SessionId>)>>,
+    >,
     /// Filesystem the child uses to APPEND its conversation to
     /// `<hook_subagents_dir>/agent-<id>.jsonl`. Set with the subagents dir at
     /// boot: naming the path without wiring a writer is what left the
@@ -703,6 +711,8 @@ impl PoolSubagentSpawner {
             hook_cwd: std::path::PathBuf::new(),
             hook_subagents_dir: None,
             subagents_dir_provider: None,
+            subagents_dir_for_session_provider: None,
+            allocated_transcript_paths: Arc::new(std::sync::Mutex::new(HashMap::new())),
             transcript_fs: None,
             name_registry: Arc::new(RwLock::new(HashMap::new())),
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
@@ -1259,6 +1269,35 @@ impl PoolSubagentSpawner {
     ) -> Self {
         self.subagents_dir_provider = Some(provider);
         self
+    }
+
+    /// Resolve owned child transcripts without consulting mutable active-session state.
+    #[must_use]
+    pub fn with_subagents_dir_for_session_provider(
+        mut self,
+        provider: Arc<
+            dyn Fn(protocol::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError> + Send + Sync,
+        >,
+    ) -> Self {
+        self.subagents_dir_for_session_provider = Some(provider);
+        self
+    }
+
+    fn resolved_origin_session_id(
+        &self,
+        request: &SubagentSpawnRequest,
+    ) -> Option<protocol::SessionId> {
+        workflow_transcript_subdir_override()
+            .and_then(|path| path.ancestors().nth(3).map(std::path::Path::to_path_buf))
+            .and_then(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(protocol::SessionId::parse_prefixed)
+            })
+            .or(request.origin_session_id)
+            .or_else(|| {
+                (self.hook_session_id != protocol::SessionId::nil()).then_some(self.hook_session_id)
+            })
     }
 
     fn resolved_subagents_dir(&self) -> Option<std::path::PathBuf> {
@@ -1862,6 +1901,7 @@ impl PoolSubagentSpawner {
     async fn apply_agent_spawn_hook(
         &self,
         request: &SubagentSpawnRequest,
+        origin_session_id: Option<protocol::SessionId>,
     ) -> Result<Option<SubagentSpawnRequest>, SubagentSpawnError> {
         // `RuntimeLink::get` already hands back an owned `Arc`; the
         // `OnceLock` this arrived on borrows and needs a `.cloned()`.
@@ -1893,7 +1933,7 @@ impl PoolSubagentSpawner {
             .execute(
                 event,
                 hooks::HookContext {
-                    session_id: self.hook_session_id,
+                    session_id: origin_session_id.unwrap_or(self.hook_session_id),
                     cwd: self.hook_cwd.clone(),
                     ..Default::default()
                 },
@@ -1956,7 +1996,19 @@ impl PoolSubagentSpawner {
         // `agent.spawn` runs FIRST: everything below derives from `request`, so
         // a rewrite here is re-derived by definition resolution, the bypass
         // clamps and tool policy without any of them knowing a hook ran.
-        let rewritten = self.apply_agent_spawn_hook(request).await?;
+        let restored_transcript = restored_agent_id.and_then(|agent_id| {
+            self.allocated_transcript_paths
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&agent_id)
+                .cloned()
+        });
+        let workflow_dir = workflow_transcript_subdir_override();
+        let origin_session_id = restored_transcript
+            .as_ref()
+            .and_then(|(_, owner)| *owner)
+            .or_else(|| self.resolved_origin_session_id(request));
+        let rewritten = self.apply_agent_spawn_hook(request, origin_session_id).await?;
         let request = rewritten.as_ref().unwrap_or(request);
 
         // The parent / main-loop model this spawn resolves against: the request's
@@ -2094,7 +2146,7 @@ impl PoolSubagentSpawner {
             restored_agent_id.unwrap_or_else(AgentId::new),
         );
         ctx.session_interactive = self.session_interactive;
-        ctx.origin_session_id = request.origin_session_id;
+        ctx.origin_session_id = origin_session_id;
         // Hand the child the refusal-fallback chain. Upstream's subagents share
         // the main thread's cascade because they share its query generator;
         // here the loops are separate, so it is passed down.
@@ -2141,7 +2193,7 @@ impl PoolSubagentSpawner {
         ctx.parent_agent_id = request.creator_agent_id;
         ctx.task_registry = self.task_registry.get().and_then(std::sync::Weak::upgrade);
         ctx.tool_invoker = Some(inherit.tool_invoker);
-        let child_budget = request
+        let child_budget = ctx
             .origin_session_id
             .and_then(|session_id| inherit.budget.scoped_for_session(session_id))
             .unwrap_or_else(|| Arc::clone(&inherit.budget));
@@ -2166,13 +2218,24 @@ impl PoolSubagentSpawner {
             .copied()
             .unwrap_or(false);
         ctx.skill_loader = self.skill_loader.get();
-        ctx.hook_session_id = self.hook_session_id;
+        ctx.hook_session_id = ctx.origin_session_id.unwrap_or(self.hook_session_id);
         ctx.hook_cwd = self.hook_cwd.clone();
         // A RESTORE seeds the child from its recovered conversation, replacing
         // prompt + fork-context + preload (see `SubagentContext::resumed_history`).
         ctx.resumed_history = request.resumed_history.clone();
         // Seed the child's REAL transcript_subdir when the host wired one.
-        if let Some(subagents_dir) = self.resolved_transcript_subdir() {
+        let restored_subdir = restored_transcript
+            .and_then(|(path, _)| path.parent().map(std::path::Path::to_path_buf));
+        let subagents_dir = if let Some(pinned) = restored_subdir.or(workflow_dir) {
+            Some(pinned)
+        } else {
+            ctx.origin_session_id
+                .zip(self.subagents_dir_for_session_provider.as_ref())
+                .map(|(session_id, provider)| provider(session_id))
+                .transpose()?
+                .or_else(|| self.resolved_subagents_dir())
+        };
+        if let Some(subagents_dir) = subagents_dir {
             ctx.transcript_subdir = subagents_dir;
             // Only wire the writer alongside a REAL subagents dir — writing a
             // transcript into the `/tmp` placeholder would scatter files a
@@ -2340,6 +2403,7 @@ pub trait StreamingSubagentSpawner: Send + Sync {
         observer: Arc<dyn SubagentSpawnObserver>,
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
         let agent_type = request.subagent_type.clone();
+        let origin_session_id = request.origin_session_id;
         let (agent_id, receiver) = self.spawn_persistent(request, inherit).await?;
         observer
             .before_start(&SubagentObservation::Allocated {
@@ -2350,6 +2414,7 @@ pub trait StreamingSubagentSpawner: Send + Sync {
                 model_profile: None,
                 persistent: true,
                 initial_message_index: 0,
+                origin_session_id,
             })
             .await?;
         Ok((agent_id, receiver))
@@ -2408,6 +2473,14 @@ pub trait StreamingSubagentSpawner: Send + Sync {
 impl StreamingSubagentSpawner for PoolSubagentSpawner {
     fn transcript_path(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
         self.transcript_fs.as_ref()?;
+        if let Some((path, _)) = self
+            .allocated_transcript_paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&agent_id)
+        {
+            return Some(path.clone());
+        }
         Some(
             self.resolved_transcript_subdir()?
                 .join(format!("agent-{agent_id}.jsonl")),
@@ -2998,11 +3071,24 @@ impl SubagentSpawner for PoolSubagentSpawner {
             model_profile: resolved_model_profile.clone(),
             persistent: false,
             initial_message_index,
+            origin_session_id: ctx.origin_session_id,
         };
-        let allocation_receipt = (!observers.is_empty()).then(|| {
+        let transcript_path = ctx
+            .transcript_fs
+            .as_ref()
+            .map(|_| ctx.transcript_subdir.join(format!("agent-{agent_id}.jsonl")));
+        let origin_session_id = ctx.origin_session_id;
+        let allocation_receipt = (!observers.is_empty() || transcript_path.is_some()).then(|| {
+            let allocated_transcript_paths = self.allocated_transcript_paths.clone();
             let allocation_event = allocation_event.clone();
             let observers = observers.clone();
             Arc::new(move |_allocated_agent_id: AgentId| {
+                if let Some(path) = &transcript_path {
+                    allocated_transcript_paths
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(agent_id, (path.clone(), origin_session_id));
+                }
                 for observer in &observers {
                     observer.on_allocated(&allocation_event);
                 }
@@ -3621,11 +3707,24 @@ impl PoolSubagentSpawner {
             model_profile: resolved_model_profile.clone(),
             persistent: true,
             initial_message_index,
+            origin_session_id: ctx.origin_session_id,
         };
-        let allocation_receipt = (!observers.is_empty()).then(|| {
+        let transcript_path = ctx
+            .transcript_fs
+            .as_ref()
+            .map(|_| ctx.transcript_subdir.join(format!("agent-{agent_id}.jsonl")));
+        let origin_session_id = ctx.origin_session_id;
+        let allocation_receipt = (!observers.is_empty() || transcript_path.is_some()).then(|| {
+            let allocated_transcript_paths = self.allocated_transcript_paths.clone();
             let allocation_event = allocation_event.clone();
             let observers = observers.clone();
             Arc::new(move |_allocated_agent_id: AgentId| {
+                if let Some(path) = &transcript_path {
+                    allocated_transcript_paths
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(agent_id, (path.clone(), origin_session_id));
+                }
                 for observer in &observers {
                     observer.on_allocated(&allocation_event);
                 }
@@ -5603,7 +5702,7 @@ mod tests {
         let spawner = PoolSubagentSpawner::new(pool);
 
         let rewritten = spawner
-            .apply_agent_spawn_hook(&minimal_spawn_request("do the thing"))
+            .apply_agent_spawn_hook(&minimal_spawn_request("do the thing"), None)
             .await
             .expect("an unwired hook executor must not refuse the spawn");
         assert!(rewritten.is_none(), "nothing rewrote the request");
@@ -5627,7 +5726,7 @@ mod tests {
 
         // Wired: the hook runs, and this registry has nothing to say about it.
         assert!(spawner
-            .apply_agent_spawn_hook(&minimal_spawn_request("before drain"))
+            .apply_agent_spawn_hook(&minimal_spawn_request("before drain"), None)
             .await
             .expect("a wired executor with no matching hook allows the spawn")
             .is_none());
@@ -5636,7 +5735,7 @@ mod tests {
         assert!(spawner.hook_executor_handle().is_sealed());
 
         let refused = spawner
-            .apply_agent_spawn_hook(&minimal_spawn_request("after drain"))
+            .apply_agent_spawn_hook(&minimal_spawn_request("after drain"), None)
             .await;
         let Err(SubagentSpawnError::Runtime(message)) = refused else {
             panic!("a spawn after the host released the hook executor must be refused, not run unhooked: {refused:?}");
@@ -8275,6 +8374,196 @@ mod tests {
             Some("fu_abc123:p0"),
             "the request's correlation_id must reach the child SubagentContext"
         );
+    }
+
+    #[tokio::test]
+    async fn session_retarget_resolver_failure_cannot_fall_back_to_boot_session() {
+        let a = protocol::SessionId::new();
+        let b = protocol::SessionId::new();
+        let spawner = PoolSubagentSpawner::new(Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            4,
+        )))
+        .with_hook_context(a, "/tmp".into(), Some("/sessions/boot/subagents".into()))
+        .with_subagents_dir_for_session_provider(Arc::new(|_| {
+            Err(SubagentSpawnError::Runtime("directory denied".into()))
+        }));
+        let mut request = minimal_spawn_request("new main B");
+        request.origin_session_id = Some(b);
+        assert!(
+            matches!(spawner.spawn(request.clone(), dummy_inherit()).await,
+                Err(SubagentSpawnError::Runtime(message)) if message == "directory denied")
+        );
+        let workflow_dir = std::path::PathBuf::from("/sessions")
+            .join(a.as_uuid().to_string())
+            .join("subagents/workflows/pinned");
+        let (ctx, _) = with_transcript_subdir_override(
+            Some(workflow_dir.clone()),
+            spawner.build_subagent_context(&request, dummy_inherit(), false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.transcript_subdir, workflow_dir);
+        assert_eq!(ctx.hook_session_id, a);
+    }
+
+    #[tokio::test]
+    async fn session_retarget_pins_real_child_transcripts_and_allocation_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = protocol::SessionId::new();
+        let b = protocol::SessionId::new();
+        let session_dir =
+            |id: protocol::SessionId| dir.path().join(id.as_uuid().to_string()).join("subagents");
+        let active = Arc::new(Mutex::new(session_dir(a)));
+        let live = active.clone();
+        let root = dir.path().to_path_buf();
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+        let spawner = PoolSubagentSpawner::new(Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            4,
+        )))
+        .with_api_client(Arc::new(QueueApi {
+            responses: Mutex::new(VecDeque::from([
+                text_response("a completed"),
+                text_response("b completed"),
+                text_response("old a nested completed"),
+                text_response("workflow completed"),
+                text_response("restored workflow completed"),
+            ])),
+            calls: AtomicUsize::new(0),
+        }))
+        .with_hook_context(a, dir.path().to_path_buf(), Some(session_dir(a)))
+        .with_subagents_dir_provider(Arc::new(move || Some(live.lock().unwrap().clone())))
+        .with_subagents_dir_for_session_provider(Arc::new(move |id| {
+            let path = root.join(id.as_uuid().to_string()).join("subagents");
+            std::fs::create_dir_all(&path).unwrap();
+            Ok(path)
+        }))
+        .with_transcript_fs(Arc::new(platform_posix::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        )))
+        .with_spawn_observer(observer.clone());
+        let mut spawned: Vec<(AgentId, protocol::SessionId, std::path::PathBuf)> = Vec::new();
+        for (owner, prompt, nested) in [
+            (a, "first in A", false),
+            (b, "new main B", false),
+            (a, "nested old A", true),
+        ] {
+            if owner == b {
+                *active.lock().unwrap() = session_dir(b);
+            }
+            let mut request = minimal_spawn_request(prompt);
+            request.origin_session_id = Some(owner);
+            if nested {
+                request.creator_agent_id = Some(spawned[0].0);
+                request.depth = 2;
+            }
+            let (ctx, _) = spawner
+                .build_subagent_context(&request, dummy_inherit(), false)
+                .await
+                .unwrap();
+            assert_eq!(ctx.hook_session_id, owner);
+            assert_eq!(ctx.origin_session_id, Some(owner));
+            assert_eq!(ctx.transcript_subdir, session_dir(owner));
+            let result = spawner.spawn(request, dummy_inherit()).await.unwrap();
+            let SubagentResult::Completed { agent_id, .. } = result else {
+                panic!("child must complete")
+            };
+            let path = session_dir(owner).join(format!("agent-{agent_id}.jsonl"));
+            assert!(std::fs::read_to_string(&path).unwrap().contains(prompt));
+            assert!(!session_dir(if owner == a { b } else { a })
+                .join(format!("agent-{agent_id}.jsonl"))
+                .exists());
+            spawned.push((agent_id, owner, path));
+        }
+        let workflow_dir = session_dir(a).join("workflows/run-a");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        let mut request = minimal_spawn_request("workflow stays in A");
+        request.origin_session_id = Some(b);
+        let agent_id = with_transcript_subdir_override(Some(workflow_dir.clone()), async {
+            let (ctx, _) = spawner
+                .build_subagent_context(&request, dummy_inherit(), false)
+                .await
+                .unwrap();
+            assert_eq!(ctx.hook_session_id, a);
+            assert_eq!(ctx.origin_session_id, Some(a));
+            assert_eq!(ctx.transcript_subdir, workflow_dir);
+            let SubagentResult::Completed { agent_id, .. } =
+                spawner.spawn(request, dummy_inherit()).await.unwrap()
+            else {
+                panic!("workflow must complete")
+            };
+            agent_id
+        })
+        .await;
+        let workflow_path = workflow_dir.join(format!("agent-{agent_id}.jsonl"));
+        assert!(std::fs::read_to_string(&workflow_path)
+            .unwrap()
+            .contains("workflow stays in A"));
+        spawned.push((agent_id, a, workflow_path.clone()));
+        // Restore outside the workflow task-local scope while B is active.
+        let mut restore = minimal_spawn_request("");
+        restore.origin_session_id = Some(b);
+        restore.resumed_history = Some(vec![ConversationMessage::user(
+            MessageId::new(),
+            "restore old workflow".into(),
+        )]);
+        let (restored_id, mut events) = spawner
+            .restore_persistent_with_observer(agent_id, restore, dummy_inherit(), observer.clone())
+            .await
+            .unwrap();
+        assert_eq!(restored_id, agent_id);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, SubagentEvent::Completed { .. }) {
+                    return;
+                }
+            }
+            panic!("restored workflow must complete");
+        })
+        .await
+        .unwrap();
+        spawner.stop(&agent_id).await.unwrap();
+        assert!(std::fs::read_to_string(&workflow_path)
+            .unwrap()
+            .contains("restored workflow completed"));
+        for (agent_id, _, path) in &spawned {
+            assert_eq!(
+                StreamingSubagentSpawner::transcript_path(&spawner, *agent_id).as_ref(),
+                Some(path)
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let owners = observer
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|event| {
+                        if let SubagentObservation::Allocated {
+                            agent_id,
+                            origin_session_id,
+                            ..
+                        } = event
+                        {
+                            Some((*agent_id, *origin_session_id))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<HashMap<_, _>>();
+                if spawned
+                    .iter()
+                    .all(|(id, owner, _)| owners.get(id) == Some(&Some(*owner)))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("allocation ownership matches actual transcript ownership");
     }
 
     #[tokio::test]

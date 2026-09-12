@@ -539,6 +539,7 @@ impl SubagentSpawner for SyncBlockingAllocationSpawner {
                         model_profile: request.model_profile,
                         persistent: false,
                         initial_message_index: 0,
+                        origin_session_id: None,
                     },
                 );
             }
@@ -973,6 +974,7 @@ impl SubagentSpawner for CancelOnFirstAllocationSpawner {
                     model_profile: request.model_profile,
                     persistent: false,
                     initial_message_index: 0,
+                    origin_session_id: None,
                 };
                 observer.on_allocated(&event);
             }
@@ -1097,6 +1099,7 @@ impl FakeSpawner {
                     model_profile: request.model_profile.clone(),
                     persistent: false,
                     initial_message_index: 0,
+                    origin_session_id: None,
                 },
             )
             .await;
@@ -4183,6 +4186,7 @@ async fn outer_cancel_after_allocation_corrects_an_initial_zero_progress_snapsho
                         model_profile: request.model_profile,
                         persistent: false,
                         initial_message_index: 0,
+                        origin_session_id: None,
                     };
                     observer.on_allocated(&event);
                 }

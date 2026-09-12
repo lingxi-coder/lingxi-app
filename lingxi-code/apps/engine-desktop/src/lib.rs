@@ -12040,22 +12040,32 @@ pub async fn build(
         // a non-Anthropic default profile behaves like the TS non-firstParty
         // branch (Explore → inherit, never the opus cap).
         .with_session_provider_first_party(session_provider_first_party)
-        // G4/G5: stamp the session id + cwd on the `HookContext` the child runner
-        // builds for the SubagentStart fire (the orchestrator's hook context is
-        // session-scoped at runtime; the spawner uses the boot-stable owning
-        // session id so both hook payloads and checkpoint keys remain aligned.
-        // FIX C: also thread the boot-computed MAIN-session subagents dir
-        // (`…/projects/<sanitize(cwd)>/<main_session>/subagents`) so each spawned
-        // child's `agent_transcript_path` (the agent-scoped `SubagentStop` field)
-        // resolves to the real `…/subagents/agent-<id>.jsonl` (claude-code
-        // `getAgentTranscriptPath`) instead of the prior `/tmp` placeholder. The
-        // subdir and hook context both key on the MAIN session id (claude
-        // `getSessionId()`).
+        // Legacy callers without an explicit origin keep the boot context.
+        // Normal and nested Agent calls carry their owning session, so a
+        // session switch cannot redirect an older background child's files.
         .with_hook_context(
             subagent_hook_session_id,
             cwd.clone(),
             Some(main_subagents_dir.clone()),
         )
+        .with_subagents_dir_for_session_provider(Arc::new({
+            let lingxi_home = cfg.lingxi_home.clone();
+            let project_cwd = cwd.to_string_lossy().into_owned();
+            move |session_id: protocol::SessionId| {
+                let dir = orchestrator::transcript_paths::subagents_dir(
+                    &lingxi_home,
+                    &project_cwd,
+                    &session_id.as_uuid().to_string(),
+                );
+                std::fs::create_dir_all(&dir).map_err(|error| {
+                    platform_api::subagent_spawn::SubagentSpawnError::Runtime(format!(
+                        "cannot create subagent transcript directory {}: {error}",
+                        dir.display(),
+                    ))
+                })?;
+                Ok(dir)
+            }
+        }))
         // …and the writer that actually creates the file the line above names.
         // Without it `agent_transcript_path` pointed at nothing, and a
         // background agent's conversation existed only in memory.

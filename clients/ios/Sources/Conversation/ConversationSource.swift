@@ -732,7 +732,16 @@ final class ConversationModel: ObservableObject {
         let modelProfile = incomingIsCurrent
             ? (incoming.modelProfile.flatMap { $0.isEmpty ? nil : $0 } ?? current.modelProfile)
             : (current.modelProfile.flatMap { $0.isEmpty ? nil : $0 } ?? incoming.modelProfile)
-        let status = if currentIsTerminal && !incomingIsTerminal {
+        // The terminal rule is an ORDERING guard — it exists so a `running`
+        // that was emitted BEFORE the end, and merely delivered after it,
+        // cannot resurrect a finished agent. Applied to a NEWER update it
+        // becomes an absorbing state instead, and that is wrong for every
+        // agent that can come back: a parked background agent now reports
+        // claude-code's `completed` (rendered `done`) rather than the port's
+        // invented `idle`, so without `!incomingIsCurrent` a resumed agent
+        // would sit at `done` for the rest of the session while it worked.
+        // `incomingIsCurrent` is the ordering signal the guard actually wants.
+        let status = if currentIsTerminal && !incomingIsTerminal && !incomingIsCurrent {
             current.status
         } else if incomingIsCurrent {
             incoming.status

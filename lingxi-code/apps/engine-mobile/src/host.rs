@@ -6224,7 +6224,13 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                             agent_type: bound.agent_type,
                             model: Some(bound.model),
                             model_profile: bound.model_profile,
-                            status: if terminal { "completed" } else { "idle" }.to_string(),
+                            // `completed` either way: claude-code labels a
+                            // finished background agent `(done)` whether or not
+                            // it can still be resumed, and reserves `idle` for
+                            // the footer group and for teammates. Resumability
+                            // stays in `terminal` below, which decides whether
+                            // the agent's state is cleared.
+                            status: "completed".to_string(),
                             latest_activity: None,
                             updated_at_ms: Some(unix_time_ms()),
                         },
@@ -10615,7 +10621,12 @@ impl MobileEngineHandle {
                         "failed" => "failed",
                         "killed" => "killed",
                         "cancelled" => "cancelled",
-                        "idle" => "idle",
+                        // The TRANSCRIPT's own rest marker (`agent_idle`,
+                        // written by `agent::transcript::record_terminal`) is
+                        // an engine-internal word. Translate it here rather
+                        // than letting it reach a client: on the wire a parked
+                        // agent is `completed`, exactly like claude-code's row.
+                        "idle" => "completed",
                         "running" => "running",
                         _ => "unknown",
                     }
@@ -10630,7 +10641,7 @@ impl MobileEngineHandle {
             }
         }
         let row = session::agent_rows::read_row(path.parent()?, &agent_id).await;
-        let (row_name, row_type, row_model, row_model_profile, idle) = row
+        let (row_name, row_type, row_model, row_model_profile, parked) = row
             .map(|row| {
                 (
                     row.request.name.or(row.request.description),
@@ -10655,8 +10666,12 @@ impl MobileEngineHandle {
                     .take(8)
                     .collect()
             });
-        if idle && status == "running" {
-            status = "idle".to_string();
+        // A `.task.json` row beside the transcript means the agent PARKED:
+        // it finished a turn-set and is resumable. claude-code renders that as
+        // `(done)` under status `completed`; `idle` is the footer group's word,
+        // not a row's status.
+        if parked && status == "running" {
+            status = "completed".to_string();
         }
         let updated_at_ms = tokio::fs::metadata(path)
             .await

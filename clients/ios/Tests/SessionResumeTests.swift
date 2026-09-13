@@ -165,6 +165,57 @@ visionDelegationEnabled: true)
             XCTAssertEqual(child?.updatedAtMs, 2_000)
         }
 
+        /// A parked background agent must be able to come back.
+        ///
+        /// The engine reports claude-code's `completed` for one (it renders as
+        /// `done`), where the port used to invent `idle`. `completed` is in the
+        /// terminal set, and the terminal rule used to win over ANY later
+        /// update — so a resumed agent would have sat at `done` for the rest of
+        /// the session while it worked. The rule is an ordering guard, so it
+        /// now yields to a NEWER update; the test above still pins the older
+        /// one losing.
+        func testResumedParkedAgentLeavesItsCompletedStatus() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+
+            source.applyForTesting(.sessionAgentUpdated(
+                sessionId: "session-a",
+                agent: SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "designer",
+                    agentType: "workflow-subagent",
+                    model: "deepseek-flash",
+                    modelProfile: "deepseek",
+                    status: "completed",
+                    latestActivity: "Design complete",
+                    updatedAtMs: 1_000
+                )
+            ))
+            XCTAssertEqual(source.model.agentSummaries.first { $0.id == agentID }?.status,
+                           "completed",
+                           "precondition: parking reports completed, a terminal word")
+
+            source.applyForTesting(.sessionAgentUpdated(
+                sessionId: "session-a",
+                agent: SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "designer",
+                    agentType: "workflow-subagent",
+                    model: "deepseek-flash",
+                    modelProfile: "deepseek",
+                    status: "running",
+                    latestActivity: "Reviewing feedback",
+                    updatedAtMs: 2_000
+                )
+            ))
+
+            let child = source.model.agentSummaries.first { $0.id == agentID }
+            XCTAssertEqual(child?.status, "running", "a resumed parked agent runs again")
+            XCTAssertEqual(child?.latestActivity, "Reviewing feedback")
+            XCTAssertEqual(child?.updatedAtMs, 2_000)
+        }
+
         func testSessionAgentTranscriptReplacesOnlySelectedChildView() {
             let source = makeSource()
             source.model.activeSessionId = "session-a"

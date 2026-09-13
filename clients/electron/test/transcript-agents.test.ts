@@ -35,7 +35,10 @@ test('running and finished agents remain visible with distinct states and detail
   assert.equal((html.match(/data-agent-id=/g) ?? []).length, 3);
   assert.equal((html.match(/data-agent-running="true"/g) ?? []).length, 1);
   assert.match(html, /Search · Running · Open agent details/);
-  assert.match(html, /Review · Completed · Open agent details/);
+  // `done`, not `completed`: claude-code relabels only that one status, and
+  // this chip sentence-cases whatever it is shown as. (A `cancelled` agent
+  // stays `Cancelled` below — only a background SHELL renames it to `stopped`.)
+  assert.match(html, /Review · Done · Open agent details/);
   assert.match(html, /Build · Failed · Open agent details/);
   assert.match(html, /Checked 5 files/);
 });

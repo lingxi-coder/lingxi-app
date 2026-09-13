@@ -3,6 +3,7 @@ import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { AgentAvatar } from './AgentAvatar';
+import { statusLabel } from '../bridge/agentStatus';
 
 export interface TranscriptAgentsProps {
   agents?: readonly SessionAgentSummaryDto[];
@@ -39,7 +40,11 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent }: Transcr
       const name = agent.name.trim() || agent.agent_type || 'Agent';
       const running = agent.status === 'running' || agent.status === 'working';
       const failed = agent.status === 'failed' || agent.status === 'error';
-      const status = running ? 'Running' : agent.status ? agent.status[0].toUpperCase() + agent.status.slice(1).replace(/_/g, ' ') : 'Unknown';
+      // claude-code's word, then sentence case for this chip: a finished
+      // background agent reads `Done`, never `Completed` and never the port's
+      // old invented `Idle`.
+      const shown = agent.status ? statusLabel(agent.status) : '';
+      const status = running ? 'Running' : shown ? shown[0].toUpperCase() + shown.slice(1).replace(/_/g, ' ') : 'Unknown';
       return <button
         key={agent.agent_id}
         type="button"

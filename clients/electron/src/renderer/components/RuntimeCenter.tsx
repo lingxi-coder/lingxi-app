@@ -12,6 +12,7 @@ import {
   type RuntimeCenterSection,
   type RuntimeResource,
 } from '../bridge/runtimeCenterState';
+import { statusLabel } from '../bridge/agentStatus';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { AgentAvatar } from './AgentAvatar';
@@ -141,6 +142,7 @@ function OverviewRow({
   thumbnail,
   agentId,
   status,
+  statusText,
   onClick,
 }: {
   icon: string;
@@ -148,7 +150,10 @@ function OverviewRow({
   subtitle?: string;
   thumbnail?: string;
   agentId?: string;
+  /** MACHINE status — drives the colour and the running shimmer. */
   status?: string;
+  /** What the user reads, when it differs (claude-code shows `done` for `completed`). */
+  statusText?: string;
   onClick(): void;
 }) {
   const t = useT();
@@ -171,7 +176,7 @@ function OverviewRow({
         <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 14, fontWeight: 400 }}>{title}</span>
         {subtitle && <span style={{ display: 'block', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.dark ? t.text2 : t.text3, fontSize: 12 }}>{subtitle}</span>}
       </span>
-      {status && <span className={status === 'running' ? 'running-sweep' : undefined} style={{ flexShrink: 0, color: statusColor(t, status), fontSize: 10 }}>{status}</span>}
+      {status && <span className={status === 'running' ? 'running-sweep' : undefined} style={{ flexShrink: 0, color: statusColor(t, status), fontSize: 10 }}>{statusText ?? status}</span>}
     </button>
   );
 }
@@ -182,8 +187,30 @@ function SummarySection({ section, children }: { section: RuntimeCenterSection; 
   </section>;
 }
 
+/**
+ * The MACHINE status the counters work on. `agentStatusSummary` and
+ * `statusColor` both match on `completed` / `failed` / `running`, so they must
+ * never be handed a rendered label — feed them `done` and the summary silently
+ * reports "0 done" for a panel full of finished tasks.
+ */
+function taskSummaryStatus(task: TaskRowDto): string {
+  return (task as { awaiting_plan_approval?: boolean }).awaiting_plan_approval
+    ? 'awaiting approval'
+    : task.status.type;
+}
+
+/**
+ * A task row's rendered status, including claude-code's `, unread` suffix for a
+ * completion the model has not been told about yet (its
+ * `status === "completed" && !notified`; the engine already lowers that onto
+ * `TaskRowDto.unread`). Before this, `unread` reached the client on every task
+ * listing and nothing rendered it.
+ */
 function taskDisplayStatus(task: TaskRowDto): string {
-  return (task as { awaiting_plan_approval?: boolean }).awaiting_plan_approval ? 'awaiting approval' : task.status.type;
+  if ((task as { awaiting_plan_approval?: boolean }).awaiting_plan_approval) return 'awaiting approval';
+  const kind = task.task_type === 'local_bash' ? 'shell' : 'agent';
+  const label = statusLabel(task.status.type, kind);
+  return (task as { unread?: boolean }).unread ? `${label}, unread` : label;
 }
 
 function agentStatusSummary(statuses: readonly string[]): string {
@@ -276,7 +303,7 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
       <SummarySection section="agents">
         {agents.length === 0 && tasks.length === 0 ? <EmptyRow>No subagents or background tasks.</EmptyRow> : <>
           {agents.length > 0 && <OverviewRow icon="subagent" title={agentStatusSummary(agents.map((agent) => agent.status))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
-          {tasks.length > 0 && <OverviewRow icon="activity" title={`${tasks.length} background ${tasks.length === 1 ? 'task' : 'tasks'}`} subtitle={agentStatusSummary(tasks.map(taskDisplayStatus))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
+          {tasks.length > 0 && <OverviewRow icon="activity" title={`${tasks.length} background ${tasks.length === 1 ? 'task' : 'tasks'}`} subtitle={agentStatusSummary(tasks.map(taskSummaryStatus))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
         </>}
       </SummarySection>
       <SummarySection section="todos">
@@ -362,7 +389,7 @@ export function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bri
   if (!task) return <EmptyRow>Task is no longer available.</EmptyRow>;
   return (
     <div style={{ padding: 15, overflowY: 'auto' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: statusColor(t, taskDisplayStatus(task)), fontSize: 11 }}><Icon name="activity" size={14} /><span>{taskDisplayStatus(task)}</span></div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: statusColor(t, taskSummaryStatus(task)), fontSize: 11 }}><Icon name="activity" size={14} /><span>{taskDisplayStatus(task)}</span></div>
       {task.stage && <div style={{ marginTop: 6, color: t.text3, fontSize: 11 }}>{task.stage}</div>}
       <p style={{ margin: '12px 0', color: t.text, fontSize: 13, lineHeight: 1.55 }}>{task.description}</p>
       {output ? <pre className="mono" style={{ margin: 0, padding: 11, borderRadius: 9, background: t.windowBg, border: `0.5px solid ${t.border}`, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || '(No output yet)'}{output.truncated ? `\n\n…${output.totalLines} lines total` : ''}</pre> : <EmptyRow>Loading task output…</EmptyRow>}
@@ -379,7 +406,7 @@ function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefi
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ padding: '10px 13px', borderBottom: `0.5px solid ${t.border}`, color: t.text3, fontSize: 10.5 }}>
-        <span style={{ color: statusColor(t, agent.status), fontWeight: 650 }}>{agent.status}</span>
+        <span style={{ color: statusColor(t, agent.status), fontWeight: 650 }}>{statusLabel(agent.status, 'agent')}</span>
         {agent.model && <span> · {agent.model}</span>}
         {agent.latest_activity && <span style={{ display: 'block', marginTop: 4, color: t.dark ? t.text2 : t.text3 }}>{shorten(agent.latest_activity, 150)}</span>}
       </div>
@@ -537,8 +564,8 @@ function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bri
     {section === 'todos' && (todos.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : todos.map((todo, index) => <OverviewRow key={planRuntimeItemId(todo, index, todos)} icon={todo.state === 'completed' ? 'check' : 'goal'} title={todo.subject} status={todo.state} onClick={() => bridge.openRuntimeItem({ kind: 'todo', id: planRuntimeItemId(todo, index, todos) })} />))}
     {section === 'agents' && <>
       {agents.length === 0 && tasks.length === 0 && <EmptyRow>No subagents or background tasks.</EmptyRow>}
-      {agents.map((agent) => <OverviewRow key={agent.agent_id} icon="subagent" agentId={agent.agent_id} title={agent.name || agent.agent_type} subtitle={`Subagent · ${agent.latest_activity ?? agent.agent_type}`} status={agent.status} onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })} />)}
-      {tasks.map((task) => <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={`Background task · ${shorten(task.status.type === 'running' && task.stage ? task.stage : task.description)}`} status={taskDisplayStatus(task)} onClick={() => bridge.openRuntimeItem({ kind: 'task', id: task.task_id })} />)}
+      {agents.map((agent) => <OverviewRow key={agent.agent_id} icon="subagent" agentId={agent.agent_id} title={agent.name || agent.agent_type} subtitle={`Subagent · ${agent.latest_activity ?? agent.agent_type}`} status={agent.status} statusText={statusLabel(agent.status, 'agent')} onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })} />)}
+      {tasks.map((task) => <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={`Background task · ${shorten(task.status.type === 'running' && task.stage ? task.stage : task.description)}`} status={taskSummaryStatus(task)} statusText={taskDisplayStatus(task)} onClick={() => bridge.openRuntimeItem({ kind: 'task', id: task.task_id })} />)}
     </>}
     {section === 'resources' && (center.resources.length === 0 ? <EmptyRow>No input resources in this session.</EmptyRow> : center.resources.map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : 'file'} title={resource.name} subtitle={resource.path ?? resource.detail} onClick={() => bridge.openRuntimeItem({ kind: 'resource', id: resource.id })} />))}
   </div>;

@@ -195,9 +195,16 @@ test('teammate roster preserves idle, running, and terminal states in the inspec
     }])),
   };
   const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  // The word each status is SHOWN as, per claude-code's row renderer: only
+  // `completed` is relabelled (`done`). `idle` stays `idle` — it is a real
+  // teammate state there, arriving through `coordinator_worker`; what it is not
+  // is a finished background agent's status, which is the borrow this pass
+  // undid. This loop used to assert every status rendered verbatim, which is to
+  // say it pinned the divergence.
+  const shown: Record<string, string> = { running: 'running', idle: 'idle', completed: 'done', failed: 'failed' };
   for (const status of ['running', 'idle', 'completed', 'failed']) {
     assert.ok(html.includes(`reviewer-${status}`));
-    assert.ok(html.includes(`>${status}</span>`));
+    assert.ok(html.includes(`>${shown[status]}</span>`), `status ${status} renders as ${shown[status]}: ${html}`);
   }
   assert.ok(html.includes('Waiting for a message'));
 });
@@ -234,4 +241,59 @@ test('plan approval state overrides running label and clears after either decisi
   const bridge = runtimeBridge();
   bridge.desktop = { ...emptyDesktopState(), tasks: { [task.task_id]: task } };
   assert.ok(render(React.createElement(RuntimeCenterOverview, { bridge })).includes('1 awaiting approval'));
+});
+
+/**
+ * Finished work reads as claude-code writes it.
+ *
+ * Its task row keeps the machine status (`completed`) and RENDERS a different
+ * word: `done` for an agent, plus `, unread` while the completion has not been
+ * surfaced to the model; a background shell says `error` / `stopped` instead of
+ * `failed` / `cancelled`. The port showed the raw status, and — worse — the
+ * engine invented a sixth status, `idle`, for a parked persistent agent, so ONE
+ * finished agent appeared twice in this panel under two different words: `idle`
+ * on its Subagents row and `completed` on its task row.
+ *
+ * Asserted on the rendered markup, because the bug was never in the state: the
+ * status reached the client intact both times and the JSX printed it verbatim.
+ */
+test('finished agents and tasks render claude-code labels, and the summary still counts them', () => {
+  const agents = {
+    'agent:parked': {
+      agent_id: 'agent:parked',
+      name: 'audit-cli',
+      agent_type: 'Explore',
+      status: 'completed',
+      latest_activity: 'Bash',
+    },
+  };
+  const tasks = {
+    a0000001: { task_id: 'a0000001', task_type: 'local_agent', status: { type: 'completed' }, description: 'Audit CLI parity', unread: true },
+    a0000002: { task_id: 'a0000002', task_type: 'local_agent', status: { type: 'completed' }, description: 'Audit mcp parity' },
+    b0000003: { task_id: 'b0000003', task_type: 'local_bash', status: { type: 'failed' }, description: 'grep flag' },
+    b0000004: { task_id: 'b0000004', task_type: 'local_bash', status: { type: 'cancelled' }, description: 'stopped sweep' },
+  } as unknown as Record<string, TaskRowDto>;
+  const active = { kind: 'section', id: 'agents' } as const;
+  const bridge = {
+    runtimeCenter: { ...emptyRuntimeCenterState(), agents, inspectorOpen: true, activeItem: active, tabs: [active] },
+    desktop: { ...emptyDesktopState(), tasks },
+    conversation: { plan: [] },
+  } as unknown as UseBridge;
+
+  const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(html.includes('>done<'), `a finished agent reads "done": ${html}`);
+  assert.ok(html.includes('done, unread'), `an unsurfaced completion keeps claude-code's ", unread": ${html}`);
+  assert.ok(html.includes('>error<'), `a failed background shell reads "error": ${html}`);
+  assert.ok(html.includes('>stopped<'), `a cancelled background shell reads "stopped": ${html}`);
+  assert.ok(!html.includes('>idle<'), `"idle" is the footer group's word, never a row's: ${html}`);
+  assert.ok(!html.includes('>completed<'), `the machine status is not what the user reads: ${html}`);
+
+  // The counters must keep seeing the MACHINE status. Feed them the rendered
+  // labels instead and the overview reports "0 done" for a panel of finished
+  // work — a subset comparison that reports all clear.
+  const overview = render(React.createElement(RuntimeCenterOverview, {
+    bridge: { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, overviewOpen: true } } as unknown as UseBridge,
+  }));
+  assert.ok(overview.includes('2 done · 2 failed'), `background-task summary counts raw statuses: ${overview}`);
+  assert.ok(overview.includes('1 done'), `subagent summary counts raw statuses: ${overview}`);
 });

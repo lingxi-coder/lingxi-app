@@ -407,8 +407,14 @@ pub struct SessionAgentSummaryDto {
     /// Provider profile paired with [`Self::model`], when pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_profile: Option<String>,
-    /// Lifecycle label (`running`, `idle`, `completed`, `failed`, `killed`,
-    /// or `unknown`).
+    /// Lifecycle status — claude-code's task vocabulary: `running`, `pending`,
+    /// `completed`, `failed`, `killed`, `cancelled`, or `unknown`.
+    ///
+    /// A parked persistent agent is `completed`, NOT `idle`: claude-code renders
+    /// a finished background agent as `(done)` whatever its resumability, and
+    /// reserves `idle` for the footer group those rows collapse into and for a
+    /// teammate's own state (which still arrives here through
+    /// `coordinator_worker`). Clients render `completed` as `done`.
     pub status: String,
     /// Compact, user-facing description of the most recent activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]

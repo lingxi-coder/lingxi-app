@@ -226,8 +226,10 @@ mod tests {
     ) -> (
         Arc<crate::ConversationOrchestrator>,
         Arc<crate::test_support::MockStreamingApiClient>,
+        Arc<crate::test_support::MockOutputStream>,
     ) {
         use crate::test_support::*;
+        let output = Arc::new(MockOutputStream::new());
         let api = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
             message_start("wake", "claude-opus-4-7"),
             content_block_start_text(0),
@@ -243,25 +245,34 @@ mod tests {
             Arc::new(tool_api::ToolRegistry::new()),
             noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
+            output.clone(),
             Arc::new(StaticMemoryProvider::empty()),
             std::env::temp_dir(),
         )
         .with_task_notifications(Arc::new(RegistryTaskNotifications::new(registry)));
-        (Arc::new(orch), api)
+        (Arc::new(orch), api, output)
     }
 
     #[tokio::test]
     async fn idle_wake_delivers_preexisting_completion_without_a_human_prompt() {
         let registry = Arc::new(FakeRegistry::new(vec![]));
         registry.complete(); // No subscriber yet: startup must check existing state.
-        let (orch, api) = wake_orchestrator(registry.clone());
+        let (orch, api, output) = wake_orchestrator(registry.clone());
         orch.run_task_notification_rewake(
             registry.as_ref(),
             tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
+        // A rewake is a turn NOBODY submitted, so it has to say so: hosts that
+        // track turn liveness (Desktop's bridge, mobile's turn listener) learn
+        // about a turn only from its start, and drop every event — and every
+        // permission request — belonging to one they were never told about.
+        assert_eq!(
+            output.turn_start_count().await,
+            1,
+            "the rewake must announce itself exactly once",
+        );
         let calls = api.captured_calls().await;
         assert_eq!(calls.len(), 1);
         let content = calls[0]
@@ -281,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn idle_wake_waits_for_active_turn_and_rechecks_consumed_completion() {
         let registry = Arc::new(FakeRegistry::new(vec![]));
-        let (orch, api) = wake_orchestrator(registry.clone());
+        let (orch, api, _output) = wake_orchestrator(registry.clone());
         let gate = orch.turn_gate.lock().await;
         registry.complete();
         let wake_orch = orch.clone();
@@ -321,7 +332,7 @@ mod tests {
     async fn human_turn_completion_uses_the_same_turn_provenance_header() {
         let registry = Arc::new(FakeRegistry::new(vec![]));
         registry.complete();
-        let (orch, api) = wake_orchestrator(registry.clone());
+        let (orch, api, _output) = wake_orchestrator(registry.clone());
         orch.run_turn_streaming("a genuine user message")
             .await
             .unwrap();

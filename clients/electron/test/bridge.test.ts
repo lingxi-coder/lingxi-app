@@ -1306,6 +1306,58 @@ test('cancelling turn rejects late interactions but keeps turn events flowing', 
   );
 });
 
+test('an engine-initiated turn re-arms the host and its permission prompts reach the user', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    diagnostics,
+  });
+  const broadcasts: Array<{ channel: string; payload: any }> = [];
+  (manager as any).broadcast = (channel: string, payload: unknown) => broadcasts.push({ channel, payload });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+
+  (manager as any).wireClient(fakeClient, 0);
+  handlers.get('event')!({ type: 'turn_started', turn_id: 3 });
+  handlers.get('event')!({
+    type: 'turn_ended',
+    outcome: { type: 'end_turn' },
+    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '' },
+  });
+  assert.equal(manager.turnActive, false, 'the user turn released the slot');
+
+  // Nothing the CLIENT did starts what comes next: the engine drains a
+  // background-task notification (or the leftover queue) into a follow-up turn
+  // of its own. `turn_started` is the ONLY thing that can re-arm the host, so
+  // the engine has to send one — see `driver.rs`
+  // `a_queued_turn_announces_itself_before_it_streams` and the
+  // `AdapterOutputStream::emit_turn_started` impl, which did not exist and made
+  // every such turn invisible here.
+  const beforeReArm = diagnostics.snapshot().length;
+  handlers.get('permission')!({ request_id: 21, kind: { type: 'exit_plan_mode' } });
+  assert.equal((manager as any).pendingPermissionIds.size, 0, 'no turn owns this request yet');
+  assert.match(
+    diagnostics.snapshot().slice(beforeReArm).map((entry) => entry.message).join('\n'),
+    /dropped permission request 21/,
+    'dropping one is a five-minute stall at the engine gate, never a silent no-op',
+  );
+
+  handlers.get('event')!({ type: 'turn_started', turn_id: undefined });
+  assert.equal(manager.turnActive, true, 'the engine-initiated turn owns the slot');
+
+  handlers.get('permission')!({ request_id: 22, kind: { type: 'exit_plan_mode' } });
+  handlers.get('event')!({ type: 'tool_use_started', id: 'rewake', tool: 'Bash', view: {} });
+
+  assert.ok((manager as any).pendingPermissionIds.has(22), 'its permission prompts reach the user');
+  assert.equal(
+    broadcasts.some((entry) => entry.payload?.type === 'tool_use_started' && entry.payload?.id === 'rewake'),
+    true,
+    'and its transcript events reach the renderer',
+  );
+});
+
 test('prompt submission owns the pre-turn_started cancellation window', () => {
   const calls: Array<{ type: string; value?: unknown }> = [];
   const manager = new BridgeManager({

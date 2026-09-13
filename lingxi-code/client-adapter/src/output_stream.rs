@@ -219,6 +219,27 @@ impl OutputStream for AdapterOutputStream {
         self.sink.emit(ClientEvent::TaskLifecycle { event_json: event.to_string() }).await;
     }
 
+    /// Announce a turn the CLIENT did not submit — claude-code enqueues a
+    /// background-task completion onto the SAME command queue as typed input
+    /// (`enqueuePendingNotification` pushes onto the array `enqueue` pushes
+    /// onto) and the main loop then runs it as an ordinary turn: same spinner,
+    /// same transcript, same permission prompts. There is no "turn the client
+    /// did not start" anywhere in the oracle, so a host must be able to tell a
+    /// rewake apart from an idle connection.
+    ///
+    /// This impl was MISSING, so the trait's no-op default ran and
+    /// [`ClientEvent::TurnStarted`] had NO producer on the bridge path at all.
+    /// A desktop host that mirrors turn liveness (Electron's `activeTurn`, set
+    /// only when it itself sends a prompt and cleared by every `TurnEnded`)
+    /// therefore sat at "idle" for the whole of an engine-initiated turn and
+    /// dropped its events — and its permission requests, which then died at the
+    /// gate's 300s timeout with no prompt ever shown. `turn_id` is left `None`:
+    /// a rewake has no client correlator, and the bridge's `FrameEventSink`
+    /// stamps the owning turn's id on the way out.
+    async fn emit_turn_started(&self) {
+        self.sink.emit(crate::turn::turn_started_event(None)).await;
+    }
+
     async fn emit_text(&self, text: &str) {
         let mut blocks = self.message_blocks.lock().await;
         if let Some(MessageBlockDto::Text { text: current }) = blocks.last_mut() {
@@ -558,6 +579,35 @@ mod tests {
         let event = serde_json::json!({"type":"system", "subtype":"task_updated", "task_id":"b12345678", "patch":{"status":"completed"}});
         stream.emit_task_lifecycle(&event).await;
         assert_eq!(sink.events().await, vec![ClientEvent::TaskLifecycle { event_json: event.to_string() }]);
+    }
+
+    /// `emit_turn_started` must reach the sink as a real `TurnStarted`.
+    ///
+    /// This impl did not exist, so the `OutputStream` trait's no-op default ran
+    /// and the ONLY producer of `ClientEvent::TurnStarted` on the bridge path
+    /// was nothing at all. Every turn the engine started by itself — a
+    /// background-task rewake, a queue drain — reached the desktop as a stream
+    /// of events for a turn the client had never been told about, and the
+    /// Electron host, whose `activeTurn` is armed only by its own `sendPrompt`
+    /// and cleared by every `TurnEnded`, dropped all of them.
+    ///
+    /// Asserting on the SINK (not on the call returning) is the point: a
+    /// default-implemented trait method returns `()` just as happily as a wired
+    /// one, so only the emitted event distinguishes the two.
+    #[tokio::test]
+    async fn emit_turn_started_reaches_client_event_sink() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        platform_api::OutputStream::emit_turn_started(&stream).await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::TurnStarted { turn_id: None }],
+            "an engine-initiated turn must announce itself; `turn_id` stays None \
+             because a rewake has no client correlator and the bridge's \
+             FrameEventSink stamps the owning turn's id on the way out",
+        );
     }
 
     #[tokio::test]

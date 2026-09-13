@@ -1625,7 +1625,19 @@ export class SessionRuntime {
       this.broadcastClientEvent(event);
     });
     client.on('permission', (request: PermissionRequest) => {
-      if (generation !== this.generation || !this.activeTurn || this.cancellingTurn) return;
+      if (generation !== this.generation) return;
+      // NEVER drop one of these silently. The engine parks the tool for
+      // `DEFAULT_PERMISSION_TIMEOUT` (300s) waiting for an answer that a
+      // discarded request can never produce, then fails the tool closed with
+      // "permission request timed out" — a five-minute stall whose only trace,
+      // before this line existed, was the model being told its tool broke.
+      // `activeTurn` mirrors the engine's turn owner; it used to go stale for
+      // the whole of any turn the engine started by itself (a background-task
+      // rewake, a queue drain), which is exactly when this fired.
+      if (!this.activeTurn || this.cancellingTurn) {
+        this.diagnostics.add('warn', 'bridge', `dropped permission request ${request.request_id}: ${this.cancellingTurn ? 'turn is cancelling' : 'no active turn'}`);
+        return;
+      }
       if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
         if (this.resolvedPermissionIds.has(request.request_id)) return;
         if (!this.pendingPermissionIds.has(request.request_id) && this.pendingPermissionIds.size >= MAX_PENDING_PERMISSIONS) {
@@ -1638,7 +1650,13 @@ export class SessionRuntime {
       }
     });
     client.on('computerAccess', (request: ComputerAccessRequestDto) => {
-      if (generation !== this.generation || !this.activeTurn || this.cancellingTurn) return;
+      if (generation !== this.generation) return;
+      // Same reasoning as the permission handler above: the engine is parked on
+      // an answer, so a discarded request is a stall, not a no-op.
+      if (!this.activeTurn || this.cancellingTurn) {
+        this.diagnostics.add('warn', 'bridge', `dropped computer access request ${request.request_id}: ${this.cancellingTurn ? 'turn is cancelling' : 'no active turn'}`);
+        return;
+      }
       if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
         if (
           !this.pendingComputerAccessIds.has(request.request_id)

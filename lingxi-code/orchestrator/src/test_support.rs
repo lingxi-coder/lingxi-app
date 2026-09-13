@@ -351,6 +351,14 @@ pub struct MockOutputStream {
     attachments: Arc<Mutex<Vec<platform_api::AttachmentKind>>>,
     /// Compaction lifecycle is separate from transcript events.
     compaction_phases: Arc<Mutex<Vec<String>>>,
+    /// How many times `emit_turn_started` was called, same rationale as
+    /// `denials` and `attachments`: the trait method is DEFAULTED, so without
+    /// this override the mock inherits the no-op and a test cannot tell an
+    /// announced turn from an unannounced one. That is not hypothetical — the
+    /// bridge's own `AdapterOutputStream` shipped without the override, so
+    /// `ClientEvent::TurnStarted` had no producer at all and every turn the
+    /// engine started by itself ran invisibly on Desktop.
+    turn_starts: Arc<Mutex<usize>>,
 }
 
 impl MockOutputStream {
@@ -367,7 +375,14 @@ impl MockOutputStream {
             denials: Arc::new(Mutex::new(Vec::new())),
             attachments: Arc::new(Mutex::new(Vec::new())),
             compaction_phases: Arc::new(Mutex::new(Vec::new())),
+            turn_starts: Arc::new(Mutex::new(0)),
         }
+    }
+
+    /// How many times the orchestrator announced a turn the client did not
+    /// submit (`emit_turn_started`).
+    pub async fn turn_start_count(&self) -> usize {
+        *self.turn_starts.lock().await
     }
 
     /// Snapshot observed compaction phases, including start and terminal status.
@@ -440,6 +455,10 @@ impl Default for MockOutputStream {
 impl OutputStream for MockOutputStream {
     async fn emit_task_lifecycle(&self, event: &serde_json::Value) {
         self.lifecycle_events.lock().await.push(event.clone());
+    }
+
+    async fn emit_turn_started(&self) {
+        *self.turn_starts.lock().await += 1;
     }
 
     async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {

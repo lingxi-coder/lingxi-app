@@ -546,6 +546,28 @@ impl OrchestratorTurnDriver {
             .collect()
     }
 
+    /// Announce a turn the CLIENT did not submit, before it starts producing.
+    ///
+    /// [`crate::server::drain_main_thread`] runs whatever is left on the queue
+    /// as its OWN follow-up turn — a `/loop` tick, a `Now`-priority interrupt, a
+    /// slash command typed mid-turn. claude-code drains that same queue into the
+    /// ordinary submit path, so the turn it produces is indistinguishable from a
+    /// typed one: spinner, transcript, permission prompts. A host that learns
+    /// about turns only from the prompts IT sent would render none of it, and
+    /// would keep its composer unlocked and its Stop button hidden while the
+    /// engine works.
+    ///
+    /// The task-notification rewake is announced one layer up instead — the
+    /// orchestrator's own `emit_turn_started` (`conversation::drivers`) reaches
+    /// the client through this same [`client_adapter::AdapterOutputStream`], so
+    /// announcing it here as well would double-emit.
+    async fn announce_engine_initiated_turn(&self) {
+        use platform_api::OutputStream;
+        if let Some(output) = &self.message_output {
+            output.emit_turn_started().await;
+        }
+    }
+
     /// Drive ONE streaming turn with already-decoded image `sources`, surfacing a
     /// turn-level failure as a terminal [`ClientEvent::Error`] when an error sink
     /// is wired. Shared by [`TurnDriver::run_turn`] (no images) and
@@ -717,6 +739,7 @@ impl TurnDriver for OrchestratorTurnDriver {
         in_human_turn: bool,
         cancel: CancellationToken,
     ) {
+        self.announce_engine_initiated_turn().await;
         self.drive_turn(prompt, Vec::new(), cancel, None, in_human_turn)
             .await;
     }
@@ -957,6 +980,65 @@ mod tests {
                 .iter()
                 .all(|b| !matches!(b, ContentBlock::Image { .. })),
             "the text-only path carries no image blocks: {plain:?}"
+        );
+    }
+
+    /// Build a driver whose emitted `ClientEvent`s stay observable, with the
+    /// SAME `AdapterOutputStream` wired both into the orchestrator and into the
+    /// driver's `message_output` — the production shape (`boot::assemble`).
+    fn build_driver_with_sink(
+        streaming: Arc<MockStreamingApiClient>,
+    ) -> (OrchestratorTurnDriver, Arc<MockSink>) {
+        let batched = Arc::new(MockApiClient::new(Vec::new()));
+        let sink = MockSink::arc();
+        let message_output = AdapterOutputStream::new(sink.clone() as Arc<dyn ClientEventSink>);
+        let output: Arc<dyn platform_api::OutputStream> = Arc::new(message_output.clone());
+        let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+        let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            batched,
+            streaming,
+            tools,
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate) as Arc<dyn PermissionGate>,
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        (
+            OrchestratorTurnDriver::new(orchestrator).with_message_output(message_output),
+            sink,
+        )
+    }
+
+    /// A turn the client did not submit must ANNOUNCE itself, and must do so
+    /// BEFORE it starts producing.
+    ///
+    /// `drain_main_thread` runs the leftover queue as its own follow-up turn
+    /// (`run_queued_turn` / `run_queued_batch`) after the previous turn's
+    /// `TurnEnded` already told the client the connection went idle. Without a
+    /// `TurnStarted` in front of it, a host that mirrors turn liveness sees a
+    /// stream of events belonging to no turn it knows about — Electron's
+    /// `BridgeManager` drops exactly those, along with the permission requests
+    /// the turn parks on, so the turn runs invisibly and its tools die at the
+    /// 300s permission timeout.
+    ///
+    /// Asserting on the FIRST event (not merely on presence) is what makes this
+    /// honest: an announcement that arrives after the first `TextDelta` has
+    /// already been dropped is no announcement at all.
+    #[tokio::test]
+    async fn a_queued_turn_announces_itself_before_it_streams() {
+        let (driver, sink) = build_driver_with_sink(streaming_one_turn());
+
+        driver
+            .run_queued_turn("drained from the queue".to_string(), false, CancellationToken::new())
+            .await;
+
+        let events = sink.events().await;
+        assert_eq!(
+            events.first(),
+            Some(&client_protocol::events::ClientEvent::TurnStarted { turn_id: None }),
+            "a queue-drained turn must open with TurnStarted; got {events:?}",
         );
     }
 

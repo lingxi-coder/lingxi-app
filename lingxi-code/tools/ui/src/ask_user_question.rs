@@ -39,9 +39,15 @@
 //! `_skipped` telemetry.
 //!
 //! Fidelity notes / divergences (see Batch 5 spec):
-//! - TS `checkPermissions` uses `behavior:'ask'` ("Answer questions?"); the Rust
-//!   headless path keeps `PermissionResult::Allow` (vestigial — no interactive
-//!   approval substrate). `requires_user_interaction()` stays true.
+//! - TS `checkPermissions` uses `behavior:'ask'` ("Answer questions?"), and
+//!   upstream RENDERS that ask as the questionnaire itself
+//!   (`AskUserQuestionPermissionDialog`, answers returned as
+//!   `updatedInput.answers`). This port draws the questionnaire in `call` via
+//!   [`AskUserQuestionResolver`], so the permission result is `Allow` — an ask
+//!   here would stack a generic approval dialog in front of the question card.
+//!   `requires_user_interaction()` stays true, and the tool is deliberately
+//!   absent from the auto-mode safe allowlist, so nothing else that bit governs
+//!   changes. See `check_permissions` for the full reasoning.
 //! - The HTML-preview validation (`validateHtmlPreview`, gated on
 //!   `getQuestionPreviewFormat()==='html'`) remains out of scope here:
 //!   `preview` is still a passthrough string. The synthetic "Other" answer path
@@ -57,7 +63,6 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
-use permission::result::PermissionPrompt;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Map, Value};
 use telemetry::pii::{PiiTagged, Verified};
@@ -780,16 +785,45 @@ impl Tool for AskUserQuestionTool {
     }
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        PermissionResult::Ask {
+        // 🚨 This must NOT be an `Ask`, even though the oracle's own
+        // `checkPermissions` is `{behavior:"ask", message:"Answer questions?"}`
+        // (2.1.270 `As` tool object, src_169588164.js @3607405). Upstream, that
+        // `ask` IS the questionnaire: the permission surface for this one tool
+        // is `AskUserQuestionPermissionDialog`
+        // (`{event:"ui.render",component:"AskUserQuestion",
+        // drawnBy:"AskUserQuestionPermissionDialog"}`), which draws the
+        // questions and returns the chosen labels as `updatedInput.answers` —
+        // `call` then only formats what the dialog already collected.
+        //
+        // This port puts the questionnaire in [`Self::call`] instead, behind
+        // [`AskUserQuestionResolver`] (the TUI bottom-pane view, the desktop
+        // `AskUserQuestionPrompt`, the mobile sheet). So an `ask` here does not
+        // BECOME the question card the way it does upstream — it adds a
+        // generic "allow AskUserQuestion?" approval in front of it, and the user
+        // answers two dialogs for one question. Returning `Allow` is what makes
+        // the observable behavior match the oracle's: exactly one dialog, the
+        // questionnaire, and the user's answer is still the only way the call
+        // produces a result.
+        //
+        // `requires_user_interaction()` stays `true` (the oracle's
+        // `requiresUserInteraction(){return!0}`) so the tool keeps every
+        // property that bit governs: no one-tap always-allow rule
+        // (`suppressesAlwaysAllowRule`), no hook rescue, and no auto-mode
+        // classifier waving it through — `AskUserQuestion` is deliberately NOT
+        // in 2.1.270's `ojo` safe allowlist
+        // (`permission::mode_policy::is_auto_mode_safe_tool`).
+        //
+        // ⛔ Do not "restore" the ask without first moving the questionnaire
+        // onto the permission surface; the ask alone is a double prompt. It was
+        // switched to `Ask` in `9ed4d5598` ("Enforce authorization before
+        // interactive and executable surfaces") on the reading that the oracle
+        // asks here, without that half.
+        PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: ASK_USER_QUESTION_ASK_MESSAGE.into(),
             },
-            prompt: PermissionPrompt {
-                title: ASK_USER_QUESTION_TOOL_NAME.into(),
-                message: ASK_USER_QUESTION_ASK_MESSAGE.into(),
-                options: Vec::new(),
-            },
-            pending_classifier_check: None,
+            updated_input: None,
+            update_destination: None,
             metadata: PermissionMetadata::default(),
         }
     }
@@ -936,6 +970,39 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         }
+    }
+
+    /// 🚨 The permission layer must NOT raise a prompt for this tool.
+    ///
+    /// Upstream's `checkPermissions` IS an `ask`, but upstream RENDERS that ask
+    /// as the questionnaire (`AskUserQuestionPermissionDialog`) and reads the
+    /// chosen labels back out of `updatedInput.answers`. This port draws the
+    /// questionnaire in `call`, behind `AskUserQuestionResolver`, so an `ask`
+    /// here is a SECOND dialog — a generic "allow AskUserQuestion?" card in
+    /// front of the questions — and the user answers twice for one question.
+    ///
+    /// `requires_user_interaction()` must stay true regardless: it is what
+    /// suppresses the one-tap always-allow rule and blocks a hook rescue.
+    #[tokio::test]
+    async fn permission_layer_does_not_stack_a_prompt_in_front_of_the_questionnaire() {
+        let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
+        let input = json!({
+            "questions": [{
+                "question": "Which approach?",
+                "header": "Approach",
+                "options": [opt("A", "first"), opt("B", "second")],
+                "multiSelect": false
+            }]
+        });
+        let result = tool.check_permissions(&input, &fresh_ctx()).await;
+        assert!(
+            matches!(result, PermissionResult::Allow { .. }),
+            "AskUserQuestion owns its own dialog; the permission layer must not add one: {result:?}"
+        );
+        assert!(
+            tool.requires_user_interaction(),
+            "the oracle's requiresUserInteraction(){{return!0}} still holds"
+        );
     }
 
     fn opt(label: &str, desc: &str) -> Value {

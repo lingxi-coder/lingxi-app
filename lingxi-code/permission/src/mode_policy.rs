@@ -1,12 +1,19 @@
-//! Plan-mode tool policy — the read-only / planning-safe allowlist.
+//! The two tool allowlists that let a call skip a prompt on mode alone.
 //!
-//! Ports the EXTERNAL subset of claude-code's `SAFE_YOLO_ALLOWLISTED_TOOLS`
-//! (`classifierDecision.ts:56-98`) — the set of tools the auto-mode classifier
-//! treats as safe enough to skip a classifier round-trip because they are
-//! read-only or only touch agent-local planning state. The same set is reused
-//! here as the Plan-mode mutation-block allowlist: in `Plan` mode every tool
-//! NOT on this list is treated as a potential state mutation and asked about
-//! (see [`crate::policy::PermissionPolicy::authorize`]).
+//! * [`AUTO_MODE_SAFE_TOOLS`] is the AUTO-mode set — the 2.1.270 `ojo` set read
+//!   by `Sft(e,n)`. A tool on it is allowed outright in Auto mode and never
+//!   reaches the classifier.
+//! * [`PLAN_SAFE_TOOLS`] is the PLAN-mode mutation-block allowlist: in `Plan`
+//!   mode every tool NOT on this list is treated as a potential state mutation
+//!   and asked about (see [`crate::policy::PermissionPolicy::authorize`]).
+//!
+//! They started as one list (the port reused the EXTERNAL subset of
+//! `SAFE_YOLO_ALLOWLISTED_TOOLS` for both) and have since diverged at the
+//! source: 2.1.270's `ojo` dropped `SendMessage` / `AskUserQuestion` and grew
+//! the MCP-maintenance rows, while the Plan backstop is this port's own
+//! construct with no upstream twin (upstream enforces Plan mode by not
+//! ADVERTISING mutating tools, so a plan-mode `AskUserQuestion` must keep
+//! working). Keeping them separate is what lets each track its own source.
 //!
 //! ## Divergence from TS
 //! - The TS set is built from per-tool `*_TOOL_NAME` constants imported across
@@ -76,6 +83,78 @@ const PLAN_SAFE_TOOLS: &[&str] = &[
     "SendMessage",
 ];
 
+/// The 2.1.270 AUTO-MODE safe allowlist — 1:1 with the binary's `ojo` set, read
+/// by `Sft(e,n)` (src_169588164.js @2150529) and consumed by the auto-mode
+/// decision `dKo` as:
+///
+/// ```js
+/// if(Xn===void 0&&Pe===void 0&&!Le&&Sft(e.name,n)){
+///   …t(`Skipping auto mode classifier for ${e.name}: tool is on the safe allowlist`),
+///   …De({updatedInput:M.updatedInput??n,decisionReason:{type:"mode",mode:"auto"}})}
+/// ```
+///
+/// i.e. a tool on this list is ALLOWED in Auto mode without paying a classifier
+/// round-trip. This is a DIFFERENT list from [`PLAN_SAFE_TOOLS`] even though the
+/// port originally reused one set for both: by 2.1.270 `ojo` no longer carries
+/// `SendMessage` or `AskUserQuestion` (both have their own `checkPermissions`
+/// and, for `AskUserQuestion`, `requiresUserInteraction`), while it has grown
+/// the MCP-maintenance and task-metadata rows below. The Plan-mode backstop is
+/// this port's own construct (upstream enforces Plan mode by not ADVERTISING
+/// mutating tools), so the two sets are kept separate rather than merged.
+///
+/// Rows with no counterpart in this port are listed anyway so the set stays
+/// byte-comparable against the binary; they are simply never queried. The
+/// binary additionally splices `PLUGIN_SKILL_SAFE_TOOL_NAMES` (six plugin-skill
+/// tools: `SuggestSkills`, `SuggestPluginInstall`, …) and the Chrome/browser MCP
+/// prefix families handled by `Sft`'s `sjo`/`BPn`/`UPn`/`HPn` arms — all of
+/// which are per-INPUT predicates over tools this port does not advertise, so
+/// they are documented omissions rather than rows.
+const AUTO_MODE_SAFE_TOOLS: &[&str] = &[
+    // Read-only file + search (`rt`, `co`, `bo`, `MW`, `ji`).
+    "Read",
+    "Grep",
+    "Glob",
+    "LSP",
+    "ToolSearch",
+    // MCP resource reads and server maintenance (`X5`, `AW`, `vW`, `WM`, `eD`).
+    "ListMcpResourcesTool",
+    "ReadMcpResourceTool",
+    "ReadMcpResourceDirTool",
+    "RefreshMcpTools",
+    "WaitForMcpServers",
+    // Review reporting (`t0`).
+    "ReportFindings",
+    // Task / todo metadata (`Ay`, `uw`, `VF`, `pw`, `uS`, `Kg`, `A2`, `dw`).
+    "TodoWrite",
+    "TaskCreate",
+    "TaskGet",
+    "TaskUpdate",
+    "TaskList",
+    "TaskStop",
+    "TaskOutput",
+    "GetTask",
+    // Plan-mode UI (`TC`, `Dy`).
+    "EnterPlanMode",
+    "ExitPlanMode",
+    // Onboarding / connector discovery (`I0e`, `uJe`, `PPn`, `IPn`, `MPn`).
+    // Present in `ojo`; this port advertises none of them.
+    "ConnectGitHub",
+    "ShowOnboardingRolePicker",
+    "SearchMcpRegistry",
+    "SuggestConnectors",
+    "ListConnectors",
+];
+
+/// Is `tool_name` on the auto-mode safe allowlist (`Sft` / `ojo`)?
+///
+/// `true` ⇒ Auto mode allows the call outright, with
+/// `decisionReason: {type:"mode", mode:"auto"}`, and never reaches the
+/// classifier. `false` ⇒ the call continues down `dKo` to the classifier.
+#[must_use]
+pub fn is_auto_mode_safe_tool(tool_name: &str) -> bool {
+    AUTO_MODE_SAFE_TOOLS.contains(&tool_name)
+}
+
 /// Is `tool_name` on the read-only / planning-safe allowlist?
 ///
 /// Used by the Plan-mode backstop in [`crate::policy::PermissionPolicy::authorize`]:
@@ -91,6 +170,58 @@ pub fn is_plan_safe_tool(tool_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_mode_safe_set_matches_270_ojo() {
+        // Every row the binary's `ojo` carries that this port can advertise.
+        for t in [
+            "Read",
+            "Grep",
+            "Glob",
+            "LSP",
+            "ToolSearch",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
+            "RefreshMcpTools",
+            "WaitForMcpServers",
+            "ReportFindings",
+            "TodoWrite",
+            "TaskCreate",
+            "TaskGet",
+            "TaskUpdate",
+            "TaskList",
+            "TaskStop",
+            "TaskOutput",
+            "GetTask",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "ConnectGitHub",
+            "ShowOnboardingRolePicker",
+            "SearchMcpRegistry",
+            "SuggestConnectors",
+            "ListConnectors",
+        ] {
+            assert!(is_auto_mode_safe_tool(t), "{t} is in 2.1.270 `ojo`");
+        }
+        assert_eq!(AUTO_MODE_SAFE_TOOLS.len(), 26);
+    }
+
+    #[test]
+    fn auto_mode_safe_set_excludes_what_270_ojo_dropped() {
+        // `Sft` is NOT the Plan list. `AskUserQuestion` carries
+        // `requiresUserInteraction()` and `SendMessage` its own
+        // `checkPermissions`; neither is in `ojo`, so both must still reach the
+        // auto-mode classifier rather than be waved through.
+        for t in ["AskUserQuestion", "SendMessage"] {
+            assert!(!is_auto_mode_safe_tool(t), "{t} is not in 2.1.270 `ojo`");
+            assert!(is_plan_safe_tool(t), "{t} stays plan-safe");
+        }
+        // Side-effecting tools are on neither list.
+        for t in ["Bash", "Edit", "Write", "WebFetch", "Agent", "CronCreate"] {
+            assert!(!is_auto_mode_safe_tool(t), "{t} must reach the classifier");
+        }
+    }
 
     #[test]
     fn read_only_and_search_tools_are_plan_safe() {

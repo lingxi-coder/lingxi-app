@@ -4,9 +4,11 @@
 //! claude-code references that justify each row. Unknown tool names default
 //! to [`PromptDefault::DenyByDefault`] (fail-closed).
 //!
-//! Aggregate, oracle-parity set: 21 `DenyByDefault` (destructive / external
-//! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 42 tools,
-//! plus one synthetic `<unknown>` fallback.
+//! Aggregate, oracle-parity set: 14 `DenyByDefault` (destructive / external
+//! side-effects), 32 `AllowByDefault` (read-only, agent-local, or — the 2.1.270
+//! re-audit — a tool whose oracle object declares no `checkPermissions` and so
+//! defaults to `{behavior:"allow"}`) = 46 tools, plus one synthetic
+//! `<unknown>` fallback.
 //!
 //! LINGXI DIVERGENCE: 39 further rows with no oracle counterpart, reported by
 //! [`is_divergence_tool`]. 38 are the `LocalApp*` first-party local-app host
@@ -44,9 +46,9 @@ static TOOL_DEFAULTS: OnceLock<HashMap<&'static str, PromptDefault>> = OnceLock:
 
 fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
-    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(81);
+    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(85);
 
-    // Allow-by-default tools ([Y/n]) — 21 entries. (It said 20 while there
+    // Allow-by-default tools ([Y/n]) — 32 entries. (It said 20 while there
     // were 21, from before `ListAgents` was added; the count is asserted in
     // `tests::the_counts_in_this_module_doc_are_the_counts_in_the_table` now.)
     m.insert("Agent", AllowByDefault);
@@ -77,26 +79,55 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("TaskOutput", AllowByDefault);
     m.insert("TodoWrite", AllowByDefault);
     m.insert("ToolSearch", AllowByDefault);
+    // ---- 2.1.270 re-audit: tools whose ORACLE default is `allow` ------------
+    // The oracle's tool factory supplies the default every tool object that
+    // declares no `checkPermissions` of its own gets:
+    //
+    // ```js
+    // checkPermissions:(n,a)=>{let{tool:r,call:i}=t(a);
+    //   return r.checkPermissions?r.checkPermissions(n,i)
+    //                            :Promise.resolve({behavior:"allow",updatedInput:n})}
+    // ```
+    // (`At`, src_167837625.js @8300). Only a `passthrough` reaches `tBn`'s mode
+    // tail (`C.behavior==="passthrough"?{...C,behavior:"ask",…}:C`), so a tool
+    // with no `checkPermissions` NEVER prompts on mode alone — deny/ask rules,
+    // `requiresUserInteraction` and the MCP ceiling still bind above it.
+    //
+    // Scanning every `At({…})` literal in the 2.1.270 binary for the presence
+    // of a `checkPermissions` key gives the authoritative split. These eleven
+    // rows were on the wrong side of it: each of the tool objects below
+    // declares none, so upstream allows them outright, while this table's
+    // fail-closed `DenyByDefault` (or missing row) made
+    // `read_only_default_auto_allows` false and raised a prompt on every call.
+    // `TaskCreate` is the one users hit constantly — "create task" prompted in
+    // every mode, Auto included.
+    m.insert("TaskCreate", AllowByDefault); // `uw`, no checkPermissions
+    m.insert("TaskUpdate", AllowByDefault); // `pw`, no checkPermissions
+    m.insert("TaskStop", AllowByDefault); // `Kg`, no checkPermissions
+    m.insert("CronDelete", AllowByDefault); // `cw`, no checkPermissions
+    m.insert("ExitWorktree", AllowByDefault); // `ile`, no checkPermissions
+    m.insert("ListMcpResourcesTool", AllowByDefault); // `X5`, no checkPermissions
+    m.insert("ReadMcpResourceTool", AllowByDefault); // `AW`, no checkPermissions
 
-    // Deny-by-default tools ([y/N]) — 21 entries.
+    // Rows this table never had at all, so they fell to the fail-closed
+    // `DenyByDefault` that `tool_default` returns for an unknown name.
+    m.insert("ReadMcpResourceDirTool", AllowByDefault); // `vW`
+    m.insert("WaitForMcpServers", AllowByDefault); // `eD`
+    m.insert("ReportFindings", AllowByDefault); // `t0`
+    m.insert("PushNotification", AllowByDefault); // `UR`
+
+    // Deny-by-default tools ([y/N]) — 14 entries.
     m.insert("Bash", DenyByDefault);
     m.insert("Edit", DenyByDefault);
     m.insert("EnterWorktree", DenyByDefault);
-    m.insert("ExitWorktree", DenyByDefault);
-    m.insert("ListMcpResourcesTool", DenyByDefault);
     m.insert("MCP", DenyByDefault);
     m.insert("McpAuth", DenyByDefault);
     m.insert("NotebookEdit", DenyByDefault);
     m.insert("PowerShell", DenyByDefault);
     m.insert("REPL", DenyByDefault);
-    m.insert("ReadMcpResourceTool", DenyByDefault);
     m.insert("RemoteTrigger", DenyByDefault);
     m.insert("CronCreate", DenyByDefault);
-    m.insert("CronDelete", DenyByDefault);
     m.insert("SendMessage", DenyByDefault);
-    m.insert("TaskCreate", DenyByDefault);
-    m.insert("TaskStop", DenyByDefault);
-    m.insert("TaskUpdate", DenyByDefault);
     m.insert("WebFetch", DenyByDefault);
     m.insert("WebSearch", DenyByDefault);
     m.insert("Write", DenyByDefault);
@@ -224,9 +255,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 42 oracle-parity tools + 39 LingXi divergence rows (38 local-app
+    // 46 oracle-parity tools + 39 LingXi divergence rows (38 local-app
     // builtins + `Workflow`).
-    debug_assert_eq!(m.len(), 81, "tool defaults table must list all 81 tools");
+    debug_assert_eq!(m.len(), 85, "tool defaults table must list all 85 tools");
     m
 }
 
@@ -263,12 +294,12 @@ pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
 /// could answer "does this ROW name a tool that still exists", because
 /// `TOOL_DEFAULTS` is a private `static` and only single-key lookups were
 /// exported. THREE guards do constrain this table's composition, not one:
-/// `init_defaults`'s own `debug_assert_eq!(m.len(), 81, "tool defaults table
-/// must list all 81 tools")`, the test
+/// `init_defaults`'s own `debug_assert_eq!(m.len(), 85, "tool defaults table
+/// must list all 85 tools")`, the test
 /// `table_splits_into_the_parity_set_and_the_mobile_divergence`'s
-/// `oracle == 42` / `divergence == 39`, and the test
+/// `oracle == 46` / `divergence == 39`, and the test
 /// `the_counts_in_this_module_doc_are_the_counts_in_the_table`'s four
-/// hand-bumped bucket counts (23/21/15/24). NONE of those seven numbers moves
+/// hand-bumped bucket counts (14/32/15/24). NONE of those seven numbers moves
 /// for the orphan this function exists for, because every one of them counts
 /// `TOOL_DEFAULTS` alone: delete a tool from a CONSUMER crate's table, leave
 /// its row here, and all seven still hold. They also fail by naming a NUMBER
@@ -410,18 +441,78 @@ mod tests {
         assert_eq!(tool_default("WebSearch"), PromptDefault::DenyByDefault);
     }
 
+    /// The MCP family splits exactly where the oracle's tool objects split on
+    /// `checkPermissions`: the generic MCP call surface and the auth flow
+    /// declare one (and are `passthrough`/`ask`-capable), while the three
+    /// resource readers and the server-maintenance tools declare none and so
+    /// take `At`'s `{behavior:"allow"}` default. Pinning both sides keeps a
+    /// future re-audit from sliding the whole family one way.
     #[test]
-    fn mcp_tools_are_deny() {
+    fn mcp_call_surface_is_deny_and_resource_reads_are_allow() {
         assert_eq!(tool_default("MCP"), PromptDefault::DenyByDefault);
         assert_eq!(tool_default("McpAuth"), PromptDefault::DenyByDefault);
-        assert_eq!(
-            tool_default("ListMcpResourcesTool"),
-            PromptDefault::DenyByDefault
-        );
-        assert_eq!(
-            tool_default("ReadMcpResourceTool"),
-            PromptDefault::DenyByDefault
-        );
+        for name in [
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
+            "WaitForMcpServers",
+        ] {
+            assert_eq!(
+                tool_default(name),
+                PromptDefault::AllowByDefault,
+                "{name} declares no checkPermissions upstream"
+            );
+        }
+    }
+
+    /// The rows the 2.1.270 re-audit moved. Every one of these tool objects
+    /// declares no `checkPermissions` in the binary, so upstream never prompts
+    /// for them on mode alone; this table used to, which is what made
+    /// "create task" raise a permission request in every mode.
+    #[test]
+    fn tools_with_no_oracle_check_permissions_are_allow() {
+        for name in [
+            "TaskCreate",
+            "TaskUpdate",
+            "TaskStop",
+            "TaskGet",
+            "TaskList",
+            "TaskOutput",
+            "TodoWrite",
+            "CronDelete",
+            "CronList",
+            "ExitWorktree",
+            "ReportFindings",
+            "PushNotification",
+        ] {
+            assert_eq!(
+                tool_default(name),
+                PromptDefault::AllowByDefault,
+                "{name} declares no checkPermissions upstream"
+            );
+        }
+        // The other half of the same scan: these DO declare one, so they keep
+        // reaching the prompt. A blanket flip would have taken them too.
+        for name in [
+            "Bash",
+            "Write",
+            "Edit",
+            "NotebookEdit",
+            "WebFetch",
+            "WebSearch",
+            "SendMessage",
+            "RemoteTrigger",
+            "EnterWorktree",
+            "CronCreate",
+            "REPL",
+            "PowerShell",
+        ] {
+            assert_eq!(
+                tool_default(name),
+                PromptDefault::DenyByDefault,
+                "{name} declares checkPermissions upstream"
+            );
+        }
     }
 
     #[test]
@@ -452,7 +543,7 @@ mod tests {
         // without being recorded as a divergence, which a single total hides.
         let oracle = m.keys().filter(|k| !is_divergence_tool(k)).count();
         let divergence = m.keys().filter(|k| is_divergence_tool(k)).count();
-        assert_eq!(oracle, 42, "oracle-parity tool count changed");
+        assert_eq!(oracle, 46, "oracle-parity tool count changed");
         assert_eq!(divergence, 39, "divergence row count changed");
         assert_eq!(m.len(), oracle + divergence);
         // `Workflow` must be booked as a divergence, never as oracle parity:
@@ -473,12 +564,12 @@ mod tests {
         };
         assert_eq!(
             count(false, PromptDefault::DenyByDefault),
-            21,
+            14,
             "oracle deny"
         );
         assert_eq!(
             count(false, PromptDefault::AllowByDefault),
-            21,
+            32,
             "oracle allow"
         );
         assert_eq!(

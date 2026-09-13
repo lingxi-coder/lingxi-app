@@ -40,6 +40,49 @@
 //! //   Nle: if(e==="auto"&&!P0()){let o=One();return{ok:!1,error:`Cannot set permission mode to auto: ${Jce(o)}`}}
 //! ```
 //!
+//! ## Re-audited against 2.1.270 (2026-09-13)
+//!
+//! The cluster was re-read in the 2.1.270 binary. The availability decision and
+//! its message map are now:
+//!
+//! ```js
+//! function aC(){if(WSe())return!1;if(eqe())return!1;if(!Xce(nt()))return!1;return!0}   // P0
+//! function R8(){if(eqe())return"settings";if(WSe())return"circuit-breaker";
+//!               if(!Xce(nt()))return"model";return AFn()}                              // One
+//! function KW(e){switch(e){                                                            // Jce
+//!   case"settings":       return"auto mode disabled by settings";
+//!   case"circuit-breaker":return"auto mode is unavailable for your plan";
+//!   case"fast-mode":      return"auto mode unavailable while fast mode is on \xB7 run /fast off";
+//!   case"model":          return"auto mode unavailable for this model"}}
+//! function iBe(){let e=R8();return e!==null?KW(e):"auto mode is unavailable right now"}
+//! function fae(e){return e.includes("claude-3-")||e==="claude-opus-4-0"||e==="claude-opus-4-1"
+//!   ||e==="claude-opus-4-5"||e==="claude-sonnet-4-0"||e==="claude-sonnet-4-5"||e==="claude-haiku-4-5"}
+//! function Xce(e){let n=je(e),r=He();if(fae(n))return!1;                                // dUe
+//!   if(r!=="firstParty"&&!XD(r)&&(n==="claude-opus-4-6"||n==="claude-sonnet-4-6"||n.includes("haiku")))return!1;
+//!   return!0}
+//! ```
+//!
+//! Two deltas against the 2.1.207 shape this module was written from:
+//!
+//! * **`jqt` is gone.** `Xce` no longer consults a provider opt-in, so
+//!   `AutoGateDenialReason::Provider` has no counterpart in 2.1.270 at all —
+//!   not merely an unreachable one. It is kept here only because removing a
+//!   public variant is a wider edit than this pass; it stays unreachable
+//!   ([`provider_allows_auto_mode`] is constant `true`).
+//! * **A `fast-mode` reason was ADDED.** `R8`'s tail is `AFn()` — the
+//!   `fastModeBreakerReason` latch — whose message is
+//!   `auto mode unavailable while fast mode is on · run /fast off`, and `iBe`
+//!   adds the null-reason fallback `auto mode is unavailable right now`. This
+//!   port has a fast mode (`/fast`, `OrchestratorHandle::set_fast_mode`) but
+//!   does not feed a breaker latch into this gate, and inventing an input that
+//!   nothing sets would add a variant no code path can reach. NOT PORTED,
+//!   deliberately; wire the latch first, then add the reason.
+//!
+//! The model deny-list itself is unchanged from 2.1.207 EXCEPT that the
+//! "counts as first-party" test is `XD` (`anthropicAws` **or**
+//! `anthropicGoogleCloud`), which this module had as `anthropicAws` alone —
+//! see [`is_anthropic_managed_provider`].
+//!
 //! ## Documented omissions vs the binary (no substrate in this build)
 //! - **Statsig remote-disable** (`tengu_auto_mode_config.enabled==="disabled"`,
 //!   read by the runtime `AVr`/`verifyAutoModeGateAccess`): `LingXi` has no
@@ -139,14 +182,33 @@ pub fn model_supports_auto_mode(model: &str, provider: &str) -> bool {
         return false;
     }
     // Non-1P (bedrock/vertex/gateway/…) additionally exclude the 4-6 pair and
-    // every haiku.
+    // every haiku. The "counts as first-party" family is `XD` —
+    // [`is_anthropic_managed_provider`] — NOT `anthropicAws` alone.
     if provider != "firstParty"
-        && provider != "anthropicAws"
+        && !is_anthropic_managed_provider(provider)
         && (model == "claude-opus-4-6" || model == "claude-sonnet-4-6" || model.contains("haiku"))
     {
         return false;
     }
     true
+}
+
+/// `XD(e)` — the Anthropic-operated provider family, 2.1.270
+/// (`src_166316371.js` @27030):
+///
+/// ```js
+/// function XD(e=He()){return e==="anthropicAws"||e==="anthropicGoogleCloud"}
+/// ```
+///
+/// 🚨 This port previously spelled the second arm of [`model_supports_auto_mode`]
+/// as `provider != "anthropicAws"`, which was the 2.1.207 reading and is one
+/// provider short. On `anthropicGoogleCloud` the omission is user-visible and
+/// wrong in the RESTRICTIVE direction: a session on `claude-sonnet-4-6` (or any
+/// haiku) there was told `auto mode unavailable for this model` and refused
+/// entry to Auto mode, while upstream lets it in.
+#[must_use]
+pub fn is_anthropic_managed_provider(provider: &str) -> bool {
+    provider == "anthropicAws" || provider == "anthropicGoogleCloud"
 }
 
 /// `P0()` — is auto mode available? Short-circuits in the binary's order:
@@ -292,6 +354,41 @@ mod tests {
         assert!(!model_supports_auto_mode("claude-opus-4-6", "bedrock"));
         assert!(!model_supports_auto_mode("claude-opus-4-6", "vertex"));
         assert!(!model_supports_auto_mode("claude-sonnet-4-6", "gateway"));
+    }
+
+    /// 🚨 The gate's "counts as first-party" test is `XD` — `anthropicAws` OR
+    /// `anthropicGoogleCloud` — not `anthropicAws` alone. With only the first
+    /// arm, a 2.1.270-supported model on `anthropicGoogleCloud` was refused
+    /// entry to Auto mode with `auto mode unavailable for this model`. The
+    /// tests above all used `anthropicAws`, so nothing was red.
+    #[test]
+    fn anthropic_google_cloud_is_in_the_first_party_family() {
+        assert!(is_anthropic_managed_provider("anthropicAws"));
+        assert!(is_anthropic_managed_provider("anthropicGoogleCloud"));
+        for provider in ["firstParty", "bedrock", "vertex", "gateway", "foundry"] {
+            assert!(
+                !is_anthropic_managed_provider(provider),
+                "{provider} is not in `XD`"
+            );
+        }
+        for model in ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-6"] {
+            assert!(
+                model_supports_auto_mode(model, "anthropicGoogleCloud"),
+                "{model} must be allowed on anthropicGoogleCloud"
+            );
+            // The same model on a provider OUTSIDE `XD` is still denied, so the
+            // fix widens exactly one family and nothing else.
+            assert!(!model_supports_auto_mode(model, "vertex"), "{model}");
+        }
+        // The shared exclusion list still binds inside the family.
+        assert!(!model_supports_auto_mode(
+            "claude-haiku-4-5",
+            "anthropicGoogleCloud"
+        ));
+        assert!(!model_supports_auto_mode(
+            "claude-opus-4-5",
+            "anthropicGoogleCloud"
+        ));
     }
 
     #[test]

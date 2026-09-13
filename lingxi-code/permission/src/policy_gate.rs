@@ -1727,6 +1727,12 @@ fn read_only_default_auto_allows(
     reason: &PermissionDecisionReason,
     mode: PermissionMode,
 ) -> bool {
+    // An undecided Auto-mode subagent needs contextual approval. Its legacy
+    // AllowByDefault entry must not turn classifier Pass into an approval when
+    // the contextual classifier is unavailable or itself cannot decide.
+    if mode == PermissionMode::Auto && matches!(name, "Agent" | "Task") {
+        return false;
+    }
     // LINGXI DIVERGENCE, narrowly scoped to the rows that have no oracle
     // counterpart (`defaults_per_tool::is_divergence_tool`: the `LocalApp*`
     // family plus `Workflow`).

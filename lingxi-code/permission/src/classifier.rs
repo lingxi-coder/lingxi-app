@@ -74,7 +74,13 @@ pub fn classify_tool_call(tool_name: &str, input: &Value) -> AutoModeClassifierV
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => classify_file_mutation(input),
         "TodoWrite" | "ExitPlanMode" => allow("Local Operations"),
         "WebFetch" | "WebSearch" => classify_web(tool_name, input),
-        "Agent" | "Task" => classify_agent(input),
+        // Prompt prose can discuss unsafe modes while auditing their implementation.
+        // It does not establish the child permissions (the deprecated `mode` input
+        // is ignored). Let the contextual classifier or user prompt decide; never
+        // infer either approval or denial from words inside the task description.
+        "Agent" | "Task" => AutoModeClassifierVerdict::Pass {
+            reason: "Subagent request needs transcript-aware approval".to_string(),
+        },
         _ => AutoModeClassifierVerdict::Pass {
             reason: format!("No auto-mode classifier rule for {tool_name}"),
         },
@@ -279,25 +285,6 @@ fn classify_web(tool_name: &str, input: &Value) -> AutoModeClassifierVerdict {
     }
     AutoModeClassifierVerdict::Pass {
         reason: "Network destination is not trusted by auto-mode environment".to_string(),
-    }
-}
-
-fn classify_agent(input: &Value) -> AutoModeClassifierVerdict {
-    let text = input.to_string().to_ascii_lowercase();
-    if contains_any(
-        &text,
-        &[
-            "dangerously-skip-permissions",
-            "bypasspermissions",
-            "no-sandbox",
-            "disable approval",
-        ],
-    ) {
-        deny_soft("Create Unsafe Agents")
-    } else {
-        AutoModeClassifierVerdict::Pass {
-            reason: "Subagent request needs transcript-aware approval".to_string(),
-        }
     }
 }
 

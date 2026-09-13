@@ -93,7 +93,7 @@ pub use auto_edit_safety::{
 };
 pub use auto_gate::{
     apply_auto_mode_gate, auto_mode_available, auto_mode_denial_reason, cannot_set_auto_message,
-    model_supports_auto_mode, provider_allows_auto_mode, AutoGateDenialReason, AutoGateInputs,
+    is_anthropic_managed_provider, model_supports_auto_mode, AutoGateDenialReason, AutoGateInputs,
 };
 pub use bash_command_clamp::{
     clamp_bash_deny_message, clamp_crash_deny_message, clamp_surface_deny_message, find_clamp_miss,

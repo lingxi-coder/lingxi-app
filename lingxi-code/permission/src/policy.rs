@@ -203,6 +203,59 @@ pub struct PermissionPolicy {
     /// clamp layer (which is every session today), so `authorize` is
     /// byte-identical to its pre-clamp behavior by default.
     pub bash_command_clamps: Vec<Vec<String>>,
+    /// Apply every AUTO-mode restriction regardless of the `mode` the authorize
+    /// call is actually running under: the dangerous-classifier allow-rule
+    /// suspension in [`Self::rule_is_available_in_mode`], and the loop-tool
+    /// carve-out that withholds `CronCreate` / `ScheduleWakeup`'s tool-local
+    /// allow so they keep reaching the classifier.
+    ///
+    /// Set only by the gate's auto-mode `acceptEdits` SIMULATION
+    /// (`PolicyPermissionGate::accept_edits_fast_path`), which is `dKo`'s
+    /// "would be allowed in acceptEdits mode" probe. Upstream runs that probe
+    /// with the dangerous-classifier allow rules FILTERED OUT:
+    ///
+    /// ```js
+    /// let Lr=(Wr)=>{let Zo=yr(Wr);return!$He(Zo.toolName,Zo.ruleContent)},
+    ///     yo=gs(F.alwaysAllowRules,(Wr)=>(Wr??[]).filter(Lr)), …
+    ///     ko=(Wr)=>e.checkPermissions(rs,{…getAppState:()=>({…toolPermissionContext:
+    ///           {...Zo.toolPermissionContext,mode:"acceptEdits",alwaysAllowRules:yo}})})
+    /// ```
+    ///
+    /// `$He` is [`crate::dangerous_perms::is_dangerous_classifier_permission`],
+    /// which this port applies through [`Self::rule_is_available_in_mode`] —
+    /// but that keys on the mode being `Auto`, and the simulation deliberately
+    /// passes `AcceptEdits`. Without this flag the simulation would honour
+    /// `Bash(python:*)` and hand the fast path an allow the classifier was
+    /// supposed to adjudicate: a FAIL-OPEN introduced by the fast path itself.
+    /// Defaults to `false`, so every non-simulation authorize is untouched.
+    pub apply_auto_mode_restrictions: bool,
+    /// `host.launchOptions.isInteractive()` — was this process launched as an
+    /// INTERACTIVE session?
+    ///
+    /// The only consumer is the plan-mode bypass, whose oracle predicate is
+    ///
+    /// ```js
+    /// function zj(e,n){return e==="plan"&&n===!0&&!Ae()}
+    /// function Ae(){return!n().host.launchOptions.isInteractive()}
+    /// ```
+    ///
+    /// (2.1.270 `src_165140675.js` @64480 and `src_164505306.js` @77144). So
+    /// `plan` counts as `bypassPermissions` only in a session a person is
+    /// actually steering. This port had the conjunct as
+    /// `!bypass_killswitch_active` instead, which is a different predicate: a
+    /// HEADLESS run launched with `--dangerously-skip-permissions` and then put
+    /// into plan mode got a blanket allow that upstream withholds.
+    ///
+    /// Defaults to `false` so a host that does not declare its launch kind
+    /// fails CLOSED — the flag only ever widens permission.
+    ///
+    /// ⚠️ This is a LAUNCH property, not the per-call
+    /// `is_non_interactive_session` / `shouldAvoidPermissionPrompts` that the
+    /// gate context carries; upstream reads it from the ambient host, not from
+    /// the call. It is a field rather than a process-global read so the
+    /// parallel test harness cannot make one test's launch kind leak into
+    /// another's authorize.
+    pub interactive_session: bool,
 }
 
 impl PermissionPolicy {
@@ -231,6 +284,8 @@ impl PermissionPolicy {
             classify_all_shell: false,
             workspace_leases: None,
             bash_command_clamps: Vec::new(),
+            apply_auto_mode_restrictions: false,
+            interactive_session: false,
         }
     }
 
@@ -259,6 +314,24 @@ impl PermissionPolicy {
     #[must_use]
     pub fn with_managed_permission_rules_only(mut self, enabled: bool) -> Self {
         self.allow_managed_permission_rules_only = enabled;
+        self
+    }
+
+    /// Declare whether this process was launched as an INTERACTIVE session —
+    /// `host.launchOptions.isInteractive()`. See
+    /// [`Self::interactive_session`]; the plan-mode bypass is its only reader.
+    #[must_use]
+    pub fn with_interactive_session(mut self, interactive: bool) -> Self {
+        self.interactive_session = interactive;
+        self
+    }
+
+    /// Force `Auto`-mode rule availability regardless of the mode the authorize
+    /// call runs under — the auto-mode `acceptEdits` simulation only. See
+    /// [`Self::apply_auto_mode_restrictions`].
+    #[must_use]
+    pub fn with_apply_auto_mode_restrictions(mut self, enabled: bool) -> Self {
+        self.apply_auto_mode_restrictions = enabled;
         self
     }
 
@@ -971,6 +1044,8 @@ impl PermissionPolicy {
             classify_all_shell: self.classify_all_shell,
             workspace_leases: self.workspace_leases.clone(),
             bash_command_clamps: self.bash_command_clamps.clone(),
+            apply_auto_mode_restrictions: self.apply_auto_mode_restrictions,
+            interactive_session: self.interactive_session,
         }
     }
 
@@ -1546,6 +1621,28 @@ impl PermissionPolicy {
         if let Some(result) = self.shell_compound_allow(tool_name, input, &sources, mode) {
             return result;
         }
+        // .270 CronDelete/CronList inherit At's tool-local allow. Creation
+        // and dynamic wakeups allow outside Auto; Auto's passthrough must
+        // continue to the classifier. Explicit rules already ran above.
+        if matches!(tool_name, "CronDelete" | "CronList")
+            || (matches!(tool_name, "CronCreate" | "ScheduleWakeup")
+                && mode != PermissionMode::Auto
+                // The gate's acceptEdits SIMULATION runs this walk under
+                // `AcceptEdits` while the session is in `Auto`. Without this
+                // conjunct the simulation hands back the very allow the line
+                // above withholds, and the probe waves both loop tools past the
+                // classifier — the exact bypass this carve-out exists to stop.
+                && !self.apply_auto_mode_restrictions)
+        {
+            return PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other {
+                    reason: "Scheduled task tool permits this permission mode".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: PermissionMetadata::default(),
+            };
+        }
         // 3b. Plan-mode mutation backstop (claude-code `prepareContextForPlanMode`,
         //     `permissionSetup.ts:1462-1500`). In `Plan` mode, the primary
         //     enforcement is that mutating tools are NOT advertised on the wire
@@ -1570,8 +1667,17 @@ impl PermissionPolicy {
         //     sed asks stay bypass-immune — matching the TS step order (1a deny,
         //     1d ask, 1g safety all precede the 2a bypass). Subject to the same
         //     killswitch override as `BypassPermissions`.
+        // `zj(D, M.isBypassPermissionsModeAvailable)` = `D==="plan" &&
+        // available===true && !Ae()`, where `Ae()` is `!isInteractive()`.
+        // ⚠️ The `!bypass_killswitch_active` conjunct is this port's own, and is
+        // KEPT: upstream's `zj` does not consult the killswitch here (only the
+        // Shift+Tab cycle's `oKe` does, as `!bS()`), so dropping it to match
+        // byte-for-byte would REOPEN the plan bypass on a session whose
+        // administrator disabled bypass mode. A strictly-narrowing divergence,
+        // recorded rather than removed.
         if mode == PermissionMode::Plan
             && self.bypass_permissions_available
+            && self.interactive_session
             && !self.bypass_killswitch_active
         {
             return allow_with_mode(PermissionMode::Plan);
@@ -1812,7 +1918,7 @@ impl PermissionPolicy {
     }
 
     fn rule_is_available_in_mode(&self, rule: &PermissionRule, mode: PermissionMode) -> bool {
-        mode != PermissionMode::Auto
+        (mode != PermissionMode::Auto && !self.apply_auto_mode_restrictions)
             || !crate::dangerous_perms::is_dangerous_classifier_permission_with_flag(
                 &rule.value.tool_name,
                 &rule.value.rule_content,
@@ -2449,7 +2555,11 @@ impl PermissionPolicy {
             return false;
         }
         mode == PermissionMode::BypassPermissions
-            || (mode == PermissionMode::Plan && self.bypass_permissions_available)
+            || (mode == PermissionMode::Plan
+                && self.bypass_permissions_available
+                // `zj`'s third conjunct, `!Ae()` — plan counts as bypass only
+                // in an interactive session. See [`Self::interactive_session`].
+                && self.interactive_session)
     }
 
     /// Resolve a per-tool GUARD ask against the bypass override (BYPASS-01) and

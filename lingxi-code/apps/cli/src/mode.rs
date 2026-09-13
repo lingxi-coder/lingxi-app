@@ -1051,6 +1051,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // captured before `tui_build` is partly consumed below).
     let initial_permission_mode = tui_build.initial_permission_mode;
     let bypass_available = tui_build.bypass_available;
+    // `I1(e)` — whether Shift+Tab may land on `auto` (claude-code `sKe`).
+    let auto_available = tui_build.auto_available;
     platform_api::live_sessions::set_process_permission_mode(
         initial_permission_mode.wire_str(),
         bypass_available,
@@ -2390,6 +2392,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             prompt_history,
             initial_permission_mode,
             bypass_available,
+            auto_available,
             emoji_completion_enabled,
             startup_view_mode,
             Some(agents_snapshot_provider),

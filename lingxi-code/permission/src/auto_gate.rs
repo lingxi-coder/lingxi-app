@@ -64,11 +64,14 @@
 //!
 //! Two deltas against the 2.1.207 shape this module was written from:
 //!
-//! * **`jqt` is gone.** `Xce` no longer consults a provider opt-in, so
-//!   `AutoGateDenialReason::Provider` has no counterpart in 2.1.270 at all —
-//!   not merely an unreachable one. It is kept here only because removing a
-//!   public variant is a wider edit than this pass; it stays unreachable
-//!   ([`provider_allows_auto_mode`] is constant `true`).
+//! * **`jqt` is gone, and with it the `provider` reason.** `Xce` no longer
+//!   consults a provider opt-in, and `KW` has no `provider` case; the string
+//!   `auto mode requires CLAUDE_CODE_ENABLE_AUTO_MODE=1` occurs ZERO times in
+//!   the 2.1.270 binary (the env-var NAME survives only inside settings
+//!   allowlists). `AutoGateDenialReason::Provider` and the vestigial
+//!   `provider_allows_auto_mode` are therefore DELETED rather than kept
+//!   unreachable — an unreachable variant that prints copy the oracle no longer
+//!   has is a divergence in the port's own direction.
 //! * **A `fast-mode` reason was ADDED.** `R8`'s tail is `AFn()` — the
 //!   `fastModeBreakerReason` latch — whose message is
 //!   `auto mode unavailable while fast mode is on · run /fast off`, and `iBe`
@@ -91,9 +94,6 @@
 //!   already-ported LOCAL denial-tracking breaker
 //!   ([`crate::denial_tracking::DenialTrackingState::is_circuit_broken`]); the
 //!   remote-config latch is inert-by-default.
-//! - **`jqt` provider opt-in** is ported vestigially (always `true`, as in
-//!   2.1.207) so [`AutoGateDenialReason::Provider`] stays structurally present
-//!   but unreachable. No `LINGXI_ENABLE_AUTO_MODE` opt-in is built around it.
 //! - **`ao(e)` model normalization** (inference-profile / `[1m]` stripping) is
 //!   approximated by treating the passed model id as already canonical; the exact
 //!   `===` / `.includes` checks below match on that canonical form.
@@ -102,16 +102,13 @@ use crate::mode::PermissionMode;
 
 /// Why auto mode is unavailable — 1:1 with claude-code `One()`'s four return
 /// tags. Precedence (highest first): [`Self::Settings`] → [`Self::CircuitBreaker`]
-/// → [`Self::Provider`] → [`Self::Model`].
+/// → [`Self::Model`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoGateDenialReason {
     /// `disableAutoMode == "disable"` at either settings position (`Bpa()`).
     Settings,
     /// The local denial circuit-breaker has tripped (`q6r()`).
     CircuitBreaker,
-    /// Provider opt-in missing — **unreachable** in 2.1.207 (`jqt()` is always
-    /// true); ported for structural parity only.
-    Provider,
     /// The active model does not support auto mode (`dUe()` deny-list).
     Model,
 }
@@ -123,7 +120,6 @@ impl AutoGateDenialReason {
         match self {
             AutoGateDenialReason::Settings => "auto mode disabled by settings",
             AutoGateDenialReason::CircuitBreaker => "auto mode is unavailable for your plan",
-            AutoGateDenialReason::Provider => "auto mode requires CLAUDE_CODE_ENABLE_AUTO_MODE=1",
             AutoGateDenialReason::Model => "auto mode unavailable for this model",
         }
     }
@@ -147,15 +143,6 @@ pub struct AutoGateInputs {
     pub provider: String,
 }
 
-/// `jqt(e)` — provider opt-in. **Vestigial in 2.1.207**: always `true`
-/// (`if(e==="firstParty"||e==="anthropicAws")return!0;return!0`). Kept as a
-/// named fn so [`model_supports_auto_mode`] and [`auto_mode_denial_reason`]
-/// mirror the binary's call sites exactly.
-#[must_use]
-pub fn provider_allows_auto_mode(_provider: &str) -> bool {
-    true
-}
-
 /// `dUe(e)` — does the active model support auto mode? Ports the binary's exact
 /// deny-list:
 /// - Off for `claude-3-*` and the legacy 4-x line
@@ -166,10 +153,6 @@ pub fn provider_allows_auto_mode(_provider: &str) -> bool {
 /// - Otherwise on.
 #[must_use]
 pub fn model_supports_auto_mode(model: &str, provider: &str) -> bool {
-    // `if(!jqt(r))return!1` — vestigial (always passes) but ported for shape.
-    if !provider_allows_auto_mode(provider) {
-        return false;
-    }
     // Shared exclusion list (all providers).
     if model.contains("claude-3-")
         || model == "claude-opus-4-0"
@@ -229,9 +212,9 @@ pub fn auto_mode_available(inputs: &AutoGateInputs) -> bool {
 
 /// `One()` — the denial reason (or `None` when auto mode IS available). NOTE the
 /// precedence order differs from [`auto_mode_available`]'s short-circuit order:
-/// settings → circuit-breaker → provider → model, exactly as the binary's
-/// `One()`. [`AutoGateDenialReason::Provider`] is unreachable
-/// ([`provider_allows_auto_mode`] is always `true`).
+/// settings → circuit-breaker → model, exactly as the binary's
+/// `One()` — settings → circuit-breaker → model. (2.1.270's `R8` has a fourth
+/// tail, `AFn()`'s `fast-mode`; see the module doc for why it is not ported.)
 #[must_use]
 pub fn auto_mode_denial_reason(inputs: &AutoGateInputs) -> Option<AutoGateDenialReason> {
     if inputs.disabled_by_settings {
@@ -239,9 +222,6 @@ pub fn auto_mode_denial_reason(inputs: &AutoGateInputs) -> Option<AutoGateDenial
     }
     if inputs.circuit_broken {
         return Some(AutoGateDenialReason::CircuitBreaker);
-    }
-    if !provider_allows_auto_mode(&inputs.provider) {
-        return Some(AutoGateDenialReason::Provider);
     }
     if !model_supports_auto_mode(&inputs.model, &inputs.provider) {
         return Some(AutoGateDenialReason::Model);
@@ -299,24 +279,9 @@ mod tests {
             "auto mode is unavailable for your plan"
         );
         assert_eq!(
-            AutoGateDenialReason::Provider.message(),
-            "auto mode requires CLAUDE_CODE_ENABLE_AUTO_MODE=1"
-        );
-        assert_eq!(
             AutoGateDenialReason::Model.message(),
             "auto mode unavailable for this model"
         );
-    }
-
-    #[test]
-    fn provider_opt_in_is_vestigially_true() {
-        // jqt() is unconditionally true in 2.1.207 (dead "provider" branch).
-        assert!(provider_allows_auto_mode("firstParty"));
-        assert!(provider_allows_auto_mode("anthropicAws"));
-        assert!(provider_allows_auto_mode("bedrock"));
-        assert!(provider_allows_auto_mode("vertex"));
-        assert!(provider_allows_auto_mode("openrouter"));
-        assert!(provider_allows_auto_mode(""));
     }
 
     #[test]
@@ -454,14 +419,29 @@ mod tests {
         );
     }
 
+    /// 2.1.270's `R8` reports only `settings` / `circuit-breaker` / `model`
+    /// (plus the unported `fast-mode` tail). A model-only denial is `Model`;
+    /// there is no `provider` tag left to confuse it with, and the string the
+    /// deleted one printed occurs ZERO times in the binary.
     #[test]
-    fn denial_reason_provider_is_unreachable() {
-        // With jqt() always true, the Provider branch can never fire — a
-        // model-only denial is reported as Model, never Provider.
+    fn denial_reason_for_an_unsupported_model_is_model() {
         let i = inputs("claude-opus-4-6", "bedrock"); // model unsupported off-1P
         assert_eq!(
             auto_mode_denial_reason(&i),
             Some(AutoGateDenialReason::Model)
+        );
+        // The full message map, byte-exact against `KW`.
+        assert_eq!(
+            AutoGateDenialReason::Settings.message(),
+            "auto mode disabled by settings"
+        );
+        assert_eq!(
+            AutoGateDenialReason::CircuitBreaker.message(),
+            "auto mode is unavailable for your plan"
+        );
+        assert_eq!(
+            AutoGateDenialReason::Model.message(),
+            "auto mode unavailable for this model"
         );
     }
 

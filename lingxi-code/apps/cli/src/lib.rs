@@ -1445,6 +1445,28 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 /// remote-disable is a documented omission. The provider is resolved as
 /// `"firstParty"` at this CLI surface (multi-provider provider-mapping into the
 /// gate is deferred — see [`permission::auto_gate`]).
+/// Is `auto` an available Shift+Tab cycle target for this launch?
+///
+/// `I1(e)` in claude-code 2.1.270 (`src_178976794.js`) is
+/// `!!e.isAutoModeAvailable && aC()`, and `sKe`'s `plan` / `bypassPermissions`
+/// arms consult it before falling through to `default`. This is the `aC()`
+/// half, evaluated from the same inputs [`resolve_permission_mode`] feeds the
+/// boot downgrade; the circuit breaker is fresh at boot and the provider is
+/// `"firstParty"` at this CLI surface, exactly as there.
+pub(crate) fn auto_mode_cycle_available(argv: &Argv) -> bool {
+    let settings = read_cli_mode_settings(argv);
+    let model = argv
+        .model
+        .clone()
+        .unwrap_or_else(|| engine_desktop::DesktopConfig::default().default_model);
+    permission::auto_mode_available(&permission::AutoGateInputs {
+        disabled_by_settings: settings.auto_mode_disabled,
+        circuit_broken: false,
+        model,
+        provider: "firstParty".to_string(),
+    })
+}
+
 pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMode, Option<String>) {
     let settings = read_cli_mode_settings(argv);
     // MODE-ENV-SCRUB-03: `LINGXI_SUBPROCESS_ENV_SCRUB` (the port's spelling of

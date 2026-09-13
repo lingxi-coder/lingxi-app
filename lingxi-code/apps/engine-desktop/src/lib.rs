@@ -12910,7 +12910,11 @@ pub async fn build(
                 .with_pwsh_parser(std::sync::Arc::new(
                     permission::powershell_parse::SystemPwshParser,
                 ))
-                .with_plan_files(plan_files.clone());
+                .with_plan_files(plan_files.clone())
+                // `zj`'s `!Ae()` — plan mode counts as bypassPermissions only
+                // in an interactive launch. `interactive_session` is the
+                // `host.launchOptions.isInteractive()` twin resolved above.
+                .with_interactive_session(interactive_session);
         policy.bypass_killswitch_active = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
         // refuses `auto` when any tier set `disableAutoMode: "disable"`.
@@ -14292,6 +14296,11 @@ pub async fn build(
                     .with_bypass_available(
                         cfg.permission_mode == permission::PermissionMode::BypassPermissions
                             || cfg.allow_dangerously_skip_permissions,
+                    )
+                    // `zj`'s `!Ae()`; this fallback path has no settings read,
+                    // so it takes the launch kind straight from the config.
+                    .with_interactive_session(
+                        cfg.session_composition().is_interactive_session(),
                     )
                     .with_roots(permission::FsRoots {
                         cwd: cwd.clone(),

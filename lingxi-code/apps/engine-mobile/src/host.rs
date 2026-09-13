@@ -3975,6 +3975,10 @@ async fn build_mobile_inner_with_ask(
         }
         resolved_permission_mode = mode;
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
+            // `zj`'s `!Ae()` — plan mode counts as bypassPermissions only in an
+            // interactive launch. A mobile foreground host is one; a cron-fired
+            // throwaway runtime is not.
+            .with_interactive_session(interactive_launch)
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
             .with_block_reads_outside_working_directories(block_reads_outside_working_directories)

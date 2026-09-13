@@ -565,6 +565,7 @@ fn build_effective_policy(
     policy = policy
         .with_block_reads_outside_working_directories(base.block_reads_outside_working_directories);
     policy = policy.with_bypass_available(base.bypass_permissions_available);
+    policy = policy.with_interactive_session(base.interactive_session);
     policy = policy.with_restricted(base.restricted);
     policy.bypass_killswitch_active = base.bypass_killswitch_active;
     policy.auto_mode_disabled = base.auto_mode_disabled;

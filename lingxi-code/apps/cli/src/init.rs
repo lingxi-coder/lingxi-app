@@ -211,6 +211,11 @@ pub struct TuiBuild {
     /// below-composer permission-mode indicator.
     pub initial_permission_mode: permission::PermissionMode,
     pub bypass_available: bool,
+    /// Whether `auto` is an available Shift+Tab cycle target — claude-code
+    /// `I1(e)` = `!!e.isAutoModeAvailable && aC()` (2.1.270 `src_178976794.js`
+    /// @~760). Without it `sKe`'s `plan`/`bypassPermissions` arms fall through
+    /// to `default` and auto mode is unreachable from the keyboard.
+    pub auto_available: bool,
     /// Bridge receiver — the TUI render loop drains this into
     /// `tui::streaming::apply_event`.
     pub bridge_rx: tokio::sync::mpsc::UnboundedReceiver<tui_core::orchestrator_bridge::TurnEvent>,
@@ -1486,6 +1491,9 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         bypass_available: !argv.restricted_enabled()
             && (argv.allow_dangerously_skip_permissions
                 || permission_mode == permission::PermissionMode::BypassPermissions),
+        // `I1(e)`'s `aC()` half — the same availability gate the boot downgrade
+        // and the live `set_permission_mode` use.
+        auto_available: crate::auto_mode_cycle_available(argv),
         bridge_rx,
         turn_tx,
         workflow_events,

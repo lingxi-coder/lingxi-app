@@ -2280,11 +2280,59 @@ mod tests {
 
     // ── PERM.4: Plan mode + isBypassPermissionsModeAvailable bypasses ──────
 
+    /// 🚨 `zj(e,n)` is `e==="plan" && n===!0 && !Ae()`, and `Ae()` is
+    /// `!host.launchOptions.isInteractive()` (2.1.270 `src_165140675.js`
+    /// @64480, `src_164505306.js` @77144). A HEADLESS run launched with
+    /// `--dangerously-skip-permissions` and then put into plan mode therefore
+    /// does NOT get the blanket allow. This port had `!bypass_killswitch_active`
+    /// where upstream has `!Ae()`, which is a different predicate entirely and
+    /// let exactly that case through.
+    #[test]
+    fn plan_bypass_requires_an_interactive_launch() {
+        let headless = PermissionPolicy::new(PermissionMode::Plan)
+            .with_bypass_available(true)
+            .with_interactive_session(false);
+        // The plan-mutation backstop still binds: no blanket allow.
+        assert!(
+            matches!(
+                headless.authorize("Edit", &edit("/proj/src/x.rs")),
+                PermissionResult::Ask { .. }
+            ),
+            "a non-interactive launch must not take the plan bypass"
+        );
+        assert!(matches!(
+            headless.authorize("Bash", &serde_json::json!({ "command": "rm -rf /tmp/x" })),
+            PermissionResult::Ask { .. } | PermissionResult::Deny { .. }
+        ));
+        // Premise: the SAME policy with an interactive launch does take it, so
+        // the assertion above is about `interactive_session` and not about some
+        // unrelated arm having swallowed the call.
+        let interactive = PermissionPolicy::new(PermissionMode::Plan)
+            .with_bypass_available(true)
+            .with_interactive_session(true);
+        assert!(matches!(
+            interactive.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Allow { .. }
+        ));
+        // `bypassPermissions` itself is NOT interactive-gated — `zj` governs
+        // only the plan arm.
+        let headless_bypass = PermissionPolicy::new(PermissionMode::BypassPermissions)
+            .with_interactive_session(false);
+        assert!(matches!(
+            headless_bypass.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
     #[test]
     fn plan_with_bypass_available_allows_mutating_tool() {
         // Plan + bypass-available → a mutating tool is ALLOWED (tagged Plan),
         // instead of the plan-mutation backstop ask.
-        let p = PermissionPolicy::new(PermissionMode::Plan).with_bypass_available(true);
+        // `zj`'s third conjunct (`!Ae()`): the bypass is interactive-only, so
+        // the session has to declare its launch kind.
+        let p = PermissionPolicy::new(PermissionMode::Plan)
+            .with_bypass_available(true)
+            .with_interactive_session(true);
         match p.authorize("Edit", &edit("/proj/src/x.rs")) {
             PermissionResult::Allow { reason, .. } => assert!(
                 matches!(
@@ -3662,6 +3710,7 @@ mod tests {
     fn bypass01_plan_with_bypass_available_suppresses_guard() {
         let mut p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Plan);
         p.bypass_permissions_available = true;
+        p.interactive_session = true;
         assert!(matches!(
             p.authorize("Bash", &bash("cat /etc/passwd")),
             PermissionResult::Allow { .. }

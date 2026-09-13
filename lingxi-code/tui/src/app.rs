@@ -793,6 +793,7 @@ pub fn run_app(
     // Shift+Tab cycle target — seeds the below-composer mode indicator.
     initial_permission_mode: permission::PermissionMode,
     bypass_available: bool,
+    auto_available: bool,
     emoji_completion_enabled: bool,
     startup_view_mode: Option<String>,
     agents_snapshot_provider: Option<
@@ -932,7 +933,7 @@ pub fn run_app(
     // Seed the below-composer permission-mode indicator from the resolved boot
     // mode (so `--dangerously-skip-permissions` shows `⏵⏵ bypass permissions on`).
     app.chat_widget
-        .set_permission_mode(initial_permission_mode, bypass_available);
+        .set_permission_mode(initial_permission_mode, bypass_available, auto_available);
     // `/sandbox`: wire the shared bash-sandbox toggle cell (the same one the
     // bash tool reads). `None` (tests / unsupported host) keeps `/sandbox` a
     // graceful "unavailable" no-op.

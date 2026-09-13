@@ -809,9 +809,11 @@ impl ChatWidget {
         &mut self,
         mode: permission::PermissionMode,
         bypass_available: bool,
+        auto_available: bool,
     ) {
         self.bottom_pane.set_permission_mode(mode);
         self.bottom_pane.set_bypass_available(bypass_available);
+        self.bottom_pane.set_auto_available(auto_available);
     }
 
     /// Wire mode id for the engine `set_permission_mode` control request

@@ -253,6 +253,8 @@ pub struct BottomPane {
     /// `--allow-dangerously-skip-permissions`). Gates the Shift+Tab cycle into
     /// bypass, mirroring claude-code `isBypassPermissionsModeAvailable`.
     bypass_available: bool,
+    /// `I1(e)` — whether `auto` is an available Shift+Tab cycle target.
+    auto_available: bool,
     /// Vim editing state when `/vim` is enabled (`None` → plain editor).
     vim: Option<VimState>,
     /// Whether a custom status line owns rendering the vim mode label.
@@ -376,6 +378,7 @@ impl BottomPane {
             emoji_completion_enabled: true,
             permission_mode: permission::PermissionMode::Default,
             bypass_available: false,
+            auto_available: false,
             vim: None,
             hide_vim_mode_indicator: false,
             vim_insert_mode_remaps: BTreeMap::new(),
@@ -462,6 +465,10 @@ impl BottomPane {
 
     /// Mark `BypassPermissions` as an available Shift+Tab cycle target (the
     /// session was launched with the skip-permissions flag).
+    pub fn set_auto_available(&mut self, available: bool) {
+        self.auto_available = available;
+    }
+
     pub fn set_bypass_available(&mut self, available: bool) {
         self.bypass_available = available;
     }
@@ -512,16 +519,23 @@ impl BottomPane {
                 }
             }
         }
-        // Shift+Tab (BackTab) cycles the session permission mode — claude-code's
-        // bottom-of-input mode cycle (`default → acceptEdits → plan → bypass?/
-        // default`). Handled after any active view / completion popup consumed
-        // the key, so it only fires at the bare composer. `Auto` is excluded
-        // (its classifier is an unwired stub, so it is not a cycle target).
+        // Shift+Tab (BackTab) cycles the session permission mode — claude-code
+        // `sKe` (2.1.270 `src_178976794.js`):
+        // `default → acceptEdits → plan → (bypass? | auto? | default)`, and
+        // `bypassPermissions → (auto? | default)`. Handled after any active
+        // view / completion popup consumed the key, so it only fires at the
+        // bare composer.
+        //
+        // `auto_available` is `I1(e)`. It used to be hardcoded `false` on the
+        // grounds that "its classifier is an unwired stub" — that is no longer
+        // true (the two-stage classifier decides every tool in Auto mode), and
+        // while it held, Shift+Tab could never reach a mode the desktop picker
+        // offers.
         if key.code == KeyCode::BackTab && self.completion.is_none() {
             let next = permission::next_permission_mode(
                 self.permission_mode,
                 self.bypass_available,
-                false,
+                self.auto_available,
             );
             self.permission_mode = next;
             return BottomPaneOutcome::CyclePermissionMode(next);
@@ -2853,6 +2867,69 @@ mod tests {
             match pane.handle_key(back_tab) {
                 BottomPaneOutcome::CyclePermissionMode(m) => assert_eq!(m, expected),
                 other => panic!("expected {expected:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// `sKe`'s `auto` arms: `plan` falls through to `auto` when bypass is NOT
+    /// available but `I1(e)` is, and `bypassPermissions` goes straight to
+    /// `auto`. This pane used to pass `false` for that gate unconditionally, so
+    /// Shift+Tab could never reach a mode the desktop picker offers.
+    #[test]
+    fn shift_tab_reaches_auto_when_the_gate_is_open() {
+        use permission::PermissionMode;
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+
+        // plan → auto (no bypass, auto available).
+        let mut from_plan = pane();
+        from_plan.set_permission_mode(PermissionMode::Plan);
+        from_plan.set_auto_available(true);
+        match from_plan.handle_key(back_tab) {
+            BottomPaneOutcome::CyclePermissionMode(m) => assert_eq!(m, PermissionMode::Auto),
+            other => panic!("expected Auto, got {other:?}"),
+        }
+        // auto → default closes the cycle.
+        match from_plan.handle_key(back_tab) {
+            BottomPaneOutcome::CyclePermissionMode(m) => assert_eq!(m, PermissionMode::Default),
+            other => panic!("expected Default, got {other:?}"),
+        }
+
+        // bypass → auto, and bypass still WINS over auto from `plan`.
+        let mut from_bypass = pane();
+        from_bypass.set_permission_mode(PermissionMode::BypassPermissions);
+        from_bypass.set_bypass_available(true);
+        from_bypass.set_auto_available(true);
+        match from_bypass.handle_key(back_tab) {
+            BottomPaneOutcome::CyclePermissionMode(m) => assert_eq!(m, PermissionMode::Auto),
+            other => panic!("expected Auto, got {other:?}"),
+        }
+        let mut both = pane();
+        both.set_permission_mode(PermissionMode::Plan);
+        both.set_bypass_available(true);
+        both.set_auto_available(true);
+        match both.handle_key(back_tab) {
+            BottomPaneOutcome::CyclePermissionMode(m) => {
+                assert_eq!(m, PermissionMode::BypassPermissions);
+            }
+            other => panic!("bypass is checked before auto in `sKe`, got {other:?}"),
+        }
+    }
+
+    /// Premise for the test above: with the gate CLOSED the same keystrokes
+    /// land on `default`, so that test is about `auto_available` and not about
+    /// the cycle having changed shape.
+    #[test]
+    fn shift_tab_skips_auto_when_the_gate_is_closed() {
+        use permission::PermissionMode;
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        for from in [PermissionMode::Plan, PermissionMode::BypassPermissions] {
+            let mut closed = pane();
+            closed.set_permission_mode(from);
+            match closed.handle_key(back_tab) {
+                BottomPaneOutcome::CyclePermissionMode(m) => {
+                    assert_eq!(m, PermissionMode::Default, "from {from:?}");
+                }
+                other => panic!("expected Default, got {other:?}"),
             }
         }
     }

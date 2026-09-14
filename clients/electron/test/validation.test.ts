@@ -258,10 +258,8 @@ test('session lifecycle commands cannot cross the renderer command boundary', ()
   );
 });
 
-test('active turns reject model and session mutation but retain recovery commands', () => {
+test('active turns allow live model and permission controls but reject session lifecycle mutations', () => {
   for (const command of [
-    { type: 'set_model', model: 'claude-sonnet' },
-    { type: 'set_permission_mode', mode: 'acceptEdits' },
     { type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } },
     { type: 'set_fast_mode', enabled: true },
     { type: 'login' },
@@ -274,6 +272,8 @@ test('active turns reject model and session mutation but retain recovery command
       /cancel the active turn/,
     );
   }
+  assert.doesNotThrow(() => assertCommandAllowedDuringTurn({ type: 'set_model', model: 'claude-sonnet' }, true));
+  assert.doesNotThrow(() => assertCommandAllowedDuringTurn({ type: 'set_permission_mode', mode: 'acceptEdits' }, true));
   assert.doesNotThrow(() => assertCommandAllowedDuringTurn({ type: 'task_stop', task_id: 'task-1' }, true));
   assert.doesNotThrow(() => assertCommandAllowedDuringTurn({ type: 'list_models' }, false));
 });

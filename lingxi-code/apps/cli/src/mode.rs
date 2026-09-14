@@ -1111,10 +1111,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         std::sync::Arc::new(move || session_cwd.cwd())
             as std::sync::Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>
     };
-    // The ENFORCING permission gate, for Shift+Tab live permission-mode cycling.
-    let set_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
-    // A second clone kept in THIS scope (the `on_set_permission_mode` closure
-    // moves `set_mode_gate`): read on exit to snapshot the live permission mode
+    // Read the enforcing gate on exit to snapshot the live permission mode
     // into `RemountState`, so an in-process `/resume`/`/branch`/`/rewind`
     // restores it instead of resetting to the CLI/config default.
     let carried_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
@@ -1123,6 +1120,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let fusion_turn_tx = turn_tx.clone();
     let teammate_turn_tx = turn_tx.clone();
     let set_mode_turn_tx = turn_tx.clone();
+    let switch_turn_tx = turn_tx.clone();
     let connect_turn_tx = turn_tx.clone();
     let permission_turn_tx = turn_tx.clone();
     let bash_turn_tx = turn_tx.clone();
@@ -1200,6 +1198,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let compact_orch = orchestrator.clone();
     let compact_handle = handle.clone();
     let set_mode_handle = handle.clone();
+    let set_mode_orch = orchestrator.clone();
     let set_mode_reg = registration.clone();
     let rename_orch = orchestrator.clone();
     let rename_reg = registration.clone();
@@ -1529,6 +1528,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         };
     let on_switch_model = move |model: String, profile: Option<String>| {
         let orch = switch_orch.clone();
+        let tx = switch_turn_tx.clone();
         switch_handle.spawn(async move {
             // Persist the pick only when the live switch succeeded (best-effort
             // writes; a failure never breaks the switch): `settings.model`
@@ -1537,11 +1537,19 @@ pub(crate) async fn run_ratatui_with_initial_state(
             // entry, the boot connected-provider fallback's first-preference
             // pass. This recording was lost in the iocraft-TUI deletion; the
             // ratatui picker previously only mutated in-memory session state.
-            if orch
+            if let Err(error) = orch
                 .switch_model_with_source(&model, profile.as_deref(), "picker")
                 .await
-                .is_ok()
             {
+                let _ = tx.send(tui::TurnEvent::SystemNotice {
+                    body: format!("Could not change model: {error}"),
+                    is_error: true,
+                });
+            } else {
+                let _ = tx.send(tui::TurnEvent::ModelChanged {
+                    model: model.clone(),
+                    profile: profile.clone(),
+                });
                 match profile.as_deref() {
                     Some(p) => {
                         tui_core::recent_models::record_default_model(&format!("{p}/{model}"));
@@ -1829,19 +1837,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
-    // (Shift+Tab) Push the cycled permission mode to the live ENFORCING gate
+    // (Shift+Tab) Push the cycled permission mode through the orchestrator
     // off the render thread, so enforcement follows the bottom-of-composer
     // indicator (the pane already updated its display). On failure — e.g. the
     // bypass killswitch — report via `TurnEvent::SystemNotice`.
     let on_set_permission_mode = move |mode: String| {
-        let Some(gate) = set_mode_gate.clone() else {
-            return;
-        };
+        let orch = set_mode_orch.clone();
         let tx = set_mode_turn_tx.clone();
         let bypass_available = bypass_available;
         let set_mode_reg = set_mode_reg.clone();
         set_mode_handle.spawn(async move {
-            if let Err(e) = gate.set_permission_mode(&mode).await {
+            if let Err(e) = orch.set_permission_mode(&mode).await {
                 let _ = tx.send(tui::TurnEvent::SystemNotice {
                     body: format!("Could not change permission mode: {e}"),
                     is_error: true,
@@ -1854,6 +1860,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         bypass_available,
                     ));
                 }
+            }
+            if let Some(mode) = orch.permission_mode().await {
+                let _ = tx.send(tui::TurnEvent::PermissionModeChanged(mode));
             }
         });
     };

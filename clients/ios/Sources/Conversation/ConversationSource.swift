@@ -6509,29 +6509,17 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
-        /// Switch the active model (SHIP-BLOCKER #2): submit `SetModel` with a REAL
-        /// engine id. The engine confirms with `ModelChanged`, which `applyActiveModel`
-        /// adopts + persists. Optimistically reflect the id so the chip updates even
-        /// before the round-trip completes. No-op when the id is already active.
+        /// Keep the model chip on the confirmed selection until ModelChanged
+        /// arrives. A failed control command must not terminate the active reply.
         func setModel(_ id: String) {
             guard !id.isEmpty, id != model.activeModelId else { return }
-            let previous = model.activeModelId
-            model.activeModelId = id
-            if let opt = MockData.models.first(where: { $0.id == id || $0.name == id }) {
-                model.model = opt
-            }
+            model.controlsError = nil
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    let handle = try await self.ensureHandle()
-                    try await handle.submit(command: .setModel(model: id))
+                    try await self.submitCommand(.setModel(model: id))
                 } catch {
-                    // The engine REJECTS a model no configured provider serves,
-                    // so the optimistic update above has to be undone — leaving
-                    // the chip on a model the session did not switch to would
-                    // send the next turn under a label that is simply wrong.
-                    self.model.activeModelId = previous
-                    self.fail(.host, String(localized: "chat_switch_model_failed \(error)"))
+                    self.model.controlsError = String(localized: "chat_switch_model_failed \(error)")
                 }
             }
         }

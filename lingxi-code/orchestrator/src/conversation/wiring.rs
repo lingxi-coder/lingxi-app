@@ -75,6 +75,7 @@ impl ConversationOrchestrator {
                 invoked_skill_session_id,
             ),
             turn_gate: Arc::new(Mutex::new(())),
+            model_switch_gate: Mutex::new(()),
             dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::default(),
             workflow_size_guideline:
                 platform_api::session_flags::WorkflowSizeGuidelineState::default(),

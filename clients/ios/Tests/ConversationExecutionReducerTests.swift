@@ -174,6 +174,44 @@ import SwiftUI
             XCTAssertFalse(source.model.controlsPending)
         }
 
+        func testModelSwitchWaitsForConfirmationWhileStreaming() async {
+            let source = makeSource()
+            source.model.activeModelId = "provider/old"
+            source.model.streaming = true
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { submitted.append($0) }
+
+            source.setModel("provider/new")
+            await waitForSubmittedCommands(1, commands: submitted)
+            XCTAssertEqual(source.model.activeModelId, "provider/old")
+            XCTAssertTrue(source.model.streaming)
+            guard case .setModel(model: "provider/new")? = submitted.first else {
+                return XCTFail("expected the qualified model switch command")
+            }
+            source.applyForTesting(.modelChanged(model: "provider/new"))
+            XCTAssertEqual(source.model.activeModelId, "provider/new")
+            XCTAssertTrue(source.model.streaming)
+        }
+
+        func testRejectedModelSwitchDoesNotStopStreaming() async {
+            let source = makeSource()
+            source.model.activeModelId = "provider/old"
+            source.model.streaming = true
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting {
+                submitted.append($0)
+                throw NSError(domain: "ModelSwitch", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "model unavailable"])
+            }
+
+            source.setModel("provider/new")
+            await waitForSubmittedCommands(1, commands: submitted)
+            XCTAssertEqual(source.model.activeModelId, "provider/old")
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertNotNil(source.model.controlsError)
+            XCTAssertNil(source.model.error)
+        }
+
         func testNormalPermissionModeSendsTheSessionModeCommand() async {
             let source = makeSource()
             var submitted: [ClientCommand] = []

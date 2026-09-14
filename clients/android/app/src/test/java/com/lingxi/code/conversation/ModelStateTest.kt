@@ -405,12 +405,16 @@ class ModelStateTest {
     /** A source whose model state we can drive; submit/streams are inert. */
     private class FakeModelSource(
         private val models: MutableStateFlow<EngineModelState>,
+        private val switchError: Throwable? = null,
     ) : ConversationSource {
         val setModelCalls = mutableListOf<String>()
         override fun initialMessages(): List<Message> = emptyList()
         override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
         override val modelState: StateFlow<EngineModelState> = models.asStateFlow()
-        override suspend fun setModel(id: String) { setModelCalls += id }
+        override suspend fun setModel(id: String) {
+            setModelCalls += id
+            switchError?.let { throw it }
+        }
     }
 
     @Test
@@ -494,9 +498,22 @@ class ModelStateTest {
         }
         vm.selectModel(sonnet)
 
-        // The pick reflects locally AND submits the complete qualified ref.
-        assertEquals("anthropic/claude-sonnet-4-20250514", vm.state.value.model.id)
+        // The chip remains on the confirmed model until ModelChanged arrives.
+        assertEquals("anthropic/claude-opus-4-20250514", vm.state.value.model.id)
         assertEquals(listOf("anthropic/claude-sonnet-4-20250514"), source.setModelCalls)
+    }
+
+    @Test
+    fun rejectedModelSwitch_preservesConfirmedModel_andReportsError() = runTest {
+        val flow = MutableStateFlow(EngineModelState(
+            available = listOf("provider/old", "provider/new"),
+            active = "provider/old",
+        ))
+        val vm = ChatViewModel(FakeModelSource(flow, IllegalStateException("model unavailable")))
+        vm.selectModel(vm.state.value.availableModels.first { it.id == "provider/new" })
+
+        assertEquals("provider/old", vm.state.value.model.id)
+        assertEquals("model unavailable", vm.state.value.error?.message)
     }
 
     private fun testDetails(

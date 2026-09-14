@@ -102,10 +102,10 @@ impl ConversationOrchestrator {
             "command" | "picker" | "sdk" | "auto" | "resume" => source,
             _ => "sdk",
         };
-        // Keep the hook decision and the state mutation atomic with respect to
-        // an in-flight turn. This prevents a turn from snapshotting the old
-        // model after a pre-hook allowed the switch but before the mutation.
-        let _turn_guard = self.turn_gate.lock().await;
+        // Preserve hook ordering between selections while allowing controls
+        // during a running turn. In-flight requests keep their prepared model;
+        // the next request snapshots the selection under the session lock.
+        let _switch_guard = self.model_switch_gate.lock().await;
         let listings = self.api.list_model_listings();
         let (target_model, target_profile) = normalize_session_model_ref(model, profile, &listings);
         let (from_model, from_profile) = {
@@ -307,6 +307,9 @@ impl ConversationOrchestrator {
         turn_guard: tokio::sync::OwnedMutexGuard<()>,
         request: OwnedSessionSwitch,
     ) -> Result<(), HandleError> {
+        // A model hook sequence must belong entirely to one session even
+        // though live selections no longer acquire the turn gate.
+        let _switch_guard = self.model_switch_gate.lock().await;
         match request {
             OwnedSessionSwitch::Clear => self.execute_clear_session(turn_guard).await,
             OwnedSessionSwitch::Resume {
@@ -2492,6 +2495,43 @@ mod tests {
         orch.fire_session_end("prompt_input_exit").await;
 
         assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_model_switch_does_not_wait_for_the_running_turn() {
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let _running_turn = orch.turn_gate.lock().await;
+        let prepared_before = orch
+            .prepare_model_call_snapshot(crate::conversation::ModelCallPath::Streaming, None, None)
+            .await
+            .expect("prepare in-flight request");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            orch.switch_model("live-model", Some("live-provider")),
+        )
+        .await
+        .expect("model controls must complete while the turn is active")
+        .expect("model switch");
+        let session = orch.session.lock().await;
+        assert_eq!(session.model, "live-model");
+        assert_eq!(session.model_profile.as_deref(), Some("live-provider"));
+        drop(session);
+        let prepared_after = orch
+            .prepare_model_call_snapshot(crate::conversation::ModelCallPath::Streaming, None, None)
+            .await
+            .expect("prepare next request");
+        assert_ne!(prepared_before.model, "live-model");
+        assert_eq!(prepared_after.model, "live-model");
+        assert_eq!(prepared_after.model_profile.as_deref(), Some("live-provider"));
     }
 
     /// A transcript can carry a PROVIDER-QUALIFIED model reference with no

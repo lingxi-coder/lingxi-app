@@ -346,6 +346,8 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::ToolUseResult { .. } => FocusRefreshKind::ResetAssistantTail,
         TurnEvent::RateLimit { .. } | TurnEvent::SubagentActivity { .. } => FocusRefreshKind::None,
         TurnEvent::PermissionRequest { .. }
+        | TurnEvent::ModelChanged { .. }
+        | TurnEvent::PermissionModeChanged(_)
         | TurnEvent::ToolHeartbeat { .. }
         | TurnEvent::ToolHeartbeatBatch { .. }
         | TurnEvent::CostUpdated(_)
@@ -1757,6 +1759,38 @@ impl ChatWidget {
             // bridge — live prompts arrive through the `permission_bridge`
             // channel into [`Self::open_permission`] instead.
             TurnEvent::PermissionRequest { .. } => {}
+            TurnEvent::ModelChanged {
+                model: request_model,
+                profile,
+            } => {
+                // Re-point the snapshot's current-model marker so the /model
+                // picker `●`, statusline, and welcome line all follow the switch
+                // (they read `session.models`' `is_current`, frozen at launch
+                // otherwise). Provider-scoped so a wire id shared across
+                // providers only dots the switched-to provider's row.
+                self.set_current_model(&request_model, profile.as_deref());
+                // Refresh the statusline model + re-arm the pump so the command
+                // reports the new model (claude-code re-runs on model change).
+                // Read the row `set_current_model` just marked `is_current` (already
+                // provider-scoped) — NOT `find(request_model)` alone, which for a
+                // wire id shared across providers could pick the wrong provider's
+                // display and diverge from the ● marker.
+                let display = self
+                    .session
+                    .models
+                    .iter()
+                    .find(|m| m.is_current)
+                    .map_or_else(|| request_model.clone(), |m| m.display.clone());
+                self.with_status_line(|s| {
+                    s.data.model_id = request_model.clone();
+                    s.data.model = display;
+                    s.dirty = true;
+                });
+            }
+            TurnEvent::PermissionModeChanged(mode) => {
+                self.bottom_pane
+                    .set_permission_mode(permission::permission_mode_from_cli_string(&mode));
+            }
             // A `/web` async effect (secret/settings save, test search)
             // finished off-loop; surface its result as a transcript line —
             // red for a failure, dim grey otherwise (`RenderedMessage::
@@ -5406,29 +5440,6 @@ impl ChatWidget {
                     body: format!("Switching model to {request_model}…"),
                     timestamp: 0,
                     is_error: false,
-                });
-                // Re-point the snapshot's current-model marker so the /model
-                // picker `●`, statusline, and welcome line all follow the switch
-                // (they read `session.models`' `is_current`, frozen at launch
-                // otherwise). Provider-scoped so a wire id shared across
-                // providers only dots the switched-to provider's row.
-                self.set_current_model(&request_model, profile.as_deref());
-                // Refresh the statusline model + re-arm the pump so the command
-                // reports the new model (claude-code re-runs on model change).
-                // Read the row `set_current_model` just marked `is_current` (already
-                // provider-scoped) — NOT `find(request_model)` alone, which for a
-                // wire id shared across providers could pick the wrong provider's
-                // display and diverge from the ● marker.
-                let display = self
-                    .session
-                    .models
-                    .iter()
-                    .find(|m| m.is_current)
-                    .map_or_else(|| request_model.clone(), |m| m.display.clone());
-                self.with_status_line(|s| {
-                    s.data.model_id = request_model.clone();
-                    s.data.model = display;
-                    s.dirty = true;
                 });
                 ChatOutcome::SwitchModel(request_model, profile)
             }
@@ -10695,6 +10706,21 @@ mod tests {
             matches!(outcome, ChatOutcome::SwitchModel(ref m, _) if m == "claude-sonnet-5"),
             "expected a switch to claude-sonnet-5"
         );
+        // A pending or failed switch must retain the actual current model.
+        assert!(widget.session.models.iter().any(|m| {
+            m.is_current && m.request_model == "claude-opus-4-8"
+        }));
+        widget.apply_turn_event(TurnEvent::SystemNotice {
+            body: "Could not change model".into(),
+            is_error: true,
+        });
+        assert!(widget.session.models.iter().any(|m| {
+            m.is_current && m.request_model == "claude-opus-4-8"
+        }));
+        widget.apply_turn_event(TurnEvent::ModelChanged {
+            model: "claude-sonnet-5".into(),
+            profile: Some("anthropic".into()),
+        });
         // Reopen: the current marker now points at the switched-to model.
         submit_command(&mut widget, "/model");
         let current: Vec<String> = widget
@@ -10797,6 +10823,14 @@ mod tests {
             2,
             "profile-less switch falls back to model-only matching"
         );
+    }
+
+    #[test]
+    fn permission_mode_confirmation_restores_rejected_optimistic_choice() {
+        let mut widget = widget_with_models();
+        widget.bottom_pane.set_permission_mode(permission::PermissionMode::BypassPermissions);
+        widget.apply_turn_event(TurnEvent::PermissionModeChanged("default".into()));
+        assert_eq!(widget.bottom_pane.permission_mode(), permission::PermissionMode::Default);
     }
 
     #[test]

@@ -136,6 +136,15 @@ pub enum TurnEvent {
     MessageIdentity(protocol::MessageId),
     /// Remove only the assistant response with this transcript identity.
     MessageRetracted(protocol::MessageId),
+    /// Model selection confirmed by the live orchestrator.
+    ModelChanged {
+        /// Provider-local model identifier.
+        model: String,
+        /// Provider profile selected by the user.
+        profile: Option<String>,
+    },
+    /// Authoritative permission mode after a live change attempt.
+    PermissionModeChanged(String),
     /// Streaming text chunk from the assistant.
     TextDelta(String),
     /// A completed assistant thinking block (M5 live streaming). The

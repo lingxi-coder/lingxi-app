@@ -717,7 +717,7 @@ export class SessionRuntime {
       try {
         await this.ensureModelProviderCredential(model);
         if (this.pendingModelSwitch !== pending) return;
-        if (generation !== this.generation || client !== this.client || this.archiving || this.activeTurn) {
+        if (generation !== this.generation || client !== this.client || this.archiving) {
           throw new Error('Model switch was interrupted.');
         }
         pending.sent = true;

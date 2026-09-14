@@ -602,9 +602,7 @@ export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActiv
   if (
     turnActive
     && (
-      command.type === 'set_model'
-      || command.type === 'set_permission_mode'
-      || command.type === 'set_reasoning_selection'
+      command.type === 'set_reasoning_selection'
       || command.type === 'set_fast_mode'
       || command.type === 'run_slash_command'
       || command.type === 'login'

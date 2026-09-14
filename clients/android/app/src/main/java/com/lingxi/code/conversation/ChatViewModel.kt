@@ -1926,16 +1926,18 @@ class ChatViewModel(
         }
     }
 
-    /**
-     * Change the active model. Reflects the pick locally immediately (snappy
-     * chip), then submits `SetModel(id)` to the engine with the REAL wire id —
-     * the engine confirms with `ModelChanged`, which re-selects the row via
-     * [applyModelState].
-     */
+    /** The engine's ModelChanged event confirms the model shown in the chip. */
     fun selectModel(model: ModelOption) {
         if (model.id.isBlank()) return
-        _state.update { it.copy(model = model) }
-        viewModelScope.launch { source.setModel(model.id) }
+        viewModelScope.launch {
+            try {
+                source.setModel(model.id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                reportHostError(error.message ?: error.toString())
+            }
+        }
     }
 
     /**

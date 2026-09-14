@@ -1486,7 +1486,7 @@ test('provider credential writes cross only the authenticated bridge command pat
   await pending;
 });
 
-test('provider switching hot-loads the destination credential once before set_model', async () => {
+test('provider switching during an active turn hot-loads the destination credential before set_model', async () => {
   const commands: Array<Record<string, unknown>> = [];
   let resolves = 0;
   const manager = new BridgeManager({
@@ -1500,6 +1500,7 @@ test('provider switching hot-loads the destination credential once before set_mo
   (manager as any).credentialRoutingSettings = {};
   (manager as any).activeWorkspace = '/workspace';
   (manager as any).activeWorkspaceTrusted = true;
+  (manager as any).activeTurn = true;
   (manager as any).runtimeCredentialProviders.add('deepseek');
   (manager as any).client = Object.assign(new EventEmitter(), {
     sendCommand: (command: Record<string, unknown>) => {
@@ -1776,12 +1777,13 @@ test('bypassPermissions is refused when no confirmer is wired (never one-click)'
   assert.equal(commands.length, 0);
 });
 
-test('non-bypass permission modes are not gated by the acceptance dialog', async () => {
+test('non-bypass permission modes reach the engine during an active turn', async () => {
   let confirmCalls = 0;
   const { manager, commands } = trustedManager(async () => {
     confirmCalls += 1;
     return true;
   });
+  (manager as any).activeTurn = true;
   await (manager as any).dispatchCommand({ type: 'set_permission_mode', mode: 'acceptEdits' });
   assert.equal(confirmCalls, 0, 'only bypassPermissions consults the confirmer');
   assert.equal(commands.length, 1);
@@ -2390,7 +2392,7 @@ test('cold set_model resolves a declared model alias before dispatch', async () 
   assert.deepEqual(calls, ['refresh_listings', 'key:custom', 'set_model']);
 });
 
-test('a prompt submitted during a cold model switch waits for the new model acknowledgement', async () => {
+test('a turn starting during cold model loading does not interrupt switching or release the waiting prompt early', async () => {
   const nextKey = deferred<string>();
   const calls: string[] = [];
   const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void; sendPrompt(): void; cancel(): void };
@@ -2416,6 +2418,7 @@ test('a prompt submitted during a cold model switch waits for the new model ackn
   const prompt = runtime.sendPrompt('hello');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(calls, ['refresh_listings', 'key:next']);
+  (runtime as any).activeTurn = true;
   nextKey.resolve('next-key');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(calls.includes('prompt'), false);
@@ -2426,7 +2429,7 @@ test('a prompt submitted during a cold model switch waits for the new model ackn
   assert.equal(calls.includes('key:old'), false);
 });
 
-for (const interruption of ['cancel', 'restart', 'active-turn'] as const) {
+for (const interruption of ['cancel', 'restart'] as const) {
   test(`${interruption} interrupts a model switch and its waiting prompt`, async () => {
     const key = deferred<string>();
     const calls: string[] = [];
@@ -2453,12 +2456,12 @@ for (const interruption of ['cancel', 'restart', 'active-turn'] as const) {
     else if (interruption === 'restart') {
       (runtime as any).startInternal = async () => undefined;
       await runtime.restart();
-    } else (runtime as any).activeTurn = true;
+    }
     key.resolve('new-key');
     const results = await settled;
     assert.deepEqual(results.map((result) => result.status), ['rejected', 'rejected']);
     assert.equal(calls.includes('set_model'), false);
     assert.equal(calls.includes('prompt'), false);
-    assert.equal(runtime.turnActive, interruption === 'active-turn');
+    assert.equal(runtime.turnActive, false);
   });
 }

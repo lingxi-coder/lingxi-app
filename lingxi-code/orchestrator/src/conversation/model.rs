@@ -2623,7 +2623,25 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `PolicyPermissionGate` actually mutates (other gates no-op). Returns the
     /// gate's validation error string on an invalid / disallowed mode.
     pub async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
-        self.perms.set_permission_mode(mode).await
+        self.perms.set_permission_mode(mode).await?;
+        // Tool dispatch and plan reminders also consult session.plan_mode.
+        // Synchronize it with the accepted live gate mode so a user can leave
+        // a plan entered by EnterPlanMode without retaining its write block.
+        let mut session = self.session.lock().await;
+        if let Some(live_mode) = self.perms.permission_mode() {
+            let plan_mode = live_mode == "plan";
+            if session.plan_mode != plan_mode {
+                session.plan_mode = plan_mode;
+                if plan_mode {
+                    session.plan_reminder_shown = false;
+                    session.plan_mode_exit_pending = false;
+                } else {
+                    session.plan_mode_exited = true;
+                    session.plan_mode_exit_pending = true;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Apply or clear the LIVE per-MCP-server permission-mode override
@@ -2771,6 +2789,10 @@ mod session_sidecar_tests {
             "an unsafe source must not quarantine the target"
         );
     }
+
+#[cfg(test)]
+#[path = "tests/live_permission_mode_tests.rs"]
+mod live_permission_mode_tests;
 
     #[cfg(unix)]
     #[test]

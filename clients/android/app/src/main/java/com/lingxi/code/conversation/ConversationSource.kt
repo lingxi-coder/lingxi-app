@@ -1839,13 +1839,9 @@ class EngineConversationSource private constructor(
 
     override suspend fun setModel(id: String) {
         if (id.isBlank()) return
-        try {
-            handle.submit(ClientCommand.SetModel(model = id))
-        } catch (_: Throwable) {
-            // A SetModel that can't be delivered leaves the active id as-is; the
-            // engine never emits ModelChanged, so the picker reverts to whatever
-            // the engine last reported (no optimistic local mutation).
-        }
+        // Let the caller surface delivery/rejection errors; only ModelChanged
+        // advances modelState, so a failed switch retains the confirmed model.
+        handle.submit(ClientCommand.SetModel(model = id))
     }
 
     /**

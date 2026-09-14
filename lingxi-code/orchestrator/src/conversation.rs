@@ -1209,6 +1209,8 @@ pub struct ConversationOrchestrator {
     /// may finish while a user turn is still streaming; waiting here makes its
     /// re-wake the next turn instead of racing two model loops over one history.
     pub(crate) turn_gate: Arc<Mutex<()>>,
+    /// Serializes model-switch hooks without blocking on a running turn.
+    pub(crate) model_switch_gate: Mutex<()>,
     /// Model selection, accounting, fallback, and request preparation state.
     pub(crate) model_runtime: ModelRuntime,
     /// Session-owned dynamic-workflow gate shared with the Workflow tool and

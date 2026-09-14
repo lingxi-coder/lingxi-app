@@ -1087,6 +1087,15 @@ impl Drop for SessionSwitchClaim {
 
 /// State owned by model controls, usage accounting, and fallback handling.
 pub(crate) struct ModelRuntime {
+    /// Prompt-cache ledger for the MAIN conversation (CLI-4).
+    ///
+    /// Fed one entry per successful provider response; read by
+    /// `snapshot_cost_real` to render `/cost`'s `Prompt cache (main):` line.
+    /// Session-scoped rather than global: a `/clear` builds a new runtime, and
+    /// carrying a previous conversation's misses into a fresh one would report
+    /// faults against a prefix that no longer exists.
+    pub(crate) prompt_cache_ledger:
+        tokio::sync::Mutex<cost::prompt_cache_ledger::PromptCacheLedger>,
     /// Live main-loop effort. Unlike `config.effort`, this can change through
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
@@ -1186,6 +1195,9 @@ impl ModelRuntime {
         current_effort_explicit: bool,
     ) -> Self {
         Self {
+            prompt_cache_ledger: tokio::sync::Mutex::new(
+                cost::prompt_cache_ledger::PromptCacheLedger::new(),
+            ),
             current_effort: std::sync::RwLock::new(current_effort),
             current_reasoning_selection: std::sync::RwLock::new(current_reasoning_selection),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),

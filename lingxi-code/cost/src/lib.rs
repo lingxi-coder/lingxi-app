@@ -8,6 +8,7 @@
 //! for the M3-05 extensions.
 #![forbid(unsafe_code)]
 
+pub mod prompt_cache_ledger;
 pub mod attempt;
 pub mod budget;
 pub mod calculator;

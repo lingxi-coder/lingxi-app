@@ -874,6 +874,23 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         )
     });
 
+    // CLI-4: one ledger entry per provider response. Recorded from the SAME
+    // token split the cost tracker just billed, so the two can never disagree
+    // about what the provider reported.
+    {
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let mut ledger = orch.model_runtime.prompt_cache_ledger.lock().await;
+        ledger.record(cost::prompt_cache_ledger::RequestFacts {
+            at_ms: now_ms,
+            input_tokens: response.usage.billable_tokens.input,
+            cache_read_tokens: response.usage.billable_tokens.cache_read,
+            cache_creation_tokens: response.usage.billable_tokens.cache_write,
+            // The port asks for the 5m TTL; a 1h request would set this from
+            // the cache-control it sent.
+            ttl: cost::prompt_cache_ledger::CacheTtl::FiveMinutes,
+        });
+    }
+
     // Retain paid usage in the owned cost mutation before surfacing output failure.
     orch.check_output_accounting()?;
 

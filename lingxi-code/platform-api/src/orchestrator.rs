@@ -94,6 +94,16 @@ pub struct CostSnapshot {
     /// `context_window.current_usage` payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_usage: Option<CurrentUsageSnapshot>,
+    /// The `/cost` prompt-cache line, pre-rendered (CLI-4).
+    ///
+    /// Rendered by the orchestrator rather than carried as structured data: the
+    /// ledger and its renderer both live in `cost`, which depends on this crate
+    /// and not the other way round, so mirroring `CacheSummary` here would be a
+    /// second copy of a type that exists to be printed once. `None` before the
+    /// first API response, and the line is then omitted entirely rather than
+    /// shown empty.
+    #[serde(default)]
+    pub prompt_cache_line: Option<String>,
 }
 
 /// Token classes from the most recent successful model response.

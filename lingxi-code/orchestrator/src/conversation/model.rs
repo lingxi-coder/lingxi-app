@@ -1222,8 +1222,21 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed();
+        // CLI-4: render the prompt-cache line here, where both the ledger and
+        // `cost::render` are in scope. `None` before the first response, and
+        // the line is then omitted rather than shown empty.
+        let prompt_cache_line = {
+            let ledger = self.model_runtime.prompt_cache_ledger.lock().await;
+            let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+            cost::render::prompt_cache_line(
+                &ledger.summary(now_ms),
+                ledger.estimate_recache_tokens(),
+                now_ms,
+            )
+        };
         platform_api::CostSnapshot {
             session_id,
+            prompt_cache_line,
             total_nano_usd: state.total_nano_usd,
             total_tokens: input_tokens.saturating_add(output_tokens),
             total_usd,

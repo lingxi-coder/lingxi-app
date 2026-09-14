@@ -275,6 +275,12 @@ fun RootScreen(
     viewModel: ChatViewModel? = null,
     requestedConversationLaunch: ConversationLaunchRequest? = null,
     onConversationLaunchHandled: () -> Unit = {},
+    // 设置页请求切换到的项目 id。设置页自己做不了这件事：项目层/本地层写到哪个目录
+    // 由引擎的 cwd 决定，换 cwd 就要重建会话源，而那套状态机（switchEngineScope）
+    // 住在这里。走的是和 requestedConversationLaunch 完全相同的「宿主持有请求、
+    // RootScreen 消费后回调清除」形状，而不是另起一套只给设置页用的切换逻辑。
+    requestedProjectSwitch: String? = null,
+    onProjectSwitchHandled: () -> Unit = {},
     requestedLocalAppLaunch: LocalAppLaunchRequest? = null,
     onLocalAppLaunchHandled: () -> Unit = {},
     openLocalAppsRequest: Boolean = false,
@@ -1019,6 +1025,18 @@ fun RootScreen(
         allowInactiveWaitingRecovery = allowInactiveWaitingRecovery,
         sessionModeOverride = sessionModeOverride,
     )
+
+    LaunchedEffect(requestedProjectSwitch, projectState.loading, projectState.projects) {
+        val projectId = requestedProjectSwitch ?: return@LaunchedEffect
+        // 项目目录还没加载完就先不动：此时 projects 是空的，会把一个存在的项目
+        // 误判成「不存在」然后把请求丢掉。
+        if (projectState.loading) return@LaunchedEffect
+        val project = projectState.projects.firstOrNull { it.record.id == projectId }
+        if (project != null) {
+            switchEngineScope(project = project, target = null, newSession = true)
+        }
+        onProjectSwitchHandled()
+    }
 
     LaunchedEffect(
         requestedConversationLaunch,

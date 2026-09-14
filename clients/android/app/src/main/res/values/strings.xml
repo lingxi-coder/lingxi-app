@@ -1012,6 +1012,10 @@
     <string name="mcp_loading_state">正在读取 MCP 配置…</string>
     <string name="mcp_reconnect">重新连接</string>
     <string name="mcp_remove_server">移除此服务器</string>
+    <string name="mcp_scope_local_desc">也存在主目录的配置文件里，但只对这个项目生效——文件不在项目内，不会提交。</string>
+    <string name="mcp_scope_project_desc">存在项目内的配置文件里，随仓库提交、团队共享。</string>
+    <string name="mcp_scope_user_desc">存在主目录的配置文件里，本机所有项目共用。</string>
+    <string name="mcp_scope_vs_layers_note">MCP 的作用域与设置页的层是两套独立存储，同名不同义：MCP 的「本地」在主目录，设置的「本地」在项目内。</string>
     <string name="mcp_section_configuration">服务器配置</string>
     <string name="mcp_section_servers_fmt">服务器 · %1$d</string>
     <string name="mcp_section_tool_permissions">工具权限</string>
@@ -1458,6 +1462,7 @@
     <string name="settings_parity_confirm_apply">确认并应用</string>
     <string name="settings_parity_create_skill">创建 Skill</string>
     <string name="settings_parity_credentials">Provider 凭据</string>
+    <string name="settings_parity_current_project">当前项目</string>
     <string name="settings_parity_custom_providers">自定义 Provider 与路由</string>
     <string name="settings_parity_default">默认</string>
     <string name="settings_parity_default_permission">默认权限模式</string>
@@ -1503,8 +1508,10 @@
     <string name="settings_parity_layer_explanation">编辑仅替换此层中选定的键。生效值可能合并其他层；使用 null 继承。</string>
     <string name="settings_parity_layer_unavailable">此层数据尚不可用</string>
     <string name="settings_parity_local_layer">本地</string>
+    <string name="settings_parity_local_layer_desc">写进项目内的本地设置文件，只对这个项目、只在本机生效；该文件不会提交。</string>
     <string name="settings_parity_manage_credentials">管理 Provider 凭据</string>
     <string name="settings_parity_managed_layer">托管</string>
+    <string name="settings_parity_managed_layer_desc">管理员托管的策略，只读，优先级高于以上所有层。</string>
     <string name="settings_parity_managed_readonly">托管策略：只读</string>
     <string name="settings_parity_marketplace_source">市场来源</string>
     <string name="settings_parity_max_panel">Panel 模型数量上限</string>
@@ -1524,6 +1531,8 @@
     <string name="settings_parity_plugins">插件与市场</string>
     <string name="settings_parity_preview_marketplace">预检添加市场</string>
     <string name="settings_parity_project_layer">项目</string>
+    <string name="settings_parity_project_layer_desc">写进项目内的设置文件，只对这个项目生效；该文件会随仓库提交，团队成员都会拿到。</string>
+    <string name="settings_parity_project_unknown">正在向引擎确认这一层写入哪个项目…</string>
     <string name="settings_parity_projects_trust">项目与信任</string>
     <string name="settings_parity_provider_accounts">Provider 账户</string>
     <string name="settings_parity_provider_validation_env">apiKeyEnv 必须是有效的环境变量名</string>
@@ -1559,9 +1568,12 @@
     <string name="settings_parity_skill_documents">Skill 文档</string>
     <string name="settings_parity_skill_name">Skill 名称</string>
     <string name="settings_parity_skill_trash">将 Skill 移到废纸篓</string>
+    <string name="settings_parity_switch_project">切换项目</string>
+    <string name="settings_parity_switch_project_warning">切换项目会同时切换当前会话。</string>
     <string name="settings_parity_synthesizer">综合模型</string>
     <string name="settings_parity_tools_agent">工具与 Agent 行为</string>
     <string name="settings_parity_user_layer">用户</string>
+    <string name="settings_parity_user_layer_desc">写进你的用户设置文件，本机所有项目都生效。</string>
     <string name="settings_parity_validate_hooks">校验 Hooks</string>
     <string name="settings_parity_voice">语音</string>
     <string name="settings_parity_wait_snapshot">正在等待引擎设置快照…</string>

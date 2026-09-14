@@ -1012,6 +1012,10 @@
     <string name="mcp_loading_state">正在讀取 MCP 設定…</string>
     <string name="mcp_reconnect">重新連線</string>
     <string name="mcp_remove_server">移除此伺服器</string>
+    <string name="mcp_scope_local_desc">也存在主目錄的設定檔裡，但只對這個專案生效——檔案不在專案內，不會提交。</string>
+    <string name="mcp_scope_project_desc">存在專案內的設定檔裡，隨儲存庫提交、團隊共享。</string>
+    <string name="mcp_scope_user_desc">存在主目錄的設定檔裡，本機所有專案共用。</string>
+    <string name="mcp_scope_vs_layers_note">MCP 的範圍與設定頁的層是兩套獨立儲存，同名不同義：MCP 的「本機」在主目錄，設定的「本機」在專案內。</string>
     <string name="mcp_section_configuration">伺服器設定</string>
     <string name="mcp_section_servers_fmt">伺服器 · %1$d</string>
     <string name="mcp_section_tool_permissions">工具權限</string>
@@ -1458,6 +1462,7 @@
     <string name="settings_parity_confirm_apply">確認並套用</string>
     <string name="settings_parity_create_skill">建立 Skill</string>
     <string name="settings_parity_credentials">Provider 憑證</string>
+    <string name="settings_parity_current_project">目前專案</string>
     <string name="settings_parity_custom_providers">自訂 Provider 與路由</string>
     <string name="settings_parity_default">預設</string>
     <string name="settings_parity_default_permission">預設權限模式</string>
@@ -1503,8 +1508,10 @@
     <string name="settings_parity_layer_explanation">編輯僅取代此層中選定的鍵。生效值可能合併其他層；使用 null 繼承。</string>
     <string name="settings_parity_layer_unavailable">此層資料尚無法使用</string>
     <string name="settings_parity_local_layer">本機</string>
+    <string name="settings_parity_local_layer_desc">寫進專案內的本機設定檔，只對這個專案、只在本機生效；該檔案不會提交。</string>
     <string name="settings_parity_manage_credentials">管理 Provider 憑證</string>
     <string name="settings_parity_managed_layer">受管理</string>
+    <string name="settings_parity_managed_layer_desc">管理員託管的原則，唯讀，優先權高於以上所有層。</string>
     <string name="settings_parity_managed_readonly">受管理原則：唯讀</string>
     <string name="settings_parity_marketplace_source">市集來源</string>
     <string name="settings_parity_max_panel">Panel 模型數量上限</string>
@@ -1524,6 +1531,8 @@
     <string name="settings_parity_plugins">外掛與市集</string>
     <string name="settings_parity_preview_marketplace">預檢新增市集</string>
     <string name="settings_parity_project_layer">專案</string>
+    <string name="settings_parity_project_layer_desc">寫進專案內的設定檔，只對這個專案生效；該檔案會隨儲存庫提交，團隊成員都會拿到。</string>
+    <string name="settings_parity_project_unknown">正在向引擎確認這一層寫入哪個專案…</string>
     <string name="settings_parity_projects_trust">專案與信任</string>
     <string name="settings_parity_provider_accounts">Provider 帳戶</string>
     <string name="settings_parity_provider_validation_env">apiKeyEnv 必須是有效的環境變數名稱</string>
@@ -1559,9 +1568,12 @@
     <string name="settings_parity_skill_documents">Skill 文件</string>
     <string name="settings_parity_skill_name">Skill 名稱</string>
     <string name="settings_parity_skill_trash">將 Skill 移至垃圾桶</string>
+    <string name="settings_parity_switch_project">切換專案</string>
+    <string name="settings_parity_switch_project_warning">切換專案會同時切換目前的對話。</string>
     <string name="settings_parity_synthesizer">綜合模型</string>
     <string name="settings_parity_tools_agent">工具與 Agent 行為</string>
     <string name="settings_parity_user_layer">使用者</string>
+    <string name="settings_parity_user_layer_desc">寫進你的使用者設定檔，本機所有專案都生效。</string>
     <string name="settings_parity_validate_hooks">驗證 Hooks</string>
     <string name="settings_parity_voice">語音</string>
     <string name="settings_parity_wait_snapshot">正在等待引擎設定快照…</string>

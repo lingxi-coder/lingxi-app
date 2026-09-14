@@ -32,6 +32,32 @@ import {
 
 export { parseJsonObjectInput };
 
+/**
+ * MCP 的三个作用域各自落在哪。**它和设置层不是一回事**，尽管用了同样三个词 ——
+ * 见下面 `MCP_SCOPE_VS_LAYERS_NOTE`。这三条对应 `client-protocol` 里
+ * `McpScopeDto` 各变体的文档：user → `~/.lingxi.json` 顶层 `mcpServers`；
+ * local → 同一个 `~/.lingxi.json` 里 `projects["<项目>"]` 下；
+ * project → `<项目>/.mcp.json`。
+ *
+ * 与设置层的说明一样不写死路径：每台机器的实际文件位置由引擎在选中条目的
+ * `path` 上回传，页面已经在标题下方显示它。
+ */
+const MCP_SCOPE_DESCRIPTIONS: Record<McpScopeDto, string> = {
+  user: '存在主目录的配置文件里，本机所有项目共用。',
+  local: '也存在主目录的配置文件里，但只对这个项目生效——文件不在项目内，不会提交。',
+  project: '存在项目内的配置文件里，随仓库提交、团队共享。',
+};
+
+/**
+ * 这句对照是必须的，不是锦上添花：MCP 的「本地」和设置层的「本地」含义正好相反。
+ * 设置层的 local 在**项目里**（`<项目>/.lingxi/settings.local.json`），MCP 的 local
+ * 在**主目录里**。一个刚在设置页学会「本地 = 项目内、不提交」的人，到这一页会把
+ * 同一个词读成同一个意思，然后猜错文件在哪。
+ */
+const MCP_SCOPE_VS_LAYERS_NOTE =
+  'MCP 的作用域与设置页的层是两套独立存储，同名不同义：MCP 的「本地」在主目录，'
+  + '设置的「本地」在项目内。在这里选的作用域不受设置页顶部层切换器影响。';
+
 interface ScopeSnapshot {
   scope: McpScopeDto;
   path: string;
@@ -304,6 +330,11 @@ export function McpServers({ bridge }: PageContentProps) {
   return (
     <>
       <Card title="MCP Servers">
+        {/* 同名不同义的提醒放在页首，而不是藏在作用域下拉旁边：读到下拉的时候，
+            人已经在拿设置页的「本地」去理解这里的「本地」了。 */}
+        <div data-testid="mcp-scope-vs-layers" style={noteStyle(t)}>
+          {MCP_SCOPE_VS_LAYERS_NOTE}
+        </div>
         <div style={managerShellStyle(t)}>
           <div style={managerSidebarStyle(t)}>
             <div style={{ display: 'grid', gap: 10 }}>
@@ -362,6 +393,9 @@ export function McpServers({ bridge }: PageContentProps) {
                   <option value="local">本地</option>
                   <option value="project">项目</option>
                 </select>
+                <div data-testid="mcp-scope-description" style={{ marginTop: 6, fontSize: 11.5, color: t.text3, lineHeight: 1.6 }}>
+                  {MCP_SCOPE_DESCRIPTIONS[draftScope]}
+                </div>
               </Field>
               <Field t={t} label="名称">
                 <input value={draftName} onChange={(event) => setDraftName(event.target.value)} disabled={Boolean(selected)} style={{ ...inputStyle(t), opacity: selected ? 0.65 : 1 }} aria-label="mcp-name" />

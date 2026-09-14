@@ -31,6 +31,30 @@ export function provenanceLabel(d: Provenance): string {
   return PROVENANCE_LABELS[d];
 }
 
+/**
+ * 每一层「值落到哪、影响谁」的一句话。这是整套设置界面里唯一解释层含义的地方——
+ * 三个裸标签（用户 / 项目 / 本地）本身什么都不说明，而它们的差别有真实后果：
+ * `project` 层的文件随仓库提交，团队每个人都会拿到；`local` 层的同名文件被
+ * gitignore（`lingxi-code/.gitignore`），只在本机生效。一个人在「项目」层加一条
+ * 权限规则，是在替整个团队做决定——今天界面上没有任何东西说过这件事。
+ *
+ * 刻意不写死具体路径：真实路径由引擎在 `files_json` 里逐层回传，界面显示的必须是
+ * 那一个（见 `useEngineSettings.ts` 的 `projectDirFromSnapshot`）。这里只讲含义，
+ * 于是这张表不会因为引擎换了配置目录而变成谎话。
+ */
+const PROVENANCE_DESCRIPTIONS: Record<Provenance, string> = {
+  device: '存在这台设备的应用里，不经引擎合并，与项目无关。',
+  user: '写进你的用户设置文件，本机所有项目都生效。',
+  project: '写进项目内的设置文件，只对这个项目生效；该文件会随仓库提交，团队成员都会拿到。',
+  local: '写进项目内的本地设置文件，只对这个项目、只在本机生效；该文件不会提交。',
+  managed: '管理员托管的策略，只读，优先级高于以上所有层。',
+};
+
+/** Total over `Provenance`, for the same reason {@link provenanceLabel} is. */
+export function provenanceDescription(d: Provenance): string {
+  return PROVENANCE_DESCRIPTIONS[d];
+}
+
 /** A group of settings rows: a rounded card whose rows are separated by hairlines inside it. */
 export function Card({ title, children }: { title?: string; children: ReactNode }) {
   const t = useT();

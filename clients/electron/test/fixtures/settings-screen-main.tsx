@@ -30,6 +30,11 @@ function Fixture() {
   const [lastEngineSettingsPatch, setLastEngineSettingsPatch] = useState<unknown>(null);
   const [providerCredentials, setProviderCredentials] = useState<Array<{ providerId: string; configured: boolean; encryptionAvailable: boolean; credentialPreview?: string }>>([]);
   const [credentialWrites, setCredentialWrites] = useState<string[]>([]);
+  const [projectList, setProjectList] = useState<string[]>([]);
+  const [projectCatalogs, setProjectCatalogs] = useState<Record<string, { sessions: Array<{ uuid: string; title: string; modified_rfc3339: string; message_count: number }> }>>({});
+  // Ref, not state: `state()` reads it and a state update here would have to
+  // join the reporter effect's dep list just to be observable.
+  const navCalls = useRef<string[]>([]);
   const failNextCredential = useRef(false);
   const holdSettingsWrite = useRef(false);
   const releaseSettingsWrite = useRef<(() => void) | null>(null);
@@ -72,7 +77,8 @@ function Fixture() {
       // "general" (default) and "diagnostics" page ids in these scenarios
       // now render for real instead of a placeholder — a bootstrap this
       // thin would otherwise throw reading `.settings.theme` etc.
-      settings: { version: 1 as const, projects: [] as string[], pinnedSessions: [] as never[] },
+      settings: { version: 1 as const, projects: projectList, pinnedSessions: [] as never[] },
+      projectCatalogs,
       providerCredentials,
       workspace: hasProject ? { path: '/test/project', trusted: true } : { trusted: false },
       runtimes: [] as never[],
@@ -183,7 +189,13 @@ function Fixture() {
     exportDiagnostics: noopAsyncNull,
     addProject: noopAsyncNull,
     removeProject: noopAsyncVoid,
-    activateProject: noopAsyncNull,
+    // 记录而不是空实现：设置页的项目切换器必须**既**激活项目**又**真的把引擎
+    // 落到那个项目上（`activateProject` 单独用只改元数据，不换引擎进程）。
+    // 只有把三个调用都记下来，场景才能证明这件事，而不是只证明「点了没报错」。
+    activateProject: async (path: string) => { navCalls.current.push(`activate:${path}`); return null; },
+    openSession: async (path: string, sessionId: string) => { navCalls.current.push(`open:${path}:${sessionId}`); },
+    newSession: async (path?: string) => { navCalls.current.push(`new:${path ?? ''}`); },
+    listProjectSessions: async (path: string) => { navCalls.current.push(`list:${path}`); },
     setThemePreference: noopAsyncVoid,
     // `voice` (Task 9 of the desktop-audio-capability plan) joined the
     // `page-content` scenario's list alongside the Task 18 pages — same
@@ -314,6 +326,16 @@ function Fixture() {
       setSettingsFiles: (files: unknown[]) => {
         setSettingsSnapshotEvent({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}', files_json: JSON.stringify(files) } as SettingsSnapshotEvent);
       },
+      setProjectList: (
+        paths: string[],
+        catalogs: Record<string, { sessions: Array<{ uuid: string; title: string; modified_rfc3339: string; message_count: number }> }> = {},
+      ) => { setProjectList(paths); setProjectCatalogs(catalogs); },
+      clickTestId: (testId: string) => {
+        (document.querySelector(`[data-testid="${testId}"]`) as HTMLButtonElement | null)?.click();
+      },
+      clickProjectOption: (path: string) => {
+        (document.querySelector(`[data-project-option="${path}"]`) as HTMLButtonElement | null)?.click();
+      },
       setMalformedSnapshot: () => {
         setSettingsSnapshotEvent({
           type: 'settings_snapshot',
@@ -331,6 +353,13 @@ function Fixture() {
         projectDisabled: (document.querySelector('[data-layer="project"]') as HTMLButtonElement | null)?.disabled ?? null,
         localDisabled: (document.querySelector('[data-layer="local"]') as HTMLButtonElement | null)?.disabled ?? null,
         layerSwitcherReasonText: document.querySelector('[data-testid="layer-switcher-disabled-reason"]')?.textContent ?? null,
+        layerDescriptionText: document.querySelector('[data-testid="layer-description"]')?.textContent ?? null,
+        layerProjectName: document.querySelector('[data-testid="layer-project-name"]')?.textContent ?? null,
+        layerProjectPath: document.querySelector('[data-testid="layer-project-path"]')?.textContent ?? null,
+        layerProjectUnknown: document.querySelector('[data-testid="layer-project-unknown"]')?.textContent ?? null,
+        hasProjectPicker: Boolean(document.querySelector('[data-testid="layer-project-picker"]')),
+        projectSwitchWarning: document.querySelector('[data-testid="layer-project-switch-warning"]')?.textContent ?? null,
+        navCalls: [...navCalls.current],
         hasBanner: Boolean(document.querySelector('[data-testid="settings-pending-banner"]')),
         placeholderKind: document.querySelector('[data-testid="page-placeholder"]')?.getAttribute('data-placeholder-kind') ?? null,
         hasSnapshotError: Boolean(document.querySelector('[data-testid="settings-snapshot-error"]')),
@@ -383,6 +412,12 @@ declare global {
       getFieldValue(selector: string): string | null;
       markElement(selector: string, value: string): void;
       readElementMarker(selector: string): string | null;
+      setProjectList(
+        paths: string[],
+        catalogs?: Record<string, { sessions: Array<{ uuid: string; title: string; modified_rfc3339: string; message_count: number }> }>,
+      ): void;
+      clickTestId(testId: string): void;
+      clickProjectOption(path: string): void;
       setMalformedSnapshot(): void;
       close(): void;
       openSettings(): void;
@@ -394,6 +429,13 @@ declare global {
         projectDisabled: boolean | null;
         localDisabled: boolean | null;
         layerSwitcherReasonText: string | null;
+        layerDescriptionText: string | null;
+        layerProjectName: string | null;
+        layerProjectPath: string | null;
+        layerProjectUnknown: string | null;
+        hasProjectPicker: boolean;
+        projectSwitchWarning: string | null;
+        navCalls: string[];
         hasBanner: boolean;
         placeholderKind: string | null;
         hasSnapshotError: boolean;

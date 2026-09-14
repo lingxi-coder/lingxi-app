@@ -153,6 +153,15 @@ struct DesktopMCPAdminPage: View {
         let root = DesktopSettingsRepository.object(scopeRow["raw_json"] as? String ?? "{}") ?? [:]
         return root["mcpServers"] as? [String: Any] ?? root
     }
+    /// 当前作用域的落盘位置。具体路径不写死在文案里 —— 引擎在 `scopeRow["path"]`
+    /// 上回传真实路径，就在下面一行显示；这里只讲含义与影响范围。
+    private var mcpScopeDescription: String {
+        switch scope {
+        case "project": String(localized: "mcp_scope_project_desc")
+        case "local": String(localized: "mcp_scope_local_desc")
+        default: String(localized: "mcp_scope_user_desc")
+        }
+    }
     private var managed: Bool { host.managedMcpInventory(serverName: name) != nil }
     private var writable: Bool { repository.connected && !repository.saving && draftRevision != nil && !managed }
     var body: some View {
@@ -161,6 +170,11 @@ struct DesktopMCPAdminPage: View {
             Picker("MCP storage scope", selection: $scope) {
                 Text("User").tag("user"); Text("Local workspace").tag("local"); Text("Project .mcp.json").tag("project")
             }.pickerStyle(.segmented)
+            // MCP 的三个作用域和设置页的层用了同样的词，却是两套独立存储 —— 而且
+            // 「本地」的含义正好相反：设置层的 local 在项目内，MCP 的 local 在主目录。
+            // 刚在设置页学会一个意思的人，到这一页会把同一个词读成同一个意思。
+            Text(mcpScopeDescription).font(.caption).foregroundStyle(.secondary)
+            Text("mcp_scope_vs_layers_note").font(.caption2).foregroundStyle(.secondary)
             Text(scopeRow["path"] as? String ?? "Load the engine configuration to view this scope.")
                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             DisclosureGroup("Runtime servers") {

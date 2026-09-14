@@ -110,6 +110,51 @@ export function rowState(
 }
 
 /**
+ * 引擎放项目级配置的目录名（Rust 侧的 `branding::DOT_DIR`）。客户端没有共享常量：
+ * `main/host-utils.ts` 与 `main/file-search.ts` 也各自写死同一个字面量。
+ */
+const SETTINGS_DOT_DIR = '.lingxi';
+
+/**
+ * 引擎解析 `project` / `local` 两层时实际用的那个项目目录，或 `null`。
+ *
+ * 唯一可信的来源是引擎自己回传的 `files_json`。`SettingsPaths.project_dir` 在
+ * bridge-server 启动时就由 `--cwd` 定死（`apps/bridge-server/src/boot.rs`），而桌面端
+ * 每个会话各起一个引擎进程 —— 所以「项目层这次写到哪个目录」只有正在答题的那个引擎
+ * 知道。渲染端的 `bootstrap.workspace.path` / `settings.activeProject` 是**界面**的当前
+ * 项目，两者可以不是同一个（切换项目只改元数据，不重开引擎），拿它们去标注层切换器，
+ * 就会在指着项目 B 的同时把值写进项目 A 的文件。
+ *
+ * 反推只做一件事：把路径末尾的 `<DOT_DIR>/settings.json` 去掉。后缀对不上就返回
+ * `null` —— 宁可不显示项目，也不猜一个可能是错的。
+ */
+export function projectDirFromSnapshot(snapshot: SettingsSnapshot | null): string | null {
+  const path = snapshot?.files.find((file) => file.layer === 'project')?.path;
+  if (!path) return null;
+  const segments = path.split(/[\\/]/);
+  if (segments.length < 3) return null;
+  if (segments[segments.length - 1] !== 'settings.json') return null;
+  if (segments[segments.length - 2] !== SETTINGS_DOT_DIR) return null;
+  // Windows 路径（`C:\proj\.lingxi\settings.json`）要拼回反斜杠；只有在路径里确实
+  // 只出现反斜杠时才这么判断，混用分隔符的路径按 POSIX 处理。
+  const separator = path.includes('\\') && !path.includes('/') ? '\\' : '/';
+  const dir = segments.slice(0, -2).join(separator);
+  return dir.length > 0 ? dir : separator;
+}
+
+/**
+ * 项目目录的末段，用作人读的项目名 —— 全应用一致的约定（顶栏
+ * `BetaDesktop.tsx` 与「项目与信任」页都是「末段加粗、完整路径在下」）。
+ *
+ * 路径本身永远要同时显示：末段会重名（两个不同项目都叫 `app`），只给名字等于
+ * 又造一个「到底是哪一个」的问题，而那正是这次要消除的东西。
+ */
+export function projectDisplayName(dir: string): string {
+  const segments = dir.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] ?? dir;
+}
+
+/**
  * 「这次写入还没被引擎回答」的哨兵值。
  *
  * 一次写入是从「点了保存」开始的，但那一刻还没有任何东西可以和「引擎回答之后

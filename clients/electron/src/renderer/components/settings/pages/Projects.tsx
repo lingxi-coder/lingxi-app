@@ -6,6 +6,9 @@ import type { PageContentProps } from '../SettingsScreen';
 import type { PinnedSessionRecord } from '../../../bridge/lingxi';
 import { formatSessionMetadata } from '../../../bridge/sessionPresentation';
 import { ghostButtonStyle } from './ghostButton';
+// 与层切换器下的项目行共用同一个「末段即项目名」的约定，而不是在设置树里
+// 留两份同名同实现的 `basename`。
+import { projectDisplayName } from '../useEngineSettings';
 
 export interface ProjectRow {
   path: string;
@@ -47,11 +50,6 @@ export function pinnedSessionRows(settings: { pinnedSessions: PinnedSessionRecor
     sessionId: pinned.sessionId,
     title: pinned.title,
   }));
-}
-
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] ?? path;
 }
 
 /**
@@ -158,7 +156,7 @@ export function Projects({ bridge }: PageContentProps) {
               title={
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <Icon name="folder" size={14} color={row.active ? t.text2 : t.text3} stroke={1.7} />
-                  {basename(row.path)}
+                  {projectDisplayName(row.path)}
                   {row.active && (
                     <span style={{ fontSize: 10.5, padding: '2px 7px', borderRadius: 5, background: t.surfaceHover, color: t.text3, fontWeight: 600 }}>
                       当前
@@ -217,7 +215,7 @@ export function Projects({ bridge }: PageContentProps) {
               key={`${row.projectPath}\0${row.sessionId}`}
               align="center"
               title={title}
-              desc={`${basename(row.projectPath)} · ${metadata}`}
+              desc={`${projectDisplayName(row.projectPath)} · ${metadata}`}
             >
               <button type="button" onClick={() => handleUnpin(row, title)} style={ghostButtonStyle(t)}>
                 <Icon name="pin" size={12} stroke={2} /> 取消置顶

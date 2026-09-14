@@ -46,6 +46,55 @@ async function runProjectTabsScenario(webContents) {
   return { withoutProject, withProject };
 }
 
+/**
+ * 层切换器旁的项目身份来自**引擎**回传的 `files_json`，而不是渲染端的
+ * `bootstrap.workspace.path`。这个场景刻意让两者不一致：workspace 说
+ * `/test/project`，快照里的 project 层却指向 `/test/engine-answer`。
+ * 直接读 workspace 的实现会在这里报出 `project` 而不是 `engine-answer`。
+ *
+ * 第二半证明切换项目不是只喊了一嗓子：`activateProject` 单独用不换引擎
+ * （`main/host.ts` 那一分支只写元数据），所以调用序列里必须还有一次
+ * `open:`/`new:`。
+ */
+async function runLayerProjectScenario(webContents) {
+  const call = (expression) => webContents.executeJavaScript(expression);
+  await call('window.__settingsScreenTest.setHasProject(true)');
+  await call('window.__settingsScreenTest.selectPage("permissions")');
+
+  // 先停在项目层、且快照还没到 —— 「不知道是哪个项目」必须说出来，而不是
+  // 悄悄回落到界面侧的当前项目。
+  await call('window.__settingsScreenTest.clickLayerTab("project")');
+  const beforeSnapshot = await call('window.__settingsScreenTest.state()');
+
+  await call(`window.__settingsScreenTest.setSettingsFiles(${JSON.stringify([
+    { layer: 'user', path: '/test/home/.lingxi/settings.json', exists: true, parsed: true },
+    { layer: 'project', path: '/test/engine-answer/.lingxi/settings.json', exists: true, parsed: true },
+    { layer: 'local', path: '/test/engine-answer/.lingxi/settings.local.json', exists: false, parsed: true },
+  ])})`);
+
+  const onProjectLayer = await call('window.__settingsScreenTest.state()');
+  await call('window.__settingsScreenTest.clickLayerTab("user")');
+  const onUserLayer = await call('window.__settingsScreenTest.state()');
+  await call('window.__settingsScreenTest.clickLayerTab("project")');
+
+  await call(`window.__settingsScreenTest.setProjectList(${JSON.stringify(['/test/engine-answer', '/test/other'])}, ${JSON.stringify({
+    '/test/other': {
+      sessions: [
+        { uuid: 'older', title: 'older', modified_rfc3339: '2026-01-01T00:00:00Z', message_count: 1 },
+        { uuid: 'newest', title: 'newest', modified_rfc3339: '2026-06-01T00:00:00Z', message_count: 2 },
+      ],
+    },
+  })})`);
+  await call('window.__settingsScreenTest.clickTestId("layer-project-switch")');
+  const pickerOpen = await call('window.__settingsScreenTest.state()');
+
+  await call('window.__settingsScreenTest.clickProjectOption("/test/other")');
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const afterSwitch = await call('window.__settingsScreenTest.state()');
+
+  return { beforeSnapshot, onUserLayer, onProjectLayer, pickerOpen, afterSwitch };
+}
+
 async function runNoEngineBannerScenario(webContents) {
   await webContents.executeJavaScript(
     'window.__settingsScreenTest.setSnapshot({ model: "opus", theme: "dark" }, { model: "sonnet", theme: "dark" })',
@@ -525,6 +574,7 @@ async function main() {
       : scenario === 'custom-providers' ? await runCustomProvidersScenario(window, webContents)
       : scenario === 'visual-admin' ? await runVisualAdminScenario(window, webContents)
       : scenario === 'project-tabs' ? await runProjectTabsScenario(webContents)
+      : scenario === 'layer-project' ? await runLayerProjectScenario(webContents)
       : scenario === 'no-engine-banner' ? await runNoEngineBannerScenario(webContents)
       : scenario === 'malformed-snapshot' ? await runMalformedSnapshotScenario(webContents)
       : scenario === 'session-loading-guard' ? await runSessionLoadingGuardScenario(webContents)

@@ -667,6 +667,14 @@ struct RootView: View {
                     localAppsStore: localAppsStore,
                     projectCwd: projectStore.activeProject?.workspace.hostURL.path,
                     projectStore: projectStore,
+                    // 设置页里的「切换项目」必须真的把引擎换过去：项目层/本地层写到
+                    // 哪个目录由引擎进程的 cwd 决定，只更新「当前项目」这个记号是不够
+                    // 的。关掉设置页再走同一条 `switchScope`，与抽屉里换项目走的是完全
+                    // 相同的一条路径，而不是另起一套只在设置页生效的切换逻辑。
+                    onSwitchProject: { projectID in
+                        navigation.closeSettings()
+                        _ = switchScope(to: .project(projectID))
+                    },
                     onReconnectAfterSecretChange: {
                         #if canImport(engine_mobileFFI)
                             let hasPendingPermission = !source.model.pendingPermissions.isEmpty

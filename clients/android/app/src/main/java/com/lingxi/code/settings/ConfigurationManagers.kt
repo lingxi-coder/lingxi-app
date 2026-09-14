@@ -41,6 +41,11 @@ internal fun McpConfigurationPage(bridge: SettingsEngineBridge) {
         if (!state.connected) { Text(settingsLabel("Connect an engine to manage MCP servers.")); return@Column }
         TextButton(onClick = ::load) { Text(settingsLabel("Refresh servers")) }
         SingleChoiceRow(listOf("user", "project", "local"), scope, { scope = it })
+        // 「与设置层无关」上面那行已经说了，但没说清差在哪 —— 而「本地」两边的含义
+        // 正好相反：设置层的 local 在项目内，MCP 的 local 在主目录。真实路径由引擎
+        // 在下一行的 path 上回传，所以这两句只讲含义。
+        Text(settingsLabel("mcp_scope_${scope}_desc"))
+        Text(settingsLabel("mcp_scope_vs_layers_note"))
         current?.optString("path")?.let { Text(it) }
         if (current == null) Text(settingsLabel("Waiting for this scope's configuration…"))
         servers.keys().asSequence().toList().sorted().forEach { server ->

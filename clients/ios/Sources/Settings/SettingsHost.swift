@@ -38,6 +38,11 @@ struct SettingsHost: View {
     /// Active project root used to read/write the engine's project `.mcp.json`.
     var projectCwd: String? = nil
     var projectStore: ProjectStore? = nil
+    /// 由根视图提供：把当前会话切到另一个项目。设置页自己做不了这件事 ——
+    /// 「项目」层写到哪个目录由引擎进程的 `--cwd` 决定，而换 cwd 就意味着重建
+    /// 会话源，那套状态机住在 `RootView.switchScope` 里。nil 表示本宿主不提供
+    /// 切换能力，此时层切换器下不画切换入口。
+    var onSwitchProject: ((String) -> Void)? = nil
     /// Supplied by the root only when it can rebuild an idle engine safely.
     var onReconnectAfterSecretChange: (() async throws -> Void)? = nil
     @State private var providerRepository = ProviderRepository.shared
@@ -121,6 +126,16 @@ struct SettingsHost: View {
             }
         }
         .task { await DesktopSettingsRepository.shared.refresh() }
+        // 项目切换能力一次性注入给整棵设置树：`SettingsLayerPicker` 出现在四个页面
+        // 上，逐个页面加构造参数只会把同一个值抄四遍。`onSwitchProject` 为 nil 时
+        // `switchTo` 也是 nil，切换入口就整个不画 —— 不画按钮好过画一个点了没反应的。
+        .environment(\.settingsProjectSwitching, SettingsProjectSwitching(
+            projects: (projectStore?.projects ?? []).map {
+                SettingsProjectChoice(id: $0.record.id, name: $0.record.name)
+            },
+            activeProjectID: projectStore?.activeProjectId,
+            switchTo: onSwitchProject
+        ))
         .background(t.windowBg)
         // Settings controls draw their own cards and fills. Avoid the automatic
         // tinted capsule that newer iOS versions add around custom labels.

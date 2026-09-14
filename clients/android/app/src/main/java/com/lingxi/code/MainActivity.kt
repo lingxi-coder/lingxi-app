@@ -239,6 +239,9 @@ class MainActivity : ComponentActivity() {
             val desktopProjectStore: com.lingxi.code.project.ProjectStore = viewModel(key = "projects", factory = com.lingxi.code.project.ProjectStore.factory(applicationContext))
             var activeConversationBusy by remember { mutableStateOf(false) }
             var activeConversationSource by remember { mutableStateOf<com.lingxi.code.conversation.ConversationSource?>(null) }
+            // 设置页请求的项目切换。宿主持有请求、RootScreen 消费后回调清除 ——
+            // 与下面 pendingConversationLaunch 同一个形状。
+            var pendingProjectSwitch by remember { mutableStateOf<String?>(null) }
             var engineRuntimeMode by rememberSaveable {
                 mutableStateOf(settingsState.linuxRuntime.selectedMode.name)
             }
@@ -337,6 +340,8 @@ class MainActivity : ComponentActivity() {
                         reconnectToken = engineReconnect,
                         settingsStore = settingsStore,
                         onConversationSourceChanged = { activeConversationSource = it },
+                        requestedProjectSwitch = pendingProjectSwitch,
+                        onProjectSwitchHandled = { pendingProjectSwitch = null },
                         onConversationBusyChanged = { activeConversationBusy = it },
                         requestedConversationLaunch = requestedConversationLaunch,
                         onConversationLaunchHandled = { pendingConversationLaunch.value = null },
@@ -353,6 +358,14 @@ class MainActivity : ComponentActivity() {
                         SettingsHost(
                             engineSource = activeConversationSource,
                             projectStore = desktopProjectStore,
+                            // 「在这里换项目」要真的把引擎换过去，而不是只挪一个记号：
+                            // 项目层写进哪个目录由引擎进程的 cwd 决定。关掉设置页、把
+                            // 请求交给 RootScreen 的 switchEngineScope，与抽屉里换项目
+                            // 走的是同一条路径。
+                            onSwitchProject = { projectId ->
+                                pendingProjectSwitch = projectId
+                                settingsOpen = false
+                            },
                             appearanceStore = store,
                             isDark = darkTheme,
                             accentId = prefs.accentId,

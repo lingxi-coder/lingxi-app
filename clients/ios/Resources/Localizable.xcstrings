@@ -37266,6 +37266,142 @@
         }
       }
     },
+    "mcp_scope_local_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "也存在主目录的配置文件里，但只对这个项目生效——文件不在项目内，不会提交。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "也存在主目錄的設定檔裡，但只對這個專案生效——檔案不在專案內，不會提交。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Also in your home-directory config, but scoped to this project only: not inside the project, not committed."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同じくホームディレクトリの設定ファイルにありますが、このプロジェクトにのみ適用されます。プロジェクト内にはなく、コミットもされません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "마찬가지로 홈 디렉터리 설정 파일에 있지만 이 프로젝트에만 적용됩니다. 프로젝트 안에 있지 않으며 커밋되지 않습니다."
+          }
+        }
+      }
+    },
+    "mcp_scope_project_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存在项目内的配置文件里，随仓库提交、团队共享。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存在專案內的設定檔裡，隨儲存庫提交、團隊共享。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stored inside the project and committed, so your team gets it."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクト内の設定ファイルに保存され、コミットされてチームで共有されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "프로젝트 안의 설정 파일에 저장되고 커밋되어 팀과 공유됩니다."
+          }
+        }
+      }
+    },
+    "mcp_scope_user_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存在主目录的配置文件里，本机所有项目共用。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存在主目錄的設定檔裡，本機所有專案共用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stored in your home-directory config and shared by every project on this machine."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ホームディレクトリの設定ファイルに保存され、このマシンのすべてのプロジェクトで共有されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "홈 디렉터리 설정 파일에 저장되어 이 컴퓨터의 모든 프로젝트가 공유합니다."
+          }
+        }
+      }
+    },
+    "mcp_scope_vs_layers_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP 的作用域与设置页的层是两套独立存储，同名不同义：MCP 的「本地」在主目录，设置的「本地」在项目内。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP 的範圍與設定頁的層是兩套獨立儲存，同名不同義：MCP 的「本機」在主目錄，設定的「本機」在專案內。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP scopes are separate storage from the settings layers. Same words, different meaning: MCP's Local lives in your home directory; the settings Local lives inside the project."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP のスコープは設定の層とは別の保存先です。同じ言葉でも意味が異なります：MCP の「ローカル」はホームディレクトリに、設定の「ローカル」はプロジェクト内にあります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP 범위는 설정 계층과는 별개의 저장소입니다. 같은 단어지만 의미가 다릅니다. MCP의 '로컬'은 홈 디렉터리에, 설정의 '로컬'은 프로젝트 안에 있습니다."
+          }
+        }
+      }
+    },
     "mcp_section_configuration": {
       "localizations": {
         "zh-Hans": {
@@ -51585,13 +51721,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "我被 @"
+            "value": "启用通知"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "我被 @"
+            "value": "啟用通知"
           }
         },
         "en": {
@@ -51603,13 +51739,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "@ メンション"
+            "value": "通知を有効にする"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "내가 @ 멘션됨"
+            "value": "알림 사용"
           }
         }
       }
@@ -51619,13 +51755,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "会话内有人提到你"
+            "value": "关闭后灵犀不再发送任何系统通知"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "會話內有人提到你"
+            "value": "關閉後靈犀不再傳送任何系統通知"
           }
         },
         "en": {
@@ -51637,13 +51773,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "会話内であなたが言及されたとき"
+            "value": "オフにすると灵犀はシステム通知を一切送信しません"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "대화 중 누군가 나를 언급했을 때"
+            "value": "끄면 灵犀가 시스템 알림을 전혀 보내지 않습니다"
           }
         }
       }
@@ -51653,31 +51789,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "产品更新"
+            "value": "等待你的输入"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "產品更新"
+            "value": "等待你的輸入"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Product Updates"
+            "value": "Waiting For Your Input"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "プロダクトアップデート"
+            "value": "入力を待っています"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "제품 업데이트"
+            "value": "입력 대기 중"
           }
         }
       }
@@ -51687,31 +51823,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "新功能与重要变更"
+            "value": "回合结束后你一直没回来时"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "新功能與重要變更"
+            "value": "回合結束後你一直沒回來時"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "New features and important changes"
+            "value": "When a turn ends and you have not come back"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "新機能と重要な変更"
+            "value": "ターン終了後に戻ってこなかったとき"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "새로운 기능 및 주요 변경 사항"
+            "value": "턴이 끝난 뒤 돌아오지 않았을 때"
           }
         }
       }
@@ -51721,31 +51857,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "工作流完成"
+            "value": "闲置提醒等待时间"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "工作流完成"
+            "value": "閒置提醒等待時間"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Workflow Complete"
+            "value": "Idle Reminder Delay"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ワークフロー完了"
+            "value": "アイドル通知までの待ち時間"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "워크플로 완료"
+            "value": "유휴 알림 대기 시간"
           }
         }
       }
@@ -51755,25 +51891,25 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "AI 跑完多步任务时"
+            "value": "回合结束后等待多久才提醒"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "AI 跑完多步任務時"
+            "value": "回合結束後等待多久才提醒"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "When the AI finishes a multi-step task"
+            "value": "How long after a turn ends before reminding you"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "AI が複数ステップのタスクを完了したとき"
+            "value": "ターン終了後どれだけ待ってから通知するか"
           }
         },
         "ko": {
@@ -52834,6 +52970,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "제공업체 인증 정보"
+          }
+        }
+      }
+    },
+    "settings_parity_current_project": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前项目"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前專案"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Current project"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在のプロジェクト"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "현재 프로젝트"
           }
         }
       }
@@ -54368,6 +54538,40 @@
         }
       }
     },
+    "settings_parity_local_layer_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写进项目内的本地设置文件，只对这个项目、只在本机生效；该文件不会提交。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "寫進專案內的本機設定檔，只對這個專案、只在本機生效；該檔案不會提交。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved inside the project but git-ignored: applies only to this project, only on this machine."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクト内のローカル設定ファイルに保存されます。このプロジェクトの、このマシンでのみ有効で、コミットされません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "프로젝트 안의 로컬 설정 파일에 저장됩니다. 이 프로젝트에서, 이 컴퓨터에서만 적용되며 커밋되지 않습니다."
+          }
+        }
+      }
+    },
     "settings_parity_manage_credentials": {
       "localizations": {
         "zh-Hans": {
@@ -54432,6 +54636,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "관리"
+          }
+        }
+      }
+    },
+    "settings_parity_managed_layer_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理员托管的策略，只读，优先级高于以上所有层。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理員託管的原則，唯讀，優先權高於以上所有層。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Administrator policy. Read-only, and it outranks every layer above."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理者が管理するポリシーです。読み取り専用で、上記のすべての層より優先されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "관리자가 관리하는 정책입니다. 읽기 전용이며 위의 모든 계층보다 우선합니다."
           }
         }
       }
@@ -55078,6 +55316,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "프로젝트"
+          }
+        }
+      }
+    },
+    "settings_parity_project_layer_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写进项目内的设置文件，只对这个项目生效；该文件会随仓库提交，团队成员都会拿到。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "寫進專案內的設定檔，只對這個專案生效；該檔案會隨儲存庫提交，團隊成員都會拿到。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved inside the project and applies only to it. This file is committed, so your team gets it too."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクト内の設定ファイルに保存され、このプロジェクトにのみ適用されます。このファイルはコミットされるため、チーム全員に共有されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "프로젝트 안의 설정 파일에 저장되어 이 프로젝트에만 적용됩니다. 이 파일은 커밋되므로 팀원도 함께 받습니다."
+          }
+        }
+      }
+    },
+    "settings_parity_project_unknown": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在向引擎确认这一层写入哪个项目…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在向引擎確認這一層寫入哪個專案…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking with the engine which project this layer writes to…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この層がどのプロジェクトに書き込むか、エンジンに確認しています…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 계층이 어느 프로젝트에 쓰는지 엔진에 확인하는 중…"
           }
         }
       }
@@ -56272,6 +56578,74 @@
         }
       }
     },
+    "settings_parity_switch_project": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换项目"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切換專案"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switch project"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクトを切り替え"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "프로젝트 전환"
+          }
+        }
+      }
+    },
+    "settings_parity_switch_project_warning": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换项目会同时切换当前会话。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切換專案會同時切換目前的對話。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switching the project also switches your current conversation."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクトを切り替えると、現在の会話も切り替わります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "프로젝트를 전환하면 현재 대화도 함께 전환됩니다."
+          }
+        }
+      }
+    },
     "settings_parity_synthesizer": {
       "localizations": {
         "zh-Hans": {
@@ -56370,6 +56744,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "사용자"
+          }
+        }
+      }
+    },
+    "settings_parity_user_layer_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写进你的用户设置文件，本机所有项目都生效。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "寫進你的使用者設定檔，本機所有專案都生效。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved to your user settings: applies to every project on this machine."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ユーザー設定ファイルに保存され、このマシンのすべてのプロジェクトに適用されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용자 설정 파일에 저장되어 이 컴퓨터의 모든 프로젝트에 적용됩니다."
           }
         }
       }

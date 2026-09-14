@@ -77,6 +77,10 @@ fun SettingsHost(
     onPermissionModeChanged: suspend (String) -> Unit = {},
     onTypescriptLspModeChanged: suspend (String) -> Unit = {},
     onSetLocalAppPluginEnabled: suspend (String, Boolean) -> Unit = { _, _ -> },
+    // 把当前会话切到另一个项目。设置页自己做不了：项目层/本地层写到哪个目录由引擎
+    // 进程的 cwd 决定，换 cwd 就要重建会话源，那套状态机住在 RootScreen 里。
+    // null 表示本宿主不提供切换能力，此时层选择器下不画切换入口。
+    onSwitchProject: ((String) -> Unit)? = null,
 ) {
     val engineBridge = remember { SettingsEngineBridge() }
     val draftRegistry = remember(engineSource) { SettingsDraftRegistry() }
@@ -131,7 +135,25 @@ fun SettingsHost(
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.systemBars),
     ) {
-        androidx.compose.runtime.CompositionLocalProvider(LocalSettingsDraftRegistry provides draftRegistry) {
+        // 经一个恒定存在的 flow 收集，而不是 `projectStore?.state?.collect…()`：
+        // 后者会让一次 @Composable 调用变成条件调用（projectStore 可空），而直接读
+        // `.value` 又不会在项目列表变化时重组。
+        val projectsFlow = remember(projectStore) {
+            projectStore?.state
+                ?: kotlinx.coroutines.flow.MutableStateFlow(com.lingxi.code.project.ProjectStoreState())
+        }
+        val projectsForSwitching by projectsFlow.collectAsStateWithLifecycle()
+        val projectSwitching = SettingsProjectSwitching(
+            projects = projectsForSwitching.projects.map {
+                SettingsProjectChoice(id = it.record.id, name = it.record.name)
+            },
+            activeProjectId = projectsForSwitching.activeProjectId,
+            switchTo = onSwitchProject,
+        )
+        androidx.compose.runtime.CompositionLocalProvider(
+            LocalSettingsDraftRegistry provides draftRegistry,
+            LocalSettingsProjectSwitching provides projectSwitching,
+        ) {
         Column(Modifier.fillMaxSize()) {
             SettingsTopBar(
                 title = titleFor(backEntry, state),

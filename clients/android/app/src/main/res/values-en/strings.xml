@@ -1012,6 +1012,10 @@
     <string name="mcp_loading_state">Reading MCP configuration…</string>
     <string name="mcp_reconnect">Reconnect</string>
     <string name="mcp_remove_server">Remove This Server</string>
+    <string name="mcp_scope_local_desc">Also in your home-directory config, but scoped to this project only: not inside the project, not committed.</string>
+    <string name="mcp_scope_project_desc">Stored inside the project and committed, so your team gets it.</string>
+    <string name="mcp_scope_user_desc">Stored in your home-directory config and shared by every project on this machine.</string>
+    <string name="mcp_scope_vs_layers_note">MCP scopes are separate storage from the settings layers. Same words, different meaning: MCP\'s Local lives in your home directory; the settings Local lives inside the project.</string>
     <string name="mcp_section_configuration">Server Configuration</string>
     <string name="mcp_section_servers_fmt">Servers · %1$d</string>
     <string name="mcp_section_tool_permissions">Tool Permissions</string>
@@ -1458,6 +1462,7 @@
     <string name="settings_parity_confirm_apply">Confirm and apply</string>
     <string name="settings_parity_create_skill">Create skill</string>
     <string name="settings_parity_credentials">Provider credentials</string>
+    <string name="settings_parity_current_project">Current project</string>
     <string name="settings_parity_custom_providers">Custom providers &amp; routing</string>
     <string name="settings_parity_default">Default</string>
     <string name="settings_parity_default_permission">Default permission mode</string>
@@ -1503,8 +1508,10 @@
     <string name="settings_parity_layer_explanation">Edits replace only the chosen key in this layer. Effective values can include other layers. Use null to inherit.</string>
     <string name="settings_parity_layer_unavailable">Layer data unavailable</string>
     <string name="settings_parity_local_layer">Local</string>
+    <string name="settings_parity_local_layer_desc">Saved inside the project but git-ignored: applies only to this project, only on this machine.</string>
     <string name="settings_parity_manage_credentials">Manage provider credentials</string>
     <string name="settings_parity_managed_layer">Managed</string>
+    <string name="settings_parity_managed_layer_desc">Administrator policy. Read-only, and it outranks every layer above.</string>
     <string name="settings_parity_managed_readonly">Managed policy: read-only</string>
     <string name="settings_parity_marketplace_source">Marketplace source</string>
     <string name="settings_parity_max_panel">Maximum panel size</string>
@@ -1524,6 +1531,8 @@
     <string name="settings_parity_plugins">Plugins &amp; marketplace</string>
     <string name="settings_parity_preview_marketplace">Preview adding marketplace</string>
     <string name="settings_parity_project_layer">Project</string>
+    <string name="settings_parity_project_layer_desc">Saved inside the project and applies only to it. This file is committed, so your team gets it too.</string>
+    <string name="settings_parity_project_unknown">Checking with the engine which project this layer writes to…</string>
     <string name="settings_parity_projects_trust">Projects &amp; trust</string>
     <string name="settings_parity_provider_accounts">Provider accounts</string>
     <string name="settings_parity_provider_validation_env">Use an environment variable name for apiKeyEnv</string>
@@ -1559,9 +1568,12 @@
     <string name="settings_parity_skill_documents">Skill documents</string>
     <string name="settings_parity_skill_name">Skill name</string>
     <string name="settings_parity_skill_trash">Move skill to trash</string>
+    <string name="settings_parity_switch_project">Switch project</string>
+    <string name="settings_parity_switch_project_warning">Switching the project also switches your current conversation.</string>
     <string name="settings_parity_synthesizer">Synthesizer</string>
     <string name="settings_parity_tools_agent">Tools &amp; agent behavior</string>
     <string name="settings_parity_user_layer">User</string>
+    <string name="settings_parity_user_layer_desc">Saved to your user settings: applies to every project on this machine.</string>
     <string name="settings_parity_validate_hooks">Validate hooks</string>
     <string name="settings_parity_voice">Voice</string>
     <string name="settings_parity_wait_snapshot">Waiting for engine settings snapshot…</string>

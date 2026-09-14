@@ -8,6 +8,7 @@ import {
   resolveInitialPage,
   SETTINGS_SIDEBAR_TOP_INSET,
 } from '../src/renderer/components/settings/SettingsScreen';
+import { projectDirFromSnapshot } from '../src/renderer/components/settings/useEngineSettings';
 import type { SettingsSnapshotEvent } from '../src/renderer/bridge/useBridge';
 
 test('resolveInitialPage opens the provider-credentials deep link when a provider id is given', () => {
@@ -149,4 +150,52 @@ test('parseSettingsSnapshot surfaces a malformed optional field as an error too'
   const { snapshot, error } = parseSettingsSnapshot(rawSnapshot({ files_json: '[not json' }));
   assert.equal(snapshot, null);
   assert.ok(error);
+});
+
+// `projectDirFromSnapshot` 的判据落在 `files_json` 上，而不是渲染端的当前项目
+// 状态：引擎的 `project_dir` 在 bridge-server 启动时由 `--cwd` 定死，界面的
+// 「当前项目」可以已经指向别处（切换项目只改元数据，不重开引擎）。下面第一个
+// 测试就是这条的种雷 —— 快照里的项目和 bootstrap 里的项目故意不同名。
+test('projectDirFromSnapshot reads the project layer path the ENGINE reported', () => {
+  const { snapshot } = parseSettingsSnapshot(rawSnapshot({
+    files_json: JSON.stringify([
+      { layer: 'user', path: '/Users/me/.lingxi/settings.json', exists: true, parsed: true },
+      { layer: 'project', path: '/Users/me/work/engine-answer/.lingxi/settings.json', exists: true, parsed: true },
+      { layer: 'local', path: '/Users/me/work/engine-answer/.lingxi/settings.local.json', exists: false, parsed: true },
+    ]),
+  }));
+  assert.equal(projectDirFromSnapshot(snapshot), '/Users/me/work/engine-answer');
+});
+
+test('projectDirFromSnapshot returns null when no project layer was reported', () => {
+  const { snapshot } = parseSettingsSnapshot(rawSnapshot({
+    files_json: JSON.stringify([
+      { layer: 'user', path: '/Users/me/.lingxi/settings.json', exists: true, parsed: true },
+    ]),
+  }));
+  assert.equal(projectDirFromSnapshot(snapshot), null);
+});
+
+test('projectDirFromSnapshot returns null rather than guessing when the suffix does not match', () => {
+  for (const path of [
+    '/Users/me/work/proj/settings.json',
+    '/Users/me/work/proj/.claude/settings.json',
+    '/Users/me/work/proj/.lingxi/settings.local.json',
+    'settings.json',
+  ]) {
+    const { snapshot } = parseSettingsSnapshot(rawSnapshot({
+      files_json: JSON.stringify([{ layer: 'project', path, exists: true, parsed: true }]),
+    }));
+    assert.equal(projectDirFromSnapshot(snapshot), null, `must not guess a project from ${path}`);
+  }
+});
+
+test('projectDirFromSnapshot is null-safe and handles Windows separators', () => {
+  assert.equal(projectDirFromSnapshot(null), null);
+  const { snapshot } = parseSettingsSnapshot(rawSnapshot({
+    files_json: JSON.stringify([
+      { layer: 'project', path: 'C:\\Users\\me\\proj\\.lingxi\\settings.json', exists: true, parsed: true },
+    ]),
+  }));
+  assert.equal(projectDirFromSnapshot(snapshot), 'C:\\Users\\me\\proj');
 });

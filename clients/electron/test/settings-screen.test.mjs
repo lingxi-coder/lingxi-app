@@ -283,3 +283,47 @@ test('adding an allow rule dispatches exactly what capturePermissionEdit would p
     remove: [],
   });
 });
+
+test('the layer switcher names the project the ENGINE reported, and switching it really re-points the engine', async () => {
+  const { beforeSnapshot, onUserLayer, onProjectLayer, pickerOpen, afterSwitch } = await runScenario('layer-project');
+
+  // 每一层都要有一句说明。三个裸标签（用户/项目/本地）不解释任何东西，而它们的
+  // 差别有真实后果 —— 「项目」层的文件随仓库提交给整个团队。
+  assert.match(onUserLayer.layerDescriptionText ?? '', /本机所有项目/,
+    'the user layer must say it applies to every project on this machine');
+  assert.match(onProjectLayer.layerDescriptionText ?? '', /提交/,
+    'the project layer must say the file is committed and shared with the team');
+
+  // 用户层是本机全局的，给它挂一个项目名就是在暗示一个不存在的作用域。
+  assert.equal(onUserLayer.layerProjectName, null, 'the user layer must not claim a project');
+
+  // 种雷：fixture 的 `bootstrap.workspace.path` 是 `/test/project`，而快照里
+  // project 层指向 `/test/engine-answer`。读 workspace 的实现会在这里拿到
+  // `project`，只有读 `files_json` 的才拿得到 `engine-answer`。
+  assert.equal(onProjectLayer.layerProjectName, 'engine-answer',
+    'the project name must come from the snapshot files_json, not bootstrap.workspace');
+  assert.equal(onProjectLayer.layerProjectPath, '/test/engine-answer',
+    'the full path is always shown alongside the name — basenames collide');
+
+  // 快照还没到时不猜：宁可说「还不知道」也不要指着 B 写 A。
+  assert.equal(beforeSnapshot.layerProjectName, null);
+  assert.match(beforeSnapshot.layerProjectUnknown ?? '', /确认/,
+    'with no snapshot yet the UI must say it does not know the project, not invent one');
+
+  assert.equal(pickerOpen.hasProjectPicker, true, 'the switch button must open a project list');
+  assert.match(pickerOpen.projectSwitchWarning ?? '', /切换当前会话/,
+    'switching the settings project also switches the conversation — say so before it happens');
+
+  // 判据落在**调用序列**上，不是「点了没报错」：`activateProject` 只写元数据，
+  // 引擎进程的 `--cwd` 不会因它改变。所以必须还有一次 open/new 把引擎真的
+  // 落到新项目上，否则下一次「项目」层写入仍然写进旧项目的文件。
+  assert.ok(afterSwitch.navCalls.includes('activate:/test/other'),
+    `expected the project to be activated, got ${JSON.stringify(afterSwitch.navCalls)}`);
+  assert.ok(
+    afterSwitch.navCalls.some((entry) => entry.startsWith('open:/test/other:') || entry.startsWith('new:/test/other')),
+    `activateProject alone does not re-point the engine; expected an open/new session call, got ${JSON.stringify(afterSwitch.navCalls)}`,
+  );
+  // 有历史会话时打开最近的那个，而不是每切一次项目就凭空造一个空会话。
+  assert.ok(afterSwitch.navCalls.includes('open:/test/other:newest'),
+    `expected the most recently modified session to be opened, got ${JSON.stringify(afterSwitch.navCalls)}`);
+});

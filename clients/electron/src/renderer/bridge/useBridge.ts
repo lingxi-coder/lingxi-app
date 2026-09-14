@@ -82,6 +82,7 @@ import type {
   ConnectionState,
   DiagnosticEntry,
   PluginSecretMetadata,
+  ProjectSessionCatalogState,
   ProviderCredentialMetadata,
   ProviderCredentialUpdate,
   ProviderConnectionTestResult,
@@ -208,11 +209,13 @@ export interface UseBridge {
   archiveSession(projectPath: string, sessionId: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
   openSession(projectPath: string, sessionId: string): Promise<void>;
-  listProjectSessions(projectPath: string): Promise<void>;
+  listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState | undefined>;
   sessionRuntimeStatus(sessionId: string): SessionRuntimeStatus | undefined;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  loginCodex(): Promise<ProviderCredentialUpdate>;
+  cancelCodexLogin(): Promise<void>;
   testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
   refreshProviderCredential(providerId: string): Promise<void>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
@@ -1120,21 +1123,25 @@ export function useBridge(): UseBridge {
     setBootstrap((previous) => previous ? { ...previous, ...patch } : previous);
   }, []);
 
-  const listProjectSessions = useCallback(async (projectPath: string): Promise<void> => {
-    if (!host) return;
+  // Returns the catalog it fetched as well as writing it into `bootstrap`. A
+  // caller acting on a click cannot read the bootstrap it just triggered — the
+  // `bridge` it closed over is that render's snapshot — so handing back the
+  // value is what lets "switch to this project" open the newest session instead
+  // of falling through to a stray new one.
+  const listProjectSessions = useCallback(async (projectPath: string): Promise<ProjectSessionCatalogState | undefined> => {
+    if (!host) return undefined;
     const generation = beginProjectCatalogRequest(catalogRequestGenerations.current, projectPath);
     const result = await host.listProjectSessions(projectPath);
-    if (!isLatestProjectCatalogRequest(catalogRequestGenerations.current, projectPath, generation)) return;
+    if (!isLatestProjectCatalogRequest(catalogRequestGenerations.current, projectPath, generation)) return undefined;
+    const catalog: ProjectSessionCatalogState = {
+      sessions: result.sessions.map((session) => ({ ...session })),
+      ...(result.error ? { error: result.error } : {}),
+    };
     setBootstrap((previous) => previous ? {
       ...previous,
-      projectCatalogs: {
-        ...previous.projectCatalogs,
-        [result.projectPath]: {
-          sessions: result.sessions.map((session) => ({ ...session })),
-          ...(result.error ? { error: result.error } : {}),
-        },
-      },
+      projectCatalogs: { ...previous.projectCatalogs, [result.projectPath]: catalog },
     } : previous);
+    return catalog;
   }, [host]);
 
   const scheduleProjectCatalogRefresh = useCallback((sessionId: string): void => {

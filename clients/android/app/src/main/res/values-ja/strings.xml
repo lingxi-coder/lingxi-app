@@ -1012,6 +1012,10 @@
     <string name="mcp_loading_state">MCP 設定を読み込んでいます…</string>
     <string name="mcp_reconnect">再接続</string>
     <string name="mcp_remove_server">このサーバーを削除</string>
+    <string name="mcp_scope_local_desc">同じくホームディレクトリの設定ファイルにありますが、このプロジェクトにのみ適用されます。プロジェクト内にはなく、コミットもされません。</string>
+    <string name="mcp_scope_project_desc">プロジェクト内の設定ファイルに保存され、コミットされてチームで共有されます。</string>
+    <string name="mcp_scope_user_desc">ホームディレクトリの設定ファイルに保存され、このマシンのすべてのプロジェクトで共有されます。</string>
+    <string name="mcp_scope_vs_layers_note">MCP のスコープは設定の層とは別の保存先です。同じ言葉でも意味が異なります：MCP の「ローカル」はホームディレクトリに、設定の「ローカル」はプロジェクト内にあります。</string>
     <string name="mcp_section_configuration">サーバー設定</string>
     <string name="mcp_section_servers_fmt">サーバー · %1$d</string>
     <string name="mcp_section_tool_permissions">ツール権限</string>
@@ -1458,6 +1462,7 @@
     <string name="settings_parity_confirm_apply">確認して適用</string>
     <string name="settings_parity_create_skill">スキルを作成</string>
     <string name="settings_parity_credentials">プロバイダー認証情報</string>
+    <string name="settings_parity_current_project">現在のプロジェクト</string>
     <string name="settings_parity_custom_providers">カスタムプロバイダーとルーティング</string>
     <string name="settings_parity_default">デフォルト</string>
     <string name="settings_parity_default_permission">既定の権限モード</string>
@@ -1503,8 +1508,10 @@
     <string name="settings_parity_layer_explanation">編集はこのレイヤーの選択したキーのみを置き換えます。有効値には他のレイヤーも含まれます。継承するには null を使用します。</string>
     <string name="settings_parity_layer_unavailable">レイヤーデータを取得できません</string>
     <string name="settings_parity_local_layer">ローカル</string>
+    <string name="settings_parity_local_layer_desc">プロジェクト内のローカル設定ファイルに保存されます。このプロジェクトの、このマシンでのみ有効で、コミットされません。</string>
     <string name="settings_parity_manage_credentials">プロバイダー認証情報を管理</string>
     <string name="settings_parity_managed_layer">管理</string>
+    <string name="settings_parity_managed_layer_desc">管理者が管理するポリシーです。読み取り専用で、上記のすべての層より優先されます。</string>
     <string name="settings_parity_managed_readonly">管理ポリシー：読み取り専用</string>
     <string name="settings_parity_marketplace_source">マーケットプレイスのソース</string>
     <string name="settings_parity_max_panel">パネルの最大モデル数</string>
@@ -1524,6 +1531,8 @@
     <string name="settings_parity_plugins">プラグインとマーケットプレイス</string>
     <string name="settings_parity_preview_marketplace">マーケットプレイス追加を確認</string>
     <string name="settings_parity_project_layer">プロジェクト</string>
+    <string name="settings_parity_project_layer_desc">プロジェクト内の設定ファイルに保存され、このプロジェクトにのみ適用されます。このファイルはコミットされるため、チーム全員に共有されます。</string>
+    <string name="settings_parity_project_unknown">この層がどのプロジェクトに書き込むか、エンジンに確認しています…</string>
     <string name="settings_parity_projects_trust">プロジェクトと信頼</string>
     <string name="settings_parity_provider_accounts">プロバイダーのアカウント</string>
     <string name="settings_parity_provider_validation_env">apiKeyEnv には環境変数名を指定してください</string>
@@ -1559,9 +1568,12 @@
     <string name="settings_parity_skill_documents">スキル文書</string>
     <string name="settings_parity_skill_name">スキル名</string>
     <string name="settings_parity_skill_trash">スキルをゴミ箱に移動</string>
+    <string name="settings_parity_switch_project">プロジェクトを切り替え</string>
+    <string name="settings_parity_switch_project_warning">プロジェクトを切り替えると、現在の会話も切り替わります。</string>
     <string name="settings_parity_synthesizer">統合モデル</string>
     <string name="settings_parity_tools_agent">ツールとエージェントの動作</string>
     <string name="settings_parity_user_layer">ユーザー</string>
+    <string name="settings_parity_user_layer_desc">ユーザー設定ファイルに保存され、このマシンのすべてのプロジェクトに適用されます。</string>
     <string name="settings_parity_validate_hooks">Hooks を検証</string>
     <string name="settings_parity_voice">音声</string>
     <string name="settings_parity_wait_snapshot">エンジンの設定を取得中…</string>

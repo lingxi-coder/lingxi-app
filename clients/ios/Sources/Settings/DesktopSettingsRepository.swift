@@ -6,6 +6,13 @@ enum DesktopSettingsLayer: String, CaseIterable, Identifiable {
     case user, project, local, managed
     var id: String { rawValue }
     var title: String { String(localized: String.LocalizationValue(stringLiteral: "settings_parity_\(rawValue)_layer")) }
+    /// 这一层的值落到哪、影响谁。四个裸标签（用户 / 项目 / 本地 / 托管）本身不解释
+    /// 任何东西，而它们的差别有真实后果：`project` 层的文件随仓库提交给整个团队，
+    /// `local` 层的同名文件被 gitignore、只在本机生效。
+    var summary: String { String(localized: String.LocalizationValue(stringLiteral: "settings_parity_\(rawValue)_layer_desc")) }
+    /// 落盘位置是否取决于当前项目。`user` 是本机全局的，给它标一个项目名就是在
+    /// 暗示一个并不存在的作用域。
+    var isProjectScoped: Bool { self == .project || self == .local }
     var destination: SettingsDestinationDto? {
         switch self { case .user: .user; case .project: .project; case .local: .local; case .managed: nil }
     }
@@ -98,6 +105,33 @@ final class DesktopSettingsRepository {
         if !layerParsed(layer) { return "This settings file contains invalid JSON. Repair it before editing this layer." }
         if layers[layer.rawValue] == nil { return String(localized: "settings_parity_layer_unavailable") }
         return nil
+    }
+
+    /// 引擎解析 `project` / `local` 两层时实际用的那个项目目录，或 `nil`。
+    ///
+    /// 唯一可信的来源是引擎自己在 `files_json` 里回传的路径：`project_dir` 由引擎
+    /// 进程启动时的 `--cwd` 定死，而移动端连的是远端桌面桥 —— 客户端这边任何
+    /// 「当前项目」状态（`ProjectStore.activeProject`）都可能和答题的那个引擎不是
+    /// 同一个。反推只做一件事：去掉末尾的 `<DOT_DIR>/settings.json`；对不上就返回
+    /// `nil`，宁可不显示项目，也不猜一个可能是错的。
+    var projectDirectory: String? {
+        guard let files = try? JSONSerialization.jsonObject(with: Data(filesJSON.utf8)) as? [[String: Any]],
+              let file = files.first(where: { $0["layer"] as? String == DesktopSettingsLayer.project.rawValue }),
+              let path = file["path"] as? String else { return nil }
+        var segments = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard segments.count >= 3, segments.removeLast() == "settings.json",
+              segments.removeLast() == Self.dotDirectoryName else { return nil }
+        let directory = segments.joined(separator: "/")
+        return directory.isEmpty ? "/" : directory
+    }
+
+    /// 引擎放项目级配置的目录名（Rust 侧的 `branding::DOT_DIR`）。
+    private static let dotDirectoryName = ".lingxi"
+
+    /// 项目目录的末段，用作人读的项目名 —— 与抽屉里的项目行同一个约定。完整路径
+    /// 永远跟着一起显示：末段会重名，只给名字等于又造一个「到底是哪一个」的问题。
+    static func projectDisplayName(_ directory: String) -> String {
+        directory.split(separator: "/").last.map(String.init) ?? directory
     }
 
     private func layerParsed(_ layer: DesktopSettingsLayer) -> Bool {

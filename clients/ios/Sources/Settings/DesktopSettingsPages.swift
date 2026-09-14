@@ -219,15 +219,98 @@ struct DesktopProjectsPage: View {
     }
 }
 
+/// 一个可切换到的项目。刻意只带 `id` 与展示用的名字：把「当前是哪个」判在
+/// `ProjectStore.activeProjectId` 上，而不是拿引擎回传的路径去和客户端的
+/// workspace 路径做字符串比较 —— host/guest 两套路径推导在这个仓库里已经分叉过
+/// 一次，用 id 判等可以完全绕开它。
+struct SettingsProjectChoice: Identifiable, Hashable {
+    let id: String
+    let name: String
+}
+
+/// 设置页内切换项目所需的一切，由根视图注入。
+///
+/// 走 Environment 而不是构造参数：`SettingsLayerPicker` 出现在四个页面上，每个页面
+/// 各有自己的 `@State layer`，用构造参数就要在四处各加一个形参、再让它们各自的
+/// 构造点把值传进来。而真正能执行切换的 `switchScope` 住在 `RootView` 里，离这里
+/// 隔着一整层 `fullScreenCover`。
+struct SettingsProjectSwitching {
+    var projects: [SettingsProjectChoice] = []
+    var activeProjectID: String?
+    /// `nil` 表示这个宿主没法安全地换项目（例如根视图没注入），此时不画切换入口，
+    /// 而不是画一个点了没反应的按钮。
+    var switchTo: ((String) -> Void)?
+}
+
+private struct SettingsProjectSwitchingKey: EnvironmentKey {
+    static let defaultValue = SettingsProjectSwitching()
+}
+
+extension EnvironmentValues {
+    var settingsProjectSwitching: SettingsProjectSwitching {
+        get { self[SettingsProjectSwitchingKey.self] }
+        set { self[SettingsProjectSwitchingKey.self] = newValue }
+    }
+}
+
 struct SettingsLayerPicker: View {
     @Binding var selection: DesktopSettingsLayer
     @State private var repository = DesktopSettingsRepository.shared
+    @State private var showProjectList = false
+    @Environment(\.settingsProjectSwitching) private var switching
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Picker("Settings layer", selection: $selection) {
                 ForEach(DesktopSettingsLayer.allCases) { Text($0.title).tag($0) }
             }.pickerStyle(.segmented)
+            // 每一层都要有一句「值落到哪、影响谁」。四个裸标签本身不解释任何东西，
+            // 而「项目」层的文件是随仓库提交给整个团队的。
+            Text(selection.summary).font(.caption).foregroundStyle(.secondary)
+            if selection.isProjectScoped { projectSection }
             if let issue = repository.layerIssue(selection) { Text(issue).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+
+    @ViewBuilder private var projectSection: some View {
+        if let directory = repository.projectDirectory {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("settings_parity_current_project").font(.caption2).foregroundStyle(.secondary)
+                    Text(DesktopSettingsRepository.projectDisplayName(directory)).font(.callout.weight(.semibold))
+                    // 名字会重复（两个项目都叫 `app`），所以完整路径永远跟着一起显示。
+                    Text(directory).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                if switching.switchTo != nil {
+                    Button("settings_parity_switch_project") { showProjectList.toggle() }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                }
+            }
+        } else {
+            // 快照还没到就不猜项目名：宁可说「还不知道」，也不要指着 B 写 A。
+            Text("settings_parity_project_unknown").font(.caption).foregroundStyle(.secondary)
+        }
+        if showProjectList, let switchTo = switching.switchTo {
+            VStack(alignment: .leading, spacing: 4) {
+                // 这个后果必须先说：引擎是按会话起的，换设置的项目就等于换掉当前对话。
+                Text("settings_parity_switch_project_warning").font(.caption2).foregroundStyle(.orange)
+                ForEach(switching.projects) { project in
+                    Button {
+                        showProjectList = false
+                        switchTo(project.id)
+                    } label: {
+                        HStack {
+                            Text(project.name)
+                            if project.id == switching.activeProjectID {
+                                Text("settings_parity_current_project").font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 }

@@ -94,6 +94,21 @@ internal fun settingsLabel(text: String): String = when (text) {
     "project" -> stringResource(R.string.settings_parity_project_layer)
     "local" -> stringResource(R.string.settings_parity_local_layer)
     "managed" -> stringResource(R.string.settings_parity_managed_layer)
+    // 每一层「值落到哪、影响谁」的一句话。四个裸标签本身不解释任何东西，而它们的
+    // 差别有真实后果：项目层的文件随仓库提交给整个团队，本地层的被 gitignore。
+    "user_layer_desc" -> stringResource(R.string.settings_parity_user_layer_desc)
+    "project_layer_desc" -> stringResource(R.string.settings_parity_project_layer_desc)
+    "local_layer_desc" -> stringResource(R.string.settings_parity_local_layer_desc)
+    "managed_layer_desc" -> stringResource(R.string.settings_parity_managed_layer_desc)
+    "Current project" -> stringResource(R.string.settings_parity_current_project)
+    "Switch project" -> stringResource(R.string.settings_parity_switch_project)
+    "Switching the project also switches your current conversation." -> stringResource(R.string.settings_parity_switch_project_warning)
+    "Checking with the engine which project this layer writes to…" -> stringResource(R.string.settings_parity_project_unknown)
+    // MCP 的作用域与设置层同名不同义，「本地」的含义正好相反 —— 见 ConfigurationManagers.kt。
+    "mcp_scope_user_desc" -> stringResource(R.string.mcp_scope_user_desc)
+    "mcp_scope_local_desc" -> stringResource(R.string.mcp_scope_local_desc)
+    "mcp_scope_project_desc" -> stringResource(R.string.mcp_scope_project_desc)
+    "mcp_scope_vs_layers_note" -> stringResource(R.string.mcp_scope_vs_layers_note)
     "Not configured" -> stringResource(R.string.settings_parity_not_configured)
     "Choose" -> stringResource(R.string.settings_parity_choose)
     "Panel models" -> stringResource(R.string.settings_parity_panel_models)

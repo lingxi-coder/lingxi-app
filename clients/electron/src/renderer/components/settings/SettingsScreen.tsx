@@ -23,7 +23,8 @@ import { ProviderCredentials } from './pages/ProviderCredentials';
 import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
 import { Voice } from './pages/Voice';
-import { provenanceLabel, type Provenance } from './rows';
+import { provenanceDescription, provenanceLabel, type Provenance } from './rows';
+import { projectDirFromSnapshot, projectDisplayName } from './useEngineSettings';
 import type { SettingsSnapshot } from './useEngineSettings';
 
 /**
@@ -308,6 +309,181 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
   );
 }
 
+/**
+ * 层切换器下面那块「这一层的值会落到哪」的说明，以及项目层/本地层归属哪个项目。
+ *
+ * 存在的理由：切换器只有三个裸标签（用户 / 项目 / 本地），既没说清每个词是什么
+ * 意思，也没说「项目」指的是哪一个项目 —— 而这两件事都有真实后果。写进「项目」
+ * 层的权限规则会随仓库提交给整个团队；写进「本地」层的不会。至于是哪个项目，
+ * 答案只有引擎知道：`SettingsPaths.project_dir` 在 bridge-server 启动时由 `--cwd`
+ * 定死，而桌面端每个会话各起一个引擎进程。所以项目名一律取自快照的 `files_json`
+ * （`projectDirFromSnapshot`），不取渲染端的「当前项目」状态 —— 后者可以已经指向
+ * 别处，那正是下面 `handleSwitch` 要处理的问题。
+ */
+function LayerContext({ bridge, layer, projectDir, locked }: {
+  bridge: UseBridge;
+  layer: EditableLayer;
+  projectDir: string | null;
+  locked: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const projects = bridge.bootstrap?.settings.projects ?? [];
+  const catalogs = bridge.bootstrap?.projectCatalogs;
+  // 只有项目层和本地层的落盘位置取决于项目；用户层是本机全局的，给它标一个项目
+  // 名就是在暗示一个并不存在的作用域。
+  const needsProject = layer !== 'user';
+
+  // 展开列表时预取每个项目的会话目录。`handleSwitch` 需要目标项目里的一个会话
+  // 才能真的把引擎换过去，而 `listProjectSessions` 的结果是异步回填进 bootstrap
+  // 的、同一次点击里读不到。`BetaDesktop.tsx` 展开项目时用的是同一套预取。
+  useEffect(() => {
+    if (!open) return;
+    for (const path of projects) {
+      if (!catalogs?.[path]) void bridge.listProjectSessions(path).catch(() => undefined);
+    }
+    // Depend on the stable METHOD, not on `bridge`: `useBridge()` returns a
+    // fresh object literal every render and the app re-renders on every engine
+    // event, so listing `bridge` re-fired this prefetch per event for every
+    // project whose catalog had not landed — and a listing that keeps failing
+    // is swallowed by `.catch`, so the retry storm never stops.
+  }, [open, projects, catalogs, bridge.listProjectSessions]);
+
+  const handleSwitch = async (path: string) => {
+    setError(null);
+    if (path === projectDir) { setOpen(false); return; }
+    setBusy(true);
+    try {
+      await bridge.activateProject(path);
+      // `activateProject` 单独用是不够的：它只写 `settings.activeProject`
+      // （`main/host.ts` 的 `selectWorkspaceInternal` 在 addProject=false 分支里
+      // 就只做这一件事），不开会话、不换活动会话、因而不换引擎进程。而项目层写到
+      // 哪个目录完全由引擎进程的 `--cwd` 决定。只调它的话，界面会显示已经切到 B，
+      // 下一次「项目」层写入却仍然落进 A 的 `.lingxi/settings.json`。
+      // 所以这里必须再落到该项目的一个会话上：有历史会话就打开最近的一个，
+      // 没有就新建 —— 两者都会以新项目为 `--cwd` 起一个引擎。
+      // `bridge` is this render's snapshot, so a catalog the prefetch above
+      // landed after that render is invisible here — and falling through to
+      // `newSession` would bury the project's real chats behind a stray empty
+      // one. Fetch it when the snapshot has nothing.
+      const sessions = bridge.bootstrap?.projectCatalogs?.[path]?.sessions
+        ?? (await bridge.listProjectSessions(path).catch(() => undefined))?.sessions
+        ?? [];
+      let latest: (typeof sessions)[number] | undefined;
+      for (const entry of sessions) {
+        if (!latest || entry.modified_rfc3339 > latest.modified_rfc3339) latest = entry;
+      }
+      if (latest) await bridge.openSession(path, latest.uuid);
+      else await bridge.newSession(path);
+      setOpen(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法切换项目。');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div data-testid="layer-context" style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div data-testid="layer-description" style={{ fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
+        {provenanceDescription(layer)}
+      </div>
+
+      {needsProject && projectDir && (
+        <div data-testid="layer-project" style={{
+          display: 'flex', alignItems: 'center', gap: 9, padding: '7px 10px',
+          borderRadius: 8, background: t.surface, border: `0.5px solid ${t.border}`,
+        }}>
+          <Icon name="folder" size={14} color={t.text3} stroke={1.7} />
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div data-testid="layer-project-name" style={{
+              fontSize: 12.5, fontWeight: 600, color: t.text,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>{projectDisplayName(projectDir)}</div>
+            {/* 名字会重复（两个项目都叫 `app`），所以完整路径永远跟着一起显示。 */}
+            <div className="mono" data-testid="layer-project-path" style={{
+              fontSize: 10.5, color: t.text4,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>{projectDir}</div>
+          </div>
+          <button
+            type="button"
+            data-testid="layer-project-switch"
+            aria-expanded={open}
+            disabled={locked || busy}
+            onClick={() => setOpen((previous) => !previous)}
+            style={{
+              padding: '4px 10px', borderRadius: 6, fontSize: 11.5, fontFamily: 'inherit',
+              border: `0.5px solid ${t.border}`, background: t.surfaceHover,
+              color: locked || busy ? t.text4 : t.text2,
+              cursor: locked || busy ? 'not-allowed' : 'pointer',
+            }}
+          >切换项目</button>
+        </div>
+      )}
+
+      {/* 快照还没到的时候不猜一个项目名：宁可说「还不知道」，也不要指着 B 写 A。 */}
+      {needsProject && !projectDir && (
+        <div data-testid="layer-project-unknown" style={{ fontSize: 11.5, color: t.text4 }}>
+          正在向引擎确认这一层写入哪个项目…
+        </div>
+      )}
+
+      {open && (
+        <div data-testid="layer-project-picker" style={{
+          display: 'flex', flexDirection: 'column', gap: 2, padding: 6,
+          borderRadius: 8, background: t.surface, border: `0.5px solid ${t.border}`,
+        }}>
+          {/* 这个后果必须先说：引擎是按会话起的，换设置的项目就等于换掉当前对话。 */}
+          <div data-testid="layer-project-switch-warning" style={{ fontSize: 11, color: t.warn, padding: '2px 6px 6px' }}>
+            切换项目会同时切换当前会话。
+          </div>
+          {projects.length === 0 && (
+            <div style={{ fontSize: 11.5, color: t.text4, padding: '4px 6px' }}>
+              还没有添加项目文件夹，可在「项目与信任」页添加。
+            </div>
+          )}
+          {projects.map((path) => (
+            <button
+              key={path}
+              type="button"
+              data-project-option={path}
+              disabled={busy}
+              onClick={() => void handleSwitch(path)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                padding: '6px 8px', borderRadius: 6, border: 'none', textAlign: 'left',
+                background: path === projectDir ? t.surfaceActive : 'transparent',
+                color: t.text2, fontFamily: 'inherit', fontSize: 12,
+                cursor: busy ? 'wait' : 'pointer',
+              }}
+            >
+              <span style={{ fontWeight: 600, flexShrink: 0 }}>{projectDisplayName(path)}</span>
+              {path === projectDir && (
+                <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 5, background: t.surfaceHover, color: t.text3, fontWeight: 600 }}>
+                  当前
+                </span>
+              )}
+              <span className="mono" style={{
+                flex: 1, minWidth: 0, fontSize: 10.5, color: t.text4,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'right',
+              }}>{path}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <div role="alert" data-testid="layer-project-error" style={{ fontSize: 11.5, color: t.danger }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NavIcon({ name }: { name: string }) {
   const t = useT();
   return <Icon name={name} size={15} color="currentColor" stroke={1.7} style={{ color: t.text3 }} />;
@@ -405,6 +581,11 @@ export function SettingsScreen({
     () => parseSettingsSnapshot(bridge.settingsSnapshotEvent),
     [bridge.settingsSnapshotEvent],
   );
+  // 「项目层这次写进哪个目录」只有正在答题的那个引擎知道 —— 见
+  // `projectDirFromSnapshot` 的注释。这里刻意不回落到 `bridge.bootstrap.workspace`
+  // 或 `settings.activeProject`：它们是**界面**的当前项目，和引擎的可以不是同一个，
+  // 拿它们顶上就会把「不知道」渲染成一个看起来确定、实际可能错的项目名。
+  const projectDir = projectDirFromSnapshot(snapshot);
 
   let body: ReactNode;
   // Whether the body actually has something a layer switcher could target.
@@ -558,6 +739,9 @@ export function SettingsScreen({
               <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
             )}
           </div>
+          {showLayerSwitcher && (
+            <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
+          )}
           {body}
         </div>
 

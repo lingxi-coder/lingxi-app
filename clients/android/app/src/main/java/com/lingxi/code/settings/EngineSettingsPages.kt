@@ -22,6 +22,56 @@ internal val layeredPageKeys = mapOf(
     SettingsRoutes.PROJECTS to listOf("trustedDirectories"),
 )
 
+// 一个可切换到的项目。只带 id 与展示名：把「当前是哪个」判在 activeProjectId 上，
+// 而不是拿引擎回传的路径去和客户端的 workspace 路径做字符串比较 —— host/guest 两套
+// 路径推导在这个仓库里已经分叉过一次，用 id 判等可以完全绕开它。
+internal data class SettingsProjectChoice(val id: String, val name: String)
+
+// 设置页内切换项目所需的一切，由宿主注入。switchTo 为 null 表示本宿主提供不了切换
+// 能力，此时不画切换入口 —— 不画按钮好过画一个点了没反应的。
+internal data class SettingsProjectSwitching(
+    val projects: List<SettingsProjectChoice> = emptyList(),
+    val activeProjectId: String? = null,
+    val switchTo: ((String) -> Unit)? = null,
+)
+
+// 走 CompositionLocal 而不是构造参数：层选择器所在的 EngineSettingsPage 有两个调用
+// 点，而真正能执行切换的 switchEngineScope 离这里隔着 SettingsHost 和 MainActivity。
+internal val LocalSettingsProjectSwitching = staticCompositionLocalOf { SettingsProjectSwitching() }
+
+// 引擎放项目级配置的目录名（Rust 侧的 branding::DOT_DIR）。
+private const val SETTINGS_DOT_DIR = ".lingxi"
+
+// 引擎解析 project / local 两层时实际用的那个项目目录，或 null。
+//
+// 唯一可信的来源是引擎自己在 files_json 里回传的路径：project_dir 由引擎进程启动时
+// 的 cwd 定死，客户端这边任何「当前项目」状态都可能和答题的那个引擎不是同一个。
+// 反推只做一件事：去掉末尾的 <DOT_DIR>/settings.json；对不上就返回 null —— 宁可不
+// 显示项目，也不猜一个可能是错的。
+internal fun projectDirectoryFromFiles(filesJson: String?): String? {
+    val files = runCatching { JSONArray(filesJson ?: "[]") }.getOrNull() ?: return null
+    for (index in 0 until files.length()) {
+        val entry = files.optJSONObject(index) ?: continue
+        if (entry.optString("layer") != "project") continue
+        val path = entry.optString("path").ifBlank { return null }
+        val segments = path.split("/")
+        if (segments.size < 3) return null
+        if (segments[segments.size - 1] != "settings.json") return null
+        if (segments[segments.size - 2] != SETTINGS_DOT_DIR) return null
+        val directory = segments.subList(0, segments.size - 2).joinToString("/")
+        return directory.ifEmpty { "/" }
+    }
+    return null
+}
+
+// 项目目录的末段，用作人读的项目名。完整路径永远跟着一起显示：末段会重名。
+internal fun projectDisplayName(directory: String): String =
+    directory.split("/").lastOrNull { it.isNotEmpty() } ?: directory
+
+// 落盘位置是否取决于当前项目。user 是本机全局的，给它标一个项目名就是在暗示一个
+// 并不存在的作用域；managed 是只读策略，也不归任何项目管。
+private fun isProjectScopedLayer(layer: String): Boolean = layer == "project" || layer == "local"
+
 @Composable
 internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onReconnect: (() -> Unit)? = null) {
     val state by bridge.state.collectAsState()
@@ -51,6 +101,32 @@ internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onR
             return@Column
         }
         SingleChoiceRow(listOf("user", "project", "local", "managed"), layer, { layer = it })
+        Text(settingsLabel("${layer}_layer_desc"), color = LingXiTheme.palette.text4)
+        if (isProjectScopedLayer(layer)) {
+            val projectDirectory = projectDirectoryFromFiles(snapshot.filesJson)
+            if (projectDirectory == null) {
+                Text(settingsLabel("Checking with the engine which project this layer writes to…"), color = LingXiTheme.palette.text4)
+            } else {
+                Text(settingsLabel("Current project"), color = LingXiTheme.palette.text4)
+                Text(projectDisplayName(projectDirectory))
+                SelectionContainer { Text(projectDirectory, color = LingXiTheme.palette.text4) }
+            }
+            val switching = LocalSettingsProjectSwitching.current
+            val switchTo = switching.switchTo
+            if (switchTo != null) {
+                var showProjects by remember(route) { mutableStateOf(false) }
+                TextButton(onClick = { showProjects = !showProjects }) { Text(settingsLabel("Switch project")) }
+                if (showProjects) {
+                    // 这个后果必须先说：引擎是按会话起的，换设置的项目就等于换掉当前对话。
+                    Text(settingsLabel("Switching the project also switches your current conversation."), color = LingXiTheme.palette.text4)
+                    switching.projects.forEach { choice ->
+                        TextButton(onClick = { showProjects = false; switchTo(choice.id) }) {
+                            Text(if (choice.id == switching.activeProjectId) "${choice.name} · ${settingsLabel("Current project")}" else choice.name)
+                        }
+                    }
+                }
+            }
+        }
         Text(settingsLabel("Edits replace only the chosen key in this layer. Effective values can include other layers. Use null to inherit."), color = LingXiTheme.palette.text4)
         if (route == SettingsRoutes.CUSTOM_PROVIDERS) ProviderBulkImport(bridge,layer)
         val raw = runCatching { JSONObject(snapshot.layersJson ?: "{}").optJSONObject(layer) }.getOrNull()

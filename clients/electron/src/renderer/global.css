@@ -1600,7 +1600,7 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
   .desktop-inspector-trigger[aria-expanded='true'] { display: none; }
 }
 
-/* Keep the trailing action anchored while the pending-message slot expands. */
+/* Stop and send share one fixed trailing action slot. */
 .composer-submit-actions {
   --composer-action-duration: 220ms;
   --composer-action-ease: cubic-bezier(.2, 0, 0, 1);
@@ -1610,7 +1610,6 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
   flex: 0 0 auto;
   transition: width var(--composer-action-duration) var(--composer-action-ease);
 }
-.composer-submit-actions[data-pending='true'] { width: 84px; }
 .composer-send-presence,
 .composer-stop-presence {
   position: absolute;
@@ -1624,7 +1623,7 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
   filter: blur(4px);
   visibility: hidden;
   pointer-events: none;
-  transition: opacity var(--composer-action-duration) var(--composer-action-ease), transform var(--composer-action-duration) var(--composer-action-ease), filter var(--composer-action-duration) var(--composer-action-ease), visibility 0s var(--composer-action-duration);
+  transition: opacity var(--composer-action-duration) var(--composer-action-ease), transform var(--composer-action-duration) var(--composer-action-ease), filter var(--composer-action-duration) var(--composer-action-ease), visibility 0s;
 }
 .composer-send-presence[data-visible='true'],
 .composer-stop-presence[data-visible='true'] {
@@ -1634,9 +1633,6 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0s;
-}
-.composer-submit-actions[data-pending='true'] > .composer-stop-presence {
-  transform: translateX(-44px) scale(1);
 }
 .composer-icon-action,
 .composer-submit-button {

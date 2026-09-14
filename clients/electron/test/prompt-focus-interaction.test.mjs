@@ -192,7 +192,7 @@ test('real Electron restores an independent unsent composer draft for each sessi
         editable: true,
         attachEnabled: true,
         goalEnabled: false,
-        stopEnabled: true,
+        stopEnabled: false,
       },
       sentPending: 'pending follow-up',
     });

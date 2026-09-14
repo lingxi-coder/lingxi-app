@@ -101,9 +101,9 @@ async function main() {
     await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
     const pendingBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Send pending message"]').getBoundingClientRect().toJSON()`);
     assert.equal(pendingBounds.x, sendBounds.x);
-    await waitFor(webContents, `document.querySelector('.composer-submit-actions').getBoundingClientRect().width === 84`);
-    const pendingStopBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop current turn"]').getBoundingClientRect().toJSON()`);
-    assert.equal(pendingBounds.x - pendingStopBounds.x, 44);
+    await waitFor(webContents, `document.querySelector('.composer-submit-actions').getBoundingClientRect().width === 40`);
+    assert.equal(await webContents.executeJavaScript(`getComputedStyle(document.querySelector('.composer-stop-presence')).visibility`), 'hidden');
+    assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop current turn"]').tabIndex`), -1);
     if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
       await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.pending.png', (await webContents.capturePage()).toPNG());
     }

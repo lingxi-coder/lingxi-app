@@ -2234,8 +2234,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     <button
       type="button"
       className="composer-submit-button"
-      disabled={!bridge.running || bridge.isCancelling}
-      tabIndex={bridge.running ? 0 : -1}
+      disabled={!bridge.running || hasPrompt || bridge.isCancelling}
+      tabIndex={bridge.running && !hasPrompt ? 0 : -1}
       onClick={() => invoke(() => bridge.cancel())}
       aria-label={bridge.isCancelling ? 'Stopping current turn' : 'Stop current turn'}
       title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
@@ -2713,8 +2713,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           >
             <Icon name="waveform" size={18} color="currentColor" stroke={2.15} />
           </button>}
-          <div className="composer-submit-actions" style={!bridge.running && !hasPrompt ? { display: 'none' } : undefined} data-pending={bridge.running && hasPrompt}>
-            <span className="composer-stop-presence" data-visible={bridge.running} aria-hidden={!bridge.running}>
+          <div className="composer-submit-actions" style={!bridge.running && !hasPrompt ? { display: 'none' } : undefined}>
+            <span className="composer-stop-presence" data-visible={bridge.running && !hasPrompt} aria-hidden={!bridge.running || hasPrompt}>
               {stopTurnButton}
             </span>
             <span className="composer-send-presence" data-visible={hasPrompt} aria-hidden={!hasPrompt}>

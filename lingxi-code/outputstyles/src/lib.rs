@@ -16,5 +16,5 @@ pub use disk::{
 pub use model::*;
 pub use registry::{
     resolve_builtin_output_style, BuiltinOutputStyle, OutputStyleError, OutputStyleRegistry,
-    DEFAULT_OUTPUT_STYLE_NAME,
+    BUILTIN_OUTPUT_STYLES, DEFAULT_OUTPUT_STYLE_NAME,
 };

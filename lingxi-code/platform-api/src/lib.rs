@@ -229,6 +229,7 @@ pub use orchestrator::{
     McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelBillingMode,
     ModelCapabilities, ModelListing, ModelMetadata, ModelPricing, ModelPricingTier,
     ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent, OutputStream,
+    OutputStyleListing,
     PermissionControlState, PermissionModeAvailability, PlanSnapshot, PromptSnapshot,
     PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec,
     ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome, RegisterRepoRootRequest,

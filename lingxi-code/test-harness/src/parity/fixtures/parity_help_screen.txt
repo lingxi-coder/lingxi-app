@@ -45,6 +45,7 @@ Commands:
   /memory               Edit LINGXI.md files and memory settings
   /mobile               Show QR code to download the Claude mobile app
   /model                Set the AI model for LingXi
+  /output-style         List output styles or switch to one
   /passes               Share a free week of LingXi with friends and earn extra usage
   /permissions          Manage allow and deny tool permission rules
   /plan                 Enable plan mode or view the current session plan

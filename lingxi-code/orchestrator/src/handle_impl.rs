@@ -1238,6 +1238,64 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
+    async fn output_styles(&self) -> Option<platform_api::OutputStyleListing> {
+        let mut styles: Vec<(String, Option<String>)> = vec![(
+            // Upstream's style table maps `default` to `null`, so the listing
+            // renders it with no description. Keeping that shape here means the
+            // rendered line matches without the renderer special-casing a name.
+            outputstyles::DEFAULT_OUTPUT_STYLE_NAME.to_string(),
+            None,
+        )];
+        for builtin in outputstyles::BUILTIN_OUTPUT_STYLES {
+            styles.push((
+                builtin.name.to_string(),
+                Some(builtin.description.to_string()),
+            ));
+        }
+        for dir in &self.config.output_style_dirs {
+            for style in outputstyles::load_output_styles_from_dir(dir) {
+                if styles.iter().any(|(name, _)| *name == style.name) {
+                    continue;
+                }
+                let description = (!style.description.is_empty()).then_some(style.description);
+                styles.push((style.name, description));
+            }
+        }
+        if let Some(registry) = &self.prompt_runtime.output_style_registry {
+            for name in registry.read().await.names() {
+                if styles.iter().any(|(existing, _)| *existing == name) {
+                    continue;
+                }
+                styles.push((name, None));
+            }
+        }
+        let current = self
+            .active_output_style_setting()
+            .await
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| outputstyles::DEFAULT_OUTPUT_STYLE_NAME.to_string());
+        Some(platform_api::OutputStyleListing { current, styles })
+    }
+
+    async fn set_output_style(&self, name: &str) -> Result<(), HandleError> {
+        let listing = self
+            .output_styles()
+            .await
+            .ok_or_else(|| HandleError::ActionFailed("no output styles are available".into()))?;
+        // Case-INSENSITIVE, like upstream's `l.find(e => e.toLowerCase() === a)`,
+        // but the CANONICAL spelling is what gets stored: the resolvers look
+        // names up case-sensitively, so storing what the user typed would
+        // select nothing.
+        let canonical = listing
+            .styles
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(candidate, _)| candidate.clone())
+            .ok_or_else(|| HandleError::ActionFailed(format!("unknown output style {name:?}")))?;
+        *self.prompt_runtime.live_output_style.lock().await = Some(canonical);
+        Ok(())
+    }
+
     async fn conversation_controls(&self) -> Option<platform_api::ConversationControls> {
         let state = self.session.lock().await;
         Some(self.conversation_controls_for_model(&state.model, state.model_profile.as_deref()))

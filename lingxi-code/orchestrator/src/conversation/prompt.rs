@@ -743,22 +743,31 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// The output style in force for THIS turn: a `/output-style` switch made
+    /// during the session, else the boot setting.
+    ///
+    /// Read per turn rather than captured once, mirroring upstream, where the
+    /// `/output-style` handler writes `outputStyle` into localSettings and the
+    /// next prompt assembly reads it back. `Some("default")` is an explicit
+    /// choice and must win over an inherited custom style — treating it as
+    /// "unset" would make switching BACK to the default impossible.
+    pub(crate) async fn active_output_style_setting(&self) -> Option<String> {
+        if let Some(chosen) = self.prompt_runtime.live_output_style.lock().await.clone() {
+            return Some(chosen);
+        }
+        self.config.output_style.clone()
+    }
+
     pub(super) async fn resolve_active_output_style(
         &self,
     ) -> Option<outputstyles::ResolvedOutputStyle> {
+        let setting = self.active_output_style_setting().await;
         if let Some(registry) = &self.prompt_runtime.output_style_registry {
-            if let Some(style) = registry
-                .read()
-                .await
-                .resolve(self.config.output_style.as_deref())
-            {
+            if let Some(style) = registry.read().await.resolve(setting.as_deref()) {
                 return Some(style);
             }
         }
-        outputstyles::resolve_output_style(
-            self.config.output_style.as_deref(),
-            &self.config.output_style_dirs,
-        )
+        outputstyles::resolve_output_style(setting.as_deref(), &self.config.output_style_dirs)
     }
 
     /// Assemble the full system-prompt STRING from the static prompt members

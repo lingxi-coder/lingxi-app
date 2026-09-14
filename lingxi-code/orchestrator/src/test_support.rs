@@ -871,6 +871,11 @@ pub struct MockOrchestratorHandle {
     permission_mode: StdMutex<Option<String>>,
     /// Live effort value used by `/effort` command tests.
     effort: StdMutex<Option<String>>,
+    /// Output-style listing returned by `output_styles`; `None` means this
+    /// engine has no prompt-assembly layer (the trait default).
+    output_style_listing: StdMutex<Option<platform_api::OutputStyleListing>>,
+    /// Every name passed to `set_output_style`, in order.
+    output_style_switches: StdMutex<Vec<String>>,
     /// Optional live controls snapshot for routing synchronization tests.
     conversation_controls: StdMutex<Option<platform_api::ConversationControls>>,
     /// Session-scoped fast-mode flag used by bridge routing tests.
@@ -948,6 +953,8 @@ impl MockOrchestratorHandle {
             switch_model_error: StdMutex::new(None),
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
+            output_style_listing: StdMutex::new(None),
+            output_style_switches: StdMutex::new(Vec::new()),
             conversation_controls: StdMutex::new(None),
             fast_mode: AtomicBool::new(false),
             dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::new(
@@ -1126,6 +1133,15 @@ impl MockOrchestratorHandle {
     /// Pre-load the list returned by `list_available_models`.
     pub fn set_available_models(&self, m: Vec<String>) {
         *self.available_models.lock().unwrap() = m;
+    }
+    /// Pre-load the listing `output_styles` answers with.
+    pub fn set_output_style_listing(&self, listing: platform_api::OutputStyleListing) {
+        *self.output_style_listing.lock().unwrap() = Some(listing);
+    }
+    /// Every name `set_output_style` was called with, in order.
+    #[must_use]
+    pub fn output_style_switches(&self) -> Vec<String> {
+        self.output_style_switches.lock().unwrap().clone()
     }
     /// Pre-load the read-file-state cache keys returned by `files_in_context`.
     pub fn set_files_in_context(&self, files: Vec<PathBuf>) {
@@ -1349,6 +1365,18 @@ impl OrchestratorHandle for MockOrchestratorHandle {
                 "invalid workflowSizeGuideline: {value}"
             )))
         }
+    }
+
+    async fn output_styles(&self) -> Option<platform_api::OutputStyleListing> {
+        self.output_style_listing.lock().unwrap().clone()
+    }
+
+    async fn set_output_style(&self, name: &str) -> Result<(), HandleError> {
+        self.output_style_switches
+            .lock()
+            .unwrap()
+            .push(name.to_string());
+        Ok(())
     }
 
     async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {

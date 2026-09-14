@@ -172,6 +172,8 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "mcp",
     "memory",
     "model",
+    // cc2.1.269 reinstated `/output-style` as a `type:"local"` command.
+    "output-style",
     "permissions",
     "plan",
     "plugin",
@@ -215,9 +217,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 86);
-    assert_eq!(f.commands.len(), 86);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
+    assert_eq!(f.meta.total_count_lock, 87);
+    assert_eq!(f.commands.len(), 87);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 

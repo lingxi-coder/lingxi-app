@@ -62,6 +62,15 @@ const LEARNING: BuiltinOutputStyle = BuiltinOutputStyle {
     keep_coding_instructions: true,
 };
 
+/// Every compiled-in style, in the order `/output-style` lists them.
+///
+/// ⚠️ 2.1.270 ships FOUR built-ins — `Proactive` and `Concise` in addition to
+/// these two — each with a verbatim prompt body plus `turnReminder` /
+/// `waitingTurnReminder` surfaces this port has no analogue for. Porting those
+/// is its own item; listing the two that exist is still the whole selectable
+/// set HERE, so the listing is honest about what this build can switch to.
+pub const BUILTIN_OUTPUT_STYLES: [BuiltinOutputStyle; 2] = [EXPLANATORY, LEARNING];
+
 /// Resolve the active builtin output style from the engine settings
 /// `output_style` value (the `Option<String>` from `lingxi_core::settings`).
 ///
@@ -168,6 +177,14 @@ impl OutputStyleRegistry {
     /// Register a single style (or overwrite an existing one with the same name).
     pub fn register(&mut self, style: OutputStyle) {
         self.styles.insert(style.name.clone(), style);
+    }
+
+    /// Every registered style's name, sorted, for the `/output-style` listing.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.styles.keys().cloned().collect();
+        out.sort();
+        out
     }
 
     /// Look up a registered style by name.

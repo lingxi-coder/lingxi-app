@@ -2133,6 +2133,18 @@ pub enum AttachmentKind {
     },
 }
 
+/// What `/output-style` needs to render its listing: every style this session
+/// can switch to, plus the one in force.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputStyleListing {
+    /// The style in force right now (the `default` style is named, not empty).
+    pub current: String,
+    /// Every selectable style: `(name, description)`. Order is the order the
+    /// listing renders in.
+    pub styles: Vec<(String, Option<String>)>,
+}
+
+
 /// Public handle to the orchestrator that slash commands operate against.
 ///
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
@@ -2355,6 +2367,27 @@ pub trait OrchestratorHandle: Send + Sync {
     /// rows. Persistence of the default remains the slash command's concern.
     async fn set_effort_level(&self, _effort: Option<String>) -> Result<(), HandleError> {
         Ok(())
+    }
+
+    /// The output styles this session can switch to, and which one is in force
+    /// — the listing half of `/output-style`.
+    ///
+    /// `None` from an engine with no prompt-assembly layer; the command then
+    /// reports that it cannot see any styles rather than claiming there are
+    /// none.
+    async fn output_styles(&self) -> Option<OutputStyleListing> {
+        None
+    }
+
+    /// Switch the output style for the rest of the session. Takes effect on the
+    /// NEXT turn's system prompt, like upstream, which persists the setting and
+    /// re-reads it during prompt assembly.
+    ///
+    /// The name must be one of [`Self::output_styles`]'s entries; an unknown
+    /// name is an error rather than a silent no-op, because a silent no-op
+    /// looks exactly like a successful switch.
+    async fn set_output_style(&self, _name: &str) -> Result<(), HandleError> {
+        Err(HandleError::Unimplemented("set_output_style".into()))
     }
 
     /// Read the active conversation controls snapshot.

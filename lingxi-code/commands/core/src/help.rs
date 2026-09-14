@@ -70,15 +70,17 @@ mod tests {
                 // policy-only `/heapdump` object is absent from recognition.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 79 newlines total (1 header + 78 visible commands).
+                // 80 newlines total (1 header + 79 visible commands).
                 // SLASH-06 gave `bug` its own visible row and dropped `share`
                 // (that command's alias, not a command); SLASH-14 then removed
                 // `/version`, whose two oracle objects @2.1.238 296268759 both
                 // carry `isEnabled:()=>!1`; SLASH-13 added the ungated
-                // `/powerup` object (2.1.238 @296124285).
-                assert_eq!(s.matches('\n').count(), 79);
+                // `/powerup` object (2.1.238 @296124285); cc2.1.269 brought
+                // `/output-style` back as a visible `type:"local"` command.
+                assert_eq!(s.matches('\n').count(), 80);
                 assert!(s.contains("  /bug "));
                 assert!(s.contains("  /powerup "));
+                assert!(s.contains("  /output-style "));
                 assert!(!s.contains("  /version "));
             }
             other => panic!("expected Done, got {other:?}"),

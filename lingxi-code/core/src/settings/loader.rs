@@ -109,6 +109,97 @@ pub fn local_settings_path(project_dir: &Path) -> PathBuf {
         .join("settings.local.json")
 }
 
+/// Set ONE top-level key in a settings file, read-modify-write, preserving
+/// every other key — including fields this build's schema does not know about
+/// (the reader tolerates-and-ignores them, so the writer must not delete them).
+///
+/// The file is parsed as a raw JSON object rather than through
+/// [`SettingsJson`]: round-tripping through the typed schema would silently
+/// drop unknown keys and rewrite the ones it does know in schema order. A
+/// missing file is created; an empty file is treated as `{}`. Passing
+/// `Value::Null` REMOVES the key, which is how a setting is reset to its
+/// inherited value rather than pinned to a literal null.
+///
+/// Size-guarded by [`MAX_SETTINGS_FILE_BYTES`] on the read, like every other
+/// settings read, so a hostile file cannot be loaded here either.
+///
+/// # Errors
+///
+/// - [`SettingsError::Io`] when the file cannot be read, its parent cannot be
+///   created, or the write fails.
+/// - [`SettingsError::ParseError`] when the existing file is not valid JSON.
+/// - [`SettingsError::SchemaViolation`] when the existing file parses as JSON
+///   but is not an object — overwriting it would destroy whatever it holds.
+pub fn set_settings_key(
+    path: &Path,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), SettingsError> {
+    let mut object = match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => {
+            return Err(SettingsError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })
+        }
+        Ok(meta) if meta.len() > MAX_SETTINGS_FILE_BYTES => {
+            return Err(SettingsError::SchemaViolation(format!(
+                "settings file at {} exceeds {MAX_SETTINGS_FILE_BYTES} bytes",
+                path.display()
+            )))
+        }
+        Ok(_) => {
+            let bytes = std::fs::read(path).map_err(|e| SettingsError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            if bytes.is_empty() {
+                serde_json::Map::new()
+            } else {
+                match serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|source| {
+                    SettingsError::ParseError {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })? {
+                    serde_json::Value::Object(m) => m,
+                    _ => {
+                        return Err(SettingsError::SchemaViolation(format!(
+                            "settings file at {} is not a JSON object",
+                            path.display()
+                        )))
+                    }
+                }
+            }
+        }
+    };
+
+    if value.is_null() {
+        object.remove(key);
+    } else {
+        object.insert(key.to_string(), value);
+    }
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| SettingsError::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
+    }
+    let mut body = serde_json::to_vec_pretty(&serde_json::Value::Object(object)).map_err(|e| {
+        SettingsError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(e),
+        }
+    })?;
+    body.push(b'\n');
+    std::fs::write(path, &body).map_err(|e| SettingsError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }

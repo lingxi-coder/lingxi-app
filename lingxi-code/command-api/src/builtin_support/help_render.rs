@@ -6,7 +6,7 @@
 //! ```text
 //! Commands:\n
 //!   /<name padded to longest+2>  <description>\n
-//!   ... (78 visible command lines, sorted ASCII-ascending) ...
+//!   ... (79 visible command lines, sorted ASCII-ascending) ...
 //! ```
 //!
 //! Where `<description>` is `core_description(name)` — the real per-command
@@ -15,7 +15,7 @@
 //! LingXi-specific / internal commands without one. The 8 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 78
+//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 79
 //! visible commands = 79 lines.
 
 use crate::builtin_support::names::{
@@ -46,7 +46,7 @@ pub fn render_help_screen() -> String {
     let col1_width = visible().map(|n| n.len()).max().unwrap_or(0) + 2;
 
     // Capacity hint: header + visible lines.
-    let mut out = String::with_capacity(10 + 78 * (col1_width + 40));
+    let mut out = String::with_capacity(10 + 79 * (col1_width + 40));
     out.push_str("Commands:\n");
 
     for name in visible() {
@@ -84,19 +84,19 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_78_visible_lines() {
-        // 1 header + 78 visible commands = 79 lines (each terminated by '\n').
+    fn output_has_exactly_79_visible_lines() {
+        // 1 header + 79 visible commands = 80 lines (each terminated by '\n').
         // The hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (86 builtins − 8 hidden = 78 visible, with no DISABLE_* env set.)
+        // (87 builtins − 8 hidden = 79 visible, with no DISABLE_* env set.)
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 79,
-            "expected 79 newlines (1 header + 78 visible commands), got {n}"
+            n, 80,
+            "expected 80 newlines (1 header + 79 visible commands), got {n}"
         );
     }
 
@@ -179,7 +179,7 @@ mod tests {
         let s = render_help_screen();
         for name in BUILTIN_COMMAND_NAMES {
             // Hidden/disabled commands are filtered out (see is_palette_hidden);
-            // only the 78 visible commands appear.
+            // only the 79 visible commands appear.
             if is_palette_hidden(name) {
                 continue;
             }

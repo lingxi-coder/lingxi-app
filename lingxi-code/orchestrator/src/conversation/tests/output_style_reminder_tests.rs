@@ -131,6 +131,89 @@ async fn builder_returns_none_for_default_and_unknown_styles() {
     }
 }
 
+// ----- CLI-1: `/output-style` switches take effect on the NEXT turn ---------
+
+fn orch_with(cfg: OrchestratorConfig) -> ConversationOrchestrator {
+    ConversationOrchestrator::new(
+        cfg,
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+}
+
+/// `OrchestratorConfig` is a boot snapshot, so before this the active style was
+/// fixed for the life of the session and `/output-style` could not have had any
+/// effect no matter how it was wired.
+#[tokio::test]
+async fn a_runtime_switch_changes_the_style_the_next_turn_resolves() {
+    use platform_api::OrchestratorHandle;
+    let orch = orch_with(config_with_style("Explanatory"));
+    assert_eq!(
+        orch.resolve_active_output_style().await.map(|s| s.name),
+        Some("Explanatory".to_string())
+    );
+
+    orch.set_output_style("Learning")
+        .await
+        .expect("Learning is a builtin");
+    assert_eq!(
+        orch.resolve_active_output_style().await.map(|s| s.name),
+        Some("Learning".to_string()),
+        "the switch must be visible to prompt assembly, not just recorded"
+    );
+}
+
+/// Switching BACK to `default` has to beat the boot setting. Treating the live
+/// value as "unset" whenever it names the default style would make the default
+/// the one style a session could never return to.
+#[tokio::test]
+async fn switching_back_to_default_overrides_the_boot_setting() {
+    use platform_api::OrchestratorHandle;
+    let orch = orch_with(config_with_style("Explanatory"));
+    orch.set_output_style("default")
+        .await
+        .expect("default is always selectable");
+    assert!(
+        orch.resolve_active_output_style().await.is_none(),
+        "an explicit `default` must clear the inherited style"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_style_is_refused_rather_than_silently_ignored() {
+    use platform_api::OrchestratorHandle;
+    let orch = orch_with(config_with_style("Explanatory"));
+    assert!(orch.set_output_style("Nonexistent").await.is_err());
+    assert_eq!(
+        orch.resolve_active_output_style().await.map(|s| s.name),
+        Some("Explanatory".to_string()),
+        "a refused switch must leave the previous style in force"
+    );
+}
+
+/// The listing is what `/output-style` renders, so it has to contain every
+/// selectable name — including `default`, which upstream lists with no
+/// description because its style table maps that key to `null`.
+#[tokio::test]
+async fn the_listing_contains_default_plus_every_builtin() {
+    use platform_api::OrchestratorHandle;
+    let orch = orch_with(config_with_style("Learning"));
+    let listing = orch.output_styles().await.expect("a listing");
+    assert_eq!(listing.current, "Learning");
+    let names: Vec<&str> = listing.styles.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["default", "Explanatory", "Learning"]);
+    assert!(
+        listing.styles[0].1.is_none(),
+        "`default` carries no description upstream"
+    );
+    assert!(listing.styles[1].1.is_some());
+}
+
 // ----- batched driver (`run_turn` / `execute_one_turn`) -----
 
 #[tokio::test]

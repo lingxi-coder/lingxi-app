@@ -151,7 +151,8 @@ pub fn register_core_batch_2(
 ) {
     use crate::{
         AgentsHandler, ConfigHandler, DoctorHandler, HooksHandler, IdeHandler, LoginHandler,
-        LogoutHandler, McpHandler, ModelHandler, PermissionsHandler, StatusHandler, VersionHandler,
+        LogoutHandler, McpHandler, ModelHandler, OutputStyleHandler, PermissionsHandler,
+        StatusHandler, VersionHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AgentsHandler::new(handle.clone())));
@@ -163,6 +164,13 @@ pub fn register_core_batch_2(
     reg.register_builtin_handler(Arc::new(LogoutHandler::new(auth)));
     reg.register_builtin_handler(Arc::new(McpHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ModelHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(
+        // Persistence is opted into HERE, at the composition point, not baked
+        // into the handler: a bare `OutputStyleHandler::new` switches for the
+        // session only, so no test that merely constructs one can write a
+        // user's settings file.
+        OutputStyleHandler::new(handle.clone()).persisting_to_local_settings(),
+    ));
     reg.register_builtin_handler(Arc::new(PermissionsHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(StatusHandler::new(handle)));
     reg.register_builtin_handler(Arc::new(VersionHandler::new()));
@@ -226,9 +234,11 @@ pub fn register_core_batch_4(
 /// `release-notes` (the changelog URL fallback) joins the batch-3 set here as a
 /// handle-free `Done` display.
 ///
-/// NOTE: `output-style` and `pr-comments` were removed in claude-code v2.1.183
-/// (0 command objects in the binary) and are no longer LingXi builtins (slash
-/// parity #67), so their former batch-3 handlers were deleted. `review` went
+/// NOTE: `pr-comments` was removed in claude-code v2.1.183 (0 command objects
+/// in the binary) and is no longer a LingXi builtin (slash parity #67), so its
+/// former batch-3 handler was deleted. `output-style` was removed in the same
+/// release and came BACK in 2.1.269 — it is registered in batch 2 now (it needs
+/// the orchestrator handle), not here. `review` went
 /// the same way in v2.1.238 (`name:"review"`: 2.1.220 = 1 hit, 2.1.238 = 0 —
 /// the PR-review surface is now the bundled `code-review` skill), so it is no
 /// longer registered here either; `command_core::review` is retained only as
@@ -507,10 +517,10 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_86_names() {
+    fn register_all_registers_exactly_87_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),
@@ -535,8 +545,13 @@ mod registry_tests {
 
     /// claude-code parity (#61/#66): `/cost` and `/stats` resolve to `/usage`,
     /// and `/desktop`/`/mobile`/`/session` aliases resolve to their targets.
-    /// Also asserts cost/stats/vim/pr-comments/output-style are NOT standalone
-    /// builtins anymore (removed per #66/#67).
+    /// Also asserts cost/stats/vim/pr-comments are NOT standalone builtins
+    /// anymore (removed per #66/#67).
+    ///
+    /// `output-style` is NOT in that removed set any more: 2.1.269 brought it
+    /// back as a `type:"local"` text command, so it is asserted PRESENT here.
+    /// Leaving it in the removed list would have re-deleted it the next time
+    /// someone trusted this test.
     #[test]
     fn usage_cost_stats_and_platform_aliases_resolve() {
         let mut reg = CommandRegistry::new();
@@ -555,12 +570,17 @@ mod registry_tests {
             assert_eq!(cmd.name, target, "/{alias} should resolve to /{target}");
         }
         // Removed standalone commands are gone from the builtin name surface.
-        for removed in ["vim", "pr-comments", "output-style"] {
+        for removed in ["vim", "pr-comments"] {
             assert!(
                 !BUILTIN_COMMAND_NAMES.contains(&removed),
                 "/{removed} should have been removed from BUILTIN_COMMAND_NAMES"
             );
         }
+        // …and the one that came back is present again (cc2.1.269).
+        assert!(
+            BUILTIN_COMMAND_NAMES.contains(&"output-style"),
+            "/output-style was reintroduced upstream in 2.1.269"
+        );
     }
 
     #[test]
@@ -816,7 +836,6 @@ mod batch_3_tests {
 
     /// The handle-free batch-3 `release-notes` `Done` command must NOT return
     /// the locked M5 stub literal after the standard registration call.
-    /// (`output-style` was removed upstream — slash parity #67.)
     #[tokio::test]
     async fn release_notes_returns_done_not_stub() {
         let mut reg = CommandRegistry::new();

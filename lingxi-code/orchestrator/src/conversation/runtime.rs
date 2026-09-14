@@ -188,6 +188,16 @@ pub(crate) struct PromptRuntime {
     /// visible to prompt assembly without rebuilding the orchestrator.
     pub(crate) output_style_registry:
         Option<Arc<tokio::sync::RwLock<outputstyles::OutputStyleRegistry>>>,
+    /// Output style chosen DURING the session (`/output-style <name>`), which
+    /// overrides `OrchestratorConfig::output_style` for every later turn.
+    ///
+    /// `OrchestratorConfig` is an immutable snapshot taken at boot with 40-odd
+    /// exhaustive construction sites, so a runtime switch cannot live there.
+    /// `Some(name)` is an explicit choice — including `Some("default")`, which
+    /// must override an inherited custom style rather than read as "unset";
+    /// `None` means nothing has been chosen this session and the config value
+    /// stands.
+    pub(crate) live_output_style: Mutex<Option<String>>,
     /// Session-level cache for the expensive prompt/schema serialization of
     /// the post-filter tool pool. Dynamic per-turn marks (`strict`,
     /// `defer_loading`) are applied to a clone after cache lookup.
@@ -439,6 +449,7 @@ impl PromptRuntime {
             git_status_snapshot: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
             output_style_registry: None,
+            live_output_style: Mutex::new(None),
             wire_tool_schema_cache: Mutex::new(None),
             deferred_tool_token_cache: Mutex::new(std::collections::HashMap::new()),
             silent_turn_reminder_marks: std::sync::Mutex::new(Vec::new()),

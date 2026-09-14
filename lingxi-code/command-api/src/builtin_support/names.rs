@@ -88,7 +88,7 @@
 //!   it never reaches the command table at all.
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **86** for the current 2.1.252 parity
+/// ASCII-sorted. Locked at length **87** for the current 2.1.270 parity
 /// surface. The latest oracle removed the stale internal command objects
 /// listed in the slash audit, including the policy-gated `heapdump` object
 /// which has no provider-neutral runtime analog.
@@ -97,7 +97,7 @@
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the current membership lock).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 86] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 87] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -152,6 +152,11 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 86] = &[
     "memory",
     "mobile",
     "model",
+    // SLASH (cc2.1.269): `/output-style` came BACK after its 2.1.183 removal.
+    // The shipping object is `type:"local"` with `supportsNonInteractive:!0` —
+    // a text command. Its `local-jsx` "moved to /config" sibling is gated on
+    // `tengu_maple_sundial`, which defaults FALSE, so it is dormant.
+    "output-style",
     "passes",
     "permissions",
     "plan",
@@ -609,6 +614,8 @@ pub fn core_description(name: &str) -> &'static str {
         "mcp" => "Manage MCP servers",
         "memory" => "Edit LINGXI.md files and memory settings",
         "model" => "Set the AI model for LingXi",
+        // Byte-exact from the 2.1.270 command object `QNt`.
+        "output-style" => "List output styles or switch to one",
         "permissions" => "Manage allow and deny tool permission rules",
         "status" => "Show LingXi status including version, model, account, API connectivity, and tool statuses",
         // claude-code v2.1.183 live `usage` command object
@@ -730,8 +737,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_86() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
+    fn total_count_locked_at_87() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
     }
 
     #[test]
@@ -1202,7 +1209,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
     }
 
     // ========================================================================
@@ -1307,7 +1314,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "all disabled commands are correct-by-design"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
     }
 
     #[test]

@@ -48,6 +48,37 @@ function bridgeWithHost(host: Record<string, unknown>): UseBridge {
   return captured as unknown as UseBridge;
 }
 
+test('adding a project refreshes saved state even when initial session startup fails', async () => {
+  let refreshed = false;
+  const bridge = bridgeWithHost({
+    pickWorkspace: async () => { throw new Error('engine startup failed'); },
+    bootstrap: async () => {
+      refreshed = true;
+      return { revision: 1, settings: { projects: ['/saved/project'] }, runtimes: [] };
+    },
+  });
+  await assert.rejects(() => bridge.addProject(), /engine startup failed/);
+  assert.equal(refreshed, true);
+});
+
+test('project recovery preserves the startup error if refreshing also fails', async () => {
+  const bridge = bridgeWithHost({
+    pickWorkspace: async () => { throw new Error('engine startup failed'); },
+    bootstrap: async () => { throw new Error('refresh failed'); },
+  });
+  await assert.rejects(() => bridge.addProject(), /engine startup failed/);
+});
+
+test('cancelling the project picker does not refresh state', async () => {
+  let refreshed = false;
+  const bridge = bridgeWithHost({
+    pickWorkspace: async () => null,
+    bootstrap: async () => { refreshed = true; },
+  });
+  assert.equal(await bridge.addProject(), null);
+  assert.equal(refreshed, false);
+});
+
 test('a rejected legacy API base URL update reaches its caller', async () => {
   // The setter remains for backward-compatible callers even though built-in
   // Provider settings no longer expose a custom endpoint editor.

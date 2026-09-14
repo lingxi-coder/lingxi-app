@@ -284,6 +284,26 @@ test('adding the first project uses the real settings store, trusts it, and star
   }
 });
 
+test('failed first-session startup still exposes the saved project in bootstrap', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-add-failed-settings-'));
+  const workspace = mkdtempSync(join(tmpdir(), 'lingxi-add-failed-project-'));
+  const settings = new SettingsStore(userData);
+  const bridge = { newSession: async () => { throw new Error('engine startup failed'); } };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer());
+  try {
+    await assert.rejects(() => (host as any).selectWorkspace(workspace, true), /engine startup failed/);
+    const snapshot = await (host as any).bootstrap();
+    const canonical = realpathSync.native(workspace);
+    assert.deepEqual(snapshot.settings.projects, [canonical]);
+    assert.equal(snapshot.settings.activeProject, canonical);
+    assert.equal(snapshot.activeSession, undefined);
+    assert.deepEqual(new SettingsStore(userData).getPublic().projects, [canonical]);
+  } finally {
+    rmSync(userData, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('activating an existing project always returns membership-backed trust', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-existing-project-settings-'));
   const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-existing-project-'));

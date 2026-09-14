@@ -1786,6 +1786,14 @@ export function useBridge(): UseBridge {
       }
       return workspace;
     } catch (cause) {
+      // The host persists the first project before starting its initial
+      // session. Recover that saved project even if engine startup fails.
+      if (isCurrentNavigationOperation(operationId)) {
+        try {
+          const snapshot = await host.bootstrap();
+          if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+        } catch { /* Preserve the original project/startup error. */ }
+      }
       if (isCurrentNavigationOperation(operationId)) return capture(cause);
       return null;
     }

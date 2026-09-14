@@ -462,6 +462,12 @@ pub enum RulePatternMatch {
 /// reports `false`, which is what a caller that cannot see the rest of its
 /// settings source must assume. Source-aware callers use
 /// [`test_rule_pattern`].
+///
+/// ⚠️ Nothing inside this crate calls this any more — every rule walk became
+/// source-aware with HP-7. It is kept as the safe public answer for a caller
+/// that genuinely has one pattern and no source context, and calling it can
+/// only ever be MORE restrictive than the real policy, never less. Do not read
+/// its presence as evidence that the per-rule form is still the live path.
 #[must_use]
 pub fn path_matches_rule_pattern(
     input_path: &str,

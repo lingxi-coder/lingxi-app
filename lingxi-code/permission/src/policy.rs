@@ -1870,21 +1870,6 @@ impl PermissionPolicy {
     ///     DENY rule never blocks a read (claude-code `checkRead` only consults
     ///     `read` deny rules) — the `behavior == Allow` clause enforces this
     ///     because deny rules are only ever evaluated from the deny bucket.
-    /// `rule_matches` for the callers that cannot see the rest of the settings
-    /// source, and therefore cannot honour a gitignore negation: a `!`-negated
-    /// rule reports "no match".
-    fn rule_matches(
-        &self,
-        rule: &PermissionRule,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> bool {
-        matches!(
-            self.rule_match_kind(rule, tool_name, input),
-            RulePatternMatch::Match
-        )
-    }
-
     fn rule_match_kind(
         &self,
         rule: &PermissionRule,

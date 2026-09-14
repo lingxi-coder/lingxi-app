@@ -1862,13 +1862,88 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
     }
 }
 
-/// claude-code's concurrency cap for in-flight `agent()` calls:
-/// `Math.min(16, Math.max(2, cpus-2))` — at least 2.
+/// The env var that raises or lowers the workflow's in-flight `agent()` gate
+/// for one run, above (or below) the CPU-derived default.
+const WORKFLOW_MAX_CONCURRENT_AGENTS_ENV: &str = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS";
+
+/// claude-code's DEFAULT concurrency cap for in-flight `agent()` calls —
+/// `lr(ir())` where `function lr(e){return Math.min(16,Math.max(2,e-2))}`
+/// and `ir()` is the CPU count. At least 2, at most 16.
+fn concurrency_cap_default(cores: usize) -> usize {
+    cores.saturating_sub(2).max(2).min(16)
+}
+
+/// Parse the `CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` override, or `None`
+/// when there is nothing usable to apply.
+///
+/// The env proxy runs the schema entry `int({min:1,max:256,digitsOnly:!0})`,
+/// whose transform is:
+///
+/// ```js
+/// if (e === void 0) return;
+/// if (n?.digitsOnly && !/^[+-]?\d+$/.test(e.trim())) return;
+/// let i = Sl(e);
+/// if (!Number.isFinite(i)) return;
+/// if (n?.min !== void 0 && i < n.min) return;
+/// if (n?.max !== void 0 && i > n.max) return;
+/// return i;
+/// ```
+///
+/// Every rejection path returns `undefined` — NOT an error and NOT a clamp.
+/// `let Kt = a.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS ?? ur` then takes the
+/// CPU default, so a typo, a non-integer, or a value outside 1..=256 silently
+/// keeps the default rather than failing the run or quietly running at the
+/// nearest legal value. Both alternatives would be worse: a failed run loses
+/// the work, and a clamp would honour a request the user did not make.
+fn parse_concurrency_cap_override(raw: &str) -> Option<usize> {
+    let trimmed = raw.trim();
+    // `/^[+-]?\d+$/` against the TRIMMED string: a leading sign is allowed
+    // here and rejected below by `min`, and surrounding whitespace is fine.
+    let digits = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // A digit run too long for `i64` is `Number.isFinite` in JS but lands far
+    // above `max`, so both spellings reach the same rejection.
+    let value = trimmed.parse::<i64>().ok()?;
+    if !(1..=256).contains(&value) {
+        return None;
+    }
+    usize::try_from(value).ok()
+}
+
+/// Compose the default with the override — oracle
+/// `let Kt = a.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS ?? ur`.
+///
+/// Pure so the composition itself is pinned: reading the env here instead
+/// would leave "the override is parsed but never applied" untestable without
+/// `set_var`, which makes the parallel suite flake.
+fn resolve_concurrency_cap(raw: Option<&str>, cores: usize) -> usize {
+    let default = concurrency_cap_default(cores);
+    let override_value = raw.and_then(parse_concurrency_cap_override);
+    // `if(a.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS!==void 0)` — `a` is the
+    // PARSED proxy, so this logs exactly when the override was accepted. An
+    // unusable value says nothing and runs at the default.
+    if let Some(cap) = override_value {
+        tracing::debug!(
+            "workflow: concurrent agent gate = {cap} ({WORKFLOW_MAX_CONCURRENT_AGENTS_ENV})"
+        );
+    }
+    override_value.unwrap_or(default)
+}
+
+/// claude-code's concurrency cap for in-flight `agent()` calls, after the
+/// per-run env override.
 fn concurrency_cap() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    cores.saturating_sub(2).max(2).min(16)
+    resolve_concurrency_cap(
+        std::env::var(WORKFLOW_MAX_CONCURRENT_AGENTS_ENV)
+            .ok()
+            .as_deref(),
+        cores,
+    )
 }
 
 /// JavaScript `String.length` counts UTF-16 code units, which is the value

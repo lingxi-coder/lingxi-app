@@ -5433,14 +5433,17 @@ fn fusion_chain_key_never_collides_with_an_agent_prompt_spelling_the_discriminat
 /// At 1–3 cores the floor is 2; at 5 cores it's 3; at 18 cores it's capped at 16.
 #[test]
 fn concurrency_cap_formula_matches_binary() {
-    // Direct formula test: cores.saturating_sub(2).max(2).min(16)
-    let formula = |cores: usize| cores.saturating_sub(2).max(2).min(16);
-    assert_eq!(formula(1), 2, "1 core → 2");
-    assert_eq!(formula(2), 2, "2 cores → 2");
-    assert_eq!(formula(3), 2, "3 cores → 2");
-    assert_eq!(formula(4), 2, "4 cores → 2");
-    assert_eq!(formula(5), 3, "5 cores → 3");
-    assert_eq!(formula(18), 16, "18 cores → 16 (cap)");
+    // Calls the PRODUCTION function. This previously re-declared the formula as
+    // a local closure and asserted against that, so it stayed green no matter
+    // what `concurrency_cap_default` did.
+    assert_eq!(concurrency_cap_default(1), 2, "1 core → 2");
+    assert_eq!(concurrency_cap_default(2), 2, "2 cores → 2");
+    assert_eq!(concurrency_cap_default(3), 2, "3 cores → 2");
+    assert_eq!(concurrency_cap_default(4), 2, "4 cores → 2");
+    assert_eq!(concurrency_cap_default(5), 3, "5 cores → 3");
+    assert_eq!(concurrency_cap_default(10), 8, "10 cores → 8");
+    assert_eq!(concurrency_cap_default(18), 16, "18 cores → 16 (cap)");
+    assert_eq!(concurrency_cap_default(128), 16, "still 16 (cap)");
 }
 
 #[test]
@@ -7020,5 +7023,83 @@ async fn workflow_fusion_option_error_name_reaches_a_script_for_a_bad_dimension(
         "a bad `dimensions` option must be rejected before dispatch, but the executor \
          saw {} request(s)",
         executor.seen.lock().unwrap().len()
+    );
+}
+
+/// A value inside `int({min:1,max:256})` is taken verbatim, including the
+/// boundaries.
+#[test]
+fn an_in_range_override_is_taken_verbatim() {
+    assert_eq!(parse_concurrency_cap_override("1"), Some(1));
+    assert_eq!(parse_concurrency_cap_override("32"), Some(32));
+    assert_eq!(parse_concurrency_cap_override("256"), Some(256));
+    // `.test(e.trim())` — surrounding whitespace is trimmed before the regex.
+    assert_eq!(parse_concurrency_cap_override("  7  "), Some(7));
+    // `/^[+-]?\d+$/` admits a leading plus.
+    assert_eq!(parse_concurrency_cap_override("+7"), Some(7));
+}
+
+/// Every rejection path in the oracle's transform returns `undefined`, and
+/// `?? ur` then takes the CPU default. Nothing is clamped and nothing throws —
+/// a clamp would honour a request the user never made, and throwing would lose
+/// the run over a typo.
+#[test]
+fn an_unusable_override_falls_back_rather_than_clamping_or_failing() {
+    for raw in [
+        "0",     // below min:1
+        "-1",    // passes the regex, rejected by min
+        "257",   // above max:256
+        "1000",  // far above max
+        "8.5",   // not digitsOnly
+        "1e3",   // not digitsOnly
+        "abc",   // not a number at all
+        "",      // empty
+        "   ",   // whitespace only
+        "+",     // sign with no digits
+        "99999999999999999999999", // finite in JS, still above max
+    ] {
+        assert_eq!(
+            parse_concurrency_cap_override(raw),
+            None,
+            "{raw:?} must fall back to the default, not clamp into range"
+        );
+    }
+}
+
+/// The override is not merely parsed — it REPLACES the CPU default, in both
+/// directions. Eight cores default to 6, so each case below is visibly not the
+/// default.
+#[test]
+fn an_accepted_override_replaces_the_cpu_default() {
+    assert_eq!(concurrency_cap_default(8), 6, "premise: 8 cores default to 6");
+    assert_eq!(
+        resolve_concurrency_cap(Some("64"), 8),
+        64,
+        "the override raises the gate above the 16 ceiling the default obeys"
+    );
+    assert_eq!(
+        resolve_concurrency_cap(Some("1"), 8),
+        1,
+        "and lowers it below the floor of 2 the default obeys"
+    );
+}
+
+/// With nothing usable to apply, the gate is the CPU default — the override
+/// path must not leak a zero, a clamp, or a panic into the run.
+#[test]
+fn without_a_usable_override_the_gate_is_the_cpu_default() {
+    assert_eq!(resolve_concurrency_cap(None, 8), 6);
+    assert_eq!(resolve_concurrency_cap(Some("0"), 8), 6);
+    assert_eq!(resolve_concurrency_cap(Some("257"), 8), 6);
+    assert_eq!(resolve_concurrency_cap(Some("nonsense"), 8), 6);
+}
+
+/// The env var's spelling is the contract with the user; a typo here fails
+/// silently and looks exactly like the feature not existing.
+#[test]
+fn the_override_env_var_is_spelled_the_way_claude_code_spells_it() {
+    assert_eq!(
+        WORKFLOW_MAX_CONCURRENT_AGENTS_ENV,
+        "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"
     );
 }

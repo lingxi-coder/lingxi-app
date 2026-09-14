@@ -858,6 +858,22 @@ impl Tool for ConfigTool {
                 final_value.as_bool().unwrap_or(false),
             );
         }
+        if setting == "includeCoAuthoredBy" {
+            // Republish so the attribution trailers follow the setting inside
+            // the running session, like the output caps below.
+            platform_api::session_flags::set_include_co_authored_by(final_value.as_bool());
+        }
+        if setting == "attribution" {
+            let commit = final_value
+                .get("commit")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let pr = final_value
+                .get("pr")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            platform_api::session_flags::set_attribution(commit, pr);
+        }
         if setting == "bashOutputMaxChars" {
             // Republish so the Bash cap moves with the setting inside the
             // running session, exactly as `taskOutputMaxChars` does below.

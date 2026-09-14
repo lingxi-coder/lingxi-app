@@ -66,6 +66,10 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     ("enabledPlugins", MergeStrategy::DeepMerge),
     ("pluginConfigs", MergeStrategy::DeepMerge),
     ("extraKnownMarketplaces", MergeStrategy::DeepMerge),
+    // `attribution` is a plain object of optional strings, so the customizer's
+    // array special-case never applies and it deep-merges per field: a layer
+    // naming only `pr` leaves an inherited `commit` in place.
+    ("attribution", MergeStrategy::DeepMerge),
     // NB: `outputStyle` is intentionally NOT here — TS types it as a string and
     // merges it scalar-override (settingsMergeCustomizer special-cases only
     // arrays), so it falls through to the default Override strategy.
@@ -148,6 +152,23 @@ pub enum TeammateMode {
 /// under the previous `deny_unknown_fields` strictness any such key made the
 /// whole-file load fail, and production callers' `.ok()` then silently
 /// dropped the entire settings layer.
+/// `settings.attribution` — per-trailer overrides for the git attribution lines.
+///
+/// Both fields are optional and independent: naming only `commit` leaves the PR
+/// trailer at its default. An empty string DISABLES that trailer, which is why
+/// these are `Option<String>` rather than `String` — "unset" and "set to empty"
+/// must stay distinguishable.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Attribution {
+    /// Replaces the `Co-Authored-By:` commit trailer. Empty string = no trailer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Replaces the PR-body attribution line. Empty string = no line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
@@ -347,6 +368,23 @@ pub struct SettingsJson {
     /// absent, the env var applies over the built-in default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bash_output_max_chars: Option<u32>,
+
+    /// Scalar field (later source wins). Overrides the git commit / PR
+    /// attribution trailers Bash's git sections interpolate.
+    ///
+    /// claude-code `$gs()`: the OBJECT wins over [`Self::include_co_authored_by`],
+    /// and it counts only when it names at least one of the two
+    /// (`RWn(e) = e !== void 0 && (e.commit !== void 0 || e.pr !== void 0)`);
+    /// whichever it omits keeps its default. An explicit EMPTY STRING is a
+    /// value, not an absence — it disables that trailer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<Attribution>,
+
+    /// Scalar field (later source wins). The coarse switch that predates
+    /// [`Self::attribution`]: `false` empties BOTH trailers. Ignored whenever
+    /// `attribution` names either field, matching `$gs()`'s arm order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_co_authored_by: Option<bool>,
 
     /// Scalar field (later source wins). When enabled, a literal `ultracode`
     /// token in a submitted prompt emits the Workflow authorization reminder.

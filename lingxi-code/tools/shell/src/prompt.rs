@@ -206,7 +206,51 @@ const PR_ATTRIBUTION: &str = "🤖 Generated with [LingXi](https://claude.com/cl
 /// `hvt()`'s outer session-URL decoration (`ecT(e, url, …)`, gated on
 /// `I_l()` — remote/teleport sessions only) is EXCLUDED surface.
 fn attribution_texts() -> (String, String) {
-    (COMMIT_ATTRIBUTION.to_string(), PR_ATTRIBUTION.to_string())
+    let (commit, pr) = platform_api::session_flags::attribution();
+    resolve_attribution(
+        commit,
+        pr,
+        platform_api::session_flags::include_co_authored_by(),
+        COMMIT_ATTRIBUTION,
+        PR_ATTRIBUTION,
+    )
+}
+
+/// The settings arms of `$gs()`, pure so the ARM ORDER is testable without a
+/// settings source:
+///
+/// ```js
+/// let i = o.attribution;
+/// if (i !== void 0 && V8s(i)) return { commit: i.commit ?? n, pr: i.pr ?? r };
+/// if (o.includeCoAuthoredBy === !1) return { commit: "", pr: "" };
+/// return { commit: n, pr: r };
+/// ```
+///
+/// Three things the order encodes, each pinned by a test below:
+/// * `V8s(i)` (`RWn`) accepts the object only when it names `commit` or `pr`, so
+///   an `attribution: {}` falls through to `includeCoAuthoredBy` rather than
+///   blanking both trailers.
+/// * The object WINS over `includeCoAuthoredBy`, so `attribution.commit` still
+///   applies alongside `includeCoAuthoredBy: false`.
+/// * `?? n` is null-coalescing, so an explicit EMPTY STRING is kept as a value
+///   — that is how a user disables one trailer while keeping the other.
+fn resolve_attribution(
+    commit: Option<String>,
+    pr: Option<String>,
+    include_co_authored_by: Option<bool>,
+    default_commit: &str,
+    default_pr: &str,
+) -> (String, String) {
+    if commit.is_some() || pr.is_some() {
+        return (
+            commit.unwrap_or_else(|| default_commit.to_string()),
+            pr.unwrap_or_else(|| default_pr.to_string()),
+        );
+    }
+    if include_co_authored_by == Some(false) {
+        return (String::new(), String::new());
+    }
+    (default_commit.to_string(), default_pr.to_string())
 }
 
 // ===== Sandbox section ======================================================
@@ -1480,5 +1524,70 @@ mod tests {
         let items = vec![Bullet::Item("top".into()), Bullet::Sub(vec!["sub".into()])];
         let out = prepend_bullets(&items);
         assert_eq!(out, vec![" - top".to_string(), "  - sub".to_string()]);
+    }
+
+    /// With no settings at all, both trailers keep their defaults — the arm the
+    /// port has always had, and the one every other test here depends on.
+    #[test]
+    fn no_attribution_settings_keeps_both_defaults() {
+        let (commit, pr) = resolve_attribution(None, None, None, "COMMIT", "PR");
+        assert_eq!(commit, "COMMIT");
+        assert_eq!(pr, "PR");
+    }
+
+    /// `{ commit: i.commit ?? n, pr: i.pr ?? r }` — naming ONE field overrides
+    /// only that one. The other must keep its default rather than blanking,
+    /// which is the whole point of a per-trailer override.
+    #[test]
+    fn naming_one_trailer_leaves_the_other_at_its_default() {
+        let (commit, pr) =
+            resolve_attribution(Some("mine".into()), None, None, "COMMIT", "PR");
+        assert_eq!(commit, "mine");
+        assert_eq!(pr, "PR", "an unnamed trailer must not be erased");
+
+        let (commit, pr) = resolve_attribution(None, Some("mine".into()), None, "COMMIT", "PR");
+        assert_eq!(commit, "COMMIT");
+        assert_eq!(pr, "mine");
+    }
+
+    /// `?? ` is null-coalescing, so an explicit EMPTY STRING is a VALUE, not an
+    /// absence: it disables that one trailer while the other stays put. If
+    /// "unset" and "set to empty" ever collapse, this silently stops working in
+    /// the direction that keeps emitting the trailer.
+    #[test]
+    fn an_empty_string_disables_just_that_trailer() {
+        let (commit, pr) = resolve_attribution(Some(String::new()), None, None, "COMMIT", "PR");
+        assert_eq!(commit, "", "an explicit empty commit trailer is honoured");
+        assert_eq!(pr, "PR", "and does not touch the PR line");
+    }
+
+    /// `if (o.includeCoAuthoredBy === !1) return { commit: "", pr: "" }` — the
+    /// coarse switch empties BOTH, and only on an explicit `false`. Unset is a
+    /// third state and must not behave like `false`.
+    #[test]
+    fn include_co_authored_by_false_empties_both_but_unset_does_not() {
+        let (commit, pr) = resolve_attribution(None, None, Some(false), "COMMIT", "PR");
+        assert_eq!((commit.as_str(), pr.as_str()), ("", ""));
+
+        let (commit, pr) = resolve_attribution(None, None, None, "COMMIT", "PR");
+        assert_eq!((commit.as_str(), pr.as_str()), ("COMMIT", "PR"));
+
+        let (commit, pr) = resolve_attribution(None, None, Some(true), "COMMIT", "PR");
+        assert_eq!((commit.as_str(), pr.as_str()), ("COMMIT", "PR"));
+    }
+
+    /// ARM ORDER: the object is tested FIRST, so a named trailer still applies
+    /// even alongside `includeCoAuthoredBy: false`. Reversing the two arms would
+    /// blank a trailer the user explicitly set, and nothing else here would
+    /// notice.
+    #[test]
+    fn the_attribution_object_wins_over_include_co_authored_by() {
+        let (commit, pr) =
+            resolve_attribution(Some("mine".into()), None, Some(false), "COMMIT", "PR");
+        assert_eq!(commit, "mine", "an explicit trailer survives the coarse switch");
+        assert_eq!(
+            pr, "PR",
+            "and the unnamed one falls back to its DEFAULT, not to empty"
+        );
     }
 }

@@ -8479,6 +8479,22 @@ fn load_merged_bash_output_max_chars(project_dir: &std::path::Path) -> Option<u3
     load_merged_settings(project_dir).and_then(|eff| eff.settings.bash_output_max_chars)
 }
 
+/// Load `settings.attribution` + `settings.includeCoAuthoredBy` — the git
+/// attribution trailer overrides, resolved the same way as the caps above.
+fn load_merged_attribution(
+    project_dir: &std::path::Path,
+) -> (Option<String>, Option<String>, Option<bool>) {
+    let Some(eff) = load_merged_settings(project_dir) else {
+        return (None, None, None);
+    };
+    let attribution = eff.settings.attribution.clone();
+    (
+        attribution.as_ref().and_then(|a| a.commit.clone()),
+        attribution.and_then(|a| a.pr),
+        eff.settings.include_co_authored_by,
+    )
+}
+
 /// Load `settings.workflowKeywordTriggerEnabled`. The default remains off,
 /// matching Claude Code's optional setting.
 fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -> bool {
@@ -11739,6 +11755,26 @@ pub async fn build(
     } else {
         load_merged_bash_output_max_chars(&cfg.cwd)
     });
+    // `settings.attribution` / `settings.includeCoAuthoredBy` — the git
+    // attribution trailers. Published at boot, not only from `/config`:
+    // otherwise a user who has the setting on disk keeps emitting the trailer
+    // until they happen to change it mid-session.
+    let (attribution_commit, attribution_pr, include_co_authored_by) = if cfg.restricted {
+        let attribution = effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.attribution.clone());
+        (
+            attribution.as_ref().and_then(|a| a.commit.clone()),
+            attribution.and_then(|a| a.pr),
+            effective_settings
+                .as_ref()
+                .and_then(|settings| settings.settings.include_co_authored_by),
+        )
+    } else {
+        load_merged_attribution(&cfg.cwd)
+    };
+    platform_api::session_flags::set_attribution(attribution_commit, attribution_pr);
+    platform_api::session_flags::set_include_co_authored_by(include_co_authored_by);
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
     // project style overrides a user one and both override the builtins. A

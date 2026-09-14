@@ -10,6 +10,7 @@
 //! session mode, read by builders such as the `AgentTool` fork gate.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::RwLock;
 use std::sync::Arc;
 
 /// `getIsNonInteractiveSession()` analog. Defaults `false` (interactive); set by
@@ -50,6 +51,20 @@ static BRIEF_MODE_REMINDER: AtomicU8 = AtomicU8::new(0);
 /// `--allowedTools` (oracle `ZDn(ERe.some(ue))`, `src_160988549.js` @3434970)
 /// and never mutated afterwards.
 static TODO_TOOLS_OPT_IN: AtomicBool = AtomicBool::new(false);
+
+/// `settings.attribution.commit` / `.pr` and the coarser
+/// `settings.includeCoAuthoredBy`, published once per session by each host root
+/// and republished by `/config`.
+///
+/// Strings rather than atomics because the values are user copy. `None` is
+/// UNSET; `Some("")` is an explicit empty, which DISABLES that trailer — the
+/// two must never collapse into one state or the override silently becomes a
+/// no-op in the direction that keeps emitting the trailer.
+static ATTRIBUTION_COMMIT: RwLock<Option<String>> = RwLock::new(None);
+/// Companion of [`ATTRIBUTION_COMMIT`] for the PR-body line.
+static ATTRIBUTION_PR: RwLock<Option<String>> = RwLock::new(None);
+/// `settings.includeCoAuthoredBy`. 0 = unset, 1 = true, 2 = false.
+static INCLUDE_CO_AUTHORED_BY: AtomicU8 = AtomicU8::new(0);
 
 /// CLI `--system-prompt-snapshot <on|off>` — oracle `lje(e)`'s
 /// `e.systemPromptSnapshot`, which is `undefined` unless the flag was passed.
@@ -480,6 +495,47 @@ pub fn set_system_prompt_snapshot(choice: Option<bool>) {
 #[must_use]
 pub fn system_prompt_snapshot() -> Option<bool> {
     match SYSTEM_PROMPT_SNAPSHOT.load(Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// Publish `settings.attribution`. Pass `None` for a field the settings do not
+/// name; `Some(String::new())` is an explicit empty and disables that trailer.
+pub fn set_attribution(commit: Option<String>, pr: Option<String>) {
+    if let Ok(mut slot) = ATTRIBUTION_COMMIT.write() {
+        *slot = commit;
+    }
+    if let Ok(mut slot) = ATTRIBUTION_PR.write() {
+        *slot = pr;
+    }
+}
+
+/// The published `settings.attribution` pair: `(commit, pr)`, each `None` when
+/// the settings do not name it.
+#[must_use]
+pub fn attribution() -> (Option<String>, Option<String>) {
+    let commit = ATTRIBUTION_COMMIT.read().ok().and_then(|s| s.clone());
+    let pr = ATTRIBUTION_PR.read().ok().and_then(|s| s.clone());
+    (commit, pr)
+}
+
+/// Publish `settings.includeCoAuthoredBy`. `None` leaves it unset, which is
+/// NOT the same as `Some(true)`: only an explicit `false` empties the trailers.
+pub fn set_include_co_authored_by(value: Option<bool>) {
+    let encoded = match value {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    };
+    INCLUDE_CO_AUTHORED_BY.store(encoded, Ordering::Relaxed);
+}
+
+/// The published `settings.includeCoAuthoredBy`, or `None` when unset.
+#[must_use]
+pub fn include_co_authored_by() -> Option<bool> {
+    match INCLUDE_CO_AUTHORED_BY.load(Ordering::Relaxed) {
         1 => Some(true),
         2 => Some(false),
         _ => None,

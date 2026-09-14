@@ -3614,6 +3614,21 @@ async fn build_mobile_inner_with_ask(
     );
     platform_api::session_flags::set_task_output_max_chars(provider_settings.task_output_max_chars);
     platform_api::session_flags::set_bash_output_max_chars(provider_settings.bash_output_max_chars);
+    // `settings.attribution` / `settings.includeCoAuthoredBy` — the git
+    // attribution trailers, published at boot beside the output caps.
+    platform_api::session_flags::set_attribution(
+        provider_settings
+            .attribution
+            .as_ref()
+            .and_then(|a| a.commit.clone()),
+        provider_settings
+            .attribution
+            .as_ref()
+            .and_then(|a| a.pr.clone()),
+    );
+    platform_api::session_flags::set_include_co_authored_by(
+        provider_settings.include_co_authored_by,
+    );
     // Mobile is a transport host, not the CLI REPL. Keep main-query telemetry
     // on Claude Code's SDK source and never mark it as `--print`.
     orch_cfg.query_source = orchestrator::QUERY_SOURCE_SDK.to_string();

@@ -12,6 +12,25 @@ use crate::settings::schema::{strategy_for, MergeStrategy, SettingsJson};
 ///
 /// Locked signature: every caller (loader, tests, parity driver) uses this
 /// exact form. Do not change without updating every call site.
+/// Per-field merge for `settings.attribution` — lodash `merge` semantics for a
+/// plain object: each field independently takes `next` when set, else `prev`.
+///
+/// NOT `next.or(prev)`: that would let a layer naming only `pr` erase an
+/// inherited `commit`, which is the opposite of what a per-trailer override is
+/// for. An explicit empty string is a VALUE and survives the merge.
+fn merge_attribution(
+    prev: Option<crate::settings::schema::Attribution>,
+    next: Option<crate::settings::schema::Attribution>,
+) -> Option<crate::settings::schema::Attribution> {
+    match (prev, next) {
+        (None, other) | (other, None) => other,
+        (Some(prev), Some(next)) => Some(crate::settings::schema::Attribution {
+            commit: next.commit.or(prev.commit),
+            pr: next.pr.or(prev.pr),
+        }),
+    }
+}
+
 #[must_use]
 pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
     SettingsJson {
@@ -112,6 +131,15 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         bash_output_max_chars: next
             .bash_output_max_chars
             .or(prev.bash_output_max_chars),
+        // `attribution` is a plain OBJECT, and the upstream customizer
+        // special-cases only arrays (see the note above `permissions`), so two
+        // layers deep-merge per field rather than the later one replacing the
+        // whole object: a user-level `attribution.commit` survives a project
+        // that sets only `attribution.pr`.
+        attribution: merge_attribution(prev.attribution, next.attribution),
+        include_co_authored_by: next
+            .include_co_authored_by
+            .or(prev.include_co_authored_by),
         enable_workflows: next.enable_workflows.or(prev.enable_workflows),
         workflow_size_guideline: next
             .workflow_size_guideline
@@ -923,6 +951,14 @@ mod tests {
             ("additionalIncludes", json!(["a.md"]), json!(["b.md"])),
             ("lingxiMdExcludes", json!(["x/**"]), json!(["y/**"])),
             ("companyAnnouncements", json!(["one"]), json!(["two"])),
+            // Each side names a DIFFERENT field, so the typed and raw paths
+            // only agree if both deep-merge per field — an override on either
+            // side would drop one of the two and show up as a mismatch.
+            (
+                "attribution",
+                json!({"commit": "from lower"}),
+                json!({"pr": "from upper"}),
+            ),
             (
                 "allowedHttpHookUrls",
                 json!(["https://a"]),
@@ -1138,6 +1174,12 @@ mod tests {
                 json!({"qualityPanelCount": 3}),
                 json!({"fastPanelCount": 2}),
             ),
+            // `attribution` is a TYPED object, so the generic `lowerEntry`/
+            // `upperEntry` probe cannot round-trip it — serde drops the unknown
+            // keys and the re-serialized value no longer matches. It needs a
+            // pair drawn from its own fields, and the two sides must name
+            // DIFFERENT ones so a per-field merge is visible as combining.
+            (json!({"commit": "lower"}), json!({"pr": "upper"})),
             (json!(["lower"]), json!(["upper"])),
             (json!("lower"), json!("upper")),
             (json!(true), json!(false)),
@@ -1338,6 +1380,62 @@ mod tests {
         assert!(
             unioned.is_empty(),
             "the merged value is exactly the upper layer's, so it is not a union, got {unioned:?}"
+        );
+    }
+
+    /// `attribution` is an OBJECT, so two layers merge PER FIELD. A project
+    /// that sets only `pr` must not erase a user-level `commit` — which is
+    /// exactly what the `next.or(prev)` used for scalars would have done.
+    #[test]
+    fn attribution_merges_per_field_rather_than_replacing_the_object() {
+        use crate::settings::schema::Attribution;
+        let user = SettingsJson {
+            attribution: Some(Attribution {
+                commit: Some("user commit".into()),
+                pr: None,
+            }),
+            ..Default::default()
+        };
+        let project = SettingsJson {
+            attribution: Some(Attribution {
+                commit: None,
+                pr: Some("project pr".into()),
+            }),
+            ..Default::default()
+        };
+        let merged = merge(user, project).attribution.expect("attribution");
+        assert_eq!(
+            merged.commit.as_deref(),
+            Some("user commit"),
+            "the later layer named only `pr`, so `commit` must survive"
+        );
+        assert_eq!(merged.pr.as_deref(), Some("project pr"));
+    }
+
+    /// Within a field the later layer still wins, and an explicit empty string
+    /// is a VALUE that overrides — not an absence that falls through.
+    #[test]
+    fn a_later_layer_overrides_a_named_field_including_with_empty() {
+        use crate::settings::schema::Attribution;
+        let user = SettingsJson {
+            attribution: Some(Attribution {
+                commit: Some("user commit".into()),
+                pr: None,
+            }),
+            ..Default::default()
+        };
+        let project = SettingsJson {
+            attribution: Some(Attribution {
+                commit: Some(String::new()),
+                pr: None,
+            }),
+            ..Default::default()
+        };
+        let merged = merge(user, project).attribution.expect("attribution");
+        assert_eq!(
+            merged.commit.as_deref(),
+            Some(""),
+            "an explicit empty must override, i.e. disable the trailer"
         );
     }
 }

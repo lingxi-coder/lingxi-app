@@ -15,28 +15,54 @@
 //!
 //! Model resolution mirrors `getSmallFastModel()`
 //! (`claude-code/src/utils/model/model.ts:36-37` →
-//! `getDefaultHaikuModel():131-139`): the hook's `model` override wins; else
-//! `$ANTHROPIC_SMALL_FAST_MODEL`; else `$ANTHROPIC_DEFAULT_HAIKU_MODEL`; else
-//! the default Haiku 4.5 string.
+//! `getDefaultHaikuModel():131-139`) for a session served by Anthropic: the
+//! hook's `model` override wins; else `$ANTHROPIC_SMALL_FAST_MODEL`; else
+//! `$ANTHROPIC_DEFAULT_HAIKU_MODEL`; else the default Haiku 4.5 string. A
+//! session served by any other provider evaluates on its own model and
+//! profile — see [`ApiClientHookPromptRunner::resolve_model`] for why — which
+//! the runner learns through [`ApiClientHookPromptRunner::attach`].
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use hooks::{HookPromptRunner, PromptHookError, PromptHookRequest};
 use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use protocol::{ConversationMessage, MessageId};
 
-use crate::conversation::OrchestratorApiClient;
+use crate::conversation::{ConversationOrchestrator, OrchestratorApiClient};
 
 /// Default small-fast model when no override / env var is set
 /// (`getDefaultHaikuModel()` → `getModelStrings().haiku45`;
 /// `model.ts:137`). Matches the orchestrator's `list_available_models` haiku id.
 const DEFAULT_SMALL_FAST_MODEL: &str = "claude-haiku-4-5";
 
+/// Where the evaluator learns which model the session it judges is talking to.
+///
+/// The runner is built before the orchestrator exists (the hook executor is a
+/// constructor input of the orchestrator), so the session is bound late through
+/// [`ApiClientHookPromptRunner::attach`] — the same cell shape as
+/// [`crate::JsonlHookAttachmentSink`]. A test binds a fake instead.
+#[async_trait]
+pub trait HookSessionModel: Send + Sync {
+    /// The session's live `(model, model_profile)`, or `None` once the session
+    /// is gone.
+    async fn session_model(&self) -> Option<(String, Option<String>)>;
+}
+
+#[async_trait]
+impl HookSessionModel for Weak<ConversationOrchestrator> {
+    async fn session_model(&self) -> Option<(String, Option<String>)> {
+        let orch = self.upgrade()?;
+        let session = orch.session.lock().await;
+        Some((session.model.clone(), session.model_profile.clone()))
+    }
+}
+
 /// Implements [`HookPromptRunner`] over the orchestrator's one-shot
 /// non-streaming `messages_create` seam.
 pub struct ApiClientHookPromptRunner {
     api: Arc<dyn OrchestratorApiClient>,
+    session: OnceLock<Arc<dyn HookSessionModel>>,
 }
 
 impl ApiClientHookPromptRunner {
@@ -45,27 +71,61 @@ impl ApiClientHookPromptRunner {
     /// shares the provider routing / auth / telemetry.
     #[must_use]
     pub fn new(api: Arc<dyn OrchestratorApiClient>) -> Self {
-        Self { api }
+        Self {
+            api,
+            session: OnceLock::new(),
+        }
     }
 
-    /// Resolve the effective model: the hook's override, then
-    /// `ANTHROPIC_SMALL_FAST_MODEL`, then `ANTHROPIC_DEFAULT_HAIKU_MODEL`, then
-    /// the default Haiku string (`getSmallFastModel()`; `model.ts:36-37`).
-    fn resolve_model(override_model: Option<&str>) -> String {
+    /// Bind the runner to the session whose transcript it evaluates. Until
+    /// then the evaluator resolves as if the session were served by Anthropic.
+    ///
+    /// First call wins; the runner holds a `Weak`, so this creates no
+    /// orchestrator↔hook-executor cycle.
+    pub fn attach(&self, orch: &Arc<ConversationOrchestrator>) {
+        self.attach_session_model(Arc::new(Arc::downgrade(orch)));
+    }
+
+    /// [`Self::attach`] with an arbitrary session-model source.
+    pub fn attach_session_model(&self, session: Arc<dyn HookSessionModel>) {
+        let _ = self.session.set(session);
+    }
+
+    /// The evaluator's `(model, profile)`.
+    ///
+    /// Upstream only ever talks to Anthropic, so `getSmallFastModel()`
+    /// (`model.ts:36-37`) is the whole story there: the hook's override, else
+    /// `ANTHROPIC_SMALL_FAST_MODEL`, else `ANTHROPIC_DEFAULT_HAIKU_MODEL`, else
+    /// Haiku. This port serves other providers too, and a Haiku id on a
+    /// `DeepSeek` session is not a cheaper evaluator — it is a request the
+    /// session's provider cannot serve, routed to an Anthropic codec that
+    /// rejects the session's unsigned reasoning blocks before anything is
+    /// sent. So the Anthropic ladder applies only when the session itself is
+    /// served by Anthropic; every other session evaluates on its own model and
+    /// profile, the one pair known to exist for it. The override stays
+    /// unconditional: it is the hook author's explicit choice.
+    fn resolve_model(
+        override_model: Option<&str>,
+        session: Option<(&str, Option<&str>)>,
+    ) -> (String, Option<String>) {
         if let Some(m) = override_model {
-            return m.to_string();
+            return (m.to_string(), None);
         }
-        if let Ok(m) = std::env::var("ANTHROPIC_SMALL_FAST_MODEL") {
-            if !m.is_empty() {
-                return m;
+        let profile = match session {
+            Some((model, profile)) if !anthropic_served(model, profile) => {
+                return (model.to_string(), profile.map(str::to_owned));
+            }
+            Some((_, profile)) => profile.map(str::to_owned),
+            None => None,
+        };
+        for var in ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
+            if let Ok(m) = std::env::var(var) {
+                if !m.is_empty() {
+                    return (m, profile);
+                }
             }
         }
-        if let Ok(m) = std::env::var("ANTHROPIC_DEFAULT_HAIKU_MODEL") {
-            if !m.is_empty() {
-                return m;
-            }
-        }
-        DEFAULT_SMALL_FAST_MODEL.to_string()
+        (DEFAULT_SMALL_FAST_MODEL.to_string(), profile)
     }
 
     /// Concatenate the assistant message's text blocks (the analog of
@@ -104,22 +164,73 @@ impl ApiClientHookPromptRunner {
     }
 }
 
+/// Whether `(model, profile)` is served by the Anthropic provider. The profile
+/// is authoritative (`anthropic`, or a connection of it, `anthropic:<name>`);
+/// an unscoped id is judged by its `claude-` prefix.
+fn anthropic_served(model: &str, profile: Option<&str>) -> bool {
+    match profile {
+        Some(profile) => platform_api::split_connection_profile(profile).0 == "anthropic",
+        None => model.starts_with("claude-"),
+    }
+}
+
+/// Drop reasoning blocks from the transcript before it is judged.
+///
+/// The evaluator runs with thinking disabled and is told to judge transcript
+/// evidence; a reasoning trace is not evidence, and it is the one block that
+/// cannot cross providers — Anthropic refuses a `thinking` block without the
+/// signature only its own models produce, and `DeepSeek` / `Kimi` traces never
+/// carry one. An assistant message left empty keeps the placeholder the
+/// signature-recovery path uses, so no message goes out without content.
+fn strip_transcript_thinking(messages: &mut [ConversationMessage]) {
+    let is_thinking = |block: &protocol::ContentBlock| {
+        matches!(
+            block,
+            protocol::ContentBlock::Thinking { .. } | protocol::ContentBlock::RedactedThinking { .. }
+        )
+    };
+    for message in messages {
+        let ConversationMessage::Assistant { content, .. } = message else {
+            continue;
+        };
+        if !content.iter().any(is_thinking) {
+            continue;
+        }
+        content.retain(|block| !is_thinking(block));
+        if content.is_empty() {
+            content.push(protocol::ContentBlock::Text {
+                text: "[Thinking removed]".into(),
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl HookPromptRunner for ApiClientHookPromptRunner {
     async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError> {
-        let model = Self::resolve_model(req.model.as_deref());
+        let session = match self.session.get() {
+            Some(session) => session.session_model().await,
+            None => None,
+        };
+        let (model, profile) = Self::resolve_model(
+            req.model.as_deref(),
+            session
+                .as_ref()
+                .map(|(model, profile)| (model.as_str(), profile.as_deref())),
+        );
         // Single user turn carrying the (already `$ARGUMENTS`-substituted)
         // hook prompt; the fixed evaluation system prompt is passed via
         // `system`. No tools are advertised — the prompt hook only needs the
         // model's `{ok, reason?}` JSON text (`execPromptHook.ts:62-100`).
         let hooks::PromptHookTranscript {
-            messages: transcript,
+            messages: mut transcript,
             last_usage_tokens: last_usage,
             message_grouping,
         } = match req.transcript {
             Some(transcript) => transcript,
             None => load_hook_transcript(req.transcript_path.as_deref()).await?,
         };
+        strip_transcript_thinking(&mut transcript);
         let budget = hook_transcript_budget(&model);
         let query = async {
             let mut messages = if last_usage <= budget {
@@ -133,7 +244,12 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
             ));
             let response = self
                 .api
-                .messages_create_hook_prompt(&model, &req.system_prompt, messages)
+                .messages_create_hook_prompt(
+                    &model,
+                    profile.as_deref(),
+                    &req.system_prompt,
+                    messages,
+                )
                 .await;
             let response = match response {
                 Err(LlmError::ContextOverflow { .. }) if !transcript.is_empty() => {
@@ -147,7 +263,12 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
                         req.prompt.clone(),
                     ));
                     self.api
-                        .messages_create_hook_prompt(&model, &req.system_prompt, messages)
+                        .messages_create_hook_prompt(
+                            &model,
+                            profile.as_deref(),
+                            &req.system_prompt,
+                            messages,
+                        )
                         .await
                 }
                 other => other,
@@ -355,8 +476,22 @@ mod tests {
     use llm_client::{LlmResponse, Usage};
     use std::sync::Mutex;
 
-    /// One recorded `messages_create` call: `(model, system, messages)`.
-    type RecordedCall = (String, Option<String>, Vec<ConversationMessage>);
+    /// One recorded `messages_create` call: `(model, profile, system, messages)`.
+    type RecordedCall = (
+        String,
+        Option<String>,
+        Option<String>,
+        Vec<ConversationMessage>,
+    );
+
+    /// A bound session with a fixed `(model, profile)`.
+    struct FixedSession(String, Option<String>);
+    #[async_trait]
+    impl HookSessionModel for FixedSession {
+        async fn session_model(&self) -> Option<(String, Option<String>)> {
+            Some((self.0.clone(), self.1.clone()))
+        }
+    }
 
     fn make_text_response(body: &str) -> LlmResponse {
         LlmResponse {
@@ -393,13 +528,14 @@ mod tests {
         async fn messages_create(
             &self,
             model: &str,
-            _profile: Option<&str>,
+            profile: Option<&str>,
             system: Option<&str>,
             msgs: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
         ) -> Result<LlmResponse, LlmError> {
             self.recorded.lock().unwrap().push((
                 model.to_string(),
+                profile.map(str::to_owned),
                 system.map(str::to_owned),
                 msgs,
             ));
@@ -570,9 +706,9 @@ mod tests {
         });
         runner.run(request).await.unwrap();
         let recorded = api.recorded.lock().unwrap();
-        assert_eq!(&recorded[0].2[..2], messages.as_slice());
+        assert_eq!(&recorded[0].3[..2], messages.as_slice());
         assert_eq!(
-            recorded[0].2.len(),
+            recorded[0].3.len(),
             3,
             "native 1M keeps the full transcript at 300k usage"
         );
@@ -588,10 +724,11 @@ mod tests {
         assert_eq!(out, r#"{"ok": true}"#);
         let recorded = api.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1);
-        let (model, system, msgs) = &recorded[0];
-        // Default model resolves to the small-fast haiku string (no env set in
+        let (model, profile, system, msgs) = &recorded[0];
+        // Unbound runner: the small-fast haiku string, unscoped (no env set in
         // the typical test environment).
         assert_eq!(model, "claude-haiku-4-5");
+        assert_eq!(profile, &None);
         assert_eq!(system.as_deref(), Some("SYS"));
         assert_eq!(msgs.len(), 1);
         match &msgs[0] {
@@ -652,8 +789,135 @@ mod tests {
     #[test]
     fn resolve_model_prefers_override() {
         assert_eq!(
-            ApiClientHookPromptRunner::resolve_model(Some("custom-model")),
-            "custom-model"
+            ApiClientHookPromptRunner::resolve_model(
+                Some("custom-model"),
+                Some(("deepseek-flash", Some("deepseek")))
+            ),
+            ("custom-model".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn anthropic_sessions_keep_haiku_and_every_other_provider_uses_its_own_model() {
+        let resolve = |model: &str, profile: Option<&str>| {
+            ApiClientHookPromptRunner::resolve_model(None, Some((model, profile)))
+        };
+        // Anthropic-served, by profile (plain or a connection of it) or by an
+        // unscoped `claude-` id: the upstream small-fast ladder, pinned to the
+        // session's own profile so a connection keeps its key.
+        assert_eq!(
+            resolve("claude-opus-4-8", Some("anthropic")),
+            ("claude-haiku-4-5".to_string(), Some("anthropic".to_string()))
+        );
+        assert_eq!(
+            resolve("claude-opus-4-8", Some("anthropic:work#1")),
+            ("claude-haiku-4-5".to_string(), Some("anthropic:work#1".to_string()))
+        );
+        assert_eq!(
+            resolve("claude-opus-4-8", None),
+            ("claude-haiku-4-5".to_string(), None)
+        );
+        // Anything else: the session's own pair. A Haiku id here would be a
+        // request the session's provider cannot serve.
+        assert_eq!(
+            resolve("deepseek-flash", Some("deepseek")),
+            ("deepseek-flash".to_string(), Some("deepseek".to_string()))
+        );
+        assert_eq!(
+            resolve("deepseek-flash", Some("deepseek:cn#1")),
+            ("deepseek-flash".to_string(), Some("deepseek:cn#1".to_string()))
+        );
+        assert_eq!(
+            resolve("kimi-k2", None),
+            ("kimi-k2".to_string(), None)
+        );
+        // A Claude id reached through another provider follows that provider.
+        assert_eq!(
+            resolve("claude-opus-4-8", Some("openrouter")),
+            ("claude-opus-4-8".to_string(), Some("openrouter".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_deepseek_session_evaluates_on_its_own_model_and_profile() {
+        let api = MockApi::text("x", r#"{"ok": true}"#);
+        let runner = ApiClientHookPromptRunner::new(api.clone());
+        runner.attach_session_model(Arc::new(FixedSession(
+            "deepseek-flash".into(),
+            Some("deepseek:cn".into()),
+        )));
+
+        runner.run(req("judge", None)).await.unwrap();
+
+        let recorded = api.recorded.lock().unwrap();
+        assert_eq!(recorded[0].0, "deepseek-flash");
+        assert_eq!(recorded[0].1.as_deref(), Some("deepseek:cn"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_blocks_never_reach_the_evaluator() {
+        let api = MockApi::text("x", r#"{"ok": true}"#);
+        let runner = ApiClientHookPromptRunner::new(api.clone());
+        let mut request = req("judge", None);
+        request.transcript = Some(hooks::PromptHookTranscript {
+            messages: vec![
+                ConversationMessage::user(MessageId::new(), "run tests".into()),
+                ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content: vec![
+                        // A DeepSeek trace: no signature, which the Anthropic
+                        // codec refuses outright.
+                        protocol::ContentBlock::Thinking {
+                            thinking: "let me think".into(),
+                            signature: None,
+                        },
+                        protocol::ContentBlock::Text {
+                            text: "tests passed".into(),
+                        },
+                    ],
+                    stop_reason: None,
+                },
+                ConversationMessage::user(MessageId::new(), "and again".into()),
+                ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content: vec![
+                        protocol::ContentBlock::Thinking {
+                            thinking: "only thinking".into(),
+                            signature: Some("sig".into()),
+                        },
+                        protocol::ContentBlock::RedactedThinking {
+                            data: "opaque".into(),
+                        },
+                    ],
+                    stop_reason: None,
+                },
+            ],
+            last_usage_tokens: 10,
+            ..Default::default()
+        });
+
+        runner.run(request).await.unwrap();
+
+        let recorded = api.recorded.lock().unwrap();
+        let sent = &recorded[0].3;
+        assert_eq!(sent.len(), 5, "4 transcript messages + the condition prompt");
+        let assistant_content = |index: usize| match &sent[index] {
+            ConversationMessage::Assistant { content, .. } => content.clone(),
+            other => panic!("expected assistant at {index}, got {other:?}"),
+        };
+        assert_eq!(
+            assistant_content(1),
+            vec![protocol::ContentBlock::Text {
+                text: "tests passed".into()
+            }]
+        );
+        // Signed and redacted traces go too: the evaluator judges text, and a
+        // message must not go out empty.
+        assert_eq!(
+            assistant_content(3),
+            vec![protocol::ContentBlock::Text {
+                text: "[Thinking removed]".into()
+            }]
         );
     }
 }

@@ -307,7 +307,11 @@ impl WireCodec for OpenAiChatCodec {
         if let Some(response_format) = &request.response_format {
             body.insert(
                 "response_format".to_string(),
-                encode_response_format(response_format),
+                if deepseek_profile {
+                    encode_deepseek_response_format(response_format)
+                } else {
+                    encode_response_format(response_format)
+                },
             );
         }
 
@@ -1013,6 +1017,21 @@ fn encode_response_format(response_format: &ResponseFormat) -> Value {
     }
 }
 
+/// `DeepSeek` serves exactly one JSON mode. Verified live on 2026-09-14 against
+/// `api.deepseek.com` / `deepseek-flash`: `{"type":"json_schema",…}` is a 400
+/// (`This response_format type is unavailable now`), `{"type":"json_object"}`
+/// is a 200 with the JSON the prompt asked for. Its catalog row still says
+/// `structured_output: true`, so the schema request reaches this codec; the
+/// schema only ever reached the model through the prompt on this provider,
+/// and every caller validates the reply locally.
+fn encode_deepseek_response_format(response_format: &ResponseFormat) -> Value {
+    match response_format {
+        ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. } => {
+            serde_json::json!({"type": "json_object"})
+        }
+    }
+}
+
 fn encode_tool_choice(tool_choice: &ToolChoice) -> Value {
     match tool_choice {
         ToolChoice::Auto => Value::String("auto".to_string()),
@@ -1241,6 +1260,40 @@ mod tests {
             }
             other => panic!("expected retry-visible InvalidRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deepseek_json_schema_degrades_to_json_object_the_only_json_mode_it_serves() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"]
+        });
+        let request = |model: &str| {
+            let mut request = LlmRequest::new(model);
+            request.response_format = Some(ResponseFormat::JsonSchema {
+                schema: schema.clone(),
+            });
+            request
+        };
+        for codec in [
+            OpenAiChatCodec::new("https://api.deepseek.com"),
+            OpenAiChatCodec::new("https://deepseek-proxy.example/v1").with_profile_name("deepseek"),
+        ] {
+            let encoded = codec.encode_request(&request("deepseek-flash")).unwrap();
+            assert_eq!(
+                body_of(&encoded)["response_format"],
+                serde_json::json!({"type": "json_object"}),
+                "DeepSeek rejects json_schema outright (live 400)"
+            );
+        }
+        // Every other OpenAI-compatible endpoint keeps the strict schema.
+        let encoded = OpenAiChatCodec::new("https://api.openai.com/v1")
+            .encode_request(&request("gpt-5"))
+            .unwrap();
+        let body = body_of(&encoded);
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["schema"], schema);
     }
 
     fn request_with_named_tool_choice(model: &str) -> LlmRequest {

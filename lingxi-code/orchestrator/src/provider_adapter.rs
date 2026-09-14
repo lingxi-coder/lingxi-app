@@ -184,9 +184,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         msgs: Vec<ConversationMessage>,
     ) -> Result<LlmResponse, LlmError> {
         let stream = self.service.stream_json_schema_with_thinking(
-            model, None, Some(system), msgs,
+            model, profile, Some(system), msgs,
             serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
             None, None, Some(llm_client::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
+        profile: Option<&str>,
         ).await?;
         llm_client::stream_accumulator::accumulate_stream_salvaging(stream)
             .await

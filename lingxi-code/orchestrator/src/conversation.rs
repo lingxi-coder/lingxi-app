@@ -90,13 +90,16 @@ pub trait OrchestratorApiClient: Send + Sync {
 
     /// Isolated prompt-hook evaluation. Production disables thinking and requests
     /// the evaluator JSON schema without modifying the conversation settings.
+    /// `profile` pins the provider the way the session's own turns are pinned;
+    /// `None` resolves the id unscoped.
     async fn messages_create_hook_prompt(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: &str,
         msgs: Vec<ConversationMessage>,
     ) -> Result<LlmResponse, LlmError> {
-        self.messages_create(model, None, Some(system), msgs, Vec::new())
+        self.messages_create(model, profile, Some(system), msgs, Vec::new())
             .await
     }
 

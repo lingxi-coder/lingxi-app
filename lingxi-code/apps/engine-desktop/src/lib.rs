@@ -13233,9 +13233,7 @@ pub async fn build(
             Arc::new(PosixProcess::new()) as Arc<dyn platform_api::ProcessRunner>,
             Arc::new(PosixSandbox::new()) as Arc<dyn platform_api::Sandbox>,
         )
-        .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
-            api_client.clone(),
-        )))
+        .with_prompt_runner(hook_prompt_runner.clone() as Arc<dyn hooks::HookPromptRunner>)
         .with_async_registry(async_hook_registry)
         // Wire the Agent hook arm: an `agent`-type hook action spawns a subagent
         // through the SAME pool spawner the `AgentTool` uses (4.6 below). The arm
@@ -13305,6 +13303,12 @@ pub async fn build(
         }
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
         mcp::XaaIdpSettings::from_settings_tiers(&refs).map(|settings| {
+    // Same late-bound shape for the prompt-hook evaluator: it needs the
+    // session's live model/profile (a non-Anthropic session evaluates on its
+    // own model), and the session does not exist yet. `attach` below.
+    let hook_prompt_runner = Arc::new(orchestrator::ApiClientHookPromptRunner::new(
+        api_client.clone(),
+    ));
             // Build the server→(AS client_id, server_key) lookup from the known
             // MCP configs so the provider can resolve the AS `client_secret`.
             let lookup = mcp::MapServerOAuthLookup::from_specs(
@@ -15641,6 +15645,7 @@ pub async fn build(
                     .map_or("firstParty", String::as_str);
                 let provider = if profile_provider == "firstParty" {
                     first_party_environment_provider.clone()
+    hook_prompt_runner.attach(&orch);
                 } else {
                     profile_provider.to_string()
                 };

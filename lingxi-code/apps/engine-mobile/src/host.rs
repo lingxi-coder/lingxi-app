@@ -4159,15 +4159,19 @@ async fn build_mobile_inner_with_ask(
     let hooks: Arc<hooks::HookExecutorImpl> = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
+    // Same late-bound shape for the prompt-hook evaluator: it needs the
+    // session's live model/profile (a non-Anthropic session evaluates on its
+    // own model), and the session does not exist yet. `attach`ed in step 8.
+    let hook_prompt_runner = Arc::new(orchestrator::ApiClientHookPromptRunner::new(
+        api_client.clone(),
+    ));
             http.clone(),
             Arc::new(platform_posix_minimal::PosixRuntime::new())
                 as Arc<dyn platform_api::RuntimeSpawner>,
         )
         .with_policy_disable_all_hooks(disable_all_hooks)
         .with_process_runner(process.clone(), sandbox.clone())
-        .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
-            api_client.clone(),
-        )))
+        .with_prompt_runner(hook_prompt_runner.clone() as Arc<dyn hooks::HookPromptRunner>)
         // (H-BIN-12) Gate outbound HTTP-hook URLs + intersect the per-hook env
         // allowlist from the merged settings; `(None, None)` = no restriction.
         .with_http_hook_policy(allowed_http_hook_urls, http_hook_allowed_env_vars)
@@ -5295,6 +5299,7 @@ async fn build_mobile_inner_with_ask(
             session.try_lock().ok().map(|state| {
                 let profile = state
                     .model_profile
+    hook_prompt_runner.attach(&orch);
                     .as_ref()
                     .or_else(|| model_provider_profiles.get(&state.model));
                 let provider = profile

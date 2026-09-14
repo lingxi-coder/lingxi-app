@@ -380,7 +380,17 @@ downgrade) and threaded to the bottom pane.
    restore the `Ask` was the FAITHFUL path all along. The divergence was on the
    other path, which skipped the classifier entirely — see §7.2.
 
-6. **The sandbox-network action reaches the classifier under a name its own
+6. ~~**The sandbox-network action reaches the classifier under a name its own
+   rule does not use.**~~ **Landed 2026-09-14** (`a0c6448f1`): the call site now
+   passes `SandboxNetworkAccess`, and `ive`'s block arm is ported — a denied
+   `host:port` is not asked about again. The allow arm is not: upstream keys it
+   on a transcript watermark (`CLe`) this callback is never given, and a cached
+   allow without one would outlive the transcript that justified it. Committed
+   as HEAD's file plus three hunks, because the shared copy of
+   `apps/engine-desktop/src/lib.rs` carries another session's work. Original
+   finding below.
+
+   **The sandbox-network action reaches the classifier under a name its own
    rule does not use.** Upstream's third `bke` consumer is `mUe`, which
    synthesises a tool call named `XV = "SandboxNetworkAccess"` carrying
    `{host, port}` and classifies it (`severitySite: {key:"sandboxNetwork"}`),

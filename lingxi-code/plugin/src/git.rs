@@ -1,5 +1,42 @@
 //! Git plugin-source clone (Stage 1 install arm).
 //!
+//! ## MP-6 `skipLfs`: already the permanent behaviour here, and NOT testable cheaply
+//!
+//! Upstream's `skipLfs` sets `GIT_LFS_SKIP_SMUDGE=1` on clone and pull so LFS
+//! pointer files stay as pointers instead of downloading their content. That
+//! variable is read by the git-lfs SMUDGE FILTER, which git runs through a
+//! `filter.<driver>.smudge` config entry. This clone is libgit2, which does not
+//! execute external filter drivers at all — so a pointer is never smudged here
+//! and `skipLfs: true` is already what happens, unconditionally.
+//!
+//! ⚠️ The DIVERGENCE is the other direction: `skipLfs: false` — upstream's
+//! default — cannot be honoured, because this port never downloads LFS content
+//! for a plugin or marketplace clone. Failure direction is "pointer files on
+//! disk, less bandwidth", never "surprise multi-GB fetch", and a marketplace's
+//! `marketplace.json` is not an LFS object.
+//!
+//! ⛔ Do not "prove" this with a fixture repo that configures
+//! `filter.x.smudge` and asserts the clone produced the raw blob. I wrote that
+//! test; it passed; its CONTROL — the same clone through the git CLI, which
+//! must produce the SMUDGED content or the fixture proves nothing — failed.
+//! Filter drivers are read from the CLONE's config, not the origin's, so a
+//! repository cannot ship one and neither git nor libgit2 smudges anything.
+//! (git-lfs works because `git lfs install` writes `filter.lfs.*` into the
+//! user's GLOBAL config.) A live fixture therefore needs process-global config
+//! surgery — `GIT_CONFIG_GLOBAL`, or `git2::opts::set_search_path` — which is
+//! exactly the process-global state that makes a parallel suite flake. The
+//! claim above is reasoned from libgit2 having no external-driver support, and
+//! it is labelled as reasoned rather than dressed up as measured.
+//!
+//! ## MP-6 `--sparse`: done, elsewhere
+//!
+//! `sparsePaths` IS consumed — `configuration_admin::plugin_marketplace`'s
+//! `prune_to_sparse_paths` drops every non-listed top-level entry right after
+//! the clone, on the only path that materialises one. libgit2 has no
+//! sparse-checkout, so the port clones fully and prunes: same end state on
+//! disk, more bandwidth than upstream's `sparse-checkout set --cone`. An audit
+//! that greps only this file concludes the opposite.
+//!
 //! Unlike the Android `tool-git-mobile` clone (which is anchored to the sandbox
 //! workspace root), the plugin cache lives under `~/.lingxi/plugins`, OUTSIDE any
 //! workspace, so this clone is intentionally NOT workspace-anchored. It is a thin

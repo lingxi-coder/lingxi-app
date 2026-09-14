@@ -386,6 +386,16 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_co_authored_by: Option<bool>,
 
+    /// Scalar field (later source wins). Whether the Bash tool's prompt carries
+    /// the git / PR instruction sections. Default `true`.
+    ///
+    /// claude-code `iQ()` consults this ONLY when
+    /// `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS` is undefined — a defined env var
+    /// wins outright in BOTH directions, so an explicit env `false` re-enables
+    /// the sections over a settings `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_git_instructions: Option<bool>,
+
     /// Scalar field (later source wins). When enabled, a literal `ultracode`
     /// token in a submitted prompt emits the Workflow authorization reminder.
     #[serde(default, skip_serializing_if = "Option::is_none")]

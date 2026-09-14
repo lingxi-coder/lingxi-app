@@ -11775,6 +11775,13 @@ pub async fn build(
     };
     platform_api::session_flags::set_attribution(attribution_commit, attribution_pr);
     platform_api::session_flags::set_include_co_authored_by(include_co_authored_by);
+    platform_api::session_flags::set_include_git_instructions(if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.include_git_instructions)
+    } else {
+        load_merged_settings(&cfg.cwd).and_then(|eff| eff.settings.include_git_instructions)
+    });
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
     // project style overrides a user one and both override the builtins. A

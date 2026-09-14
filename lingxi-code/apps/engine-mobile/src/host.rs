@@ -3629,6 +3629,9 @@ async fn build_mobile_inner_with_ask(
     platform_api::session_flags::set_include_co_authored_by(
         provider_settings.include_co_authored_by,
     );
+    platform_api::session_flags::set_include_git_instructions(
+        provider_settings.include_git_instructions,
+    );
     // Mobile is a transport host, not the CLI REPL. Keep main-query telemetry
     // on Claude Code's SDK source and never mark it as `--print`.
     orch_cfg.query_source = orchestrator::QUERY_SOURCE_SDK.to_string();

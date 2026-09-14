@@ -150,15 +150,50 @@ fn cheap_commands_bullet_enabled() -> bool {
     std::env::var("LINGXI_GORSE_PLOVER").is_ok_and(|v| !v.is_empty())
 }
 
-/// Port of `shouldIncludeGitInstructions` (`aOt()`, `utils/gitSettings.ts`).
+/// Port of `shouldIncludeGitInstructions` — oracle `iQ()`:
 ///
-/// R-MINOR: claude-code omits the git/PR section when
-/// `LINGXI_DISABLE_GIT_INSTRUCTIONS` is set (truthy), else honors a settings
-/// `git.includeGitInstructions` toggle (default true). LingXi has no
-/// `gitSettings` source in this crate, so it models the env half (the settings
-/// toggle defaults to "on", so the env check is the only observable gate here).
+/// ```js
+/// let e = a.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS;
+/// if (e !== void 0) return !e;
+/// return Ge().includeGitInstructions ?? !0;
+/// ```
+///
+/// The env var is THREE-valued and wins outright whenever it is DEFINED, in
+/// both directions: `…=1` removes the sections, and an explicit `…=0` puts them
+/// back even against a settings `false`. Only an UNDEFINED env falls through to
+/// the setting, which defaults to on.
+///
+/// (The previous note here said the toggle lived at `git.includeGitInstructions`
+/// and that its default made the env the only observable gate. Both were wrong:
+/// `Ge()` reads it at the TOP level, and a settings `false` is observable
+/// whenever the env var is absent — which is the normal case.)
 fn should_include_git_instructions() -> bool {
-    !is_env_truthy("LINGXI_DISABLE_GIT_INSTRUCTIONS")
+    include_git_instructions_from(
+        env_tristate("LINGXI_DISABLE_GIT_INSTRUCTIONS"),
+        platform_api::session_flags::include_git_instructions(),
+    )
+}
+
+/// `iQ()` with both inputs passed in, so the precedence is testable without
+/// touching the process environment.
+///
+/// `disable_env` is the PARSED env var: `None` when unset, else its boolean
+/// value. Returning `!e` for a defined env is what makes an explicit `0`
+/// override a settings `false` — collapsing "unset" into "false" here would
+/// silently turn that override into a no-op.
+fn include_git_instructions_from(disable_env: Option<bool>, setting: Option<bool>) -> bool {
+    if let Some(disabled) = disable_env {
+        return !disabled;
+    }
+    setting.unwrap_or(true)
+}
+
+/// Read an env var as the oracle's parsed-proxy boolean: `None` when the
+/// variable is absent, else whether its value is truthy.
+fn env_tristate(name: &str) -> Option<bool> {
+    std::env::var(name).ok().map(|raw| {
+        platform_api::env::is_env_truthy(Some(raw.as_str()))
+    })
 }
 
 // ===== Commit / PR attribution ==============================================
@@ -1588,6 +1623,41 @@ mod tests {
         assert_eq!(
             pr, "PR",
             "and the unnamed one falls back to its DEFAULT, not to empty"
+        );
+    }
+
+    /// `iQ()`'s precedence. The env var wins whenever DEFINED, in both
+    /// directions; only an absent env falls through to the setting.
+    #[test]
+    fn git_instructions_env_wins_in_both_directions() {
+        // Absent env: the setting decides, defaulting to on.
+        assert!(include_git_instructions_from(None, None), "default is on");
+        assert!(include_git_instructions_from(None, Some(true)));
+        assert!(
+            !include_git_instructions_from(None, Some(false)),
+            "a settings false IS observable — it is the normal case, since the \
+             env var is usually absent"
+        );
+
+        // Defined env: `return !e`, so it overrides the setting either way.
+        assert!(!include_git_instructions_from(Some(true), Some(true)));
+        assert!(
+            include_git_instructions_from(Some(false), Some(false)),
+            "an explicit env `0` puts the sections back over a settings false"
+        );
+    }
+
+    /// "Unset" and "set to false" are different env states. Collapsing them
+    /// turns the re-enabling override into a no-op, and nothing else notices.
+    #[test]
+    fn an_unset_env_is_not_the_same_as_an_env_set_false() {
+        assert!(
+            !include_git_instructions_from(None, Some(false)),
+            "unset env: the setting applies"
+        );
+        assert!(
+            include_git_instructions_from(Some(false), Some(false)),
+            "env explicitly false: it wins and re-enables"
         );
     }
 }

@@ -65,6 +65,8 @@ static ATTRIBUTION_COMMIT: RwLock<Option<String>> = RwLock::new(None);
 static ATTRIBUTION_PR: RwLock<Option<String>> = RwLock::new(None);
 /// `settings.includeCoAuthoredBy`. 0 = unset, 1 = true, 2 = false.
 static INCLUDE_CO_AUTHORED_BY: AtomicU8 = AtomicU8::new(0);
+/// `settings.includeGitInstructions`. 0 = unset, 1 = true, 2 = false.
+static INCLUDE_GIT_INSTRUCTIONS: AtomicU8 = AtomicU8::new(0);
 
 /// CLI `--system-prompt-snapshot <on|off>` — oracle `lje(e)`'s
 /// `e.systemPromptSnapshot`, which is `undefined` unless the flag was passed.
@@ -477,6 +479,28 @@ pub fn set_todo_tools_opt_in(opted_in: bool) {
 #[must_use]
 pub fn todo_tools_opt_in() -> bool {
     TODO_TOOLS_OPT_IN.load(Ordering::Relaxed)
+}
+
+/// Publish `settings.includeGitInstructions`. `None` leaves it unset, which
+/// the gate reads as "default true" — distinct from an explicit `Some(true)`
+/// only in intent, but distinct from `Some(false)` in effect.
+pub fn set_include_git_instructions(value: Option<bool>) {
+    let encoded = match value {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    };
+    INCLUDE_GIT_INSTRUCTIONS.store(encoded, Ordering::Relaxed);
+}
+
+/// The published `settings.includeGitInstructions`, or `None` when unset.
+#[must_use]
+pub fn include_git_instructions() -> Option<bool> {
+    match INCLUDE_GIT_INSTRUCTIONS.load(Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
 }
 
 /// Publish the launch-time `--system-prompt-snapshot` choice. `None` is the

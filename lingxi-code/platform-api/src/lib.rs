@@ -257,7 +257,7 @@ pub use orchestrator::{
     reasoning_control_spec_for_model, validated_reasoning_selection_for_model, ActiveGoalSnapshot,
     AgentInfo, AttachmentKind, CheckStatus, CompactionSummary, ContextPressureBanner,
     ContextPressureLevel, ContextUsageCategory, ContextUsageCategoryKind, ContextUsageSnapshot,
-    ConversationControls, CostSnapshot, CurrentUsageSnapshot, DeferredToolReplay,
+    ConversationControls, CostSnapshot, CurrentUsageSnapshot, DeferredToolReplay, SummarizeDirection,
     DirectoryAddedHookSummary, DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome,
     split_connection_profile, ConnectionRef, GoalClearedReason, GoalStatusAttachment, GoalStatusKind, HandleError, HookInfo,
     McpActionState,

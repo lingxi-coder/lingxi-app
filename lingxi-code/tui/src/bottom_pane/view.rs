@@ -153,15 +153,38 @@ pub enum ViewOutcome {
         /// Which parts to restore.
         scope: RewindScope,
     },
+    /// The `/rewind` picker resolved to a SUMMARIZE of `message`.
+    ///
+    /// ⛔ Deliberately not a [`Self::Rewind`] variant. `Rewind` unwinds the app
+    /// loop; this must not, because the summarizer needs the conversation that
+    /// the unwind would discard. Keeping them separate makes routing a
+    /// summarize through the restore path a type error rather than a subtle
+    /// one where the summary is produced from an already-truncated history.
+    Summarize {
+        /// The target user-message uuid — the split point.
+        message: uuid::Uuid,
+        /// Which side is summarized.
+        direction: platform_api::SummarizeDirection,
+        /// The free text typed into the picker row, trimmed. `None` when it was
+        /// submitted empty — claude-code's `allowEmptySubmitToCancel` means an
+        /// empty submit SELECTS the option (`si = text.trim() || undefined`),
+        /// despite reading like the opposite.
+        context: Option<String>,
+    },
     /// The user delivered a held cross-session message. The owner should
     /// start a skip-append turn (`run_async_hook_rewake`) so the inbox
     /// drain can inject the released body.
     RewakePeer,
 }
 
-/// Which parts of the session a `/rewind` restore should touch (claude-code
-/// `RestoreOption`, first-cut = the three concrete scopes; `summarize` /
-/// `summarize_up_to` are deferred).
+/// Which action a `/rewind` confirm performs — claude-code's `RestoreOption`
+/// union, `both | conversation | code | summarize | summarize_up_to`.
+///
+/// ⚠️ The last two are NOT restores and do not travel the restore path: they
+/// summarize one side of the CURRENT conversation in place. The picker emits
+/// [`ViewOutcome::Summarize`] for them, never [`ViewOutcome::Rewind`], so the
+/// app loop is not unwound — a summarize needs a live model call over the
+/// conversation that an unwind would have already discarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RewindScope {
     /// Restore BOTH the working-tree files and the conversation (claude `both`).
@@ -170,6 +193,24 @@ pub enum RewindScope {
     CodeOnly,
     /// Restore only the conversation position (claude `conversation`).
     ConversationOnly,
+    /// Summarize from this message onwards, keeping everything before it
+    /// (claude `summarize`, "Summarize from here").
+    SummarizeFrom,
+    /// Summarize everything before this message, keeping it and what follows
+    /// (claude `summarize_up_to`, "Summarize up to here").
+    SummarizeUpTo,
+}
+
+impl RewindScope {
+    /// The summarize direction this scope carries, or `None` for a restore.
+    #[must_use]
+    pub fn summarize_direction(self) -> Option<platform_api::SummarizeDirection> {
+        match self {
+            Self::SummarizeFrom => Some(platform_api::SummarizeDirection::From),
+            Self::SummarizeUpTo => Some(platform_api::SummarizeDirection::UpTo),
+            Self::CodeAndConversation | Self::CodeOnly | Self::ConversationOnly => None,
+        }
+    }
 }
 
 /// An app-level `/permissions` effect a view can request via

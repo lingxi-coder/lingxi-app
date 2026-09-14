@@ -129,6 +129,15 @@ pub struct AppCallbacks<'cb> {
     /// runtime (never on the render thread) and reports the summary back via a
     /// [`TurnEvent::SystemNotice`]. The `String` is the argument tail.
     pub on_compact: Box<dyn FnMut(String, CancellationToken) + 'cb>,
+    /// Executed on [`ChatOutcome::Summarize`]: the caller drives
+    /// `OrchestratorHandle::summarize_at` off-loop and reports the result via
+    /// [`TurnEvent::SystemNotice`], exactly like `on_compact`.
+    ///
+    /// ⛔ This must NOT unwind the app — see [`ChatOutcome::Summarize`].
+    pub on_summarize: Box<
+        dyn FnMut(uuid::Uuid, platform_api::SummarizeDirection, Option<String>, CancellationToken)
+            + 'cb,
+    >,
     /// Executed on [`ChatOutcome::RenameSession`]: the caller appends the
     /// `custom-title` line via `OrchestratorHandle::rename_session` off the
     /// render thread and reports the result back via a
@@ -431,6 +440,21 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::Rewind { message, scope } => {
                         self.chat_widget.cancel_active_turn();
                         return Ok(AppExit::Rewind { message, scope });
+                    }
+                    // `/rewind` → Summarize: runs IN PLACE on the live runtime.
+                    // Deliberately no `AppExit`: unwinding here would discard
+                    // the very conversation the summarizer is about to read.
+                    ChatOutcome::Summarize {
+                        message,
+                        direction,
+                        context,
+                    } => {
+                        (self.callbacks.on_summarize)(
+                            message,
+                            direction,
+                            context,
+                            CancellationToken::new(),
+                        );
                     }
                     ChatOutcome::Submit(prompt, images, token) => {
                         // The queued images ride inside the Submit payload
@@ -811,6 +835,12 @@ pub fn run_app(
     on_reload_plugins: impl FnMut(),
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String, CancellationToken),
+    on_summarize: impl FnMut(
+        uuid::Uuid,
+        platform_api::SummarizeDirection,
+        Option<String>,
+        CancellationToken,
+    ),
     on_rename: impl FnMut(String),
     on_fast_mode: impl FnMut(Option<bool>),
     on_plan_mode: impl FnMut(String),
@@ -866,6 +896,7 @@ pub fn run_app(
             on_reload_plugins: Box::new(on_reload_plugins),
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
+            on_summarize: Box::new(on_summarize),
             on_rename: Box::new(on_rename),
             on_fast_mode: Box::new(on_fast_mode),
             on_plan_mode: Box::new(on_plan_mode),
@@ -1046,6 +1077,7 @@ mod tests {
                 on_reload_plugins: Box::new(|| {}),
                 on_bash: Box::new(|_| {}),
                 on_compact: Box::new(|_, _| {}),
+                on_summarize: Box::new(|_, _, _, _| {}),
                 on_rename: Box::new(|_| {}),
                 on_fast_mode: Box::new(|_| {}),
                 on_plan_mode: Box::new(|_| {}),

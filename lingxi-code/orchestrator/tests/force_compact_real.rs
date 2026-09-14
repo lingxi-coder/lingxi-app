@@ -716,3 +716,238 @@ async fn manual_status_lifecycle_matches_success_empty_and_too_short_oracles() {
         }
     }
 }
+
+// ===== CMP-1: `/rewind` → Summarize from / up to here (oracle `zir`) =========
+
+/// Read back the live history as plain text, in order.
+async fn history_texts(orch: &ConversationOrchestrator) -> Vec<String> {
+    let session = orch.session();
+    let s = session.lock().await;
+    s.history
+        .iter()
+        .map(protocol::ConversationMessage::text_content)
+        .collect()
+}
+
+/// Seed a short, identifiable conversation and return the uuid of message `at`.
+async fn seed_marked(orch: &ConversationOrchestrator, n: usize, at: usize) -> String {
+    let session = orch.session();
+    let mut s = session.lock().await;
+    let mut chosen = String::new();
+    for i in 0..n {
+        let message = if i % 2 == 0 {
+            ConversationMessage::user(MessageId::new(), format!("USER-{i}"))
+        } else {
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![protocol::ContentBlock::Text {
+                    text: format!("ASSISTANT-{i}"),
+                }],
+                stop_reason: Some("end_turn".into()),
+            }
+        };
+        if i == at {
+            chosen = message.id().to_string();
+        }
+        s.history.push(message);
+    }
+    chosen
+}
+
+/// 🚨 The property the whole feature turns on: which half survives, and where
+/// the summary lands relative to it.
+///
+/// Both directions run the same code and both produce a plausible history, so
+/// a swapped direction is invisible without asserting the actual message order.
+#[tokio::test]
+async fn summarize_up_to_replaces_the_past_and_keeps_the_present() {
+    let orch = make_orch();
+    let chosen = seed_marked(&orch, 6, 3).await;
+
+    orch.summarize_at(
+        &chosen,
+        None,
+        platform_api::SummarizeDirection::UpTo,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("summarize_at ok");
+
+    let texts = history_texts(&orch).await;
+    // [boundary, summary, kept…]
+    assert!(
+        texts[1].contains("Summary:"),
+        "the summary must lead the kept messages: {texts:?}"
+    );
+    let kept: Vec<&String> = texts.iter().filter(|t| t.starts_with("ASSISTANT-3")).collect();
+    assert_eq!(kept.len(), 1, "the chosen message is KEPT by up_to: {texts:?}");
+    assert!(
+        !texts.iter().any(|t| t.starts_with("USER-0")),
+        "everything before the chosen message is summarized away: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("ASSISTANT-5")),
+        "…and everything after it survives: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn summarize_from_keeps_the_past_and_replaces_the_present() {
+    let orch = make_orch();
+    let chosen = seed_marked(&orch, 6, 3).await;
+
+    orch.summarize_at(
+        &chosen,
+        None,
+        platform_api::SummarizeDirection::From,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("summarize_at ok");
+
+    let texts = history_texts(&orch).await;
+    assert!(
+        texts.iter().any(|t| t.starts_with("USER-0")),
+        "the earlier messages survive `from`: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.starts_with("ASSISTANT-5")),
+        "everything from the chosen message on is summarized away: {texts:?}"
+    );
+    let summary_at = texts
+        .iter()
+        .position(|t| t.contains("Summary:"))
+        .expect("a summary message");
+    let last_kept = texts
+        .iter()
+        .rposition(|t| t.starts_with("USER-") || t.starts_with("ASSISTANT-"))
+        .expect("a kept message");
+    assert!(
+        summary_at > last_kept,
+        "`from`'s summary must come AFTER the messages it follows, not before \
+         them — otherwise the model reads the conversation backwards: {texts:?}"
+    );
+}
+
+/// The byte-exact guards, and that they are direction-specific.
+#[tokio::test]
+async fn an_edge_selection_reports_the_oracles_sentence() {
+    let orch = make_orch();
+    let first = seed_marked(&orch, 4, 0).await;
+
+    let err = orch
+        .summarize_at(
+            &first,
+            None,
+            platform_api::SummarizeDirection::UpTo,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect_err("nothing precedes the first message");
+    assert!(
+        err.to_string()
+            .contains("Nothing to summarize before the selected message."),
+        "got {err}"
+    );
+
+    // …and the same selection is fine in the other direction.
+    orch.summarize_at(
+        &first,
+        None,
+        platform_api::SummarizeDirection::From,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("everything after the first message is summarizable");
+}
+
+#[tokio::test]
+async fn an_unknown_message_uuid_is_reported_not_guessed() {
+    let orch = make_orch();
+    seed_marked(&orch, 4, 0).await;
+    let err = orch
+        .summarize_at(
+            "not-a-message-in-this-conversation",
+            None,
+            platform_api::SummarizeDirection::From,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect_err("an unknown uuid must not silently summarize something else");
+    assert!(err.to_string().contains("Message not found."), "got {err}");
+}
+
+/// The 5-arg boundary (`mne(trigger, preTokens, lastUuid, userContext,
+/// messagesSummarized)`) that upstream sets ONLY on this path.
+#[tokio::test]
+async fn the_boundary_records_the_user_context_and_the_count() {
+    let orch = make_orch();
+    let chosen = seed_marked(&orch, 6, 3).await;
+
+    orch.summarize_at(
+        &chosen,
+        Some("  keep the parser notes  "),
+        platform_api::SummarizeDirection::UpTo,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("summarize_at ok");
+
+    let session = orch.session();
+    let s = session.lock().await;
+    let metadata = s
+        .history
+        .iter()
+        .find_map(|message| match message {
+            ConversationMessage::System {
+                compact_metadata: Some(metadata),
+                ..
+            } => Some(metadata.clone()),
+            _ => None,
+        })
+        .expect("a compact boundary");
+    assert_eq!(
+        metadata.user_context.as_deref(),
+        Some("keep the parser notes"),
+        "the picker text is recorded on the boundary, trimmed"
+    );
+    assert_eq!(
+        metadata.messages_summarized,
+        Some(3),
+        "three messages preceded the chosen one"
+    );
+    // `logicalParentUuid` is NOT the oracle's `hn` here: this port sets it from
+    // the last on-disk JSONL line uuid (the value has to match a real line), so
+    // it stays `None` in a test with no transcript writer. Asserted so nobody
+    // "fixes" it by feeding the conversation uuid into the boundary
+    // constructor, where `apply_post_compact` would discard it.
+    assert_eq!(
+        metadata.logical_parent_uuid, None,
+        "with no transcript writer there is no JSONL line to point at"
+    );
+}
+
+/// An ordinary `/compact` must NOT gain the two message-selector fields: a real
+/// 2.1.208 transcript never carries them, and a cold resume compares shapes.
+#[tokio::test]
+async fn an_ordinary_compact_boundary_keeps_the_three_arg_shape() {
+    let orch = make_orch();
+    seed_history(&orch, 12).await;
+    orch.force_compact().await.expect("force_compact ok");
+
+    let session = orch.session();
+    let s = session.lock().await;
+    let metadata = s
+        .history
+        .iter()
+        .find_map(|message| match message {
+            ConversationMessage::System {
+                compact_metadata: Some(metadata),
+                ..
+            } => Some(metadata.clone()),
+            _ => None,
+        })
+        .expect("a compact boundary");
+    assert_eq!(metadata.user_context, None);
+    assert_eq!(metadata.messages_summarized, None);
+}

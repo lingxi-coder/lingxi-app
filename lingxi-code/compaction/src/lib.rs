@@ -20,6 +20,7 @@ pub mod post_compact;
 pub mod prompt;
 pub mod ptl_retry;
 pub mod reactive;
+pub mod selector;
 pub mod session_memory;
 pub mod snip;
 pub mod strip_media;

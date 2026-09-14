@@ -208,6 +208,21 @@ pub enum ChatOutcome {
         /// Which parts to restore.
         scope: crate::bottom_pane::view::RewindScope,
     },
+    /// `/rewind` → "Summarize from here" / "Summarize up to here": summarize
+    /// one side of the CURRENT conversation in place.
+    ///
+    /// ⛔ The app must NOT unwind for this, unlike [`Self::Rewind`]. The
+    /// summarizer needs the conversation an unwind would already have thrown
+    /// away, so the CLI runs it off-loop through
+    /// `OrchestratorHandle::summarize_at` and stays mounted.
+    Summarize {
+        /// The split point.
+        message: uuid::Uuid,
+        /// Which side is summarized.
+        direction: platform_api::SummarizeDirection,
+        /// The user's "add context (optional)" text, trimmed; `None` when empty.
+        context: Option<String>,
+    },
     /// `/branch [name]`: fork the conversation into a NEW session at this point
     /// and SWITCH into it. The widget carries only the optional custom title;
     /// the CLI (`session::branch::create_branch`) does the transcript copy off
@@ -5477,6 +5492,15 @@ impl ChatWidget {
             BottomPaneOutcome::RunTaskAction(action) => ChatOutcome::TaskAction(action),
             BottomPaneOutcome::RunPluginAction(action) => ChatOutcome::PluginAction(action),
             BottomPaneOutcome::Rewind { message, scope } => ChatOutcome::Rewind { message, scope },
+            BottomPaneOutcome::Summarize {
+                message,
+                direction,
+                context,
+            } => ChatOutcome::Summarize {
+                message,
+                direction,
+                context,
+            },
             // `/cd` confirm accepted: reuse the permission-effect channel (no
             // dedicated app callback) so the CLI swaps the shared `SessionCwd`
             // cell + emits `tengu_cd_command` + prints the result off-loop.

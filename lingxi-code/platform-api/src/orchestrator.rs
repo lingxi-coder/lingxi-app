@@ -2159,6 +2159,43 @@ pub struct OutputStyleListing {
 ///
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
 /// `ConversationOrchestrator` does NOT yet implement it.
+/// Summarize direction — oracle `xer`'s second parameter, defaulting `"from"`.
+///
+/// The two options differ in which HALF of the conversation survives verbatim,
+/// and therefore where the summary sits:
+///
+/// | Direction | Summarized | Retained | Summary sits |
+/// |---|---|---|---|
+/// | [`Self::From`] | messages AFTER the chosen point | a HEAD | at the END |
+/// | [`Self::UpTo`] | messages BEFORE the chosen point | a TAIL | at the START |
+///
+/// 🚨 The mapping is the opposite of the intuitive reading of the labels, and
+/// the prompt bodies are what settle it: `SUMMARIZE_FROM_PROMPT` says the
+/// earlier messages "are being kept intact", `SUMMARIZE_UP_TO_PROMPT` says the
+/// summary "will be placed at the start of a continuing session".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummarizeDirection {
+    /// `"from"` — "Summarize from here". Everything from the chosen message on
+    /// is summarized; earlier messages are kept verbatim BEFORE the summary.
+    From,
+    /// `"up_to"` — "Summarize up to here". Everything before the chosen message
+    /// is summarized; that message and everything after it are kept verbatim
+    /// AFTER the summary.
+    UpTo,
+}
+
+impl SummarizeDirection {
+    /// The wire spelling (`"from"` / `"up_to"`) used by the picker option and
+    /// the persisted boundary metadata.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::UpTo => "up_to",
+        }
+    }
+}
+
 #[async_trait]
 pub trait OrchestratorHandle: Send + Sync {
     /// The session id currently driving the conversation.
@@ -2196,6 +2233,33 @@ pub trait OrchestratorHandle: Send + Sync {
         }
         self.force_compact_with_instructions(custom_instructions.unwrap_or_default())
             .await
+    }
+
+    /// `/rewind` → "Summarize from here" / "Summarize up to here".
+    ///
+    /// Summarizes one side of the conversation at `message_uuid` and keeps the
+    /// other verbatim. `direction` is `"from"` or `"up_to"`; `user_context` is
+    /// the free text typed into the picker row (`None` when submitted empty).
+    ///
+    /// ⚠️ Unlike the `/rewind` restore scopes, this must NOT unwind the app
+    /// loop: it is a live summarizer call over the CURRENT conversation. A host
+    /// that unwinds first has nothing left to summarize.
+    ///
+    /// The default is [`HandleError::Unimplemented`] rather than a silent
+    /// no-op — a handle that cannot summarize must say so, because the caller
+    /// otherwise reports a summary that never happened.
+    ///
+    /// # Errors
+    /// [`HandleError::ActionFailed`] with the user-visible sentence, or
+    /// [`HandleError::Unimplemented`] on a handle without a compactor.
+    async fn summarize_at(
+        &self,
+        _message_uuid: &str,
+        _user_context: Option<&str>,
+        _direction: SummarizeDirection,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<CompactionSummary, HandleError> {
+        Err(HandleError::Unimplemented("summarize_at".to_string()))
     }
 
     /// Snapshot the cumulative cost.

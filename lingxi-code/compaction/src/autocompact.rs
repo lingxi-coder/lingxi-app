@@ -117,6 +117,16 @@ pub struct Autocompactor {
     cache_slot: Option<Arc<CacheSafeParamsSlot>>,
 }
 
+/// Overrides that make one `compact_impl` pass a `/rewind` message-selector
+/// summarize instead of an ordinary compaction — oracle `zir`'s two deltas
+/// against `Juy`/`Ejt`.
+struct SelectorSummarize {
+    /// `xer(instructions, direction)` — the direction-specific body.
+    prompt: String,
+    /// `pbe`'s `suppressFollowUpQuestions`.
+    suppress_follow_up_questions: bool,
+}
+
 impl Autocompactor {
     /// Construct an autocompactor with default config and no forked runner
     /// (falls back to the M1.7 stub summary).
@@ -187,7 +197,7 @@ impl Autocompactor {
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&str>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_impl(messages, custom_instructions, false, None)
+        self.compact_impl(messages, custom_instructions, false, None, None)
             .await
     }
 
@@ -209,7 +219,50 @@ impl Autocompactor {
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&str>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_impl(messages, custom_instructions, true, None)
+        self.compact_impl(messages, custom_instructions, true, None, None)
+            .await
+    }
+
+    /// Summarize ONE SIDE of a `/rewind` message-selector split — oracle `zir`.
+    ///
+    /// `context` is what the summarizer sees, which is NOT always what is being
+    /// summarized: [`crate::selector::SummarizeSplit::summarizer_context`]
+    /// hands `up_to` only the summarized half and `from` the whole conversation
+    /// (oracle `Ze = S==="up_to" ? V : e`). The prompt tells the model which
+    /// part of that context to summarize.
+    ///
+    /// Returns an empty `messages_to_preserve`: the caller owns the kept half
+    /// and the assembly order, because only it knows which SIDE survives.
+    ///
+    /// # Errors
+    /// [`CompactionError::Internal`] when no forked summarizer is wired — this
+    /// is an explicit user command, so it must never fall back to the
+    /// deterministic no-model stub and report success.
+    pub async fn summarize_selection(
+        &self,
+        context: Vec<ConversationMessage>,
+        custom_instructions: Option<&str>,
+        direction: crate::prompt::SummarizeDirection,
+    ) -> Result<CompactionResult, CompactionError> {
+        if !self
+            .forked_runner
+            .as_ref()
+            .is_some_and(|runner| runner.has_side_query_client())
+        {
+            return Err(CompactionError::Internal(
+                "no forked summarizer wired".into(),
+            ));
+        }
+        let overrides = SelectorSummarize {
+            prompt: crate::prompt::get_summarize_prompt(custom_instructions, direction),
+            // `pbe(Je, {suppressFollowUpQuestions: !1, …})`. Every automatic and
+            // `/compact` path passes `!0`; this one passes FALSE, because the
+            // user asked for a summary and is still sitting in the conversation
+            // — the "Resume directly, do not acknowledge the summary"
+            // continuation would be addressed to nobody.
+            suppress_follow_up_questions: false,
+        };
+        self.compact_impl(context, custom_instructions, false, None, Some(overrides))
             .await
     }
 
@@ -221,7 +274,7 @@ impl Autocompactor {
         custom_instructions: Option<&str>,
         initial_token_gap: Option<u64>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_impl(messages, custom_instructions, true, initial_token_gap)
+        self.compact_impl(messages, custom_instructions, true, initial_token_gap, None)
             .await
     }
 
@@ -231,6 +284,7 @@ impl Autocompactor {
         custom_instructions: Option<&str>,
         preserve_tail: bool,
         initial_token_gap: Option<u64>,
+        selector: Option<SelectorSummarize>,
     ) -> Result<CompactionResult, CompactionError> {
         let pre = crate::grouping::estimate_tokens_for_range(&messages);
         if preserve_tail
@@ -295,7 +349,11 @@ impl Autocompactor {
             let mut summarize = messages[..split_at].to_vec();
             let mut stripped_media = false;
             let mut head_truncations = 0;
-            let prompt = if custom_instructions
+            // The message-selector path brings its own body (`xer`); every other
+            // path uses the base prompt, prebuilt unless focus text was given.
+            let prompt = if let Some(overrides) = selector.as_ref() {
+                overrides.prompt.clone()
+            } else if custom_instructions
                 .is_some_and(|text| !crate::prompt::trim_compact_text(text).is_empty())
             {
                 crate::prompt::get_compact_prompt(custom_instructions)
@@ -389,14 +447,23 @@ impl Autocompactor {
                     "Failed to generate conversation summary - response did not contain valid text content".into()
                 }));
             }
-            let summary_text = crate::prompt::get_compact_user_summary_message(
+            let summary_text = crate::prompt::get_compact_user_summary_message_with(
                 &raw_summary_text,
-                true,
+                selector
+                    .as_ref()
+                    .map_or(true, |overrides| overrides.suppress_follow_up_questions),
                 cache_params
                     .transcript_path
                     .as_deref()
                     .and_then(std::path::Path::to_str),
+                // `pbe`'s `recentMessagesPreserved`: NO oracle caller in 2.1.270
+                // sets it (checked at all three `pbe(` sites), so passing
+                // `false` here is parity, not an omission — the parameter
+                // exists because the function is ported whole.
                 false,
+                // `headTruncated`: a PTL retry dropped the oldest messages, so
+                // the summary does not cover them and the model must be told.
+                head_truncations > 0,
             );
             let summary_messages = vec![ConversationMessage::compact_summary(
                 protocol::MessageId::new(),
@@ -822,6 +889,107 @@ mod tests {
         assert!(!result.summary_messages[0]
             .text_content()
             .contains("Recent messages are preserved verbatim."));
+    }
+
+    // ===== `/rewind` message-selector summarize (oracle `zir`) ==============
+
+    /// The direction must reach the wire. Both options run the SAME code path,
+    /// so a direction that is accepted and then ignored produces a plausible
+    /// summary of the wrong half with every other assertion still green.
+    #[tokio::test]
+    async fn summarize_selection_sends_the_direction_specific_prompt() {
+        use crate::prompt::SummarizeDirection;
+
+        for direction in [SummarizeDirection::UpTo, SummarizeDirection::From] {
+            let (compactor, client) = wired("<summary>ok</summary>", vec![]).await;
+            compactor
+                .summarize_selection(vec![user_msg("history")], None, direction)
+                .await
+                .expect("wired summarize succeeds");
+            let sent = client.seen.lock().unwrap().clone().expect("client called");
+            let prompt = sent.messages.last().expect("prompt message").text_content();
+            assert_eq!(
+                prompt,
+                crate::prompt::get_summarize_prompt(None, direction),
+                "{direction:?} must send its own body"
+            );
+            assert_ne!(
+                prompt,
+                crate::prompt::get_compact_prompt(None),
+                "{direction:?} must not fall back to the base compact prompt"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_selection_appends_the_users_context() {
+        use crate::prompt::SummarizeDirection;
+        let (compactor, client) = wired("<summary>ok</summary>", vec![]).await;
+        compactor
+            .summarize_selection(
+                vec![user_msg("history")],
+                Some("keep the migration notes"),
+                SummarizeDirection::From,
+            )
+            .await
+            .expect("wired summarize succeeds");
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        assert_eq!(
+            sent.messages.last().unwrap().text_content(),
+            crate::prompt::get_summarize_prompt(
+                Some("keep the migration notes"),
+                SummarizeDirection::From
+            )
+        );
+    }
+
+    /// `pbe(Je, {suppressFollowUpQuestions: !1, …})` — the ONE `pbe` call site
+    /// in the oracle that passes false.
+    ///
+    /// The user asked for this summary and is still sitting in the
+    /// conversation; "Resume directly — do not acknowledge the summary" is
+    /// addressed to a session that is being RESUMED, which this is not.
+    #[tokio::test]
+    async fn a_selector_summary_does_not_carry_the_resume_continuation() {
+        use crate::prompt::SummarizeDirection;
+        let (compactor, _client) = wired("<summary>ok</summary>", vec![]).await;
+        let result = compactor
+            .summarize_selection(vec![user_msg("history")], None, SummarizeDirection::UpTo)
+            .await
+            .expect("wired summarize succeeds");
+        let text = result.summary_messages[0].text_content();
+        assert!(
+            text.starts_with(
+                "This session is being continued from a previous conversation that ran out of context."
+            ),
+            "the summary body is still `pbe`'s: {text}"
+        );
+        assert!(
+            !text.contains("Continue the conversation from where it left off"),
+            "the resume continuation must NOT be appended on this path: {text}"
+        );
+        assert!(
+            result.messages_to_preserve.is_empty(),
+            "the caller owns the kept half — this layer must not also claim one"
+        );
+    }
+
+    /// An explicit user command must never report a summary no model produced.
+    #[tokio::test]
+    async fn summarize_selection_without_a_real_client_is_a_hard_error() {
+        use crate::prompt::SummarizeDirection;
+        let err = Autocompactor::new()
+            .summarize_selection(
+                vec![user_msg("q"), assistant_text("answer")],
+                None,
+                SummarizeDirection::From,
+            )
+            .await
+            .expect_err("an unwired summarizer must fail, not stub a summary");
+        assert!(
+            matches!(err, CompactionError::Internal(ref detail) if detail.contains("no forked summarizer")),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

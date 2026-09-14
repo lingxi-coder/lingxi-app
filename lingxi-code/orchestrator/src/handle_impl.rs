@@ -665,6 +665,17 @@ impl OrchestratorHandle for ConversationOrchestrator {
         .await
     }
 
+    async fn summarize_at(
+        &self,
+        message_uuid: &str,
+        user_context: Option<&str>,
+        direction: platform_api::SummarizeDirection,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<CompactionSummary, HandleError> {
+        ConversationOrchestrator::summarize_at(self, message_uuid, user_context, direction, cancel)
+            .await
+    }
+
     async fn get_active_goal(&self) -> Option<ActiveGoalSnapshot> {
         let s = self.session.lock().await;
         s.active_goal.as_ref().map(|goal| ActiveGoalSnapshot {

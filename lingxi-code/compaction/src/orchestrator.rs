@@ -245,6 +245,57 @@ impl CompactionOrchestrator {
         })
     }
 
+    /// Summarize one side of a `/rewind` message-selector split — oracle `zir`.
+    ///
+    /// `context` is what the summarizer sees; `summarized` is the half the
+    /// summary actually covers. They differ for
+    /// [`crate::prompt::SummarizeDirection::From`], which shows the model the
+    /// whole conversation so it can tell the recent portion from the earlier
+    /// one.
+    ///
+    /// ⚠️ No `group_messages_by_api_round(..).len() < 2` guard, unlike
+    /// [`Self::process_forced`]: the user picked this split point, and
+    /// upstream's only precondition is that the summarize side is non-empty
+    /// (checked in [`crate::selector::split_at`]). Refusing a two-message
+    /// selection here would reject a choice the picker offered.
+    ///
+    /// # Errors
+    /// Propagates [`CompactionError`] from the autocompact layer.
+    pub async fn summarize_selection(
+        &self,
+        context: Vec<ConversationMessage>,
+        summarized: &[ConversationMessage],
+        custom_instructions: Option<&str>,
+        direction: crate::prompt::SummarizeDirection,
+    ) -> Result<IterationCompactionResult, CompactionError> {
+        // Vision sidecars from the SUMMARIZED half only: the kept half still
+        // carries its own, and `apply_post_compact` de-duplicates against it.
+        let media_analysis_to_preserve = media_analysis_messages(summarized);
+        let result = self
+            .auto
+            .summarize_selection(context, custom_instructions, direction)
+            .await?;
+        let total_tokens_freed = result
+            .pre_compact_token_count
+            .saturating_sub(result.post_compact_token_count);
+
+        Ok(IterationCompactionResult {
+            messages: result.summary_messages,
+            raw_summary_text: result.raw_summary_text,
+            layers_applied: vec![CompactionLayer::Autocompact],
+            total_tokens_freed,
+            cache_hit: false,
+            consecutive_failures: 0,
+            was_compacted: true,
+            rapid_refill_breaker_tripped: false,
+            consecutive_rapid_refills: 0,
+            messages_to_preserve: result.messages_to_preserve,
+            media_analysis_to_preserve,
+            compaction_usage: result.compaction_usage,
+            compaction_model: Some(result.summary_model),
+        })
+    }
+
     /// Rescue an actual provider overflow even when the local estimate is
     /// below the automatic threshold. Failed attempts leave input history intact.
     pub async fn process_reactive_tracked(

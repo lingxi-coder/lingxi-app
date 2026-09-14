@@ -2,6 +2,43 @@
 
 use super::*;
 
+/// Which side of the surviving messages the fresh summary lands on.
+///
+/// 🚨 There is exactly ONE `AfterKept` caller — `/rewind`'s "Summarize from
+/// here" — and the distinction is not cosmetic: it decides whether the model
+/// reads the summary as "here is everything before this point" or "here is
+/// everything after it". Both orders are well-formed histories, so a wrong
+/// choice produces no error, just a model that has the conversation backwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SummaryPlacement {
+    /// `[marker, summary, kept…]` — the summary replaces the older messages.
+    /// Every automatic, reactive and `/compact` pass, plus `summarize_up_to`.
+    BeforeKept,
+    /// `[marker, kept…, summary]` — the earlier messages survive and the
+    /// summary covers what came after them. `summarize` ("from here") only.
+    AfterKept,
+}
+
+/// The two boundary fields oracle `mne` sets only on the message-selector path
+/// (`mne("manual", preTokens, lastUuid, userContext, messagesSummarized)`).
+#[derive(Debug, Clone)]
+pub(crate) struct SelectorBoundaryMetadata {
+    /// `messagesSummarized` — how many messages the summary replaced.
+    pub messages_summarized: u32,
+    /// `userContext` — the free text the user typed into the picker row, if
+    /// any. `None` when they submitted the row empty.
+    pub user_context: Option<String>,
+}
+
+// ⛔ No `logicalParentUuid` field here, deliberately. The oracle's `hn` is a
+// CONVERSATION message uuid (`up_to` takes `e.slice(0,n).findLast(…)`, `from`
+// takes `Se.at(-1)` — the same message either way, the last one before the
+// split). This port derives it from `transcript.last_jsonl_uuid` instead,
+// because the value has to match an on-disk JSONL line uuid, and
+// `apply_post_compact` overwrites whatever the boundary constructor was given.
+// Passing `hn` in here would read as wired and be discarded two hundred lines
+// later.
+
 impl ConversationOrchestrator {
     /// Clone the current session request state and run the shared pre-call
     /// preparation hook, if one is wired.
@@ -294,6 +331,209 @@ impl ConversationOrchestrator {
     ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
         self.force_compact_with_instructions_and_cancel(None, cancel)
             .await
+    }
+
+    /// `/rewind` → "Summarize from here" / "Summarize up to here" — oracle
+    /// `zir` (`src_169588164.js`).
+    ///
+    /// Summarizes ONE side of the conversation at `message_uuid` and keeps the
+    /// other verbatim. Unlike `/rewind`'s restore scopes this does NOT unwind
+    /// the app loop: it is a live summarizer call over the CURRENT conversation
+    /// followed by a history swap, exactly like `/compact`.
+    ///
+    /// `user_context` is the free text typed into the picker row. Upstream
+    /// wraps it as `User context: <text>` and merges it with any PreCompact
+    /// hook stdout before it reaches the prompt — it is the user telling the
+    /// summarizer what to keep, not a second system instruction.
+    ///
+    /// # Errors
+    /// The byte-exact `Nothing to summarize …` sentence when the chosen point
+    /// leaves nothing on the summarize side, plus every failure
+    /// [`Self::force_compact_with_instructions_and_cancel`] can produce.
+    pub async fn summarize_at(
+        &self,
+        message_uuid: &str,
+        user_context: Option<&str>,
+        direction: compaction::prompt::SummarizeDirection,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+        let Some(compactor) = self.compaction_runtime.compaction.clone() else {
+            return Err(platform_api::HandleError::ActionFailed(
+                "compaction unavailable".into(),
+            ));
+        };
+
+        let _turn_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(platform_api::HandleError::ActionFailed(
+                    "Compaction canceled.".into(),
+                ));
+            }
+            guard = self.turn_gate.lock() => guard,
+        };
+
+        let (history_before, model) = {
+            let session = self.session.lock().await;
+            (session.model_context_history(), session.model.clone())
+        };
+        if history_before.is_empty() {
+            return Err(platform_api::HandleError::ActionFailed(
+                "No messages to compact".into(),
+            ));
+        }
+        let Some(index) = compaction::selector::index_of(&history_before, message_uuid) else {
+            return Err(platform_api::HandleError::ActionFailed(
+                "Message not found.".into(),
+            ));
+        };
+        let split = compaction::selector::split_at(&history_before, index, direction)
+            .map_err(|message| platform_api::HandleError::ActionFailed(message.to_string()))?;
+
+        let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
+        let bytes_before: u64 = history_before.iter().map(protocol::text_byte_size).sum();
+        let pre_tokens_estimate =
+            compaction::grouping::estimate_tokens_for_range(&split.to_summarize);
+        let messages_summarized = u32::try_from(split.to_summarize.len()).unwrap_or(u32::MAX);
+        let compact_started = std::time::Instant::now();
+        self.output.emit_compaction_started().await;
+
+        let outcome = async {
+        let pre_compact = self.fire_pre_compact("manual", user_context).await;
+        if let Some(detail) = pre_compact.blocked_by {
+            let msg = if detail.is_empty() {
+                "Compaction blocked by PreCompact hook".to_string()
+            } else {
+                format!("Compaction blocked by PreCompact hook: {detail}")
+            };
+            tracing::warn!("{msg}");
+            return Err(platform_api::HandleError::ActionFailed(msg));
+        }
+
+        // `xe = lRe(we.newCustomInstructions, m ? `User context: ${m}` : undefined)`.
+        // The label matters: without it the summarizer reads the user's note as
+        // another instruction from the system rather than as the user saying
+        // what they care about.
+        let labelled_context = user_context
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| format!("User context: {text}"));
+        let merged_instructions = merge_compact_instructions(
+            pre_compact.additional_instructions.as_deref(),
+            labelled_context.as_deref(),
+        );
+
+        let system_prompt = self.effective_system_prompt().await;
+        let tools = self.build_wire_tools().await;
+        self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
+            .await;
+
+        self.output.emit_compaction_phase("summarizing").await;
+        let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
+            platform_api::HandleError::ActionFailed(format!(
+                "Compaction cost preflight failed: {error}"
+            ))
+        })?;
+        let api_started = std::time::Instant::now();
+        let context = split.summarizer_context(&history_before);
+        let mut result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(platform_api::HandleError::ActionFailed(
+                    "Compaction canceled.".into(),
+                ));
+            }
+            r = compactor.summarize_selection(
+                context,
+                &split.to_summarize,
+                merged_instructions.as_deref(),
+                direction,
+            ) => r
+                .map_err(Self::summarize_error)?,
+        };
+        let compact_duration = api_started.elapsed();
+        let cost_receipt =
+            self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
+        if cancel.is_cancelled() {
+            return Err(platform_api::HandleError::ActionFailed(
+                "Compaction canceled.".into(),
+            ));
+        }
+        self.settle_compaction_usage(cost_receipt)
+            .await
+            .map_err(|error| {
+                platform_api::HandleError::ActionFailed(format!(
+                    "Compaction cost settlement failed: {error}"
+                ))
+            })?;
+
+        // The kept half rides through `apply_post_compact`'s preserved-tail
+        // slot; `placement` decides which side of the summary it lands on.
+        result.messages_to_preserve =
+            compaction::partial::zero_preserved_tail_usage(split.to_keep.clone());
+
+        let placement = match direction {
+            compaction::prompt::SummarizeDirection::UpTo => SummaryPlacement::BeforeKept,
+            compaction::prompt::SummarizeDirection::From => SummaryPlacement::AfterKept,
+        };
+
+        let Some(summary_out) = self
+            .apply_post_compact_placed(
+                result,
+                compaction::CompactTrigger::Manual,
+                pre_tokens_estimate,
+                messages_before,
+                bytes_before,
+                compact_started,
+                Some(&cancel),
+                placement,
+                Some(SelectorBoundaryMetadata {
+                    messages_summarized,
+                    user_context: user_context
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(ToString::to_string),
+                }),
+            )
+            .await
+        else {
+            return Err(platform_api::HandleError::ActionFailed(
+                "Compaction canceled.".into(),
+            ));
+        };
+
+        Ok(summary_out)
+        }.await;
+        if let Err(error) = &outcome {
+            let detail = match error {
+                platform_api::HandleError::ActionFailed(detail) => detail.as_str(),
+                platform_api::HandleError::Unimplemented(_) => "compaction failed",
+            };
+            self.output.emit_compaction_finished(Some(detail)).await;
+        }
+        outcome
+    }
+
+    /// Map a compactor error onto the user-visible sentence, shared by the
+    /// summarize path with `/compact`'s mapping.
+    fn summarize_error(
+        error: compaction::autocompact::CompactionError,
+    ) -> platform_api::HandleError {
+        use compaction::autocompact::CompactionError;
+        platform_api::HandleError::ActionFailed(match error {
+            CompactionError::MaxRetriesExceeded => {
+                "Compaction failed \u{b7} conversation could not be reduced below the context limit"
+                    .to_string()
+            }
+            CompactionError::NotEnoughMessages => "Not enough messages to compact.".to_string(),
+            CompactionError::MediaUnstrippable => {
+                "Compaction failed \u{b7} attached media exceeds size limits".to_string()
+            }
+            CompactionError::Summary(detail) | CompactionError::Internal(detail) => {
+                format!("Error during compaction: {detail}")
+            }
+            other => format!("Error during compaction: {other}"),
+        })
     }
 
     /// Manual `/compact` with optional focus text and cooperative cancellation.
@@ -1058,6 +1298,42 @@ impl ConversationOrchestrator {
         compact_started: std::time::Instant,
         cancel: Option<&tokio_util::sync::CancellationToken>,
     ) -> Option<platform_api::CompactionSummary> {
+        self.apply_post_compact_placed(
+            result,
+            trigger,
+            pre_tokens_estimate,
+            messages_before,
+            bytes_before,
+            compact_started,
+            cancel,
+            SummaryPlacement::BeforeKept,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::apply_post_compact`] with the two knobs only the `/rewind`
+    /// message-selector summarize needs.
+    ///
+    /// `placement` decides which side of the kept messages the summary lands
+    /// on, and `selector_metadata` carries the 5-arg boundary fields
+    /// (`messagesSummarized` / `userContext`) that oracle `mne` sets ONLY on
+    /// that path — every other path passes the 3-arg shape, and adding the two
+    /// fields there would put keys in persisted boundaries that a real
+    /// claude-code transcript never carries.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn apply_post_compact_placed(
+        &self,
+        result: compaction::IterationCompactionResult,
+        trigger: compaction::CompactTrigger,
+        pre_tokens_estimate: u64,
+        messages_before: u32,
+        bytes_before: u64,
+        compact_started: std::time::Instant,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+        placement: SummaryPlacement,
+        selector_metadata: Option<SelectorBoundaryMetadata>,
+    ) -> Option<platform_api::CompactionSummary> {
         self.output.emit_compaction_phase("restoring").await;
         // Preserve the transcript-only summary before `result.messages` is
         // consumed into the replacement history. The TUI carries this on the
@@ -1099,7 +1375,18 @@ impl ConversationOrchestrator {
         // anchor is the last of `result.messages` (the summary set). When the
         // tail is empty, `create_compact_boundary_with_preserved_tail` yields
         // `preserved_segment: None`, identical to the plain constructor.
-        let anchor_uuid = if preserved_tail.is_empty() {
+        // `preserved_segment` exists so a session loader can re-splice a
+        // preserved TAIL back after the summary (`WAo`). Under `AfterKept`
+        // there is no tail: the kept messages are the conversation's own HEAD
+        // and they are already in their original order. Describing them as a
+        // preserved tail would make a cold resume splice them after the summary
+        // — the exact reordering this placement exists to avoid — so the
+        // boundary is built with no preserved segment at all.
+        let boundary_tail: &[protocol::ConversationMessage] = match placement {
+            SummaryPlacement::BeforeKept => &preserved_tail,
+            SummaryPlacement::AfterKept => &[],
+        };
+        let anchor_uuid = if boundary_tail.is_empty() {
             None
         } else {
             result
@@ -1122,11 +1409,16 @@ impl ConversationOrchestrator {
         let (mut marker, mut metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
             pre_tokens_estimate,
+            // `logicalParentUuid` is set from the transcript below, not here.
             None,
-            None,
-            None,
+            selector_metadata
+                .as_ref()
+                .and_then(|selector| selector.user_context.clone()),
+            selector_metadata
+                .as_ref()
+                .map(|selector| selector.messages_summarized),
             &discovered_tools,
-            &preserved_tail,
+            boundary_tail,
             anchor_uuid.as_ref(),
         );
 
@@ -1205,9 +1497,22 @@ impl ConversationOrchestrator {
         );
         let tail_preserved = !preserved_tail.is_empty();
         history_after.push(marker.clone());
-        history_after.extend(result.messages.iter().cloned());
-        // #58: the usage-zeroed verbatim tail (`messagesToKeep`).
-        history_after.extend(preserved_tail);
+        // `BeforeKept` is every path but one: the summary replaces the older
+        // messages, so it leads and the preserved tail follows. `AfterKept` is
+        // `/rewind`'s "Summarize from here", where the EARLIER messages survive
+        // and the summary describes what came after them — putting it first
+        // would tell the model the conversation ended before it began.
+        match placement {
+            SummaryPlacement::BeforeKept => {
+                history_after.extend(result.messages.iter().cloned());
+                // #58: the usage-zeroed verbatim tail (`messagesToKeep`).
+                history_after.extend(preserved_tail);
+            }
+            SummaryPlacement::AfterKept => {
+                history_after.extend(preserved_tail);
+                history_after.extend(result.messages.iter().cloned());
+            }
+        }
         // Vision sidecars from the summarized prefix are internal messages,
         // not prose that may be dropped by the summary model. Keep them after
         // the summary so future turns can reuse their fingerprints.

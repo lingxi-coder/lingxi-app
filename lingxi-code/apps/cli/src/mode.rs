@@ -1234,6 +1234,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // `on_submit` moves `orchestrator`/`handle` into its closure.
     let compact_orch = orchestrator.clone();
     let compact_handle = handle.clone();
+    let summarize_orch = orchestrator.clone();
+    let summarize_handle = handle.clone();
+    let summarize_turn_tx = turn_tx.clone();
     let set_mode_handle = handle.clone();
     let set_mode_orch = orchestrator.clone();
     let set_mode_reg = registration.clone();
@@ -1716,6 +1719,46 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 }
             };
             // Clear the spinner/bar first, then land the terminal line.
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactEnded);
+            let _ =
+                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
+        });
+    };
+    // `/rewind` → "Summarize from here" / "Summarize up to here". Runs off the
+    // render thread on the LIVE runtime, exactly like `/compact` above.
+    //
+    // ⛔ Deliberately NOT the `AppExit::Rewind` path: that unwinds the app loop
+    // and re-mounts against a truncated transcript, and there would be nothing
+    // left for the summarizer to read.
+    let on_summarize = move |message: uuid::Uuid,
+                             direction: platform_api::SummarizeDirection,
+                             context: Option<String>,
+                             cancel: CancellationToken| {
+        let orch = summarize_orch.clone();
+        let tx = summarize_turn_tx.clone();
+        summarize_handle.spawn(async move {
+            let (body, is_error) = match orch
+                .summarize_at(&message.to_string(), context.as_deref(), direction, cancel)
+                .await
+            {
+                Ok(_summary) => (
+                    "Summarized (ctrl+o to see full summary)".to_string(),
+                    false,
+                ),
+                // `Vo`'s catch renders `Failed to summarize:\n${msg}`; the
+                // per-class compaction mapping supplies the sentence, so a hook
+                // block or a cancel still reads the way `/compact` does.
+                Err(error) => {
+                    let raw = error.to_string();
+                    (
+                        format!(
+                            "Failed to summarize:\n{}",
+                            command_core::compact::compact_failure_display(&raw)
+                        ),
+                        true,
+                    )
+                }
+            };
             let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactEnded);
             let _ =
                 tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
@@ -2495,6 +2538,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_reload_plugins,
             on_bash,
             on_compact,
+            on_summarize,
             on_rename,
             on_fast_mode,
             on_plan_mode,
@@ -4697,6 +4741,49 @@ async fn trust_gate() -> TrustGateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `/rewind` summarize closure must call `summarize_at` and thread the
+    /// DIRECTION and the user's context through it.
+    ///
+    /// `run_app` takes the closure positionally, so a MISSING one is a compile
+    /// error — but a wrong one is not: calling `force_compact_with_instructions`
+    /// instead, or dropping `direction`, compiles and produces a real summary of
+    /// the wrong half. There is no way to observe this without standing up the
+    /// whole TUI, so the gate reads this file's own source. The needles are
+    /// assembled at runtime so they cannot match the comment explaining them.
+    #[test]
+    fn the_summarize_closure_calls_summarize_at_with_the_direction() {
+        const SRC: &str = include_str!("mode.rs");
+        let production = SRC
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(SRC, |(prod, _)| prod);
+
+        let call = ".summarize_a".to_string() + "t(&message.to_string(), context.as_deref(), direction, cancel)";
+        assert_eq!(
+            production.matches(&call).count(),
+            1,
+            "the summarize closure must dispatch `{call}` — direction and \
+             context both have to reach the orchestrator"
+        );
+        let passed = "on_summariz".to_string() + "e,";
+        assert!(
+            production.contains(&passed),
+            "…and the closure must be handed to `run_app`, or the picker's \
+             Summarize outcome reaches nothing"
+        );
+        // ⛔ It must NOT route through the unwinding restore path.
+        let unwind = "AppExit::Rewin".to_string() + "d";
+        let summarize_block = production
+            .split_once("let on_summarize = move |message")
+            .and_then(|(_, rest)| rest.split_once("let on_rename"))
+            .map(|(block, _)| block)
+            .expect("the summarize closure");
+        assert!(
+            !summarize_block.contains(&unwind),
+            "a summarize must never unwind the app loop: the summarizer needs \
+             the conversation the unwind discards"
+        );
+    }
 
     #[tokio::test]
     async fn loop_queue_is_meta_later_and_shutdown_cancels_its_turn_token() {

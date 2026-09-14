@@ -193,6 +193,17 @@ pub enum BottomPaneOutcome {
         /// Which parts to restore.
         scope: crate::bottom_pane::view::RewindScope,
     },
+    /// The `/rewind` picker asked to SUMMARIZE one side of the conversation at
+    /// `message`. Unlike [`Self::Rewind`] the owner must NOT unwind the app
+    /// loop: the summarizer runs over the conversation as it stands.
+    Summarize {
+        /// The split point.
+        message: uuid::Uuid,
+        /// Which side is summarized.
+        direction: platform_api::SummarizeDirection,
+        /// The user's "add context (optional)" text, trimmed; `None` when empty.
+        context: Option<String>,
+    },
     /// The `/cd` confirm view was accepted: the owner must move the session's
     /// working directory to this (absolute, validated) path off-loop — surfaced
     /// up through `ChatOutcome::PermissionAction(PermissionAction::ChangeDirectory)`
@@ -1501,6 +1512,15 @@ impl BottomPane {
             ViewOutcome::RunTaskAction(action) => BottomPaneOutcome::RunTaskAction(action),
             ViewOutcome::RunPluginAction(action) => BottomPaneOutcome::RunPluginAction(action),
             ViewOutcome::Rewind { message, scope } => BottomPaneOutcome::Rewind { message, scope },
+            ViewOutcome::Summarize {
+                message,
+                direction,
+                context,
+            } => BottomPaneOutcome::Summarize {
+                message,
+                direction,
+                context,
+            },
             ViewOutcome::ChangeDirectory(path) => BottomPaneOutcome::ChangeDirectory(path),
             ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
             ViewOutcome::OpenAgentSession(target) => BottomPaneOutcome::OpenAgentSession(target),

@@ -314,12 +314,31 @@ downgrade) and threaded to the bottom pane.
    fails closed to a prompt.
 2. **`fd(e) = e==="auto" || e==="plan" && xS()`** — the "plan mode with auto
    active" arm has no port counterpart; Plan mode never reaches the classifier.
-   `xS()` is a session latch (`$$().active`, set by `Rk`) that survives entering
-   Plan mode only via `IQe`, which also stamps `prePlanMode:"auto"` on the
-   context. The port has NEITHER: `grep -rn 'pre_plan_mode\|auto_active'` is
-   empty, and plan exit here does not return to the pre-plan mode at all. So
-   this is not a one-line predicate change — the latch has nowhere to live until
-   the plan enter/exit state machine exists.
+   **Attempted 2026-09-13 and reverted, because the arm would have been dead
+   code.** Two earlier readings were both wrong and are corrected here:
+
+   * *"The latch has nowhere to live."* It does: `xS()` is a session latch
+     (`$$().active`, set by `Rk`) and every transition upstream applies it in
+     the mode setter, which in this port is `PolicyPermissionGate::set_permission_mode`
+     — one clean file. `prePlanMode` is only needed for restoring auto on plan
+     EXIT, a different behaviour.
+   * *"The opt-out makes it dormant upstream."* It does not. `kkn() = aC() && l6n()`,
+     `l6n() = hNt("useAutoModeDuringPlan")`, and `hNt(k)` is
+     `![…tiers].some(s => s?.[k] === false)` — true unless a tier explicitly
+     says false. Default ON.
+
+   What actually blocks it is the port's plan-mode FLOOR. Upstream bails out of
+   the classifier for a plan-mode ask through a dedicated check
+   (`Tn = Z$n(M.decisionReason) && …` → `plan_mode_floor`), leaving every OTHER
+   ask in plan mode classifier-eligible. This port folds the floor into
+   `reason_allows_classifier`, which admits only `PermissionMode{Auto}` and
+   `SafetyCheck{classifier_approvable}` — and in Plan mode neither occurs.
+   Measured with the latch implemented and a classifier bound: `Edit` on a
+   `.lingxi/settings.json`, `Write` on `~/.ssh/config`, a safe `Bash`, a
+   dangerous `Bash`, and a `WebFetch` all gave **classifier_calls=0,
+   prompt=1**. The predicate change alone buys nothing; splitting the floor out
+   of `reason_allows_classifier` has to come first, and that widens what reaches
+   the classifier in Plan mode — a behaviour change that wants its own pass.
 3. ~~**Classifier-unavailable handling.**~~ Half of this was wrong and the other
    half is now fixed; see §7.1. What remains is narrower: when NO classifier is
    bound at all (a host that never filled `loop_classifier_handle`), the local

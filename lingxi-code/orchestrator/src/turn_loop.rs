@@ -3650,6 +3650,16 @@ async fn apply_tool_result_persistence_with_process_output(
                 &output_file.path,
                 &preview,
                 content_has_more || output_file.size > trp::PREVIEW_CHARS as u64,
+                // TL-6, the externally-persisted arm: upstream's Bash
+                // `mapToolResultToToolResultBlockParam` marks the envelope
+                // truncated with `(size ?? 0) >= HY ? HY : undefined`, where
+                // `HY = 67108864`. The spool stops at the same 64 MiB, so a
+                // result that REACHED the cap is exactly the one that was cut.
+                (output_file.size >= platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES)
+                    .then_some(
+                        usize::try_from(platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES)
+                            .unwrap_or(usize::MAX),
+                    ),
             );
             let replacement = String::from_utf16_lossy(&exact_replacement);
             tracing::info!(
@@ -3786,7 +3796,16 @@ async fn apply_tool_result_persistence(
     // The on-disk stem is the port's INTERNAL `ToolUseId`, matching the
     // oracle's `${e.tool_use_id}.txt` — claude-code's internal block-param id
     // likewise differs from the `toolu_…` id it records in the transcript.
-    let persisted = match trp::persist(home, &dir, tool_use_id.as_str(), &body, is_json).await {
+    let persisted = match trp::persist(
+        home,
+        &dir,
+        tool_use_id.as_str(),
+        &body,
+        is_json,
+        trp::MAX_PERSIST_UTF16_UNITS,
+    )
+    .await
+    {
         Ok(p) => p,
         Err(msg) => {
             tracing::error!(
@@ -3810,6 +3829,7 @@ async fn apply_tool_result_persistence(
         &path_display,
         &persisted.preview_utf16,
         persisted.has_more,
+        persisted.truncated_at,
     );
     let replacement = String::from_utf16_lossy(&exact_replacement);
     if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {

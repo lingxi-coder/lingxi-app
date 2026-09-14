@@ -35,6 +35,42 @@ pub const CHARS_PER_TOKEN: usize = 4;
 /// `was = "tool-results"` — the per-session subdirectory name.
 pub const TOOL_RESULTS_DIR: &str = "tool-results";
 
+/// `fAr = 1073741824` — `E2`'s default persist cap (TL-6, 2.1.266).
+///
+/// ⚠️ The name says BYTES because upstream's envelope does, but the value is
+/// compared against `p.length` — JavaScript UTF-16 code units — exactly like
+/// [`Persisted::original_size`] and [`PREVIEW_CHARS`]. A 1 GiB cap over UTF-16
+/// units is up to 3 GiB of UTF-8 on disk for CJK text; that is upstream's
+/// behaviour, inherited deliberately rather than "fixed" into a byte cap that
+/// would truncate a non-ASCII result earlier than the oracle does.
+///
+/// ⛔ Do NOT confuse this with the background-task spool caps in
+/// `tasks::output_manager` (5 GB write / 8 MiB read). Those are `diskOutput.ts`
+/// — a different upstream file guarding a different surface.
+pub const MAX_PERSIST_UTF16_UNITS: usize = 1_073_741_824;
+
+/// Truncate to at most `limit` UTF-16 code units without splitting a surrogate
+/// pair — the slice half of upstream's cap helper, WITHOUT the newline-midpoint
+/// trim [`preview_utf16`] applies. A preview may end on a tidy line; a
+/// truncated persisted body must keep every unit that fits.
+#[must_use]
+fn truncate_utf16_units(s: &str, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+    let mut units: Vec<u16> = s.encode_utf16().collect();
+    if units.len() <= limit {
+        return s.to_string();
+    }
+    units.truncate(limit);
+    // A trailing HIGH surrogate has lost its partner; dropping it is what keeps
+    // the written file valid text rather than ending in a replacement char.
+    if units.last().is_some_and(|u| (0xD800..=0xDBFF).contains(u)) {
+        units.pop();
+    }
+    String::from_utf16_lossy(&units)
+}
+
 /// `M0u`'s ceiling fold (2.1.220 @ 230269046):
 /// `Math.min(tool.maxResultSizeChars, tool.persistenceThresholdCeiling ?? AKr)`.
 ///
@@ -55,8 +91,16 @@ pub fn resolve_threshold(max_result_size_chars: usize, ceiling: Option<usize>) -
 /// Result of a successful [`persist`] call — the `x2e` return shape.
 #[derive(Debug, Clone)]
 pub struct Persisted {
-    /// Absolute path the full content was written to.
+    /// Absolute path the content was written to. "Full" only when
+    /// [`Self::truncated_at`] is `None`.
     pub filepath: PathBuf,
+    /// `truncatedAtBytes` — the cap, when the body exceeded it and was cut to
+    /// fit; `None` when the whole body was written.
+    ///
+    /// Upstream computes it as `c === p ? undefined : l`: the CAP, not the
+    /// written length, so the envelope can say "only the first {cap} were
+    /// saved" using one number twice.
+    pub truncated_at: Option<usize>,
     /// UTF-16 code-unit length of the persisted body (`l.length` in `tG`).
     pub original_size: usize,
     /// Whether the body was serialized from a content ARRAY (`.json`).
@@ -138,10 +182,12 @@ pub fn wrap_utf16(
     filepath: &str,
     preview: &[u16],
     has_more: bool,
+    truncated_at: Option<usize>,
 ) -> Vec<u16> {
     let mut units: Vec<u16> = format!(
-        "{PERSISTED_OUTPUT_OPEN}\nOutput too large ({}). Full output saved to: {filepath}\n\nPreview (first {}):\n",
-        format_bytes(original_size), format_bytes(PREVIEW_CHARS)
+        "{PERSISTED_OUTPUT_OPEN}\n{}Preview (first {}):\n",
+        persisted_lead(original_size, filepath, truncated_at),
+        format_bytes(PREVIEW_CHARS)
     ).encode_utf16().collect();
     units.extend_from_slice(preview);
     units.extend(if has_more { "\n...\n" } else { "\n" }.encode_utf16());
@@ -151,17 +197,44 @@ pub fn wrap_utf16(
 
 /// Port of claude-code `Alt` (2.1.220 @ 230269820, byte-verified via `od -c`).
 #[must_use]
-pub fn wrap(original_size: usize, filepath: &str, preview: &str, has_more: bool) -> String {
+pub fn wrap(
+    original_size: usize,
+    filepath: &str,
+    preview: &str,
+    has_more: bool,
+    truncated_at: Option<usize>,
+) -> String {
     // `let t=`${Clt}\n`;
-    //  t+=`Output too large (${pl(e.originalSize)}). Full output saved to: ${e.filepath}\n\n`;
+    //  t+= truncatedAtBytes===undefined
+    //      ? `Output too large (${pl(e.originalSize)}). Full output saved to: ${e.filepath}\n\n`
+    //      : `Output exceeded the ${pl(e.truncatedAtBytes)} persist limit; only the first ${pl(e.truncatedAtBytes)} were saved to: ${e.filepath}\n\n`;
     //  t+=`Preview (first ${pl(_or)}):\n`; t+=e.preview;
     //  t+=e.hasMore?`\n...\n`:`\n`; t+=Cas`
     let tail = if has_more { "\n...\n" } else { "\n" };
     format!(
-        "{PERSISTED_OUTPUT_OPEN}\nOutput too large ({}). Full output saved to: {filepath}\n\nPreview (first {}):\n{preview}{tail}{PERSISTED_OUTPUT_CLOSE}",
-        format_bytes(original_size),
+        "{PERSISTED_OUTPUT_OPEN}\n{}Preview (first {}):\n{preview}{tail}{PERSISTED_OUTPUT_CLOSE}",
+        persisted_lead(original_size, filepath, truncated_at),
         format_bytes(PREVIEW_CHARS),
     )
+}
+
+/// The envelope's first sentence — `hee`'s ternary. The truncated arm prints
+/// the CAP twice and never mentions the original size, which is upstream's
+/// choice: once a body is cut, "how big it was" is less actionable than "how
+/// much of it is in the file".
+#[must_use]
+fn persisted_lead(original_size: usize, filepath: &str, truncated_at: Option<usize>) -> String {
+    match truncated_at {
+        None => format!(
+            "Output too large ({}). Full output saved to: {filepath}\n\n",
+            format_bytes(original_size)
+        ),
+        Some(cap) => format!(
+            "Output exceeded the {} persist limit; only the first {} were saved to: {filepath}\n\n",
+            format_bytes(cap),
+            format_bytes(cap)
+        ),
+    }
 }
 
 /// `xke()` — `<config_home>/projects/<project_dir_name(cwd)>/<session_uuid>/tool-results`.
@@ -274,7 +347,16 @@ pub async fn persist(
     id: &str,
     body: &str,
     is_json: bool,
+    cap_utf16_units: usize,
 ) -> Result<Persisted, String> {
+    // `c = hFt(p, l)` — cut the body to the cap BEFORE anything is written, so
+    // a runaway tool result cannot fill the disk. `originalSize` still reports
+    // the FULL length (`p.length`), which is what makes the envelope able to
+    // say how much was dropped.
+    let capped = truncate_utf16_units(body, cap_utf16_units);
+    let truncated_at = (capped.len() != body.len()).then_some(cap_utf16_units);
+    let original_size = body.encode_utf16().count();
+    let body: &str = &capped;
     check_directory(config_home, dir).await?;
     let _ = tokio::fs::create_dir_all(dir).await;
     check_directory(config_home, dir).await?;
@@ -318,14 +400,17 @@ pub async fn persist(
         Err(e) => return Err(e.to_string()),
     }
 
+    // `Ytt(c, …)` — the preview comes off the WRITTEN body, not the original,
+    // so a capped result previews what the file actually contains.
     let (preview_utf16, has_more) = preview_utf16(body, PREVIEW_CHARS);
     Ok(Persisted {
         filepath,
-        original_size: body.encode_utf16().count(),
+        original_size,
         is_json,
         preview: String::from_utf16_lossy(&preview_utf16),
         preview_utf16,
         has_more,
+        truncated_at,
     })
 }
 
@@ -405,7 +490,7 @@ mod tests {
     // T3 — `Alt`, byte-exact.
     #[test]
     fn wrap_is_byte_exact() {
-        let out = wrap(30_075, "/tmp/s/tool-results/x.txt", "PREVIEW", true);
+        let out = wrap(30_075, "/tmp/s/tool-results/x.txt", "PREVIEW", true, None);
         assert_eq!(
             out,
             "<persisted-output>\nOutput too large (29.4KB). Full output saved to: \
@@ -415,7 +500,7 @@ mod tests {
 
     #[test]
     fn wrap_without_more_uses_a_single_newline_tail() {
-        let out = wrap(1_024, "/p.txt", "P", false);
+        let out = wrap(1_024, "/p.txt", "P", false, None);
         assert_eq!(
             out,
             "<persisted-output>\nOutput too large (1KB). Full output saved to: \
@@ -429,7 +514,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("sess").join(TOOL_RESULTS_DIR);
         let body = "hello world";
-        let p = persist(tmp.path(), &dir, "toolu_abc", body, false)
+        let p = persist(tmp.path(), &dir, "toolu_abc", body, false, MAX_PERSIST_UTF16_UNITS)
             .await
             .expect("persist ok");
         assert_eq!(p.filepath, dir.join("toolu_abc.txt"));
@@ -447,7 +532,7 @@ mod tests {
     async fn persist_uses_a_json_extension_for_array_bodies() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
-        let p = persist(tmp.path(), &dir, "id1", "[\n  1\n]", true)
+        let p = persist(tmp.path(), &dir, "id1", "[\n  1\n]", true, MAX_PERSIST_UTF16_UNITS)
             .await
             .expect("persist ok");
         assert_eq!(p.filepath, dir.join("id1.json"));
@@ -460,7 +545,7 @@ mod tests {
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("id1.txt"), "OLD").expect("seed");
-        let p = persist(tmp.path(), &dir, "id1", "NEW-BODY", false)
+        let p = persist(tmp.path(), &dir, "id1", "NEW-BODY", false, MAX_PERSIST_UTF16_UNITS)
             .await
             .expect("EEXIST is success");
         assert_eq!(p.filepath, dir.join("id1.txt"));
@@ -478,7 +563,7 @@ mod tests {
     async fn persisted_size_counts_utf16_units() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
-        let result = persist(tmp.path(), &dir, "unicode", "中😀", false)
+        let result = persist(tmp.path(), &dir, "unicode", "中😀", false, MAX_PERSIST_UTF16_UNITS)
             .await
             .unwrap();
         assert_eq!(result.original_size, 3);
@@ -491,7 +576,7 @@ mod tests {
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
         std::fs::create_dir_all(dir.join("id.txt")).unwrap();
         assert_eq!(
-            persist(tmp.path(), &dir, "id", "new", false)
+            persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS)
                 .await
                 .unwrap_err(),
             "tool result path is not a regular file; not persisted"
@@ -508,7 +593,7 @@ mod tests {
         let target = tmp.path().join("target");
         std::fs::write(&target, "old").unwrap();
         symlink(&target, dir.join("id.txt")).unwrap();
-        let result = persist(tmp.path(), &dir, "id", "new", false).await.unwrap();
+        let result = persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS).await.unwrap();
         assert_eq!(std::fs::read_to_string(target).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(result.filepath).unwrap(), "new");
     }
@@ -523,7 +608,9 @@ mod tests {
         let root = tmp.path().join("config");
         symlink(&real, &root).unwrap();
         let dir = root.join(TOOL_RESULTS_DIR);
-        persist(&root, &dir, "id", "new", false).await.unwrap();
+        persist(&root, &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS)
+            .await
+            .unwrap();
         let link = dir.join("collision.txt");
         symlink(dir.join("id.txt"), &link).unwrap();
         // `OIn` removes preexisting symlinks. A symlink appearing at the
@@ -555,14 +642,14 @@ mod tests {
         let collision = dir.join("id.txt");
         std::fs::hard_link(&target, &collision).unwrap();
         assert_eq!(
-            persist(tmp.path(), &dir, "id", "new", false)
+            persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS)
                 .await
                 .unwrap_err(),
             "tool result path has another name; not persisted"
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
         std::fs::remove_file(target).unwrap();
-        persist(tmp.path(), &dir, "id", "new", false).await.unwrap();
+        persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS).await.unwrap();
         assert_eq!(std::fs::read_to_string(collision).unwrap(), "old");
     }
 
@@ -577,14 +664,14 @@ mod tests {
         std::fs::write(&target, "old").unwrap();
         std::fs::hard_link(&target, dir.join("id.txt")).unwrap();
         assert_eq!(
-            persist(tmp.path(), &dir, "id", "new", false)
+            persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS)
                 .await
                 .unwrap_err(),
             "tool result path has another name; not persisted"
         );
         let link = tmp.path().join("linked");
         symlink(&dir, &link).unwrap();
-        let err = persist(tmp.path(), &link.join("nested"), "other", "new", false)
+        let err = persist(tmp.path(), &link.join("nested"), "other", "new", false, MAX_PERSIST_UTF16_UNITS)
             .await
             .unwrap_err();
         assert!(err.contains("is a link or not a directory"));
@@ -614,5 +701,98 @@ mod tests {
             d,
             PathBuf::from("/home/u/.lingxi/projects/-w-p/uuid-1/tool-results")
         );
+    }
+
+    // ---- TL-6: the persist cap (oracle `fAr`, 2.1.266) --------------------
+
+    #[test]
+    fn the_cap_is_the_oracle_constant_and_is_not_the_spool_cap() {
+        assert_eq!(MAX_PERSIST_UTF16_UNITS, 1_073_741_824);
+        // ⛔ 1 GiB, NOT the background-task spool's 5 GB write cap. The two
+        // guard different surfaces and live in different upstream files; the
+        // backlog conflated them, which is how this constant went missing.
+        assert_ne!(MAX_PERSIST_UTF16_UNITS, 5 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn truncation_counts_utf16_units_and_never_splits_a_surrogate() {
+        // An astral char is ONE `char` but TWO UTF-16 units, so a cap of 3 over
+        // "a😀b" must keep "a😀" — cutting at 3 would leave a lone high
+        // surrogate, which is how a persisted file ends in a replacement char.
+        assert_eq!(truncate_utf16_units("a\u{1F600}b", 3), "a\u{1F600}");
+        assert_eq!(truncate_utf16_units("a\u{1F600}b", 2), "a");
+        assert_eq!(truncate_utf16_units("a\u{1F600}b", 4), "a\u{1F600}b");
+        assert_eq!(truncate_utf16_units("abc", 0), "");
+        // Under the cap is returned untouched.
+        assert_eq!(truncate_utf16_units("abc", 99), "abc");
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_cap_is_cut_before_it_reaches_disk() {
+        let tmp = tempfile::tempdir().expect("temp");
+        let dir = tmp.path().join("projects/p/s/tool-results");
+        let body = "x".repeat(5_000);
+
+        let p = persist(tmp.path(), &dir, "capped", &body, false, 1_000)
+            .await
+            .expect("persist");
+
+        // The FILE holds only what the cap allowed…
+        let written = std::fs::read_to_string(&p.filepath).expect("read back");
+        assert_eq!(
+            written.len(),
+            1_000,
+            "the cap must be applied BEFORE the write, not after"
+        );
+        // …while `original_size` still reports the whole body, which is what
+        // lets the envelope say how much was dropped.
+        assert_eq!(p.original_size, 5_000);
+        assert_eq!(p.truncated_at, Some(1_000));
+    }
+
+    #[tokio::test]
+    async fn a_body_under_the_cap_is_untouched_and_unmarked() {
+        let tmp = tempfile::tempdir().expect("temp");
+        let dir = tmp.path().join("projects/p/s/tool-results");
+        let p = persist(tmp.path(), &dir, "small", "hello", false, 1_000)
+            .await
+            .expect("persist");
+        assert_eq!(
+            std::fs::read_to_string(&p.filepath).expect("read back"),
+            "hello"
+        );
+        assert_eq!(p.original_size, 5);
+        assert_eq!(
+            p.truncated_at, None,
+            "an uncapped body must not claim it was truncated"
+        );
+    }
+
+    #[test]
+    fn the_envelope_says_which_kind_of_large_it_was() {
+        // Untruncated: the size that did not fit, and "Full output".
+        let full = wrap(30_075, "/t/x.txt", "P", false, None);
+        assert!(full.contains("Output too large (29.4KB). Full output saved to: /t/x.txt"));
+        assert!(!full.contains("persist limit"));
+
+        // Truncated: the CAP, twice, and no claim that the file is complete.
+        let cut = wrap(5_000_000_000, "/t/x.txt", "P", false, Some(1_073_741_824));
+        assert!(
+            cut.contains("Output exceeded the 1GB persist limit; only the first 1GB were saved to: /t/x.txt"),
+            "{cut}"
+        );
+        assert!(
+            !cut.contains("Full output saved"),
+            "a truncated file must never be described as the full output: {cut}"
+        );
+        // The UTF-16 twin renders the same lead.
+        let cut16 = String::from_utf16_lossy(&wrap_utf16(
+            5_000_000_000,
+            "/t/x.txt",
+            &"P".encode_utf16().collect::<Vec<_>>(),
+            false,
+            Some(1_073_741_824),
+        ));
+        assert_eq!(cut16, cut);
     }
 }

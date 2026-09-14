@@ -528,6 +528,18 @@ pub fn lower_model_listing(listing: llm_client::ModelListing) -> platform_api::M
         reasoning: listing.capabilities.reasoning,
         structured_output: listing.capabilities.structured_output,
     };
+    // Computed before the struct literal moves `profile_name` out.
+    // Only report a group when the profile actually is one connection of
+    // several; a standalone provider leaves this default so every existing
+    // consumer keeps reading `provider_id` and nothing changes for it.
+    let connection = if listing.group == listing.profile_name {
+        platform_api::ConnectionRef::default()
+    } else {
+        platform_api::ConnectionRef {
+            group: Some(listing.group),
+            connection_id: Some(listing.connection_id),
+        }
+    };
     platform_api::ModelListing {
         display_model: listing.display_model,
         request_model: listing.request_model,
@@ -539,6 +551,7 @@ pub fn lower_model_listing(listing: llm_client::ModelListing) -> platform_api::M
         capabilities,
         reasoning: lower_reasoning_spec(listing.reasoning),
         fusion_analyst_capable: listing.fusion_analyst_capable,
+        connection,
     }
 }
 
@@ -573,6 +586,7 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
             // picker shows nothing here rather than offering a pick that only
             // fails once every panel has spent.
             fusion_analyst_capable: false,
+            connection: Default::default(),
         }
     };
 
@@ -1134,6 +1148,7 @@ mod tests {
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
                     vision_delegate: None,
+                    connection: Default::default(),
                 }],
             })
             .expect("client"),
@@ -1751,6 +1766,7 @@ mod tests {
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
                     vision_delegate: None,
+                    connection: Default::default(),
                 }],
             })
             .expect("client"),
@@ -1853,6 +1869,7 @@ mod tests {
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
                     vision_delegate: None,
+                    connection: Default::default(),
                 }],
             })
             .expect("client"),

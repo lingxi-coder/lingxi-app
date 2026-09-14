@@ -988,6 +988,7 @@ async fn set_model_keeps_provider_in_acknowledgement() {
         reasoning: Default::default(),
         supports_reasoning: true,
         fusion_analyst_capable: false,
+        connection: Default::default(),
     }]);
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
     let sink = CapturingSink::arc();
@@ -1239,6 +1240,7 @@ async fn list_models_curates_and_preserves_provider_identity() {
             reasoning: Default::default(),
             supports_reasoning: true,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         },
         platform_api::ModelListing {
             display_model: "GPT-4o".into(),
@@ -1254,6 +1256,7 @@ async fn list_models_curates_and_preserves_provider_identity() {
             reasoning: Default::default(),
             supports_reasoning: false,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         },
         platform_api::ModelListing {
             display_model: "GPT-5.6 Sol".into(),
@@ -1269,6 +1272,7 @@ async fn list_models_curates_and_preserves_provider_identity() {
             reasoning: Default::default(),
             supports_reasoning: true,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         },
     ]);
     handle.set_status_snapshot(StatusSnapshot {
@@ -1333,6 +1337,7 @@ async fn list_models_uses_full_provider_catalog_when_provided() {
         reasoning: Default::default(),
         supports_reasoning: true,
         fusion_analyst_capable: false,
+        connection: Default::default(),
     }]);
     handle.set_status_snapshot(StatusSnapshot {
         model: "deepseek-flash".into(),
@@ -1361,6 +1366,7 @@ async fn list_models_uses_full_provider_catalog_when_provided() {
             reasoning: Default::default(),
             supports_reasoning: true,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         },
         platform_api::ModelListing {
             display_model: "Internal 7B".into(),
@@ -1376,6 +1382,7 @@ async fn list_models_uses_full_provider_catalog_when_provided() {
             reasoning: Default::default(),
             supports_reasoning: true,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         },
     ]);
     let sink = CapturingSink::arc();

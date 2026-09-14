@@ -380,6 +380,7 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client");

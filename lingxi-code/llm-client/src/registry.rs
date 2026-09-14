@@ -1,8 +1,8 @@
 //! Model registry and route identity resolution.
 
 use crate::{
-    reasoning_control_spec, Capabilities, ClientConfig, LlmError, PricingModelRef, ProviderId,
-    ReasoningControlSpec, ReasoningTarget,
+    reasoning_control_spec, Capabilities, ClientConfig, FailoverTriggers, LlmError, ModelProfile,
+    PricingModelRef, ProviderId, ProviderProfile, ReasoningControlSpec, ReasoningTarget,
 };
 use platform_api::{ModelBillingMode, ModelMetadata, ModelPricing};
 
@@ -13,6 +13,14 @@ pub struct ModelListing {
     pub provider_id: ProviderId,
     /// Configured provider profile name.
     pub profile_name: String,
+    /// Provider GROUP this profile is a connection of. Equals `profile_name`
+    /// for a standalone provider, so grouping is always well-defined.
+    pub group: String,
+    /// This profile's connection id within the group (`"default"` when the
+    /// provider declares no connections).
+    pub connection_id: String,
+    /// Whether this connection is a spare key slot, never offered for selection.
+    pub hidden: bool,
     /// Human-facing model label.
     pub display_model: String,
     /// Provider-local model value sent on the wire.
@@ -54,6 +62,27 @@ pub struct ResolvedRoute {
     pub pricing_model: PricingModelRef,
     /// Model capabilities for this route.
     pub capabilities: Capabilities,
+    /// Sibling connections of the SAME provider group that also serve this
+    /// model, in configured order, excluding the one chosen above.
+    ///
+    /// Empty when the caller pinned a single connection, or when the group has
+    /// only one. This is the failover order the drive loop walks: every hop is a
+    /// different endpoint/credential for the same logical model, so retrying
+    /// along it is transparent to the caller.
+    pub connection_chain: Vec<ConnectionHop>,
+    /// Which failures move along [`Self::connection_chain`]. Empty unless the
+    /// provider opted in, so a route with no connections is untouched.
+    pub failover: FailoverTriggers,
+}
+
+/// One sibling connection to fall over to, already resolved to its profile and
+/// wire model id so no second lookup is needed at failover time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionHop {
+    /// Profile name of the connection to try.
+    pub profile_name: String,
+    /// Provider-local model value to send on that connection.
+    pub request_model: String,
 }
 
 /// Resolved main route plus an optional vision delegate route.
@@ -171,10 +200,17 @@ impl ModelRegistry {
         self.config
             .providers
             .iter()
+            // Extra key slots of one connection exist only to be failed over
+            // onto; listing them would show the same model several times and
+            // let a user "pick" a spare credential.
+            .filter(|provider| !provider.connection.hidden)
             .flat_map(|provider| {
                 provider.models.iter().map(|model| ModelListing {
                     provider_id: provider.provider_id.clone(),
                     profile_name: provider.profile_name.clone(),
+                    group: provider.group().to_string(),
+                    connection_id: provider.connection_id().to_string(),
+                    hidden: provider.connection.hidden,
                     display_model: model.display_model.clone(),
                     request_model: model.request_model.clone(),
                     billing_model: model.billing_model.clone(),
@@ -199,28 +235,43 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// Resolve a model id, optionally scoped to one provider profile.
-    /// `profile = Some(p)` matches only within profile `p` (absent model or
-    /// unknown profile → `ModelUnavailable`); `None` matches across all
-    /// providers (ambiguous → error).
+    /// Resolve a model id, optionally scoped to one provider profile or group.
+    ///
+    /// `profile = Some(p)` matches only connections whose profile name OR group
+    /// is `p` (absent model or unknown profile → `ModelUnavailable`);
+    /// `None` matches across all providers.
+    ///
+    /// Several matches inside ONE provider group are not ambiguous: they are the
+    /// group's connections (a domestic and an international endpoint, or two API
+    /// keys), which all serve the same model. The first by
+    /// [`ProviderProfile::connection_sort_key`] is chosen and the rest are
+    /// returned as [`ResolvedRoute::connection_chain`]. Matches spanning several
+    /// groups stay ambiguous — that is a genuine "which provider did you mean".
     pub fn resolve_in(
         &self,
         requested: &str,
         profile: Option<&str>,
     ) -> Result<ResolvedRoute, LlmError> {
+        let in_scope = |provider: &ProviderProfile| match profile {
+            // A group name scopes to every connection in that group, so a
+            // session that stored the group-qualified ref the picker showed
+            // still routes.
+            Some(p) => provider.profile_name == p || provider.group() == p,
+            None => true,
+        };
+        let matches_model = |model: &ModelProfile, wanted: &str| {
+            model.display_model == wanted
+                || model.request_model == wanted
+                || model.aliases.iter().any(|alias| alias == wanted)
+        };
+
         let mut matches = Vec::new();
         for provider in &self.config.providers {
-            if let Some(p) = profile {
-                if provider.profile_name != p {
-                    continue;
-                }
+            if !in_scope(provider) {
+                continue;
             }
             for model in &provider.models {
-                let is_match = model.display_model == requested
-                    || model.request_model == requested
-                    || model.aliases.iter().any(|alias| alias == requested);
-
-                if is_match {
+                if matches_model(model, requested) {
                     matches.push((provider, model));
                 }
             }
@@ -234,18 +285,19 @@ impl ModelRegistry {
         // provider-qualified UI ref at this final routing boundary. This is the
         // last fail-safe if a lifecycle path lets the display ref reach the LLM
         // client without first splitting it.
+        //
+        // The qualifier may name either a single connection (`deepseek:cn`) or a
+        // whole group (`deepseek`) — pickers show the group form, so both must
+        // route.
         if matches.is_empty() {
             if let Some((qualifier, provider_model)) = requested.split_once('/') {
                 if profile.is_none_or(|scoped| scoped == qualifier) {
                     for provider in &self.config.providers {
-                        if provider.profile_name != qualifier {
+                        if provider.profile_name != qualifier && provider.group() != qualifier {
                             continue;
                         }
                         for model in &provider.models {
-                            let is_match = model.display_model == provider_model
-                                || model.request_model == provider_model
-                                || model.aliases.iter().any(|alias| alias == provider_model);
-                            if is_match {
+                            if matches_model(model, provider_model) {
                                 matches.push((provider, model));
                             }
                         }
@@ -254,41 +306,65 @@ impl ModelRegistry {
             }
         }
 
-        match matches.as_slice() {
-            [] => Err(LlmError::ModelUnavailable),
-            [(provider, model)] => Ok(ResolvedRoute {
-                provider_id: provider.provider_id.clone(),
-                profile_name: provider.profile_name.clone(),
+        if matches.is_empty() {
+            return Err(LlmError::ModelUnavailable);
+        }
+
+        // More than one group in play is a real ambiguity; within one group the
+        // extra matches are the failover chain.
+        let mut groups: Vec<&str> = matches.iter().map(|(p, _)| p.group()).collect();
+        groups.sort_unstable();
+        groups.dedup();
+        if groups.len() > 1 {
+            let suggestions = groups
+                .iter()
+                .map(|g| format!("{g}/{requested}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "model reference '{requested}' is ambiguous across profiles: {} \
+                     — qualify it, e.g. {}",
+                    groups.join(", "),
+                    suggestions
+                ),
+            });
+        }
+
+        matches.sort_by(|(a, _), (b, _)| a.connection_sort_key().cmp(&b.connection_sort_key()));
+        let (provider, model) = matches[0];
+        // Only fail over between connections billed the same way. A provider can
+        // publish the same model on a subscription endpoint AND a pay-per-token
+        // one (Zhipu ships exactly this: `glm-coding` and `zai` share eight model
+        // ids at different billing modes). Silently moving a rate-limited
+        // subscription request onto the metered endpoint would start charging
+        // real money for what the user believes their plan covers, so a
+        // cross-billing hop has to be an explicit choice, not a failover.
+        let billing = provider.pricing.billing_mode;
+        let connection_chain = matches[1..]
+            .iter()
+            .filter(|(p, _)| p.pricing.billing_mode == billing)
+            .map(|(p, m)| ConnectionHop {
+                profile_name: p.profile_name.clone(),
+                request_model: m.request_model.clone(),
+            })
+            .collect();
+
+        Ok(ResolvedRoute {
+            provider_id: provider.provider_id.clone(),
+            profile_name: provider.profile_name.clone(),
+            request_model: model.request_model.clone(),
+            display_model: model.display_model.clone(),
+            pricing_model: PricingModelRef {
+                pricing_provider_id: provider.provider_id.clone(),
+                billing_model: model.billing_model.clone(),
                 request_model: model.request_model.clone(),
                 display_model: model.display_model.clone(),
-                pricing_model: PricingModelRef {
-                    pricing_provider_id: provider.provider_id.clone(),
-                    billing_model: model.billing_model.clone(),
-                    request_model: model.request_model.clone(),
-                    display_model: model.display_model.clone(),
-                },
-                capabilities: model.capabilities,
-            }),
-            multiple => {
-                let profiles: Vec<&str> = multiple
-                    .iter()
-                    .map(|(p, _)| p.profile_name.as_str())
-                    .collect();
-                let suggestions = profiles
-                    .iter()
-                    .map(|p| format!("{p}/{requested}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                Err(LlmError::InvalidRequest {
-                    message: format!(
-                        "model reference '{requested}' is ambiguous across profiles: {} \
-                         — qualify it, e.g. {}",
-                        profiles.join(", "),
-                        suggestions
-                    ),
-                })
-            }
-        }
+            },
+            capabilities: model.capabilities,
+            connection_chain,
+            failover: provider.connection.failover,
+        })
     }
 
     /// Resolve across all providers (unscoped). Ambiguous ids error.

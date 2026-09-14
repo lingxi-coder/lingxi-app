@@ -581,6 +581,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         supports_fast_mode: false,
                         fusion_analyst_capable: false,
                     }],
+                    group: None, connection_id: None,
                 }],
             },
         ),

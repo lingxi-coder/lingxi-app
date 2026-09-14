@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '13.1.0';
+export const CLIENT_PROTOCOL_VERSION = '14.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -745,6 +745,15 @@ export interface ProviderModelCatalogEntryDto {
   provider_id: string;
   provider_label: string;
   models: ModelDetailsDto[];
+  /**
+   * Vendor this entry is one connection of; absent when it stands alone.
+   * Settings UIs collapse entries sharing a group under one provider heading.
+   * Model pickers must NOT: two connections can differ in billing, so the
+   * choice has to stay visible.
+   */
+  group?: string;
+  /** This connection's id within `group` (`cn`, `intl`, `coding`, …). */
+  connection_id?: string;
 }
 
 /** Authoritative state for the active conversation's reasoning controls. */

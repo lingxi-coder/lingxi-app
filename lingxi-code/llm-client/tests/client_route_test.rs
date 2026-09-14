@@ -35,6 +35,7 @@ async fn client_builds_routes_from_config_and_lists_models() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
 
@@ -73,6 +74,7 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
 
@@ -120,6 +122,7 @@ async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encodi
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .unwrap();
@@ -173,6 +176,7 @@ async fn slash_bearing_openrouter_wire_model_is_not_mistaken_for_a_ui_ref() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .unwrap();
@@ -216,6 +220,7 @@ fn anthropic_fast_profile(profile_name: &str, base_url: &str) -> ProviderProfile
         supports_websocket_compression: false,
         websocket_connect_timeout_ms: None,
         vision_delegate: None,
+        connection: Default::default(),
     }
 }
 
@@ -305,6 +310,7 @@ async fn github_copilot_gpt5_and_codex_route_to_responses_endpoint() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -368,6 +374,7 @@ async fn non_copilot_openai_chat_provider_is_never_overridden() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -417,6 +424,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -515,6 +523,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -618,6 +627,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
                 vision_delegate: None,
+                connection: Default::default(),
             },
             ProviderProfile {
                 provider_id: ProviderId::AnthropicFirstParty,
@@ -646,6 +656,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
                 vision_delegate: None,
+                connection: Default::default(),
             },
         ],
     };
@@ -686,6 +697,7 @@ async fn openai_responses_profile_prepares_post_to_responses_endpoint() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
 
@@ -742,6 +754,7 @@ async fn openai_responses_websocket_capability_selects_stream_transport_only_for
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: Some(1234),
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -796,6 +809,7 @@ fn websocket_capability_is_rejected_for_non_responses_protocols() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
 
@@ -837,6 +851,7 @@ async fn response_format_is_rejected_when_selected_model_lacks_structured_output
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     };
 

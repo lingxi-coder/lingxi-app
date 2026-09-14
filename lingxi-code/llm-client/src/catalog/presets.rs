@@ -36,6 +36,18 @@ struct Preset {
     billing_mode: ModelBillingMode,
     /// Embedded models.dev slice JSON.
     slice_json: &'static str,
+    /// Provider GROUP this preset is a connection of, and its id within that
+    /// group. `None` = the preset stands alone as its own provider.
+    ///
+    /// Profile names stay exactly as they are: they are the credential ids in
+    /// the keychain and the qualifier in any model reference a user has saved.
+    /// Grouping is purely additive — `zhipu/glm-4.7` starts resolving while
+    /// `zai/glm-4.7` and `glm-coding/glm-4.7` keep working unchanged.
+    ///
+    /// Grouping does NOT make two connections interchangeable: the chain built
+    /// in `ModelRegistry::resolve_in` drops any hop whose billing mode differs,
+    /// so a subscription route never fails over onto a metered one.
+    group: Option<(&'static str, &'static str)>,
 }
 
 const OPENROUTER: &str = include_str!("../../data/models-dev/openrouter.json");
@@ -62,6 +74,7 @@ fn presets() -> Vec<Preset> {
             credential_env: Some("OPENROUTER_API_KEY"),
             billing_mode: ModelBillingMode::PerToken,
             slice_json: OPENROUTER,
+            group: None,
         },
         Preset {
             profile_name: "deepseek",
@@ -74,6 +87,7 @@ fn presets() -> Vec<Preset> {
             credential_env: Some("DEEPSEEK_API_KEY"),
             billing_mode: ModelBillingMode::PerToken,
             slice_json: DEEPSEEK,
+            group: None,
         },
         // Kimi Open Platform (China): OpenAI-compatible Chat Completions wire
         // with bearer API-key auth. Keep the stable user-facing profile id
@@ -89,6 +103,7 @@ fn presets() -> Vec<Preset> {
             credential_env: Some("MOONSHOT_API_KEY"),
             billing_mode: ModelBillingMode::PerToken,
             slice_json: KIMI,
+            group: Some(("kimi", "open")),
         },
         // Kimi Code is a distinct membership-backed service. Its API keys,
         // model ids, quotas, and endpoint are not interchangeable with the
@@ -99,11 +114,12 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::OpenAICompatible {
-                name: "kimi-code".to_string(),
+                name: "kimi".to_string(),
             },
             credential_env: Some("KIMI_API_KEY"),
             billing_mode: ModelBillingMode::Subscription,
             slice_json: KIMI_CODE,
+            group: Some(("kimi", "code")),
         },
         // GLM coding plan: Anthropic-compatible endpoint (reuses AnthropicMessagesCodec).
         // The snapshot's api points at /api/coding/paas/v4 (OpenAI-style); we override.
@@ -113,11 +129,12 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::AnthropicMessages,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::Custom {
-                name: "glm-coding".to_string(),
+                name: "zhipu".to_string(),
             },
             credential_env: Some("ZHIPU_API_KEY"),
             billing_mode: ModelBillingMode::Subscription,
             slice_json: GLM_CODING,
+            group: Some(("zhipu", "coding")),
         },
         // Z.AI: international GLM API (the global counterpart to the China-only
         // open.bigmodel.cn). OpenAI-compatible wire, pay-per-token. A distinct
@@ -128,12 +145,18 @@ fn presets() -> Vec<Preset> {
             base_url: "https://api.z.ai/api/paas/v4",
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
-            provider_id: ProviderId::OpenAICompatible {
-                name: "zai".to_string(),
+            // `Custom`, matching its `glm-coding` sibling: the two connections
+            // are one vendor billed as one, and the group speaks two different
+            // wires, so neither is "the OpenAI-compatible one". `cost` unions
+            // `Custom` and `OpenAICompatible` by name, so the rollup is by
+            // "zhipu" either way.
+            provider_id: ProviderId::Custom {
+                name: "zhipu".to_string(),
             },
             credential_env: Some("ZAI_API_KEY"),
             billing_mode: ModelBillingMode::PerToken,
             slice_json: ZAI,
+            group: Some(("zhipu", "api")),
         },
         // OpenAI first-party: Responses API (codex removed the chat wire, so all
         // OpenAI traffic is Responses-only). API-key auth as a Bearer token.
@@ -148,6 +171,7 @@ fn presets() -> Vec<Preset> {
             credential_env: Some("OPENAI_API_KEY"),
             billing_mode: ModelBillingMode::PerToken,
             slice_json: OPENAI,
+            group: None,
         },
         // OpenAI via ChatGPT-account OAuth login: routes to the Codex backend
         // (Responses API). Credential is OAuth (no env var) → resolved by the
@@ -164,6 +188,7 @@ fn presets() -> Vec<Preset> {
             credential_env: None,
             billing_mode: ModelBillingMode::Subscription,
             slice_json: OPENAI_CHATGPT,
+            group: None,
         },
         // GitHub Copilot: OpenAI-compatible wire; GitHub OAuth token used
         // directly as the bearer via AuthStrategy::CopilotBearer (no exchange).
@@ -178,6 +203,7 @@ fn presets() -> Vec<Preset> {
             credential_env: Some("GITHUB_TOKEN"),
             billing_mode: ModelBillingMode::Subscription,
             slice_json: GITHUB_COPILOT,
+            group: None,
         },
         // Google Gemini (first-party): generateContent wire; API key sent as the
         // `x-goog-api-key` header (AuthStrategy::ApiKey + GeminiGenerateContent).
@@ -193,6 +219,7 @@ fn presets() -> Vec<Preset> {
             credential_env: Some("GEMINI_API_KEY"),
             billing_mode: ModelBillingMode::PerToken,
             slice_json: GEMINI,
+            group: None,
         },
     ]
 }
@@ -209,7 +236,21 @@ pub fn builtin_presets() -> BuiltinCatalog {
     let openai_reference: ProviderSlice =
         serde_json::from_str(OPENAI).expect("vendored openai slice must parse");
 
+    // Ordinal of each connection within its group, assigned in table order so
+    // the first-listed connection of a provider is the one a bare model id
+    // resolves to.
+    let mut group_orders: std::collections::BTreeMap<&'static str, u32> =
+        std::collections::BTreeMap::new();
     for preset in presets() {
+        let group_order = match preset.group {
+            Some((group, _)) => {
+                let slot = group_orders.entry(group).or_insert(0);
+                let order = *slot;
+                *slot += 1;
+                order
+            }
+            None => 0,
+        };
         let slice: ProviderSlice = serde_json::from_str(preset.slice_json)
             .unwrap_or_else(|e| panic!("vendored slice {} parse: {e}", preset.profile_name));
 
@@ -311,6 +352,16 @@ pub fn builtin_presets() -> BuiltinCatalog {
             // vision route; the delegate only fires for the text-only V4 Pro.
             vision_delegate: (preset.profile_name == "deepseek")
                 .then_some("deepseek-flash".to_string()),
+            connection: match preset.group {
+                Some((group, connection_id)) => crate::ConnectionSpec {
+                    group: Some(group.to_string()),
+                    connection_id: Some(connection_id.to_string()),
+                    order: group_order,
+                    hidden: false,
+                    failover: crate::FailoverTriggers::DEFAULT,
+                },
+                None => crate::ConnectionSpec::default(),
+            },
         });
     }
 

@@ -330,6 +330,7 @@ fn gemini_client() -> DefaultLlmClient {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client")
@@ -363,6 +364,7 @@ fn anthropic_client() -> DefaultLlmClient {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client")

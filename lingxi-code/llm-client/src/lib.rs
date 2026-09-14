@@ -68,8 +68,8 @@ pub use cloud_provider_env::{
     vertex_region_for_model, vertex_region_for_model_from_env, FoundryCredential,
 };
 pub use config::{
-    AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, ModelProfile,
-    PricingConfig, ProtocolFamily, ProviderProfile, SigningConfig,
+    AuthStrategy, AzureConfig, Capabilities, ClientConfig, ConnectionSpec, CredentialConfig,
+    FailoverTriggers, ModelProfile, PricingConfig, ProtocolFamily, ProviderProfile, SigningConfig,
 };
 pub use copilot::{
     CopilotAuthenticator, CopilotHttp, CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome,
@@ -110,7 +110,7 @@ pub use reasoning_controls::{
     ReasoningTarget, TokenBudgetRange,
 };
 pub use redaction::Redactor;
-pub use registry::{MediaRoute, ModelListing, ModelRegistry, ResolvedRoute};
+pub use registry::{ConnectionHop, MediaRoute, ModelListing, ModelRegistry, ResolvedRoute};
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
 pub use service::{ApiService, RetryInfo, RetryReporter, SubscriberState};

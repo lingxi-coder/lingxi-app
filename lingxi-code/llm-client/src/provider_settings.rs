@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 
 use crate::{
-    AuthStrategy, AzureConfig, Capabilities, CredentialConfig, LlmError, ModelProfile,
-    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, SigningConfig, TokenPricing,
+    AuthStrategy, AzureConfig, Capabilities, ConnectionSpec, CredentialConfig, FailoverTriggers,
+    LlmError, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    SigningConfig, TokenPricing,
 };
 
 const SUPPORTED_PROVIDER_TYPES: &str =
@@ -171,7 +172,7 @@ pub fn parse_provider_profiles_strict(
     for (name, value) in providers {
         let parsed = parse_one_provider(name, value, options, true)
             .map_err(|message| LlmError::InvalidRequest { message })?;
-        out.push(parsed.provider);
+        out.extend(parsed.into_iter().map(|p| p.provider));
     }
     Ok(out)
 }
@@ -188,13 +189,233 @@ pub fn parse_provider_profiles_lenient(
     for (name, value) in providers {
         match parse_one_provider(name, value, options, false) {
             Ok(parsed) => {
-                warnings.extend(parsed.warnings);
-                out.push(parsed.provider);
+                for one in parsed {
+                    warnings.extend(one.warnings);
+                    out.push(one.provider);
+                }
             }
             Err(message) => warnings.push(format!("{message}; skipped")),
         }
     }
     (out, warnings)
+}
+
+/// One desugared connection: a flat provider entry the existing validator can
+/// parse, plus the group identity to stamp onto the profile it produces.
+#[derive(Debug)]
+struct ExpandedConnection {
+    profile_name: String,
+    entry: Value,
+    identity: ConnectionSpec,
+    /// Keychain credential id from `apiKeys`, when this is one key slot.
+    credential_override: Option<String>,
+}
+
+/// Shallow-merge a connection's overrides over the provider-level defaults.
+///
+/// Shallow is deliberate: a connection that redeclares `models` or `pricing`
+/// means "this endpoint serves exactly these", not "add to the provider's list".
+fn merge_connection(base: &Map<String, Value>, overrides: &Map<String, Value>) -> Value {
+    let mut merged = base.clone();
+    merged.remove("connections");
+    merged.remove("fallback");
+    merged.remove("apiKeys");
+    for (k, v) in overrides {
+        if k == "id" || k == "apiKeys" {
+            continue;
+        }
+        merged.insert(k.clone(), v.clone());
+    }
+    Value::Object(merged)
+}
+
+/// Expand one `apiKeys` list into sibling key slots of the same connection.
+///
+/// Each slot is a full profile differing ONLY in its credential, so key rotation
+/// reuses the connection failover walk instead of needing a key index threaded
+/// through the auth path. Only the first is selectable; the rest exist to be
+/// failed over onto.
+fn expand_key_slots(
+    profile_name: &str,
+    entry: &Value,
+    group: &str,
+    connection_id: &str,
+    keys: &[String],
+    failover: FailoverTriggers,
+    order: &mut u32,
+    out: &mut Vec<ExpandedConnection>,
+) {
+    for (slot, key) in keys.iter().enumerate() {
+        out.push(ExpandedConnection {
+            profile_name: format!("{profile_name}#{slot}"),
+            entry: entry.clone(),
+            identity: ConnectionSpec {
+                group: Some(group.to_string()),
+                connection_id: Some(connection_id.to_string()),
+                order: *order,
+                hidden: slot > 0,
+                failover,
+            },
+            credential_override: Some(key.clone()),
+        });
+        *order += 1;
+    }
+}
+
+/// Read an `apiKeys` list, rejecting anything that is not a list of non-empty
+/// distinct strings.
+fn parse_api_keys(
+    obj: &Map<String, Value>,
+    label: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(raw) = obj.get("apiKeys") else {
+        return Ok(None);
+    };
+    let arr = raw
+        .as_array()
+        .ok_or_else(|| format!("{label}: \"apiKeys\" must be an array of credential ids"))?;
+    if arr.is_empty() {
+        return Err(format!("{label}: \"apiKeys\" must not be empty"));
+    }
+    let mut keys = Vec::with_capacity(arr.len());
+    for item in arr {
+        let key = item
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{label}: \"apiKeys\" entries must be non-empty strings"))?;
+        if keys.iter().any(|existing| existing == key) {
+            return Err(format!("{label}: duplicate apiKeys entry {key:?}"));
+        }
+        keys.push(key.to_string());
+    }
+    Ok(Some(keys))
+}
+
+/// Read `fallback.on` into a trigger set.
+///
+/// A provider that declares connections but no `fallback` gets
+/// [`FailoverTriggers::DEFAULT`] — declaring several ways to reach a provider
+/// and then not using them on failure would be a surprising default.
+fn parse_failover(obj: &Map<String, Value>, name: &str) -> Result<FailoverTriggers, String> {
+    let Some(fallback) = obj.get("fallback") else {
+        return Ok(FailoverTriggers::DEFAULT);
+    };
+    let fallback = fallback
+        .as_object()
+        .ok_or_else(|| format!("provider {name:?}: \"fallback\" must be an object"))?;
+    let Some(on) = fallback.get("on") else {
+        return Ok(FailoverTriggers::DEFAULT);
+    };
+    let list = on
+        .as_array()
+        .ok_or_else(|| format!("provider {name:?}: \"fallback.on\" must be an array"))?;
+    let mut triggers = FailoverTriggers::NONE;
+    for item in list {
+        let token = item.as_str().ok_or_else(|| {
+            format!("provider {name:?}: \"fallback.on\" entries must be strings")
+        })?;
+        // Name the bad token rather than silently dropping it: a typo here
+        // disables failover, which is invisible until the day it is needed.
+        triggers.apply_name(token).ok_or_else(|| {
+            format!(
+                "provider {name:?}: unknown fallback.on trigger {token:?} (supported: rate_limit, overloaded, server_error, network, auth)"
+            )
+        })?;
+    }
+    Ok(triggers)
+}
+
+/// Desugar a provider entry into its connections.
+///
+/// No `connections` and no `apiKeys` reproduces the historical single flat
+/// profile exactly, identity included, so every pre-existing config and every
+/// built-in preset is untouched.
+fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<ExpandedConnection>, String> {
+    let provider_keys = parse_api_keys(obj, &format!("provider {name:?}"))?;
+    let failover = parse_failover(obj, name)?;
+
+    let Some(raw) = obj.get("connections") else {
+        let entry = merge_connection(obj, &Map::new());
+        let mut out = Vec::new();
+        let mut order = 0;
+        match provider_keys {
+            Some(keys) => expand_key_slots(name, &entry, name, "default", &keys, failover, &mut order, &mut out),
+            // No connections and no apiKeys: the historical single profile.
+            // Its chain is always empty, so it never fails over regardless.
+            None => out.push(ExpandedConnection {
+                profile_name: name.to_string(),
+                entry,
+                identity: ConnectionSpec::default(),
+                credential_override: None,
+            }),
+        }
+        return Ok(out);
+    };
+
+    let list = raw
+        .as_array()
+        .ok_or_else(|| format!("provider {name:?}: \"connections\" must be an array"))?;
+    if list.is_empty() {
+        return Err(format!(
+            "provider {name:?}: \"connections\" must not be empty (omit it for a single-connection provider)"
+        ));
+    }
+
+    let mut out = Vec::new();
+    let mut order = 0;
+    let mut seen: Vec<String> = Vec::new();
+    for (index, item) in list.iter().enumerate() {
+        let conn = item.as_object().ok_or_else(|| {
+            format!("provider {name:?}: connections[{index}] is not an object")
+        })?;
+        let id = conn
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                format!("provider {name:?}: connections[{index}] needs a non-empty string \"id\"")
+            })?;
+        if id.contains('/') || id.contains(':') || id.contains('#') {
+            return Err(format!(
+                "provider {name:?}: connection id {id:?} must not contain '/', ':' or '#' (they separate a qualified model reference)"
+            ));
+        }
+        if seen.iter().any(|existing| existing == id) {
+            return Err(format!(
+                "provider {name:?}: duplicate connection id {id:?}"
+            ));
+        }
+        seen.push(id.to_string());
+
+        let entry = merge_connection(obj, conn);
+        let profile_name = format!("{name}:{id}");
+        let label = format!("provider {name:?} connection {id:?}");
+        let keys = match parse_api_keys(conn, &label)? {
+            Some(keys) => Some(keys),
+            None => provider_keys.clone(),
+        };
+        match keys {
+            Some(keys) => {
+                expand_key_slots(&profile_name, &entry, name, id, &keys, failover, &mut order, &mut out);
+            }
+            None => {
+                out.push(ExpandedConnection {
+                    profile_name,
+                    entry,
+                    identity: ConnectionSpec {
+                        group: Some(name.to_string()),
+                        connection_id: Some(id.to_string()),
+                        order,
+                        hidden: false,
+                        failover,
+                    },
+                    credential_override: None,
+                });
+                order += 1;
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug)]
@@ -203,13 +424,56 @@ struct ProviderParseResult {
     warnings: Vec<String>,
 }
 
-#[allow(clippy::too_many_lines)]
+/// Parse one `settings.providers` entry into its connections.
+///
+/// A provider with `connections` (or `apiKeys`) yields several profiles that
+/// share one group; everything else yields exactly one, byte-identical to the
+/// pre-`connections` behaviour.
 fn parse_one_provider(
     name: &str,
     value: &Value,
     options: ProviderParseOptions,
     strict: bool,
+) -> Result<Vec<ProviderParseResult>, String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("provider {name:?}: entry is not an object"))?;
+    let expanded = expand_connections(name, obj)?;
+
+    let mut out = Vec::with_capacity(expanded.len());
+    for connection in expanded {
+        let mut parsed = parse_flat_provider(
+            name,
+            &connection.profile_name,
+            &connection.entry,
+            options,
+            strict,
+            connection.credential_override.as_deref(),
+        )?;
+        parsed.provider.profile.connection = connection.identity;
+        out.push(parsed);
+    }
+    Ok(out)
+}
+
+/// Parse ONE already-desugared flat provider entry.
+///
+/// `group` is the provider the entry belongs to and drives `provider_id`, so
+/// every connection of one provider shares a billing/pricing identity.
+/// `profile_name` is this connection's own name. For a provider written without
+/// `connections` the two are equal, which is exactly the historical behaviour.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn parse_flat_provider(
+    group: &str,
+    profile_name: &str,
+    value: &Value,
+    options: ProviderParseOptions,
+    strict: bool,
+    credential_override: Option<&str>,
 ) -> Result<ProviderParseResult, String> {
+    // Error labels and `parse_models` name the CONNECTION, which is what the
+    // operator needs to see; for a flat provider it is the provider name.
+    let name = profile_name;
     let mut warnings = Vec::new();
     let obj = value
         .as_object()
@@ -289,13 +553,18 @@ fn parse_one_provider(
     if kind.requires_api_key_env()
         && options.credential_mode == ProviderCredentialMode::Env
         && env_var.is_none()
+        // An `apiKeys` slot names a stored credential outright, so there is no
+        // env var to require.
+        && credential_override.is_none()
     {
         return Err(format!(
             "provider {name:?}: \"apiKeyEnv\" is required and must not be empty"
         ));
     }
 
-    let credential = if matches!(kind, ProviderKind::BedrockClaude) {
+    let credential = if let Some(id) = credential_override {
+        CredentialConfig::Static { id: id.to_string() }
+    } else if matches!(kind, ProviderKind::BedrockClaude) {
         CredentialConfig::HostManaged {
             id: "bedrock_sigv4".to_string(),
         }
@@ -353,8 +622,8 @@ fn parse_one_provider(
     Ok(ProviderParseResult {
         provider: ParsedUserProvider {
             profile: ProviderProfile {
-                provider_id: kind.provider_id(name),
-                profile_name: name.to_string(),
+                provider_id: kind.provider_id(group),
+                profile_name: profile_name.to_string(),
                 base_url,
                 protocol,
                 auth,
@@ -367,6 +636,7 @@ fn parse_one_provider(
                 supports_websocket_compression,
                 websocket_connect_timeout_ms,
                 vision_delegate,
+                connection: Default::default(),
             },
             env_var,
         },
@@ -910,6 +1180,7 @@ pub fn anthropic_provider_profile(
         supports_websocket_compression: false,
         websocket_connect_timeout_ms: None,
         vision_delegate: None,
+        connection: Default::default(),
     }
 }
 

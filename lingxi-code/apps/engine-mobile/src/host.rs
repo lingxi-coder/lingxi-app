@@ -20545,6 +20545,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: false,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             },
             platform_api::ModelListing {
                 display_model: "gpt-5.2".to_string(),
@@ -20557,6 +20558,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: false,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             },
             platform_api::ModelListing {
                 display_model: "claude-sonnet-4-20250514".to_string(),
@@ -20569,6 +20571,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: true,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             },
         ];
 
@@ -20609,6 +20612,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: true,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             },
             platform_api::ModelListing {
                 display_model: "gpt-5.6-sol".into(),
@@ -20621,6 +20625,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: true,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             },
         ];
 
@@ -23006,6 +23011,7 @@ mod default_model_resolution_tests {
             reasoning: Default::default(),
             supports_reasoning: true,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         };
         let listings = vec![listing("anthropic"), listing("github-copilot")];
         assert_eq!(
@@ -23055,6 +23061,7 @@ mod default_model_resolution_tests {
             reasoning: Default::default(),
             supports_reasoning: false,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         }];
         assert_eq!(
             resolve_default_model_ref("anthropic/claude-sonnet-5", &listings),

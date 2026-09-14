@@ -128,6 +128,7 @@ impl DurableHarness {
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
                     vision_delegate: None,
+                    connection: Default::default(),
                 }],
             })
             .unwrap(),
@@ -501,7 +502,10 @@ async fn desktop_attempt_registration_allows_pick_when_optional_synthesis_is_una
 fn workflow_registration(
     harness: &DurableHarness,
     scope: Option<WorkflowOutputScope>,
-) -> (Arc<DesktopFusionAttempts>, fusion::FusionAttemptRegistration) {
+) -> (
+    Arc<DesktopFusionAttempts>,
+    fusion::FusionAttemptRegistration,
+) {
     let origin = &harness.authority.captured;
     let session = origin.control.identity().session_id.unwrap();
     let mut request = origin.request.clone();
@@ -684,10 +688,17 @@ async fn desktop_attempt_workflow_late_wire_charges_original_generation() {
         call.await.unwrap();
         let summary = registered.finalizer.finish().wait().await.unwrap();
         assert_eq!(summary.usage.provider_requests, 1);
-        assert_eq!(recorded_generation, original.generation_id(), "WAL intent must retain the launching turn");
+        assert_eq!(
+            recorded_generation,
+            original.generation_id(),
+            "WAL intent must retain the launching turn"
+        );
         assert_eq!(original.spent(), if complete { 8 } else { 50 });
         assert_eq!(current.spent(), 0);
-        assert_eq!(harness.authority.budget.active_reservation_nano_usd().await, 0);
+        assert_eq!(
+            harness.authority.budget.active_reservation_nano_usd().await,
+            0
+        );
     }
 }
 
@@ -723,19 +734,35 @@ async fn desktop_attempt_workflow_original_limit_blocks_borrowing_new_turn_capac
     use fusion::FusionAttemptRegistrar;
     let mut harness = DurableHarness::with_limits(true, 10_000, 1).await;
     let original = harness.authority.output.clone();
-    let current = harness.authority.budget.workflow_output_scopes()
-        .begin_turn(original.session_id(), protocol::MessageId::new(), Some(1_000)).await.unwrap();
+    let current = harness
+        .authority
+        .budget
+        .workflow_output_scopes()
+        .begin_turn(
+            original.session_id(),
+            protocol::MessageId::new(),
+            Some(1_000),
+        )
+        .await
+        .unwrap();
     let (host, captured) = workflow_registration(&harness, Some(original.clone()));
     let control = captured.control.clone();
     let registered = host.register(captured).unwrap();
     assert!(control.activate_at(tokio::time::Instant::now()));
     harness.service.set_model_attempt_hooks(host);
     let mut request = harness.request.clone();
-    request.model_attempt = Some(registered.run.context(ModelAttemptStage::Panel, Some(0)).unwrap());
+    request.model_attempt = Some(
+        registered
+            .run
+            .context(ModelAttemptStage::Panel, Some(0))
+            .unwrap(),
+    );
     let service = harness.service.clone();
     let mut call = tokio::spawn(async move {
         let mut stream = service.stream_request(request).await?;
-        while let Some(event) = stream.next().await { event?; }
+        while let Some(event) = stream.next().await {
+            event?;
+        }
         Ok::<(), LlmError>(())
     });
     // A broken implementation can admit against A2. Acknowledge and drain
@@ -751,12 +778,18 @@ async fn desktop_attempt_workflow_original_limit_blocks_borrowing_new_turn_capac
         }
     };
     registered.finalizer.finish().wait().await.unwrap();
-    assert!(denied_without_intent, "A2 headroom must not authorize a call belonging to A1");
+    assert!(
+        denied_without_intent,
+        "A2 headroom must not authorize a call belonging to A1"
+    );
     assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
     assert!(harness.queue.try_recv().is_err());
     assert_eq!(original.spent(), 0);
     assert_eq!(current.spent(), 0);
-    assert_eq!(harness.authority.budget.active_reservation_nano_usd().await, 0);
+    assert_eq!(
+        harness.authority.budget.active_reservation_nano_usd().await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -892,6 +925,8 @@ fn route() -> PinnedRoute {
                 display_model: "display".into(),
             },
             capabilities: Default::default(),
+            connection_chain: Vec::new(),
+            failover: Default::default(),
         },
         limits: fusion::ModelLimits {
             context_window_tokens: Some(20_000),

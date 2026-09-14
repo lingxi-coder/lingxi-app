@@ -126,6 +126,7 @@ fn two_profile_client() -> llm_client::client::DefaultLlmClient {
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
                 vision_delegate: None,
+                connection: Default::default(),
             },
             ProviderProfile {
                 provider_id: ProviderId::OpenAICompatible {
@@ -146,6 +147,7 @@ fn two_profile_client() -> llm_client::client::DefaultLlmClient {
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
                 vision_delegate: None,
+                connection: Default::default(),
             },
         ],
     };

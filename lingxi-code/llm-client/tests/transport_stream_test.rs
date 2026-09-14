@@ -124,6 +124,7 @@ fn client(protocol: ProtocolFamily, provider_id: ProviderId, base_url: &str) -> 
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client")
@@ -176,6 +177,7 @@ fn openai_responses_websocket_client() -> DefaultLlmClient {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: Some(250),
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client")

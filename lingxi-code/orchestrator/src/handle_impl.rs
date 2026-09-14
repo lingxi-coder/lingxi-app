@@ -2557,6 +2557,7 @@ mod tests {
             reasoning: Default::default(),
             supports_reasoning: true,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         }]);
         let orch = crate::ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
@@ -2613,6 +2614,7 @@ mod tests {
             reasoning: Default::default(),
             supports_reasoning: true,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         }]);
         let orch = crate::ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
@@ -2676,6 +2678,7 @@ mod tests {
             reasoning: Default::default(),
             supports_reasoning: false,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         }];
         for (recorded, want_model, want_profile) in [
             // An openrouter wire id whose OWN name contains a slash: the

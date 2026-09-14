@@ -6,7 +6,8 @@ export const SUPPORTED_PROVIDER_TYPES = [
 ] as const;
 export type SupportedProviderType = (typeof SUPPORTED_PROVIDER_TYPES)[number];
 export interface CustomProviderModelDraft { id: string; aliases?: string[]; [key: string]: unknown }
-export interface CustomProviderDraft { type: string; baseUrl?: string; apiKeyEnv?: string; models: CustomProviderModelDraft[]; [key: string]: unknown }
+export interface CustomProviderConnectionDraft { id: string; [key: string]: unknown }
+export interface CustomProviderDraft { type: string; baseUrl?: string; apiKeyEnv?: string; models: CustomProviderModelDraft[]; connections?: CustomProviderConnectionDraft[]; apiKeys?: string[]; [key: string]: unknown }
 export interface ImportDiagnostic { severity: 'error' | 'warning'; message: string }
 export interface ProviderImportEntry {
   name: string;
@@ -27,7 +28,80 @@ export function validateProfileName(name: string): string | null {
   return typeof name === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) && !forbidden.has(name)
     ? null : 'Profile ID 需为 1–64 位小写字母、数字、点、下划线或连字符，并以字母或数字开头。';
 }
+/**
+ * Merge one connection over the provider-level defaults.
+ *
+ * Shallow, exactly like the engine's desugaring: a connection that redeclares
+ * `models` means "this endpoint serves exactly these", not "add to the list".
+ */
+function mergeConnection(draft: CustomProviderDraft, connection: CustomProviderConnectionDraft): CustomProviderDraft {
+  const base = { ...draft };
+  delete base.connections;
+  delete base.fallback;
+  delete base.apiKeys;
+  const merged = { ...base } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(connection)) {
+    if (key === 'id' || key === 'apiKeys') continue;
+    merged[key] = value;
+  }
+  return merged as CustomProviderDraft;
+}
+
+const FALLBACK_TRIGGERS = ['rate_limit', 'overloaded', 'server_error', 'network', 'auth'];
+
+/** `apiKeys` must be a non-empty list of distinct non-empty credential ids. */
+function validateApiKeys(value: unknown, label: string): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || !value.length) return `${label}apiKeys 必须是非空数组。`;
+  if (value.some((key) => !nonempty(key))) return `${label}apiKeys 的每一项必须是非空字符串。`;
+  if (new Set(value.map((key) => (key as string).trim())).size !== value.length) return `${label}apiKeys 不能重复。`;
+  return null;
+}
+
+/**
+ * A provider reachable several ways: validate each connection as if it were the
+ * flat provider it desugars to, so one endpoint cannot pass rules another fails.
+ */
+function validateConnections(draft: CustomProviderDraft): string | null {
+  const connections = draft.connections;
+  if (!Array.isArray(connections) || !connections.length) return 'connections 必须是非空数组；单一连接请直接省略该字段。';
+  const seen = new Set<string>();
+  for (const [index, connection] of connections.entries()) {
+    if (!record(connection)) return `connections[${index}] 必须是对象。`;
+    const id = connection.id;
+    if (!nonempty(id)) return `connections[${index}] 需要非空的 id。`;
+    const trimmed = (id as string).trim();
+    // The id becomes part of a qualified model reference (`provider:conn/model`),
+    // so a separator in it would produce a reference that cannot be routed.
+    if (/[/:#]/.test(trimmed)) return `连接 id ${JSON.stringify(trimmed)} 不能包含 '/'、':' 或 '#'。`;
+    if (seen.has(trimmed)) return `连接 id ${JSON.stringify(trimmed)} 重复。`;
+    seen.add(trimmed);
+    const keysError = validateApiKeys(connection.apiKeys, `连接 ${JSON.stringify(trimmed)} 的 `);
+    if (keysError) return keysError;
+    const merged = mergeConnection(draft, connection as CustomProviderConnectionDraft);
+    const error = validateCustomProvider(merged);
+    if (error) return `连接 ${JSON.stringify(trimmed)}：${error}`;
+  }
+  if (draft.fallback !== undefined) {
+    if (!record(draft.fallback)) return 'fallback 必须为对象。';
+    const on = (draft.fallback as Record<string, unknown>).on;
+    if (on !== undefined) {
+      if (!Array.isArray(on)) return 'fallback.on 必须是数组。';
+      for (const trigger of on) {
+        if (!nonempty(trigger) || !FALLBACK_TRIGGERS.includes((trigger as string).trim())) return `fallback.on 取值无效，支持：${FALLBACK_TRIGGERS.join(', ')}。`;
+      }
+    }
+  }
+  return null;
+}
+
 export function validateCustomProvider(draft: CustomProviderDraft): string | null {
+  // A provider with `connections` is validated CONNECTION BY CONNECTION below;
+  // the provider entry itself only supplies defaults, so it need not satisfy
+  // baseUrl/models on its own.
+  if (record(draft) && draft.connections !== undefined) return validateConnections(draft);
+  const keysError = validateApiKeys(draft.apiKeys, '');
+  if (keysError) return keysError;
   if (!record(draft) || !SUPPORTED_PROVIDER_TYPES.includes(draft.type as SupportedProviderType)) return `请选择支持的协议：${SUPPORTED_PROVIDER_TYPES.join(', ')}`;
   if (!Array.isArray(draft.models) || !draft.models.length) return 'models 至少需要一个模型。';
   if (draft.models.some(m => !record(m) || !nonempty(m.id))) return '每个 models 条目必须有非空 id。';

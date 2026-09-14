@@ -60,6 +60,7 @@ async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client")
@@ -131,6 +132,7 @@ fn profile(
         supports_websocket_compression: false,
         websocket_connect_timeout_ms: None,
         vision_delegate: None,
+        connection: Default::default(),
     }
 }
 
@@ -379,6 +381,7 @@ async fn sigv4_without_signing_config_fails_at_prepare() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client")
@@ -463,6 +466,7 @@ async fn azure_token_injects_api_key_header() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client");
@@ -693,6 +697,7 @@ async fn sigv4_null_body_content_sha256_via_client() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client")
@@ -832,6 +837,7 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     })
     .expect("client")

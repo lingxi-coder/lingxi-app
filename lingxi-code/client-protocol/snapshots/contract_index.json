@@ -1085,6 +1085,8 @@
   "PromptModeDto::Normal": "normal",
   "PromptModeDto::Plan": "plan",
   "ProviderCredentialSecretDto.value": "String",
+  "ProviderModelCatalogEntryDto.connection_id": "Option<String>",
+  "ProviderModelCatalogEntryDto.group": "Option<String>",
   "ProviderModelCatalogEntryDto.models": "Vec<ModelDetailsDto>",
   "ProviderModelCatalogEntryDto.provider_id": "String",
   "ProviderModelCatalogEntryDto.provider_label": "String",

@@ -170,12 +170,48 @@ fn connect_display_meta(profile_name: &str) -> DisplayMeta {
             popular: *popular,
         };
     }
+
+    // A provider reachable several ways names each connection
+    // `<group>:<connection>`, and each extra key slot of one connection adds
+    // `#<n>`. Both need a key of their own here, so both must read as a row a
+    // human can pick — not as "Deepseek:cn#1".
+    let (group, connection, slot) = split_connection_profile(profile_name);
+    if connection.is_some() || slot.is_some() {
+        let base = curated
+            .iter()
+            .find(|(id, ..)| *id == group)
+            .map_or_else(|| title_case(group), |(_, label, ..)| (*label).to_string());
+        let label = match (connection, slot) {
+            (Some(connection), Some(slot)) => {
+                format!("{base} · {connection} · key {}", slot + 1)
+            }
+            (Some(connection), None) => format!("{base} · {connection}"),
+            (None, Some(slot)) => format!("{base} · key {}", slot + 1),
+            (None, None) => unreachable!("guarded above"),
+        };
+        let blurb = if slot.is_some() {
+            "Additional key for this connection".to_string()
+        } else {
+            "Connection of this provider".to_string()
+        };
+        return DisplayMeta {
+            label,
+            blurb,
+            popular: false,
+        };
+    }
+
     DisplayMeta {
         label: title_case(profile_name),
         blurb: "Provider".to_string(),
         popular: false,
     }
 }
+
+/// Re-exported so this module reads the same way it did; the parser itself is
+/// shared with the desktop provider header via `platform_api`, so the two
+/// cannot drift into labelling one profile differently.
+use platform_api::split_connection_profile;
 
 /// "brand-new-provider" → "Brand New Provider" (split on '-'/'_').
 fn title_case(id: &str) -> String {
@@ -749,5 +785,60 @@ mod render_tests {
             .filter(|l| matches!(l, VisibleLine::Item(_)))
             .count();
         assert_eq!(items, n);
+    }
+}
+
+#[cfg(test)]
+mod connection_label_tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_provider_is_unchanged() {
+        assert_eq!(split_connection_profile("deepseek"), ("deepseek", None, None));
+        assert_eq!(connect_display_meta("deepseek").label, "DeepSeek");
+        assert_eq!(connect_display_meta("groq").label, "Groq");
+    }
+
+    #[test]
+    fn a_connection_reads_as_its_vendor_plus_the_connection() {
+        assert_eq!(
+            split_connection_profile("deepseek:cn"),
+            ("deepseek", Some("cn"), None)
+        );
+        // Inherits the curated vendor label rather than title-casing the id.
+        assert_eq!(connect_display_meta("deepseek:cn").label, "DeepSeek · cn");
+    }
+
+    #[test]
+    fn a_spare_key_slot_is_named_as_a_key_not_a_provider() {
+        assert_eq!(
+            split_connection_profile("deepseek:cn#1"),
+            ("deepseek", Some("cn"), Some(1))
+        );
+        // 1-based for humans: slot 0 is "key 1".
+        assert_eq!(
+            connect_display_meta("deepseek:cn#1").label,
+            "DeepSeek · cn · key 2"
+        );
+        assert_eq!(connect_display_meta("deepseek#0").label, "DeepSeek · key 1");
+    }
+
+    #[test]
+    fn an_unknown_vendor_still_title_cases_its_group() {
+        assert_eq!(
+            connect_display_meta("my-proxy:eu").label,
+            "My Proxy · eu"
+        );
+    }
+
+    /// `#` is only a slot marker when what follows is a number, so a provider
+    /// that simply has one in its name does not lose half its label.
+    #[test]
+    fn a_hash_that_is_not_a_slot_index_is_left_alone() {
+        assert_eq!(
+            split_connection_profile("weird#name"),
+            ("weird#name", None, None)
+        );
+        assert_eq!(connect_display_meta("weird#name").label, "Weird#name");
     }
 }

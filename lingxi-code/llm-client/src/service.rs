@@ -114,6 +114,39 @@ fn strip_signature_blocks(messages: &mut [crate::Message]) {
 /// oracle does not do for this path. The pure [`strip_signature_blocks`]
 /// transform stays separately tested and ready for when the internal account
 /// class is actually plumbed.
+/// Re-point `req` at the next CONNECTION of the same provider group.
+///
+/// Returns the connection's profile name when the request was moved and the
+/// caller should retry it, `None` when this error does not trigger failover or
+/// the group is exhausted.
+///
+/// This is NOT model fallback. The model is identical — only the endpoint and
+/// credential change — so thinking signatures stay valid, nothing is stripped,
+/// and no `tengu_model_fallback_triggered` is emitted: from the caller's point
+/// of view the same model simply answered.
+///
+/// The retry budget is reset per connection: attempts burned against an
+/// endpoint that is rate-limited or down say nothing about the next one.
+fn advance_connection(
+    req: &mut crate::LlmRequest,
+    state: &mut RetryState,
+    chain: &[crate::ConnectionHop],
+    index: &mut usize,
+    triggers: crate::FailoverTriggers,
+    error: &LlmError,
+) -> Option<String> {
+    if !triggers.matches(error) {
+        return None;
+    }
+    let hop = chain.get(*index)?;
+    *index += 1;
+    req.profile = Some(hop.profile_name.clone());
+    req.model.clone_from(&hop.request_model);
+    state.attempt = 0;
+    state.consecutive_overloaded = 0;
+    Some(hop.profile_name.clone())
+}
+
 fn strip_signature_blocks_for_fallback(messages: &mut [crate::Message]) {
     if is_internal_account_class() {
         strip_signature_blocks(messages);
@@ -2758,6 +2791,13 @@ impl ApiService {
     ) -> Result<LlmResponse, LlmError> {
         let request_id = new_request_id();
         let started = Instant::now();
+        // Sibling connections of this model's provider group, captured from the
+        // FIRST prepare: once `req.profile` is pinned to one connection a later
+        // resolve sees only that one, so the remaining hops must be held here.
+        let mut connection_chain: Vec<crate::ConnectionHop> = Vec::new();
+        let mut connection_index = 0usize;
+        let mut failover = crate::FailoverTriggers::NONE;
+        let mut connections_captured = false;
         telemetry::emit_started(&self.analytics, &req.model, &request_id, false).await;
         if let Some(query_source) = req.query_source.as_deref() {
             telemetry::emit_query_source(&self.analytics, &req.model, query_source).await;
@@ -2813,6 +2853,12 @@ impl ApiService {
                     return Err(e);
                 }
             };
+            if !connections_captured {
+                connections_captured = true;
+                connection_chain
+                    .clone_from(&prepared.route.resolved_route.connection_chain);
+                failover = prepared.route.resolved_route.failover;
+            }
             Self::log_deepseek_prepared_request(&req.model, &prepared, false);
             self.inject_headers(&mut prepared, &request_id, dispatch);
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
@@ -2837,6 +2883,21 @@ impl ApiService {
                             status,
                         )
                         .await;
+                        continue;
+                    }
+                    if let Some(next) = advance_connection(
+                        &mut req,
+                        &mut state,
+                        &connection_chain,
+                        &mut connection_index,
+                        failover,
+                        &transport_err,
+                    ) {
+                        tracing::info!(
+                            event = "connection_failover",
+                            next_connection = %next,
+                            "endpoint failed; retrying the same model on the next connection"
+                        );
                         continue;
                     }
                     // Transport-layer failure; feed into the retry driver.
@@ -3039,6 +3100,21 @@ impl ApiService {
                                 continue;
                             }
 
+                            if let Some(next) = advance_connection(
+                                &mut req,
+                                &mut state,
+                                &connection_chain,
+                                &mut connection_index,
+                                failover,
+                                &effective_err,
+                            ) {
+                                tracing::info!(
+                                    event = "connection_failover",
+                                    next_connection = %next,
+                                    "endpoint failed; retrying the same model on the next connection"
+                                );
+                                continue;
+                            }
                             let step = guard_max_tokens_adjustment(
                                 next_step_with_backoff(
                                     &mut state,
@@ -3783,6 +3859,14 @@ impl ApiService {
             self.settings_max_retries,
         );
         let thinking_budget: u32 = reasoning_budget(req.reasoning);
+        // Connection failover state — see the non-stream drive for why the chain
+        // is captured once. The stream connect phase had NO fallback of any kind
+        // before this, which is why `routing.fallback` never ran on desktop or
+        // mobile (both drive turns through `StreamingTurnDriver`).
+        let mut connection_chain: Vec<crate::ConnectionHop> = Vec::new();
+        let mut connection_index = 0usize;
+        let mut failover = crate::FailoverTriggers::NONE;
+        let mut connections_captured = false;
         // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
         let mut aws_auth_attempts: u32 = 0;
         // `StreamNoResponse` owns a separate one-retry ledger in the oracle.
@@ -3800,6 +3884,12 @@ impl ApiService {
                 Ok(p) => p,
                 Err(e) => return Err(e),
             };
+            if !connections_captured {
+                connections_captured = true;
+                connection_chain
+                    .clone_from(&prepared.route.resolved_route.connection_chain);
+                failover = prepared.route.resolved_route.failover;
+            }
             Self::log_deepseek_prepared_request(&req.model, &prepared, true);
             tracing::debug!(model = %req.model, event = "request_prepared");
             self.inject_stream_headers(&mut prepared, &request_id, dispatch);
@@ -3880,6 +3970,21 @@ impl ApiService {
                             status,
                         )
                         .await;
+                        continue;
+                    }
+                    if let Some(next) = advance_connection(
+                        &mut req,
+                        &mut state,
+                        &connection_chain,
+                        &mut connection_index,
+                        failover,
+                        &transport_err,
+                    ) {
+                        tracing::info!(
+                            event = "connection_failover",
+                            next_connection = %next,
+                            "endpoint failed; retrying the same model on the next connection"
+                        );
                         continue;
                     }
                     let step = next_step_with_backoff(
@@ -3991,6 +4096,21 @@ impl ApiService {
                             continue;
                         }
 
+                        if let Some(next) = advance_connection(
+                            &mut req,
+                            &mut state,
+                            &connection_chain,
+                            &mut connection_index,
+                            failover,
+                            &effective_err,
+                        ) {
+                            tracing::info!(
+                                event = "connection_failover",
+                                next_connection = %next,
+                                "endpoint failed; retrying the same model on the next connection"
+                            );
+                            continue;
+                        }
                         let step = guard_max_tokens_adjustment(
                             next_step_with_backoff(
                                 &mut state,

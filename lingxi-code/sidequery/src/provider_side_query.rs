@@ -137,6 +137,7 @@ impl ProviderSideQueryClient {
                 // `LlmError::ModelUnavailable` — the caller should use a known
                 // model id.
                 models: sidequery_model_table(),
+                connection: Default::default(),
             }],
         };
 
@@ -1186,6 +1187,7 @@ mod tests {
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
                 vision_delegate: None,
+                connection: Default::default(),
             }],
         };
         let parent_client = DefaultLlmClient::from_config(config)
@@ -1726,6 +1728,7 @@ mod tests {
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
                 vision_delegate: None,
+                connection: Default::default(),
             }],
         };
         let session_client = DefaultLlmClient::from_config(config)
@@ -2027,6 +2030,7 @@ mod tests {
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
                 vision_delegate: None,
+                connection: Default::default(),
             }],
         };
         let session_client = DefaultLlmClient::from_config(config)

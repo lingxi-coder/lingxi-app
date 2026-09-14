@@ -194,6 +194,8 @@ pub fn lower_provider_model_catalog_entry(
         provider_id: entry.provider_id.clone(),
         provider_label: entry.provider_label.clone(),
         models: entry.models.iter().map(lower_model_details).collect(),
+        group: entry.connection.group.clone(),
+        connection_id: entry.connection.connection_id.clone(),
     }
 }
 

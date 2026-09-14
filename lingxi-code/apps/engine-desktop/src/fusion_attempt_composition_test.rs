@@ -110,6 +110,7 @@ fn service() -> Arc<llm_client::ApiService> {
         supports_websocket_compression: false,
         websocket_connect_timeout_ms: None,
         vision_delegate: None,
+        connection: Default::default(),
     };
     Arc::new(llm_client::ApiService::new(
         Arc::new(

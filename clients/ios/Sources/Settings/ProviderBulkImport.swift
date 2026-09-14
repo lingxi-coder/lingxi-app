@@ -23,7 +23,12 @@ struct ProviderImportDocument {
 enum ProviderBulkImport {
     static let maximumBytes = 2_097_152
     static let supportedTypes = ["openai", "openai-responses", "anthropic", "gemini", "azure-openai", "bedrock-claude", "vertex-claude", "vertex-gemini", "foundry-claude"]
-    private static let providerFields: Set<String> = ["type", "baseUrl", "apiKeyEnv", "models", "region", "apiVersion", "supportsWebsockets", "supportsWebsocketCompression", "websocketConnectTimeoutMs", "visionDelegate", "pricing", "billingMode"]
+    /// Keys carried through from an imported provider. Anything absent here is
+    /// dropped with a warning, so a provider reachable several ways MUST list
+    /// `connections` / `apiKeys` / `fallback` — otherwise importing a
+    /// multi-connection config silently yields a single-connection provider.
+    private static let providerFields: Set<String> = ["type", "baseUrl", "apiKeyEnv", "models", "region", "apiVersion", "supportsWebsockets", "supportsWebsocketCompression", "websocketConnectTimeoutMs", "visionDelegate", "pricing", "billingMode", "connections", "apiKeys", "fallback"]
+    private static let fallbackTriggers: Set<String> = ["rate_limit", "overloaded", "server_error", "network", "auth"]
     private static let modelFields: Set<String> = ["id", "aliases", "capabilities", "metadata"]
     private static let forbidden: Set<String> = ["__proto__", "prototype", "constructor"]
 
@@ -58,11 +63,75 @@ enum ProviderBulkImport {
         return result
     }
 
+    /// Merge one connection over the provider-level defaults.
+    ///
+    /// Shallow, matching the engine's desugaring: a connection that restates
+    /// `models` means "this endpoint serves exactly these", not "add to them".
+    private static func mergedConnection(_ draft: [String: Any], _ connection: [String: Any]) -> [String: Any] {
+        var merged = draft
+        merged.removeValue(forKey: "connections")
+        merged.removeValue(forKey: "fallback")
+        merged.removeValue(forKey: "apiKeys")
+        for (key, value) in connection where key != "id" && key != "apiKeys" { merged[key] = value }
+        return merged
+    }
+
+    private static func validateApiKeys(_ value: Any?) -> String? {
+        guard let value else { return nil }
+        guard let keys = value as? [Any], !keys.isEmpty else { return localized("settings_parity_provider_validation_invalid") }
+        let ids = keys.compactMap { $0 as? String }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard ids.count == keys.count, ids.allSatisfy({ !$0.isEmpty }), Set(ids).count == ids.count else {
+            return localized("settings_parity_provider_validation_invalid")
+        }
+        return nil
+    }
+
+    /// A provider reachable several ways is validated CONNECTION BY CONNECTION:
+    /// the provider entry itself only supplies defaults, so it need not satisfy
+    /// `models` / `baseUrl` on its own, and no endpoint can pass a rule another
+    /// one fails.
+    private static func validateConnections(_ entry: ProviderImportEntry, credentialConfigured: Bool) -> String? {
+        let draft = entry.draft
+        guard let connections = draft["connections"] as? [[String: Any]], !connections.isEmpty else {
+            return localized("settings_parity_provider_validation_invalid")
+        }
+        if let error = validateApiKeys(draft["apiKeys"]) { return error }
+        var seen: Set<String> = []
+        for connection in connections {
+            guard let rawID = connection["id"] as? String else { return localized("settings_parity_provider_validation_invalid") }
+            let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            // The id becomes part of a qualified model reference, so a
+            // separator in it would produce a reference that cannot be routed.
+            guard !id.isEmpty, !id.contains("/"), !id.contains(":"), !id.contains("#"), !seen.contains(id) else {
+                return localized("settings_parity_provider_validation_invalid")
+            }
+            seen.insert(id)
+            if let error = validateApiKeys(connection["apiKeys"]) { return error }
+            var merged = entry
+            merged.draft = mergedConnection(draft, connection)
+            if let error = validate(merged, credentialConfigured: credentialConfigured) { return error }
+        }
+        if let fallback = draft["fallback"] {
+            guard let map = fallback as? [String: Any] else { return localized("settings_parity_provider_validation_invalid") }
+            if let on = map["on"] {
+                guard let triggers = on as? [Any] else { return localized("settings_parity_provider_validation_invalid") }
+                for trigger in triggers {
+                    guard let name = trigger as? String, fallbackTriggers.contains(name) else {
+                        return localized("settings_parity_provider_validation_invalid")
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     static func validate(_ entry: ProviderImportEntry, credentialConfigured: Bool) -> String? {
         guard entry.name.range(of: "^[a-z0-9][a-z0-9._-]{0,63}$", options: .regularExpression) != nil,
               !forbidden.contains(entry.name), !["builtin", "claude"].contains(entry.name) else { return localized("settings_parity_provider_validation_invalid") }
         if let error = entry.errors.first { return error }
         let draft = entry.draft
+        if draft["connections"] != nil { return validateConnections(entry, credentialConfigured: credentialConfigured) }
+        if let error = validateApiKeys(draft["apiKeys"]) { return error }
         guard let type = draft["type"] as? String, supportedTypes.contains(type) else { return localized("settings_parity_provider_validation_protocol") }
         guard let models = draft["models"] as? [[String: Any]], !models.isEmpty else { return localized("settings_parity_provider_validation_models") }
         let ids = models.compactMap { $0["id"] as? String }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -127,6 +196,28 @@ enum ProviderBulkImport {
         var errorDescription: String? { message }
     }
 
+    /// Normalize a `models` value: accept `"id"` strings or objects, keep only
+    /// known model fields, and trim ids. Returns `nil` when the value is not a
+    /// list, having already recorded the error.
+    private static func normalizedModels(_ value: Any, entry: inout ProviderImportEntry) -> [[String: Any]]? {
+        guard let models = value as? [Any] else {
+            entry.errors.append(localized("settings_parity_provider_validation_models")); return nil
+        }
+        return models.map { value -> [String: Any] in
+            if let string = value as? String { return ["id": string.trimmingCharacters(in: .whitespacesAndNewlines)] }
+            guard let model = value as? [String: Any] else {
+                entry.errors.append(localized("settings_parity_provider_validation_models")); return [:]
+            }
+            var sanitized: [String: Any] = [:]
+            for (field, value) in model {
+                guard modelFields.contains(field) else { entry.warnings.append(localized("settings_parity_import_models_warning")); continue }
+                sanitized[field] = safe(value, errors: &entry.errors)
+            }
+            if let id = sanitized["id"] as? String { sanitized["id"] = id.trimmingCharacters(in: .whitespacesAndNewlines) }
+            return sanitized
+        }
+    }
+
     private static func convertNative(_ raw: [String: Any], entry: inout ProviderImportEntry) {
         for (key, value) in raw where key != "apiKey" {
             guard providerFields.contains(key) else {
@@ -135,16 +226,30 @@ enum ProviderBulkImport {
                 continue
             }
             if key == "models" {
-                guard let models = value as? [Any] else { entry.errors.append(localized("settings_parity_provider_validation_models")); continue }
-                entry.draft[key] = models.map { value -> [String: Any] in
-                    if let string = value as? String { return ["id": string.trimmingCharacters(in: .whitespacesAndNewlines)] }
-                    guard let model = value as? [String: Any] else { entry.errors.append(localized("settings_parity_provider_validation_models")); return [:] }
-                    var sanitized: [String: Any] = [:]
-                    for (field, value) in model {
-                        guard modelFields.contains(field) else { entry.warnings.append(localized("settings_parity_import_models_warning")); continue }
-                        sanitized[field] = safe(value, errors: &entry.errors)
+                guard let models = normalizedModels(value, entry: &entry) else { continue }
+                entry.draft[key] = models
+            } else if key == "connections" {
+                guard let connections = value as? [Any] else { entry.errors.append(localized("settings_parity_provider_validation_invalid")); continue }
+                // A connection carries the same editable fields as the provider
+                // row, so it needs the same normalization — otherwise a
+                // connection written with `models: ["m"]` survives import in a
+                // shape the engine rejects.
+                entry.draft[key] = connections.map { element -> [String: Any] in
+                    guard let connection = element as? [String: Any] else {
+                        entry.errors.append(localized("settings_parity_provider_validation_invalid")); return [:]
                     }
-                    if let id = sanitized["id"] as? String { sanitized["id"] = id.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    var sanitized: [String: Any] = [:]
+                    for (field, value) in connection {
+                        if field == "models" {
+                            if let models = normalizedModels(value, entry: &entry) { sanitized[field] = models }
+                        } else if ["id", "baseUrl", "apiKeyEnv"].contains(field), let text = value as? String {
+                            sanitized[field] = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        } else if unsafeKey(field) {
+                            entry.errors.append(localized("settings_parity_provider_validation_secret"))
+                        } else {
+                            sanitized[field] = safe(value, errors: &entry.errors)
+                        }
+                    }
                     return sanitized
                 }
             } else if ["baseUrl", "apiKeyEnv"].contains(key), let text = value as? String {

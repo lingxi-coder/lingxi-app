@@ -33,15 +33,19 @@ fn version_is_semver() {
     }
 }
 
-/// The `receipt` removal established major 13; appended TaskMessage advances
-/// the additive minor version to 13.1.0. Both former request records lost their LAST field and
-/// `LocalAppReceiptStatusDto` went with them, so no surviving field moved
-/// ordinal — but the structural guard treats any REMOVED indexed leaf as
-/// breaking, and the UniFFI-generated mobile records lose a member, so this is
-/// a real major bump.
+/// Multi-connection providers establish major 14: `ProviderModelCatalogEntryDto`
+/// gains `group` + `connection_id` so several catalog entries can say they are
+/// one vendor reached different ways. The JSON is additive and both fields are
+/// last in the record, but the UniFFI-generated mobile record grows two members
+/// and those layouts are positional, so — as for 9.0.0 and 12.0.0 — it is a real
+/// major bump.
+///
+/// This test is the deliberate second lock on the version: the structural guard
+/// only asks that SOME bump happened, so without this a later edit could ride
+/// along on this bump without anyone choosing it.
 #[test]
-fn version_is_thirteen_one_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "13.1.0");
+fn version_is_fourteen_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "14.0.0");
 }
 
 fn repository_root() -> PathBuf {

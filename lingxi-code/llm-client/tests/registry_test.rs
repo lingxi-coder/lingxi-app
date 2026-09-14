@@ -39,6 +39,7 @@ fn test_config() -> ClientConfig {
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
             vision_delegate: None,
+            connection: Default::default(),
         }],
     }
 }

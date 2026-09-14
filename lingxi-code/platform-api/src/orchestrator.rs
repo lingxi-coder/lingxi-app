@@ -1177,9 +1177,62 @@ impl ModelProvenance {
     }
 }
 
-/// One model entry for the grouped `/model` picker. Sourced from the llm-client
-/// provider catalog: `display_model` is the human label, `request_model` is the
-/// wire id passed to `switch_model`, `provider_id` is the stable grouping key,
+/// Split a profile name of the form `"<group>[:<connection>][#<slot>]"`.
+///
+/// Returns the group plus, when present, the connection id and the zero-based
+/// key-slot index. A provider reachable one way yields `(name, None, None)`, so
+/// every profile written before connections existed takes the unchanged path in
+/// callers.
+///
+/// `#N` counts as a key slot only when `N` parses as a number, so a provider
+/// literally named `foo#bar` keeps its whole name instead of losing half of it.
+/// Shared by the TUI connect picker and the desktop provider header so the two
+/// cannot drift into labelling the same profile differently.
+#[must_use]
+pub fn split_connection_profile(profile_name: &str) -> (&str, Option<&str>, Option<usize>) {
+    let (head, slot) = match profile_name.rsplit_once('#') {
+        Some((head, index)) => match index.parse::<usize>() {
+            Ok(index) => (head, Some(index)),
+            Err(_) => (profile_name, None),
+        },
+        None => (profile_name, None),
+    };
+    match head.split_once(':') {
+        Some((group, connection)) if !group.is_empty() && !connection.is_empty() => {
+            (group, Some(connection), slot)
+        }
+        _ => (head, None, slot),
+    }
+}
+
+/// Which provider GROUP a route's profile belongs to.
+///
+/// A provider can be reachable several ways — a domestic and an international
+/// host, or several API keys — and each of those is a separate profile with its
+/// own credential. They are one vendor, and this is what says so.
+///
+/// `provider_id` deliberately stays the PROFILE name: it keys the availability
+/// map, the picker's recents, and `provider_has_curated_list`, and it is what a
+/// saved `profile/model` reference names. Grouping is additive on top.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionRef {
+    /// The vendor this profile is a connection of. `None` ⇒ it stands alone and
+    /// callers should read `provider_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Connection id within the group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+}
+
+impl ConnectionRef {
+    /// Whether this is the default (standalone) reference.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.group.is_none() && self.connection_id.is_none()
+    }
+}
+
 /// and `provider_label` is the human provider header (e.g. "`GitHub` Copilot").
 /// The active/default row carries its selection provenance separately in the
 /// TUI model snapshot.
@@ -1220,6 +1273,10 @@ pub struct ModelListing {
     /// name a judge that fails only after every panel has already spent.
     #[serde(default)]
     pub fusion_analyst_capable: bool,
+    /// The provider group this route's profile belongs to, when it is one
+    /// connection of several.
+    #[serde(default, skip_serializing_if = "ConnectionRef::is_default")]
+    pub connection: ConnectionRef,
 }
 
 /// One provider section in the shared client-side model directory.
@@ -1231,6 +1288,12 @@ pub struct ProviderModelCatalogEntry {
     pub provider_label: String,
     /// Provider-scoped model rows that remain eligible for conversation UIs.
     pub models: Vec<ModelListing>,
+    /// The vendor this entry is one connection of, when it is. Settings UIs
+    /// collapse entries sharing a group under one provider heading; the picker
+    /// keeps them separate, because two connections can differ in billing and
+    /// the user has to be able to choose.
+    #[serde(default, skip_serializing_if = "ConnectionRef::is_default")]
+    pub connection: ConnectionRef,
 }
 
 /// Provider-neutral user selection for reasoning / effort controls.
@@ -2006,6 +2069,7 @@ pub fn provider_model_catalog(listings: &[ModelListing]) -> Vec<ProviderModelCat
                 provider_id: provider_id.clone(),
                 provider_label,
                 models: Vec::new(),
+                connection: listing.connection.clone(),
             });
             index
         });

@@ -526,6 +526,7 @@ fn vision_route() -> MediaRoute {
             reasoning: false,
             structured_output: false,
         },
+        connection_chain: Vec::new(), failover: Default::default(),
     };
     MediaRoute {
         main: route("claude-opus-4-8", false),

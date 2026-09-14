@@ -108,4 +108,13 @@
 /// additive lifecycle event keeps 13.0.0 and updates the contract index only.
 /// 13.1.0 appends TaskMessage for trusted human task follow-ups. Existing
 /// variant ordinals and payload layouts are unchanged.
-pub const CLIENT_PROTOCOL_VERSION: &str = "13.1.0";
+///
+/// Bumped to 14.0.0 for multi-connection providers. `ProviderModelCatalogEntryDto`
+/// gains `group` + `connection_id`, which say that several catalog entries are
+/// one vendor reached different ways (a domestic and an international host, or
+/// several API keys) rather than unrelated providers. The JSON is additive and
+/// both fields are LAST in the record, but the UniFFI-generated native record
+/// grows two fields and mobile binding layouts are positional — the same reason
+/// 9.0.0 and 12.0.0 were real majors for otherwise wire-additive additions
+/// (12.0.0 was this very record). Mobile bindings version-lock with the host.
+pub const CLIENT_PROTOCOL_VERSION: &str = "14.0.0";

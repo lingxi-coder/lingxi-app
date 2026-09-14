@@ -8109,6 +8109,20 @@ fn subscription_snapshot_from(
 /// (e.g. `groq` -> `Groq`, `my-provider` -> `My Provider`) so a user-defined
 /// provider reads cleanly in its own group.
 fn provider_profile_label(profile_name: &str) -> String {
+    // A provider reachable several ways names each connection
+    // `<group>:<connection>` (+ `#<n>` per extra key slot). Label it after its
+    // VENDOR plus the connection, so the `/model` header reads "DeepSeek · cn"
+    // rather than the title-cased id "Deepseek:cn".
+    let (group, connection, slot) = platform_api::split_connection_profile(profile_name);
+    if connection.is_some() || slot.is_some() {
+        let base = provider_profile_label(group);
+        return match (connection, slot) {
+            (Some(connection), Some(slot)) => format!("{base} · {connection} · key {}", slot + 1),
+            (Some(connection), None) => format!("{base} · {connection}"),
+            (None, Some(slot)) => format!("{base} · key {}", slot + 1),
+            (None, None) => base,
+        };
+    }
     match profile_name {
         "anthropic" => "Anthropic".to_string(),
         "openrouter" => "OpenRouter".to_string(),
@@ -10593,6 +10607,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                 reasoning: Default::default(),
                 supports_reasoning: m.capabilities.reasoning,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             })
         })
         .collect();
@@ -21021,6 +21036,19 @@ still flip to available"
         assert_eq!(super::provider_profile_label("groq"), "Groq");
         assert_eq!(super::provider_profile_label("my-provider"), "My Provider");
         assert_eq!(super::provider_profile_label("ACME_corp"), "Acme Corp");
+        // A connection of a provider is labelled after its VENDOR plus the
+        // connection, so the header never reads as the raw id "Deepseek:cn".
+        assert_eq!(
+            super::provider_profile_label("deepseek:cn"),
+            "DeepSeek · cn"
+        );
+        assert_eq!(
+            super::provider_profile_label("deepseek:cn#1"),
+            "DeepSeek · cn · key 2"
+        );
+        assert_eq!(super::provider_profile_label("groq#0"), "Groq · key 1");
+        // `#` is a key slot only when a number follows it.
+        assert_eq!(super::provider_profile_label("weird#name"), "Weird#name");
     }
 
     /// `anthropic_models_for` always includes the first-party defaults plus the
@@ -25464,6 +25492,7 @@ must be filtered out: got {after:?}"
                 reasoning: Default::default(),
                 supports_reasoning: false,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             },
             platform_api::ModelListing {
                 display_model: "gpt-4o".to_string(),
@@ -25476,6 +25505,7 @@ must be filtered out: got {after:?}"
                 reasoning: Default::default(),
                 supports_reasoning: false,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             },
             platform_api::ModelListing {
                 display_model: "claude-sonnet-4-6".to_string(),
@@ -25488,6 +25518,7 @@ must be filtered out: got {after:?}"
                 reasoning: Default::default(),
                 supports_reasoning: true,
                 fusion_analyst_capable: false,
+                connection: Default::default(),
             },
         ];
 
@@ -27102,6 +27133,7 @@ mod connected_fallback_tests {
             reasoning: Default::default(),
             supports_reasoning: false,
             fusion_analyst_capable: false,
+            connection: Default::default(),
         }
     }
 

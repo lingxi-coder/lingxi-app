@@ -682,6 +682,8 @@ mod tests {
                     reasoning: false,
                     structured_output: false,
                 },
+                connection_chain: Vec::new(),
+                failover: Default::default(),
             },
             vision_delegate: Some(llm_client::ResolvedRoute {
                 provider_id: llm_client::ProviderId::OpenAICompatible {
@@ -706,6 +708,8 @@ mod tests {
                     reasoning: false,
                     structured_output: false,
                 },
+                connection_chain: Vec::new(),
+                failover: Default::default(),
             }),
         }
     }

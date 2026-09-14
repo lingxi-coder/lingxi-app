@@ -267,6 +267,7 @@ fn provider_model_catalog_round_trips() {
             provider_id: "anthropic".into(),
             provider_label: "Anthropic".into(),
             models: vec![detail],
+            group: None, connection_id: None,
         }],
     };
     let value = serde_json::to_value(&event).unwrap();

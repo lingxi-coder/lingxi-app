@@ -208,6 +208,16 @@ pub struct ModelDetailsDto {
 }
 
 /// One provider's settings-visible conversation model catalog.
+///
+/// `provider_id` is the PROFILE name and stays the identity for credentials,
+/// recents and `profile/model` references. When a vendor is reachable several
+/// ways — a domestic and an international host, or several API keys — each way
+/// is its own entry, and `group` is what says they are one vendor.
+///
+/// Settings UIs should collapse entries sharing a `group` under one provider
+/// heading with a connection row each. Model PICKERS should not: two
+/// connections can differ in billing (Zhipu ships the same eight model ids on a
+/// subscription endpoint and a metered one), so the choice has to stay visible.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[allow(missing_docs)]
@@ -215,6 +225,12 @@ pub struct ProviderModelCatalogEntryDto {
     pub provider_id: String,
     pub provider_label: String,
     pub models: Vec<ModelDetailsDto>,
+    /// Vendor this entry is one connection of. `None` ⇒ it stands alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// This connection's id within `group` (`"cn"`, `"intl"`, `"coding"`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────────────

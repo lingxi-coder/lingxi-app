@@ -198,8 +198,21 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
 
         let cwd_s = cwd.and_then(Path::to_str).unwrap_or(".");
         let m = state.manager.as_ref().expect("manager initialized above");
+        // HP-6: drop `sandbox.credentials` variables before the command runs.
+        //
+        // Prefixing the COMMAND (rather than the bwrap/seatbelt invocation) is
+        // what makes this portable: both platform branches end in a shell, and
+        // `unset` there covers the command and everything it spawns. Names are
+        // validated as POSIX env names first — they come from a settings file,
+        // which on the project tier can be checked into a repository.
+        let unset = sandbox::credentials::unset_prefix(&cfg.credential_deny_env);
+        let command: std::borrow::Cow<'_, str> = if unset.is_empty() {
+            std::borrow::Cow::Borrowed(command)
+        } else {
+            std::borrow::Cow::Owned(format!("{unset}{command}"))
+        };
         let (wrapped, mounts) = m
-            .wrap_with_sandbox(command, bin_shell, None, cwd_s)
+            .wrap_with_sandbox(&command, bin_shell, None, cwd_s)
             .map_err(map_err)?;
         state.mount_points = mounts;
         Ok(wrapped)
@@ -252,6 +265,73 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// HP-6 end to end: a `sandbox.credentials` env var must actually be
+    /// dropped from the command the sandbox runs.
+    ///
+    /// 🚨 Asserting only the pure `unset_prefix` would be a tautology — the
+    /// whole failure mode this feature exists to close is a credential setting
+    /// that is parsed, resolved, and then never reaches the command. So this
+    /// asserts on the WRAPPED STRING the sandbox actually hands back.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_credential_env_var_is_unset_in_the_wrapped_command() {
+        let runner = SandboxRuntimeRunner::new();
+        let mut cfg = cfg_with_domains(&["github.com"]);
+        cfg.credential_deny_env = vec![
+            "AWS_SECRET_ACCESS_KEY".to_string(),
+            // …and a hostile name alongside it, to prove the guard does not
+            // simply drop the whole list when one entry is bad.
+            "OOPS; touch /tmp/pwned".to_string(),
+        ];
+        let cwd = std::path::PathBuf::from("/tmp");
+
+        let wrapped = runner
+            .wrap("echo hi", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
+            .await
+            .expect("macOS initialize+wrap should succeed");
+        let decoded = decode_wrapped(&wrapped);
+        assert!(
+            decoded.contains("unset AWS_SECRET_ACCESS_KEY"),
+            "the credential variable must be unset in the command the sandbox \
+             runs, got: {decoded}"
+        );
+        assert!(
+            !decoded.contains("touch /tmp/pwned"),
+            "a settings-supplied name that is not a POSIX env name must never \
+             reach the shell: {decoded}"
+        );
+
+        // …and with no credentials configured the command is untouched.
+        let plain = runner
+            .wrap("echo hi", &cfg_with_domains(&["github.com"]), Platform::Mac, Some("bash"), Some(&cwd))
+            .await
+            .expect("wrap should succeed");
+        assert!(
+            !decode_wrapped(&plain).contains("unset "),
+            "an unconfigured sandbox must produce the same command as before"
+        );
+    }
+
+    /// The wrapped command embeds the user command base64-encoded; decode every
+    /// base64 run so the assertions above look at what the shell will see.
+    #[cfg(target_os = "macos")]
+    fn decode_wrapped(wrapped: &str) -> String {
+        use base64::Engine as _;
+        let mut out = wrapped.to_string();
+        for token in wrapped.split(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')) {
+            if token.len() < 8 {
+                continue;
+            }
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(token) {
+                if let Ok(text) = String::from_utf8(bytes) {
+                    out.push('\n');
+                    out.push_str(&text);
+                }
+            }
+        }
+        out
     }
 
     /// On macOS the manager binds its proxies locally (no bridge needed) and

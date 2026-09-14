@@ -15,6 +15,10 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
+# The wrapped command embeds the user command base64-encoded; the HP-6 wrap test
+# decodes it to assert on what the shell will actually see. Already in the
+# lockfile via `sandbox-runtime`.
+base64 = "0.22"
 
 [lints]
 workspace = true

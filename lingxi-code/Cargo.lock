@@ -6054,6 +6054,7 @@ name = "sandbox-runtime-runner"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "sandbox",
  "sandbox-runtime",
  "serde_json",

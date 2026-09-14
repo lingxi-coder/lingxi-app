@@ -619,3 +619,85 @@ fn task_output_root_is_protected_even_when_temp_root_is_writable() {
     let config = convert_settings_to_runtime_config(&SettingsJson::default(), &context);
     assert!(config.filesystem.deny_write.contains(&"/tmp/claude-1/project/session/tasks".into()));
 }
+
+// ===== HP-6: `sandbox.credentials` ==========================================
+
+/// 🚨 The wiring test. Every layer below this is pure and green on its own; the
+/// failure this closes is a `sandbox.credentials` block that parses, resolves,
+/// and then never reaches the runtime config the sandbox is built from — which
+/// is indistinguishable, from the user's side, from the silent-ignore it
+/// replaces.
+#[test]
+fn credentials_reach_the_runtime_config_the_sandbox_is_built_from() {
+    use sandbox::credentials::{CredentialEnvVar, CredentialFile, CredentialMode, SandboxCredentials};
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
+
+    let mut s = SettingsJson::default();
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        credentials: Some(SandboxCredentials {
+            files: Some(vec![
+                CredentialFile {
+                    path: "/home/u/.aws/credentials".into(),
+                    mode: CredentialMode::Deny,
+                    extract: None,
+                    on_extract_no_match: None,
+                    inject_hosts: None,
+                },
+                CredentialFile {
+                    path: "/home/u/.npmrc".into(),
+                    mode: CredentialMode::Mask,
+                    extract: None,
+                    on_extract_no_match: None,
+                    inject_hosts: None,
+                },
+            ]),
+            env_vars: Some(vec![CredentialEnvVar {
+                name: "AWS_SECRET_ACCESS_KEY".into(),
+                mode: CredentialMode::Mask,
+                extract: None,
+                on_extract_no_match: None,
+                decode: None,
+                mask_claims: None,
+                inject_hosts: None,
+            }]),
+            ..SandboxCredentials::default()
+        }),
+        ..Default::default()
+    });
+
+    let cfg = convert_settings_to_runtime_config(&s, &SandboxConvertContext::default());
+
+    let denied = |needle: &str| cfg.filesystem.deny_read.iter().any(|p| p.contains(needle));
+    assert!(
+        denied(".aws/credentials"),
+        "a credential file deny must reach filesystem.deny_read: {:?}",
+        cfg.filesystem.deny_read
+    );
+    assert!(
+        denied(".npmrc"),
+        "…and so must a MASK, because this port degrades it to a deny rather \
+         than leaving the file readable: {:?}",
+        cfg.filesystem.deny_read
+    );
+    assert_eq!(
+        cfg.credential_deny_env,
+        vec!["AWS_SECRET_ACCESS_KEY"],
+        "the env var must reach the list the wrap seam unsets from"
+    );
+}
+
+/// An absent block must leave the runtime config byte-identical to before this
+/// feature existed — the whole point is that nothing changes until a user asks.
+#[test]
+fn no_credentials_block_changes_nothing() {
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
+
+    let mut s = SettingsJson::default();
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        ..Default::default()
+    });
+    let cfg = convert_settings_to_runtime_config(&s, &SandboxConvertContext::default());
+    assert!(cfg.credential_deny_env.is_empty());
+}

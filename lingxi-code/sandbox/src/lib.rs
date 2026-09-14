@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod credentials;
 pub mod decision;
 pub mod dependency_check;
 pub mod path_pattern;

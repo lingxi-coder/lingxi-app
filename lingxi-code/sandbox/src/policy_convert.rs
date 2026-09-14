@@ -310,6 +310,34 @@ pub fn convert_settings_to_runtime_config(
         if let Some(v) = &s.ignore_violations {
             cfg.ignore_violations.clone_from(v);
         }
+        // `sandbox.credentials` (HP-6). Both `deny` and `mask` withhold the
+        // credential here; see `sandbox::credentials` for why `mask` degrades
+        // rather than falling through to no protection. Paths are resolved the
+        // same way every other filesystem entry is, so `~` and a relative
+        // spelling reach the same file the user meant.
+        if let Some(v) = &s.credentials {
+            let resolved = crate::credentials::resolve(v);
+            cfg.filesystem
+                .deny_read
+                .extend(
+                    resolved
+                        .deny_read_paths
+                        .iter()
+                        .map(|p| resolve_sandbox_filesystem_path(p, &settings_dir)),
+                );
+            for name in resolved.deny_env_vars {
+                if !cfg.credential_deny_env.contains(&name) {
+                    cfg.credential_deny_env.push(name);
+                }
+            }
+            // ⚠️ A degraded `mask` changes what the user's commands can do, so
+            // it must not be silent. This is the only channel this layer has —
+            // the sandbox crate surfaces nothing user-facing today (its sibling
+            // `linux_glob_pattern_warnings` has no production consumer either).
+            for notice in &resolved.degraded {
+                tracing::warn!("{notice}");
+            }
+        }
         if let Some(v) = s.enable_weaker_nested_sandbox {
             cfg.enable_weaker_nested_sandbox = v;
         }

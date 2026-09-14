@@ -227,6 +227,15 @@ pub struct SandboxRuntimeConfig {
     /// caller). When `false`, the runtime falls back to no-sandbox execution.
     #[serde(default)]
     pub fail_if_unavailable: bool,
+    /// Environment variables the sandboxed process must NOT receive, from
+    /// `sandbox.credentials.envVars` (see [`crate::credentials`]).
+    ///
+    /// ⚠️ Port-local. Upstream's srt config carries the whole `credentials`
+    /// block because its proxy does the masking; this port only ever withholds,
+    /// so the reduced form is the list of names to drop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_deny_env: Vec<String>,
+
     /// Optional restriction of the platforms on which the sandbox runs. `None`
     /// means "run on every supported platform".
     #[serde(default, deserialize_with = "deserialize_enabled_platforms")]
@@ -304,6 +313,7 @@ impl Default for SandboxRuntimeConfig {
             auto_allow_bash_if_sandboxed: false,
             allow_unsandboxed_commands: true,
             network: NetworkRestrictionConfig::default(),
+            credential_deny_env: Vec::new(),
             filesystem: FilesystemRestrictionConfig::default(),
             ignore_violations: HashMap::new(),
             enable_weaker_nested_sandbox: false,
@@ -399,6 +409,15 @@ pub struct SandboxSettingsJson {
     pub filesystem: Option<FilesystemRestrictionConfig>,
     /// Override `SandboxRuntimeConfig::ignore_violations`.
     pub ignore_violations: Option<HashMap<String, Vec<String>>>,
+    /// `sandbox.credentials` — credential files and environment variables to
+    /// withhold from the sandboxed process.
+    ///
+    /// 🚨 Before this field existed the key was an UNKNOWN settings field:
+    /// stripped and silently ignored, so a user who configured
+    /// `{"mode": "mask"}` over their AWS keys got a sandbox that handed the real
+    /// keys to every command. See [`crate::credentials`] for what this port
+    /// enforces and what it degrades.
+    pub credentials: Option<crate::credentials::SandboxCredentials>,
     /// Override `SandboxRuntimeConfig::enable_weaker_nested_sandbox`.
     pub enable_weaker_nested_sandbox: Option<bool>,
     /// Override `SandboxRuntimeConfig::enable_weaker_network_isolation`.

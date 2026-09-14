@@ -712,11 +712,24 @@ the working copy of the same file                                               
 ```
 
 Thirty cron files are dirty. The review counted against the working tree, so the
-strings are inside another session's in-flight rewrite. On main those files were
-last touched by `cdf462b27` ("Collapse a quiet /loop streak, and delete the cron
-exports nobody calls") and `e0530991e`, which points at the /loop + cron cluster;
-`fix-lingxi-gaps-2.1.270` independently checked all of its commits and has zero
-hits on `clients/` or any cron file.
+strings are inside an in-flight rewrite.
+
+**That rewrite is ownerless.** Its author's session ended; all five live sessions
+have disclaimed it. The uncommitted cluster is the `/loop` + wakeup-scheduler
+work (`run_queued_batch`, `stop_dynamic_loop`, `runtime_wakeup.rs`), cron
+automation (`AutomationRunStatus`, `claim_automation_run`, `CronTask.automation`),
+`cron_native.rs`, the cron UI strings below, and the `taskOnly` pair in
+`CronModels.swift`. It is preserved at `refs/recovered/working-state-2026-09-13`
+(`8d2e3c676`) so it cannot be lost with the worktree.
+
+⚠️ A correction to an earlier version of this note: it named `cdf462b27`
+("Collapse a quiet /loop streak…") and `e0530991e` as pointing at the owner.
+They do not. Every commit in this repo carries the same git author, so a commit
+trail identifies the WORK, never the session — and routing on it sent this
+finding to a session that had never touched a cron file. Four sessions routed it
+to that same session for the same reason, compounded by a first-person "blocked,
+to be committed later" note in the project-shared memory directory, which reads
+as your own backlog unless you check `originSessionId`.
 
 Four hazards for whoever does it, each confirmed from two independent records:
 

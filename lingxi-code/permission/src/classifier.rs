@@ -14,6 +14,20 @@ use crate::{read_only_command, shell_command};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Session-owned LLM classifier used for scheduled prompts and monitors.
+/// Hosts bind their existing provider and conversation; no credentials live here.
+#[async_trait::async_trait]
+pub trait LoopPermissionClassifier: Send + Sync {
+    /// Classify after explicit permission rules and safety guards have run.
+    async fn classify(
+        &self,
+        tool_name: &str,
+        input: &Value,
+        host_context: &[crate::host_context::HostContextRecord],
+        deny_rules: &[String],
+    ) -> AutoModeClassifierVerdict;
+}
+
 /// Classifier score used for deterministic rule hits.
 pub const RULE_MATCH_SCORE: f64 = 1.0;
 /// Classifier score used for conservative local-operation allows.

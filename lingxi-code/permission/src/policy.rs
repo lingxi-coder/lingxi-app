@@ -799,17 +799,48 @@ impl PermissionPolicy {
         // permission tool name to "Bash" for a command-monitor so all of that
         // machinery — deny/ask rule matching, safety, `&` — applies exactly as it
         // would to Bash. A `ws`-monitor (the `NU_` branch) is left untouched.
-        let tool_name = if tool_name == "Monitor"
+        let monitor_command = tool_name == "Monitor"
             && input.get("ws").is_none()
             && input
                 .get("command")
                 .and_then(serde_json::Value::as_str)
-                .is_some()
-        {
-            "Bash"
-        } else {
-            tool_name
-        };
+                .is_some();
+        // .270 tBn checks the actual Monitor name before its tool-local
+        // resolver delegates to Bash. Preserve that outer rule layer.
+        if monitor_command {
+            for content in [false, true] {
+                if let Some(rule) = self.first_match(
+                    &self.deny_rules,
+                    &SOURCES_BY_PRIORITY,
+                    "Monitor",
+                    input,
+                    content,
+                ) {
+                    return deny_with_rule(rule);
+                }
+            }
+        }
+        let monitor_ask = monitor_command
+            .then(|| {
+                self.first_match(
+                    &self.ask_rules,
+                    &SOURCES_BY_PRIORITY,
+                    "Monitor",
+                    input,
+                    false,
+                )
+                .or_else(|| {
+                    self.first_match(
+                        &self.ask_rules,
+                        &SOURCES_BY_PRIORITY,
+                        "Monitor",
+                        input,
+                        true,
+                    )
+                })
+            })
+            .flatten();
+        let tool_name = if monitor_command { "Bash" } else { tool_name };
         let result = self.authorize_inner(tool_name, input, mode, workspace_lease_token);
         // BGOP-01 — `&` background-operator allow→ask downgrade (claude-code
         // `Yqr`, the Bash checkPermissions wrapper). After the whole flow, an
@@ -821,6 +852,28 @@ impl PermissionPolicy {
         let result = self
             .background_operator_ask(tool_name, input, &result)
             .unwrap_or(result);
+        let result = if monitor_command && !matches!(result, PermissionResult::Deny { .. }) {
+            if let Some(rule) = monitor_ask {
+                ask_with_rule(rule, "Monitor")
+            } else if !monitor_ask_requires_confirmation(&result) {
+                match self.first_match(
+                    &self.allow_rules,
+                    &SOURCES_BY_PRIORITY,
+                    "Monitor",
+                    input,
+                    false,
+                ) {
+                    Some(rule) if self.rule_is_available_in_mode(rule, mode) => {
+                        allow_with_rule(rule)
+                    }
+                    _ => result,
+                }
+            } else {
+                result
+            }
+        } else {
+            result
+        };
         // PERM.1 — DontAsk transform (claude-code `permissions.ts:503-517`):
         // applied LAST so no early-return ask escapes it. A remaining `ask`
         // becomes `deny`, EXCEPT for read-only / `AllowByDefault` tools — in TS
@@ -3220,6 +3273,25 @@ fn ask_sed_constraint(message: String, reason: String) -> PermissionResult {
         },
         pending_classifier_check: None,
         metadata: PermissionMetadata::default(),
+    }
+}
+
+// .270 tBn preserves nested shell safety/plan objections ahead of an outer
+// Monitor allow rule (K_ recursively checks subcommandResults).
+fn monitor_ask_requires_confirmation(result: &PermissionResult) -> bool {
+    let PermissionResult::Ask { reason, .. } = result else {
+        return false;
+    };
+    match reason {
+        PermissionDecisionReason::SafetyCheck { .. }
+        | PermissionDecisionReason::SandboxOverride { .. }
+        | PermissionDecisionReason::PermissionMode {
+            mode: PermissionMode::Plan,
+        } => true,
+        PermissionDecisionReason::SubcommandResults { reasons } => reasons
+            .values()
+            .any(|result| monitor_ask_requires_confirmation(result)),
+        _ => false,
     }
 }
 

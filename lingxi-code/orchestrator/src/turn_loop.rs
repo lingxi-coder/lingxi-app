@@ -4738,10 +4738,12 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     },
                 ) => tool_permission_deny_resolution(name, reason, explanation.as_deref()),
                 (
-                    PermissionResolution::Allow { rule_source },
+                    PermissionResolution::Allow { rule_source, classifier_approved },
                     permission::PermissionResult::Ask { reason, .. },
                 ) if tool_ask_is_protected
-                    || (rule_source.is_none() && (!bypass_mode || requires_user_interaction)) =>
+                    || (rule_source.is_none() && (!bypass_mode || requires_user_interaction)
+                        && !(*classifier_approved && name == "Monitor" && effective_input.get("ws").is_some()
+                            && matches!(reason, permission::PermissionDecisionReason::Other { .. }))) =>
                 {
                     let (rt, rtext) = tool_ask_reason_context(reason);
                     tool_ask_reason = Some(reason.clone());
@@ -4788,7 +4790,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 _ => (None, None),
             };
             match resolution {
-                PermissionResolution::Allow { rule_source } => {
+                PermissionResolution::Allow { rule_source, .. } => {
                     decision_otel_source = rule_decision_otel_source(rule_source.as_deref(), true);
                     PermissionDecision::Allow
                 }
@@ -9067,6 +9069,64 @@ mod tool_hook_wiring_tests {
         rule_source: Option<String>,
     }
 
+    #[tokio::test]
+    async fn monitor_websocket_classifier_allow_does_not_ask_again() {
+        use permission::classifier::{AutoModeClassifierVerdict, LoopPermissionClassifier};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Model(AtomicUsize);
+        #[async_trait]
+        impl LoopPermissionClassifier for Model {
+            async fn classify(&self, _: &str, _: &Value, _: &[permission::host_context::HostContextRecord], _: &[String]) -> AutoModeClassifierVerdict {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                AutoModeClassifierVerdict::Allow { score: 1.0, reason: "Allowed by fast classifier".into() }
+            }
+        }
+        struct NoPrompt;
+        #[async_trait]
+        impl PermissionGate for NoPrompt {
+            async fn check(&self, _: &str, _: &Value) -> PermissionDecision { panic!("approved websocket must not ask twice") }
+        }
+        struct Monitor(Arc<AtomicUsize>);
+        #[async_trait]
+        impl Tool for Monitor {
+            fn name(&self) -> &str { "Monitor" }
+            fn input_schema(&self) -> &Value {
+                static SCHEMA: once_cell::sync::Lazy<Value> = once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+                &SCHEMA
+            }
+            fn is_enabled(&self, _: &ToolStaticContext) -> bool { true }
+            fn max_result_size_chars(&self) -> usize { 1024 }
+            fn is_concurrency_safe(&self, _: &Value) -> bool { true }
+            fn is_read_only(&self, _: &Value) -> bool { false }
+            async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> Result<(), ValidationError> { Ok(()) }
+            async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> permission::PermissionResult {
+                permission::PermissionResult::Ask {
+                    reason: permission::PermissionDecisionReason::Other { reason: "Monitor will open a WebSocket".into() },
+                    prompt: permission::result::PermissionPrompt { title: "Monitor".into(), message: "Monitor will open a WebSocket".into(), options: vec![] },
+                    pending_classifier_check: None,
+                    metadata: permission::result::PermissionMetadata::default(),
+                }
+            }
+            async fn description(&self, _: &Value, _: &DescriptionOptions) -> String { String::new() }
+            async fn prompt(&self, _: &PromptOptions) -> String { String::new() }
+            async fn call(&self, _: Value, _: ToolUseContext, _: ToolProgressSender) -> Result<ToolCallResult, ToolError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolCallResult::from_data(json!({"content":"ran"})))
+            }
+        }
+        let classifier = Arc::new(Model(AtomicUsize::new(0)));
+        let gate = permission::PolicyPermissionGate::new(Arc::new(permission::PermissionPolicy::new(permission::PermissionMode::Auto)), Arc::new(NoPrompt));
+        assert!(gate.loop_classifier_handle().set(classifier.clone()).is_ok());
+        let called = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(Monitor(called.clone())) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(OrchestratorConfig::default(), Arc::new(MockApiClient::new(vec![])), Arc::new(registry), noop_hook_executor(), Arc::new(gate), Arc::new(MockOutputStream::new()), Arc::new(StaticMemoryProvider::empty()), PathBuf::from("/tmp"));
+        let uses = vec![(ToolUseId::new(), "Monitor".into(), json!({"ws":{"url":"wss://events.example.com"}}), None)];
+        dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        assert_eq!(classifier.0.load(Ordering::SeqCst), 1);
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+    }
+
     #[async_trait]
     impl PermissionGate for PromptSpyGate {
         async fn check(&self, _t: &str, _i: &Value) -> PermissionDecision {
@@ -9080,6 +9140,7 @@ mod tool_hook_wiring_tests {
         async fn resolve_detailed(&self, _t: &str, _i: &Value) -> PermissionResolution {
             PermissionResolution::Allow {
                 rule_source: self.rule_source.clone(),
+                classifier_approved: false,
             }
         }
     }

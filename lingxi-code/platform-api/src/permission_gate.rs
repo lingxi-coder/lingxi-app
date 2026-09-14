@@ -491,6 +491,10 @@ pub enum PermissionResolution {
         /// rule layer). Feeds the OTEL decision-source label — claude-code
         /// `ZX_(decisionReason.rule.source, behavior)`.
         rule_source: Option<String>,
+        /// An LLM classifier has already evaluated this action and approved it.
+        /// Kept separate from rule provenance so tool-local ordinary asks are
+        /// not mistaken for new evidence after classification.
+        classifier_approved: bool,
     },
     /// Rejected, with the rendered deny reason and its source.
     Deny {
@@ -919,7 +923,7 @@ pub trait PermissionGate: Send + Sync {
     ) -> Result<PermissionResolution, PermissionAbort> {
         let _ = ctx;
         Ok(match self.check_in_plan_mode(name, input).await {
-            PermissionDecision::Allow => PermissionResolution::Allow { rule_source: None },
+            PermissionDecision::Allow => PermissionResolution::Allow { rule_source: None, classifier_approved: false },
             PermissionDecision::Deny { reason } => PermissionResolution::Deny {
                 reason,
                 source: PermissionDecisionSource::Unspecified,
@@ -953,7 +957,7 @@ pub trait PermissionGate: Send + Sync {
     /// types.) Additive DEFAULTED (frozen-trait safe).
     async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
         match self.check(name, input).await {
-            PermissionDecision::Allow => PermissionResolution::Allow { rule_source: None },
+            PermissionDecision::Allow => PermissionResolution::Allow { rule_source: None, classifier_approved: false },
             PermissionDecision::Deny { reason } => PermissionResolution::Deny {
                 reason,
                 source: PermissionDecisionSource::Unspecified,

@@ -29,6 +29,7 @@ pub mod bash_security;
 pub mod bash_tree_sitter;
 pub mod bypass_guard;
 pub mod classifier;
+pub mod loop_llm;
 pub mod cli_mode;
 pub mod command_path_containment;
 pub mod dangerous_patterns;
@@ -179,3 +180,6 @@ pub use workspace_lease::{
 };
 
 pub use model_path::{FileSystemPathTranslator, ModelPathOutcome, ModelPathTranslator};
+
+mod monitor_url;
+pub use monitor_url::monitor_websocket_url_host;

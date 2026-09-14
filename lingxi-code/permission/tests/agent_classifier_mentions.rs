@@ -74,3 +74,74 @@ async fn agent_audit_without_contextual_classifier_requires_user_confirmation() 
         );
     }
 }
+
+struct ContextualClassifier(AutoModeClassifierVerdict);
+
+#[async_trait::async_trait]
+impl permission::classifier::LoopPermissionClassifier for ContextualClassifier {
+    async fn classify(
+        &self,
+        _: &str,
+        _: &serde_json::Value,
+        _: &[permission::host_context::HostContextRecord],
+        _: &[String],
+    ) -> AutoModeClassifierVerdict {
+        self.0.clone()
+    }
+}
+
+#[tokio::test]
+async fn agent_contextual_verdict_is_preserved_and_pass_still_prompts() {
+    use permission::{policy::PermissionPolicy, policy_gate::PolicyPermissionGate, PermissionMode};
+    use platform_api::{PermissionDecision, PermissionGate};
+    use std::sync::Arc;
+
+    for tool in ["Agent", "Task"] {
+        for (verdict, expected) in [
+            (
+                AutoModeClassifierVerdict::Allow {
+                    score: 1.0,
+                    reason: "Safe audit".into(),
+                },
+                PermissionDecision::Allow,
+            ),
+            (
+                AutoModeClassifierVerdict::Deny {
+                    score: 1.0,
+                    reason: "Unsafe delegation".into(),
+                    hard: false,
+                },
+                PermissionDecision::Deny {
+                    reason: "Auto mode classifier blocked action: Unsafe delegation".into(),
+                },
+            ),
+            (
+                AutoModeClassifierVerdict::Pass {
+                    reason: "Unavailable".into(),
+                },
+                PermissionDecision::Deny {
+                    reason: "user declined confirmation".into(),
+                },
+            ),
+        ] {
+            let gate = PolicyPermissionGate::new(
+                Arc::new(PermissionPolicy::new(PermissionMode::Auto)),
+                Arc::new(RejectPrompt),
+            );
+            assert!(gate
+                .loop_classifier_handle()
+                .set(Arc::new(ContextualClassifier(verdict)))
+                .is_ok());
+            let decision = gate
+                .check(
+                    tool,
+                    &json!({
+                        "description": "Audit sandbox parity",
+                        "prompt": "Inspect bypassPermissions and no-sandbox handling.",
+                    }),
+                )
+                .await;
+            assert_eq!(decision, expected);
+        }
+    }
+}

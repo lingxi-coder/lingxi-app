@@ -28,6 +28,7 @@ pub mod handle_impl;
 pub mod hook_attachment_sink;
 pub mod hook_prompt_runner;
 pub mod image_input;
+pub mod loop_permission_classifier;
 pub mod mcp_hook_dispatcher;
 pub mod model;
 pub mod prompt;

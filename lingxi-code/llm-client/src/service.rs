@@ -664,6 +664,21 @@ impl ApiService {
             .await
     }
 
+    /// Classifier side queries own a retry budget independent of main turns.
+    pub async fn execute_classifier_request(
+        &self,
+        mut request: LlmRequest,
+        max_retries: u32,
+    ) -> Result<LlmResponse, LlmError> {
+        request.stream = false;
+        let mut control = resolve_retry_control_with_settings(
+            &request.model, None, self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(), self.settings_max_retries,
+        );
+        control.max_retries = max_retries;
+        self.drive_non_stream(request, control, DispatchHeaderState::AUXILIARY).await
+    }
+
     /// Stream a canonical request through the accounting-aware physical driver.
     pub async fn stream_request(
         &self,

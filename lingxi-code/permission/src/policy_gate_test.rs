@@ -1216,7 +1216,7 @@ mod tests {
                 )
                 .await
                 .expect("default impl never aborts"),
-            PermissionResolution::Allow { rule_source: None }
+            PermissionResolution::Allow { rule_source: None, classifier_approved: false }
         );
 
         let deny = RecordingInner::new(PermissionDecision::Deny {
@@ -1260,7 +1260,8 @@ mod tests {
             // `SettingSource` token claude-code's `ZX_` reads off the matched
             // rule to label the OTEL decision source.
             PermissionResolution::Allow {
-                rule_source: Some("userSettings".into())
+                rule_source: Some("userSettings".into()),
+                classifier_approved: false,
             }
         );
         assert_eq!(
@@ -1283,7 +1284,8 @@ mod tests {
         assert_eq!(
             gate.resolve_detailed("Bash", &serde_json::json!({})).await,
             PermissionResolution::Allow {
-                rule_source: Some("session".into())
+                rule_source: Some("session".into()),
+                classifier_approved: false,
             }
         );
     }
@@ -1341,7 +1343,7 @@ mod tests {
             gate.resolve_detailed("Read", &serde_json::json!({})).await,
             // No rule matched — the auto-allow carries no settings scope, so
             // `ZX_`'s default arm labels it "config".
-            PermissionResolution::Allow { rule_source: None }
+            PermissionResolution::Allow { rule_source: None, classifier_approved: false }
         );
         assert_eq!(inner.calls(), 0, "read-only auto-allow never prompts");
     }
@@ -1395,7 +1397,7 @@ mod tests {
         let allow = RecordingInner::new(PermissionDecision::Allow);
         assert_eq!(
             allow.resolve_detailed("Bash", &serde_json::json!({})).await,
-            PermissionResolution::Allow { rule_source: None }
+            PermissionResolution::Allow { rule_source: None, classifier_approved: false }
         );
         let deny = RecordingInner::new(PermissionDecision::Deny {
             reason: "nope".into(),

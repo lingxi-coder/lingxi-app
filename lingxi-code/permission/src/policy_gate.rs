@@ -144,6 +144,7 @@ pub struct PolicyPermissionGate {
     /// never reaches this path in `Auto`); a contended read returns `None` and
     /// likewise skips (fail-open, matching every other post-orch live cell).
     live_model_provider: Arc<std::sync::OnceLock<LiveModelProvider>>,
+    loop_classifier: Arc<std::sync::OnceLock<Arc<dyn crate::classifier::LoopPermissionClassifier>>>,
     /// Live session rule/directory state after applying host
     /// `updatedPermissions`. Starts as a clone of the boot policy's mutable
     /// permission state, then diverges only through
@@ -161,7 +162,10 @@ pub struct PolicyPermissionGate {
 
 impl PolicyPermissionGate {
     async fn check_prompt_transport(
-        &self, name: &str, input: &Value, ctx: &PermissionCheckContext,
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         // 2.1.263 Ge: only the actual prompt wait counts; policy/classifier
         // work happens before this boundary. Drop also covers cancellation.
@@ -243,11 +247,19 @@ impl PolicyPermissionGate {
             mode_override: std::sync::RwLock::new(None),
             mcp_mode_overrides: std::sync::RwLock::new(std::collections::HashMap::new()),
             live_model_provider: Arc::new(std::sync::OnceLock::new()),
+            loop_classifier: Arc::new(std::sync::OnceLock::new()),
             path_translator: None,
             auto_mode_disabled_from_settings: std::sync::atomic::AtomicBool::new(
                 auto_mode_disabled_from_settings,
             ),
         }
+    }
+
+    /// Fill after constructing the session so the classifier can use weak ownership.
+    pub fn loop_classifier_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<Arc<dyn crate::classifier::LoopPermissionClassifier>>> {
+        self.loop_classifier.clone()
     }
 
     /// Install the guest→host translator (mobile only). Without it the gate is
@@ -972,6 +984,62 @@ impl PolicyPermissionGate {
             .with_bash_command_clamps(folded.bash_command_clamps.clone())
     }
 
+    /// `dKo`'s **acceptEdits simulation** — the fast path that answers an Auto
+    /// mode call without a classifier round-trip when the SAME call would have
+    /// been allowed outright in `acceptEdits`:
+    ///
+    /// ```js
+    /// let ko=(Wr)=>e.checkPermissions(rs,{…toolPermissionContext:
+    ///        {...Zo.toolPermissionContext,mode:"acceptEdits",alwaysAllowRules:yo}}),
+    ///     vo=await ko([]);
+    /// …
+    /// if(vo.behavior==="allow"&&!jn){ …
+    ///   t(`Skipping auto mode classifier for ${e.name}: would be allowed in acceptEdits mode`),
+    ///   …De({updatedInput:vo.updatedInput??n,decisionReason:{type:"mode",mode:"auto"}})}
+    /// ```
+    ///
+    /// `yo` is the allow-rule set with the dangerous-classifier rules filtered
+    /// out, which is [`PermissionPolicy::apply_auto_mode_restrictions`] here:
+    /// the probe runs under `AcceptEdits` but keeps `Auto`'s rule availability,
+    /// so a `Bash(python:*)` allow cannot buy its way past the classifier
+    /// through the probe. Without the probe, an ordinary in-tree `Edit` on an
+    /// ABSOLUTE path — the shape a model produces constantly — pays a model
+    /// call in Auto mode, and so does every `mkdir`/`touch`/`cp`/`mv`/`rm`/safe
+    /// `sed` on `ACCEPT_EDITS_ALLOWED_COMMANDS`.
+    ///
+    /// Upstream guards the probe with `Xn===void 0 && Pe===void 0 && !Le &&
+    /// e.sandboxNetworkLists?.(n)===void 0 && !ze && !fn && !zn`: a forced
+    /// Chrome navigation, `classifierOnly()`, a `sandboxNetworkLists` /
+    /// `sandboxOverride` decision reason, an edit-classification gate, and plan
+    /// mode. Only the last has a port counterpart — `zn` is `U==="plan"`, and
+    /// this is only ever called with the effective mode, which the caller has
+    /// already established is `Auto`. The rest are structurally absent.
+    ///
+    /// Upstream also re-runs the probe with linked-worktree directories
+    /// (`vo.decisionReason?.type==="workingDir" && UZt()` → `xMn` → `ko(Nn)`);
+    /// that retry is NOT ported, which can only make this probe answer `false`
+    /// more often — i.e. send the call to the classifier, never past it.
+    fn accept_edits_fast_path(
+        &self,
+        name: &str,
+        input: &Value,
+        folded: &FoldedPermissionContext,
+        workspace_lease_token: Option<u64>,
+    ) -> bool {
+        let policy = self
+            .live_policy_with_layers(folded)
+            .with_apply_auto_mode_restrictions(true);
+        matches!(
+            policy.authorize_with_mode_and_workspace_lease(
+                name,
+                input,
+                PermissionMode::AcceptEdits,
+                workspace_lease_token,
+            ),
+            PermissionResult::Allow { .. }
+        )
+    }
+
     /// `ULa` / `jLa` — append rule strings to the `command` source bucket,
     /// deduped (`to(...)`).
     fn extend_command_rules(
@@ -1075,7 +1143,17 @@ impl PolicyPermissionGate {
                     }
                     return decision;
                 }
-                match self.auto_mode_classifier_result(mode, reason, name, input, false) {
+                match self
+                    .auto_mode_classifier_result(mode, reason, name, input, false, &|| {
+                        self.accept_edits_fast_path(
+                            name,
+                            input,
+                            &FoldedPermissionContext::default(),
+                            None,
+                        )
+                    })
+                    .await
+                {
                     Ok(AutoModeClassifierResult::Classified(classified)) => {
                         return self.classified_result_to_decision(classified, name);
                     }
@@ -1122,6 +1200,7 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
         ctx: &PermissionCheckContext,
+        accept_edits_fast_path: &(dyn Fn() -> bool + Sync),
     ) -> Result<PermissionOutcome, PermissionAbort> {
         match result {
             // A policy-rule allow may itself carry a rewritten input — surface it
@@ -1200,13 +1279,17 @@ impl PolicyPermissionGate {
                 // Auto mode re-allows the tool, the 2.1.207 regression 211/215
                 // removed.
                 let fallback_decision_reason = if !ctx.hook_ask_floor {
-                    match self.auto_mode_classifier_result(
-                        mode,
-                        reason,
-                        name,
-                        input,
-                        ctx.is_non_interactive_session,
-                    )? {
+                    match self
+                        .auto_mode_classifier_result(
+                            mode,
+                            reason,
+                            name,
+                            input,
+                            ctx.is_non_interactive_session,
+                            accept_edits_fast_path,
+                        )
+                        .await?
+                    {
                         AutoModeClassifierResult::Classified(classified) => {
                             return Ok(self.classified_result_to_outcome(classified, name));
                         }
@@ -1304,17 +1387,19 @@ impl PolicyPermissionGate {
     /// The turn loop uses this to fire the source-gated permission hooks
     /// (`PermissionRequest` on `Ask`, `PermissionDenied` on a classifier `Deny`)
     /// before delegating to the transport. See [`PermissionGate::resolve_detailed`].
-    fn resolve_with_mode(
+    async fn resolve_with_mode(
         &self,
         mode: PermissionMode,
         result: PermissionResult,
         name: &str,
         input: &Value,
         is_non_interactive_session: bool,
+        accept_edits_fast_path: &(dyn Fn() -> bool + Sync),
     ) -> Result<PermissionResolution, PermissionAbort> {
         match result {
             PermissionResult::Allow { ref reason, .. } => Ok(PermissionResolution::Allow {
                 rule_source: rule_settings_source(reason),
+                classifier_approved: matches!(reason, PermissionDecisionReason::ClassifierApproved { .. }),
             }),
             PermissionResult::Deny {
                 reason,
@@ -1339,21 +1424,27 @@ impl PolicyPermissionGate {
                 content_blocks: Vec::new(),
             }),
             PermissionResult::Ask { ref reason, .. } => {
-                match self.auto_mode_classifier_result(
-                    mode,
-                    reason,
-                    name,
-                    input,
-                    is_non_interactive_session,
-                )? {
+                match self
+                    .auto_mode_classifier_result(
+                        mode,
+                        reason,
+                        name,
+                        input,
+                        is_non_interactive_session,
+                        accept_edits_fast_path,
+                    )
+                    .await?
+                {
                     AutoModeClassifierResult::Classified(classified) => {
-                        return self.resolve_with_mode(
+                        return Box::pin(self.resolve_with_mode(
                             mode,
                             classified,
                             name,
                             input,
                             is_non_interactive_session,
-                        );
+                            accept_edits_fast_path,
+                        ))
+                        .await;
                     }
                     AutoModeClassifierResult::PromptFallback { decision_reason } => {
                         return Ok(PermissionResolution::AskWithContext {
@@ -1366,7 +1457,7 @@ impl PolicyPermissionGate {
                 if read_only_default_auto_allows(name, reason, mode) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allowed, no prompt. No rule matched, so no scope.
-                    Ok(PermissionResolution::Allow { rule_source: None })
+                    Ok(PermissionResolution::Allow { rule_source: None, classifier_approved: false })
                 } else {
                     // A would-be prompt (a mutating tool, OR an explicit `ask`
                     // rule on a read-only tool): the turn loop fires
@@ -1377,13 +1468,14 @@ impl PolicyPermissionGate {
         }
     }
 
-    fn auto_mode_classifier_result(
+    async fn auto_mode_classifier_result(
         &self,
         mode: PermissionMode,
         reason: &PermissionDecisionReason,
         name: &str,
         input: &Value,
         is_non_interactive_session: bool,
+        accept_edits_fast_path: &(dyn Fn() -> bool + Sync),
     ) -> Result<AutoModeClassifierResult, PermissionAbort> {
         if mode != PermissionMode::Auto
             || !crate::classifier::is_classifier_permissions_enabled()
@@ -1401,6 +1493,65 @@ impl PolicyPermissionGate {
                 return Ok(AutoModeClassifierResult::NoDecision);
             }
         }
+        // `dKo` runs the acceptEdits SIMULATION before the safe allowlist; keep
+        // that order so the telemetry reason a future port emits is the one
+        // upstream emits. See [`Self::accept_edits_fast_path`].
+        // Evaluated HERE, not at the call sites: the probe is a full second
+        // policy walk (clone the live policy, re-authorize under `AcceptEdits`),
+        // and every caller reaches this method on every check in every mode.
+        // Passing it by value ran that walk for Default/Plan/acceptEdits/bypass/
+        // dontAsk too, and inside Auto for calls that had already resolved to
+        // Allow or Deny. Behind `&dyn Fn()` it runs only where `dKo` runs it:
+        // an Auto-mode `ask` that the classifier is about to judge.
+        if accept_edits_fast_path() {
+            self.record_auto_mode_non_deny(mode);
+            tracing::debug!(
+                target: "permission",
+                "Skipping auto mode classifier for {name}: would be allowed in acceptEdits mode"
+            );
+            return Ok(AutoModeClassifierResult::Classified(
+                PermissionResult::Allow {
+                    reason: PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Auto,
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: PermissionMetadata::default(),
+                },
+            ));
+        }
+        // `dKo`'s safe-allowlist FAST PATH, which runs BEFORE the classifier:
+        //
+        // ```js
+        // if(Xn===void 0&&Pe===void 0&&!Le&&Sft(e.name,n)){
+        //   t(`Skipping auto mode classifier for ${e.name}: tool is on the safe allowlist`),
+        //   …De({updatedInput:M.updatedInput??n,decisionReason:{type:"mode",mode:"auto"}})}
+        // ```
+        //
+        // `Sft` is [`crate::mode_policy::is_auto_mode_safe_tool`]. The three
+        // guards upstream ANDs in are all structurally absent here: `Xn` is a
+        // forced Chrome navigation, `Pe` is `classifierOnly()` (no port tool
+        // declares it), and `Le` is a `sandboxNetworkLists` decision reason —
+        // none of which this build can produce, so the predicate reduces to
+        // `Sft` alone. Upstream also resets the consecutive-denial counter here
+        // (`if(!Ame(v))ZJ(v,D6)`), which is [`Self::record_auto_mode_non_deny`].
+        if crate::mode_policy::is_auto_mode_safe_tool(name) {
+            self.record_auto_mode_non_deny(mode);
+            tracing::debug!(
+                target: "permission",
+                "Skipping auto mode classifier for {name}: tool is on the safe allowlist"
+            );
+            return Ok(AutoModeClassifierResult::Classified(
+                PermissionResult::Allow {
+                    reason: PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Auto,
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: PermissionMetadata::default(),
+                },
+            ));
+        }
         // SH-01 — the auto-mode classifier is the DESTINATION for every
         // `classifierContext` a `PostToolUse` hook attached (oracle 2.1.238
         // @ 296466460 / 296974134). The hooks executor publishes them to
@@ -1408,8 +1559,79 @@ impl PolicyPermissionGate {
         // to the classifier. Without this read the whole hook-side pipeline
         // would be a parse with no consumer.
         let host_context = crate::host_context::store().snapshot();
-        let classified =
+        let mut classified =
             crate::classifier::classify_tool_call_with_host_context(name, input, &host_context);
+        // `dKo`'s terminal step: everything that survived the fast paths is
+        // judged by the two-stage auto-mode classifier
+        // (`Yn = await <classifier>`), NOT by a local table. This port owns the
+        // whole classifier — the bundled 2.1.270 system prompt, the fast/thinking
+        // stages and the transcript renderer all live in
+        // [`crate::loop_llm`] + `orchestrator::loop_permission_classifier` — but
+        // it used to be reachable for exactly three tool names
+        // (`CronCreate` / `ScheduleWakeup` / `Monitor`), a leftover from the
+        // batch that introduced it for the `/loop` tools. Every other tool fell
+        // through to the offline `classify_tool_call` table, whose `Pass` arm is
+        // a PROMPT: 23 of 50 ordinary development shell commands raised a
+        // permission request in Auto mode, which is the whole complaint about
+        // Auto mode prompting on everything.
+        //
+        // The deterministic table is kept AHEAD of the classifier, where it now
+        // plays the role of upstream's remaining fast paths: an `Allow` verdict
+        // (read-only command, local operation, in-tree file mutation) is
+        // answered without paying a round-trip, exactly as `Sft` above is.
+        // Anything else — `Pass` or a local `Deny` — is the classifier's call,
+        // matching `dKo`, which has no local deny list at all.
+        //
+        // When no classifier is bound (a host that never filled
+        // `loop_classifier_handle`, e.g. a bare `PolicyPermissionGate` in a
+        // test) the local verdict stands, so those hosts keep today's behavior
+        // instead of silently losing the deny side.
+        let already_allowed = matches!(classified.verdict, AutoModeClassifierVerdict::Allow { .. });
+        // A HARD deny is a boundary, not an opinion: `classify_tool_call_with_host_context`
+        // documents that host context "still never lifts a HARD BLOCK boundary", and the
+        // same has to hold for the LLM stage — otherwise `hard_shell_denial`'s
+        // exfiltration/persistence list is advisory and a model answer can wave it through.
+        let hard_denied = matches!(
+            classified.verdict,
+            AutoModeClassifierVerdict::Deny { hard: true, .. }
+        );
+        if !already_allowed && !hard_denied {
+            if let Some(classifier) = self.loop_classifier.get() {
+                let deny_rules = {
+                    let live = self.live_state.read().unwrap_or_else(|e| e.into_inner());
+                    let mut sources: Vec<_> = live.deny_rules.iter().collect();
+                    sources.sort_by_key(|(source, _)| std::cmp::Reverse(source.priority()));
+                    let mut rules = Vec::new();
+                    for (source, entries) in sources {
+                        if matches!(
+                            source,
+                            PermissionRuleSource::Command | PermissionRuleSource::ToolsNarrowing
+                        ) {
+                            continue;
+                        }
+                        for entry in entries {
+                            if entry
+                                .value
+                                .rule_content
+                                .as_deref()
+                                .is_some_and(|content| content.starts_with("prompt:"))
+                            {
+                                continue;
+                            }
+                            let rule = entry.value.to_rule_string();
+                            if !rules.contains(&rule) {
+                                rules.push(rule);
+                            }
+                        }
+                    }
+                    rules
+                };
+                classified.verdict = classifier
+                    .classify(name, input, &host_context, &deny_rules)
+                    .await;
+                classified.host_context_is_inert_for_this_verdict = false;
+            }
+        }
         if !host_context.is_empty() {
             tracing::debug!(
                 target: "permission",
@@ -1988,8 +2210,10 @@ impl PermissionGate for PolicyPermissionGate {
             .unwrap_or_else(|| self.effective_mode_for_tool(name));
         let result =
             self.authorize_with_layers(name, input, mode, ctx.workspace_lease_token, &folded);
-        self.decide_outcome_with_context(mode, result, name, input, ctx)
-            .await
+        self.decide_outcome_with_context(mode, result, name, input, ctx, &|| {
+            self.accept_edits_fast_path(name, input, &folded, ctx.workspace_lease_token)
+        })
+        .await
     }
 
     fn apply_permission_updates(&self, updates: &[Value]) {
@@ -2198,7 +2422,11 @@ impl PermissionGate for PolicyPermissionGate {
             name,
             input,
             ctx.is_non_interactive_session || folded.should_avoid_permission_prompts,
+            // `dKo` guards the acceptEdits simulation with `!zn`, i.e. NOT in
+            // plan mode. This surface is plan mode by construction.
+            &|| false,
         )
+        .await
     }
 
     async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
@@ -2206,7 +2434,12 @@ impl PermissionGate for PolicyPermissionGate {
         // so the turn loop can read the decision source (and an about-to-ask) and
         // fire PermissionRequest / PermissionDenied before the prompt resolves.
         let (mode, result) = self.effective_authorize(name, input);
-        match self.resolve_with_mode(mode, result, name, input, false) {
+        match self
+            .resolve_with_mode(mode, result, name, input, false, &|| {
+                self.accept_edits_fast_path(name, input, &FoldedPermissionContext::default(), None)
+            })
+            .await
+        {
             Ok(resolution) => resolution,
             Err(abort) => PermissionResolution::Deny {
                 reason: abort.message,
@@ -2243,7 +2476,9 @@ impl PermissionGate for PolicyPermissionGate {
             name,
             input,
             ctx.is_non_interactive_session || folded.should_avoid_permission_prompts,
+            &|| self.accept_edits_fast_path(name, input, &folded, ctx.workspace_lease_token),
         )
+        .await
     }
 
     /// Surface the wrapped policy's TOOL-WIDE deny-rule names so the orchestrator
@@ -2942,28 +3177,48 @@ mod task_pause_tests {
             PermissionDecision::Allow
         }
     }
-    fn fixture(mode: PermissionMode) -> (PolicyPermissionGate, PermissionCheckContext, Arc<AtomicU64>) {
+    fn fixture(
+        mode: PermissionMode,
+    ) -> (PolicyPermissionGate, PermissionCheckContext, Arc<AtomicU64>) {
         let rules = crate::loader::permission_rules_from_settings_json(
-            r#"{"permissions":{}}"#, PermissionRuleSource::LocalSettings,
-        ).unwrap();
+            r#"{"permissions":{}}"#,
+            PermissionRuleSource::LocalSettings,
+        )
+        .unwrap();
         let total = Arc::new(AtomicU64::new(0));
         let sink = total.clone();
         let ctx = PermissionCheckContext {
-            pause_observer: Some(platform_api::permission_gate::PermissionPauseObserver::new(move |ms| {
-                sink.fetch_add(ms, Ordering::SeqCst);
-            })),
+            pause_observer: Some(platform_api::permission_gate::PermissionPauseObserver::new(
+                move |ms| {
+                    sink.fetch_add(ms, Ordering::SeqCst);
+                },
+            )),
             ..Default::default()
         };
-        (PolicyPermissionGate::new(Arc::new(PermissionPolicy::from_rules(mode, rules)), Arc::new(Prompt)), ctx, total)
+        (
+            PolicyPermissionGate::new(
+                Arc::new(PermissionPolicy::from_rules(mode, rules)),
+                Arc::new(Prompt),
+            ),
+            ctx,
+            total,
+        )
     }
 
     #[tokio::test]
     async fn task_pause_records_real_ask_but_not_policy_allow() {
         let (gate, ctx, total) = fixture(PermissionMode::Default);
-        gate.ask_via_transport("Bash", &serde_json::json!({"command":"echo probe"}), &ctx).await;
+        gate.ask_via_transport("Bash", &serde_json::json!({"command":"echo probe"}), &ctx)
+            .await;
         assert!(total.load(Ordering::SeqCst) >= 20);
         let (gate, ctx, total) = fixture(PermissionMode::BypassPermissions);
-        gate.check_with_context_or_abort("Bash", &serde_json::json!({"command":"echo probe"}), &ctx).await.unwrap();
+        gate.check_with_context_or_abort(
+            "Bash",
+            &serde_json::json!({"command":"echo probe"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         assert_eq!(total.load(Ordering::SeqCst), 0);
     }
 
@@ -2972,7 +3227,11 @@ mod task_pause_tests {
         let (gate, ctx, total) = fixture(PermissionMode::Default);
         let input = serde_json::json!({"command":"echo probe"});
         let pending = gate.ask_via_transport("Bash", &input, &ctx);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), pending).await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), pending)
+                .await
+                .is_err()
+        );
         assert!(total.load(Ordering::SeqCst) >= 5);
     }
 }

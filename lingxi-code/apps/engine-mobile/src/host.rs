@@ -3710,6 +3710,7 @@ async fn build_mobile_inner_with_ask(
     // filled once the orchestrator (owner of the live `session.model`) exists, so
     // the live `set_permission_mode` auto gate evaluates `dUe(wi())` against the
     // CURRENT model — mirrors the desktop composition root.
+    let mut loop_classifier_cell = None;
     let mut live_model_provider_cell: Option<
         Arc<std::sync::OnceLock<permission::LiveModelProvider>>,
     > = None;
@@ -4012,6 +4013,7 @@ async fn build_mobile_inner_with_ask(
         }
         let enforcing = Arc::new(gate);
         live_model_provider_cell = Some(enforcing.live_model_provider_handle());
+        loop_classifier_cell = Some(enforcing.loop_classifier_handle());
         (enforcing.clone(), enforcing)
     };
 
@@ -5248,6 +5250,9 @@ async fn build_mobile_inner_with_ask(
     // runtime switch to `auto` on an auto-unsupported model is rejected
     // (`dUe(wi())` — claude-code `Nle`). Non-blocking `try_lock`; a contended read
     // returns `None` and the model check is skipped (fail-open). Desktop mirror.
+    if let Some(cell) = loop_classifier_cell {
+        let _ = cell.set(Arc::new(orchestrator::loop_permission_classifier::SessionLoopClassifier::new(&orch, api_service.clone())));
+    }
     if let Some(cell) = live_model_provider_cell.as_ref() {
         let session = orch.session();
         let model_provider_profiles = model_provider_profiles.clone();

@@ -12725,6 +12725,7 @@ pub async fn build(
     // against the CURRENT model (mutated by `/model` switches / resume), mirroring
     // claude-code `Nle` reading `wi()`. `None` when enforcement is off (no
     // `PolicyPermissionGate` is built, so there is no live surface to gate).
+    let mut loop_classifier_cell = None;
     let mut live_model_provider_cell: Option<
         Arc<std::sync::OnceLock<permission::LiveModelProvider>>,
     > = None;
@@ -12962,6 +12963,7 @@ pub async fn build(
         // the orchestrator exists (below).
         let enforcing = permission::PolicyPermissionGate::new(policy, perms);
         live_model_provider_cell = Some(enforcing.live_model_provider_handle());
+        loop_classifier_cell = Some(enforcing.loop_classifier_handle());
         Arc::new(enforcing)
     } else {
         // Enforcement off: the settings `additionalDirectories` tiers are not
@@ -15490,6 +15492,9 @@ pub async fn build(
     // `/model` to an auto-unsupported model is rejected (`dUe(wi())` — claude-code
     // `Nle`) instead of silently accepted. Non-blocking read (`try_lock`); a
     // contended read returns `None` and the model check is skipped (fail-open).
+    if let Some(cell) = loop_classifier_cell {
+        let _ = cell.set(Arc::new(orchestrator::loop_permission_classifier::SessionLoopClassifier::new(&orch, api_service.clone())));
+    }
     if let Some(cell) = live_model_provider_cell.as_ref() {
         let session = orch.session();
         let model_providers = model_providers.clone();

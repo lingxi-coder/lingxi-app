@@ -76,14 +76,14 @@ struct ToolCallView: View {
     private var compactHeader: some View {
         HStack(spacing: 8) {
             LXIcon(name: ToolDisplayText.icon(header: trace.header, tool: trace.tool), size: 18,
-                   color: trace.status == .failed ? t.danger : (trace.status == .running ? t.accent : t.text3), stroke: 1.8)
+                   color: trace.status == .failed ? t.danger : t.text3, stroke: 1.8)
                 .accessibilityIdentifier("conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)")
             Text(compactSummary)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(trace.status == .failed ? t.danger : t.text3)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.accent)
+                .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.text)
             Spacer(minLength: 0)
             if isCollapsible {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
@@ -110,14 +110,14 @@ struct ToolCallView: View {
             LXIcon(
                 name: ToolDisplayText.icon(header: trace.header, tool: trace.tool),
                 size: 18,
-                color: ToolDisplayText.iconColor(header: trace.header, tool: trace.tool, palette: t),
+                color: trace.status == .failed ? t.danger : t.text3,
                 stroke: 1.65
             )
             .accessibilityIdentifier(
                 "conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)"
             )
             titleText
-                .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.accent)
+                .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.text)
             Spacer(minLength: 4)
             if !compact || trace.status == .failed || trace.status == .cancelled {
                 Text(trace.status.label)
@@ -267,7 +267,7 @@ struct ToolCallView: View {
 
     private var statusColor: Color {
         switch trace.status {
-        case .running: return t.accent
+        case .running: return t.text3
         case .completed: return t.ok
         case .failed: return t.danger
         case .cancelled, .unknown: return t.text3
@@ -369,15 +369,7 @@ enum ToolDisplayText {
     }
 
     static func iconColor(header: ConversationToolHeader?, tool: String, palette: Palette) -> Color {
-        switch icon(header: header, tool: tool) {
-        case .edit, .pencil, .plus: return palette.accent2
-        case .search, .book, .bookOpen, .listFiles: return palette.accent
-        case .terminal: return palette.text3
-        case .globe: return palette.accent3
-        case .skill, .sparkles, .check, .listChecks: return palette.ok
-        case .stop, .squareStop, .warning: return palette.danger
-        default: return palette.text3
-        }
+        palette.text3
     }
 
     /// The localized verb, or the engine's override when it set one.

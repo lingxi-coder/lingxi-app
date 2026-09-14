@@ -397,7 +397,7 @@ internal fun toolCallStatusColor(status: AgentToolStatus): Color {
     val t = LingXiTheme.palette
     return when (status) {
         AgentToolStatus.Unknown -> t.text4
-        AgentToolStatus.Running -> t.accent
+        AgentToolStatus.Running -> t.text3
         AgentToolStatus.Completed -> t.ok
         AgentToolStatus.Failed -> t.danger
         AgentToolStatus.Cancelled -> t.text4

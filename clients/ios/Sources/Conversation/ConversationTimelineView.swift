@@ -193,7 +193,7 @@ private struct ConversationToolBatchRow: View {
                             .foregroundStyle(t.text4)
                             .lineLimit(1)
                     }
-                    .runtimeTextSweep(isActive: containsRunningTool, highlightColor: t.accent)
+                    .runtimeTextSweep(isActive: containsRunningTool, highlightColor: t.text)
                     if let terminalStatus {
                         Text(terminalStatus.label)
                             .font(.system(size: 10.5, weight: .medium))

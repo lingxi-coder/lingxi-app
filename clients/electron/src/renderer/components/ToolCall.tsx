@@ -169,10 +169,10 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
         padding: '2px 0', position: 'relative',
         '--tool-label-color': item.status === 'error' ? t.danger : t.text3,
         '--tool-hover-color': item.status === 'error' ? t.danger : t.text,
-        '--tool-focus-color': item.status === 'error' ? t.danger : t.accent,
-        '--tool-icon-color': item.status === 'error' ? t.danger : item.status === 'running' ? t.accent : t.text3,
+        '--tool-focus-color': item.status === 'error' ? t.danger : t.text,
+        '--tool-icon-color': item.status === 'error' ? t.danger : t.text3,
         '--sweep-base': item.status === 'error' ? t.danger : t.text3,
-        '--sweep-highlight': item.status === 'error' ? t.danger : t.accent,
+        '--sweep-highlight': item.status === 'error' ? t.danger : t.text,
       } as CSSProperties}
     >
       {/* The call and its response share one Thought-like disclosure row. */}

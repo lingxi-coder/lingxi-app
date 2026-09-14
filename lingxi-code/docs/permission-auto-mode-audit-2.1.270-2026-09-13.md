@@ -535,13 +535,88 @@ The prepend itself already has its home: `tools/agent/src/agent.rs` builds
 `content_texts` and unshifts the max-turns harness note with
 `content_texts.insert(0, …)`, which is exactly `[{type:"text",text:warning},...content]`.
 
+---
+
+## 9. The bundled prompt: what is verifiable, and what is not
+
+`permission/src/bundled/auto_mode_270_system.txt` (129 KB) decides every
+auto-mode verdict this port makes. It arrived with the classifier substrate in
+`af24c7042` carrying **no capture note**, and its name asserts more than the
+binary can confirm.
+
+Measured against 2.1.270 — the 207 MB Mach-O and all 1697 `// @bun @bytecode`
+chunks, with `\uXXXX` / `\xXX` escapes decoded before comparing:
+
+| | lines |
+|---|---|
+| total lines in the bundled prompt | 294 |
+| comparable (≥40 chars, ignoring short/blank) | 218 |
+| **present in the binary byte-for-byte** | **85** |
+| **absent from the binary entirely** | **133** |
+
+The 85 are the whole framing: the role paragraph, the transcript / `{"meta":…}`
+/ outcome-line / host-context reading rules, and the numbered user-intent rules.
+
+The 133 are the HARD BLOCK list, the SOFT BLOCK list, the ALLOW exceptions, the
+Definitions section, and the Environment slot defaults — i.e. the rules
+themselves. They are not escaped, not compressed, and not in some chunk the
+split missed: `grep -a -F` straight over the 207 MB executable finds
+
+```
+Logging/Audit Tampering        0        You are a security monitor…   1
+Toolchain Bootstrap            0        Data Exfiltration             3
+Unverifiable Deletion Target   0        HARD BLOCK                    9
+sh.rustup.rs                   0        Err on the side of blocking   3
+```
+
+— the controls hit, the rule bodies do not.
+
+**So 2.1.270 does not ship its rule bodies locally.** It assembles the prompt
+from a policy it receives, which is what the `<user_*_to_replace>` slot
+machinery and `_mt`'s `<cc_automode_permissions>` wrapper exist for. This port
+has no such server, so bundling a policy is not optional — but the bundled
+rules cannot be called byte-aligned with 2.1.270, because 2.1.270 has no local
+bytes to align them to. That is a **divergence by necessity**, not a defect, and
+the only thing wrong with it was that nothing said so.
+
+Also corrected here: `default_system_is_byte_identical_and_local_slots_preserve_defaults`
+read as a claim about the oracle and is not one — it compares the template's
+default rendering against the shipped default, both of which live in this repo.
+Renamed, and joined by `oracle_verified_framing_is_still_in_the_bundled_prompt`,
+which pins six framing anchors that occur exactly once in the raw executable and
+exactly once in the bundled file. The rule bodies deliberately get no anchor:
+there is nothing to pin them to, and copying one out of the file under test is
+the tautology the test exists to avoid.
+
+### Method notes — three instrument failures on the way to those numbers
+
+Worth recording, because each one produced a confident wrong number first:
+
+1. **Escapes.** A first pass decoded only `\n` and reported 6.9% coverage. The
+   binary stores every em dash as `\u2014`; nearly every prose line in this
+   prompt contains one. Decoding `\uXXXX` / `\xXX` moved it to 39%.
+2. **Haystack too small.** Searching only the chunk that holds `dKo` looked like
+   it might be the cause of the remaining misses. Re-running across all 1697
+   chunks gave the identical 39%, which is what made the result trustworthy —
+   the comparator printed its own coverage counts both times.
+3. **Render-vs-source.** Some misses were `- **Slot**: value` lines that the
+   binary stores without the list marker. A probe that strips `- ` and falls
+   back to a 90-char middle slice moved exactly one line, which is what ruled
+   this out as the explanation rather than assuming it either way.
+
+The rule-body absence survived all three, and then survived a fourth check
+against the raw executable with no extraction step at all.
+
 ## Test state
 
-`permission` + `tool-ui`: **1822 passed / 0 failed** (14 binaries, `--all-features`).
-Workspace `cargo build --workspace --all-features --tests`: clean.
+`cargo test -p permission --all-features`: **1640 unit + 22 auto-mode-scope + 10
+further binaries, 0 failed.** `cargo test -p tool-agent --all-features`: 178
+passed / 0 failed.
 
-New: `permission/tests/auto_mode_classifier_scope.rs` (13 tests). Every guard in
-§1 and §2 is red-proofed by planting the old behavior back:
+`permission/tests/auto_mode_classifier_scope.rs` now holds 22 tests. Every guard
+across §1, §2, §7 is red-proofed by planting the old behavior back and checking
+that the failure NAMES the right test — a guard whose plant survives is not a
+guard:
 
 | plant | goes red |
 |---|---|
@@ -550,6 +625,16 @@ New: `permission/tests/auto_mode_classifier_scope.rs` (13 tests). Every guard in
 | disable the acceptEdits probe | `accept_edits_simulation_answers_edits_and_file_shell_commands` |
 | drop `apply_auto_mode_restrictions` from `rule_is_available_in_mode` | `…does_not_honour_a_suspended_dangerous_allow_rule` |
 | drop it from the loop-tool carve-out | 2 tests |
+| put `record_auto_deny` + `trip` back in the `NoVerdict` arm | `a_classifier_that_gives_no_verdict_never_trips_the_denial_breaker` |
+| restore `if ctx.hook_ask_floor { None } else { … }` around the classifier call | 2 hook-floor tests |
+| return a fail-closed deny from the `TranscriptTooLong` arm | 3 transcript tests |
+| route the `TranscriptTooLong` transport error through `unreachable_classifier` | `a_context_overflow_is_a_transcript_too_long_not_an_outage` |
+| edit one framing sentence in the bundled prompt | `oracle_verified_framing_is_still_in_the_bundled_prompt` (naming the anchor) |
+
+Two premise tests carry their own weight, because "it did not fire" is only
+evidence if the mechanism could have fired: `a_classifier_that_blocks_does_trip_the_denial_breaker`
+proves the counter is live on that path, and `a_hook_ask_floor_still_discards_a_classifier_allow`
+proves the classifier ran under the floor at all.
 
 ## Two red tests that are NOT from this work
 

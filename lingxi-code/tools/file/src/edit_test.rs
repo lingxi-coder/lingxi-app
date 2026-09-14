@@ -160,10 +160,33 @@ mod tests {
     /// call succeeds against the current content, appends the modified-on-disk
     /// note, and marks `staleRecovered: true` (conditional spread). With the
     /// flag off (default) the same setup yields the stale J2n error.
+
+    /// The `kq` probe for these tests. The real global is a `OnceLock`, so it can be
+    /// published only once per test binary; this one reads a switch the test flips,
+    /// which is how a single end-to-end test can exercise BOTH answers.
+    static KQ_ANSWER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    
+    struct SwitchableReadAutoAllow;
+    
+    impl platform_api::read_auto_allow::ReadAutoAllow for SwitchableReadAutoAllow {
+        fn read_auto_allowed(&self, _path: &str) -> bool {
+            KQ_ANSWER.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    
+    fn set_kq_answer(allowed: bool) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            platform_api::read_auto_allow::set_read_auto_allow_probe(std::sync::Arc::new(
+                SwitchableReadAutoAllow,
+            ));
+        });
+        KQ_ANSWER.store(allowed, std::sync::atomic::Ordering::SeqCst);
+    }
+    
     #[tokio::test]
-    async fn stale_recovery_end_to_end_flag_on_vs_off() {
-        const FLAG: &str = "tengu_cedar_sundial";
-        for flag_on in [false, true] {
+    async fn stale_recovery_end_to_end_depends_on_kq() {
+        for read_auto_allowed in [false, true] {
             let tmp = TempDir::new().unwrap();
             let target = tmp.path().join("a.txt");
             std::fs::write(&target, "hello world").unwrap();
@@ -176,11 +199,10 @@ mod tests {
             filetime::set_file_mtime(&target, filetime::FileTime::from_system_time(future))
                 .unwrap();
 
-            if flag_on {
-                telemetry::feature_flags::test_set_flag(FLAG, true);
-            } else {
-                telemetry::feature_flags::test_clear_flag(FLAG);
-            }
+            // The ONLY thing that differs between the two halves is `kq` —
+            // whether the model could have read this file. `GKe` applies in
+            // both.
+            set_kq_answer(read_auto_allowed);
             let tool = FileEditTool::new(ctx);
             let outcome = tool
                 .call(
@@ -193,10 +215,10 @@ mod tests {
                     fresh_tx(),
                 )
                 .await;
-            telemetry::feature_flags::test_clear_flag(FLAG);
 
-            if flag_on {
-                let result = outcome.expect("flag-on stale edit that applies must recover");
+            if read_auto_allowed {
+                let result =
+                    outcome.expect("a readable path whose edit applies must recover");
                 // Applied against the CURRENT content.
                 assert_eq!(
                     std::fs::read_to_string(&target).unwrap(),
@@ -232,23 +254,15 @@ mod tests {
     }
 
     #[test]
-    fn stale_edit_applies_is_flag_gated_and_mirrors_zvi() {
-        const FLAG: &str = "tengu_cedar_sundial";
-        // The flag graduated upstream; this gate now stands in for the missing
-        // `kq` conjunct and fails safe. Setting it here is how the ported `GKe`
-        // semantics stay under test while production keeps refusing — see
-        // `stale_edit_applies`' note.
-        // Default (gate shut): never recovers, even for a clean unique match.
-        telemetry::feature_flags::test_clear_flag(FLAG);
-        assert!(!stale_edit_applies("alpha beta", "alpha", false));
-        // Flag on: ZVi semantics.
-        telemetry::feature_flags::test_set_flag(FLAG, true);
+    fn stale_edit_applies_mirrors_gke() {
+        // Now the PURE `GKe` predicate: no flag, and no permission question.
+        // Whether the model was allowed to read the file is oracle `kq`,
+        // applied separately at the call site.
         assert!(stale_edit_applies("alpha beta", "alpha", false)); // applies
         assert!(!stale_edit_applies("alpha beta", "", false)); // "" → no_match
         assert!(!stale_edit_applies("alpha beta", "gamma", false)); // no_match
         assert!(!stale_edit_applies("dup x dup", "dup", false)); // ambiguous
         assert!(stale_edit_applies("dup x dup", "dup", true)); // replace_all ⇒ applies
-        telemetry::feature_flags::test_clear_flag(FLAG);
     }
 
     #[test]

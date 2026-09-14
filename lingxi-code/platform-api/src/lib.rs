@@ -86,6 +86,7 @@ pub mod notification;
 pub mod orchestrator;
 pub mod panel_pool;
 pub mod parked_agent_store;
+pub mod read_auto_allow;
 pub mod permission_gate;
 pub mod plan_files;
 pub mod plan_slug;

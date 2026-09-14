@@ -174,32 +174,17 @@ pub const STALE_RECOVERED_NOTE: &str = " (note: the file had been modified on di
 /// `replace_all`. Anything else keeps the stale error. That much is ported and
 /// tested below.
 ///
-/// ⚠️ **`tengu_cedar_sundial` GRADUATED and this gate is now the only thing
-/// holding the feature shut.** The flag does not appear anywhere in the 2.1.270
-/// binary (checked against a working instrument: 2347 distinct `tengu_` names
-/// are present, this one is not), and the decision function `Mjs`
-/// (`src_169588164.js`) calls `GKe(...)==="applies"` with no flag in sight. So
-/// the note above about "default-OFF ⇒ byte-identical behavior" stopped being
-/// true: upstream recovers, this port always refuses.
+/// `tengu_cedar_sundial` GRADUATED — it appears nowhere in the 2.1.270 binary,
+/// and `Mjs` calls `GKe(...)==="applies"` with no flag. This is that pure
+/// predicate. The second half of `Mjs`'s condition — `&& !readNotAutoAllowed()`,
+/// oracle `kq` — is applied at the CALL SITE, where the path is in hand; see
+/// [`platform_api::read_auto_allow`].
 ///
-/// It stays shut anyway, deliberately, because `Mjs`'s condition is
-/// `GKe(...)==="applies" && !readNotAutoAllowed()`, and that second conjunct is
-/// oracle `kq(tools, path, permissions)` — "Read was available and permitted
-/// for this path" — which has no port equivalent (`ToolUseContext` carries
-/// neither the tool list nor a permission handle). Dropping the gate without it
-/// would let an Edit recover on a file the model was never allowed to Read,
-/// i.e. fail OPEN on a data-modifying tool. Refusing is the fail-safe side.
-///
-/// This is the SAME missing conjunct that blocks TL-2, so one piece of plumbing
-/// unblocks both. Until then the `GKe` logic below is correct, tested, and
-/// unreachable in production — which is a known state, not an oversight.
+/// Keeping them separate matters: `GKe` asks whether the edit still applies,
+/// `kq` whether the model was ever allowed to READ the file. Folded together,
+/// a failing test could not say which question was answered wrongly.
 #[must_use]
 pub fn stale_edit_applies(content: &str, old_string: &str, replace_all: bool) -> bool {
-    if !telemetry::flag_bool("tengu_cedar_sundial", false) {
-        // Not upstream's gate any more (it has none) — see the note above: this
-        // stands in for the missing `kq` conjunct and fails SAFE.
-        return false;
-    }
     if old_string.is_empty() {
         return false; // ZVi: "" → no_match
     }
@@ -721,7 +706,19 @@ impl Tool for FileEditTool {
                         tool_api::tool_trait::ToolError::InvalidInput(m)
                             if m == crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR
                     );
-                    if is_stale_error && stale_edit_applies(&before, old_string, replace_all) {
+                    // `Mjs`: `GKe(...)==="applies" && !readNotAutoAllowed()`.
+                    // `kq` asks whether the model could ever have READ this
+                    // file — it holds a reader, and the path is readable under
+                    // the policy. Without it an Edit could recover a stale read
+                    // on a file the model was never allowed to see, i.e. a write
+                    // landing on unseen content. An un-wired host answers
+                    // `false` and simply keeps the stale error.
+                    if is_stale_error
+                        && platform_api::read_auto_allow::read_auto_allowed(
+                            &canon.to_string_lossy(),
+                        )
+                        && stale_edit_applies(&before, old_string, replace_all)
+                    {
                         stale_recovered = true;
                     } else {
                         self.emit_failed(&invocation_id, "stale_read").await;

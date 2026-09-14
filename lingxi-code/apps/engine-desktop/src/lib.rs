@@ -14890,6 +14890,17 @@ pub async fn build(
     tools_inner.refresh_tool_search_view();
 
     let tools = Arc::new(tools_inner);
+    // Oracle `kq` — publish the read-auto-allow probe now that BOTH inputs
+    // exist: the policy, and the FINAL tool list. Earlier means an unknown tool
+    // list (which the probe answers `false` for); later means after the file
+    // tools can already run. With no policy there is nothing to evaluate, so
+    // the probe stays unpublished and `read_auto_allowed` keeps answering
+    // `false` — the fail-safe answer.
+    if let Some(policy) = boot_permission_policy.clone() {
+        platform_api::read_auto_allow::set_read_auto_allow_probe(std::sync::Arc::new(
+            permission::read_auto_allow::PolicyReadAutoAllow::new(policy, tools.all_names()),
+        ));
+    }
     // The SAME registry the orchestrator dispatches through, kept for
     // `DesktopRuntime::tools` (the orchestrator takes ownership below).
     let runtime_tools = tools.clone();
@@ -27969,4 +27980,30 @@ pub fn supervisor_exit_sink(
         manager,
         path.to_path_buf(),
     ))
+}
+
+#[cfg(test)]
+mod read_auto_allow_wiring_tests {
+    /// Oracle `kq` is read by leaf file tools through a process-global probe, so
+    /// a root that never publishes one silently loses the whole stale-recovery
+    /// path — `read_auto_allowed` just answers `false` forever. The composition
+    /// needs a live policy and a built registry, neither unit-constructible
+    /// here, so pin it against this file's own source. The needle is assembled
+    /// at runtime so it cannot match the comment that explains it.
+    #[test]
+    fn this_root_publishes_the_read_auto_allow_probe() {
+        const SRC: &str = include_str!("lib.rs");
+        let publish = "set_read_auto_allow_prob".to_string() + "e(";
+        assert!(
+            SRC.contains(&publish),
+            "this root must publish the kq probe, or Edit can never recover a \
+             stale-but-clean edit"
+        );
+        let inputs = "PolicyReadAutoAllow::ne".to_string() + "w(policy, tools.all_names())";
+        assert!(
+            SRC.contains(&inputs),
+            "the probe must be built from the boot policy AND the final tool \
+             list — an unknown tool list answers false for everything"
+        );
+    }
 }

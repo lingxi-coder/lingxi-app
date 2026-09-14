@@ -4920,6 +4920,16 @@ async fn build_mobile_inner_with_ask(
     }
     let tools = Arc::new(tools);
 
+    // Oracle `kq` — same publication as the desktop root, at the same point:
+    // after the FINAL tool list exists and with the boot policy in hand. An
+    // unknown tool list or a missing policy leaves the probe unpublished, and
+    // `read_auto_allowed` then answers `false` for every path.
+    if let Some(policy) = boot_permission_policy.clone() {
+        platform_api::read_auto_allow::set_read_auto_allow_probe(Arc::new(
+            permission::read_auto_allow::PolicyReadAutoAllow::new(policy, tools.all_names()),
+        ));
+    }
+
     // MCP servers may change their tool catalog after initialization. Keep the
     // mobile ToolRegistry in sync with the same generation-checked refresh path
     // used by desktop; otherwise settings changes and list_changed events only
@@ -23078,6 +23088,32 @@ mod default_model_resolution_tests {
         assert_eq!(
             resolve_default_model_ref("anthropic/deepseek/deepseek-flash", &[]),
             ("anthropic/deepseek/deepseek-flash".to_string(), None)
+        );
+    }
+}
+
+#[cfg(test)]
+mod read_auto_allow_wiring_tests {
+    /// Oracle `kq` is read by leaf file tools through a process-global probe, so
+    /// a root that never publishes one silently loses the whole stale-recovery
+    /// path — `read_auto_allowed` just answers `false` forever. The composition
+    /// needs a live policy and a built registry, neither unit-constructible
+    /// here, so pin it against this file's own source. The needle is assembled
+    /// at runtime so it cannot match the comment that explains it.
+    #[test]
+    fn this_root_publishes_the_read_auto_allow_probe() {
+        const SRC: &str = include_str!("host.rs");
+        let publish = "set_read_auto_allow_prob".to_string() + "e(";
+        assert!(
+            SRC.contains(&publish),
+            "this root must publish the kq probe, or Edit can never recover a \
+             stale-but-clean edit"
+        );
+        let inputs = "PolicyReadAutoAllow::ne".to_string() + "w(policy, tools.all_names())";
+        assert!(
+            SRC.contains(&inputs),
+            "the probe must be built from the boot policy AND the final tool \
+             list — an unknown tool list answers false for everything"
         );
     }
 }

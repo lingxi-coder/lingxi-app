@@ -64,6 +64,7 @@ pub mod plan_files {
     };
 }
 pub mod persist;
+pub mod read_auto_allow;
 pub mod policy;
 pub mod policy_gate;
 pub mod powershell_containment;

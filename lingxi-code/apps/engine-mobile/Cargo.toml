@@ -50,6 +50,7 @@ uniffi = [
     "dep:sandbox",
     "dep:telemetry",
     "dep:platform-posix-minimal",
+    "dep:memory",
     # v3 Phase 1 (workflow-on-mobile)
     "dep:agent",
     "dep:tasks",
@@ -184,6 +185,9 @@ permission = { path = "../../permission", optional = true }
 sandbox = { path = "../../sandbox", optional = true }
 telemetry = { path = "../../telemetry", optional = true }
 platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
+# MEM-1 on mobile: `build_mobile_inner_with_ask` reads the same auto-memory gate
+# as desktop (`memory::auto_memory_enabled`) before wiring the memdir selector.
+memory = { path = "../../memory", optional = true }
 # P0.2 (mobile hook lifecycle): the real `HookExecutorImpl` + `HookRegistry` +
 # `parse_hooks_from_settings_json` loader the mobile composition root wires in
 # place of `noop_hook_executor()`. Engine-tier (no `apps/*` edge), optional +

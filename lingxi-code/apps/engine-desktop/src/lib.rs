@@ -7835,23 +7835,61 @@ pub fn new_live_sandbox_runner() -> Arc<dyn tool_api::SandboxRunner> {
     Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new())
 }
 
+/// `XV` — the name upstream's `mUe` puts on the synthetic tool call it hands
+/// the classifier for a sandboxed outbound connection.
+///
+/// It matters that this is the upstream spelling and not a local one: the
+/// classifier renders whatever name it is given straight into its prompt, and
+/// the bundled policy's rule — labelled `Sandbox Network Callback` — says in its
+/// body "A `SandboxNetworkAccess` action". A local name would ask the
+/// classifier to match a rule against a name the rule never mentions.
+const SANDBOX_NETWORK_TOOL: &str = "SandboxNetworkAccess";
+
 fn sandbox_network_ask_callback(
     permission_gate: Arc<dyn PermissionGate>,
 ) -> sandbox_runtime_runner::AskFn {
+    // `ive` — upstream memoises the verdict per `host:port`. Its ALLOW arm is
+    // keyed on a transcript watermark (`CLe`: message count + last uuid) and
+    // expires when the conversation moves on; its BLOCK arm is `reuse:"always"`
+    // and stands for the session; `unavailable` is never cached at all.
+    //
+    // This callback is handed only a host and a port, with no watermark to key
+    // an allow on, so only the arm that needs none is ported: a blocked host
+    // stays blocked without paying to ask again. Allows still pay every time,
+    // which is what this build did before — the subset can only ever be more
+    // conservative than upstream, never more permissive.
+    let blocked: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     Arc::new(move |host, port| {
         let permission_gate = Arc::clone(&permission_gate);
+        let blocked = Arc::clone(&blocked);
         let host = host.to_owned();
         Box::pin(async move {
+            // `${e}:${n??"*"}` — this callback's port is not optional, so the
+            // `*` arm has no counterpart.
+            let key = format!("{host}:{port}");
+            if blocked
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(&key)
+            {
+                return Ok(false);
+            }
             let input = serde_json::json!({
                 "host": host,
                 "port": port,
             });
-            Ok(matches!(
-                permission_gate
-                    .check("Sandbox Network Callback", &input)
-                    .await,
+            let allow = matches!(
+                permission_gate.check(SANDBOX_NETWORK_TOOL, &input).await,
                 platform_api::PermissionDecision::Allow
-            ))
+            );
+            if !allow {
+                blocked
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(key);
+            }
+            Ok(allow)
         })
     })
 }
@@ -16657,7 +16695,7 @@ mod tests {
     #[async_trait::async_trait]
     impl platform_api::PermissionGate for RecordingNetworkPermissionGate {
         async fn check(&self, name: &str, input: &Value) -> platform_api::PermissionDecision {
-            assert_eq!(name, "Sandbox Network Callback");
+            assert_eq!(name, "SandboxNetworkAccess");
             assert_eq!(input["host"], "api.example.test");
             assert_eq!(input["port"], 8443);
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -16688,6 +16726,42 @@ mod tests {
         let deny = sandbox_network_ask_callback(deny_gate.clone());
         assert!(!deny("api.example.test", 8443).await.unwrap());
         assert_eq!(deny_gate.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// `ive`'s `reuse:"always"` arm: a blocked host stays blocked for the
+    /// session without asking again. The ALLOW arm is deliberately NOT cached
+    /// here — upstream keys it on a transcript watermark this callback is not
+    /// given, and a cache without that key would keep saying yes after the
+    /// conversation moved on.
+    #[tokio::test]
+    async fn a_blocked_sandbox_host_is_not_asked_about_twice() {
+        let deny_gate = Arc::new(RecordingNetworkPermissionGate {
+            calls: AtomicUsize::new(0),
+            allow: false,
+        });
+        let deny = sandbox_network_ask_callback(deny_gate.clone());
+        for _ in 0..3 {
+            assert!(!deny("api.example.test", 8443).await.unwrap());
+        }
+        assert_eq!(
+            deny_gate.calls.load(Ordering::SeqCst),
+            1,
+            "a denied host:port is remembered"
+        );
+
+        let allow_gate = Arc::new(RecordingNetworkPermissionGate {
+            calls: AtomicUsize::new(0),
+            allow: true,
+        });
+        let allow = sandbox_network_ask_callback(allow_gate.clone());
+        for _ in 0..3 {
+            assert!(allow("api.example.test", 8443).await.unwrap());
+        }
+        assert_eq!(
+            allow_gate.calls.load(Ordering::SeqCst),
+            3,
+            "an allow is re-asked: there is no watermark to expire it on"
+        );
     }
 
     /// MEM-1 — a clean install must get auto-memory. claude-code's `dLt()` ends

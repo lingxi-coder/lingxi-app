@@ -20,6 +20,7 @@ import {
 interface MarkdownContentProps {
   text: string;
   trustedHtml?: boolean;
+  variant?: 'plan';
 }
 
 type MarkdownComponentProps = {
@@ -137,7 +138,14 @@ const components = {
     hr: ({ id }: MarkdownComponentProps) => <hr id={id} className="markdown-hr" />,
 } satisfies Components;
 
-export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false }: MarkdownContentProps) {
+const planComponents: Components = {
+  ...components,
+  h1: ({ children }) => <h1 style={{ margin: '0 0 12px', fontSize: 18, lineHeight: 1.45, fontWeight: 600 }}>{children}</h1>,
+  h2: ({ children }) => <h2 style={{ margin: '20px 0 0', fontSize: 16, lineHeight: 1.45, fontWeight: 600 }}>{children}</h2>,
+  h3: ({ children }) => <h3 style={{ margin: '16px 0 0', fontSize: 15, lineHeight: 1.45, fontWeight: 600 }}>{children}</h3>,
+};
+
+export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant }: MarkdownContentProps) {
   const t = useT();
   const instanceId = useId();
   const rehypePlugins = useMemo<PluggableList>(() => [
@@ -150,9 +158,9 @@ export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml
       children={parsed.source}
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
-      components={components}
+      components={variant === 'plan' ? planComponents : components}
     />
-  ), [parsed.source, rehypePlugins]);
+  ), [parsed.source, rehypePlugins, variant]);
   const variables = {
     display: 'grid', gap: 10, minWidth: 0,
     '--text': t.text,

@@ -1,3 +1,4 @@
+import { conversationPlans } from './bridge/planDocuments';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { useBridge } from './bridge/useBridge';
@@ -26,6 +27,8 @@ export function App() {
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
   const workspace = bridge.bootstrap?.workspace;
+  const planCalls = useMemo(() => conversationPlans(bridge.conversation.items, bridge.runtimeCenter.submittedPlanState.calls), [bridge.runtimeCenter.submittedPlanState.calls, bridge.conversation.items]);
+  const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
   const providerConfigured = Boolean(bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured));
   const ready = Boolean(
     bridge.hosted
@@ -85,7 +88,7 @@ export function App() {
             runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
             onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
           />
-          {!bridge.sessionLoading && <RuntimeCenterOverview bridge={bridge} />}
+          {!bridge.sessionLoading && <RuntimeCenterOverview bridge={planBridge} />}
           <ErrorBanner bridge={bridge} />
           {bridge.loading ? (
             <div role="status" style={{ flex: 1, display: 'grid', placeItems: 'center', color: palette.text3, fontSize: 13 }}>Loading secure desktop state…</div>
@@ -93,6 +96,8 @@ export function App() {
             <>
               {/* The transcript keeps all remaining height; Todos live in Summary. */}
               <Stage
+                submittedPlans={bridge.sessionLoading ? [] : planCalls}
+                onOpenPlan={(id) => bridge.openRuntimeItem({ kind: 'plan-document', id })}
                 liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
                 running={!bridge.sessionLoading && bridge.running}
                 agents={bridge.sessionLoading ? [] : Object.values(bridge.runtimeCenter.agents)}
@@ -143,7 +148,7 @@ export function App() {
             onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
           />
           </main>
-          {page === 'chat' && !bridge.sessionLoading && <RuntimeCenterInspector bridge={bridge} />}
+          {page === 'chat' && !bridge.sessionLoading && <RuntimeCenterInspector bridge={planBridge} />}
         </SettingsBackground>
 
         {settingsRoute && (

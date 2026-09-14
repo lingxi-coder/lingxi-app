@@ -17,7 +17,7 @@ import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { AgentAvatar } from './AgentAvatar';
 import { Stage } from './Stage';
-import { MarkdownContent } from './MarkdownContent';
+import { PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 
 const SECTION_LABELS: Record<RuntimeCenterSection, string> = {
@@ -547,10 +547,7 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
 }
 
 function SubmittedPlanDetail({ plan }: { plan: SubmittedPlan | null | undefined }) {
-  const t = useT();
-  return <div className="runtime-section-detail" style={{ color: t.text }}>
-    {plan ? <><div style={{ marginBottom: 16, color: t.text3, fontSize: 12 }}>{PLAN_STATUS_LABELS[plan.status]}</div><MarkdownContent text={plan.content} /></> : <EmptyRow>No submitted plan yet.</EmptyRow>}
-  </div>;
+  return plan ? <PlanDocument key={plan.id} content={plan.content} status={PLAN_STATUS_LABELS[plan.status]}/> : <div className="runtime-section-detail"><EmptyRow>No submitted plan yet.</EmptyRow></div>;
 }
 
 function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bridge: UseBridge }) {

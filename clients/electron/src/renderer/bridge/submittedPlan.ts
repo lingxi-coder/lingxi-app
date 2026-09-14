@@ -13,6 +13,8 @@ interface Submission extends SubmittedPlan {
 export interface SubmittedPlanState {
   readonly calls: readonly Submission[];
   readonly waitingRequest?: PermissionRequest;
+  /** Last successful explicit plan-file write in this planning cycle. */
+  readonly draft?: { readonly id: string; readonly content: string; readonly ready: boolean };
   /** Gate request IDs increase monotonically; a watermark rejects old replay. */
   readonly lastResolvedRequestId?: number;
   readonly resolutions: Readonly<Record<number, 'approved' | 'denied' | 'cancelled' | 'expired'>>;
@@ -66,10 +68,22 @@ export function reduceSubmittedPlanPermission(
     } : call),
   };
 }
+function planFileWrite(state: SubmittedPlanState, id: string, json: string): SubmittedPlanState {
+  if (state.draft?.id === id) return state;
+  const input = object(json);
+  const path = typeof input.file_path === 'string' ? input.file_path.replace(/\\/g, '/') : '';
+  if (!/(?:^|\/)(?:\.lingxi|\.claude)\/plans\/[^\n]+\.md$/i.test(path)
+    || typeof input.content !== 'string' || !input.content.trim()) return state;
+  return { ...state, draft: { id, content: input.content, ready: false } };
+}
+function planFileResult(state: SubmittedPlanState, id: string, isError: boolean): SubmittedPlanState {
+  if (state.draft?.id !== id) return state;
+  return { ...state, draft: isError ? undefined : { ...state.draft, ready: true } };
+}
 function started(state: SubmittedPlanState, id: string, json: string, sessionId: string): SubmittedPlanState {
   // Replayed starts must neither reorder submissions nor downgrade approval data.
   if (state.calls.some((call) => call.id === id)) return state;
-  const next: SubmittedPlanState = { ...state, calls: [...state.calls, { id, content: content(object(json)), status: 'submitted' }] };
+  const next: SubmittedPlanState = { ...state, calls: [...state.calls, { id, content: content(object(json)) || (state.draft?.ready ? state.draft.content : ''), status: 'submitted' }] };
   return next.waitingRequest ? reduceSubmittedPlanPermission(next, next.waitingRequest, sessionId) : next;
 }
 function result(state: SubmittedPlanState, id: string, json: string, isError: boolean, historical: boolean): SubmittedPlanState {
@@ -83,7 +97,8 @@ function result(state: SubmittedPlanState, id: string, json: string, isError: bo
   }
   if (prior.resultReceived && (historical || prior.status !== 'submitted')) return state;
   const status = prior.status === 'rejected' ? 'rejected' : isError ? 'failed'
-    : !historical || value.plan_mode === false ? 'approved' : prior.status;
+    : !historical || value.plan_mode === false
+      || (typeof value.model_content === 'string' && /^User has approved (?:your plan|exiting plan mode)\./.test(value.model_content)) ? 'approved' : prior.status;
   return { ...state, calls: state.calls.map((call) => call.id === id ? {
     ...call,
     content: !isError && body ? body : call.content,
@@ -97,6 +112,9 @@ export function reduceSubmittedPlanMessages(
 ): SubmittedPlanState {
   let next = state;
   for (const message of messages) for (const block of message.blocks) {
+    if (block.type === 'tool_use' && block.tool === 'EnterPlanMode') next = { ...next, draft: undefined };
+    if (block.type === 'tool_use' && block.tool === 'Write') next = planFileWrite(next, block.id, block.input_json);
+    if (block.type === 'tool_result' && block.tool === 'Write') next = planFileResult(next, block.id, block.is_error);
     if ((block.type === 'tool_use' || block.type === 'tool_result') && block.tool === 'ExitPlanMode') {
       next = block.type === 'tool_use'
         ? started(next, block.id, block.input_json, sessionId)
@@ -110,8 +128,11 @@ export function reduceSubmittedPlanEvent(
 ): SubmittedPlanState {
   switch (event.type) {
     case 'tool_use_started':
+      if (event.tool === 'EnterPlanMode') return { ...state, draft: undefined };
+      if (event.tool === 'Write') return planFileWrite(state, event.id, event.input_json);
       return event.tool === 'ExitPlanMode' ? started(state, event.id, event.input_json, sessionId) : state;
     case 'tool_use_result':
+      if (event.tool === 'Write') return planFileResult(state, event.id, event.is_error);
       return event.tool === 'ExitPlanMode' ? result(state, event.id, event.result_json, event.is_error, false) : state;
     case 'permission_request_resolved': {
       const waiting = state.waitingRequest?.request_id === event.request_id;

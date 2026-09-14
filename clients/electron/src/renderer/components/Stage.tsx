@@ -1,3 +1,5 @@
+import { PlanPreview, PlanDocument } from './PlanDocument';
+import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { RunItem } from '../model/runItem';
@@ -116,6 +118,8 @@ import { visibleRows } from './loopFold';
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
+  submittedPlans?: readonly SubmittedPlan[];
+  onOpenPlan?: (id: string) => void;
   /** The real conversation accumulated from the bridge. */
   liveItems?: RunItem[];
   agents?: readonly SessionAgentSummaryDto[];
@@ -140,8 +144,10 @@ interface StageProps {
   foldedItemIds?: readonly string[];
 }
 
-export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', agents, onOpenAgent, foldedItemIds = [] }: StageProps) {
+export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', agents, onOpenAgent, foldedItemIds = [] }: StageProps) {
   const t = useT();
+  const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
+  useEffect(() => setLocalPlan(null), [sessionKey]);
   const tailRef = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
   const scrollSession = useRef(sessionKey);
@@ -245,6 +251,8 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
         */}
         {rows.map((item) => {
           if (item.type === 'narration') {
+            const document = submittedPlans.find(plan => plan.id === item.id);
+            if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
             return (
               <div className="transcript-run-item" data-run-type="narration" key={item.id} style={{ display: 'flex', justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start', gap: 10, width: '100%', animation: 'fade-in 0.3s ease' }}>
                 <NarrationLine
@@ -261,6 +269,12 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
                 <span className="running-sweep" style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>Thinking…</span>
               </div>
             );
+          }
+          if (item.type === 'tool-group' && item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
+            return <div key={item.id} className="transcript-run-item">{item.tools.map(tool => {
+              const plan = submittedPlans.find(plan => plan.id === tool.id);
+              return plan ? <PlanPreview key={tool.id} content={plan.content} status={plan.status} writing={tool.status === 'running' && plan.status === 'submitted'} onOpen={() => onOpenPlan ? onOpenPlan(plan.id) : setLocalPlan(plan)}/> : <ToolGroup key={tool.id} group={{...item,id:tool.id,tools:[tool]}} open={collapseOpen(visible,sessionKey,tool.id) ?? false} toolOpen={id=>collapseOpen(visible,sessionKey,id)} onSetOpen={setOpen}/>;
+            })}</div>;
           }
           if (item.type === 'tool-group') {
             return (
@@ -294,6 +308,8 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
         })}
 
         {agents && <TranscriptAgents key={sessionKey} agents={agents} onOpenAgent={onOpenAgent} />}
+
+        {localPlan && <div role="dialog" aria-label="Plan" style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>Close plan</button><PlanDocument content={localPlan.content}/></div>}
 
         {/* Scroll anchor — keeps the newest content in view as deltas arrive. */}
         <div ref={tailRef} />

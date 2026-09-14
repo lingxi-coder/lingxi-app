@@ -409,8 +409,12 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     // `fire_notification` (the `OrchestratorHandle` trait does not expose it),
     // and it is in scope here exactly like the `SessionEnd` fire below.
     let notif_armed = orch.has_notification_hook().await;
+    // AG-3 (2.1.269): hand the notifier the task registry so a session with
+    // background agents still running does not announce "waiting for your
+    // input" — it is waiting on its own work, not on the user.
     let idle_notifier =
-        crate::idle_notify::OrchestratorIdleNotifier::new(orch.clone(), notif_armed);
+        crate::idle_notify::OrchestratorIdleNotifier::new(orch.clone(), notif_armed)
+            .with_task_registry(runtime.task_registry.clone());
 
     let task_wake = ReplTaskWake {
         orchestrator: orch.clone(),

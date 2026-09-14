@@ -255,9 +255,12 @@ impl Tool for GlobTool {
                 ("path", input.get("path").and_then(Value::as_str)),
             ],
         )?;
-        if let Some(path) = input.get("path").and_then(Value::as_str) {
-            crate::dir_validate::validate_glob_directory(path, &self.cwd_now())?;
-        }
+        // TL-4 (2.1.260): the DISK probe does NOT belong here. `validate_input`
+        // runs before the permission decision, so probing here reported "that
+        // directory does not exist" for a path the session was never allowed to
+        // look at. The oracle's `validateInput` is `tze(...)` — argument checks
+        // only — and the probe moved into `call` (`pgs`), which runs after
+        // permissions. See [`Self::check_search_path`].
         Ok(())
     }
 
@@ -345,6 +348,20 @@ impl Tool for GlobTool {
             Ok(base) => base,
             Err(message) => return Err(ToolError::InvalidInput(message)),
         };
+        // TL-4 (2.1.260): the search-path probe. It lived in `validate_input`,
+        // which runs BEFORE the permission decision, so a missing directory was
+        // reported for a path the session may not be allowed to look at. The
+        // oracle's `validateInput` is argument checks only; the probe is `pgs`,
+        // called from `call`.
+        //
+        // It sits AFTER `translate_model_path` on purpose: a mobile guest path
+        // must be probed as the host directory that actually backs it. In
+        // `validate_input` it ran on the UNTRANSLATED path, so guest Glob failed
+        // its own directory check on the main dispatch path.
+        if input.get("path").and_then(Value::as_str).is_some() {
+            crate::dir_validate::validate_glob_directory(&base.to_string_lossy(), &self.cwd_now())
+                .map_err(|e| ToolError::InvalidInput(e.0))?;
+        }
         let canon_base = match canonicalize_and_validate(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
@@ -1577,15 +1594,31 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
         let tool = GlobTool::new(ctx).with_live_cwd(cell);
+        // TL-4: the probe moved from `validate_input` (pre-permission) into
+        // `call` (post-permission), so this exercises `call`.
+        assert!(
+            tool.validate_input(&json!({ "pattern": "*", "path": "no_such_dir" }), &fresh_ctx())
+                .await
+                .is_ok(),
+            "validate_input must no longer touch disk"
+        );
         let err = tool
-            .validate_input(&json!({ "path": "no_such_dir" }), &fresh_ctx())
+            .call(
+                json!({ "pattern": "*", "path": "no_such_dir" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap_err();
+        let err = match err {
+            ToolError::InvalidInput(message) => message,
+            other => panic!("expected InvalidInput, got {other:?}"),
+        };
         // The "does not exist" note prints the LIVE cwd (canonicalized sub), NOT
         // the workspace (tmp).
         let canon_sub = std::fs::canonicalize(&sub).unwrap();
         assert_eq!(
-            err.0,
+            err,
             format!(
                 "Directory does not exist: no_such_dir. Note: your current working directory is {}.",
                 canon_sub.display()

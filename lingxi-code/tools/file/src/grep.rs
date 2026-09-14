@@ -864,9 +864,9 @@ impl Tool for GrepTool {
         )?;
         validate_whole_number("head_limit", input.get("head_limit"))?;
         validate_whole_number("offset", input.get("offset"))?;
-        if let Some(path) = input.get("path").and_then(Value::as_str) {
-            crate::dir_validate::validate_grep_path(path, &self.cwd_now())?;
-        }
+        // TL-4 (2.1.260): the DISK probe moved to `call` — see the note on
+        // `FileGlobTool::validate_input`. Probing before the permission decision
+        // told the model whether a path it may not read exists.
         Ok(())
     }
 
@@ -981,6 +981,20 @@ impl Tool for GrepTool {
             Ok(base) => base,
             Err(message) => return Err(ToolError::InvalidInput(message)),
         };
+        // TL-4 (2.1.260): the search-path probe. It lived in `validate_input`,
+        // which runs BEFORE the permission decision, so a missing path was
+        // reported for a path the session may not be allowed to look at. The
+        // oracle's `validateInput` is argument checks only; the probe is `pgs`,
+        // called from `call`.
+        //
+        // It sits AFTER `translate_model_path` on purpose: a mobile guest path
+        // must be probed as the host directory that actually backs it. In
+        // `validate_input` it ran on the UNTRANSLATED path, so guest Grep failed
+        // its own path check on the main dispatch path.
+        if input.get("path").and_then(Value::as_str).is_some() {
+            crate::dir_validate::validate_grep_path(&base.to_string_lossy(), &self.cwd_now())
+                .map_err(|e| ToolError::InvalidInput(e.0))?;
+        }
         let canon_base = match canonicalize_and_validate(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
@@ -2494,16 +2508,35 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
         let tool = GrepTool::new(ctx).with_live_cwd(cell);
+        // TL-4: the probe moved from `validate_input` (pre-permission) into
+        // `call` (post-permission), so this exercises `call`.
+        assert!(
+            tool.validate_input(
+                &json!({ "pattern": "x", "path": "no_such_dir" }),
+                &fresh_ctx()
+            )
+            .await
+            .is_ok(),
+            "validate_input must no longer touch disk"
+        );
         let err = tool
-            .validate_input(&json!({ "path": "no_such_dir" }), &fresh_ctx())
+            .call(
+                json!({ "pattern": "x", "path": "no_such_dir" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap_err();
+        let err = match err {
+            ToolError::InvalidInput(message) => message,
+            other => panic!("expected InvalidInput, got {other:?}"),
+        };
         // The note prints the LIVE cwd (canonicalized sub), NOT the workspace.
         // ST-05: Grep's lead is `Path does not exist:`, not Glob's
         // `Directory does not exist:`.
         let canon_sub = std::fs::canonicalize(&sub).unwrap();
         assert_eq!(
-            err.0,
+            err,
             format!(
                 "Path does not exist: no_such_dir. Note: your current working directory is {}.",
                 canon_sub.display()

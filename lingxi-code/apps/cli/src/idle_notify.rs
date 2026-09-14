@@ -42,6 +42,27 @@ pub const IDLE_PROMPT_NOTIFICATION_TYPE: &str = "idle_prompt";
 /// const default stands in faithfully.
 pub const MESSAGE_IDLE_NOTIF_THRESHOLD_MS: u64 = 60_000;
 
+/// (2.1.269) Opt-out for the background-task check below, port-renamed from
+/// `CLAUDE_CODE_BG_TASKS_REPORT_RUNNING`. Set it to `0` to restore the old
+/// behaviour of announcing idleness regardless of what is still running.
+pub const BG_TASKS_REPORT_RUNNING_ENV: &str = "LINGXI_BG_TASKS_REPORT_RUNNING";
+
+/// Should a still-running background task suppress the idle notification?
+///
+/// 2.1.269 fixed headless sessions "reporting 'waiting for your input' while
+/// background agents were still running" — the session is not waiting on the
+/// user at all, it is waiting on its own work, and a notification saying
+/// otherwise sends someone to a terminal that needs nothing from them.
+///
+/// Default ON; `…=0` restores the old behaviour.
+#[must_use]
+pub fn bg_tasks_suppress_idle(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0") | Some("false") | Some("no") | Some("off")
+    )
+}
+
 /// Injectable seam the repl input loop races its `read_line` against.
 ///
 /// Decoupled from the concrete orchestrator so the loop is testable with a
@@ -76,6 +97,11 @@ pub struct OrchestratorIdleNotifier {
     orch: Arc<orchestrator::ConversationOrchestrator>,
     threshold: Duration,
     armed: bool,
+    /// Task registry consulted at FIRE time (AG-3). `None` keeps the old
+    /// unconditional behaviour, for hosts that have no background tasks.
+    tasks: Option<Arc<tasks::registry::TaskRegistry>>,
+    /// Whether a running background task suppresses the notification.
+    suppress_when_busy: bool,
 }
 
 impl OrchestratorIdleNotifier {
@@ -88,7 +114,34 @@ impl OrchestratorIdleNotifier {
             orch,
             threshold: Duration::from_millis(MESSAGE_IDLE_NOTIF_THRESHOLD_MS),
             armed,
+            tasks: None,
+            suppress_when_busy: bg_tasks_suppress_idle(
+                std::env::var(BG_TASKS_REPORT_RUNNING_ENV).ok().as_deref(),
+            ),
         }
+    }
+
+    /// Give the notifier the session's task registry so it can tell "waiting on
+    /// the user" from "waiting on my own background work" (AG-3, 2.1.269).
+    #[must_use]
+    pub fn with_task_registry(mut self, tasks: Arc<tasks::registry::TaskRegistry>) -> Self {
+        self.tasks = Some(tasks);
+        self
+    }
+
+    /// Is a background task still running?
+    ///
+    /// Checked at FIRE time, not arm time: a task started during the idle window
+    /// must still suppress the notification.
+    async fn background_work_in_flight(&self) -> bool {
+        let Some(tasks) = self.tasks.as_ref() else {
+            return false;
+        };
+        tasks
+            .list()
+            .await
+            .iter()
+            .any(|task| matches!(task.base().status, tasks::state::TaskStatus::Running))
     }
 }
 
@@ -105,9 +158,58 @@ impl IdleNotifier for OrchestratorIdleNotifier {
 
     fn fire(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            // AG-3 (2.1.269): a session with background agents still running is
+            // not waiting for the user, so saying so sends someone to a terminal
+            // that needs nothing from them.
+            if self.suppress_when_busy && self.background_work_in_flight().await {
+                return;
+            }
             self.orch
                 .fire_notification(IDLE_PROMPT_MESSAGE, IDLE_PROMPT_NOTIFICATION_TYPE)
                 .await;
         })
+    }
+}
+
+#[cfg(test)]
+mod bg_tasks_gate_tests {
+    use super::*;
+
+    /// AG-3 (2.1.269) — default ON: a running background task suppresses the
+    /// idle notification.
+    #[test]
+    fn the_check_is_on_by_default() {
+        assert!(bg_tasks_suppress_idle(None));
+        assert!(bg_tasks_suppress_idle(Some("")));
+        assert!(bg_tasks_suppress_idle(Some("1")));
+        assert!(bg_tasks_suppress_idle(Some("true")));
+    }
+
+    /// `CLAUDE_CODE_BG_TASKS_REPORT_RUNNING=0` restores the old behaviour, which
+    /// is the escape hatch the CHANGELOG names.
+    #[test]
+    fn zero_restores_the_old_behaviour() {
+        for raw in ["0", "false", "NO", " off "] {
+            assert!(
+                !bg_tasks_suppress_idle(Some(raw)),
+                "{raw:?} must restore the old behaviour"
+            );
+        }
+    }
+
+    /// The check is useless unless the REPL actually hands over the registry.
+    /// A `TaskRegistry` needs a runtime + filesystem + output manager, so it is
+    /// not unit-constructible here; pin the composition instead, against the
+    /// REPL's own source. Needles are assembled at runtime so they cannot match
+    /// themselves inside `include_str!`.
+    #[test]
+    fn the_repl_hands_the_notifier_its_task_registry() {
+        const SRC: &str = include_str!("repl.rs");
+        let wiring = ".with_task_registr".to_string() + "y(runtime.task_registry";
+        assert!(
+            SRC.contains(&wiring),
+            "the REPL must give the idle notifier the task registry, or the \
+             background-task check can never see anything"
+        );
     }
 }

@@ -498,11 +498,12 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         openAssistantIndex = -1;
         openThinkingIndex = -1;
       }
-      let next: ConversationState = { ...state, items, toolIndex, openAssistantIndex, openThinkingIndex };
-      if (event.is_error) {
-        next = pushError(next, `${toolName(event.tool)} failed`);
-      }
-      return next;
+      // The tool row already owns failure status and details; do not append
+      // a second, generic error message to the transcript.
+      return {
+        ...state, items, toolIndex, openAssistantIndex, openThinkingIndex,
+        ...(event.is_error ? { lastError: `${toolName(event.tool)} failed` } : {}),
+      };
     }
 
     case 'plan_updated': {

@@ -383,13 +383,15 @@ test('a /loop streak longer than the history folds nothing', () => {
   assert.deepEqual(s.foldedItemIds, []);
 });
 
-test('failing tool_use_result marks the card errored and surfaces an error line', () => {
+test('failing tool_use_result marks the card errored without a duplicate error line', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'tool_use_started', id: 't', tool: 'Bash', input_json: '{"command":"x"}' });
   s = reduceEvent(s, { type: 'tool_use_result', id: 't', tool: 'Bash', result_json: '""', is_error: true });
   const card = firstTool(s);
   assert.equal(card.status, 'error');
   assert.equal(s.lastError, 'Bash failed');
+  assert.equal(s.items.length, 1);
+  assert.equal(s.items[0]?.type, 'tool');
 });
 
 test('appendUserPrompt echoes a strong narration line and ignores blank input', () => {
@@ -895,7 +897,7 @@ test('tool_use_result with no matching start upserts the card and keeps its disp
   assert.equal(tool.view.label, 'Read');
 });
 
-test('an unpaired FAILING result upserts the card and still surfaces the error line', () => {
+test('an unpaired FAILING result upserts the card without a duplicate error line', () => {
   const s = reduceEvent(emptyConversation(), {
     type: 'tool_use_result', id: 'orphan', tool: 'Bash', result_json: '"boom"', is_error: true,
   });
@@ -903,6 +905,8 @@ test('an unpaired FAILING result upserts the card and still surfaces the error l
   assert.equal(tool.status, 'error');
   assert.equal(tool.note, 'boom');
   assert.equal(s.lastError, 'Bash failed');
+  assert.equal(s.items.length, 1);
+  assert.equal(s.items[0]?.type, 'tool');
 });
 
 

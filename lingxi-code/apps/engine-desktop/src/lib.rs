@@ -16245,7 +16245,7 @@ pub async fn build(
     let expansion_ctx_orch = orch.clone();
     let background_command_orch = orch.clone();
     let mcp_prompt_registry = mcp_registry.clone();
-    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+    let mut dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_skill_invocation_observer(skill_invocation_observer)
         .with_skill_usage_home(cfg.lingxi_home.clone())
         .with_mcp_prompt_resolver(Arc::new(move |connection_id, prompt_name, arguments| {
@@ -16282,6 +16282,13 @@ pub async fn build(
         // (#3) Real embedded-shell expansion for markdown/plugin `!`cmd`` bodies
         // AND the builtin `InjectMessage` prompts (`/commit` …). Non-MCP only.
         .with_shell_expansion(shell_expansion_provider.clone());
+    // MP-1: hand the dispatcher the enforcing gate so each input's frontmatter
+    // `disallowed-tools` reaches `alwaysDenyRules.command` (upstream `Tbt`).
+    // Without this the field is parsed and then ignored for every skill that
+    // runs INLINE — only `context: fork` skills were ever scoped by it.
+    if let Some(gate) = enforcing_permission_gate.clone() {
+        dispatcher = dispatcher.with_permission_gate(gate);
+    }
 
     // (7) Session lifecycle: fire the `SessionStart` hooks now that the
     //     orchestrator + hook registry are fully wired. claude-code fires the

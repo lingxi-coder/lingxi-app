@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
+use platform_api::permission_gate::PermissionGate;
 use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 use protocol::McpConnectionId;
 use serde_json::{Map, Value};
@@ -169,9 +170,47 @@ pub struct RegistrySlashDispatcher {
     /// enable this because they have no TUI loop to consume injected prompts;
     /// the default stays display-only for existing embedded/mobile callers.
     injected_messages_as_turns: bool,
+    /// Permission gate that receives each input's frontmatter
+    /// `disallowed-tools` (claude-code `Tbt(setToolPermissionContext, …)`).
+    /// `None` — every existing caller — leaves the field inert, so a host that
+    /// wires no gate behaves exactly as before.
+    permission_gate: Option<Arc<dyn PermissionGate>>,
 }
 
 impl RegistrySlashDispatcher {
+    /// Wire the permission gate that this dispatcher tells about each input's
+    /// `disallowed-tools` — see [`PermissionGate::set_command_input_denies`].
+    /// Without it, a skill's `disallowed-tools` is parsed and then ignored on
+    /// the INLINE path (the fork path scopes the spawned agent separately).
+    #[must_use]
+    pub fn with_permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
+        self.permission_gate = Some(gate);
+        self
+    }
+
+    /// This input's frontmatter `disallowed-tools`, or empty for anything that
+    /// declares none — a plain prompt, an unknown name, a builtin.
+    ///
+    /// Resolved for EVERY input, including non-slash text, because the empty
+    /// answer is what CLEARS the previous command's denies. Returning early for
+    /// a plain prompt would make the last skill's restrictions permanent.
+    async fn command_input_denies(&self, raw: &str) -> Vec<String> {
+        let Some(parsed) = parse_slash_command(raw) else {
+            return Vec::new();
+        };
+        let reg = self.registry.read().await;
+        let Some(command) = reg.resolve(&parsed.name) else {
+            return Vec::new();
+        };
+        match &command.kind {
+            SlashCommandKind::Markdown { frontmatter, .. }
+            | SlashCommandKind::Plugin { frontmatter, .. } => {
+                frontmatter.disallowed_tools.clone().unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Construct a dispatcher backed by the given shared registry.
     #[must_use]
     pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
@@ -184,6 +223,7 @@ impl RegistrySlashDispatcher {
             mcp_prompt_resolver: None,
             skill_invocation_observer: None,
             injected_messages_as_turns: false,
+            permission_gate: None,
         }
     }
 
@@ -339,6 +379,10 @@ impl RegistrySlashDispatcher {
             mcp_prompt_resolver: self.mcp_prompt_resolver.clone(),
             skill_invocation_observer: self.skill_invocation_observer.clone(),
             injected_messages_as_turns: self.injected_messages_as_turns,
+            // The gate must travel too: a shared dispatcher that did not clear
+            // the command denies would leave the previous skill's restrictions
+            // standing for every input routed through the clone.
+            permission_gate: self.permission_gate.clone(),
         }
     }
 
@@ -388,6 +432,17 @@ impl RegistrySlashDispatcher {
 #[async_trait]
 impl SlashCommandDispatcher for RegistrySlashDispatcher {
     async fn dispatch(&self, raw: &str) -> SlashDispatchResult {
+        // 0. `Tbt(setToolPermissionContext, result.disallowedTools ?? [])` —
+        //    REPLACE, once per processed user input. Resolved BEFORE the
+        //    early-outs below so a plain prompt, an unknown name, or a builtin
+        //    all clear the previous command's denies; that clearing is what
+        //    gives a skill's `disallowed-tools` its "until the next user
+        //    message" lifetime.
+        if let Some(gate) = self.permission_gate.as_ref() {
+            let denies = self.command_input_denies(raw).await;
+            gate.set_command_input_denies(&denies, false);
+        }
+
         // 1. Detect slash prefix.
         if !raw.starts_with('/') {
             return SlashDispatchResult::NotASlashCommand;
@@ -1882,6 +1937,140 @@ mod tests {
         assert!(
             provider.seen_allowed.lock().unwrap().is_empty(),
             "the real provider must never be built for an MCP-sourced command"
+        );
+    }
+
+    // ---- MP-1: `disallowed-tools` reaches the permission gate --------------
+
+    /// Records every `set_command_input_denies` call the dispatcher makes.
+    #[derive(Default)]
+    struct RecordingDenyGate {
+        calls: std::sync::Mutex<Vec<(Vec<String>, bool)>>,
+    }
+    #[async_trait]
+    impl PermissionGate for RecordingDenyGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &Value,
+        ) -> platform_api::permission_gate::PermissionDecision {
+            platform_api::permission_gate::PermissionDecision::Allow
+        }
+        fn set_command_input_denies(&self, specs: &[String], union: bool) {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((specs.to_vec(), union));
+        }
+    }
+
+    fn dispatcher_with_recording_gate() -> (RegistrySlashDispatcher, Arc<RecordingDenyGate>) {
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "tight".to_string(),
+            description: "A skill that narrows its own tools".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/tmp/tight.md"),
+                frontmatter: CommandFrontmatter {
+                    disallowed_tools: Some(vec!["Bash".to_string(), "Write".to_string()]),
+                    ..CommandFrontmatter::default()
+                },
+                prompt_template: "body".to_string(),
+            },
+            ..SlashCommand::default()
+        });
+        reg.register_command(SlashCommand {
+            name: "open".to_string(),
+            description: "A skill that narrows nothing".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/tmp/open.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: "body".to_string(),
+            },
+            ..SlashCommand::default()
+        });
+        let gate = Arc::new(RecordingDenyGate::default());
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+            .with_permission_gate(gate.clone());
+        (d, gate)
+    }
+
+    #[tokio::test]
+    async fn an_inline_skills_disallowed_tools_reaches_the_gate() {
+        let (d, gate) = dispatcher_with_recording_gate();
+        let _ = d.dispatch("/tight").await;
+        let calls = gate.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![(vec!["Bash".to_string(), "Write".to_string()], false)],
+            "the frontmatter denies must be published in REPLACE mode, once"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_other_input_clears_the_previous_skills_denies() {
+        // The clearing is the half that gives `disallowed-tools` a lifetime.
+        // Upstream runs `Tbt` on every PROCESSED user input, so a plain prompt,
+        // an unknown name, a builtin and a command declaring nothing all publish
+        // an empty list.
+        let (d, gate) = dispatcher_with_recording_gate();
+        let _ = d.dispatch("/tight").await;
+        let _ = d.dispatch("just a normal prompt").await;
+        let _ = d.dispatch("/open").await;
+        let _ = d.dispatch("/no-such-command").await;
+        let _ = d.dispatch("/").await;
+        let calls = gate.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                (vec!["Bash".to_string(), "Write".to_string()], false),
+                (Vec::new(), false),
+                (Vec::new(), false),
+                (Vec::new(), false),
+                (Vec::new(), false),
+            ],
+            "every input after the skill must clear what it denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dispatcher_with_no_gate_is_unchanged() {
+        // Every existing host wires none; the field must stay inert for them.
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "tight".to_string(),
+            description: "d".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/tmp/tight.md"),
+                frontmatter: CommandFrontmatter {
+                    disallowed_tools: Some(vec!["Bash".to_string()]),
+                    ..CommandFrontmatter::default()
+                },
+                prompt_template: "body".to_string(),
+            },
+            ..SlashCommand::default()
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+        assert!(matches!(
+            d.dispatch("/tight").await,
+            SlashDispatchResult::RunAsTurn { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_shared_clone_keeps_publishing_the_denies() {
+        // A clone that dropped the gate would leave the previous skill's denies
+        // standing for every input routed through it.
+        let (d, gate) = dispatcher_with_recording_gate();
+        let shared = d.clone_shared();
+        let _ = shared.dispatch("/tight").await;
+        assert_eq!(
+            gate.calls.lock().unwrap().len(),
+            1,
+            "clone_shared must carry the gate"
         );
     }
 }

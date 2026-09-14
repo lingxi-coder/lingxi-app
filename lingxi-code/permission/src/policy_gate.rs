@@ -158,6 +158,17 @@ pub struct PolicyPermissionGate {
     /// non-mobile composition root, which makes the whole feature unreachable
     /// from engine-desktop / tui / cli / bridge-server.
     path_translator: Option<Arc<dyn crate::model_path::ModelPathTranslator>>,
+    /// Deny specs contributed by the slash command / skill behind the CURRENT
+    /// user input — upstream `alwaysDenyRules.command`, written only by `Tbt`
+    /// ([`PermissionGate::set_command_input_denies`]).
+    ///
+    /// Kept in its OWN cell rather than written into `live_state.deny_rules`
+    /// under [`PermissionRuleSource::Command`], because a hook's
+    /// `permissionUpdates` can also name that source in this port and the
+    /// replace-per-input semantics would silently delete what the hook added.
+    /// Folded into the deny bucket at evaluation time instead, which keeps both
+    /// producers and gives this one the lifetime it is supposed to have.
+    command_input_denies: std::sync::RwLock<Vec<String>>,
 }
 
 impl PolicyPermissionGate {
@@ -249,6 +260,7 @@ impl PolicyPermissionGate {
             live_model_provider: Arc::new(std::sync::OnceLock::new()),
             loop_classifier: Arc::new(std::sync::OnceLock::new()),
             path_translator: None,
+            command_input_denies: std::sync::RwLock::new(Vec::new()),
             auto_mode_disabled_from_settings: std::sync::atomic::AtomicBool::new(
                 auto_mode_disabled_from_settings,
             ),
@@ -970,6 +982,7 @@ impl PolicyPermissionGate {
             &folded.deny_command_rules,
             PermissionBehavior::Deny,
         );
+        self.fold_command_input_denies(&mut deny_rules);
         // PARITY `Zm` `case "working_directory"`:
         // `if (!ctx.additionalWorkingDirectories.has(dir))
         //    …set(dir, {path: dir, source: "session"})` — an existing entry keeps
@@ -1064,15 +1077,34 @@ impl PolicyPermissionGate {
         }
     }
 
+    /// Fold the current input's command denies into a deny bucket about to be
+    /// evaluated. Every policy-building path calls this, so the rules behave
+    /// exactly like the `command`-source denies upstream stores directly —
+    /// they are just not PERSISTED into the shared bucket. See
+    /// [`Self::command_input_denies`].
+    fn fold_command_input_denies(
+        &self,
+        deny_rules: &mut HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+    ) {
+        let specs = self
+            .command_input_denies
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        Self::extend_command_rules(deny_rules, &specs, PermissionBehavior::Deny);
+    }
+
     fn live_policy(&self) -> PermissionPolicy {
         let live = self
             .live_state
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let mut deny_rules = live.deny_rules;
+        self.fold_command_input_denies(&mut deny_rules);
         self.policy.clone_with_live_state(
             live.allow_rules,
-            live.deny_rules,
+            deny_rules,
             live.ask_rules,
             live.additional_working_dirs,
         )
@@ -2071,8 +2103,59 @@ fn read_only_default_auto_allows(
         && !matches!(reason, PermissionDecisionReason::MatchedRule { .. })
 }
 
+/// Upstream `MWn = /^(?:Read|Edit)\((?:\.\/)?!/` — a `Read(!…)` / `Edit(!…)`
+/// rule spec, with an optional `./` before the `!`. Such a spec is a gitignore
+/// NEGATION (see [`permission::filesystem::RulePatternMatch`]), which cancels
+/// deny rules in its own source instead of adding one.
+fn is_negated_path_rule(spec: &str) -> bool {
+    for tool in ["Read(", "Edit("] {
+        if let Some(rest) = spec.strip_prefix(tool) {
+            let rest = rest.strip_prefix("./").unwrap_or(rest);
+            if rest.starts_with('!') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
+    /// `Tbt(setToolPermissionContext, specs, mode)` — see the trait doc for why
+    /// the two modes differ.
+    fn set_command_input_denies(&self, specs: &[String], union: bool) {
+        let mut cell = self
+            .command_input_denies
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if union {
+            // `Y([...(existing ?? []), ...specs.filter(s => !MWn.test(s))])`:
+            // append, dedup, and REFUSE a `!`-negated Read/Edit path rule. That
+            // filter is the load-bearing half — a negation cancels deny rules in
+            // its own source, so a skill unioning one in would turn
+            // "deny these tools" into "undo the denies already standing".
+            for spec in specs {
+                if is_negated_path_rule(spec) {
+                    tracing::warn!(
+                        target: "permission",
+                        spec = %spec,
+                        "a skill's disallowed-tools may not negate a path deny rule; dropping it"
+                    );
+                    continue;
+                }
+                if !cell.iter().any(|existing| existing == spec) {
+                    cell.push(spec.clone());
+                }
+            }
+        } else {
+            // REPLACE, verbatim and unfiltered, exactly as upstream's default
+            // mode is: it overwrites the whole command source rather than adding
+            // to it, so a negation here can only cancel rules this same input
+            // put there.
+            *cell = specs.to_vec();
+        }
+    }
+
     fn can_request_auto_mode(&self) -> bool {
         self.auto_mode_denial_reason().is_none()
     }
@@ -2146,9 +2229,11 @@ impl PermissionGate for PolicyPermissionGate {
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Command,
         }));
+        let mut deny_rules = live.deny_rules;
+        self.fold_command_input_denies(&mut deny_rules);
         let policy = self.policy.clone_with_live_state(
             live.allow_rules,
-            live.deny_rules,
+            deny_rules,
             live.ask_rules,
             live.additional_working_dirs,
         );

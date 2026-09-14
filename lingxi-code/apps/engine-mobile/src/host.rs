@@ -5461,6 +5461,11 @@ async fn build_mobile_inner_with_ask(
     } else {
         dispatcher
     };
+    // MP-1 (mobile sibling of `engine_desktop::build`): hand the dispatcher the
+    // enforcing gate so each input's frontmatter `disallowed-tools` reaches
+    // `alwaysDenyRules.command` (upstream `Tbt`). Wiring only one root would
+    // leave the field silently inert on the other.
+    let dispatcher = dispatcher.with_permission_gate(permission_policy_gate.clone());
 
     // (9) Session lifecycle fires (P0.2 — mobile sibling of `engine_desktop::build`
     //     §7 / §7.1). Fire `SessionStart` then `InstructionsLoaded` now that the

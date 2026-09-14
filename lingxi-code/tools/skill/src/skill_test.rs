@@ -1636,6 +1636,65 @@ mod fork_dispatch_tests {
         assert_eq!(res.data["status"], json!("inline"));
     }
 
+    /// Records every `set_command_input_denies` the Skill tool makes.
+    #[derive(Default)]
+    struct RecordingDenyGate {
+        calls: std::sync::Mutex<Vec<(Vec<String>, bool)>>,
+    }
+    #[async_trait::async_trait]
+    impl platform_api::permission_gate::PermissionGate for RecordingDenyGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+        ) -> platform_api::permission_gate::PermissionDecision {
+            platform_api::permission_gate::PermissionDecision::Allow
+        }
+        fn set_command_input_denies(&self, specs: &[String], union: bool) {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((specs.to_vec(), union));
+        }
+    }
+
+    /// An INLINE skill narrows THIS conversation — upstream
+    /// `Tbt(o.setToolPermissionContext, T, "union")`. The fork path (below)
+    /// scopes a different pool, so without this the field was parsed and then
+    /// ignored for every skill that does not declare `context: fork`.
+    #[tokio::test]
+    async fn an_inline_skill_unions_its_disallowed_tools_into_this_session() {
+        let gate = Arc::new(RecordingDenyGate::default());
+        let mut desc = inline_desc("tighten");
+        desc.disallowed_tools = vec!["Bash".into(), "Write".into()];
+        let mut ctx = shell_test_ctx(out());
+        ctx.permission_gate = Some(gate.clone());
+        let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(desc))));
+        tool.call(json!({"skill": "tighten"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("inline skill runs");
+        assert_eq!(
+            gate.calls.lock().unwrap().clone(),
+            vec![(vec!["Bash".to_string(), "Write".to_string()], true)],
+            "an inline skill must UNION its denies onto the current input's"
+        );
+    }
+
+    /// A skill that declares nothing must not touch the permission context at
+    /// all — publishing an empty union would be harmless, but publishing
+    /// anything here at all would mean the call is not reading the descriptor.
+    #[tokio::test]
+    async fn an_inline_skill_with_no_denies_leaves_the_context_alone() {
+        let gate = Arc::new(RecordingDenyGate::default());
+        let mut ctx = shell_test_ctx(out());
+        ctx.permission_gate = Some(gate.clone());
+        let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(inline_desc("plain")))));
+        tool.call(json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("inline skill runs");
+        assert!(gate.calls.lock().unwrap().is_empty());
+    }
+
     /// The skill's own `disallowed-tools` ride onto the spawned agent. Without
     /// this the fork runs with the PARENT's tools — strictly wider than the
     /// scoping the fork exists to narrow, and the launch is the only place it

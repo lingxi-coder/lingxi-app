@@ -616,6 +616,36 @@ pub trait PermissionGate: Send + Sync {
         None
     }
 
+    /// Replace — or UNION into — the deny rules contributed by the slash
+    /// command / skill that is running, claude-code `Tbt`
+    /// (`setToolPermissionContext`, writing `alwaysDenyRules.command`).
+    ///
+    /// Upstream calls this from exactly two places, and the two modes are not
+    /// interchangeable:
+    ///
+    /// - **replace** (`union == false`), once per processed user input, with
+    ///   that input's `disallowedTools` (empty for a plain prompt). This is what
+    ///   gives a skill's `disallowed-tools` a LIFETIME: it lasts until the next
+    ///   user message and is then cleared, rather than leaking into the rest of
+    ///   the session.
+    /// - **union** (`union == true`), when the Skill TOOL activates a skill
+    ///   mid-turn, so the skill's denies are added to whatever the current input
+    ///   already established.
+    ///
+    /// ⚠️ Union mode DROPS any spec matching `/^(?:Read|Edit)\((?:\.\/)?!/`
+    /// (upstream `MWn`). A `!`-prefixed path rule is a gitignore NEGATION that
+    /// CANCELS deny rules in its own source — see
+    /// `permission::filesystem::RulePatternMatch` — so letting a skill union one
+    /// in would turn a "deny more" declaration into a way to un-deny. Replace
+    /// mode has no such filter upstream and none here: it overwrites the whole
+    /// command source rather than adding to it.
+    ///
+    /// Default: a no-op, for gates that are only prompt transports.
+    /// `PolicyPermissionGate` overrides it.
+    fn set_command_input_denies(&self, specs: &[String], union: bool) {
+        let _ = (specs, union);
+    }
+
     /// Return the current `Read`-deny patterns rebased to `cwd` for search
     /// result filtering. `None` means this gate has no live policy layer and
     /// the caller should use its construction-time fallback.

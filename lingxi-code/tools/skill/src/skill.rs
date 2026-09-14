@@ -1216,6 +1216,24 @@ present this turn, the skill is loaded — follow it directly rather than callin
             }
         }
 
+        // ── inline `disallowed-tools` ───────────────────────────────────────
+        // The skill is running IN this conversation, so its own
+        // `disallowed-tools` has to narrow THIS session's permissions — upstream
+        // `Tbt(o.setToolPermissionContext, T, "union")`, which runs right after
+        // the skill is resolved and before its body is executed. Union, not
+        // replace: whatever the current user input already denied stays denied.
+        // A forking skill returned above; it scopes the SPAWNED agent through
+        // `additional_disallowed_tools` instead, which is a different pool.
+        //
+        // The union is cleared by the next user input's replace (the dispatcher
+        // calls the same seam with that input's `disallowed-tools`, empty for a
+        // plain prompt), which is the whole reason the lifetime is bounded.
+        if !desc.disallowed_tools.is_empty() {
+            if let Some(gate) = self.ctx.permission_gate.as_ref() {
+                gate.set_command_input_denies(&desc.disallowed_tools, true);
+            }
+        }
+
         // P2-12 / `zSr(e.name,u,d,r.agentId??null)`: record this invocation in
         // the process-global invoked-skill registry so its content can be
         // re-injected after a compaction (`rRg`) — the model regains the full

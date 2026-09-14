@@ -3763,4 +3763,124 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         gate.update_auto_mode_disabled_from_settings(true);
         assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
     }
+
+    // ---- MP-1: a slash command's / skill's `disallowed-tools` -------------
+
+    fn gate_with_rules(raw: &str) -> PolicyPermissionGate {
+        let rules =
+            crate::loader::permission_rules_from_settings_json(raw, PermissionRuleSource::LocalSettings)
+                .expect("settings fixture parses");
+        let policy = Arc::new(
+            PermissionPolicy::from_rules_confined(PermissionMode::Default, rules, false).with_roots(
+                FsRoots {
+                    cwd: PathBuf::from("/proj"),
+                    home: Some(PathBuf::from("/home/u")),
+                    lingxi_home: PathBuf::from("/home/u/.lingxi"),
+                },
+            ),
+        );
+        PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow))
+    }
+
+    /// Did a RULE deny this call?
+    ///
+    /// ⚠️ Not `check_noninteractive_with_allow_rules`: that folds an unresolved
+    /// ASK into `Deny`, so in `Default` mode EVERY Read comes back denied and
+    /// each assertion below would pass without the rule doing anything. `check`
+    /// sends an ask to the inner transport instead — which allows here — so only
+    /// a real deny survives.
+    async fn denied(gate: &PolicyPermissionGate, tool: &str, input: &Value) -> bool {
+        matches!(gate.check(tool, input).await, PermissionDecision::Deny { .. })
+    }
+
+    #[tokio::test]
+    async fn the_next_user_input_clears_the_previous_commands_denies() {
+        let gate = gate_with_rules(r#"{"permissions":{}}"#);
+        let bash = json!({"command": "ls"});
+        assert!(
+            !denied(&gate, "Bash", &bash).await,
+            "nothing is denied before a command declares anything"
+        );
+
+        gate.set_command_input_denies(&["Bash".to_string()], false);
+        assert!(
+            denied(&gate, "Bash", &bash).await,
+            "a skill's `disallowed-tools` must actually deny the tool"
+        );
+
+        // Upstream calls `Tbt` with the DEFAULT ("replace") mode once per
+        // processed user input; a plain prompt therefore passes an empty list.
+        // Without that call the restriction would outlive the skill.
+        gate.set_command_input_denies(&[], false);
+        assert!(
+            !denied(&gate, "Bash", &bash).await,
+            "the next user input must clear the previous command's denies"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_skill_unions_onto_what_the_input_already_denied() {
+        let gate = gate_with_rules(r#"{"permissions":{}}"#);
+        gate.set_command_input_denies(&["Bash".to_string()], false);
+        // The Skill TOOL activating mid-turn unions rather than replacing.
+        gate.set_command_input_denies(&["WebFetch".to_string()], true);
+        assert!(denied(&gate, "Bash", &json!({"command": "ls"})).await);
+        assert!(
+            denied(&gate, "WebFetch", &json!({"url": "https://x.test"})).await,
+            "the union must add the skill's own denies"
+        );
+        // Idempotent: unioning the same spec twice must not duplicate it.
+        gate.set_command_input_denies(&["WebFetch".to_string()], true);
+        assert!(denied(&gate, "WebFetch", &json!({"url": "https://x.test"})).await);
+    }
+
+    #[tokio::test]
+    async fn a_union_refuses_a_negated_path_rule_but_a_replace_does_not() {
+        // `!`-prefixed path rules are gitignore NEGATIONS: inside one source
+        // they CANCEL a deny. Upstream's `MWn` filter exists so a skill cannot
+        // use `disallowed-tools` — a "deny more" declaration — to undo denies.
+        let read_src = json!({"file_path": "/proj/src/secret.rs"});
+
+        let gate = gate_with_rules(r#"{"permissions":{}}"#);
+        gate.set_command_input_denies(&["Read(src/**)".to_string()], false);
+        assert!(denied(&gate, "Read", &read_src).await);
+        gate.set_command_input_denies(&["Read(!src/**)".to_string()], true);
+        assert!(
+            denied(&gate, "Read", &read_src).await,
+            "a skill must not be able to cancel a deny by unioning a `!` rule"
+        );
+        // The `./` spelling is the same rule (`MWn` allows an optional `./`).
+        gate.set_command_input_denies(&["Read(./!src/**)".to_string()], true);
+        assert!(denied(&gate, "Read", &read_src).await);
+
+        // NOT vacuous, and not an accident of the matcher: upstream applies the
+        // filter ONLY to the union, and in replace mode the same negation does
+        // cancel — because replace overwrites the whole source rather than
+        // adding to what is already there.
+        let replaced = gate_with_rules(r#"{"permissions":{}}"#);
+        replaced.set_command_input_denies(
+            &["Read(src/**)".to_string(), "Read(!src/**)".to_string()],
+            false,
+        );
+        assert!(
+            !denied(&replaced, "Read", &read_src).await,
+            "replace mode has no `MWn` filter upstream and must not grow one here"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_denies_do_not_disturb_rules_from_other_sources() {
+        // The replace-per-input semantics must not reach the buckets other
+        // producers own — a hook's `permissionUpdates` can name the `command`
+        // source in this port, which is why these live in their own cell.
+        let gate = gate_with_rules(r#"{"permissions":{"deny":["Bash(rm:*)"]}}"#);
+        let rm = json!({"command": "rm -rf /"});
+        assert!(denied(&gate, "Bash", &rm).await);
+        gate.set_command_input_denies(&["WebFetch".to_string()], false);
+        gate.set_command_input_denies(&[], false);
+        assert!(
+            denied(&gate, "Bash", &rm).await,
+            "clearing the command denies must leave the settings deny standing"
+        );
+    }
 }

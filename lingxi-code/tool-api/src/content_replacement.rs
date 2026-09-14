@@ -5,6 +5,19 @@
 //! precompute. That store is Anthropic's remote session backend; this module
 //! keeps the in-memory map only. The extra persist arg is a no-op without that
 //! backend (same scope cut as `performCompactTranscriptV5`).
+//!
+//! ⚠️ SES-3, verified 2026-09-14: "in-memory map only" is generous. The state
+//! is `None` at EVERY `ToolUseContext` construction site in the workspace, so
+//! nothing in this port ever replaces a tool result — the map is not merely
+//! unpersisted, it is never instantiated. The backlog asks for
+//! `content-replacement` rows in ordinary sessions (today only `session::branch`
+//! writes them, for fork/branch); persisting records of replacements that never
+//! happen would write empty rows forever.
+//!
+//! The FEATURE underneath is the one worth building: clearing large tool
+//! results from older turns to reclaim context, which is what populates this
+//! map in the first place. The persistence is downstream of it, not a gap of
+//! its own.
 
 use protocol::ToolUseId;
 use std::collections::HashMap;

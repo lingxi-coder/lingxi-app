@@ -3,6 +3,23 @@
 //!
 //! Spec §3 M5-08 row + §4.x resume completeness checks.
 //!
+//! ## SES-4: this layer is a pure transcript replay, deliberately
+//!
+//! Verified 2026-09-14: nothing in this file mentions tasks or background
+//! workers, so a resume through it does not re-attach to a background session
+//! that is still running. That is the gap the backlog names — but the
+//! capability is not missing from the product, only from this layer: shell
+//! handoff/adoption lives at the CLI composition root
+//! (`apps/cli/src/shell_handoff.rs` driving
+//! `TaskRegistryHandle::{export,prepare,adopt}_shell_handoff`), and a live
+//! attach is an explicit `lingxi-cli attach` (`apps/cli/src/commands/attach.rs`).
+//!
+//! ⇒ The question to settle before building anything here is which HOSTS lose
+//! live workers on resume — desktop and mobile resume through this path and
+//! have no `attach` command — not whether `replay_session_state` "should" know
+//! about tasks. Moving the adoption down into the orchestrator would also move
+//! it away from the only layer that currently owns process handles.
+//!
 //! Plan adaptation: the M5-07 `load_session` surface takes
 //! `(lingxi_home, cwd, session_id, fs)` (rather than the plan-doc's
 //! `(session_id, cwd)`), so [`replay_session_state`] mirrors that signature.

@@ -365,6 +365,18 @@ impl JsonlReader {
 ///    - Tier-1 metadata (`summary`/`custom-title`/`ai-title`/`last-prompt` +
 ///      feature side-maps) → side-maps on [`LoadedTranscript`].
 ///    - Tier-2 + unknown (`file-history-snapshot`, `queue-operation`, …) → ignored.
+///
+/// ⚠️ SES-2, verified 2026-09-14. The backlog records `queue-operation` as
+/// "never written" and asks for a producer. Writing one would produce
+/// WRITE-ONLY data: this line is the reason — the type is explicitly routed to
+/// the ignored tier, so nothing in this port would ever read a row back. The
+/// queue mutations themselves ARE recorded, as telemetry
+/// (`msgqueue::telemetry_recorder`), which is the half that has a consumer.
+/// The feature the rows exist to serve upstream is queue ADOPT-ON-RESUME
+/// (`WAn(e)` reads `e.adopt`); a producer here without that is a transcript
+/// that is one line longer and behaves identically. ⇒ Build the adopt path
+/// first, then the producer, then a reader arm — in that order, or the middle
+/// step is the only one that lands.
 #[must_use]
 pub fn route_lines(content: &str) -> LoadedTranscript {
     let mut out = LoadedTranscript::default();

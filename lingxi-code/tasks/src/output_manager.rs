@@ -29,6 +29,28 @@ use tokio::sync::Mutex;
 /// faithful; they are the port's halves of those two upstream consumers. The
 /// name says "BYTES" because upstream's does.
 ///
+/// ## TL-6: the 1 GiB tool-result cap belongs to a different file, and a
+/// surface this port has no consumer for
+///
+/// Verified at the 2.1.270 oracle 2026-09-14. The backlog asks for the missing
+/// "1 GB tool-result disk cap", which is `E2`'s `fAr = 1073741824` default —
+/// but `E2` is a GENERIC "persist a tool result to disk" helper returning
+/// `{filepath, originalSize, isJson, preview, hasMore, truncatedAtBytes}`, and
+/// it is NOT this file. The caps here are the background-task spool
+/// (`diskOutput.ts`), which is a different upstream file with different
+/// numbers, so adding `fAr` alongside them would put an unrelated constant in
+/// the one place it does not belong.
+///
+/// Its real consumers upstream are `persistedToolResultFiles` — the Artifact
+/// tool saving published HTML and raw attachment bytes, and WebFetch saving a
+/// raw body it cannot render. Neither exists here: there is no `Artifact` tool
+/// in the registry, and this port's WebFetch caps the transfer at
+/// `WEBFETCH_MAX_TRANSFER_BYTES` (10 MB) and TRUNCATES rather than persisting.
+///
+/// ⇒ The cap guards a surface with no consumer, and the surface's consumers
+/// are themselves unbuilt or deliberately divergent. Build a consumer first, or
+/// the constant is dead the day it lands.
+///
 /// The consequence is real and inherited: a spool of CJK text passes 5 GB on
 /// disk at roughly 1.7 G code units, so the write-side marker fires late (an
 /// emoji-heavy spool later still). That is upstream behaviour, not a port bug.

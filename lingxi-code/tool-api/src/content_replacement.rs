@@ -6,18 +6,29 @@
 //! keeps the in-memory map only. The extra persist arg is a no-op without that
 //! backend (same scope cut as `performCompactTranscriptV5`).
 //!
-//! ⚠️ SES-3, verified 2026-09-14: "in-memory map only" is generous. The state
-//! is `None` at EVERY `ToolUseContext` construction site in the workspace, so
-//! nothing in this port ever replaces a tool result — the map is not merely
-//! unpersisted, it is never instantiated. The backlog asks for
-//! `content-replacement` rows in ordinary sessions (today only `session::branch`
-//! writes them, for fork/branch); persisting records of replacements that never
-//! happen would write empty rows forever.
+//! ⚠️ SES-3, verified 2026-09-14 — and stated more carefully than in
+//! `46743c4d3`, whose note said "nothing in this port ever replaces a tool
+//! result". That is WRONG about the behaviour and right only about this struct.
 //!
-//! The FEATURE underneath is the one worth building: clearing large tool
-//! results from older turns to reclaim context, which is what populates this
-//! map in the first place. The persistence is downstream of it, not a gap of
-//! its own.
+//! `compaction::microcompact` DOES replace old tool results: it keeps the last
+//! `keep_recent` compactable ids and swaps every older `ToolResult` for
+//! `[Old tool result content cleared]`, above a 20,000-token floor, on the
+//! time-gap trigger. What is missing is the BOOKKEEPING — this state is `None`
+//! at every `ToolUseContext` construction site in the workspace, so the
+//! replacements happen and are never recorded, which is why there is nothing
+//! for a `content-replacement` row to carry.
+//!
+//! Two halves are genuinely absent, and they are one feature with TL-6 and
+//! CMP-2 rather than three backlog items:
+//!
+//! * upstream's clear takes an optional `persist(content, tool_use_id)` that
+//!   writes the cleared content to disk and leaves a reference in its place —
+//!   that hook is TL-6's `persistedToolResultFiles` surface;
+//! * the replacement is recorded here and persisted as a `content-replacement`
+//!   row, which is SES-3 proper.
+//!
+//! ⇒ Populating this struct from the microcompact clear is the small end; the
+//! persist hook is the larger one. Neither is "add a row writer".
 
 use protocol::ToolUseId;
 use std::collections::HashMap;

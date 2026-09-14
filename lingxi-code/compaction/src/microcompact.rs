@@ -68,6 +68,22 @@ pub fn compactable_tools() -> HashSet<&'static str> {
 /// is no module-level mutable state to clear — this is a documented no-op kept
 /// for call-site symmetry with the TS post-compact cleanup.
 pub fn reset_microcompact_state() {
+    // ⚠️ CMP-2, 2026-09-14: do NOT conclude from a binary grep that
+    // `pendingCacheEdits` was removed upstream. It returns zero hits in
+    // 2.1.270 — but so do `cachedMCState`, `microCompact` and
+    // `resetMicrocompactState`, which this very comment cites, while the
+    // control `cache_creation_input_tokens` returns 21 files. That whole class
+    // of identifier is minified away, so absence is not evidence either way,
+    // and the TS names above come from source, not from the binary.
+    //
+    // What IS verifiable at 2.1.270 is the shape of the clear itself, and this
+    // port already has it: keep the last `keep_recent` compactable ids, clear
+    // the rest, floor at 20k candidate tokens, `tengu_time_based_microcompact`
+    // with `toolsCleared`/`toolsKept`/`tokensSaved`. The piece upstream has and
+    // this does not is the optional `persist(content, tool_use_id)` the clear
+    // calls before substituting its placeholder — see
+    // `tool_api::content_replacement`, which carries the same finding from the
+    // bookkeeping side.
     // No Rust module-level microcompact state to reset (stateless layer).
 }
 

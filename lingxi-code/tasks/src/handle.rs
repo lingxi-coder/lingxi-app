@@ -535,13 +535,31 @@ impl TaskRegistryHandle for TaskRegistry {
         requested: &str,
         named_agents: &[(String, String)],
     ) -> Result<platform_api::task_registry::TaskStopResolution, TaskRegistryError> {
+        let records = <Self as TaskRegistryHandle>::list(self, TaskListFilter::default()).await?;
+        // The `Agent` tool publishes the AGENT uuid to the model and instructs it
+        // to use that id (`tools/agent/src/agent.rs:822`); an async agent's task
+        // is registered under both uuid spellings as aliases
+        // (`registry.rs:5356-5357`). `TaskOutput` resolves them because
+        // `registry.get` runs `canonical_or_raw`, but
+        // `crate::resolve::resolve_stop_target` matches only `task_id`,
+        // `teammate_agent_id` and named agents — so the SAME id the model was
+        // told to use worked for TaskOutput and failed for TaskStop.
+        //
+        // Try the alias map first; a real task id still wins, because
+        // `resolve_task_id` checks the task map before the alias map.
+        if let Some(task_id) = self.resolve_task_id(requested).await {
+            if let Some(record) = records.iter().find(|r| r.task_id == task_id) {
+                return Ok(platform_api::task_registry::TaskStopResolution::Found(
+                    record.clone(),
+                ));
+            }
+        }
         let mut canonical_names = Vec::new();
         for (name, id) in named_agents {
             if let Some(state) = self.get(id).await {
                 canonical_names.push((name.clone(), state.base().id.clone()));
             }
         }
-        let records = <Self as TaskRegistryHandle>::list(self, TaskListFilter::default()).await?;
         Ok(crate::resolve::resolve_stop_target(
             requested,
             records,
@@ -2045,6 +2063,74 @@ mod tests {
             .await
             .unwrap();
         assert!(running.is_empty());
+    }
+
+    /// AG-1 — the id the `Agent` tool hands the model must work for BOTH
+    /// `TaskOutput` and `TaskStop`. It resolved for `TaskOutput` (via
+    /// `registry.get` → `canonical_or_raw`) and came back `NotFound` from
+    /// `TaskStop`, because `resolve::resolve_stop_target` never consults the
+    /// alias map. The model is explicitly told to use that id, so the two tools
+    /// disagreeing about it is a contract break, not a nicety.
+    #[tokio::test]
+    async fn task_stop_resolves_the_agent_id_that_task_output_accepts() {
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h
+            .create(TaskCreateInput {
+                task_type: "local_agent".into(),
+                description: "a".into(),
+            })
+            .await
+            .unwrap();
+        // What `aliases_for_spawn` registers for an async local agent: the bare
+        // agent uuid the tool result publishes.
+        let agent_uuid = format!("11111111-2222-3333-4444-{:012x}", 0xA6E17u64);
+        registry
+            .register_task_alias(&rec.task_id, agent_uuid.clone())
+            .await
+            .unwrap();
+
+        // Precondition — TaskOutput's lookup already accepts it.
+        assert!(
+            h.get(&agent_uuid).await.unwrap().is_some(),
+            "precondition: the alias resolves for the TaskOutput path"
+        );
+
+        match h.resolve_stop_target(&agent_uuid, &[]).await.unwrap() {
+            platform_api::task_registry::TaskStopResolution::Found(found) => {
+                assert_eq!(found.task_id, rec.task_id);
+            }
+            other => panic!("TaskStop must resolve the published agent id, got {other:?}"),
+        }
+    }
+
+    /// The alias path must not shadow a real task id, and an id belonging to
+    /// nothing must still be `NotFound` — otherwise the fix would turn every
+    /// typo into a silent stop of some unrelated task.
+    #[tokio::test]
+    async fn a_real_task_id_still_wins_and_an_unknown_id_is_still_not_found() {
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h
+            .create(TaskCreateInput {
+                task_type: "local_agent".into(),
+                description: "a".into(),
+            })
+            .await
+            .unwrap();
+        match h.resolve_stop_target(&rec.task_id, &[]).await.unwrap() {
+            platform_api::task_registry::TaskStopResolution::Found(found) => {
+                assert_eq!(found.task_id, rec.task_id);
+            }
+            other => panic!("a real task id must resolve, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                h.resolve_stop_target("no-such-id-anywhere", &[]).await.unwrap(),
+                platform_api::task_registry::TaskStopResolution::NotFound { .. }
+            ),
+            "an unknown id must stay NotFound"
+        );
     }
 
     #[tokio::test]

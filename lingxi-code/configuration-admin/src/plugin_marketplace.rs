@@ -419,6 +419,83 @@ fn is_github_host(host: &str) -> bool {
     h == "github.com"
 }
 
+/// Is `host` a GitLab host? Oracle `nwo`.
+///
+/// GitLab is matched by suffix as well as exactly, because self-hosted
+/// instances live on `gitlab.<company>.com`-shaped names the way GHE does.
+fn is_gitlab_host(host: &str) -> bool {
+    let mut h = host;
+    while let Some(rest) = h.strip_prefix("www.") {
+        h = rest;
+    }
+    h == "gitlab.com" || h.starts_with("gitlab.") || h.contains(".gitlab.")
+}
+
+/// Does this GitLab URL name a project we can clone? Oracle `I$e`'s GitLab arm.
+///
+/// GitLab nests projects under groups and subgroups, so `owner/repo` is a
+/// FLOOR, not the shape. The oracle's guards, all of them load-bearing:
+///
+/// * `M.length >= 2` — at least `group/project`.
+/// * `F === "/" + M.join("/")` — the path must round-trip exactly, so a URL
+///   carrying percent-encoding or empty segments is not silently rewritten.
+/// * no tab/newline/CR anywhere in the URL.
+/// * every segment must decode.
+/// * `U[0] !== "api"` — `/api/...` is the REST API, not a project.
+/// * `!U.includes("-")` — GitLab's `/-/` separator introduces a sub-resource
+///   (`/-/merge_requests/5`, `/-/tree/main`), so the URL names a page inside a
+///   project rather than the project itself.
+fn gitlab_path_is_project(url: &str, path: &str) -> bool {
+    if url.contains(['\t', '\n', '\r']) {
+        return false;
+    }
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    // Exact round-trip: rebuilding the path from its segments must reproduce it.
+    let trimmed = path.trim_end_matches('/');
+    if trimmed != format!("/{}", segments.join("/")) {
+        return false;
+    }
+    let decoded: Vec<String> = match segments
+        .iter()
+        .map(|s| percent_decode_segment(s))
+        .collect::<Option<Vec<_>>>()
+    {
+        Some(d) => d,
+        None => return false,
+    };
+    if decoded.first().is_some_and(|s| s == "api") {
+        return false;
+    }
+    !decoded.iter().any(|s| s == "-")
+}
+
+/// Percent-decode one path segment, or `None` when it is not valid UTF-8 —
+/// the oracle's `try{decodeURIComponent(seg)}catch{return null}`.
+fn percent_decode_segment(segment: &str) -> Option<String> {
+    if !segment.contains('%') {
+        return Some(segment.to_string());
+    }
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            // `decodeURIComponent` throws on a truncated or non-hex escape.
+            let hex = bytes.get(i + 1..i + 3)?;
+            let text = std::str::from_utf8(hex).ok()?;
+            out.push(u8::from_str_radix(text, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// pathname `^/[^/]+/[^/]+` — at least an `owner/repo` pair.
 fn path_has_owner_repo(path: &str) -> bool {
     let mut segs = path.trim_start_matches('/').split('/');
@@ -453,6 +530,18 @@ fn classify_source(source: &str) -> Result<Source, String> {
                 base
             } else {
                 format!("{base}.git")
+            };
+            return Ok(Source::Git { url, git_ref });
+        }
+        // GitLab (oracle `I$e`'s second host arm). Without this a bare
+        // `https://gitlab.com/group/project` fell through to `Source::Url` and
+        // was fetched as a hosted `marketplace.json`, which it is not.
+        if is_gitlab_host(&host) && gitlab_path_is_project(&base, &path) {
+            let trimmed = base.trim_end_matches('/');
+            let url = if trimmed.ends_with(".git") {
+                trimmed.to_string()
+            } else {
+                format!("{trimmed}.git")
             };
             return Ok(Source::Git { url, git_ref });
         }
@@ -1876,6 +1965,59 @@ mod tests {
                 git_ref: Some("dev".to_string())
             }
         );
+    }
+
+    /// MP-5 — a bare GitLab project URL is a git clone, not a hosted
+    /// `marketplace.json`. Before this only `is_github_host` got the `.git`
+    /// treatment, so every GitLab marketplace fell through to `Source::Url` and
+    /// was fetched as JSON.
+    #[test]
+    fn classify_gitlab_project_urls_as_git() {
+        for (input, expected) in [
+            ("https://gitlab.com/group/project", "https://gitlab.com/group/project.git"),
+            // Nested subgroups — GitLab's shape, and why `owner/repo` is only a floor.
+            (
+                "https://gitlab.com/group/subgroup/project",
+                "https://gitlab.com/group/subgroup/project.git",
+            ),
+            // Self-hosted.
+            ("https://gitlab.acme.com/g/p", "https://gitlab.acme.com/g/p.git"),
+            // Trailing slash trimmed before `.git` is appended.
+            ("https://gitlab.com/group/project/", "https://gitlab.com/group/project.git"),
+        ] {
+            assert_eq!(
+                classify_source(input).unwrap(),
+                Source::Git { url: expected.to_string(), git_ref: None },
+                "{input}"
+            );
+        }
+        assert_eq!(
+            classify_source("https://gitlab.com/group/project#dev").unwrap(),
+            Source::Git {
+                url: "https://gitlab.com/group/project.git".to_string(),
+                git_ref: Some("dev".to_string())
+            }
+        );
+    }
+
+    /// The oracle's guards are load-bearing: each of these names something that
+    /// is NOT a project, and must stay a `url` source.
+    #[test]
+    fn gitlab_urls_that_do_not_name_a_project_stay_url_sources() {
+        for input in [
+            // `/-/` introduces a sub-resource, so this is a page in a project.
+            "https://gitlab.com/group/project/-/merge_requests/5",
+            "https://gitlab.com/group/project/-/tree/main",
+            // The REST API.
+            "https://gitlab.com/api/v4/projects/1",
+            // Only one segment.
+            "https://gitlab.com/group",
+        ] {
+            assert!(
+                matches!(classify_source(input).unwrap(), Source::Url { .. }),
+                "{input} must not be treated as a clonable project"
+            );
+        }
     }
 
     #[test]

@@ -3692,10 +3692,9 @@ pub async fn run_resume(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -
 /// with a prompt`) live in [`Argv::validate_truncating_resume_args`] so they
 /// fire in the oracle's position, before any session load.
 ///
-/// NOT ported: the `skippedLinks` warning line, which counts symlinked tracked
-/// paths the oracle's checkpoint layer refuses — the port's `FileHistory` has
-/// no such skip list, so emitting the sentence would report a filter that never
-/// ran.
+/// The `skippedLinks` warning line IS ported now (2.1.216): `FileHistory`
+/// refuses to restore or delete through a symlink / hard link at a tracked path
+/// and returns the count, so the sentence reports a filter that really ran.
 pub(crate) async fn run_rewind_files(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     let Some(target) = argv.rewind_files.as_deref() else {
         return exit_codes::SUCCESS;
@@ -3746,7 +3745,23 @@ pub(crate) async fn run_rewind_files(argv: &Argv, sink: &dyn OutputSink) -> i32 
     )
     .await
     {
-        Ok(_) => {
+        Ok(outcome) => {
+            // `if(Te.skippedLinks)process.stderr.write(`Warning: ${…} tracked
+            // ${…===1?"path was":"paths were"} skipped: ${SDt}. Run with --debug
+            // for the paths.\n`)` — emitted BEFORE the success line, on stderr.
+            if outcome.skipped_links > 0 {
+                let noun = if outcome.skipped_links == 1 {
+                    "path was"
+                } else {
+                    "paths were"
+                };
+                eprintln!(
+                    "Warning: {} tracked {noun} skipped: the tracked path is (or became) a link \
+                     or other non-regular file, its directory changed since the checkpoint, or \
+                     its backup could not be safely read. Run with --debug for the paths.",
+                    outcome.skipped_links
+                );
+            }
             // `bl(...)` is the stdout writer; the oracle's literal already ends
             // in `\n`, which `println!` supplies.
             println!("Files rewound to state at message {target}");
@@ -4802,7 +4817,26 @@ async fn drive_tui_switch_loop_inner(
                     )
                     .await
                     {
-                        Ok(files) => eprintln!("lingxi-cli: rewound {} file(s)", files.len()),
+                        Ok(outcome) => {
+                            eprintln!(
+                                "lingxi-cli: rewound {} file(s)",
+                                outcome.changed.len()
+                            );
+                            if outcome.skipped_links > 0 {
+                                let noun = if outcome.skipped_links == 1 {
+                                    "path was"
+                                } else {
+                                    "paths were"
+                                };
+                                eprintln!(
+                                    "lingxi-cli: {} tracked {noun} skipped: the tracked path is \
+                                     (or became) a link or other non-regular file, its directory \
+                                     changed since the checkpoint, or its backup could not be \
+                                     safely read.",
+                                    outcome.skipped_links
+                                );
+                            }
+                        }
                         Err(e) => eprintln!("lingxi-cli: file rewind failed: {e}"),
                     }
                 }

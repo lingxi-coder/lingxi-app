@@ -88,6 +88,47 @@ pub const WEBFETCH_ALLOWED_SCHEMES: &[&str] = &["https", "http"];
 /// WebFetch GET helper `Buo`). NOT the 30 000 ms used by other fetches.
 pub const WEBFETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Default WHOLE-FETCH deadline — claude-code `MKn=300000` (2.1.268).
+///
+/// [`WEBFETCH_TIMEOUT`] bounds ONE request. A server that keeps the response
+/// open without finishing, or a redirect chain that trickles, could still hang
+/// the tool indefinitely across hops; this bounds the entire operation.
+pub const WEBFETCH_DEADLINE_DEFAULT: Duration = Duration::from_secs(300);
+
+/// Ceiling the oracle clamps the deadline to — `Nh=2147483647`, the `setTimeout`
+/// limit. Kept so an absurd override behaves the same way here.
+pub const WEBFETCH_DEADLINE_MAX_MS: u64 = 2_147_483_647;
+
+/// Env override for the whole-fetch deadline, port-renamed from
+/// `CLAUDE_CODE_WEBFETCH_DEADLINE_MS`.
+pub const WEBFETCH_DEADLINE_ENV: &str = "LINGXI_WEBFETCH_DEADLINE_MS";
+
+/// Resolve the whole-fetch deadline from a raw env value — claude-code `$Kn()`.
+///
+/// `None`/unparseable ⇒ the 300 s default. A parsed value is clamped to
+/// [`WEBFETCH_DEADLINE_MAX_MS`]. **`0` turns the deadline off** (the CHANGELOG's
+/// "0 turns it off"), which this represents as `None`.
+#[must_use]
+pub fn resolve_webfetch_deadline(raw: Option<&str>) -> Option<Duration> {
+    let Some(parsed) = raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<u64>().ok())
+    else {
+        return Some(WEBFETCH_DEADLINE_DEFAULT);
+    };
+    if parsed == 0 {
+        return None;
+    }
+    Some(Duration::from_millis(parsed.min(WEBFETCH_DEADLINE_MAX_MS)))
+}
+
+/// [`resolve_webfetch_deadline`] over the process environment.
+#[must_use]
+pub fn webfetch_deadline() -> Option<Duration> {
+    resolve_webfetch_deadline(std::env::var(WEBFETCH_DEADLINE_ENV).ok().as_deref())
+}
+
 /// Canonical tool name in the registry.
 pub const TOOL_NAME: &str = "WebFetch";
 
@@ -1154,7 +1195,21 @@ Usage notes:\n\
         // preserving their existing behavior.
         let mut fetch_url = parsed_url.clone();
         let mut hops: u32 = 0;
+        // 2.1.268: bound the WHOLE fetch, not just each request. The per-request
+        // `WEBFETCH_TIMEOUT` cannot stop a server that keeps the response open
+        // without finishing, nor a redirect chain that trickles across hops.
+        let deadline = webfetch_deadline().map(|d| std::time::Instant::now() + d);
         let resp_result = loop {
+            if let Some(deadline) = deadline {
+                if std::time::Instant::now() >= deadline {
+                    self.emit_failed(&invocation_id, "deadline_exceeded", None, 0)
+                        .await;
+                    return Err(ToolError::Io(format!(
+                        "Request to {} timed out",
+                        fetch_url.host_str().unwrap_or("the server")
+                    )));
+                }
+            }
             let req = HttpRequest {
                 method: HttpMethod::Get,
                 url: fetch_url.to_string(),
@@ -1531,3 +1586,56 @@ Usage notes:\n\
 #[cfg(test)]
 #[path = "web_fetch_test.rs"]
 mod web_fetch_test;
+
+#[cfg(test)]
+mod webfetch_deadline_tests {
+    use super::*;
+
+    /// 2.1.268 — the whole-fetch deadline. `WEBFETCH_TIMEOUT` bounds one
+    /// request; before this a server that held the response open, or a slow
+    /// redirect chain, could hang the tool with no ceiling.
+    #[test]
+    fn the_default_deadline_is_three_hundred_seconds() {
+        assert_eq!(
+            resolve_webfetch_deadline(None),
+            Some(WEBFETCH_DEADLINE_DEFAULT)
+        );
+        assert_eq!(WEBFETCH_DEADLINE_DEFAULT.as_secs(), 300);
+        // Unset/blank/garbage all fall back rather than disabling the deadline —
+        // an unparseable value must not silently remove the ceiling.
+        for raw in [Some(""), Some("   "), Some("abc"), Some("-1"), Some("1.5")] {
+            assert_eq!(
+                resolve_webfetch_deadline(raw),
+                Some(WEBFETCH_DEADLINE_DEFAULT),
+                "{raw:?} must fall back to the default"
+            );
+        }
+    }
+
+    /// The CHANGELOG's "0 turns it off".
+    #[test]
+    fn zero_disables_the_deadline() {
+        assert_eq!(resolve_webfetch_deadline(Some("0")), None);
+    }
+
+    #[test]
+    fn an_explicit_value_is_honoured_and_clamped() {
+        assert_eq!(
+            resolve_webfetch_deadline(Some("1500")),
+            Some(Duration::from_millis(1500))
+        );
+        // `Math.min(e, Nh)` — the setTimeout ceiling.
+        assert_eq!(
+            resolve_webfetch_deadline(Some("99999999999")),
+            Some(Duration::from_millis(WEBFETCH_DEADLINE_MAX_MS))
+        );
+        assert_eq!(WEBFETCH_DEADLINE_MAX_MS, 2_147_483_647);
+    }
+
+    /// The deadline bounds the WHOLE fetch, so it must be longer than one
+    /// request's timeout — otherwise the per-request timeout could never fire.
+    #[test]
+    fn the_deadline_is_longer_than_one_request_timeout() {
+        assert!(WEBFETCH_DEADLINE_DEFAULT > WEBFETCH_TIMEOUT);
+    }
+}

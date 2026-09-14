@@ -164,7 +164,10 @@ pub async fn download_plugin_urls(urls: &[String], root: &Path) -> Result<Vec<Pa
     for (index, url) in urls.iter().enumerate() {
         let bytes = bounded_get(&client, url, &[]).await?;
         let extracted = root.join(format!("plugin-{index}"));
-        std::fs::create_dir(&extracted)
+        // 0700 + clear-before-unpack (2.1.269): another local user must not be
+        // able to read a plugin extracted for this session, and no file from a
+        // previous extraction may survive into the new one.
+        plugin::prepare_extract_dir(&extracted)
             .map_err(|e| format!("create plugin extraction directory: {e}"))?;
         plugin::unpack_plugin_archive(&bytes, &extracted)
             .map_err(|e| format!("invalid plugin archive `{url}`: {e}"))?;
@@ -178,7 +181,12 @@ pub async fn download_plugin_urls(urls: &[String], root: &Path) -> Result<Vec<Pa
 
 /// Download and unpack the oracle `archive` plugin-entry source: an HTTPS
 /// zip, optionally pinned by `sha256` — *"verified against every download and
-/// the install is refused on mismatch"*. `dest` must not already exist.
+/// the install is refused on mismatch"*.
+///
+/// `dest` is CLEARED before unpacking, so an existing directory is replaced
+/// rather than merged into (2.1.269). Callers stage into a fresh path anyway;
+/// the clear is what stops a file from a previous extraction outliving the
+/// archive that no longer ships it.
 pub async fn download_plugin_archive(
     url: &str,
     sha256: Option<&str>,
@@ -194,7 +202,11 @@ pub async fn download_plugin_archive(
             ));
         }
     }
-    std::fs::create_dir_all(dest)
+    // Same 2.1.269 hardening as `download_plugin_urls`. `create_dir_all` alone
+    // left stale files from a prior extraction in place — an archive that no
+    // longer ships a file could not remove the old copy, so a downgrade kept
+    // executing the newer version's code.
+    plugin::prepare_extract_dir(dest)
         .map_err(|e| format!("create plugin extraction directory: {e}"))?;
     plugin::unpack_plugin_archive(&bytes, dest)
         .map_err(|e| format!("invalid plugin archive `{url}`: {e}"))?;

@@ -476,6 +476,12 @@ pub struct StreamJsonStream {
     heartbeat_lines: Arc<CoalescedHeartbeatLines>,
     /// In-flight `stream_event` frames not yet drained to stdout.
     pending_stream_events: Arc<AtomicUsize>,
+    /// Tool calls refused by the permission layer, for the `result` frame's
+    /// `permission_denials`. Filled from the orchestrator's session-scoped
+    /// record just before the result frame is built (same post-construction
+    /// `Mutex` pattern as `session_id`), because the run path owns the
+    /// orchestrator and the builders only see `self`.
+    permission_denials: std::sync::OnceLock<Arc<Mutex<Vec<platform_api::PermissionDenial>>>>,
 }
 
 impl StreamJsonStream {
@@ -497,6 +503,7 @@ impl StreamJsonStream {
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames,
             last_result_text: Mutex::new(String::new()),
+            permission_denials: std::sync::OnceLock::new(),
             include_partial_messages: AtomicBool::new(false),
             include_hook_events: AtomicBool::new(false),
             forward_subagent_text: AtomicBool::new(false),
@@ -973,7 +980,10 @@ impl StreamJsonStream {
         result.insert("total_cost_usd".into(), json!(cost.total_usd));
         result.insert("usage".into(), usage);
         result.insert("modelUsage".into(), frame["modelUsage"].clone());
-        result.insert("permission_denials".into(), json!([]));
+        result.insert(
+            "permission_denials".into(),
+            self.permission_denials_value().await,
+        );
         result.insert("fast_mode_state".into(), json!(params.fast_mode_state));
         if let Some(reason) = params.fast_mode_disabled_reason {
             result.insert("fast_mode_disabled_reason".into(), json!(reason));
@@ -1078,6 +1088,54 @@ impl StreamJsonStream {
     ///
     /// Pure builder — does not write to stdout. Call `emit_result_success`
     /// to build + emit.
+    /// Point the stream at the orchestrator's LIVE denial cell
+    /// (`ConversationOrchestrator::permission_denials_handle`), so every result
+    /// frame reports the run's refusals without any emit site having to
+    /// remember to push a snapshot.
+    ///
+    /// The orchestrator's list is the authoritative record; the
+    /// `permission_denied` system frames are documented by claude-code as
+    /// advisory and incomplete, so they are NOT the source here.
+    pub fn share_permission_denials(
+        &self,
+        cell: Arc<Mutex<Vec<platform_api::PermissionDenial>>>,
+    ) {
+        let _ = self.permission_denials.set(cell);
+    }
+
+    /// Has the orchestrator's denial cell been wired in?
+    ///
+    /// An unwired stream reports `permission_denials: []` — the exact bug this
+    /// change exists to fix — so the CLI wiring is pinned by a test that asserts
+    /// this, not just by the field being present.
+    #[must_use]
+    pub fn permission_denials_wired(&self) -> bool {
+        self.permission_denials.get().is_some()
+    }
+
+    /// The `permission_denials` array for a `result` frame — oracle schema `LF`:
+    /// `{tool_name, tool_use_id, tool_input}` per entry, in denial order.
+    async fn permission_denials_value(&self) -> Value {
+        let Some(cell) = self.permission_denials.get() else {
+            // No orchestrator wired (the placeholder/JSON-mode streams built
+            // before a runtime exists). Nothing ran, so nothing was denied.
+            return Value::Array(Vec::new());
+        };
+        Value::Array(
+            cell.lock()
+                .await
+                .iter()
+                .map(|d| {
+                    json!({
+                        "tool_name": d.tool_name,
+                        "tool_use_id": d.tool_use_id,
+                        "tool_input": d.tool_input,
+                    })
+                })
+                .collect(),
+        )
+    }
+
     pub async fn build_result_success_frame(
         &self,
         result_text: &str,
@@ -1121,7 +1179,10 @@ impl StreamJsonStream {
         obj.insert("total_cost_usd".into(), json!(cost.total_usd));
         obj.insert("usage".into(), usage);
         obj.insert("modelUsage".into(), Value::Object(model_usage));
-        obj.insert("permission_denials".into(), json!([]));
+        obj.insert(
+            "permission_denials".into(),
+            self.permission_denials_value().await,
+        );
         obj.insert("terminal_reason".into(), json!("completed"));
         obj.insert("fast_mode_state".into(), json!(fast_mode_state));
         // 2.1.219 result schema: `fast_mode_disabled_reason` optional, sits
@@ -1215,7 +1276,10 @@ impl StreamJsonStream {
         obj.insert("total_cost_usd".into(), json!(cost.total_usd));
         obj.insert("usage".into(), usage);
         obj.insert("modelUsage".into(), Value::Object(model_usage));
-        obj.insert("permission_denials".into(), json!([]));
+        obj.insert(
+            "permission_denials".into(),
+            self.permission_denials_value().await,
+        );
         obj.insert("terminal_reason".into(), json!(terminal_reason));
         obj.insert("fast_mode_state".into(), json!(fast_mode_state));
         // Same optional slot as the success frame: after `fast_mode_state`.
@@ -3083,6 +3147,59 @@ mod tests {
         assert_eq!(idx("output_tokens_details"), idx("output_tokens") + 1);
         assert_eq!(idx("service_tier"), idx("output_tokens_details") + 1);
         assert_eq!(usage["output_tokens_details"]["thinking_tokens"], 0_u64);
+    }
+
+    /// OR-1 — `permission_denials` was a hardcoded `json!([])` in all three
+    /// result builders, so an SDK/desktop caller could never see that a tool
+    /// call had been refused. Oracle entry shape (schema `LF`):
+    /// `{tool_name, tool_use_id, tool_input}`.
+    #[tokio::test]
+    async fn result_frame_reports_the_sessions_permission_denials() {
+        let params = make_params("test-session-denials");
+        let stream = StreamJsonStream::new(params);
+
+        // The orchestrator's cell, shared exactly as `lib.rs` wires it.
+        let cell: Arc<Mutex<Vec<platform_api::PermissionDenial>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        stream.share_permission_denials(Arc::clone(&cell));
+        cell.lock().await.push(platform_api::PermissionDenial {
+            tool_name: "Read".into(),
+            tool_use_id: "toolu_denied_1".into(),
+            tool_input: json!({"file_path": "/repo/secret/.env"}),
+        });
+
+        let cost = CostSnapshot::default();
+        let frame = stream
+            .build_result_success_frame("done", "end_turn", &cost, "m", "off", None, &[])
+            .await;
+        let denials = frame["permission_denials"].as_array().expect("array");
+        assert_eq!(denials.len(), 1, "the denial must reach the result frame");
+        assert_eq!(denials[0]["tool_name"], "Read");
+        assert_eq!(denials[0]["tool_use_id"], "toolu_denied_1");
+        assert_eq!(denials[0]["tool_input"]["file_path"], "/repo/secret/.env");
+
+        // The error frame reports the same list — it is the same run.
+        let err = stream
+            .build_result_error_frame("error_during_execution", vec![], &cost, "m", "off", None, &[])
+            .await;
+        assert_eq!(err["permission_denials"].as_array().unwrap().len(), 1);
+    }
+
+    /// A stream with no orchestrator wired reports `[]` — which is also what the
+    /// BUG looked like. So pin the wiring itself: an unwired stream must say so.
+    #[tokio::test]
+    async fn an_unwired_stream_is_detectable_rather_than_silently_empty() {
+        let stream = StreamJsonStream::new(make_params("test-session-unwired"));
+        assert!(
+            !stream.permission_denials_wired(),
+            "a fresh stream has no orchestrator cell"
+        );
+        let cell = Arc::new(Mutex::new(Vec::new()));
+        stream.share_permission_denials(cell);
+        assert!(
+            stream.permission_denials_wired(),
+            "sharing the cell marks the stream wired"
+        );
     }
 
     /// Verify that the result/success frame has the correct 20-key order.

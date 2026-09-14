@@ -234,7 +234,7 @@ pub use orchestrator::{
 };
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{
-    AutoModePrompt, PermissionDecision, PermissionGate, PermissionRequestSource,
+    AutoModePrompt, PermissionDecision, PermissionDenial, PermissionGate, PermissionRequestSource,
 };
 pub use platform::Platform;
 pub use process::{

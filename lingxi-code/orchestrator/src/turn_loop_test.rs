@@ -6762,8 +6762,20 @@ mod memdir_index_cap_tests {
         }
     }
 
+    /// The cwd these memdir fixtures stand in for. MEM-2 scopes the User tier
+    /// per project, so the fixture's hand-built directory and the resolver must
+    /// agree on the same project — [`fixture_memdir`] derives it.
+    const FIXTURE_CWD: &str = "/work/fixture-project";
+
+    /// Where a memdir fixture under `config_home` must be written for the
+    /// resolver to find it.
+    fn fixture_memdir(config_home: &Path) -> std::path::PathBuf {
+        memory::memdir::paths::user_memdir_for_project(config_home, Path::new(FIXTURE_CWD))
+    }
+
     fn memdir_prefetch_for(config_home: &Path) -> Arc<memory::prefetch::MemoryPrefetch> {
-        let roots = memory::memdir::paths::memdir_roots_at(config_home, false);
+        let roots =
+            memory::memdir::paths::memdir_roots_at(config_home, Path::new(FIXTURE_CWD), false);
         let selector = Arc::new(memory::selector::MemorySelector::new(Arc::new(
             NoopSideQueryClient,
         )));
@@ -6809,7 +6821,7 @@ mod memdir_index_cap_tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let config_home = temp.path().join(".lingxi");
-        let memdir = config_home.join("memdir");
+        let memdir = fixture_memdir(&config_home);
         std::fs::create_dir_all(&memdir).expect("mk memdir");
         let near_cap = (0..170)
             .map(|i| format!("- [Entry {i}](entry-{i}.md) — detail"))
@@ -6871,7 +6883,7 @@ mod memdir_index_cap_tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let config_home = temp.path().join(".lingxi");
-        let memdir = config_home.join("memdir");
+        let memdir = fixture_memdir(&config_home);
         std::fs::create_dir_all(&memdir).expect("mk memdir");
         std::fs::write(memdir.join("MEMORY.md"), "small\n").expect("seed memory index");
 

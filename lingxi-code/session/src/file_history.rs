@@ -39,6 +39,44 @@ pub struct FileHistoryBackup {
     pub version: u32,
 }
 
+/// What a rewind actually did to the working tree.
+///
+/// claude-code's `rewindFiles` result (oracle schema `KNe`) is
+/// `{canRewind, error?, filesChanged?, insertions?, deletions?, skippedLinks?}`.
+/// The two fields that matter to a caller deciding whether to claim success are
+/// [`Self::changed`] and [`Self::skipped_links`]; `canRewind:false` is spelled
+/// here as `Err` from [`FileHistory::rewind_files`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RewindOutcome {
+    /// Tracked paths actually restored or deleted.
+    pub changed: Vec<String>,
+    /// Count of tracked files NOT restored or deleted because a symlink, hard
+    /// link, or other non-regular file was detected at the tracked path, or its
+    /// backup could not be safely read.
+    ///
+    /// Oracle `skippedLinks` (2.1.216). Per its own description, other per-file
+    /// failures — a missing backup file above all — are deliberately NOT counted
+    /// here; they surface through [`Self::failed`] and, when every differing file
+    /// fails, through the `Err` return.
+    pub skipped_links: usize,
+    /// Tracked files that needed a change and did not get one for a reason other
+    /// than link safety (the missing-backup case). Not part of the oracle's wire
+    /// shape — it is what decides the all-failed `canRewind:false` arm.
+    pub failed: usize,
+}
+
+/// Per-file result of one rewind step, folded into [`RewindOutcome`].
+enum RewindStep {
+    /// The file already matched the target version — nothing to do.
+    Unchanged,
+    /// Restored from backup, or deleted because it was absent at the target.
+    Changed(String),
+    /// Refused: a symlink / hard link / non-regular file sits at the path.
+    SkippedLink,
+    /// Needed a change but could not be made (e.g. the backup file is gone).
+    Failed,
+}
+
 /// A per-turn snapshot: the message it is keyed by + the pre-turn backups of
 /// every tracked file.
 #[derive(Debug, Clone)]
@@ -281,12 +319,21 @@ impl FileHistory {
 
     /// Restore the tracked files to the snapshot keyed by `message_id`: files
     /// present at that version are rewritten from their backup (only if they
-    /// differ now), files absent at that version are deleted. Returns the list
-    /// of changed paths. Errors if no snapshot matches.
+    /// differ now), files absent at that version are deleted.
+    ///
+    /// Link safety (2.1.216): a tracked path holding a symlink, hard link, or
+    /// other non-regular file is REFUSED rather than written or deleted through,
+    /// and counted in [`RewindOutcome::skipped_links`]. Before this the restore
+    /// went through `fs::copy`, which follows the destination link and writes
+    /// outside the approved tree.
     ///
     /// # Errors
-    /// Returns the target-not-found message when `message_id` has no snapshot.
-    pub async fn rewind_files(&self, message_id: Uuid) -> Result<Vec<String>, String> {
+    /// - The target-not-found message when `message_id` has no snapshot.
+    /// - `"No files could be restored …"` when EVERY file that differed from the
+    ///   target version failed to restore — the 2.1.260 fix for reporting success
+    ///   after restoring nothing, spelled `canRewind:false` in the oracle. A
+    ///   rewind where nothing differed is still `Ok` with an empty `changed`.
+    pub async fn rewind_files(&self, message_id: Uuid) -> Result<RewindOutcome, String> {
         let (target, tracked, snapshots) = {
             let st = self.state.lock().expect("file-history lock");
             let target = st
@@ -305,7 +352,7 @@ impl FileHistory {
             return Err("The selected snapshot was not found".to_string());
         };
 
-        let mut changed = Vec::new();
+        let mut outcome = RewindOutcome::default();
         for tracking_path in tracked {
             let file_path = self.expand(&tracking_path);
             // Resolve the backup for this file at the target version, falling
@@ -318,23 +365,68 @@ impl FileHistory {
             let Some(backup_name) = backup_name else {
                 continue; // unresolved → leave the file untouched
             };
-            match backup_name {
-                None => {
-                    // Absent at the target version → delete if present.
-                    if tokio::fs::remove_file(&file_path).await.is_ok() {
-                        changed.push(file_path.to_string_lossy().into_owned());
-                    }
+            match self.rewind_one(&file_path, backup_name.as_deref()).await {
+                RewindStep::Unchanged => {}
+                RewindStep::Changed(path) => outcome.changed.push(path),
+                RewindStep::SkippedLink => outcome.skipped_links += 1,
+                RewindStep::Failed => outcome.failed += 1,
+            }
+        }
+        // 2.1.260: a rewind that could not restore ANY of the files that needed
+        // restoring is not a success. The oracle spells this `canRewind:false`
+        // and the CLI prints the error instead of "Files rewound to state at …".
+        // A rewind where nothing differed has `changed == 0 && failed == 0` and
+        // stays `Ok` — "nothing to do" is not a failure.
+        if outcome.changed.is_empty() && outcome.failed > 0 {
+            return Err(format!(
+                "No files could be restored to the state at this message ({} file{} failed; \
+                 their checkpoint backups are missing)",
+                outcome.failed,
+                if outcome.failed == 1 { "" } else { "s" }
+            ));
+        }
+        Ok(outcome)
+    }
+
+    /// Apply the target version to ONE tracked path.
+    ///
+    /// `backup_file_name` is `None` when the file did not exist at the target
+    /// version (→ delete) and `Some(name)` when it did (→ restore from backup).
+    async fn rewind_one(&self, file_path: &Path, backup_file_name: Option<&str>) -> RewindStep {
+        // 2.1.216 link safety, checked BEFORE either branch touches the path:
+        // `fs::copy` writes THROUGH a destination symlink and `remove_file`
+        // would unlink the link rather than the checkpointed file, so both
+        // operations can escape the tree. `symlink_metadata` does not follow.
+        match tokio::fs::symlink_metadata(file_path).await {
+            Ok(meta) if !meta.is_file() => return RewindStep::SkippedLink,
+            Ok(meta) if is_hard_linked(&meta) => return RewindStep::SkippedLink,
+            // Absent is fine: a restore recreates it, a delete has nothing to do.
+            _ => {}
+        }
+        match backup_file_name {
+            None => {
+                // Absent at the target version → delete if present.
+                match tokio::fs::remove_file(file_path).await {
+                    Ok(()) => RewindStep::Changed(file_path.to_string_lossy().into_owned()),
+                    // Already gone ⇒ the tree already matches the target.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => RewindStep::Unchanged,
+                    Err(_) => RewindStep::Failed,
                 }
-                Some(name) => {
-                    if self.origin_file_changed(&file_path, Some(&name)).await {
-                        if self.restore_backup(&file_path, &name).await.is_ok() {
-                            changed.push(file_path.to_string_lossy().into_owned());
-                        }
-                    }
+            }
+            Some(name) => {
+                if !self.origin_file_changed(file_path, Some(name)).await {
+                    return RewindStep::Unchanged;
+                }
+                match self.restore_backup(file_path, name).await {
+                    Ok(true) => RewindStep::Changed(file_path.to_string_lossy().into_owned()),
+                    // The backup file itself is gone. Before this, `restore_backup`
+                    // returned `Ok(())` here and the path was still pushed onto
+                    // `changed` — the file was reported as restored having never
+                    // been touched.
+                    Ok(false) | Err(_) => RewindStep::Failed,
                 }
             }
         }
-        Ok(changed)
     }
 
     /// Would rewinding to `message_id` change any file on disk? (the picker's
@@ -474,16 +566,20 @@ impl FileHistory {
         })
     }
 
-    /// Overwrite `file_path` from its backup (lazy-mkdir on ENOENT). Silently
-    /// bails if the backup is missing.
+    /// Overwrite `file_path` from its backup (lazy-mkdir on ENOENT).
+    ///
+    /// Returns `Ok(false)` when the backup file is MISSING — the caller must
+    /// treat that as a failure to restore, not as success. Returning `Ok(())`
+    /// here is what let `/rewind` report a file as restored after doing nothing
+    /// (2.1.260).
     async fn restore_backup(
         &self,
         file_path: &Path,
         backup_file_name: &str,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<bool> {
         let backup_path = self.resolve_backup_path(backup_file_name);
         if tokio::fs::metadata(&backup_path).await.is_err() {
-            return Ok(());
+            return Ok(false);
         }
         if tokio::fs::copy(&backup_path, file_path).await.is_err() {
             if let Some(parent) = file_path.parent() {
@@ -491,7 +587,7 @@ impl FileHistory {
             }
             tokio::fs::copy(&backup_path, file_path).await?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Has `original` diverged from `backup_file_name`? Missing backup name ⇒
@@ -531,6 +627,26 @@ impl FileHistory {
             self.cwd.join(p)
         }
     }
+}
+
+/// Does this `symlink_metadata` describe a file with more than one hard link?
+///
+/// A tracked path that is one of several names for the same inode must not be
+/// restored or deleted through: `fs::copy` would rewrite the shared inode's
+/// content and `remove_file` would drop one name while the others keep the
+/// post-edit content — either way a file OUTSIDE the checkpoint changes
+/// (oracle 2.1.216: "a symlink, hard link, or other non-regular file").
+#[cfg(unix)]
+fn is_hard_linked(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.nlink() > 1
+}
+
+/// Windows has no portable link count through `Metadata`; symlinks and other
+/// non-regular files are still refused by the `is_file` arm at the call site.
+#[cfg(not(unix))]
+fn is_hard_linked(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 async fn files_differ(original: &Path, backup: &Path) -> bool {
@@ -660,7 +776,7 @@ pub async fn rewind_from_disk(
     cwd: &str,
     session_id: Uuid,
     message_id: Uuid,
-) -> Result<Vec<String>, String> {
+) -> Result<RewindOutcome, String> {
     let path = crate::jsonl::session_path(home, cwd, &session_id.to_string());
     let content = tokio::fs::read_to_string(&path)
         .await
@@ -713,9 +829,132 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "v1-edited\n");
 
         // Rewind to the turn → the pre-edit content is restored.
-        let changed = fh.rewind_files(msg).await.expect("rewind");
+        let changed = fh.rewind_files(msg).await.expect("rewind").changed;
         assert_eq!(changed.len(), 1);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "v0\n");
+    }
+
+    /// 2.1.260 — the regression this file shipped with: `restore_backup`
+    /// returned `Ok(())` when the checkpoint backup was missing and the caller
+    /// pushed the path onto `changed` anyway, so `/rewind` printed "Files
+    /// rewound to state at message …" having touched nothing.
+    ///
+    /// The oracle's rule is narrow: per-file failures are not `skippedLinks`,
+    /// but when EVERY differing file fails the rewind itself fails
+    /// (`canRewind:false`).
+    #[tokio::test]
+    async fn a_missing_backup_fails_the_rewind_instead_of_reporting_success() {
+        let (home, cwd) = scratch("missing-backup");
+        let file = cwd.join("a.txt");
+        std::fs::write(&file, "v0\n").unwrap();
+        let fh = FileHistory::new(home.clone(), cwd.clone(), "sess-mb".into());
+
+        let msg = Uuid::new_v4();
+        fh.make_snapshot(msg).await;
+        fh.track_edit(file.to_str().unwrap()).await;
+        std::fs::write(&file, "v1-edited\n").unwrap();
+
+        // Delete the checkpoint backup out from under the rewind.
+        let backup_dir = home.join("file-history").join("sess-mb");
+        let mut removed = 0usize;
+        for entry in std::fs::read_dir(&backup_dir).expect("backup dir exists") {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+            removed += 1;
+        }
+        assert_eq!(removed, 1, "the test must actually remove the one backup");
+
+        let err = fh
+            .rewind_files(msg)
+            .await
+            .expect_err("a rewind that restored nothing is not a success");
+        assert!(
+            err.contains("No files could be restored"),
+            "error must name what happened, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "v1-edited\n",
+            "the edited content is still on disk — nothing was restored"
+        );
+    }
+
+    /// 2.1.216 — `fs::copy` writes THROUGH a destination symlink, so a tracked
+    /// path swapped for a link to somewhere else let `/rewind` overwrite a file
+    /// outside the checkpoint. The link-safety check refuses and counts it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rewind_refuses_to_write_through_a_symlinked_tracked_path() {
+        let (home, cwd) = scratch("symlink");
+        let file = cwd.join("a.txt");
+        std::fs::write(&file, "v0\n").unwrap();
+        let fh = FileHistory::new(home, cwd.clone(), "sess-sym".into());
+
+        let msg = Uuid::new_v4();
+        fh.make_snapshot(msg).await;
+        fh.track_edit(file.to_str().unwrap()).await;
+        std::fs::write(&file, "v1-edited\n").unwrap();
+
+        // Swap the tracked path for a symlink pointing OUTSIDE the project.
+        let outsider = cwd.parent().unwrap().join("outside-the-tree.txt");
+        std::fs::write(&outsider, "DO NOT TOUCH\n").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&outsider, &file).unwrap();
+
+        let outcome = fh.rewind_files(msg).await.expect("rewind");
+        assert_eq!(outcome.skipped_links, 1, "the link must be counted");
+        assert!(outcome.changed.is_empty(), "nothing may be reported changed");
+        assert_eq!(
+            std::fs::read_to_string(&outsider).unwrap(),
+            "DO NOT TOUCH\n",
+            "the symlink target outside the tree must be untouched"
+        );
+    }
+
+    /// The delete arm escapes too: `remove_file` on a symlinked tracked path
+    /// unlinks the LINK, leaving the real file — and reports it as rewound.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rewind_refuses_to_delete_through_a_symlinked_tracked_path() {
+        let (home, cwd) = scratch("symlink-delete");
+        let fh = FileHistory::new(home, cwd.clone(), "sess-symdel".into());
+        let msg = Uuid::new_v4();
+        fh.make_snapshot(msg).await;
+        // Brand-new file at the tracked path → null backup → the rewind deletes.
+        let file = cwd.join("new.txt");
+        fh.track_edit(file.to_str().unwrap()).await;
+
+        let outsider = cwd.parent().unwrap().join("delete-target.txt");
+        std::fs::write(&outsider, "KEEP\n").unwrap();
+        std::os::unix::fs::symlink(&outsider, &file).unwrap();
+
+        let outcome = fh.rewind_files(msg).await.expect("rewind");
+        assert_eq!(outcome.skipped_links, 1);
+        assert!(outcome.changed.is_empty());
+        assert!(outsider.exists(), "the link target must survive");
+        assert!(
+            std::fs::symlink_metadata(&file).is_ok(),
+            "the link itself is left alone, not unlinked"
+        );
+    }
+
+    /// A rewind where nothing differs is NOT a failure — `changed` is empty and
+    /// `failed` is zero, so the all-failed arm must not fire. Without this the
+    /// missing-backup fix would turn every no-op rewind into an error.
+    #[tokio::test]
+    async fn a_rewind_with_nothing_to_do_still_succeeds() {
+        let (home, cwd) = scratch("noop");
+        let file = cwd.join("a.txt");
+        std::fs::write(&file, "v0\n").unwrap();
+        let fh = FileHistory::new(home, cwd.clone(), "sess-noop".into());
+        let msg = Uuid::new_v4();
+        fh.make_snapshot(msg).await;
+        fh.track_edit(file.to_str().unwrap()).await;
+        // No edit after the backup — the file already matches the target.
+
+        let outcome = fh.rewind_files(msg).await.expect("a no-op rewind is fine");
+        assert!(outcome.changed.is_empty());
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.skipped_links, 0);
     }
 
     #[tokio::test]
@@ -731,7 +970,7 @@ mod tests {
         std::fs::write(&file, "created\n").unwrap();
         assert!(file.exists());
 
-        let changed = fh.rewind_files(msg).await.expect("rewind");
+        let changed = fh.rewind_files(msg).await.expect("rewind").changed;
         assert_eq!(changed.len(), 1);
         assert!(!file.exists(), "file created after the snapshot is deleted");
     }
@@ -778,7 +1017,7 @@ mod tests {
         let fresh = FileHistory::new(home, cwd, "sess-rt".into());
         fresh.restore_from_records(parse_snapshot_records(&content));
 
-        let changed = fresh.rewind_files(msg).await.expect("rewind");
+        let changed = fresh.rewind_files(msg).await.expect("rewind").changed;
         assert_eq!(changed.len(), 1, "the created file is rewound (deleted)");
         assert!(
             !file.exists(),

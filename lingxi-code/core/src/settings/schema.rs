@@ -340,10 +340,27 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_output_max_chars: Option<u32>,
 
+    /// Scalar field (later source wins). How much Bash output Claude receives
+    /// inline before it is saved to a file (2.1.261, alongside
+    /// `taskOutputMaxChars`). Read through the same `see()` CLAMP of
+    /// `4_000..=128_000`, and when set it wins over `BASH_MAX_OUTPUT_LENGTH`;
+    /// absent, the env var applies over the built-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bash_output_max_chars: Option<u32>,
+
     /// Scalar field (later source wins). When enabled, a literal `ultracode`
     /// token in a submitted prompt emits the Workflow authorization reminder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_keyword_trigger_enabled: Option<bool>,
+
+    /// Scalar field (later source wins). Turns the file-based auto-memory
+    /// feature (the `# Memory` prompt section + per-turn memdir recall) on or
+    /// off. **Unset means ON** — claude-code's gate ends `return!0`
+    /// (`dLt()`, oracle `src_166572870.js`); see [`memory::auto_memory_enabled`]
+    /// for the full precedence, including the env killswitch that overrides
+    /// this key in BOTH directions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_memory_enabled: Option<bool>,
 
     /// Scalar field (later source wins). Session-scoped gate for dynamic
     /// workflows. Absence resolves to enabled at the composition root, matching

@@ -2490,7 +2490,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // ledger is this session's authority; the config key stays a faithful
     // upstream mirror, read back only as a once-per-session opening balance.
     {
-        let total_usd = summary_orch.snapshot_cost().await.total_usd;
+        let cost = summary_orch.snapshot_cost().await;
         let session_uuid = summary_orch.current_session_id().await.as_uuid();
         if let Some(cfg_path) = migrations::global_config::global_config_path() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -2498,7 +2498,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 &cfg_path,
                 &cwd,
                 &session_uuid.to_string(),
-                total_usd,
+                &cost,
             );
         }
     }

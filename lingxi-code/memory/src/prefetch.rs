@@ -407,7 +407,10 @@ mod tests {
     #[tokio::test]
     async fn real_path_scans_selects_and_surfaces() {
         let home = tempfile::tempdir().expect("tmp home");
-        let memdir = home.path().join(".lingxi").join("memdir");
+        let memdir = home.path().join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         std::fs::create_dir_all(&memdir).expect("mk memdir");
         std::fs::write(
             memdir.join("fd.md"),
@@ -422,7 +425,7 @@ mod tests {
         .expect("write fd");
         std::fs::write(memdir.join("rg.md"), "USE RG NOT GREP").expect("write rg");
 
-        let roots = memdir_path(home.path(), false);
+        let roots = memdir_path(home.path(), std::path::Path::new("/proj"), false);
         // The selector "picks" fd.md only.
         let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
             names: vec!["fd.md".into()],
@@ -466,7 +469,10 @@ mod tests {
     #[tokio::test]
     async fn selector_receives_redacted_memdir_frontmatter_description() {
         let home = tempfile::tempdir().expect("tmp home");
-        let memdir = home.path().join(".lingxi").join("memdir");
+        let memdir = home.path().join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         std::fs::create_dir_all(&memdir).expect("mk memdir");
         std::fs::write(
             memdir.join("fd.md"),
@@ -482,7 +488,7 @@ mod tests {
         let prefetch = MemoryPrefetch::new(
             selector,
             Arc::new(InlineRuntime),
-            memdir_path(home.path(), false),
+            memdir_path(home.path(), std::path::Path::new("/proj"), false),
         );
 
         let surfaced = prefetch
@@ -504,7 +510,7 @@ mod tests {
     #[tokio::test]
     async fn live_session_memory_is_excluded_before_selection() {
         let home = tempfile::tempdir().expect("tmp home");
-        let roots = memdir_path(home.path(), false);
+        let roots = memdir_path(home.path(), std::path::Path::new("/proj"), false);
         std::fs::create_dir_all(&roots.session_memdir).expect("mk session memdir");
         let live_id = "sess:11111111-1111-1111-1111-111111111111";
         let live_name = "11111111-1111-1111-1111-111111111111.md";
@@ -552,7 +558,7 @@ mod tests {
         // No memdir directory on disk ⇒ scan finds nothing ⇒ empty (no surfacing),
         // and the selector is never consulted.
         let home = tempfile::tempdir().expect("tmp home");
-        let roots = memdir_path(home.path(), false);
+        let roots = memdir_path(home.path(), std::path::Path::new("/proj"), false);
         let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
             names: vec!["x.md".into()],
             prompts: None,
@@ -634,10 +640,13 @@ mod tests {
         );
 
         let home = tempfile::tempdir().expect("tmp home");
-        let memdir = home.path().join(".lingxi").join("memdir");
+        let memdir = home.path().join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         std::fs::create_dir_all(&memdir).expect("mk memdir");
         std::fs::write(memdir.join("fd.md"), "USE FD NOT FIND").expect("write fd");
-        let roots = memdir_path(home.path(), false);
+        let roots = memdir_path(home.path(), std::path::Path::new("/proj"), false);
 
         let snapshot = scan_snapshot(roots).await.expect("snapshot");
         assert_eq!(snapshot.entries.len(), 1);

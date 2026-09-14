@@ -236,6 +236,43 @@ fn oauth_logical_key_config(oauth: &platform_api::McpOAuthConfigDto) -> serde_js
     serde_json::Value::Object(map)
 }
 
+/// Canonicalize a server URL for the reconnect-identity key: sort the query
+/// parameters.
+///
+/// 2.1.269 — "Fixed MCP servers reconnecting when an updated config only
+/// changed the order of the server URL's query parameters." The key is built
+/// from the config, and the URL rode it as an OPAQUE STRING, so `?b=2&a=1` and
+/// `?a=1&b=2` hashed differently and the server was torn down and reconnected
+/// for a config that had not actually changed.
+///
+/// Only the query ORDER is normalized. Everything else — scheme, host, port,
+/// path, fragment, duplicate keys and their relative order, percent-encoding —
+/// is preserved, because any of those genuinely identifies a different endpoint.
+/// A URL that does not parse is returned untouched rather than guessed at.
+fn canonical_server_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    if parsed.query().is_none() {
+        return url.to_string();
+    }
+    let mut pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    // Stable sort: two entries with the SAME key keep their original order, so
+    // a repeated parameter whose order the server cares about is unchanged.
+    pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+    {
+        let mut serializer = parsed.query_pairs_mut();
+        serializer.clear();
+        for (key, value) in &pairs {
+            serializer.append_pair(key, value);
+        }
+    }
+    parsed.to_string()
+}
+
 fn spec_logical_key_config(spec: &McpTransportSpec) -> serde_json::Value {
     let mut value = match spec {
         McpTransportSpec::Stdio { command, args, env } => serde_json::json!({
@@ -246,17 +283,17 @@ fn spec_logical_key_config(spec: &McpTransportSpec) -> serde_json::Value {
         }),
         McpTransportSpec::Sse { url, headers, .. } => serde_json::json!({
             "type": "sse",
-            "url": url,
+            "url": canonical_server_url(url),
             "headers": headers,
         }),
         McpTransportSpec::Http { url, headers, .. } => serde_json::json!({
             "type": "http",
-            "url": url,
+            "url": canonical_server_url(url),
             "headers": headers,
         }),
         McpTransportSpec::WebSocket { url, headers, .. } => serde_json::json!({
             "type": "ws",
-            "url": url,
+            "url": canonical_server_url(url),
             "headers": headers,
         }),
         McpTransportSpec::InProcess { registry_key } => serde_json::json!({
@@ -265,12 +302,12 @@ fn spec_logical_key_config(spec: &McpTransportSpec) -> serde_json::Value {
         }),
         McpTransportSpec::SseIde { url, ide_name, .. } => serde_json::json!({
             "type": "sse-ide",
-            "url": url,
+            "url": canonical_server_url(url),
             "ideName": ide_name,
         }),
         McpTransportSpec::WsIde { url, ide_name, .. } => serde_json::json!({
             "type": "ws-ide",
-            "url": url,
+            "url": canonical_server_url(url),
             "ideName": ide_name,
         }),
         McpTransportSpec::SdkControl { control_channel_id } => serde_json::json!({
@@ -2772,5 +2809,62 @@ mod tests {
             })
             .collect();
         assert_eq!(keys.len(), sources.len());
+    }
+}
+
+#[cfg(test)]
+mod url_identity_tests {
+    use super::canonical_server_url;
+
+    /// 2.1.269 — a config edit that only reorders query parameters must NOT
+    /// change the reconnect identity, or the server is torn down and
+    /// reconnected for a config that did not actually change.
+    #[test]
+    fn query_parameter_order_does_not_change_the_identity() {
+        assert_eq!(
+            canonical_server_url("https://h.test/mcp?b=2&a=1"),
+            canonical_server_url("https://h.test/mcp?a=1&b=2")
+        );
+    }
+
+    /// Everything that genuinely identifies a different endpoint must still
+    /// separate — otherwise the fix would fuse distinct servers into one.
+    #[test]
+    fn anything_other_than_order_still_separates() {
+        let base = canonical_server_url("https://h.test/mcp?a=1&b=2");
+        for other in [
+            "https://h.test/mcp?a=1&b=3",       // different value
+            "https://h.test/mcp?a=1&c=2",       // different key
+            "https://h.test/mcp?a=1",           // dropped param
+            "https://h.test/other?a=1&b=2",     // different path
+            "https://other.test/mcp?a=1&b=2",   // different host
+            "http://h.test/mcp?a=1&b=2",        // different scheme
+            "https://h.test:8443/mcp?a=1&b=2",  // different port
+            "https://h.test/mcp?a=1&b=2#frag",  // different fragment
+        ] {
+            assert_ne!(base, canonical_server_url(other), "{other} must differ");
+        }
+    }
+
+    /// A repeated key keeps its relative order — a server may treat
+    /// `?x=1&x=2` differently from `?x=2&x=1`.
+    #[test]
+    fn repeated_keys_keep_their_relative_order() {
+        assert_ne!(
+            canonical_server_url("https://h.test/mcp?x=1&x=2"),
+            canonical_server_url("https://h.test/mcp?x=2&x=1")
+        );
+    }
+
+    /// No query, or an unparseable URL, passes through untouched rather than
+    /// being guessed at.
+    #[test]
+    fn urls_without_a_query_and_unparseable_urls_pass_through() {
+        assert_eq!(
+            canonical_server_url("https://h.test/mcp"),
+            "https://h.test/mcp"
+        );
+        assert_eq!(canonical_server_url("not a url"), "not a url");
+        assert_eq!(canonical_server_url(""), "");
     }
 }

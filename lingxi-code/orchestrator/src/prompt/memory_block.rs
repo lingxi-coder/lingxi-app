@@ -332,8 +332,11 @@ pub fn build_memdir_prefetch(
     side_query_client: Arc<dyn sidequery::SideQueryClient>,
     runtime: Arc<dyn platform_api::RuntimeSpawner>,
     home: &std::path::Path,
+    cwd: &std::path::Path,
 ) -> Arc<memory::prefetch::MemoryPrefetch> {
-    let roots = memory::memdir::memdir_path(home, false);
+    // MEM-2: the User tier is scoped to `cwd`'s project, so memories written
+    // while working on one repository are not recalled in another.
+    let roots = memory::memdir::memdir_path(home, cwd, false);
     let selector = Arc::new(memory::selector::MemorySelector::new(side_query_client));
     Arc::new(memory::prefetch::MemoryPrefetch::new(
         selector, runtime, roots,
@@ -398,7 +401,7 @@ pub fn build_session_memory_handle(
 /// supplied `api_key`, independent of any multi-provider routing the host's main
 /// turn client uses. With no usable `api_key` the side query fails and the
 /// prefetch resolves to empty (inert) — never breaking a turn. Gating is the
-/// caller's (default OFF, per [`build_memdir_prefetch`]).
+/// caller's — see `memory::auto_memory_enabled` (default ON).
 #[must_use]
 pub fn build_memdir_prefetch_from_anthropic(
     api_key: impl Into<String>,
@@ -406,11 +409,12 @@ pub fn build_memdir_prefetch_from_anthropic(
     http: Arc<dyn platform_api::HttpTransport>,
     runtime: Arc<dyn platform_api::RuntimeSpawner>,
     home: &std::path::Path,
+    cwd: &std::path::Path,
 ) -> Arc<memory::prefetch::MemoryPrefetch> {
     let client: Arc<dyn sidequery::SideQueryClient> = Arc::new(
         sidequery::ProviderSideQueryClient::new(api_key, api_base, http),
     );
-    build_memdir_prefetch(client, runtime, home)
+    build_memdir_prefetch(client, runtime, home, cwd)
 }
 
 /// Verbatim preamble that precedes the memory blocks.

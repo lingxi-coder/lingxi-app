@@ -19,6 +19,76 @@ const MAX_FILES: usize = 10_000;
 /// Hard cap on total uncompressed bytes — zip-bomb guard.
 const MAX_TOTAL_BYTES: u64 = 1 << 30; // 1 GiB
 
+/// Group-write + other-write (`0o022`). claude-code's post-extraction sweep
+/// tests `mode & 18` and, when set, re-chmods to `mode & 0o755` — oracle
+/// `jko`/`O$` in `src_169588164.js`.
+#[cfg(unix)]
+const GROUP_OTHER_WRITE: u32 = 0o022;
+
+/// Mode for the extraction directory itself: owner-only (`0o700`, oracle
+/// `mode:448`), so another local user cannot read a plugin unpacked for this
+/// session.
+#[cfg(unix)]
+pub const EXTRACT_DIR_MODE: u32 = 0o700;
+
+/// Strip group/other write bits from `path`.
+///
+/// claude-code needs this because its unzip applies the archive's stored mode.
+/// This port writes with [`std::fs::write`], which never consults the archive —
+/// but that yields `0o666 & !umask`, so a permissive umask still produces a
+/// world-writable plugin file. Same outcome, different cause; the sweep is what
+/// makes the result independent of both.
+#[cfg(unix)]
+fn drop_group_other_write(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // `symlink_metadata` so a symlink planted in the archive cannot redirect the
+    // chmod at a file outside `dest` (oracle opens with `O_NOFOLLOW` for the
+    // same reason). Only regular files and directories are touched.
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = meta.permissions().mode();
+    if mode & GROUP_OTHER_WRITE == 0 {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & !GROUP_OTHER_WRITE))
+}
+
+#[cfg(not(unix))]
+fn drop_group_other_write(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Create `dest` as the owner-only root of an extraction, removing whatever was
+/// there before.
+///
+/// The removal is the 2.1.269 "stale files surviving re-extraction" half: an
+/// unpack over an existing directory leaves any file the NEW archive does not
+/// happen to overwrite, so a downgraded or tampered plugin keeps shipping code
+/// from the previous version.
+///
+/// # Errors
+/// Propagates the directory create/remove failure.
+pub fn prepare_extract_dir(dest: &Path) -> std::io::Result<()> {
+    // Clear whatever is there. A SYMLINK at `dest` is unlinked rather than
+    // recursed into — `remove_dir_all` down a link would delete the link's
+    // target tree, which is not ours to remove.
+    match std::fs::symlink_metadata(dest) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => std::fs::remove_file(dest)?,
+        Ok(_) => std::fs::remove_dir_all(dest)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::create_dir_all(dest)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(EXTRACT_DIR_MODE))?;
+    }
+    Ok(())
+}
+
 /// Lowercase hex SHA-256 of `bytes` (the bundle's only integrity check —
 /// claude-code has no signature verification).
 #[must_use]
@@ -79,6 +149,7 @@ fn unpack_mcpb_limited(
         }
         if entry.is_dir() {
             std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            drop_group_other_write(&out).map_err(|e| e.to_string())?;
         } else {
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -108,6 +179,7 @@ fn unpack_mcpb_limited(
             }
             total += buf.len() as u64;
             std::fs::write(&out, &buf).map_err(|e| e.to_string())?;
+            drop_group_other_write(&out).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -531,6 +603,115 @@ pub fn generate_mcp_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("lingxi-mcpb-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        p
+    }
+
+    fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            for (name, body) in entries {
+                w.start_file::<_, ()>(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(body).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    /// 2.1.269 — "plugin archives extracted for a session being readable by
+    /// other local users". A permissive umask alone is enough to produce a
+    /// group/other-writable plugin tree here, because `fs::write` uses
+    /// `0o666 & !umask`.
+    #[cfg(unix)]
+    #[test]
+    fn extraction_root_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dest = scratch("perms-dir");
+        prepare_extract_dir(&dest).unwrap();
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "extraction root must be owner-only, got {mode:o}");
+    }
+
+    /// `fs::write` PRESERVES an existing file's mode, so unpacking over a
+    /// world-writable path of the same name leaves it world-writable unless the
+    /// per-entry sweep runs. (A permissive umask reaches the same state on a
+    /// fresh file; this shape is testable without touching the process umask.)
+    #[cfg(unix)]
+    #[test]
+    fn unpacking_strips_group_and_other_write_from_extracted_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dest = scratch("perms-file");
+        std::fs::create_dir_all(&dest).unwrap();
+        let victim = dest.join("b.txt");
+        std::fs::write(&victim, b"old").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o022,
+            0o022,
+            "precondition: the path starts group/other-writable"
+        );
+
+        unpack_mcpb(&zip_with(&[("b.txt", b"hi")]), &dest).unwrap();
+
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o022,
+            0,
+            "group/other write must be stripped, got {mode:o}"
+        );
+    }
+
+    /// 2.1.269 — "stale files surviving re-extraction". A file the NEW archive
+    /// does not ship must not outlive the old extraction.
+    #[test]
+    fn re_extraction_does_not_leave_files_the_new_archive_dropped() {
+        let dest = scratch("stale");
+        prepare_extract_dir(&dest).unwrap();
+        unpack_mcpb(&zip_with(&[("old.js", b"stale code")]), &dest).unwrap();
+        assert!(dest.join("old.js").exists());
+
+        // Re-extract a DIFFERENT archive that no longer ships `old.js`.
+        prepare_extract_dir(&dest).unwrap();
+        unpack_mcpb(&zip_with(&[("new.js", b"fresh")]), &dest).unwrap();
+
+        assert!(dest.join("new.js").exists(), "the new file is written");
+        assert!(
+            !dest.join("old.js").exists(),
+            "a file the new archive dropped must not survive re-extraction"
+        );
+    }
+
+    /// `prepare_extract_dir` must UNLINK a symlink at `dest`, never recurse into
+    /// it — `remove_dir_all` through a link would delete the link's target tree.
+    #[cfg(unix)]
+    #[test]
+    fn preparing_a_symlinked_dest_does_not_delete_the_link_target() {
+        let base = scratch("symlink-dest");
+        std::fs::create_dir_all(&base).unwrap();
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("keep.txt"), b"KEEP").unwrap();
+        let dest = base.join("link");
+        std::os::unix::fs::symlink(&real, &dest).unwrap();
+
+        prepare_extract_dir(&dest).unwrap();
+
+        assert!(
+            real.join("keep.txt").exists(),
+            "the symlink target tree must be untouched"
+        );
+        assert!(
+            !std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink(),
+            "dest is now a real directory"
+        );
+    }
 
     #[test]
     fn sha256_is_lowercase_hex() {

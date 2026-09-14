@@ -858,6 +858,13 @@ impl Tool for ConfigTool {
                 final_value.as_bool().unwrap_or(false),
             );
         }
+        if setting == "bashOutputMaxChars" {
+            // Republish so the Bash cap moves with the setting inside the
+            // running session, exactly as `taskOutputMaxChars` does below.
+            platform_api::session_flags::set_bash_output_max_chars(
+                final_value.as_u64().and_then(|n| u32::try_from(n).ok()),
+            );
+        }
         if setting == "taskOutputMaxChars" {
             // Republish so `TaskOutput`'s cap moves with the setting inside the
             // running session, exactly as the push flag above does.

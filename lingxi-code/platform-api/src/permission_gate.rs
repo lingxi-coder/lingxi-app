@@ -18,6 +18,27 @@ use protocol::ContentBlock;
 use serde_json::Value;
 use std::path::Path;
 
+/// One tool call refused by the permission layer, as reported in the
+/// `--output-format stream-json` `result` frame's `permission_denials`.
+///
+/// Oracle schema `LF` (`src_166572870.js`):
+/// `{tool_name: string, tool_use_id: string, tool_input: Record<string, unknown>}`.
+///
+/// This is the AUTHORITATIVE denial record. claude-code's own schema doc for the
+/// `permission_denied` system event says so explicitly, and lists what that
+/// event does not cover: PreToolUse hook denies, deny-rule overrides of a hook
+/// allow/ask decision, and Read/Edit/Write calls refused by a path-scoped deny
+/// rule. Building this list from the event stream would inherit those holes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PermissionDenial {
+    /// The tool that was refused.
+    pub tool_name: String,
+    /// The `tool_use_id` of the refused call.
+    pub tool_use_id: String,
+    /// The input the model supplied, verbatim.
+    pub tool_input: Value,
+}
+
 /// Receives only time spent waiting on a permission prompt transport.
 #[derive(Clone)]
 pub struct PermissionPauseObserver(std::sync::Arc<dyn Fn(u64) + Send + Sync>);

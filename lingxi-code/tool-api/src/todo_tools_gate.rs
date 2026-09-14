@@ -59,96 +59,58 @@ use platform_api::env::is_env_truthy;
 
 use crate::tool_trait::ToolStaticContext;
 
-/// `Zao` — the per-family version thresholds at or above which the todo/task
-/// tools are withdrawn. A family absent from this table is never gated.
-const MODEL_THRESHOLDS: &[(&str, &[u64])] = &[
-    ("opus", &[4, 8]),
-    ("sonnet", &[5]),
-    ("fable", &[5]),
-    ("mythos", &[5]),
+/// `Lks` — 2.1.270's ALLOWLIST of model ids that still get the todo/task tools.
+///
+/// 2.1.268 replaced the 2.1.263 family+threshold DENYLIST (`Zao`) with this
+/// exact-id set. The port still carried the denylist, so every model added since
+/// kept the tools instead of losing them.
+///
+/// Oracle `lM()` (`src_169588164.js`):
+/// ```js
+/// Lks=new Set(["claude-3-opus","claude-3-sonnet","claude-3-haiku","claude-3-5-sonnet",
+///   "claude-3-5-haiku","claude-3-7-sonnet","claude-opus-4-0","claude-opus-4-1",
+///   "claude-opus-4-5","claude-opus-4-6","claude-opus-4-7","claude-sonnet-4-0",
+///   "claude-sonnet-4-5","claude-sonnet-4-6","claude-haiku-4-5"])
+/// ```
+const ALLOWED_MODEL_IDS: &[&str] = &[
+    "claude-3-opus",
+    "claude-3-sonnet",
+    "claude-3-haiku",
+    "claude-3-5-sonnet",
+    "claude-3-5-haiku",
+    "claude-3-7-sonnet",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
 ];
+
+/// `$ks` — a Bedrock application-inference-profile id names no model, so it can
+/// never be matched against the allowlist and is let through.
+const INFERENCE_PROFILE_MARKER: &str = "application-inference-profile";
+
+/// Does `model` look like an Anthropic model id at all?
+///
+/// ⛔ LingXi is a multi-provider product, so "not in the allowlist" is the
+/// NORMAL case, not the edge case: a DeepSeek/Kimi/GLM id would fail an
+/// exact-set lookup and silently lose TaskCreate/TodoWrite. The oracle never has
+/// to think about this because every id it sees is Anthropic's.
+///
+/// So the allowlist only DECIDES for ids that are recognisably Anthropic
+/// (`claude-*`). Anything else takes the same exit as `e===void 0` upstream:
+/// unrecognised ⇒ keep the tools. Pinned by
+/// `a_non_anthropic_model_keeps_the_tools`.
+fn is_anthropic_model_id(model: &str) -> bool {
+    model.starts_with("claude-")
+}
 
 /// The env escape hatch, port-renamed from `CLAUDE_CODE_ENABLE_TODO_TOOLS`.
 pub const ENABLE_TODO_TOOLS_ENV: &str = "LINGXI_ENABLE_TODO_TOOLS";
-
-/// `elo` — the gate key of the last `OO()` term.
-const ROSY_WREN_FLAG: &str = "tengu_rosy_wren";
-
-/// Port of `s$e(e, r)` (`src_159167389.js` @1061):
-///
-/// ```js
-/// function s$e(e,r){
-///   let t=/^claude-([a-z]+)-(\d+(?:-\d+)*)$/.exec(e),i=t?.[1],l=t?.[2];
-///   if(!i||!l)return!1;
-///   let o=r.find(([s])=>s===i)?.[1];
-///   if(!o)return!1;
-///   let c=l.split("-").map(Number);
-///   for(let s=0;s<Math.max(c.length,o.length);s++){
-///     let f=(c[s]??0)-(o[s]??0);
-///     if(f!==0)return f>0
-///   }
-///   return!0
-/// }
-/// ```
-///
-/// "Is this model id at or above its family's threshold?" — a component-wise
-/// `>=`, with missing components read as `0` and an exact tie counting as at
-/// threshold.
-///
-/// **The two `false` exits are load-bearing and must stay.** An id that does
-/// not match the regex (`gpt-5`, `anthropic/claude-opus-4-8`,
-/// `claude-3-5-sonnet`, `claude-opus-4-1-eap`) and an id whose family is not in
-/// the table (`claude-haiku-4-5`) both answer `false`, which the caller reads as
-/// "not gated — keep the tools". That is what holds LingXi's third-party
-/// provider ids out of the gate; a looser "is this current-gen" heuristic would
-/// silently strip the task tools from every non-Anthropic model.
-#[must_use]
-fn model_at_or_above_threshold(model: &str, thresholds: &[(&str, &[u64])]) -> bool {
-    let Some((family, version)) = split_claude_model_id(model) else {
-        return false;
-    };
-    let Some((_, threshold)) = thresholds.iter().find(|(name, _)| *name == family) else {
-        return false;
-    };
-    for i in 0..version.len().max(threshold.len()) {
-        let lhs = i128::from(version.get(i).copied().unwrap_or(0));
-        let rhs = i128::from(threshold.get(i).copied().unwrap_or(0));
-        if lhs != rhs {
-            return lhs > rhs;
-        }
-    }
-    true
-}
-
-/// `/^claude-([a-z]+)-(\d+(?:-\d+)*)$/`, hand-rolled so the anchors and the
-/// character classes stay literal. Returns the family and the parsed version
-/// components, or `None` when the id does not match the whole pattern.
-fn split_claude_model_id(model: &str) -> Option<(&str, Vec<u64>)> {
-    let rest = model.strip_prefix("claude-")?;
-    // `([a-z]+)` — the maximal run of lowercase ASCII. `[a-z]` matches neither
-    // a digit nor `-`, so the split point is unambiguous and greediness cannot
-    // backtrack into the version.
-    let family_len = rest.bytes().take_while(u8::is_ascii_lowercase).count();
-    if family_len == 0 {
-        return None;
-    }
-    let (family, tail) = rest.split_at(family_len);
-    // The literal `-` between the two capture groups.
-    let version = tail.strip_prefix('-')?;
-    // `(\d+(?:-\d+)*)$` — one or more `-`-joined runs of ASCII digits, and
-    // nothing else through end of string.
-    let mut components = Vec::new();
-    for part in version.split('-') {
-        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        // The regex admits arbitrarily many digits; JS would widen to f64. A
-        // component past `u64` is astronomically above any threshold, so
-        // saturating preserves the comparison's answer.
-        components.push(part.parse::<u64>().unwrap_or(u64::MAX));
-    }
-    Some((family, components))
-}
 
 /// Pure core of [`todo_tools_enabled`] — the `OO()` body with its four
 /// ambient reads (`Ja()`, `QDn()`, the env var, the gate flag) lifted into
@@ -156,30 +118,40 @@ fn split_claude_model_id(model: &str) -> Option<(&str, Vec<u64>)> {
 ///
 /// `main_loop_model` is `None` for the JS `e === void 0` path, which is an
 /// *enable*: an unknown model keeps the tools.
+/// 2.1.270 has NO trailing feature-flag term: `lM()` ends at the env check, so
+/// `gate_flag` (the old `tengu_rosy_wren`) is gone.
 #[must_use]
 pub fn todo_tools_enabled_inner(
     main_loop_model: Option<&str>,
     background_session: bool,
     opt_in: bool,
     env_enable: bool,
-    gate_flag: bool,
 ) -> bool {
-    // `if(Ja()||QDn())return!0`
+    // `if(yl()||bVn())return!0`
     if background_session || opt_in {
         return true;
     }
-    // `let e=J$e(); if(e===void 0||tlo(e))return!0`
+    // `let e=Lze(); if(e===void 0||$ks(e)||Fks(e))return!0`
     match main_loop_model {
+        // Unknown model ⇒ keep the tools (`e===void 0`).
         None => return true,
-        Some(model) if !model_at_or_above_threshold(model, MODEL_THRESHOLDS) => return true,
-        Some(_) => {}
+        Some(model) => {
+            // Bedrock inference profile: names no model, so it can never match.
+            if model.contains(INFERENCE_PROFILE_MARKER) {
+                return true;
+            }
+            // The allowlist only decides for Anthropic ids; anything else is
+            // "unrecognised" and keeps the tools (see `is_anthropic_model_id`).
+            if !is_anthropic_model_id(model) {
+                return true;
+            }
+            if ALLOWED_MODEL_IDS.contains(&model) {
+                return true;
+            }
+        }
     }
-    // `if(a.CLAUDE_CODE_ENABLE_TODO_TOOLS===!0)return!0`
-    if env_enable {
-        return true;
-    }
-    // `return H("tengu_rosy_wren",!1)===!0`
-    gate_flag
+    // `return a.CLAUDE_CODE_ENABLE_TODO_TOOLS===!0`
+    env_enable
 }
 
 /// `OO()` — whether the todo/task tool family is advertised at all.
@@ -204,7 +176,6 @@ pub fn todo_tools_enabled_for_model(main_loop_model: Option<&str>) -> bool {
         platform_api::env::is_bg_session(),
         platform_api::session_flags::todo_tools_opt_in(),
         is_env_truthy(std::env::var(ENABLE_TODO_TOOLS_ENV).ok().as_deref()),
-        telemetry::flag_bool(ROSY_WREN_FLAG, false),
     )
 }
 
@@ -212,238 +183,107 @@ pub fn todo_tools_enabled_for_model(main_loop_model: Option<&str>) -> bool {
 mod tests {
     use super::*;
 
-    /// The four ids the CHANGELOG names, plus the newer ones the `>=`
-    /// comparison is there to catch.
+    fn on(model: &str) -> bool {
+        todo_tools_enabled_inner(Some(model), false, false, false)
+    }
+
+    /// Every id in the 2.1.270 allowlist keeps the tools.
     #[test]
-    fn changelog_named_models_are_gated() {
+    fn allowlisted_models_keep_the_tools() {
+        for model in ALLOWED_MODEL_IDS {
+            assert!(on(model), "{model} is allowlisted and must keep the tools");
+        }
+    }
+
+    /// 2.1.268 flipped this from a family+threshold DENYLIST to an exact-id
+    /// ALLOWLIST. Under the old denylist every Anthropic model NOT named in the
+    /// table kept the tools, so each of these was wrongly enabled.
+    #[test]
+    fn anthropic_models_outside_the_allowlist_lose_the_tools() {
         for model in [
             "claude-opus-4-8",
             "claude-sonnet-5",
             "claude-fable-5",
             "claude-mythos-5",
-            // "and newer models"
-            "claude-opus-4-9",
             "claude-opus-5",
-            "claude-opus-6-0",
-            "claude-fable-5-1",
-            "claude-mythos-5-1",
-            "claude-sonnet-5-2",
+            "claude-haiku-5",
+            // Not in the set even though its family IS: only exact ids match.
+            "claude-sonnet-4-7",
+            "claude-3-5-opus",
         ] {
-            assert!(
-                model_at_or_above_threshold(model, MODEL_THRESHOLDS),
-                "{model} must be at or above its threshold"
-            );
-            assert!(
-                !todo_tools_enabled_inner(Some(model), false, false, false, false),
-                "{model} must lose the todo tools"
-            );
+            assert!(!on(model), "{model} is not allowlisted and must lose them");
         }
     }
 
-    /// Below threshold in the same family — the tools stay.
+    /// ⛔ The multi-provider exit. An exact-id allowlist copied verbatim would
+    /// strip TaskCreate/TodoWrite from EVERY non-Anthropic model, because none
+    /// of them can ever be in an Anthropic-only set. Unrecognised ids take the
+    /// same branch as `e === void 0` upstream: keep the tools.
     #[test]
-    fn older_models_in_a_gated_family_keep_the_tools() {
+    fn a_non_anthropic_model_keeps_the_tools() {
         for model in [
-            "claude-opus-4-7",
+            "deepseek-chat",
+            "kimi-k2",
+            "glm-4-plus",
+            "gpt-5.4",
+            "gemini-3-pro",
+            "qwen-max",
+            "",
+        ] {
+            assert!(on(model), "{model:?} is not an Anthropic id and must keep the tools");
+        }
+    }
+
+    /// `$ks` — a Bedrock application-inference-profile id names no model.
+    #[test]
+    fn an_inference_profile_keeps_the_tools() {
+        assert!(on(
+            "arn:aws:bedrock:us-east-1:1234:application-inference-profile/abc"
+        ));
+    }
+
+    /// `e === void 0`.
+    #[test]
+    fn an_unknown_model_keeps_the_tools() {
+        assert!(todo_tools_enabled_inner(None, false, false, false));
+    }
+
+    /// The three escape hatches ahead of / behind the model check.
+    #[test]
+    fn background_opt_in_and_env_each_re_enable_a_gated_model() {
+        let gated = "claude-sonnet-5";
+        assert!(!on(gated), "precondition: this model is gated");
+        assert!(todo_tools_enabled_inner(Some(gated), true, false, false), "bg session");
+        assert!(todo_tools_enabled_inner(Some(gated), false, true, false), "opt-in");
+        assert!(todo_tools_enabled_inner(Some(gated), false, false, true), "env");
+    }
+
+    /// The allowlist is the oracle's, verbatim — a drifted entry silently
+    /// changes which models get the tools.
+    #[test]
+    fn the_allowlist_matches_the_oracle_set() {
+        assert_eq!(ALLOWED_MODEL_IDS.len(), 15);
+        for expected in [
+            "claude-3-opus",
+            "claude-3-sonnet",
+            "claude-3-haiku",
+            "claude-3-5-sonnet",
+            "claude-3-5-haiku",
+            "claude-3-7-sonnet",
             "claude-opus-4-0",
-            "claude-opus-3",
+            "claude-opus-4-1",
+            "claude-opus-4-5",
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-sonnet-4-0",
             "claude-sonnet-4-5",
             "claude-sonnet-4-6",
-            "claude-fable-4-9",
-            "claude-mythos-4",
+            "claude-haiku-4-5",
         ] {
             assert!(
-                !model_at_or_above_threshold(model, MODEL_THRESHOLDS),
-                "{model} must be below its threshold"
-            );
-            assert!(
-                todo_tools_enabled_inner(Some(model), false, false, false, false),
-                "{model} must keep the todo tools"
+                ALLOWED_MODEL_IDS.contains(&expected),
+                "{expected} missing from the allowlist"
             );
         }
-    }
-
-    /// A family with no row in `Zao` is never gated, however new it is.
-    #[test]
-    fn families_absent_from_the_table_are_never_gated() {
-        for model in ["claude-haiku-4-5", "claude-haiku-9-9", "claude-instant-1"] {
-            assert!(!model_at_or_above_threshold(model, MODEL_THRESHOLDS));
-            assert!(todo_tools_enabled_inner(
-                Some(model),
-                false,
-                false,
-                false,
-                false
-            ));
-        }
-    }
-
-    /// The regex's `false` exit is what protects LingXi's multi-provider ids —
-    /// a deliberate, user-confirmed divergence. If this test goes red the gate
-    /// has started eating third-party models.
-    #[test]
-    fn ids_that_fail_the_regex_keep_the_tools() {
-        for model in [
-            // Non-Anthropic providers.
-            "gpt-5",
-            "gemini-3-pro",
-            "deepseek-chat",
-            "grok-4",
-            // Provider-qualified refs — the `^claude-` anchor rejects these.
-            "anthropic/claude-opus-4-8",
-            "openrouter/anthropic/claude-fable-5.1",
-            // Dotted rather than dashed version.
-            "claude-fable-5.1",
-            // Old-style ids where the family does not lead.
-            "claude-3-5-sonnet",
-            "claude-3-opus",
-            // Early-access and bracketed suffixes — `$` rejects the trailing
-            // non-digits.
-            "claude-opus-5-eap",
-            "claude-opus-5[1m]",
-            // Degenerate shapes.
-            "",
-            "claude-",
-            "claude-opus",
-            "claude-opus-",
-            "claude--4-8",
-            "claude-opus-4-",
-            "claude-Opus-4-8",
-            "claude-opus-4-8 ",
-            " claude-opus-4-8",
-        ] {
-            assert!(
-                !model_at_or_above_threshold(model, MODEL_THRESHOLDS),
-                "{model:?} must not match the oracle regex"
-            );
-            assert!(
-                todo_tools_enabled_inner(Some(model), false, false, false, false),
-                "{model:?} must keep the todo tools"
-            );
-        }
-    }
-
-    /// `(c[s]??0)-(o[s]??0)` — a component the other side does not have reads
-    /// as zero, so a bare `claude-sonnet-5` ties `[5]` and a `claude-opus-4`
-    /// falls short of `[4,8]`.
-    #[test]
-    fn missing_version_components_read_as_zero() {
-        assert!(model_at_or_above_threshold(
-            "claude-sonnet-5",
-            MODEL_THRESHOLDS
-        ));
-        assert!(model_at_or_above_threshold(
-            "claude-sonnet-5-0",
-            MODEL_THRESHOLDS
-        ));
-        assert!(!model_at_or_above_threshold(
-            "claude-opus-4",
-            MODEL_THRESHOLDS
-        ));
-        assert!(!model_at_or_above_threshold(
-            "claude-opus-4-0-0",
-            MODEL_THRESHOLDS
-        ));
-        assert!(model_at_or_above_threshold(
-            "claude-opus-4-8-0",
-            MODEL_THRESHOLDS
-        ));
-        assert!(model_at_or_above_threshold(
-            "claude-opus-4-8-1",
-            MODEL_THRESHOLDS
-        ));
-    }
-
-    /// The comparison is numeric, not lexicographic: `10 > 9`.
-    #[test]
-    fn version_components_compare_numerically() {
-        assert!(model_at_or_above_threshold(
-            "claude-opus-4-10",
-            MODEL_THRESHOLDS
-        ));
-        assert!(!model_at_or_above_threshold(
-            "claude-opus-4-9",
-            &[("opus", &[4, 10])]
-        ));
-        // Leading zeros parse as the number, matching JS `Number("08")`.
-        assert!(model_at_or_above_threshold(
-            "claude-opus-4-08",
-            MODEL_THRESHOLDS
-        ));
-    }
-
-    /// `if(e===void 0||…)return!0` — no known model means no gate.
-    #[test]
-    fn unknown_model_keeps_the_tools() {
-        assert!(todo_tools_enabled_inner(None, false, false, false, false));
-    }
-
-    /// The three escape hatches, each on its own.
-    #[test]
-    fn each_escape_hatch_restores_a_gated_model() {
-        let gated = Some("claude-opus-4-8");
-        assert!(!todo_tools_enabled_inner(gated, false, false, false, false));
-        // `Ja()` — background session / bg takeover.
-        assert!(todo_tools_enabled_inner(gated, true, false, false, false));
-        // `QDn()` — the user named one of the five tools in --allowedTools.
-        assert!(todo_tools_enabled_inner(gated, false, true, false, false));
-        // `CLAUDE_CODE_ENABLE_TODO_TOOLS` / `LINGXI_ENABLE_TODO_TOOLS`.
-        assert!(todo_tools_enabled_inner(gated, false, false, true, false));
-    }
-
-    /// The public wrapper reads the model off the context. Guarded on the live
-    /// process state so a stray `LINGXI_SESSION_KIND=bg` or
-    /// `LINGXI_ENABLE_TODO_TOOLS` in the environment cannot make this flaky.
-    #[test]
-    fn the_wrapper_reads_the_model_off_the_context() {
-        let hatch_open = platform_api::env::is_bg_session()
-            || platform_api::session_flags::todo_tools_opt_in()
-            || is_env_truthy(std::env::var(ENABLE_TODO_TOOLS_ENV).ok().as_deref());
-        let gated = ToolStaticContext {
-            main_loop_model: Some("claude-opus-4-8".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(todo_tools_enabled(&gated), hatch_open);
-        // Below threshold, unknown, and non-Claude all stay enabled regardless.
-        for model in [None, Some("claude-opus-4-7"), Some("gpt-5")] {
-            let ctx = ToolStaticContext {
-                main_loop_model: model.map(str::to_string),
-                ..Default::default()
-            };
-            assert!(todo_tools_enabled(&ctx), "{model:?}");
-            assert_eq!(
-                todo_tools_enabled(&ctx),
-                todo_tools_enabled_for_model(model)
-            );
-        }
-    }
-
-    /// `H("tengu_rosy_wren", false)` is the one `OO()` term that is a real gate
-    /// read rather than a constant, so it is exercised through the gate helper
-    /// the rest of the workspace uses.
-    #[test]
-    fn the_rosy_wren_gate_reopens_the_gate() {
-        let gated = Some("claude-opus-4-8");
-        assert!(!todo_tools_enabled_inner(gated, false, false, false, false));
-        assert!(todo_tools_enabled_inner(gated, false, false, false, true));
-        assert!(
-            !telemetry::flag_bool(ROSY_WREN_FLAG, false),
-            "default is off"
-        );
-    }
-
-    /// `Ja()` and `QDn()` short-circuit ahead of the model read, so they hold
-    /// even for a model that is otherwise gated and even with no model at all.
-    #[test]
-    fn session_and_opt_in_hatches_precede_the_model_read() {
-        assert!(todo_tools_enabled_inner(None, true, false, false, false));
-        assert!(todo_tools_enabled_inner(None, false, true, false, false));
-        assert!(todo_tools_enabled_inner(
-            Some("claude-mythos-5-1"),
-            true,
-            true,
-            false,
-            false
-        ));
     }
 }

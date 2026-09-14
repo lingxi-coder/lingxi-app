@@ -229,6 +229,50 @@ impl ConversationOrchestrator {
             .insert(id.to_string(), kind.to_string());
     }
 
+    /// Record a refused tool call for the stream-json `result` frame's
+    /// `permission_denials` (oracle schema `LF`).
+    ///
+    /// Recorded at the SAME funnel as [`Self::record_tool_denial_kind`], and for
+    /// the same reason its doc gives: every denial — rule, mode, plan,
+    /// classifier, hook override, prompt-transport reject — passes through here,
+    /// so a count taken here cannot miss one. Deriving the list from the
+    /// `permission_denied` system event instead would miss the three cases
+    /// claude-code's own schema doc says that event does not cover.
+    ///
+    /// Session-scoped and append-only: the result frame reports the whole run.
+    pub(crate) async fn record_permission_denial(
+        &self,
+        tool_name: &str,
+        id: &protocol::ToolUseId,
+        tool_input: &serde_json::Value,
+    ) {
+        self.transcript
+            .permission_denials
+            .lock()
+            .await
+            .push(platform_api::PermissionDenial {
+                tool_name: tool_name.to_string(),
+                tool_use_id: id.to_string(),
+                tool_input: tool_input.clone(),
+            });
+    }
+
+    /// Every tool call refused this session, in order — read by the stream-json
+    /// result builders.
+    pub async fn permission_denials(&self) -> Vec<platform_api::PermissionDenial> {
+        self.transcript.permission_denials.lock().await.clone()
+    }
+
+    /// Share the denial cell itself, so a transport can read the live list when
+    /// it builds its terminal frame instead of being handed a snapshot it might
+    /// take at the wrong moment (or forget to take at one emit site out of six).
+    #[must_use]
+    pub fn permission_denials_handle(
+        &self,
+    ) -> std::sync::Arc<tokio::sync::Mutex<Vec<platform_api::PermissionDenial>>> {
+        std::sync::Arc::clone(&self.transcript.permission_denials)
+    }
+
     /// Take the recorded kind for a message carrying EXACTLY ONE `tool_result`.
     ///
     /// The single-block guard is claude's own (`Tpr`): a user message with zero

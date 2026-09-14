@@ -108,6 +108,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         workflow_keyword_trigger_enabled: next
             .workflow_keyword_trigger_enabled
             .or(prev.workflow_keyword_trigger_enabled),
+        auto_memory_enabled: next.auto_memory_enabled.or(prev.auto_memory_enabled),
+        bash_output_max_chars: next
+            .bash_output_max_chars
+            .or(prev.bash_output_max_chars),
         enable_workflows: next.enable_workflows.or(prev.enable_workflows),
         workflow_size_guideline: next
             .workflow_size_guideline

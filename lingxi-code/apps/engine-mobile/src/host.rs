@@ -3607,6 +3607,7 @@ async fn build_mobile_inner_with_ask(
         provider_settings.show_thinking_summaries.unwrap_or(false),
     );
     platform_api::session_flags::set_task_output_max_chars(provider_settings.task_output_max_chars);
+    platform_api::session_flags::set_bash_output_max_chars(provider_settings.bash_output_max_chars);
     // Mobile is a transport host, not the CLI REPL. Keep main-query telemetry
     // on Claude Code's SDK source and never mark it as `--print`.
     orch_cfg.query_source = orchestrator::QUERY_SOURCE_SDK.to_string();
@@ -5006,20 +5007,22 @@ async fn build_mobile_inner_with_ask(
     ));
     local_workflow_status_sink.bind(task_registry.clone());
 
-    // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
-    // `LINGXI_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory
-    // selector so relevant `<lingxi_home>/memdir` entries surface each turn via a
-    // Haiku-class side query (a `ProviderSideQueryClient` over the device HTTP
-    // transport + `cfg.api_key`, independent of the multi-provider turn client).
-    // Unset/false ⇒ no prefetch ⇒ surfacing inert ⇒ the locked mobile fixtures
-    // stay byte-identical. On a device the env var is typically unset, so this is
-    // off unless the host app explicitly sets it. A missing/unusable key makes the
-    // side query fail → empty surfaced set (never breaks a turn).
-    let memdir_prefetch = if platform_api::env::is_env_truthy(
-        std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref(),
+    // MEM-1 ACTIVATION on mobile — the same gate as desktop,
+    // `memory::auto_memory_enabled`, which claude-code defaults ON (`dLt()` ends
+    // `return!0`). When active, wire the memdir-backed memory selector so
+    // relevant project memdir entries surface each turn via a Haiku-class side
+    // query (a `ProviderSideQueryClient` over the device HTTP transport +
+    // `cfg.api_key`, independent of the multi-provider turn client).
+    //
+    // Disable with `autoMemoryEnabled:false` or the `*_DISABLE_AUTO_MEMORY` /
+    // `*_SIMPLE` env killswitches. A missing/unusable key makes the side query
+    // fail → empty surfaced set (never breaks a turn).
+    let memdir_prefetch = if memory::auto_memory_enabled(
+        &memory::AutoMemoryEnv::from_process_env(),
+        provider_settings.auto_memory_enabled,
     ) {
         // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
-        // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<lingxi_home>/memdir`.
+        // the config-home segment, so pass its PARENT as `home`.
         let home = cfg
             .lingxi_home
             .parent()
@@ -5032,6 +5035,7 @@ async fn build_mobile_inner_with_ask(
             Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
                 as Arc<dyn platform_api::RuntimeSpawner>,
             &home,
+            &cwd,
         ))
     } else {
         None

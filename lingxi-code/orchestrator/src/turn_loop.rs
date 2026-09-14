@@ -5235,6 +5235,17 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 // this record, consumed when the tool_result user line is
                 // written.
                 orch.record_tool_denial_kind(tool_use_id, denial_kind).await;
+                // OR-1: the AUTHORITATIVE `permission_denials` record for the
+                // stream-json `result` frame. Recorded here — the same funnel
+                // `record_tool_denial_kind` uses — rather than aggregated from
+                // the `permission_denied` system event, which claude-code's own
+                // schema doc calls "best-effort advisory" and which does not
+                // cover PreToolUse hook denies, deny-rule overrides of a hook
+                // allow/ask, or file-tool calls refused by a path-scoped deny
+                // rule. `effective_input` is the input the decision was made on,
+                // matching the oracle's `tool_input`.
+                orch.record_permission_denial(name, tool_use_id, &effective_input)
+                    .await;
                 // O1: claude's permission-deny arm (2.1.220 BIN off 235400200)
                 // stamps `` toolUseResult: `Error: ${denyMessage}` `` — the
                 // deny message with an `Error: ` prefix, while the model
@@ -7063,6 +7074,149 @@ mod denial_kind_wiring_tests {
             .await
             .expect("dispatch must succeed on a denied tool");
         output.denial_snapshot().await
+    }
+
+    /// OR-1 — the denial must also land in the session's `permission_denials`
+    /// record, which is what the stream-json `result` frame reports.
+    ///
+    /// The CLI-side test only proves cell → frame; this proves the PRODUCER,
+    /// i.e. that the deny funnel really records. Without it the feature could be
+    /// fully plumbed and still report `[]` forever.
+    #[tokio::test]
+    async fn a_denied_tool_is_recorded_in_the_sessions_permission_denials() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(DeniedTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(ProvenanceDenyGate {
+                decision_reason_type: Some("rule".into()),
+                decision_reason: None,
+                behavior_ask: false,
+            }),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        assert!(
+            orch.permission_denials().await.is_empty(),
+            "precondition: nothing denied yet"
+        );
+
+        let id = ToolUseId::new();
+        let input = json!({"file_path": "/repo/secret/.env"});
+        let uses = vec![(id.clone(), "Denied".to_string(), input.clone(), None)];
+        dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch must succeed on a denied tool");
+
+        let denials = orch.permission_denials().await;
+        assert_eq!(denials.len(), 1, "the deny funnel must record exactly once");
+        assert_eq!(denials[0].tool_name, "Denied");
+        assert_eq!(denials[0].tool_use_id, id.to_string());
+        assert_eq!(
+            denials[0].tool_input, input,
+            "tool_input is the input the decision was made on"
+        );
+    }
+
+    /// An ALLOWED tool must not be recorded — otherwise `permission_denials`
+    /// would fill with every call and the field would be worse than empty.
+    #[tokio::test]
+    async fn an_allowed_tool_is_not_recorded_as_a_denial() {
+        struct AllowGate;
+        #[async_trait]
+        impl PermissionGate for AllowGate {
+            async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+                PermissionDecision::Allow
+            }
+        }
+        struct OkTool;
+        #[async_trait]
+        impl Tool for OkTool {
+            fn name(&self) -> &str {
+                "Ok"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                    once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+                &SCHEMA
+            }
+            fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+                true
+            }
+            fn max_result_size_chars(&self) -> usize {
+                1024 * 1024
+            }
+            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            fn is_read_only(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            async fn validate_input(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolUseContext,
+            ) -> Result<(), ValidationError> {
+                Ok(())
+            }
+            async fn check_permissions(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolUseContext,
+            ) -> permission::PermissionResult {
+                permission::PermissionResult::Allow {
+                    reason: permission::PermissionDecisionReason::Other {
+                        reason: "test".into(),
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: permission::result::PermissionMetadata::default(),
+                }
+            }
+            async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+                "ok".into()
+            }
+            async fn prompt(&self, _: &PromptOptions) -> String {
+                String::new()
+            }
+            async fn call(
+                &self,
+                _: serde_json::Value,
+                _: ToolUseContext,
+                _: ToolProgressSender,
+            ) -> Result<ToolCallResult, ToolError> {
+                Ok(ToolCallResult {
+                    data: json!("fine"),
+                    model_content: None,
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                })
+            }
+        }
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(OkTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(AllowGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(ToolUseId::new(), "Ok".to_string(), json!({}), None)];
+        dispatch_tool_uses_tracked(&orch, &uses, None).await.ok();
+        assert!(
+            orch.permission_denials().await.is_empty(),
+            "an allowed call must not be recorded as a denial"
+        );
     }
 
     /// A plain rule denial reaches the output stream stamped `permission-rule`.

@@ -1635,6 +1635,7 @@ mod tests {
             "reply_on_resume",
             "enable_auto_mode",
             "append_subagent_system_prompt",
+            "append_subagent_system_prompt_file",
             "messaging_socket_path",
             "resume_session_at",
             "resume_drops_turn",
@@ -1705,5 +1706,88 @@ mod tests {
                 .is_some_and(|ms| (ms - 1_700_000_000_000.0).abs() < 1.0),
             "a finite epoch-ms value survives the argParser"
         );
+    }
+}
+
+#[cfg(test)]
+mod append_subagent_system_prompt_file_tests {
+    use crate::argv::Argv;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Argv {
+        Argv::try_parse_from(std::iter::once("lingxi-cli").chain(args.iter().copied()))
+            .expect("parses")
+    }
+
+    /// (2.1.261) The file form exists and is separate from the inline one.
+    #[test]
+    fn the_file_flag_parses_alongside_the_inline_flag() {
+        let a = parse(&["--append-subagent-system-prompt-file", "/tmp/p.txt"]);
+        assert_eq!(
+            a.append_subagent_system_prompt_file.as_deref(),
+            Some("/tmp/p.txt")
+        );
+        assert_eq!(a.append_subagent_system_prompt, None);
+
+        let b = parse(&["--append-subagent-system-prompt", "inline"]);
+        assert_eq!(b.append_subagent_system_prompt.as_deref(), Some("inline"));
+        assert_eq!(b.append_subagent_system_prompt_file, None);
+    }
+
+    /// Both together is accepted at the argv layer; `run_cli` resolves the
+    /// precedence (inline wins) rather than clap rejecting the combination.
+    #[test]
+    fn both_forms_together_parse() {
+        let a = parse(&[
+            "--append-subagent-system-prompt",
+            "inline",
+            "--append-subagent-system-prompt-file",
+            "/tmp/p.txt",
+        ]);
+        assert_eq!(a.append_subagent_system_prompt.as_deref(), Some("inline"));
+        assert_eq!(
+            a.append_subagent_system_prompt_file.as_deref(),
+            Some("/tmp/p.txt")
+        );
+    }
+}
+
+#[cfg(test)]
+mod permission_prompts_tests {
+    use crate::argv::Argv;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Argv {
+        Argv::try_parse_from(std::iter::once("lingxi-cli").chain(args.iter().copied()))
+            .expect("parses")
+    }
+
+    /// (2.1.259) `--permission-prompts none` — oracle `NQ(e){return e==="none"}`.
+    #[test]
+    fn only_the_literal_none_turns_prompts_off() {
+        assert!(parse(&["--permission-prompts", "none"]).permission_prompts_none());
+        // Any other target is accepted and simply is not "none" — the oracle
+        // compares to the literal and tolerates the rest, so narrowing this to
+        // an enum would reject values it accepts.
+        for other in ["stdio", "tool", "None", "NONE", ""] {
+            assert!(
+                !parse(&["--permission-prompts", other]).permission_prompts_none(),
+                "{other:?} must not read as none"
+            );
+        }
+        // Unset.
+        assert!(!parse(&[]).permission_prompts_none());
+    }
+
+    /// The flag is NOT hidden — unlike the SDK-internal ones, it is documented
+    /// for unattended hosts.
+    #[test]
+    fn the_flag_is_visible_in_help() {
+        let command = <Argv as clap::CommandFactory>::command();
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "permission_prompts")
+            .expect("permission_prompts is a root flag");
+        assert!(!arg.is_hide_set());
     }
 }

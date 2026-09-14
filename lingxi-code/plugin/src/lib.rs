@@ -77,6 +77,7 @@ pub use mcpb::sha256_hex as plugin_source_sha256;
 /// Guarded zip extraction used by both installed MCP bundles and session-only
 /// `--plugin-url` archives.
 pub use mcpb::unpack_mcpb as unpack_plugin_archive;
+pub use mcpb::prepare_extract_dir;
 pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 pub use theme_registry::{PluginThemeEntry, PluginThemeRegistry};

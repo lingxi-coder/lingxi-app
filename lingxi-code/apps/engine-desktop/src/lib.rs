@@ -8462,6 +8462,12 @@ fn load_merged_task_output_max_chars(project_dir: &std::path::Path) -> Option<u3
     load_merged_settings(project_dir).and_then(|eff| eff.settings.task_output_max_chars)
 }
 
+/// Load the merged `settings.bashOutputMaxChars`. `None` when unset — the
+/// branch under which `BASH_MAX_OUTPUT_LENGTH` applies.
+fn load_merged_bash_output_max_chars(project_dir: &std::path::Path) -> Option<u32> {
+    load_merged_settings(project_dir).and_then(|eff| eff.settings.bash_output_max_chars)
+}
+
 /// Load `settings.workflowKeywordTriggerEnabled`. The default remains off,
 /// matching Claude Code's optional setting.
 fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -> bool {
@@ -11712,6 +11718,15 @@ pub async fn build(
             .and_then(|settings| settings.settings.task_output_max_chars)
     } else {
         load_merged_task_output_max_chars(&cfg.cwd)
+    });
+    // `settings.bashOutputMaxChars` (2.1.261) — the same shape for Bash output.
+    // Published RAW; `tool_shell` applies the `see()` clamp.
+    platform_api::session_flags::set_bash_output_max_chars(if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.bash_output_max_chars)
+    } else {
+        load_merged_bash_output_max_chars(&cfg.cwd)
     });
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
@@ -15233,15 +15248,25 @@ pub async fn build(
         // `/files` consumers — 1:1 with claude-code's single per-session map.
         .with_read_state_map(read_state_map);
 
-    // P0.1 ACTIVATION (gated, default OFF). When `LINGXI_MEMDIR_PREFETCH`
-    // is truthy, wire the memdir-backed memory selector so relevant
-    // `~/.lingxi/memdir` entries surface each turn (a Haiku-class side query per
-    // turn over `side_query_client`). The composition-root presence of the
-    // prefetch IS the gate — claude-code keeps this behind `tengu_moth_copse`
-    // (default false), so unset/false leaves the surfacing channel inert and the
-    // locked fixtures byte-identical (`memory_prefetch.is_some() == false`).
+    // MEM-1 ACTIVATION. The composition-root presence of the prefetch IS the
+    // gate (`memory_prefetch.is_some()`), and that presence is now decided by
+    // `memory::auto_memory_enabled` — the port of claude-code `dLt()`, whose
+    // last statement is `return!0`, i.e. **ON by default**.
+    //
+    // 🚨 This used to read `LINGXI_MEMDIR_PREFETCH` and cite `tengu_moth_copse`
+    // as the upstream gate. That attribution was wrong: `tengu_moth_copse`
+    // (`X$()`) guards `CLAUDE_MEMORY_STORES`, a different feature. So the port
+    // shipped auto-memory OFF for everyone on a mis-mapped flag.
+    //
+    // Costs a Haiku-class side query per turn over `side_query_client`; turn it
+    // off with `autoMemoryEnabled:false` or `*_DISABLE_AUTO_MEMORY` / `*_SIMPLE`.
     let (memory_prefetch_on, session_memory_on) = resolve_memory_feature_gates(
-        is_env_truthy("LINGXI_MEMDIR_PREFETCH"),
+        memory::auto_memory_enabled(
+            &memory::AutoMemoryEnv::from_process_env(),
+            effective_settings
+                .as_ref()
+                .and_then(|s| s.settings.auto_memory_enabled),
+        ),
         is_env_truthy("LINGXI_SESSION_MEMORY"),
     );
     let orch_builder = match (memory_prefetch_on, dirs::home_dir()) {
@@ -15250,6 +15275,7 @@ pub async fn build(
                 side_query_client.clone(),
                 Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
                 &home,
+                &cfg.cwd,
             ))
         }
         _ => orch_builder,
@@ -16593,6 +16619,54 @@ mod tests {
         let deny = sandbox_network_ask_callback(deny_gate.clone());
         assert!(!deny("api.example.test", 8443).await.unwrap());
         assert_eq!(deny_gate.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// MEM-1 — a clean install must get auto-memory. claude-code's `dLt()` ends
+    /// `return!0`; the port had it OFF for everyone behind
+    /// `LINGXI_MEMDIR_PREFETCH`, citing `tengu_moth_copse` — a flag that
+    /// actually guards `CLAUDE_MEMORY_STORES`.
+    #[test]
+    fn a_default_configuration_enables_the_memory_prefetch() {
+        let env = memory::AutoMemoryEnv::default();
+        let (prefetch_on, _) =
+            resolve_memory_feature_gates(memory::auto_memory_enabled(&env, None), false);
+        assert!(prefetch_on, "auto-memory must be ON with nothing configured");
+
+        let (off, _) =
+            resolve_memory_feature_gates(memory::auto_memory_enabled(&env, Some(false)), false);
+        assert!(!off, "`autoMemoryEnabled:false` must turn it off");
+    }
+
+    /// The decision must come from the real gate, not the old env var. Checked
+    /// against the composition root's own source, because `build()` is not
+    /// unit-constructible here — the same technique the plugin-workflow wiring
+    /// test above uses, with the needles assembled at runtime so they cannot
+    /// match themselves inside `include_str!`.
+    #[test]
+    fn build_gates_the_memory_prefetch_on_the_auto_memory_gate() {
+        const SRC: &str = include_str!("lib.rs");
+        let build_src = SRC
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(SRC, |(production, _)| production);
+
+        let gate_call = "memory::auto_memory_enabl".to_string() + "ed(";
+        assert!(
+            build_src.contains(&gate_call),
+            "the composition root must decide via the auto-memory gate"
+        );
+        let setting = "settings.auto_memory_enabl".to_string() + "ed";
+        assert!(
+            build_src.contains(&setting),
+            "the gate must be fed the `autoMemoryEnabled` setting"
+        );
+        // The precise thing that must be gone is the env READ, not the name —
+        // the comment above the call site still explains what it replaced.
+        let old_gate =
+            "is_env_truthy(\"LINGXI_MEMDIR_PREFETC".to_string() + "H\")";
+        assert!(
+            !build_src.contains(&old_gate),
+            "the old env-only gate must no longer decide this — it kept memory off by default"
+        );
     }
 
     #[test]

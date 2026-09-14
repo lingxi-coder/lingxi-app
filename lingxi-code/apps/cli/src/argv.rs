@@ -1094,6 +1094,31 @@ pub struct Argv {
     )]
     pub append_subagent_system_prompt: Option<String>,
 
+    /// (2.1.259) `--permission-prompts <target>` — for unattended headless
+    /// hosts. `none` means anything that would prompt is denied automatically,
+    /// while the active permission mode (including auto mode) keeps deciding.
+    ///
+    /// Oracle `NQ(e){return e==="none"}`: the value is compared to `"none"` and
+    /// nothing else, so any other target is accepted and simply is not "none" —
+    /// this port does not narrow that to an enum, because rejecting a value the
+    /// oracle tolerates would be a divergence of its own.
+    #[arg(long = "permission-prompts", value_name = "target")]
+    pub permission_prompts: Option<String>,
+
+
+    /// (2.1.261) `--append-subagent-system-prompt-file <path>` — read the
+    /// subagent system-prompt suffix from a FILE, "for prompts too large to pass
+    /// on the command line".
+    ///
+    /// Same destination as the inline flag; the inline one wins when both are
+    /// given, so a stray file cannot silently override an explicit string.
+    #[arg(
+        long = "append-subagent-system-prompt-file",
+        value_name = "path",
+        hide = true
+    )]
+    pub append_subagent_system_prompt_file: Option<String>,
+
     /// Cross-session messaging server path: a Unix domain socket on Mac/Linux,
     /// a \\.\pipe\ name on Windows (defaults to an auto-generated path)
     //
@@ -1177,6 +1202,17 @@ fn has_variadic_positional(cmd: &clap::Command) -> bool {
 }
 
 impl Argv {
+    /// `--permission-prompts none` — oracle `NQ(e){return e==="none"}`.
+    ///
+    /// When true, anything that would open a permission prompt is answered with
+    /// a local DENY. The active permission mode still decides everything it can
+    /// decide on its own (including auto mode); only the prompt surface is
+    /// removed, which is what makes it safe for an unattended host.
+    #[must_use]
+    pub fn permission_prompts_none(&self) -> bool {
+        self.permission_prompts.as_deref() == Some("none")
+    }
+
     /// Parse from any iterable of `OsString` (used by integration tests).
     ///
     /// Named `from_iter` for ergonomic parity with `Vec::from_iter`-style

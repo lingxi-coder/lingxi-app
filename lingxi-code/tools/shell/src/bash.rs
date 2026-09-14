@@ -325,10 +325,35 @@ pub fn resolve_max_output_length(raw: Option<&str>) -> usize {
     }
 }
 
-/// Read `BASH_MAX_OUTPUT_LENGTH` from the environment and resolve the effective
-/// output cap. Mirrors claude-code `getMaxOutputLength()`.
+/// The `settings.bashOutputMaxChars` clamp — claude-code `see()`:
+/// `Math.min(Math.max(e, 4000), 128000)`, or `None` when the setting is absent.
+///
+/// A value outside the range is PULLED to the nearest bound, not rejected —
+/// the same rule `taskOutputMaxChars` uses, and what makes the setting safe to
+/// honour ahead of the env var.
+fn settings_bash_output_cap() -> Option<usize> {
+    platform_api::session_flags::bash_output_max_chars()
+        .map(|v| (v as usize).clamp(BASH_OUTPUT_SETTING_MIN, BASH_OUTPUT_SETTING_MAX))
+}
+
+/// Lower bound of the `see()` clamp (2.1.261).
+pub const BASH_OUTPUT_SETTING_MIN: usize = 4_000;
+/// Upper bound of the `see()` clamp — the CHANGELOG's "up to 128K characters".
+pub const BASH_OUTPUT_SETTING_MAX: usize = 128_000;
+
+/// Resolve the effective Bash output cap.
+///
+/// Precedence (2.1.261, matching `taskOutputMaxChars`):
+/// 1. `settings.bashOutputMaxChars`, clamped to `4_000..=128_000`;
+/// 2. otherwise `BASH_MAX_OUTPUT_LENGTH` over [`BASH_MAX_OUTPUT_DEFAULT`].
+///
+/// The setting WINS over the env var — it is range-clamped, so it cannot be
+/// used to set a pathological cap the env var would have to guard against.
 #[must_use]
 pub fn bash_max_output_length() -> usize {
+    if let Some(from_settings) = settings_bash_output_cap() {
+        return from_settings;
+    }
     resolve_max_output_length(std::env::var("BASH_MAX_OUTPUT_LENGTH").ok().as_deref())
 }
 
@@ -6323,6 +6348,45 @@ mod tests {
         if std::env::var_os("BASH_MAX_OUTPUT_LENGTH").is_none() {
             assert_eq!(bash_max_output_length(), 30_000);
         }
+    }
+
+    /// TL-3 (2.1.261) — `settings.bashOutputMaxChars` is read through the same
+    /// `see()` clamp as `taskOutputMaxChars` and WINS over the env var. Before
+    /// this the Bash cap came from `BASH_MAX_OUTPUT_LENGTH` alone, so a project
+    /// that set the setting saw no effect.
+    ///
+    /// Serialized with the other process-global publishers: this asserts on a
+    /// process-wide cell, so it must not race a parallel test that sets it.
+    #[test]
+    fn the_bash_output_setting_is_clamped_and_beats_the_env_var() {
+        let _guard = bash_output_setting_lock();
+        // Unset ⇒ the env/default path is untouched.
+        platform_api::session_flags::set_bash_output_max_chars(None);
+        if std::env::var_os("BASH_MAX_OUTPUT_LENGTH").is_none() {
+            assert_eq!(bash_max_output_length(), BASH_MAX_OUTPUT_DEFAULT);
+        }
+
+        // In range: used verbatim, and it beats the env default.
+        platform_api::session_flags::set_bash_output_max_chars(Some(50_000));
+        assert_eq!(bash_max_output_length(), 50_000);
+
+        // Out of range: PULLED to the nearest bound, never rejected.
+        platform_api::session_flags::set_bash_output_max_chars(Some(1));
+        assert_eq!(bash_max_output_length(), BASH_OUTPUT_SETTING_MIN);
+        platform_api::session_flags::set_bash_output_max_chars(Some(10_000_000));
+        assert_eq!(bash_max_output_length(), BASH_OUTPUT_SETTING_MAX);
+
+        // The CHANGELOG's "up to 128K characters".
+        assert_eq!(BASH_OUTPUT_SETTING_MAX, 128_000);
+
+        platform_api::session_flags::set_bash_output_max_chars(None);
+    }
+
+    /// The publisher is a process global, so the test above must not run
+    /// concurrently with anything else that writes it.
+    fn bash_output_setting_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     // Capturing runner that records the argv handed to the process runner so we

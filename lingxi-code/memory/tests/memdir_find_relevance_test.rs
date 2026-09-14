@@ -21,14 +21,17 @@ fn write_dated(path: &std::path::Path, body: &str, age_days: u64, now: SystemTim
 fn full_memdir_scan_then_find_relevant_returns_byte_identical_ordering() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
-    let memdir = home.join(".lingxi").join("memdir");
+    let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
     fs::create_dir_all(&memdir).unwrap();
     let now = SystemTime::now();
     write_dated(&memdir.join("fresh-alpha.md"), "alpha beta gamma", 0, now);
     write_dated(&memdir.join("old-alpha.md"), "alpha beta", 270, now);
     write_dated(&memdir.join("fresh-delta.md"), "delta epsilon", 0, now);
 
-    let roots = memdir_path(home, false);
+    let roots = memdir_path(home, std::path::Path::new("/proj"), false);
     let snap = scan_memdir_at(&roots, now).unwrap();
     assert_eq!(snap.entries.len(), 3);
 
@@ -66,14 +69,17 @@ fn full_memdir_scan_then_find_relevant_returns_byte_identical_ordering() {
 fn ranking_is_deterministic_across_repeated_runs() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
-    let memdir = home.join(".lingxi").join("memdir");
+    let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
     fs::create_dir_all(&memdir).unwrap();
     let now = SystemTime::now();
     write_dated(&memdir.join("a.md"), "x y z", 0, now);
     write_dated(&memdir.join("b.md"), "x y", 30, now);
     write_dated(&memdir.join("c.md"), "y z", 60, now);
 
-    let roots = memdir_path(home, false);
+    let roots = memdir_path(home, std::path::Path::new("/proj"), false);
     let snap = scan_memdir_at(&roots, now).unwrap();
 
     let r1 = find_relevant(
@@ -104,13 +110,16 @@ fn ranking_is_deterministic_across_repeated_runs() {
 fn entries_older_than_365_dropped_at_scan_not_in_results() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
-    let memdir = home.join(".lingxi").join("memdir");
+    let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
     fs::create_dir_all(&memdir).unwrap();
     let now = SystemTime::now();
     write_dated(&memdir.join("ancient.md"), "alpha beta", 400, now);
     write_dated(&memdir.join("fresh.md"), "alpha beta", 0, now);
 
-    let roots = memdir_path(home, false);
+    let roots = memdir_path(home, std::path::Path::new("/proj"), false);
     let snap = scan_memdir_at(&roots, now).unwrap();
     let names: Vec<_> = snap
         .entries

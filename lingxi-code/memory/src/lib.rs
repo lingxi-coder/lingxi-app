@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod file;
+pub mod gate;
 pub mod index_cap;
 pub mod lingxi_md;
 pub mod memdir;
@@ -29,6 +30,7 @@ pub use index_cap::{
     human_bytes, measure, memory_index_cap_notice, memory_index_cap_notice_measured, IndexMeasure,
     MemoryIndexNotice, TENGU_MEMDIR_ENTRYPOINT_NEAR_CAP,
 };
+pub use gate::{auto_memory_enabled, AutoMemoryEnv};
 pub use tier::MemoryTier;
 
 // ------ M3-02 wire-identifier constants ------

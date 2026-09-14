@@ -389,6 +389,28 @@ pub fn task_output_max_chars() -> Option<u32> {
     }
 }
 
+/// `settings.bashOutputMaxChars`, published by the composition root, or `0`
+/// when unset. Same shape as [`TASK_OUTPUT_MAX_CHARS`]: the `4_000..=128_000`
+/// clamp is the consumer's job.
+static BASH_OUTPUT_MAX_CHARS: AtomicU32 = AtomicU32::new(0);
+
+/// Publish `settings.bashOutputMaxChars`. `None` (or a startup that never calls
+/// this) leaves the reader answering `None` — the oracle's
+/// `Ge().bashOutputMaxChars === undefined` branch, under which
+/// `BASH_MAX_OUTPUT_LENGTH` applies.
+pub fn set_bash_output_max_chars(chars: Option<u32>) {
+    BASH_OUTPUT_MAX_CHARS.store(chars.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// The published `settings.bashOutputMaxChars`, RAW.
+#[must_use]
+pub fn bash_output_max_chars() -> Option<u32> {
+    match BASH_OUTPUT_MAX_CHARS.load(Ordering::Relaxed) {
+        0 => None,
+        v => Some(v),
+    }
+}
+
 /// Whether proactive agent push notifications are opted in by settings.
 #[must_use]
 pub fn agent_push_notif_enabled() -> bool {

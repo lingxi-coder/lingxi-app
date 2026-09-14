@@ -383,7 +383,10 @@ mod tests {
     fn scan_drops_entries_older_than_365_days() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi").join("memdir");
+        let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         fs::create_dir_all(&memdir).unwrap();
         write_dated(&memdir.join("fresh.md"), b"fresh\n", 10);
         write_dated(
@@ -392,7 +395,7 @@ mod tests {
             MEMORY_AGE_HARD_DROP_DAYS + 1,
         );
 
-        let roots = memdir_path(home, false);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), false);
         let snap = scan_memdir_at(&roots, SystemTime::now()).unwrap();
         let names: Vec<_> = snap
             .entries
@@ -411,10 +414,13 @@ mod tests {
     fn user_tier_assigned_for_user_memdir() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi").join("memdir");
+        let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         fs::create_dir_all(&memdir).unwrap();
         fs::write(memdir.join("u.md"), b"u\n").unwrap();
-        let roots = memdir_path(home, false);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), false);
         let snap = scan_memdir_at(&roots, SystemTime::now()).unwrap();
         assert_eq!(snap.entries.len(), 1);
         assert_eq!(snap.entries[0].tier, MemoryEntryTier::User);
@@ -430,7 +436,7 @@ mod tests {
         let session_dir = home.join(".lingxi").join("agents").join("session-memory");
         fs::create_dir_all(&session_dir).unwrap();
         fs::write(session_dir.join("sess-1.md"), b"durable note\n").unwrap();
-        let roots = memdir_path(home, false);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), false);
         let snap = scan_memdir_at(&roots, SystemTime::now()).unwrap();
         assert_eq!(snap.entries.len(), 1);
         assert_eq!(snap.entries[0].tier, MemoryEntryTier::Session);
@@ -443,7 +449,7 @@ mod tests {
         let team = home.join(".lingxi").join("team-mem");
         fs::create_dir_all(&team).unwrap();
         fs::write(team.join("t.md"), b"t\n").unwrap();
-        let roots = memdir_path(home, true);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), true);
         let snap = scan_memdir_at(&roots, SystemTime::now()).unwrap();
         assert!(snap.entries.iter().any(|e| e.tier == MemoryEntryTier::Team));
     }
@@ -464,7 +470,10 @@ mod tests {
     fn scan_strips_frontmatter_and_redacts_secrets() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi").join("memdir");
+        let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         fs::create_dir_all(&memdir).unwrap();
         let raw = concat!(
             "---\n",
@@ -475,7 +484,7 @@ mod tests {
         );
         fs::write(memdir.join("secret.md"), raw).unwrap();
 
-        let roots = memdir_path(home, false);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), false);
         let snap = scan_memdir_at(&roots, SystemTime::now()).unwrap();
         assert_eq!(snap.entries.len(), 1);
         assert_eq!(
@@ -499,13 +508,16 @@ mod tests {
     fn scan_caps_entries_and_total_bytes_in_deterministic_order() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi").join("memdir");
+        let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         fs::create_dir_all(&memdir).unwrap();
         fs::write(memdir.join("a.md"), "aaaa").unwrap();
         fs::write(memdir.join("b.md"), "bbbb").unwrap();
         fs::write(memdir.join("c.md"), "cccc").unwrap();
 
-        let roots = memdir_path(home, false);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), false);
         let snap = scan_memdir_at_with_limits(
             &roots,
             SystemTime::now(),
@@ -542,7 +554,10 @@ mod tests {
     fn scan_preserves_room_for_session_and_team_tiers() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let user_dir = home.join(".lingxi").join("memdir");
+        let user_dir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         let session_dir = home.join(".lingxi").join("agents").join("session-memory");
         let team_dir = home.join(".lingxi").join("team-mem");
         fs::create_dir_all(&user_dir).unwrap();
@@ -555,7 +570,7 @@ mod tests {
         fs::write(session_dir.join("session.md"), "sess").unwrap();
         fs::write(team_dir.join("team.md"), "team").unwrap();
 
-        let roots = memdir_path(home, true);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), true);
         let snap = scan_memdir_at_with_limits(
             &roots,
             SystemTime::now(),
@@ -586,12 +601,15 @@ mod tests {
     fn scan_skips_large_candidate_and_keeps_smaller_later_file() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi").join("memdir");
+        let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         fs::create_dir_all(&memdir).unwrap();
         fs::write(memdir.join("a-large.md"), "123456").unwrap();
         fs::write(memdir.join("b-small.md"), "1234").unwrap();
 
-        let roots = memdir_path(home, false);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), false);
         let snap = scan_memdir_at_with_limits(
             &roots,
             SystemTime::now(),
@@ -622,14 +640,17 @@ mod tests {
     fn scan_bounds_per_tier_candidates_deterministically() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi").join("memdir");
+        let memdir = home.join(".lingxi")
+            .join("projects")
+            .join("-proj")
+            .join("memdir");
         fs::create_dir_all(&memdir).unwrap();
 
         for name in ["d.md", "b.md", "a.md", "f.md", "c.md", "e.md"] {
             fs::write(memdir.join(name), name).unwrap();
         }
 
-        let roots = memdir_path(home, false);
+        let roots = memdir_path(home, std::path::Path::new("/proj"), false);
         let snap = scan_memdir_at_with_limits(
             &roots,
             SystemTime::now(),

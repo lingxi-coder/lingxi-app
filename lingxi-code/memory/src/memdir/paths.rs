@@ -5,6 +5,31 @@ use std::path::{Path, PathBuf};
 
 /// Subdirectory under the config-home for individual memdir entries.
 pub const MEMDIR_SUBDIR: &str = "memdir";
+/// Subdirectory holding one folder per project, mirroring where sessions live.
+pub const PROJECTS_SUBDIR: &str = "projects";
+
+/// `<config-home>/projects/<project-dir>/memdir` — the User-tier memdir for the
+/// project rooted at `cwd`.
+///
+/// claude-code scopes auto-memory PER PROJECT
+/// (`<base>/projects/<sanitized-root>/memory`, oracle `defaultPath()` in
+/// `src_166572870.js`). The port used a single `<config-home>/memdir` for every
+/// repository, so a memory written while working on one codebase was recalled
+/// while working on another — the memories are project-specific advice, so
+/// cross-repo bleed is the user-visible symptom.
+///
+/// The project folder name is [`session::jsonl::path::project_dir_name`], the
+/// SAME sanitizer the session transcripts already use, so a project's memories
+/// sit beside its sessions instead of inventing a second naming scheme.
+#[must_use]
+pub fn user_memdir_for_project(config_home: &Path, cwd: &Path) -> PathBuf {
+    config_home
+        .join(PROJECTS_SUBDIR)
+        .join(session::jsonl::path::project_dir_name(
+            &cwd.to_string_lossy(),
+        ))
+        .join(MEMDIR_SUBDIR)
+}
 /// Subdirectory under the config-home for team-shared entries.
 pub const TEAM_MEM_SUBDIR: &str = "team-mem";
 /// Subdirectory under the config-home holding agent artifacts (session memory).
@@ -32,17 +57,17 @@ pub struct MemdirRoots {
 /// `team_enabled == true` (the bool comes from `settings.team_memory.enabled`;
 /// auto-detection from filesystem presence is intentionally NOT used).
 #[must_use]
-pub fn memdir_path(home: &Path, team_enabled: bool) -> MemdirRoots {
-    memdir_roots_at(&crate::lingxi_md::user_config_dir(home), team_enabled)
+pub fn memdir_path(home: &Path, cwd: &Path, team_enabled: bool) -> MemdirRoots {
+    memdir_roots_at(&crate::lingxi_md::user_config_dir(home), cwd, team_enabled)
 }
 
 /// Pure roots resolver from an already-resolved `config_home` (the `.claude`
 /// dir). Env-free, so unit tests are deterministic; [`memdir_path`] is the thin
 /// `$LINGXI_CONFIG_DIR`-honoring wrapper.
 #[must_use]
-pub fn memdir_roots_at(config_home: &Path, team_enabled: bool) -> MemdirRoots {
+pub fn memdir_roots_at(config_home: &Path, cwd: &Path, team_enabled: bool) -> MemdirRoots {
     MemdirRoots {
-        user_memdir: config_home.join(MEMDIR_SUBDIR),
+        user_memdir: user_memdir_for_project(config_home, cwd),
         session_memdir: config_home.join(AGENTS_SUBDIR).join(SESSION_MEMORY_SUBDIR),
         team_memdir: team_enabled.then(|| config_home.join(TEAM_MEM_SUBDIR)),
     }
@@ -56,8 +81,11 @@ mod tests {
     #[test]
     fn roots_are_derived_under_config_home() {
         let cfg = PathBuf::from("/home/u/.lingxi");
-        let roots = memdir_roots_at(&cfg, false);
-        assert_eq!(roots.user_memdir, PathBuf::from("/home/u/.lingxi/memdir"));
+        let roots = memdir_roots_at(&cfg, Path::new("/work/repo"), false);
+        assert_eq!(
+            roots.user_memdir,
+            PathBuf::from("/home/u/.lingxi/projects/-work-repo/memdir")
+        );
         assert_eq!(
             roots.session_memdir,
             PathBuf::from("/home/u/.lingxi/agents/session-memory")
@@ -68,10 +96,38 @@ mod tests {
     #[test]
     fn team_memdir_is_team_mem_when_enabled() {
         let cfg = PathBuf::from("/home/u/.lingxi");
-        let roots = memdir_roots_at(&cfg, true);
+        let roots = memdir_roots_at(&cfg, Path::new("/work/repo"), true);
         assert_eq!(
             roots.team_memdir,
             Some(PathBuf::from("/home/u/.lingxi/team-mem"))
+        );
+    }
+
+    /// MEM-2 — the whole point: two repositories must not share a memdir.
+    /// Before this the User tier was a single `<config-home>/memdir` for every
+    /// project, so advice written about one codebase surfaced while working on
+    /// another.
+    #[test]
+    fn two_projects_get_different_user_memdirs() {
+        let cfg = PathBuf::from("/home/u/.lingxi");
+        let a = memdir_roots_at(&cfg, Path::new("/work/alpha"), false).user_memdir;
+        let b = memdir_roots_at(&cfg, Path::new("/work/beta"), false).user_memdir;
+        assert_ne!(a, b, "different projects must not share a memdir");
+        assert!(a.starts_with(cfg.join("projects")));
+        assert!(b.starts_with(cfg.join("projects")));
+    }
+
+    /// The project folder is the SAME one the session transcripts use, so a
+    /// project's memories land beside its sessions. Pinning this stops the two
+    /// from drifting into two naming schemes.
+    #[test]
+    fn the_project_folder_matches_the_session_transcript_folder() {
+        let cwd = "/Users/x/Projects/Thing";
+        let roots = memdir_roots_at(Path::new("/cfg"), Path::new(cwd), false);
+        let expected = session::jsonl::path::project_dir_name(cwd);
+        assert_eq!(
+            roots.user_memdir,
+            PathBuf::from("/cfg").join("projects").join(&expected).join("memdir")
         );
     }
 

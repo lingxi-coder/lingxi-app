@@ -939,7 +939,13 @@ pub(crate) fn resolve_desktop_config_at(
         // (no injected gate), so an unresolved ask there resolves via the
         // `NoOpPermissionGate` (allow) — a known limitation of the v0.6.0
         // fallback REPL, not the primary interactive surface.
+        //
+        // (2.1.259) `--permission-prompts none` forces the same headless
+        // deny-on-ask composition in ANY mode, which is the whole point: an
+        // unattended host that is not `--print` still must never block on a
+        // prompt nobody will answer.
         deny_unresolved_ask: argv.print
+            || argv.permission_prompts_none()
             || (restricted && !matches!(crate::mode::decide_mode(argv), crate::mode::Mode::Tui)),
         // Claude Code 2.1.245 `process.stdout.isTTY??!1`. Independent of
         // `--print`: `-p` in a terminal is both print and TTY.
@@ -1513,6 +1519,46 @@ pub async fn build_runtime_for_tui_inner_with_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn argv_of(args: &[&str]) -> Argv {
+        use clap::Parser;
+        Argv::try_parse_from(std::iter::once("lingxi-cli").chain(args.iter().copied()))
+            .expect("parses")
+    }
+
+    /// HP-2 (2.1.259) — `--permission-prompts none` must reach
+    /// `deny_unresolved_ask`, the flag that selects the headless deny-on-ask
+    /// composition. A parsed flag that never reaches it would leave an
+    /// unattended host blocking on a prompt nobody answers, while every argv
+    /// test still passed.
+    #[test]
+    fn permission_prompts_none_reaches_deny_unresolved_ask() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mode = permission::PermissionMode::Default;
+
+        let off = resolve_desktop_config_at(&argv_of(&[]), mode, cwd.path().to_path_buf());
+        assert!(
+            !off.deny_unresolved_ask,
+            "precondition: an interactive run still prompts"
+        );
+
+        let on = resolve_desktop_config_at(
+            &argv_of(&["--permission-prompts", "none"]),
+            mode,
+            cwd.path().to_path_buf(),
+        );
+        assert!(
+            on.deny_unresolved_ask,
+            "--permission-prompts none must select the deny-on-ask composition"
+        );
+        assert!(
+            matches!(
+                on.session_composition(),
+                engine_desktop::DesktopSessionComposition::HeadlessCli
+            ),
+            "and that composition is the headless one"
+        );
+    }
 
     #[test]
     fn explicit_project_cwd_scopes_mcp_provider_and_plan_settings_together() {

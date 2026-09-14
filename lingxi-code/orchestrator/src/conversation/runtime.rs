@@ -23,6 +23,23 @@ pub(crate) struct TranscriptStore {
     /// history rather than on the message. Entries are removed on use, so a
     /// denial stamps exactly one line.
     pub(crate) tool_denial_kinds: Mutex<std::collections::HashMap<String, String>>,
+    /// Every tool call refused by the permission layer this session, in order —
+    /// the `permission_denials` array of the stream-json `result` frame.
+    ///
+    /// claude-code's own schema notes call the `permission_denied` SYSTEM EVENT
+    /// "best-effort advisory" and name `result.permission_denials` "the
+    /// authoritative record": the event does not cover PreToolUse hook denies,
+    /// deny-rule overrides of a hook allow/ask, or file-tool calls refused by a
+    /// path-scoped deny rule. So this is recorded at the deny FUNNEL (beside
+    /// [`Self::tool_denial_kinds`]), not derived from the event stream.
+    ///
+    /// Unlike the side tables above, entries are NOT removed on use and NOT
+    /// cleared per turn — the result frame reports the whole run.
+    /// `Arc` so the CLI's stream-json emitter can hold the SAME list and read it
+    /// when it builds a `result` frame — the `session_id: Arc<Mutex<String>>`
+    /// pattern. Sharing the cell beats pushing a snapshot at each of the six
+    /// result-emit sites, where forgetting one would silently report `[]` again.
+    pub(crate) permission_denials: std::sync::Arc<Mutex<Vec<platform_api::PermissionDenial>>>,
     /// Buffered `tool_result` SDK frames, keyed by `tool_use_id`.
     ///
     /// `None` = emit as soon as the tool finishes (the batched driver, which
@@ -120,6 +137,7 @@ impl TranscriptStore {
             jsonl_writer: None,
             last_jsonl_uuid: Arc::new(Mutex::new(None)),
             tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
+            permission_denials: std::sync::Arc::new(Mutex::new(Vec::new())),
             tool_frames: Mutex::new(None),
             tool_use_results: Mutex::new(std::collections::HashMap::new()),
             tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),

@@ -736,7 +736,28 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // options channel; it is also what gives the oracle's "propagated to nested
     // subagents" for free — a nested spawn is a child of the same process and
     // reads the same variables. Both are set BEFORE any runtime is constructed.
-    if let Some(text) = parsed.append_subagent_system_prompt.as_deref() {
+    //
+    // (2.1.261) `--append-subagent-system-prompt-file` feeds the same pair from
+    // a file. The INLINE flag wins when both are supplied, so adding the file
+    // form cannot silently displace an explicit string. An unreadable file is a
+    // hard error: silently running without a prompt the user asked for is worse
+    // than refusing to start.
+    let appended_subagent_prompt = match parsed.append_subagent_system_prompt.clone() {
+        Some(text) => Some(text),
+        None => match parsed.append_subagent_system_prompt_file.as_deref() {
+            Some(path) => match std::fs::read_to_string(path) {
+                Ok(text) => Some(text),
+                Err(error) => {
+                    eprintln!(
+                        "Error: --append-subagent-system-prompt-file could not read {path}: {error}"
+                    );
+                    return exit_codes::ARGV_ERROR;
+                }
+            },
+            None => None,
+        },
+    };
+    if let Some(text) = appended_subagent_prompt.as_deref() {
         std::env::set_var("LINGXI_ENABLE_APPEND_SUBAGENT_PROMPT", "1");
         std::env::set_var("LINGXI_APPEND_SUBAGENT_SYSTEM_PROMPT", text);
     }
@@ -1165,6 +1186,24 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         // local pre-check, so only an unresolved `Ask` round-trips over stdio.
         // The output-only print path keeps the headless deny-on-ask default
         // (no stdin reader to answer a control_response).
+        // (2.1.259) `--permission-prompts none` removes the prompt surface. When
+        // a surface WAS configured, say so rather than letting it look connected:
+        // oracle `if(Hn){me.hostAnswersElicitations=!1; if(Rn!==void 0) log(...)}`,
+        // where `Rn` is `"stdio"` for the SDK host or the `--permission-prompt-tool`.
+        if parsed.permission_prompts_none() {
+            if let Some(surface) = if parsed.is_stream_json_input() {
+                Some("SDK host")
+            } else if parsed.permission_prompt_tool.is_some() {
+                Some("--permission-prompt-tool")
+            } else {
+                None
+            } {
+                eprintln!(
+                    "--permission-prompts none: permission prompts are answered with a local deny; the {surface} is not consulted"
+                );
+            }
+        }
+
         let control_plane = if parsed.is_stream_json_input() {
             let plane = control_plane::StdioControlPlane::new(stream.outbound_tx());
             // GATE-SYSMSG-01: share the stream's session-id handle so a locally
@@ -1220,6 +1259,11 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                 }
             }
         };
+        // OR-1: point the stream at the orchestrator's LIVE permission-denial
+        // cell, so the `result` frame reports the run's refused tool calls
+        // instead of a hardcoded `[]`. Shared (not snapshotted) so none of the
+        // six result-emit sites has to remember to push the list.
+        stream.share_permission_denials(runtime.orchestrator.permission_denials_handle());
         if let Some(notice) = startup_deprecation_notice(&parsed) {
             eprintln!("{notice}");
         }

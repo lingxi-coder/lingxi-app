@@ -901,7 +901,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     /// the shared context into a one-off, tool-less answer. Prepended (with a
     /// blank line) to the user's question as the single user turn of the
     /// isolated side query.
-    pub(crate) const SIDE_QUESTION_SYSTEM_REMINDER: &str = "<system-reminder>This is a side question from the user. You must answer this question directly in a single response.\n\nIMPORTANT CONTEXT:\n- You are a separate, lightweight agent spawned to answer this one question\n- The main agent is NOT interrupted - it continues working independently in the background\n- You share the conversation context but are a completely separate instance\n- Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\nCRITICAL CONSTRAINTS:\n- You have NO tools available - you cannot read files, run commands, search, or take any actions\n- This is a one-off response - there will be no follow-up turns\n- You can ONLY provide information based on what you already know from the conversation context\n- NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n- If you don't know the answer, say so - do not offer to look it up or investigate\n\nSimply answer the question with the information you have.</system-reminder>";
+    pub(crate) const SIDE_QUESTION_SYSTEM_REMINDER: &str = "<system-reminder>This is a side question from the user. You must answer this question directly in a single response.\n\nIMPORTANT CONTEXT:\n- You are a separate, lightweight agent spawned to answer this one question\n- The main agent is NOT interrupted - it continues working independently in the background\n- You share the conversation context but are a completely separate instance\n- Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\nCRITICAL CONSTRAINTS:\n- You have NO tools available - you cannot read files, run commands, search, or take any actions\n- Do NOT write tool calls or tool output as text (for example invoke or function_calls XML blocks) - nothing you write here is executed; if answering would need reading files, running commands, or searching, say that can't be checked from a side question and suggest asking in the main conversation\n- This is a one-off response - there will be no follow-up turns\n- You can ONLY provide information based on what you already know from the conversation context\n- NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n- If you don't know the answer, say so - do not offer to look it up or investigate\n\nSimply answer the question with the information you have.</system-reminder>";
 
     /// Real `/btw` body — the SAME read-only, tool-denied, single-turn,
     /// HISTORY-INERT side query as [`Self::generate_recap_query`], differing
@@ -2876,5 +2876,37 @@ mod session_sidecar_tests {
         assert!(last_response_is_api_error(&[assistant("model_error")]));
         assert!(last_response_is_api_error(&[assistant("refusal")]));
         assert!(!last_response_is_api_error(&[assistant("end_turn")]));
+    }
+}
+
+#[cfg(test)]
+mod side_question_reminder_tests {
+    use crate::ConversationOrchestrator;
+
+    /// 2.1.269 — `/btw` answers that contained made-up tool calls. The side
+    /// query has no tools, so the reminder must tell it not to write any, and
+    /// must say what to do instead. Byte-exact against oracle
+    /// `src_188613081.js`.
+    #[test]
+    fn the_reminder_forbids_writing_tool_calls_as_text() {
+        let r = ConversationOrchestrator::SIDE_QUESTION_SYSTEM_REMINDER;
+        let bullet = "- Do NOT write tool calls or tool output as text (for example invoke or function_calls XML blocks) - nothing you write here is executed; if answering would need reading files, running commands, or searching, say that can't be checked from a side question and suggest asking in the main conversation";
+        assert!(r.contains(bullet), "the 2.1.269 bullet must be present verbatim");
+    }
+
+    /// Position matters: the oracle puts it directly after the no-tools bullet,
+    /// inside CRITICAL CONSTRAINTS, ahead of the one-off-response line.
+    #[test]
+    fn the_bullet_sits_directly_after_the_no_tools_bullet() {
+        let r = ConversationOrchestrator::SIDE_QUESTION_SYSTEM_REMINDER;
+        let no_tools = r
+            .find("- You have NO tools available")
+            .expect("no-tools bullet");
+        let dont_write = r.find("- Do NOT write tool calls").expect("new bullet");
+        let one_off = r.find("- This is a one-off response").expect("one-off bullet");
+        assert!(
+            no_tools < dont_write && dont_write < one_off,
+            "bullet order must be: no-tools, do-not-write, one-off"
+        );
     }
 }

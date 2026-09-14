@@ -1344,6 +1344,23 @@ async fn run_subagent_loop(
         // wired, so legacy / test builds keep a byte-identical history.
         // (Frontmatter-hook registration is done at the `run_subagent`
         // dispatcher for guaranteed cleanup.)
+        //
+        // AG-6, verified at the 2.1.270 oracle 2026-09-14 — NOT a gap here, and
+        // this line is why. 2.1.267 shipped "Fixed agent teammates and resumed
+        // subagents moving SubagentStart hook context and preloaded skills out
+        // of the prompt prefix on later turns, which broke prompt-cache reuse",
+        // with a sibling for in-process teammates re-sending their first-turn
+        // tool and skill announcements on the second turn. Both describe
+        // content that belongs in the STABLE PREFIX being re-emitted into the
+        // varying tail. Neither can happen here: the preload is seeded ONCE,
+        // into the initial history, inside the branch a resume does not take —
+        // `SubagentContext::resumed_history` REPLACES prompt + fork context +
+        // preload rather than prefixing them, because all three are already in
+        // the recovered history. The 2.1.265 half ("record the system prompt
+        // and tool definitions once instead of re-rendering them") is
+        // `SubagentContext::rendered_system_prompt`, and the resumed tool list
+        // is pinned by the same SHA-256 definition snapshot AG-5 turns on.
+        // Re-open this only with a measured prefix diff across two turns.
         history.extend(build_preload_messages(&ctx).await);
     }
 

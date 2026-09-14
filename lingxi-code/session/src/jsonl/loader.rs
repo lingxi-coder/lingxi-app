@@ -1596,6 +1596,18 @@ pub async fn read_agent_setting(
 /// routed transcript snapshot. Keeping the pair on one read prevents a
 /// concurrent append from producing a type from one revision and a definition
 /// from another.
+///
+/// 🔒 AG-5, verified at the 2.1.270 oracle 2026-09-14 — the reason that item is
+/// NOT a gap here. 2.1.268 fixed a teammate respawn that could pick up an
+/// UNTRUSTED agent file sharing the resumed agent's name, because upstream
+/// re-resolves the definition by name at respawn time. This port never does:
+/// the definition is written at spawn as an immutable `agentSnapshot`
+/// (`JsonlWriter::append_agent_setting_snapshot`) carrying a SHA-256 over its
+/// canonical JSON, and the read below returns it ONLY when the hash still
+/// matches. A catalog entry edited, replaced or shadowed after the spawn
+/// therefore cannot reach a resumed agent at all — a stronger guarantee than
+/// the upstream fix, and the reason the missing `respawn_teammate` path is not
+/// a hole. ⛔ Do not "simplify" this into a name lookup.
 pub async fn read_agent_resume_state(
     transcript_path: &Path,
     fs: Arc<dyn FileSystem>,

@@ -221,6 +221,31 @@ pub static SUPPORTED_SETTINGS: Lazy<HashMap<&'static str, SettingConfig>> = Lazy
         },
     );
     // autoDreamEnabled
+    //
+    // ⚠️ MEM-4, re-verified at the 2.1.270 oracle 2026-09-14: this key is
+    // settable and readable here, but NOTHING schedules an auto-dream run —
+    // `tasks::handlers::dream` is a complete HANDLER with no scheduler in front
+    // of it. That is deliberate, and the reason is upstream's own gate:
+    //
+    // ```js
+    // function tQn(){ return H("tengu_onyx_plover", null) }      // server object, default null
+    // function _Qe(){ let e = tQn(); return e?.enabled===true || e?.available===true }
+    // function oRe(){ if (!_Qe()) return false;                  // ← flag first
+    //                 let e = Ge().autoDreamEnabled;
+    //                 if (e !== undefined) return e;
+    //                 return tQn()?.enabled === true }
+    // ```
+    //
+    // With the flag null — which is what an unconfigured install sees — `_Qe()`
+    // is false and the USER SETTING IS IGNORED ENTIRELY. So auto-dream is
+    // dormant in the shipping binary too, and a faithful port of the scheduler
+    // would be code that can never run.
+    //
+    // ⇒ Building it is a product decision (drop the server gate this port has
+    // no analogue for, and let the setting alone arm it), not a parity fix. The
+    // missing pieces are the 24h + 5-session gate and the consolidation LOCK —
+    // a file whose mtime is `lastConsolidatedAt` — which `dream.rs`'s `kill`
+    // already documents as belonging to the scheduler, not the handler.
     m.insert(
         "autoDreamEnabled",
         SettingConfig {

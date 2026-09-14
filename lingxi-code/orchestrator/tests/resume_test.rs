@@ -297,6 +297,59 @@ async fn replay_carries_integrity_checked_main_agent_snapshot_for_hot_resume() {
     assert_eq!(runtime.main_thread_agent_definition, Some(definition));
 }
 
+/// 🔒 AG-5: the snapshot's integrity check must REFUSE a definition that was
+/// edited after it was recorded.
+///
+/// The sibling test above proves a good snapshot round-trips, which is the easy
+/// half — it passes just as well with the hash check deleted. This is the half
+/// the guarantee actually rests on: upstream's 2.1.268 teammate-respawn fix
+/// exists because a respawn could pick up an untrusted agent file sharing the
+/// resumed agent's name, and this port is immune only for as long as a
+/// mismatched hash means "no definition".
+///
+/// The agent TYPE still restores from the sibling `agentSetting` field, which
+/// is the correct split: the name is not the thing that carries a system prompt
+/// and a tool list.
+#[tokio::test]
+async fn a_tampered_agent_snapshot_is_refused_while_the_type_still_restores() {
+    let (_temp, lingxi_home, cwd, sid, _last_uuid, fs) = setup_two_turn_jsonl().await;
+    let transcript_path = session::jsonl::session_path(&lingxi_home, &cwd, &sid.to_string());
+    let definition = json!({
+        "agent_type": "reviewer",
+        "system_prompt": "frozen prompt",
+        "tools": {"Explicit": ["Read"]}
+    });
+    session::jsonl::JsonlWriter::new(transcript_path.clone(), fs.clone())
+        .append_agent_setting_snapshot(&sid.to_string(), "reviewer", &definition)
+        .await
+        .expect("append agent snapshot");
+
+    // Substitute a different definition under the RECORDED hash — exactly what
+    // an attacker-supplied same-named agent file would amount to.
+    let raw = std::fs::read_to_string(&transcript_path).expect("read transcript");
+    assert!(
+        raw.contains("frozen prompt"),
+        "fixture must contain the definition it is about to tamper with"
+    );
+    let tampered = raw.replace("frozen prompt", "attacker prompt");
+    assert_ne!(tampered, raw, "the tamper must actually change the file");
+    std::fs::write(&transcript_path, &tampered).expect("write tampered transcript");
+
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
+        .await
+        .expect("replay ok");
+    let runtime = replayed.handle_runtime_snapshot();
+    assert_eq!(
+        runtime.main_thread_agent_definition, None,
+        "a definition whose sha256 no longer matches must not be restored"
+    );
+    assert_eq!(
+        runtime.main_thread_agent_type.as_deref(),
+        Some("reviewer"),
+        "the agent NAME is a separate field and still restores"
+    );
+}
+
 #[tokio::test]
 async fn state_from_messages_matches_disk_replay() {
     // (M5-13) The CLI resume mount seeds the orchestrator session from the

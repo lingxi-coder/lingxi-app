@@ -2790,10 +2790,6 @@ mod session_sidecar_tests {
         );
     }
 
-#[cfg(test)]
-#[path = "tests/live_permission_mode_tests.rs"]
-mod live_permission_mode_tests;
-
     #[cfg(unix)]
     #[test]
     fn symlinked_sidecar_parent_is_rejected_before_target_quarantine() {
@@ -2900,6 +2896,10 @@ mod live_permission_mode_tests;
         assert!(!last_response_is_api_error(&[assistant("end_turn")]));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/live_permission_mode_tests.rs"]
+mod live_permission_mode_tests;
 
 #[cfg(test)]
 mod side_question_reminder_tests {

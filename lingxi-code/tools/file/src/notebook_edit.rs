@@ -323,6 +323,10 @@ Usage:\n\
             &canon,
             current_mtime_ms,
             &raw,
+            // Oracle `X_n(S)`: notebooks are excluded from the waiver
+            // outright — their read guard is cell-structured, so "the model
+            // could have read it" does not establish that it saw the cell.
+            false,
         ) {
             self.emit_failed(&invocation_id, "stale_read").await;
             return Err(e);

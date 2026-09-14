@@ -427,6 +427,7 @@ impl Tool for FileWriteTool {
                 &canon,
                 current_mtime_ms,
                 cmp_content,
+                crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon),
             ) {
                 self.emit_failed(&invocation_id, "stale_read").await;
                 return Err(e);

@@ -178,11 +178,80 @@ pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
 /// port and remains correct in outcome — such a read stores a *truncated*
 /// slice, so `current_full_content == entry.content` already fails — but
 /// wiring the flag at that site is a separate follow-up.
+/// Oracle `gf` — the model ids for which read-before-write is still REQUIRED.
+///
+/// Upstream waives the requirement for anything NOT in this set, on the theory
+/// that a newer model does not need the hand-holding. Verbatim, that reads
+/// "unknown id ⇒ waive".
+const READ_REQUIRED_MODELS: [&str; 10] = [
+    "claude-opus-4-6",
+    "claude-haiku-4-5",
+    "claude-opus-4-5",
+    "claude-opus-4-1",
+    "claude-opus-4-0",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-0",
+    "claude-3-7-sonnet",
+    "claude-3-5-sonnet",
+    "claude-3-5-haiku",
+];
+
+/// Oracle `!vot(model, remoteCall)`, with the multi-provider exit decided
+/// DELIBERATELY against the verbatim reading.
+///
+/// Upstream only ever sees Anthropic ids, so "not in `gf`" and "newer than
+/// `gf`" are the same statement there. In a multi-provider port they are not: a
+/// `deepseek-*` id is not in `gf` either, and a verbatim port would hand every
+/// third-party model a waiver on a guard whose whole purpose is preventing a
+/// write to a file nobody read.
+///
+/// So the waiver requires the id to be RECOGNISABLY Anthropic and newer than
+/// the set. An unrecognised id keeps the read requirement — the failure
+/// direction is "occasionally demand one extra Read", which is recoverable,
+/// against "silently overwrite unread content", which is not. (User decision,
+/// 2026-09-14; the same question as TL-7 but with the opposite cost, so the
+/// opposite answer.)
+#[must_use]
+pub fn model_waives_read_requirement(model: Option<&str>) -> bool {
+    let Some(model) = model else {
+        return false; // no model named ⇒ no waiver
+    };
+    let id = model.trim();
+    if !id.starts_with("claude-") {
+        return false; // LingXi divergence: unknown provider keeps the guard
+    }
+    !READ_REQUIRED_MODELS
+        .iter()
+        .any(|old| id == *old || id.starts_with(&format!("{old}-")))
+}
+
+/// Oracle `me = !F && !X_n(S) && !vot(V, remoteCall) && kq(...)` — whether a
+/// write may proceed against a file with NO recorded read at all.
+///
+/// All three conjuncts must hold, and each fails SAFE on its own: a notebook
+/// never qualifies, an unrecognised model never qualifies, and `kq` answers
+/// `false` unless the model had a reader AND the path was readable.
+#[must_use]
+pub fn read_requirement_waived(model: Option<&str>, canon: &std::path::Path) -> bool {
+    // `X_n(S)` — notebooks are excluded; their guard is cell-structured.
+    if canon
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
+    {
+        return false;
+    }
+    if !model_waives_read_requirement(model) {
+        return false;
+    }
+    platform_api::read_auto_allow::read_auto_allowed(&canon.to_string_lossy())
+}
+
 pub fn check_read_before_write(
     map: &tool_api::read_file_state::ReadFileStateMap,
     canon: &std::path::Path,
     current_mtime_ms: i64,
     current_full_content: &str,
+    waived: bool,
 ) -> Result<(), tool_api::tool_trait::ToolError> {
     use tool_api::tool_trait::ToolError;
 
@@ -191,7 +260,15 @@ pub fn check_read_before_write(
         // No recorded read at all → refuse. (claude-code `FOg`: `if(!r) throw
         // PWn`.) A ranged / offset read still HAS an entry, so it is NOT
         // rejected here — it falls through to the mtime / content checks below.
-        None => return Err(ToolError::InvalidInput(FILE_NOT_READ_ERROR.into())),
+        None => {
+            // Oracle `if(!me) return errorCode 2`. The waiver applies ONLY to
+            // the never-read case; a stale or partial read still falls through
+            // to the checks below.
+            if waived {
+                return Ok(());
+            }
+            return Err(ToolError::InvalidInput(FILE_NOT_READ_ERROR.into()));
+        }
     };
 
     // mtime not advanced past the recorded read → not stale. (claude-code:
@@ -364,7 +441,7 @@ mod staleness_guard_tests {
                 is_partial_view: false,
             },
         );
-        let r = check_read_before_write(&map, &p, 200, "new content");
+        let r = check_read_before_write(&map, &p, 200, "new content", false);
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
                 assert_eq!(m, FILE_UNEXPECTEDLY_MODIFIED_ERROR);
@@ -396,7 +473,7 @@ mod staleness_guard_tests {
             },
         );
         // mtime ADVANCED past the recorded read, content byte-identical.
-        let r = check_read_before_write(&map, &p, 200, "body\n");
+        let r = check_read_before_write(&map, &p, 200, "body\n", false);
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
                 assert_eq!(m, FILE_UNEXPECTEDLY_MODIFIED_ERROR);
@@ -418,7 +495,7 @@ mod staleness_guard_tests {
                 is_partial_view: false,
             },
         );
-        assert!(check_read_before_write(&map, &p, 200, "body\n").is_ok());
+        assert!(check_read_before_write(&map, &p, 200, "body\n", false).is_ok());
     }
 
     /// Assert the guard returned an `InvalidInput` error carrying exactly
@@ -434,7 +511,7 @@ mod staleness_guard_tests {
     #[test]
     fn guard_missing_entry_is_not_read() {
         let map = new_read_file_state_map();
-        let r = check_read_before_write(&map, &PathBuf::from("/x"), 100, "content");
+        let r = check_read_before_write(&map, &PathBuf::from("/x"), 100, "content", false);
         assert_err_msg(r, FILE_NOT_READ_ERROR);
     }
 
@@ -459,7 +536,7 @@ mod staleness_guard_tests {
                 is_partial_view: false,
             },
         );
-        assert!(check_read_before_write(&map, &p, 100, "c").is_ok());
+        assert!(check_read_before_write(&map, &p, 100, "c", false).is_ok());
         // limit present (offset None), mtime unchanged ⇒ proceed.
         set(
             &map,
@@ -474,7 +551,7 @@ mod staleness_guard_tests {
                 is_partial_view: false,
             },
         );
-        assert!(check_read_before_write(&map, &p, 100, "c").is_ok());
+        assert!(check_read_before_write(&map, &p, 100, "c", false).is_ok());
     }
 
     #[test]
@@ -499,7 +576,7 @@ mod staleness_guard_tests {
             },
         );
         assert_err_msg(
-            check_read_before_write(&map, &p, 200, "whole new file"),
+            check_read_before_write(&map, &p, 200, "whole new file", false),
             FILE_UNEXPECTEDLY_MODIFIED_ERROR,
         );
     }
@@ -552,7 +629,7 @@ mod staleness_guard_tests {
             },
         );
         assert!(
-            check_read_before_write(&map, &p, 100, "a\nb\nc").is_ok(),
+            check_read_before_write(&map, &p, 100, "a\nb\nc", false).is_ok(),
             "offset/limit full-read + unchanged mtime must proceed"
         );
     }
@@ -575,7 +652,7 @@ mod staleness_guard_tests {
             },
         );
         // current == recorded ⇒ not stale ⇒ Ok.
-        assert!(check_read_before_write(&map, &p, 100, "c").is_ok());
+        assert!(check_read_before_write(&map, &p, 100, "c", false).is_ok());
     }
 
     #[test]
@@ -596,7 +673,7 @@ mod staleness_guard_tests {
             },
         );
         // mtime advanced but content matches ⇒ fallback proceeds.
-        assert!(check_read_before_write(&map, &p, 200, "same").is_ok());
+        assert!(check_read_before_write(&map, &p, 200, "same", false).is_ok());
     }
 
     #[test]
@@ -620,8 +697,141 @@ mod staleness_guard_tests {
         // Write 3 / NotebookEdit 10) — the branch a model normally hits — not
         // the call-phase race sentence `WVo`.
         assert_err_msg(
-            check_read_before_write(&map, &p, 200, "new"),
+            check_read_before_write(&map, &p, 200, "new", false),
             FILE_UNEXPECTEDLY_MODIFIED_ERROR,
+        );
+    }
+
+    /// Oracle `gf`: these ids keep the read requirement, exactly as upstream.
+    #[test]
+    fn the_old_model_set_still_requires_a_read() {
+        for old in [
+            "claude-opus-4-6",
+            "claude-haiku-4-5",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
+            "claude-opus-4-0",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-0",
+            "claude-3-7-sonnet",
+            "claude-3-5-sonnet",
+            "claude-3-5-haiku",
+        ] {
+            assert!(
+                !model_waives_read_requirement(Some(old)),
+                "{old} is in `gf` and must still read before writing"
+            );
+        }
+    }
+
+    /// A NEWER Anthropic id takes the waiver, which is upstream's whole point.
+    #[test]
+    fn a_newer_anthropic_model_takes_the_waiver() {
+        assert!(model_waives_read_requirement(Some("claude-opus-4-8")));
+        assert!(model_waives_read_requirement(Some("claude-fable-5-1")));
+    }
+
+    /// THE DELIBERATE DIVERGENCE. Upstream only ever sees Anthropic ids, so
+    /// "not in `gf`" and "newer than `gf`" coincide there. Here they do not: a
+    /// third-party id is not in `gf` either, and a verbatim port would hand it
+    /// a waiver on a guard that exists to stop a write to an unread file.
+    ///
+    /// The chosen failure direction is "occasionally demand one extra Read"
+    /// (recoverable) over "silently overwrite unread content" (not).
+    #[test]
+    fn an_unrecognised_provider_keeps_the_read_requirement() {
+        for foreign in [
+            "deepseek-v3",
+            "gpt-4o",
+            "qwen-max",
+            "my-local-model",
+            "",
+            "Claude-Opus-4-8",
+        ] {
+            assert!(
+                !model_waives_read_requirement(Some(foreign)),
+                "{foreign:?} is not a recognised Anthropic id, so it must keep \
+                 the read requirement rather than inherit `newer ⇒ trusted`"
+            );
+        }
+        assert!(
+            !model_waives_read_requirement(None),
+            "no model named at all ⇒ no waiver"
+        );
+    }
+
+    /// The two conjuncts that short-circuit BEFORE `kq` — so this test does not
+    /// depend on the process-global probe, which another test in this binary
+    /// publishes. (Asserting the unpublished answer here made the result depend
+    /// on test order.)
+    #[test]
+    fn a_notebook_or_an_unknown_model_vetoes_the_waiver_on_its_own() {
+        let notebook = PathBuf::from("/w/a.ipynb");
+        assert!(
+            !read_requirement_waived(Some("claude-opus-4-8"), &notebook),
+            "a notebook never qualifies, whatever the model or the policy says"
+        );
+        assert!(
+            !read_requirement_waived(Some("CLAUDE-OPUS-4-8.IPYNB".into()), &notebook),
+            "the extension check is case-insensitive"
+        );
+        assert!(
+            !read_requirement_waived(Some("deepseek-v3"), &PathBuf::from("/w/a.rs")),
+            "an unrecognised provider vetoes before the path is even consulted"
+        );
+        assert!(!read_requirement_waived(None, &PathBuf::from("/w/a.rs")));
+    }
+
+
+    /// The waiver is scoped to the NEVER-READ case (`!F`) and nothing else.
+    ///
+    /// Upstream computes it inside `if (!F || F.isPartialView)` and consults it
+    /// only on the `!F` branch; a file that WAS read and has since changed on
+    /// disk still errors, waiver or not. Widening it to the stale branch would
+    /// let a waived model overwrite content it read an older version of — and
+    /// that widening previously passed every other test in this file.
+    #[test]
+    fn the_waiver_does_not_excuse_a_stale_read() {
+        let map = new_read_file_state_map();
+        let p = PathBuf::from("/x");
+        set(
+            &map,
+            p.clone(),
+            ReadFileEntry {
+                content: "old content".into(),
+                mtime_ms: 100,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+        );
+        // mtime advanced AND content differs: stale, and `waived` is true.
+        let r = check_read_before_write(&map, &p, 200, "new content", true);
+        match r.unwrap_err() {
+            tool_api::tool_trait::ToolError::InvalidInput(m) => {
+                assert_eq!(
+                    m, FILE_UNEXPECTEDLY_MODIFIED_ERROR,
+                    "a waived model must still be told the file changed"
+                );
+            }
+            other => panic!("expected the staleness error, got {other:?}"),
+        }
+    }
+
+    /// …and it DOES excuse the never-read case, which is the whole point.
+    #[test]
+    fn the_waiver_excuses_a_file_that_was_never_read() {
+        let map = new_read_file_state_map();
+        let p = PathBuf::from("/x");
+        assert!(
+            check_read_before_write(&map, &p, 100, "content", false).is_err(),
+            "premise: with no waiver a never-read file is refused"
+        );
+        assert!(
+            check_read_before_write(&map, &p, 100, "content", true).is_ok(),
+            "with the waiver it proceeds"
         );
     }
 }

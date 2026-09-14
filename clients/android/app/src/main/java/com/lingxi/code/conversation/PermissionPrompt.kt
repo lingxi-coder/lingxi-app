@@ -50,6 +50,16 @@ data class PermissionPromptState(
     val suppressAlwaysAllowRule: Boolean = false,
     /** Engine-owned Auto action; clients must not infer this locally. */
     val autoModePrompt: AutoModePromptDto? = null,
+    val isPlan: Boolean = false,
+    /**
+     * The bare tool name for a `ToolUseConfirm`, null for every other kind.
+     *
+     * Carried rather than re-derived: [title] has already been through
+     * `permission_allow_tool` and is a localized sentence, so the notification
+     * body would have to parse a translated string back apart to recover the
+     * one word it needs — and would get a different answer in each locale.
+     */
+    val toolName: String? = null,
 )
 
 /** Worker attribution rendered on a [PermissionPromptState] (reserved). */
@@ -97,6 +107,8 @@ fun permissionRequestToPrompt(
         ownerTurnId = request.owner?.turnId,
         suppressAlwaysAllowRule = request.suppressAlwaysAllowRule,
         autoModePrompt = request.autoModePrompt,
+        isPlan = request.kind is PermissionKindDto.ExitPlanMode,
+        toolName = (request.kind as? PermissionKindDto.ToolUseConfirm)?.toolName,
     )
 }
 

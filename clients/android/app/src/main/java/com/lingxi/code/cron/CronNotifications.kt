@@ -12,6 +12,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.lingxi.code.MainActivity
+import com.lingxi.code.notify.NotificationKind
+import com.lingxi.code.notify.allows
+import com.lingxi.code.settings.NotificationPrefsStore
 import com.lingxi.code.R
 
 /**
@@ -34,7 +37,18 @@ object CronNotifications {
     /**
      * Post one cron-result notification. `tag` keys the post so a re-fire of the
      * same job replaces its prior result (stable id from `tag.hashCode()`). A
-     * no-op when POST_NOTIFICATIONS is not granted.
+     * no-op when POST_NOTIFICATIONS is not granted, or when the user has turned
+     * scheduled-task reports off.
+     *
+     * The preference is checked HERE rather than at each call site: there are
+     * several (`postPendingNotifications`, `recoverNativeTerminal`, the
+     * archived-chat pause notice), and a toggle that only some of them honour is
+     * worse than no toggle.
+     *
+     * ⚠️ Returning `false` for a preference-off post is deliberate and matches
+     * the POST_NOTIFICATIONS branch below: callers release their durable claim
+     * on `false`, so the result stays recoverable if the user turns reports back
+     * on. Returning `true` here would consume the claim and lose it.
      */
     fun postResult(
         context: Context,
@@ -42,7 +56,8 @@ object CronNotifications {
         body: String,
         tag: String,
         runId: String = tag,
-    ) {
+    ): Boolean {
+        if (!NotificationPrefsStore(context).load().allows(NotificationKind.ScheduledRun)) return false
         ensureChannels(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(
@@ -50,7 +65,9 @@ object CronNotifications {
                 Manifest.permission.POST_NOTIFICATIONS,
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            return
+            // Not delivered. The caller must not record it as delivered, or the
+            // result is lost even after the user grants the permission.
+            return false
         }
         val contentIntent = PendingIntent.getActivity(
             context,
@@ -69,9 +86,9 @@ object CronNotifications {
             .setAutoCancel(true)
             .setContentIntent(contentIntent)
             .build()
-        runCatching {
+        return runCatching {
             NotificationManagerCompat.from(context).notify(tag, tag.hashCode(), notification)
-        }
+        }.isSuccess
     }
 
     /** Create the result channel on first use (Android 8+/O). */

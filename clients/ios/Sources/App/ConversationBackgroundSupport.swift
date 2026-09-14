@@ -60,6 +60,20 @@ enum ConversationNotificationEventClass: String, Equatable, Sendable {
     case failed
     case waitingForUser
     case pausedRecoverable
+    /// A tool is parked on a permission decision the user has not made yet.
+    case needsPermission
+}
+
+/// A parked permission request, reduced to what a notification needs.
+///
+/// The tool name is carried rather than re-derived: the prompt's own title has
+/// already been through a localized format string, so recovering the one word
+/// from it would give a different answer in each locale.
+struct ConversationPendingPermission: Identifiable, Equatable, Hashable {
+    let requestId: UInt64
+    let toolName: String
+
+    var id: UInt64 { requestId }
 }
 
 struct ConversationBackgroundSnapshot: Equatable {
@@ -67,6 +81,7 @@ struct ConversationBackgroundSnapshot: Equatable {
     let turnToken: ConversationTurnToken?
     let turnCompletion: ConversationTurnCompletion?
     let pendingQuestions: [ConversationPendingQuestion]
+    let pendingPermissions: [ConversationPendingPermission]
     let backgroundTasks: [BackgroundTaskSnapshot]
     let requiresExecutionLease: Bool
     let workspaceKey: String
@@ -77,6 +92,7 @@ struct ConversationBackgroundSnapshot: Equatable {
         turnToken: ConversationTurnToken?,
         turnCompletion: ConversationTurnCompletion?,
         pendingQuestions: [ConversationPendingQuestion],
+        pendingPermissions: [ConversationPendingPermission] = [],
         backgroundTasks: [BackgroundTaskSnapshot],
         requiresExecutionLease: Bool,
         workspaceKey: String = "global",
@@ -86,6 +102,7 @@ struct ConversationBackgroundSnapshot: Equatable {
         self.turnToken = turnToken
         self.turnCompletion = turnCompletion
         self.pendingQuestions = pendingQuestions
+        self.pendingPermissions = pendingPermissions
         self.backgroundTasks = backgroundTasks
         self.requiresExecutionLease = requiresExecutionLease
         self.workspaceKey = workspaceKey
@@ -109,7 +126,9 @@ struct ConversationNotificationPayload {
         // Background tasks all posted with `turnID: nil`, so every task in a
         // session collapsed onto ONE identifier and `post`'s delivered-set
         // guard silently swallowed every task after the first.
-        discriminator: String? = nil
+        discriminator: String? = nil,
+        /// Fills the one parameterized body (`needsPermission`'s tool name).
+        detail: String? = nil
     ) -> ConversationNotificationPayload {
         let title: String
         let body: String
@@ -126,6 +145,15 @@ struct ConversationNotificationPayload {
         case .pausedRecoverable:
             title = String(localized: "chat_background_paused_title")
             body = String(localized: "chat_background_paused_text")
+        case .needsPermission:
+            title = String(localized: "chat_background_permission_title")
+            // The only parameterized body here. `detail` carries the tool name;
+            // it is passed rather than parsed back out of the localized prompt
+            // title, which would give a different answer in each locale.
+            body = String(
+                format: String(localized: "chat_background_permission_text %@"),
+                detail ?? ""
+            )
         }
         let identifier = [
             "conversation",
@@ -197,6 +225,9 @@ struct NoopConversationActivityReporter: ConversationActivityReporting {
     func clear() {}
 }
 
+/// How the two armed delays wait. Injectable so tests need no wall clock.
+typealias ConversationNotificationSleeper = @Sendable (UInt64) async -> Void
+
 @MainActor
 final class ConversationBackgroundAlertController {
     private let scheduler: ConversationNotificationScheduling
@@ -204,14 +235,45 @@ final class ConversationBackgroundAlertController {
     private var scenePhase: ScenePhase = .active
     private var deliveredNotificationIDs = Set<String>()
     private var pendingQuestionIDs = Set<UInt64>()
+    private var pendingPermissionIDs = Set<UInt64>()
     private var taskStatuses: [String: BackgroundTaskSnapshot.Status] = [:]
+
+    /// Seeded from disk so a notification decided before the settings screen
+    /// was ever opened still honours what the user chose in a previous launch.
+    private var preferences: NotifConfig
+    private let sleeper: ConversationNotificationSleeper
+
+    /// Armed when a turn finishes, cancelled by a new turn or by the user
+    /// coming back. Upstream's idle timer.
+    private var idleTask: Task<Void, Never>?
+
+    /// The completion this `idleTask` is counting down for. `sync` re-runs on
+    /// every snapshot change (a background task flipping state, a question or
+    /// permission arriving), and `turnCompletion` stays set until a new turn —
+    /// so without this, each of those re-armed the timer for the SAME finished
+    /// turn and a session whose snapshot changes faster than the threshold
+    /// never got its idle notification at all.
+    private var armedIdleCompletion: (turnID: UInt64?, eventClass: ConversationNotificationEventClass)?
+
+    /// request_id -> armed 6s permission delay.
+    private var permissionTasks: [UInt64: Task<Void, Never>] = [:]
 
     init(
         scheduler: ConversationNotificationScheduling,
-        activityReporter: ConversationActivityReporting = NoopConversationActivityReporter()
+        activityReporter: ConversationActivityReporting = NoopConversationActivityReporter(),
+        /// Seam for the two armed delays. Injected so a test can exercise the
+        /// fire-time re-checks without a real 60-second wait — the floor on
+        /// `messageIdleNotifThresholdMs` is 5s, which is still far too slow for
+        /// a unit test, and shortening the floor for tests would weaken the
+        /// production clamp.
+        sleeper: @escaping ConversationNotificationSleeper = { try? await Task.sleep(nanoseconds: $0) },
+        /// Injected so a test never reads (or writes) the real user defaults.
+        preferences: NotifConfig = NotificationPreferencesStore.load()
     ) {
         self.scheduler = scheduler
         self.activityReporter = activityReporter
+        self.sleeper = sleeper
+        self.preferences = preferences
     }
 
     static func live() -> ConversationBackgroundAlertController {
@@ -222,7 +284,25 @@ final class ConversationBackgroundAlertController {
     }
 
     func setScenePhase(_ phase: ScenePhase) {
+        // Returning to the foreground is the strongest available proof the user
+        // came back — upstream's `getLastInteractionTime() > lastQueryCompletionTime`
+        // clause. The armed idle alert is then wrong, not merely early.
+        if phase == .active { cancelIdleAlert() }
         scenePhase = phase
+    }
+
+    func setPreferences(_ config: NotifConfig) {
+        preferences = config
+        guard !config.enabled else { return }
+        cancelIdleAlert()
+        for task in permissionTasks.values { task.cancel() }
+        permissionTasks.removeAll()
+    }
+
+    private func cancelIdleAlert() {
+        idleTask?.cancel()
+        idleTask = nil
+        armedIdleCompletion = nil
     }
 
     func sync(_ snapshot: ConversationBackgroundSnapshot) {
@@ -245,28 +325,34 @@ final class ConversationBackgroundAlertController {
 
         guard scenePhase != .active else { return }
 
+        // A finished turn ARMS the idle alert; it does not post one. Upstream
+        // has no "the turn finished" notification — it waits
+        // `messageIdleNotifThresholdMs` and only then says the session is
+        // waiting, and only if the user never came back. Coming back cancels
+        // this two ways: `setScenePhase(.active)`, and the foreground guard
+        // above on the next `sync`.
         if let completion = snapshot.turnCompletion {
             switch completion.outcome {
             case .completed:
-                post(
-                    sessionID: snapshot.sessionID,
-                    turnID: completion.token.clientTurnId,
-                    workspaceKey: snapshot.workspaceKey,
-                    sessionMode: snapshot.sessionMode,
-                    eventClass: .completed
-                )
+                armIdleAlert(snapshot, turnID: completion.token.clientTurnId, eventClass: .completed)
             case .failed:
-                post(
-                    sessionID: snapshot.sessionID,
-                    turnID: completion.token.clientTurnId,
-                    workspaceKey: snapshot.workspaceKey,
-                    sessionMode: snapshot.sessionMode,
-                    eventClass: .failed
-                )
+                armIdleAlert(snapshot, turnID: completion.token.clientTurnId, eventClass: .failed)
             case .maxTurns, .cancelled:
                 break
             }
         }
+
+        // New permission requests arm upstream's 6-second delay; ones that have
+        // gone away settle it. Only a newly-arrived id arms — re-emitting the
+        // same request must not restart the clock.
+        let permissionIDs = Set(snapshot.pendingPermissions.map(\.requestId))
+        for permission in snapshot.pendingPermissions where !pendingPermissionIDs.contains(permission.requestId) {
+            armPermissionAlert(snapshot, permission: permission)
+        }
+        for settled in pendingPermissionIDs.subtracting(permissionIDs) {
+            permissionTasks.removeValue(forKey: settled)?.cancel()
+        }
+        pendingPermissionIDs = permissionIDs
 
         let newQuestionIDs = Set(snapshot.pendingQuestions.map(\.requestId))
             .subtracting(previousQuestionIDs)
@@ -276,7 +362,8 @@ final class ConversationBackgroundAlertController {
                 turnID: snapshot.turnToken?.clientTurnId,
                 workspaceKey: snapshot.workspaceKey,
                 sessionMode: snapshot.sessionMode,
-                eventClass: .waitingForUser
+                eventClass: .waitingForUser,
+                kind: .agentNeedsInput
             )
         }
 
@@ -295,6 +382,7 @@ final class ConversationBackgroundAlertController {
                     workspaceKey: snapshot.workspaceKey,
                     sessionMode: snapshot.sessionMode,
                     eventClass: .completed,
+                    kind: .agentCompleted,
                     discriminator: task.id
                 )
             case .failed:
@@ -304,6 +392,7 @@ final class ConversationBackgroundAlertController {
                     workspaceKey: snapshot.workspaceKey,
                     sessionMode: snapshot.sessionMode,
                     eventClass: .failed,
+                    kind: .agentCompleted,
                     discriminator: task.id
                 )
             case .paused:
@@ -313,6 +402,7 @@ final class ConversationBackgroundAlertController {
                     workspaceKey: snapshot.workspaceKey,
                     sessionMode: snapshot.sessionMode,
                     eventClass: .pausedRecoverable,
+                    kind: .agentNeedsInput,
                     discriminator: task.id
                 )
             case .pending, .running, .cancelled:
@@ -333,12 +423,78 @@ final class ConversationBackgroundAlertController {
             turnID: turnToken?.clientTurnId,
             workspaceKey: workspaceKey,
             sessionMode: sessionMode,
-            eventClass: .pausedRecoverable
+            eventClass: .pausedRecoverable,
+            // Same event class as the background-task pause above, so it must
+            // answer to the same toggle: a turn the OS took away is an
+            // input-needed event, not the "your turn merely finished" nag that
+            // `.idlePrompt` governs. Under `.idlePrompt` a user who switched
+            // idle prompts off was never told the session had stalled.
+            kind: .agentNeedsInput
         )
     }
 
     func clear() {
         activityReporter.clear()
+    }
+
+    private func armIdleAlert(
+        _ snapshot: ConversationBackgroundSnapshot,
+        turnID: UInt64?,
+        eventClass: ConversationNotificationEventClass
+    ) {
+        // Re-emitting the same completion must not restart the clock, the same
+        // way `armPermissionAlert` only arms for a newly-arrived request id.
+        if idleTask != nil, let armed = armedIdleCompletion,
+           armed.turnID == turnID, armed.eventClass == eventClass {
+            return
+        }
+        cancelIdleAlert()
+        guard preferences.allows(.idlePrompt) else { return }
+        armedIdleCompletion = (turnID, eventClass)
+        let delay = UInt64(NotificationPolicy.clampIdleThreshold(preferences.messageIdleNotifThresholdMs))
+        let sleeper = self.sleeper
+        idleTask = Task { [weak self] in
+            await sleeper(delay * 1_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.idleTask = nil
+            // Re-checked at fire time, not trusted from arm time: the user may
+            // have come back, or a new turn may have started, during the wait.
+            guard self.scenePhase != .active else { return }
+            self.post(
+                sessionID: snapshot.sessionID,
+                turnID: turnID,
+                workspaceKey: snapshot.workspaceKey,
+                sessionMode: snapshot.sessionMode,
+                eventClass: eventClass,
+                kind: .idlePrompt
+            )
+        }
+    }
+
+    private func armPermissionAlert(
+        _ snapshot: ConversationBackgroundSnapshot,
+        permission: ConversationPendingPermission
+    ) {
+        guard permissionTasks[permission.requestId] == nil else { return }
+        guard preferences.allows(.permissionPrompt) else { return }
+        let delay = UInt64(NotificationPolicy.permissionPromptNotifyDelayMs)
+        let sleeper = self.sleeper
+        permissionTasks[permission.requestId] = Task { [weak self] in
+            await sleeper(delay * 1_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.permissionTasks.removeValue(forKey: permission.requestId)
+            guard self.scenePhase != .active else { return }
+            self.post(
+                sessionID: snapshot.sessionID,
+                turnID: snapshot.turnToken?.clientTurnId,
+                workspaceKey: snapshot.workspaceKey,
+                sessionMode: snapshot.sessionMode,
+                eventClass: .needsPermission,
+                kind: .permissionPrompt,
+                discriminator: String(permission.requestId),
+                detail: permission.toolName
+            )
+        }
     }
 
     private func post(
@@ -347,15 +503,19 @@ final class ConversationBackgroundAlertController {
         workspaceKey: String,
         sessionMode: SessionMode,
         eventClass: ConversationNotificationEventClass,
-        discriminator: String? = nil
+        kind: NotificationKind,
+        discriminator: String? = nil,
+        detail: String? = nil
     ) {
+        guard preferences.allows(kind) else { return }
         let payload = ConversationNotificationPayload.make(
             sessionID: sessionID,
             turnID: turnID,
             eventClass: eventClass,
             workspaceKey: workspaceKey,
             sessionMode: sessionMode,
-            discriminator: discriminator
+            discriminator: discriminator,
+            detail: detail
         )
         guard deliveredNotificationIDs.insert(payload.identifier).inserted else { return }
         Task { await scheduler.deliver(payload) }

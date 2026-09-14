@@ -12,6 +12,11 @@ final class UserNotificationCronNotifier: CronNotificationDelivering, @unchecked
     func deliver(_ payload: CronNotificationPayload) async {
         #if canImport(UserNotifications)
             guard !Task.isCancelled else { return }
+            // Checked here rather than at each call site: several paths reach
+            // this delivery, and a toggle only some of them honour is worse
+            // than no toggle. Read fresh — a cron run can fire long after the
+            // settings screen was last open.
+            guard NotificationPreferencesStore.load().allows(.scheduledRun) else { return }
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()
             guard !Task.isCancelled else { return }

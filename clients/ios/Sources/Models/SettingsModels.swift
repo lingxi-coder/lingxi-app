@@ -137,12 +137,97 @@ struct DreamConfig: Equatable {
     let lastRun: String = String(localized: "settings_dream_last_run_seed")
 }
 
+/// When a system notification is warranted.
+///
+/// The policy is Claude Code 2.1.270's, copied rather than invented, so the
+/// three GUI clients and the CLI do not end up with four different answers.
+/// Verified against the shipped oracle binary, not inferred:
+///
+///  - `RJe = 6000` — a permission prompt must sit unanswered this long before
+///    its notification fires. Upstream arms a timer when the prompt appears and
+///    clears it in a `finally`, so a prompt answered promptly notifies nothing.
+///  - `DEFAULT_GLOBAL_CONFIG.messageIdleNotifThresholdMs = 60000` — how long a
+///    session sits idle AFTER a turn ends before it says it is waiting.
+///
+/// Two consequences, both deliberate and both counter-intuitive:
+///
+///  1. **A finished turn does not notify.** It ARMS a timer. Coming back inside
+///     the threshold fires nothing — upstream re-checks at fire time rather
+///     than trusting the timer.
+///  2. **The port keeps its own wording.** Upstream's terminal has no
+///     per-session context, so its one idle message is generic; this client
+///     knows whether the turn succeeded and says so. The TIMING and GATES are
+///     upstream's; only the string is ours.
+enum NotificationPolicy {
+    /// Upstream `DEFAULT_GLOBAL_CONFIG.messageIdleNotifThresholdMs`.
+    static let defaultIdleNotifThresholdMs: Int = 60_000
+    /// Upstream `RJe`. Not user-configurable upstream, so a constant here too.
+    static let permissionPromptNotifyDelayMs: Int = 6_000
+    /// A mistyped threshold must not become "instant banner on every turn"…
+    static let minIdleThresholdMs: Int = 5_000
+    /// …nor silently disable the notification; that is what `enabled` is for.
+    static let maxIdleThresholdMs: Int = 3_600_000
+
+    static func clampIdleThreshold(_ raw: Int) -> Int {
+        min(maxIdleThresholdMs, max(minIdleThresholdMs, raw))
+    }
+}
+
+/// Upstream's `notificationType` discriminator, kept verbatim. The port's CLI
+/// already fires the `Notification` hook with these exact strings
+/// (`idle_notify.rs`, `permission_prompt_notify.rs`), so a third spelling here
+/// would be the drift this type exists to prevent.
+enum NotificationKind: String, CaseIterable, Equatable, Sendable {
+    case idlePrompt = "idle_prompt"
+    case permissionPrompt = "permission_prompt"
+    case agentNeedsInput = "agent_needs_input"
+    case agentCompleted = "agent_completed"
+    case scheduledRun = "scheduled_run"
+}
+
+/// OS-notification preferences.
+///
+/// Key names are upstream Claude Code's (`inputNeededNotifEnabled`,
+/// `taskCompleteNotifEnabled`, `messageIdleNotifThresholdMs`) so the three GUI
+/// clients cannot drift into three vocabularies for one concept.
+///
+/// This replaces a placeholder with `workflows`/`mentions`/`crons`/`marketing`
+/// fields that was never persisted and that nothing ever read — and two of
+/// whose four names this app has no concept of (there are no @-mentions and no
+/// marketing push; every notification here is a local one).
+///
+/// Deliberately absent: `preferredNotifChannel` (every value but
+/// `notifications_disabled` names a terminal escape sequence — `enabled` is the
+/// GUI equivalent of that one meaningful distinction) and
+/// `agentPushNotifEnabled` (it gates the `PushNotification` tool, which is
+/// registered-but-disabled in this port).
 struct NotifConfig: Equatable {
-    var workflows = true
-    var mentions = true
-    var crons = true
-    var marketing = false
-    var enabledCount: Int { [workflows, mentions, crons, marketing].filter { $0 }.count }
+    var enabled = true
+    var idlePromptNotifEnabled = true
+    var inputNeededNotifEnabled = true
+    var taskCompleteNotifEnabled = true
+    var scheduledRunNotifEnabled = true
+    var messageIdleNotifThresholdMs = NotificationPolicy.defaultIdleNotifThresholdMs
+
+    /// Zero when the master switch is off: reporting "4 enabled" beside a
+    /// disabled feature would be a lie the settings row renders.
+    var enabledCount: Int {
+        guard enabled else { return 0 }
+        return [
+            idlePromptNotifEnabled, inputNeededNotifEnabled,
+            taskCompleteNotifEnabled, scheduledRunNotifEnabled,
+        ].filter { $0 }.count
+    }
+
+    func allows(_ kind: NotificationKind) -> Bool {
+        guard enabled else { return false }
+        switch kind {
+        case .idlePrompt: return idlePromptNotifEnabled
+        case .permissionPrompt, .agentNeedsInput: return inputNeededNotifEnabled
+        case .agentCompleted: return taskCompleteNotifEnabled
+        case .scheduledRun: return scheduledRunNotifEnabled
+        }
+    }
 }
 
 enum LinuxRuntimeMode: String, CaseIterable, Equatable {
@@ -321,7 +406,19 @@ final class SettingsStore {
     var mcpConfigurationError: String?
     var dream = DreamConfig()
     var language = "zh-CN"
-    var notifs = NotifConfig()
+    var notifs = NotificationPreferencesStore.load()
+
+    /// Persists as well as updating state. The previous `notifs` was an
+    /// in-memory default with no writer and no reader.
+    ///
+    /// The notifier picks the new value up through `RootView`'s
+    /// `.onChange(of: settingsStore.notifs)` — it holds ARMED TIMERS and cannot
+    /// notice a preference it is not told about, and a callback field here
+    /// would be one more thing that can be left unset while still compiling.
+    func setNotifs(_ config: NotifConfig) {
+        notifs = config
+        NotificationPreferencesStore.save(config)
+    }
     var bioLock = true
     var telemetry = false
     var autoUpdate = true

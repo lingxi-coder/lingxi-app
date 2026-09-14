@@ -199,13 +199,36 @@ data class DreamConfig(
     val lastRun: String = "今早 03:24 · 整理 7 条记忆 / 草拟今日计划",
 )
 
+/**
+ * OS-notification preferences. The key names are upstream Claude Code's
+ * (`inputNeededNotifEnabled`, `taskCompleteNotifEnabled`,
+ * `messageIdleNotifThresholdMs`) so the three GUI clients cannot drift into
+ * three vocabularies for one concept — see [com.lingxi.code.notify.NotificationPolicy].
+ *
+ * This replaces a placeholder that had `workflows`/`mentions`/`crons`/`marketing`
+ * fields: it was never persisted and nothing ever read it, and two of those
+ * four named things this app does not have (there are no @-mentions and no
+ * marketing push — every notification here is a local one).
+ */
 data class NotifConfig(
-    val workflows: Boolean = true,
-    val mentions: Boolean = true,
-    val crons: Boolean = true,
-    val marketing: Boolean = false,
+    /** Master switch; the GUI equivalent of upstream's `notifications_disabled` channel. */
+    val enabled: Boolean = true,
+    /** Gates the idle notification fired after a turn ends. */
+    val idlePromptNotifEnabled: Boolean = true,
+    /** Upstream key. Gates permission prompts and AskUserQuestion. */
+    val inputNeededNotifEnabled: Boolean = true,
+    /** Upstream key. Gates finished background tasks. */
+    val taskCompleteNotifEnabled: Boolean = true,
+    /** Port-only: scheduled (cron) run reports. Still subject to each task's own policy. */
+    val scheduledRunNotifEnabled: Boolean = true,
+    /** Upstream key `messageIdleNotifThresholdMs`. */
+    val messageIdleNotifThresholdMs: Long = 60_000,
 ) {
-    val enabledCount: Int get() = listOf(workflows, mentions, crons, marketing).count { it }
+    val enabledCount: Int
+        get() = if (!enabled) 0 else listOf(
+            idlePromptNotifEnabled, inputNeededNotifEnabled,
+            taskCompleteNotifEnabled, scheduledRunNotifEnabled,
+        ).count { it }
 }
 
 // MARK: - Presets data -------------------------------------------------------

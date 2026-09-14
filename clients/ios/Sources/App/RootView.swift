@@ -453,6 +453,12 @@ struct RootView: View {
             .onChange(of: source.model.pendingQuestions) { _, _ in
                 syncConversationBackgroundSurfaces()
             }
+            .onChange(of: source.model.pendingPermissions) { _, _ in
+                syncConversationBackgroundSurfaces()
+            }
+            .onChange(of: settingsStore.notifs) { _, config in
+                conversationBackgroundAlerts.setPreferences(config)
+            }
             .onChange(of: source.model.backgroundTasks) { _, _ in
                 syncConversationBackgroundSurfaces()
             }
@@ -2397,6 +2403,16 @@ struct RootView: View {
             turnToken: turnToken,
             turnCompletion: source.model.turnCompletion,
             pendingQuestions: source.model.pendingQuestions,
+            // The tool name is carried, not re-derived: the prompt's own title
+            // has already been through a localized format string.
+            // A kind other than `toolUseConfirm` (`exitPlanMode`,
+            // `bypassPermissionsMode`) has no tool to name, so the body renders
+            // without one rather than inventing a label nobody would recognize.
+            pendingPermissions: source.model.pendingPermissions.map { pending -> ConversationPendingPermission in
+                var toolName = ""
+                if case let .toolUseConfirm(name, _, _) = pending.kind { toolName = name }
+                return ConversationPendingPermission(requestId: pending.requestId, toolName: toolName)
+            },
             backgroundTasks: source.model.backgroundTasks,
             requiresExecutionLease: source.model.requiresBackgroundExecution,
             workspaceKey: activeScope.workspaceKey,

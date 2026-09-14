@@ -727,6 +727,12 @@ fun RootScreen(
     val resolvedSettingsStore: SettingsStore =
         settingsStore ?: viewModel(factory = SettingsStore.factory(context))
     val settingsState by resolvedSettingsStore.state.collectAsState()
+    // The notifier holds ARMED TIMERS (upstream's 60s idle delay, 6s permission
+    // delay), so a preference change has to be pushed at it rather than polled.
+    // Keyed on the value, not just the ViewModel, so every edit lands.
+    LaunchedEffect(chatViewModel, settingsState.notifs) {
+        chatViewModel.setNotificationPreferences(settingsState.notifs)
+    }
     val currentEngineSource by chatViewModel.engineSource.collectAsStateWithLifecycle()
     var pendingForkRequest by remember { mutableStateOf<PendingForkRequest?>(null) }
     val currentAutoPlayReplies = rememberUpdatedState(settingsState.voice.autoPlayReplies)

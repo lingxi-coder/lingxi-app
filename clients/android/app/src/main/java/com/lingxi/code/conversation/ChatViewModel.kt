@@ -21,6 +21,7 @@ import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.MCPServer
 import com.lingxi.code.model.Message
+import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
@@ -499,7 +500,32 @@ class ChatViewModel(
             }
             launch {
                 boundSource.pendingPermission.collect { prompt ->
-                    if (sourceGeneration == generation) _pendingPermission.value = prompt
+                    if (sourceGeneration != generation) return@collect
+                    val previous = _pendingPermission.value
+                    _pendingPermission.value = prompt
+                    // Upstream arms a 6s delay when the prompt APPEARS and
+                    // clears it when the prompt settles, so a request answered
+                    // promptly notifies nothing. Only a newly-arrived id arms;
+                    // re-emitting the same prompt must not restart the clock.
+                    if (prompt != null && prompt.requestId != previous?.requestId) {
+                        val sessionId = _state.value.session.id
+                        if (sessionId.isNotBlank() && sessionId != "new") {
+                            backgroundExecution.notifyPermissionRequested(
+                                ConversationBackgroundSnapshot(
+                                    sessionId = sessionId,
+                                    turnId = durableTurnId,
+                                    statusText = null,
+                                    recoverySpec = source.recoverySpec,
+                                ),
+                                prompt.requestId,
+                                prompt.toolName
+                                    ?: strings.resolve(R.string.permission_request_title, "请求权限"),
+                            )
+                        }
+                    }
+                    if (prompt == null && previous != null) {
+                        backgroundExecution.settlePermission(previous.requestId)
+                    }
                 }
             }
             launch {
@@ -645,6 +671,25 @@ class ChatViewModel(
                 }
             }
             is ClientEvent.TaskStatusChanged -> {
+                // `TaskStatusDto` is a UniFFI-generated Kotlin ENUM, not a
+                // sealed class — `is` would not compile.
+                val terminal = event.status == TaskStatusDto.COMPLETED || event.status == TaskStatusDto.FAILED
+                if (terminal) {
+                    val sessionId = _state.value.session.id
+                    if (sessionId.isNotBlank() && sessionId != "new") {
+                        backgroundExecution.notifyTaskFinished(
+                            ConversationBackgroundSnapshot(
+                                sessionId = sessionId,
+                                turnId = durableTurnId,
+                                statusText = null,
+                                recoverySpec = source.recoverySpec,
+                            ),
+                            taskId = event.taskId,
+                            label = _state.value.backgroundTasks[event.taskId]?.description,
+                            failed = event.status == TaskStatusDto.FAILED,
+                        )
+                    }
+                }
                 _state.update {
                     val belongsToVisibleSession = event.originSessionId
                         ?.let(::canonicalSessionId)
@@ -2769,6 +2814,16 @@ class ChatViewModel(
                 finalAssistantText = finalAssistantText,
             ),
         )
+    }
+
+    /**
+     * Hands new notification preferences to the platform notifier. It holds
+     * armed timers (upstream's 60s idle delay and 6s permission delay), so a
+     * preference it is never told about would keep applying until the next
+     * process start.
+     */
+    fun setNotificationPreferences(config: NotifConfig) {
+        backgroundExecution.setNotificationPreferences(config)
     }
 
     /** Stop action from the ongoing notification, including after UI reattachment. */

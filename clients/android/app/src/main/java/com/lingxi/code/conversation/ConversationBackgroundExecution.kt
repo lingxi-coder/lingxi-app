@@ -24,9 +24,14 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.TaskStatusDto
 import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.sessionModeFromWireValue
+import com.lingxi.code.notify.NotificationKind
+import com.lingxi.code.notify.NotificationPolicy
+import com.lingxi.code.notify.allows
 import com.lingxi.code.settings.LinuxRuntimeMode
+import com.lingxi.code.settings.NotificationPrefsStore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -54,6 +59,8 @@ enum class ConversationBackgroundAlert {
     Failed,
     WaitingForUser,
     PausedRecoverable,
+    /** A tool is parked on a permission decision the user has not made yet. */
+    NeedsPermission,
 }
 
 /** Platform lease for a user-started conversation turn. */
@@ -66,6 +73,33 @@ interface ConversationBackgroundExecution {
     ) {}
     fun notifyWaitingForUser(snapshot: ConversationBackgroundSnapshot) {}
     fun notifyPausedRecoverable(snapshot: ConversationBackgroundSnapshot) {}
+
+    /**
+     * A permission request reached the UI. Arms upstream's 6-second delay —
+     * see [com.lingxi.code.notify.NotificationPolicy]. Answering inside that
+     * window notifies nothing, which is the common case when the app is in
+     * front of the user.
+     */
+    fun notifyPermissionRequested(
+        snapshot: ConversationBackgroundSnapshot,
+        requestId: ULong,
+        toolName: String,
+    ) {}
+
+    /** The permission settled. Cancels the armed delay if it has not fired. */
+    fun settlePermission(requestId: ULong) {}
+
+    /** A background task (agent, shell, workflow) reached a terminal state. */
+    fun notifyTaskFinished(
+        snapshot: ConversationBackgroundSnapshot,
+        taskId: String,
+        label: String?,
+        failed: Boolean,
+    ) {}
+
+    /** Push new preferences at the notifier. It holds ARMED TIMERS, so it
+     * cannot notice a change it is not told about. */
+    fun setNotificationPreferences(config: NotifConfig) {}
     fun retainAfterUiDestroyed(
         source: ConversationSource,
         snapshot: ConversationBackgroundSnapshot,
@@ -90,6 +124,22 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
     private var promotionToken: Long? = null
     private var latestSnapshot: ConversationBackgroundSnapshot? = null
     private val deliveredAlertTags = ConcurrentHashMap.newKeySet<String>()
+
+    private val notifPrefsStore = NotificationPrefsStore(appContext)
+
+    /**
+     * Seeded from disk so a notification decided while the Activity is gone
+     * still honours what the user chose in a previous run; refreshed live by
+     * [setNotificationPreferences] when the settings screen writes.
+     */
+    @Volatile
+    private var notifPrefs: NotifConfig = notifPrefsStore.load()
+
+    /** Armed by [finishTurn], disarmed by a new turn. Upstream's idle timer. */
+    private var idleAlert: Runnable? = null
+
+    /** request_id -> armed 6s permission delay. */
+    private val permissionAlerts = ConcurrentHashMap<ULong, Runnable>()
     private val lease = ConversationServiceLease(
         startService = ::startService,
         stopService = ::stopService,
@@ -97,7 +147,19 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
     )
 
     override fun setTurnActive(active: Boolean) {
+        // Upstream's `!isLoading` clause. A new turn starting during the
+        // countdown means the session is not idle after all, so the armed
+        // alert is wrong and gets dropped rather than re-checked later.
+        if (active) cancelIdleAlert()
         lease.setTurnActive(active)
+    }
+
+    override fun setNotificationPreferences(config: NotifConfig) {
+        notifPrefs = config
+        if (!config.enabled) {
+            cancelIdleAlert()
+            permissionAlerts.keys.toList().forEach(::settlePermission)
+        }
     }
 
     override fun updateTurn(snapshot: ConversationBackgroundSnapshot?) {
@@ -121,6 +183,15 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
         }.onFailure { Log.w(TAG, "Unable to refresh conversation foreground notification", it) }
     }
 
+    /**
+     * ARMS the idle alert; it does not post one.
+     *
+     * Upstream has no "the turn finished" notification at all — it waits
+     * `messageIdleNotifThresholdMs` and only then says the session is waiting,
+     * and only if the user never came back. Returning to the app cancels it
+     * two ways: `setTurnActive(true)` on the next turn, and `postAlert`'s
+     * foreground check at fire time.
+     */
     override fun finishTurn(
         snapshot: ConversationBackgroundSnapshot,
         outcome: ConversationTurnOutcome,
@@ -130,15 +201,82 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
             ConversationTurnOutcome.Failed -> ConversationBackgroundAlert.Failed
             ConversationTurnOutcome.Cancelled -> return
         }
-        postAlert(snapshot, alert)
+        cancelIdleAlert()
+        if (!notifPrefs.allows(NotificationKind.IdlePrompt)) return
+        val armed = Runnable {
+            idleAlert = null
+            postAlert(snapshot, alert, NotificationKind.IdlePrompt)
+        }
+        idleAlert = armed
+        mainHandler.postDelayed(
+            armed,
+            NotificationPolicy.clampIdleThreshold(notifPrefs.messageIdleNotifThresholdMs),
+        )
     }
 
     override fun notifyWaitingForUser(snapshot: ConversationBackgroundSnapshot) {
-        postAlert(snapshot, ConversationBackgroundAlert.WaitingForUser)
+        postAlert(snapshot, ConversationBackgroundAlert.WaitingForUser, NotificationKind.AgentNeedsInput)
     }
 
     override fun notifyPausedRecoverable(snapshot: ConversationBackgroundSnapshot) {
-        postAlert(snapshot, ConversationBackgroundAlert.PausedRecoverable)
+        // The system took the turn away and the session cannot make progress
+        // until the user opens it, so this belongs to the input-needed toggle —
+        // NOT `IdlePrompt`, which governs the "your turn merely finished" nag.
+        // `postAlert` gates on the kind (`if (!notifPrefs.allows(kind)) return`),
+        // so IdlePrompt silently dropped this alert for anyone who had turned
+        // idle prompts off, leaving the session stalled with no notice.
+        postAlert(snapshot, ConversationBackgroundAlert.PausedRecoverable, NotificationKind.AgentNeedsInput)
+    }
+
+    override fun notifyPermissionRequested(
+        snapshot: ConversationBackgroundSnapshot,
+        requestId: ULong,
+        toolName: String,
+    ) {
+        if (permissionAlerts.containsKey(requestId)) return
+        if (!notifPrefs.allows(NotificationKind.PermissionPrompt)) return
+        val armed = Runnable {
+            permissionAlerts.remove(requestId)
+            postAlert(
+                snapshot,
+                ConversationBackgroundAlert.NeedsPermission,
+                NotificationKind.PermissionPrompt,
+                discriminator = requestId.toString(),
+                bodyArg = toolName,
+            )
+        }
+        permissionAlerts[requestId] = armed
+        mainHandler.postDelayed(armed, NotificationPolicy.PERMISSION_PROMPT_NOTIFY_DELAY_MS)
+    }
+
+    override fun settlePermission(requestId: ULong) {
+        permissionAlerts.remove(requestId)?.let(mainHandler::removeCallbacks)
+    }
+
+    override fun notifyTaskFinished(
+        snapshot: ConversationBackgroundSnapshot,
+        taskId: String,
+        label: String?,
+        failed: Boolean,
+    ) {
+        postAlert(
+            snapshot,
+            if (failed) ConversationBackgroundAlert.Failed else ConversationBackgroundAlert.Completed,
+            NotificationKind.AgentCompleted,
+            // Without this every task in a session collapses onto one dedupe
+            // tag and only the first is ever delivered — iOS hit exactly this
+            // and fixed it the same way.
+            discriminator = taskId,
+            // `chat_background_completed_text` / `_failed_text` carry no `%1$s`
+            // slot, so passing this as `bodyArg` dropped it and every finished
+            // agent produced byte-identical body text.
+            subText = label?.takeIf { it.isNotBlank() } ?: taskId,
+        )
+    }
+
+    private fun cancelIdleAlert() {
+        idleAlert?.let(mainHandler::removeCallbacks)
+        idleAlert = null
     }
 
     override fun retainAfterUiDestroyed(
@@ -155,7 +293,19 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
     private fun postAlert(
         snapshot: ConversationBackgroundSnapshot,
         alert: ConversationBackgroundAlert,
+        kind: NotificationKind,
+        /** Distinguishes alerts that share a session, turn and class — several
+         * background tasks, or several pending permissions, otherwise collapse
+         * onto one dedupe tag and only the first is ever delivered. */
+        discriminator: String? = null,
+        /** Fills the one `%1$s` slot the parameterized bodies carry. */
+        bodyArg: String? = null,
+        /** Shown beside the title for bodies that carry no `%1$s` slot, so a
+         * name computed by the caller is not silently dropped by
+         * `String.format` (which ignores surplus arguments). */
+        subText: String? = null,
     ) {
+        if (!notifPrefs.allows(kind)) return
         if (isApplicationForeground()) return
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -186,13 +336,23 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
                 R.string.chat_background_waiting_title to R.string.chat_background_waiting_text
             ConversationBackgroundAlert.PausedRecoverable ->
                 R.string.chat_background_paused_title to R.string.chat_background_paused_text
+            ConversationBackgroundAlert.NeedsPermission ->
+                R.string.chat_background_permission_title to R.string.chat_background_permission_text_fmt
         }
-        val tag = "${snapshot.sessionId}:${snapshot.turnId}:${alert.name}"
+        val tag = buildString {
+            append(snapshot.sessionId); append(':')
+            append(snapshot.turnId); append(':')
+            append(alert.name)
+            if (discriminator != null) { append(':'); append(discriminator) }
+        }
         if (!deliveredAlertTags.add(tag)) return
         val notification = NotificationCompat.Builder(appContext, TERMINAL_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher_foreground)
             .setContentTitle(appContext.getString(title))
-            .setContentText(appContext.getString(body))
+            .setContentText(
+                if (bodyArg != null) appContext.getString(body, bodyArg) else appContext.getString(body),
+            )
+            .apply { if (subText != null) setSubText(subText) }
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)

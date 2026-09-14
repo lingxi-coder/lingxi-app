@@ -67,20 +67,89 @@ struct WorkflowsPage: View {
 }
 
 // MARK: - Notifications
+
+/// The idle-threshold choices, in render order. Pure and internal so the set
+/// and its ordering can be pinned without rendering anything.
+///
+/// One minute is upstream Claude Code's `messageIdleNotifThresholdMs` default;
+/// the others exist because a threshold that can only be the default is not a
+/// setting.
+func idleThresholdChoices() -> [(ms: Int, label: String)] {
+    [
+        (15_000, "15s"),
+        (NotificationPolicy.defaultIdleNotifThresholdMs, "1m"),
+        (180_000, "3m"),
+        (600_000, "10m"),
+    ]
+}
+
+/// Real notification preferences.
+///
+/// These four toggles used to be `workflows` / `mentions` / `crons` /
+/// `marketing` bound to an in-memory struct that was never persisted and that
+/// nothing ever read — and two of those names described things this app has no
+/// concept of. They now name the four moments that actually notify, and every
+/// edit is persisted and pushed at the notifier.
 struct NotificationsPage: View {
     @Bindable var store: SettingsStore
     var body: some View {
-        SettingsSection(label: String(localized: "settings_section_notification_type"),
+        SettingsSection(label: String(localized: "settings_notifications"),
                         footer: String(localized: "settings_notifications_footer")) {
-            SettingsRow(label: String(localized: "settings_notif_workflow_complete"),
-                        sub: String(localized: "settings_notif_workflow_complete_sub"), chevron: false) { LXToggle(isOn: $store.notifs.workflows) }
-            SettingsRow(label: String(localized: "settings_notif_mention"),
-                        sub: String(localized: "settings_notif_mention_sub"), chevron: false) { LXToggle(isOn: $store.notifs.mentions) }
-            SettingsRow(label: String(localized: "settings_notif_cron_report"),
-                        sub: String(localized: "settings_notif_cron_report_sub"), chevron: false) { LXToggle(isOn: $store.notifs.crons) }
-            SettingsRow(label: String(localized: "settings_notif_product_update"),
-                        sub: String(localized: "settings_notif_product_update_sub"), chevron: false, isLast: true) { LXToggle(isOn: $store.notifs.marketing) }
+            SettingsRow(label: String(localized: "settings_notif_enabled"),
+                        sub: String(localized: "settings_notif_enabled_sub"), chevron: false, isLast: true) {
+                LXToggle(isOn: binding(\.enabled))
+            }
         }
+        SettingsSection(label: String(localized: "settings_section_notification_type")) {
+            SettingsRow(label: String(localized: "settings_notif_idle_prompt"),
+                        sub: String(localized: "settings_notif_idle_prompt_sub"), chevron: false) {
+                LXToggle(isOn: binding(\.idlePromptNotifEnabled)).disabled(!store.notifs.enabled)
+            }
+            SettingsRow(label: String(localized: "settings_notif_needs_input"),
+                        sub: String(localized: "settings_notif_needs_input_sub"), chevron: false) {
+                LXToggle(isOn: binding(\.inputNeededNotifEnabled)).disabled(!store.notifs.enabled)
+            }
+            SettingsRow(label: String(localized: "settings_notif_background_task"),
+                        sub: String(localized: "settings_notif_background_task_sub"), chevron: false) {
+                LXToggle(isOn: binding(\.taskCompleteNotifEnabled)).disabled(!store.notifs.enabled)
+            }
+            SettingsRow(label: String(localized: "settings_notif_cron_report"),
+                        sub: String(localized: "settings_notif_cron_report_sub"), chevron: false, isLast: true) {
+                LXToggle(isOn: binding(\.scheduledRunNotifEnabled)).disabled(!store.notifs.enabled)
+            }
+        }
+        SettingsSection(label: String(localized: "settings_notif_idle_threshold"),
+                        footer: String(localized: "settings_notif_idle_threshold_sub")) {
+            Picker(String(localized: "settings_notif_idle_threshold"),
+                   selection: Binding(
+                       get: { store.notifs.messageIdleNotifThresholdMs },
+                       set: { newValue in
+                           var next = store.notifs
+                           next.messageIdleNotifThresholdMs = newValue
+                           store.setNotifs(next)
+                       }
+                   )) {
+                ForEach(idleThresholdChoices(), id: \.ms) { choice in
+                    Text(choice.label).tag(choice.ms)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!store.notifs.enabled)
+        }
+    }
+
+    /// Every write goes through `SettingsStore.setNotifs`, which persists AND
+    /// hands the value to the notifier — the notifier holds armed timers and
+    /// cannot notice a preference it is never told about.
+    private func binding(_ path: WritableKeyPath<NotifConfig, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { store.notifs[keyPath: path] },
+            set: { newValue in
+                var next = store.notifs
+                next[keyPath: path] = newValue
+                store.setNotifs(next)
+            }
+        )
     }
 }
 

@@ -1668,6 +1668,108 @@
         }
       }
     },
+    "chat_background_permission_text %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀需要你的许可来使用 %@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀需要你的許可來使用 %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lingxi needs your permission to use %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀が %@ を使用する許可を求めています"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀가 %@ 사용 권한을 요청합니다"
+          }
+        }
+      }
+    },
+    "chat_background_permission_text_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀需要你的许可来使用 %1$s"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀需要你的許可來使用 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lingxi needs your permission to use %1$s"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀が %1$s を使用する許可を求めています"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀가 %1$s 사용 권한을 요청합니다"
+          }
+        }
+      }
+    },
+    "chat_background_permission_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀需要你的许可"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀需要你的許可"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lingxi needs your permission"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀が許可を求めています"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀가 권한을 요청합니다"
+          }
+        }
+      }
+    },
     "chat_background_result_channel": {
       "localizations": {
         "zh-Hans": {
@@ -51342,6 +51444,74 @@
         }
       }
     },
+    "settings_notif_background_task": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务完成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景任務完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background Task Done"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドタスク完了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 작업 완료"
+          }
+        }
+      }
+    },
+    "settings_notif_background_task_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台 Agent 或命令结束时"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景 Agent 或指令結束時"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When a background agent or command finishes"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドのエージェントまたはコマンドが終了したとき"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 에이전트 또는 명령이 끝났을 때"
+          }
+        }
+      }
+    },
     "settings_notif_cron_report": {
       "localizations": {
         "zh-Hans": {
@@ -51410,7 +51580,7 @@
         }
       }
     },
-    "settings_notif_mention": {
+    "settings_notif_enabled": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -51427,7 +51597,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "I'm Mentioned"
+            "value": "Enable Notifications"
           }
         },
         "ja": {
@@ -51444,7 +51614,7 @@
         }
       }
     },
-    "settings_notif_mention_sub": {
+    "settings_notif_enabled_sub": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -51461,7 +51631,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Someone mentions you in a conversation"
+            "value": "When off, Lingxi sends no system notifications at all"
           }
         },
         "ja": {
@@ -51478,7 +51648,7 @@
         }
       }
     },
-    "settings_notif_product_update": {
+    "settings_notif_idle_prompt": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -51512,7 +51682,7 @@
         }
       }
     },
-    "settings_notif_product_update_sub": {
+    "settings_notif_idle_prompt_sub": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -51546,7 +51716,7 @@
         }
       }
     },
-    "settings_notif_workflow_complete": {
+    "settings_notif_idle_threshold": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -51580,7 +51750,7 @@
         }
       }
     },
-    "settings_notif_workflow_complete_sub": {
+    "settings_notif_idle_threshold_sub": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -51609,7 +51779,109 @@
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "AI가 여러 단계 작업을 마쳤을 때"
+            "value": "턴이 끝난 뒤 얼마나 기다렸다가 알릴지"
+          }
+        }
+      }
+    },
+    "settings_notif_needs_input": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要我操作"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要我操作"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Action Required"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "操作が必要"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업 필요"
+          }
+        }
+      }
+    },
+    "settings_notif_needs_input_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求权限或向你提问时"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請求權限或向你提問時"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When permission is requested or a question is asked"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "許可を求めるとき、または質問があるとき"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "권한을 요청하거나 질문할 때"
+          }
+        }
+      }
+    },
+    "settings_notif_open_system": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开系统通知设置"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開啟系統通知設定"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open system notification settings"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "システムの通知設定を開く"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시스템 알림 설정 열기"
           }
         }
       }

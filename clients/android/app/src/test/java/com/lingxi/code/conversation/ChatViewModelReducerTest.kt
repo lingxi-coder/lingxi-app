@@ -30,6 +30,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
@@ -92,6 +93,9 @@ class ChatViewModelReducerTest {
         var submittedTurnId: Long? = null
         var cancelCount = 0
         private val never = MutableSharedFlow<ReplyEvent>()
+        /** Drivable so a test can make a permission request arrive and settle. */
+        val permissions = MutableStateFlow<PermissionPromptState?>(null)
+        override val pendingPermission: StateFlow<PermissionPromptState?> get() = permissions.asStateFlow()
         override fun initialMessages(): List<Message> = emptyList()
         override fun submit(text: String): Flow<ReplyEvent> {
             submitted += text
@@ -117,9 +121,33 @@ class ChatViewModelReducerTest {
 
     private class RecordingBackgroundExecution : ConversationBackgroundExecution {
         val activeStates = mutableListOf<Boolean>()
+        val finishedTasks = mutableListOf<Triple<String, String?, Boolean>>()
+        val armedPermissions = mutableListOf<Pair<ULong, String>>()
+        val settledPermissions = mutableListOf<ULong>()
 
         override fun setTurnActive(active: Boolean) {
             if (activeStates.lastOrNull() != active) activeStates += active
+        }
+
+        override fun notifyTaskFinished(
+            snapshot: ConversationBackgroundSnapshot,
+            taskId: String,
+            label: String?,
+            failed: Boolean,
+        ) {
+            finishedTasks += Triple(taskId, label, failed)
+        }
+
+        override fun notifyPermissionRequested(
+            snapshot: ConversationBackgroundSnapshot,
+            requestId: ULong,
+            toolName: String,
+        ) {
+            armedPermissions += requestId to toolName
+        }
+
+        override fun settlePermission(requestId: ULong) {
+            settledPermissions += requestId
         }
     }
 
@@ -364,6 +392,65 @@ class ChatViewModelReducerTest {
         vm.reduce(ReplyEvent.End)
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    // --- notification wiring ------------------------------------------------
+    // These assert CALL COUNTS on the notifier, not state fields: the whole
+    // class of defect here is "computed but never wired", which renders and
+    // reduces perfectly while notifying nobody.
+
+    @Test
+    fun aFinishedBackgroundTaskIsHandedToTheNotifierWithItsLabel() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
+        vm.applyActivatedSession(
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+        )
+        runCurrent()
+
+        vm.reduceClientEvent(
+            ClientEvent.TaskRow(
+                TaskRowDto("task-1", "agent", TaskStatusDto.RUNNING, "Reindex the docs", false, null, null),
+            ),
+        )
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null, null))
+        runCurrent()
+
+        assertEquals(
+            listOf(Triple("task-1", "Reindex the docs", false)),
+            execution.finishedTasks,
+        )
+    }
+
+    @Test
+    fun anUnfinishedBackgroundTaskIsNotHandedToTheNotifier() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
+        vm.applyActivatedSession(
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+        )
+        runCurrent()
+
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.PAUSED, null, null))
+        runCurrent()
+
+        assertEquals(emptyList<Triple<String, String?, Boolean>>(), execution.finishedTasks)
+    }
+
+    @Test
+    fun aFailedBackgroundTaskFallsBackToItsIdWhenNoRowNamedIt() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
+        vm.applyActivatedSession(
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+        )
+        runCurrent()
+
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-9", TaskStatusDto.FAILED, null, "boom"))
+        runCurrent()
+
+        assertEquals(listOf(Triple("task-9", null, true)), execution.finishedTasks)
     }
 
     @Test

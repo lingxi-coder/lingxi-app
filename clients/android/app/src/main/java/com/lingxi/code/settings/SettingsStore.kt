@@ -94,6 +94,7 @@ data class SettingsUiState(
 class SettingsStore(
     private val providerRepo: ProviderSettingsRepository? = null,
     private val voiceRepo: VoiceSettingsRepository? = null,
+    private val notifRepo: NotificationPrefsStore? = null,
     private val permissionModeRepo: PermissionModeSettingsRepository? = null,
     /**
      * Resolves a string resource id to its localized text. The production
@@ -124,6 +125,7 @@ class SettingsStore(
                 permissionMode = initialPermissionMode,
                 effectivePermissionMode = initialPermissionMode,
                 voice = voiceRepo?.load() ?: VoiceConfig(),
+                notifs = notifRepo?.load() ?: NotifConfig(),
                 skills = SettingsMock.bundledSkills(::resolveWithFallback),
                 localAppPlugin = SettingsMock.localAppPlugin(),
                 mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
@@ -137,6 +139,7 @@ class SettingsStore(
         } ?: SettingsUiState(
             visionDelegationEnabled = providerRepo?.visionDelegationEnabled() ?: true,
             voice = voiceRepo?.load() ?: VoiceConfig(),
+            notifs = notifRepo?.load() ?: NotifConfig(),
             permissionMode = initialPermissionMode,
             effectivePermissionMode = initialPermissionMode,
             skills = SettingsMock.bundledSkills(::resolveWithFallback),
@@ -232,7 +235,19 @@ class SettingsStore(
             )
         }
     }
-    fun setNotifs(notifs: NotifConfig) = _state.update { it.copy(notifs = notifs) }
+    /**
+     * Persists as well as updating state. This used to only touch the
+     * in-memory copy and had ZERO callers — the notification settings screen
+     * rendered four toggles that nothing read and nothing saved.
+     */
+    fun setNotifs(notifs: NotifConfig) {
+        notifRepo?.save(notifs)
+        // The notifier picks this up by collecting `state` in RootScreen — it
+        // holds ARMED TIMERS and cannot notice a preference it is not told
+        // about, and a callback field here would be one more thing that can be
+        // left unset while still compiling.
+        _state.update { it.copy(notifs = notifs) }
+    }
     fun setVoice(voice: VoiceConfig) {
         voiceRepo?.save(voice)
         _state.update { it.copy(voice = voice) }
@@ -744,6 +759,7 @@ class SettingsStore(
                     return SettingsStore(
                         providerRepo = ProviderSettingsRepository(appContext),
                         voiceRepo = VoiceSettingsRepository(appContext),
+                        notifRepo = NotificationPrefsStore(appContext),
                         permissionModeRepo = PermissionModeSettingsRepository(appContext),
                         resolveString = appContext::getString,
                     ) as T

@@ -219,7 +219,10 @@ fun SettingsHost(
                     LanguagePage(language = state.language, onSelect = resolvedStore::setLanguage)
                 }
                 page(SettingsRoutes.NOTIFICATIONS) {
-                    NativeNotificationsPage()
+                    NativeNotificationsPage(
+                        config = state.notifs,
+                        onChange = resolvedStore::setNotifs,
+                    )
                 }
                 page(SettingsRoutes.INPUT) { NativeSystemSettingsPage(input = true) }
 

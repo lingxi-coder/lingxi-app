@@ -182,11 +182,39 @@ class SettingsMockTest {
     // --- NotifConfig derived count ----------------------------------------
 
     @Test
-    fun notifConfig_enabledCount_default3() {
-        // Defaults: workflows + mentions + crons on, marketing off → 3.
-        assertEquals(3, NotifConfig().enabledCount)
-        assertEquals(0, NotifConfig(false, false, false, false).enabledCount)
-        assertEquals(4, NotifConfig(true, true, true, true).enabledCount)
+    fun notifConfig_enabledCount_countsTheFourTypes() {
+        // Every type defaults ON: these are local notifications on the device
+        // the user is holding, not a remote push that costs a round trip.
+        assertEquals(4, NotifConfig().enabledCount)
+        assertEquals(
+            3,
+            NotifConfig(taskCompleteNotifEnabled = false).enabledCount,
+        )
+    }
+
+    @Test
+    fun notifConfig_masterSwitchZeroesTheCount_whateverTheTypesSay() {
+        // The rule `enabledCount` actually encodes: with the master switch off
+        // the per-type toggles are unreachable, so reporting "4 enabled" next
+        // to a disabled feature would be a lie the settings row would render.
+        assertEquals(0, NotifConfig(enabled = false).enabledCount)
+        assertEquals(
+            0,
+            NotifConfig(
+                enabled = false,
+                idlePromptNotifEnabled = true,
+                inputNeededNotifEnabled = true,
+                taskCompleteNotifEnabled = true,
+                scheduledRunNotifEnabled = true,
+            ).enabledCount,
+        )
+    }
+
+    @Test
+    fun notifConfig_defaultIdleThresholdIsUpstreams() {
+        // Byte-faithful to Claude Code's
+        // `DEFAULT_GLOBAL_CONFIG.messageIdleNotifThresholdMs = 60000`.
+        assertEquals(60_000L, NotifConfig().messageIdleNotifThresholdMs)
     }
 
     // --- newProvider (A7 add flow) ----------------------------------------

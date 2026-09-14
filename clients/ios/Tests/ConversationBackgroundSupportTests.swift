@@ -331,10 +331,245 @@ final class ConversationBackgroundSupportTests: XCTestCase {
         )
     }
 
+    // MARK: - Upstream timing policy
+    //
+    // The policy here is Claude Code 2.1.270's, copied rather than invented:
+    // a finished turn ARMS an idle alert instead of posting one, and a
+    // permission prompt answered inside 6 seconds notifies nothing at all.
+
+    /// Immediate sleeper: exercises the fire-time re-checks without a real wait.
+    /// The threshold's 5s floor is a production clamp worth keeping, and far too
+    /// slow for a unit test, so the delay itself is the seam rather than the
+    /// clamp.
+    private static let noWait: ConversationNotificationSleeper = { _ in }
+
+    private func completionSnapshot(
+        outcome: ConversationTurnCompletion.Outcome = .completed
+    ) -> ConversationBackgroundSnapshot {
+        let token = ConversationTurnToken(clientTurnId: 7, sessionEpoch: 1)
+        return ConversationBackgroundSnapshot(
+            sessionID: "session-a",
+            turnToken: token,
+            turnCompletion: ConversationTurnCompletion(
+                token: token,
+                outcome: outcome,
+                finalAssistantText: "done"
+            ),
+            pendingQuestions: [],
+            backgroundTasks: [],
+            requiresExecutionLease: false
+        )
+    }
+
+    func testFinishedTurnArmsTheIdleAlertRatherThanPostingOne() async {
+        let scheduler = RecordingConversationScheduler()
+        // A sleeper that never returns: the alert is armed but its delay never
+        // elapses, which is the state a user who comes back quickly is in.
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: { _ in try? await Task.sleep(nanoseconds: 60_000_000_000) },
+            preferences: NotifConfig()
+        )
+        controller.setScenePhase(.background)
+
+        controller.sync(completionSnapshot())
+        await drainAsyncNotifications()
+
+        let payloads = await scheduler.snapshot()
+        XCTAssertTrue(payloads.isEmpty, "a finished turn must not notify immediately")
+    }
+
+    func testIdleAlertFiresOnceTheThresholdElapses() async throws {
+        let scheduler = RecordingConversationScheduler()
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: Self.noWait,
+            preferences: NotifConfig()
+        )
+        controller.setScenePhase(.background)
+
+        controller.sync(completionSnapshot())
+        await drainAsyncNotifications()
+
+        let payloads = await scheduler.snapshot()
+        let payload = try XCTUnwrap(payloads.first)
+        XCTAssertEqual(payload.identifier, "conversation:session-a:7:completed:-")
+    }
+
+    func testComingBackBeforeTheThresholdCancelsTheIdleAlert() async {
+        let scheduler = RecordingConversationScheduler()
+        let gate = AsyncGate()
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: { _ in await gate.wait() },
+            preferences: NotifConfig()
+        )
+        controller.setScenePhase(.background)
+        controller.sync(completionSnapshot())
+        await drainAsyncNotifications()
+
+        // The user returns while the alert is still counting down.
+        controller.setScenePhase(.active)
+        await gate.open()
+        await drainAsyncNotifications()
+
+        let payloads = await scheduler.snapshot()
+        XCTAssertTrue(payloads.isEmpty, "returning to the app must cancel the armed alert")
+    }
+
+    func testIdlePromptTogglesOffSuppressTheAlert() async {
+        let scheduler = RecordingConversationScheduler()
+        var config = NotifConfig()
+        config.idlePromptNotifEnabled = false
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: Self.noWait,
+            preferences: config
+        )
+        controller.setScenePhase(.background)
+
+        controller.sync(completionSnapshot())
+        await drainAsyncNotifications()
+
+        let payloads = await scheduler.snapshot()
+        XCTAssertTrue(payloads.isEmpty)
+    }
+
+    func testPermissionAnsweredInsideTheDelayNotifiesNothing() async {
+        let scheduler = RecordingConversationScheduler()
+        let gate = AsyncGate()
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: { _ in await gate.wait() },
+            preferences: NotifConfig()
+        )
+        controller.setScenePhase(.background)
+
+        func snapshot(_ permissions: [ConversationPendingPermission]) -> ConversationBackgroundSnapshot {
+            ConversationBackgroundSnapshot(
+                sessionID: "session-a",
+                turnToken: ConversationTurnToken(clientTurnId: 7, sessionEpoch: 1),
+                turnCompletion: nil,
+                pendingQuestions: [],
+                pendingPermissions: permissions,
+                backgroundTasks: [],
+                requiresExecutionLease: true
+            )
+        }
+
+        controller.sync(snapshot([ConversationPendingPermission(requestId: 3, toolName: "Bash")]))
+        await drainAsyncNotifications()
+        controller.sync(snapshot([]))          // answered
+        await gate.open()
+        await drainAsyncNotifications()
+
+        let payloads = await scheduler.snapshot()
+        XCTAssertTrue(payloads.isEmpty)
+    }
+
+    func testPermissionLeftUnansweredNotifiesAndNamesTheTool() async throws {
+        let scheduler = RecordingConversationScheduler()
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: Self.noWait,
+            preferences: NotifConfig()
+        )
+        controller.setScenePhase(.background)
+
+        controller.sync(ConversationBackgroundSnapshot(
+            sessionID: "session-a",
+            turnToken: ConversationTurnToken(clientTurnId: 7, sessionEpoch: 1),
+            turnCompletion: nil,
+            pendingQuestions: [],
+            pendingPermissions: [ConversationPendingPermission(requestId: 3, toolName: "Bash")],
+            backgroundTasks: [],
+            requiresExecutionLease: true
+        ))
+        await drainAsyncNotifications()
+
+        let payloads = await scheduler.snapshot()
+        let payload = try XCTUnwrap(payloads.first)
+        XCTAssertEqual(payload.identifier, "conversation:session-a:7:needsPermission:3")
+        XCTAssertTrue(payload.body.contains("Bash"), "the body must name the tool: \(payload.body)")
+    }
+
+    func testInputNeededToggleGatesPermissionsButNotFinishedTurns() async {
+        let scheduler = RecordingConversationScheduler()
+        var config = NotifConfig()
+        config.inputNeededNotifEnabled = false
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: Self.noWait,
+            preferences: config
+        )
+        controller.setScenePhase(.background)
+
+        controller.sync(ConversationBackgroundSnapshot(
+            sessionID: "session-a",
+            turnToken: ConversationTurnToken(clientTurnId: 7, sessionEpoch: 1),
+            turnCompletion: nil,
+            pendingQuestions: [],
+            pendingPermissions: [ConversationPendingPermission(requestId: 3, toolName: "Bash")],
+            backgroundTasks: [],
+            requiresExecutionLease: true
+        ))
+        await drainAsyncNotifications()
+        let afterPermission = await scheduler.snapshot()
+        XCTAssertTrue(afterPermission.isEmpty, "input-needed is off")
+
+        controller.sync(completionSnapshot())
+        await drainAsyncNotifications()
+        let afterCompletion = await scheduler.snapshot()
+        XCTAssertEqual(
+            afterCompletion.count, 1,
+            "the idle alert has its own gate and stays on"
+        )
+    }
+
+    func testMasterSwitchOffSilencesEveryKind() async {
+        let scheduler = RecordingConversationScheduler()
+        var config = NotifConfig()
+        config.enabled = false
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: Self.noWait,
+            preferences: config
+        )
+        controller.setScenePhase(.background)
+
+        controller.sync(completionSnapshot())
+        controller.markRecoverablePause(
+            sessionID: "session-a",
+            turnToken: ConversationTurnToken(clientTurnId: 5, sessionEpoch: 1)
+        )
+        await drainAsyncNotifications()
+
+        let payloads = await scheduler.snapshot()
+        XCTAssertTrue(payloads.isEmpty)
+    }
+
     private func drainAsyncNotifications(_ turns: Int = 6) async {
         for _ in 0..<turns {
             await Task.yield()
         }
+    }
+}
+
+/// A one-shot gate so a test can hold an armed delay open, act, then release it.
+private actor AsyncGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        opened = true
+        let pending = waiters
+        waiters.removeAll()
+        for continuation in pending { continuation.resume() }
     }
 }
 

@@ -143,7 +143,8 @@ pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
 /// ## Edit-applies recovery (`zQi`) lives in the caller
 /// claude-code's Edit path additionally recovers a stale read when the edit
 /// still applies cleanly to the current content. LingXi keeps that in
-/// `edit.rs` (`stale_edit_applies`, gated on the CONTENT-CHANGED error), so
+/// `edit.rs` (`stale_edit_applies`, gated on the CONTENT-CHANGED error — and
+/// currently held shut there for a reason worth reading), so
 /// this shared guard — reused verbatim by Write / NotebookEdit, which have no
 /// such recovery — stays limited to the entry / mtime / full-read checks.
 ///

@@ -167,16 +167,38 @@ pub fn edit_result_message(path: &str, replace_all: bool, stale_recovered: bool)
 /// `a = i ? <this note> : …` in the Edit result mapper; `—` = em-dash).
 pub const STALE_RECOVERED_NOTE: &str = " (note: the file had been modified on disk since you last read it \u{2014} the edit applied cleanly, but the file contains other changes not in your context. Read it before edits that depend on surrounding content.)";
 
-/// Stale-recovery gate — claude-code `TEu(ZVi(content, old, replaceAll))`:
-/// with `tengu_cedar_sundial` on (default **false**), an edit whose file changed
-/// on disk since the last Read may still proceed when it "applies" cleanly to
-/// the CURRENT content — `ZVi`: a non-empty `old_string` found via the
-/// quote-normalizing matcher (`Ytt` = [`crate::quotes::find_actual_string`]),
-/// unique unless `replace_all`. Anything else keeps the stale error.
+/// Stale-recovery test: an edit whose file changed on disk since the last Read
+/// may still proceed when it "applies" cleanly to the CURRENT content — oracle
+/// `GKe` (was `ZVi`): a non-empty `old_string` found via the quote-normalizing
+/// matcher (`Ytt` = [`crate::quotes::find_actual_string`]), unique unless
+/// `replace_all`. Anything else keeps the stale error. That much is ported and
+/// tested below.
+///
+/// ⚠️ **`tengu_cedar_sundial` GRADUATED and this gate is now the only thing
+/// holding the feature shut.** The flag does not appear anywhere in the 2.1.270
+/// binary (checked against a working instrument: 2347 distinct `tengu_` names
+/// are present, this one is not), and the decision function `Mjs`
+/// (`src_169588164.js`) calls `GKe(...)==="applies"` with no flag in sight. So
+/// the note above about "default-OFF ⇒ byte-identical behavior" stopped being
+/// true: upstream recovers, this port always refuses.
+///
+/// It stays shut anyway, deliberately, because `Mjs`'s condition is
+/// `GKe(...)==="applies" && !readNotAutoAllowed()`, and that second conjunct is
+/// oracle `kq(tools, path, permissions)` — "Read was available and permitted
+/// for this path" — which has no port equivalent (`ToolUseContext` carries
+/// neither the tool list nor a permission handle). Dropping the gate without it
+/// would let an Edit recover on a file the model was never allowed to Read,
+/// i.e. fail OPEN on a data-modifying tool. Refusing is the fail-safe side.
+///
+/// This is the SAME missing conjunct that blocks TL-2, so one piece of plumbing
+/// unblocks both. Until then the `GKe` logic below is correct, tested, and
+/// unreachable in production — which is a known state, not an oversight.
 #[must_use]
 pub fn stale_edit_applies(content: &str, old_string: &str, replace_all: bool) -> bool {
     if !telemetry::flag_bool("tengu_cedar_sundial", false) {
-        return false; // TEu's flag gate — default-OFF ⇒ byte-identical behavior
+        // Not upstream's gate any more (it has none) — see the note above: this
+        // stands in for the missing `kq` conjunct and fails SAFE.
+        return false;
     }
     if old_string.is_empty() {
         return false; // ZVi: "" → no_match

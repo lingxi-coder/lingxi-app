@@ -234,7 +234,11 @@ mod tests {
     #[test]
     fn stale_edit_applies_is_flag_gated_and_mirrors_zvi() {
         const FLAG: &str = "tengu_cedar_sundial";
-        // Default (flag off): never recovers, even for a clean unique match.
+        // The flag graduated upstream; this gate now stands in for the missing
+        // `kq` conjunct and fails safe. Setting it here is how the ported `GKe`
+        // semantics stay under test while production keeps refusing — see
+        // `stale_edit_applies`' note.
+        // Default (gate shut): never recovers, even for a clean unique match.
         telemetry::feature_flags::test_clear_flag(FLAG);
         assert!(!stale_edit_applies("alpha beta", "alpha", false));
         // Flag on: ZVi semantics.

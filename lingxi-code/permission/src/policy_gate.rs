@@ -1270,36 +1270,50 @@ impl PolicyPermissionGate {
                 }
                 // HOOK-ASKFLOOR-03: when a PreToolUse hook returned `ask`
                 // (`ctx.hook_ask_floor`), the Auto-mode classifier's ALLOW must NOT
-                // silently defeat the hook's ask — CC's `hookAskFloor` keeps the ask
-                // (the classifier callback re-surfaces `behavior:"ask"`, and a
-                // prompt-avoiding context returns the asyncAgent deny). Skipping the
-                // classifier here lets the ask fall through to the normal path,
-                // which prompts interactively and denies in headless
-                // (`DenyOnAskGate`) — the same outcome as CC's floor. Without this,
-                // Auto mode re-allows the tool, the 2.1.207 regression 211/215
-                // removed.
-                let fallback_decision_reason = if !ctx.hook_ask_floor {
-                    match self
-                        .auto_mode_classifier_result(
-                            mode,
-                            reason,
-                            name,
-                            input,
-                            ctx.is_non_interactive_session,
-                            accept_edits_fast_path,
-                        )
-                        .await?
-                    {
-                        AutoModeClassifierResult::Classified(classified) => {
+                // silently defeat the hook's ask — the 2.1.207 regression 211/215
+                // removed. The floor lives in `De`, `dKo`'s ALLOW callback:
+                //
+                // ```js
+                // let De=(rs)=>{ …
+                //   if(xe){ if(U==="dontAsk")return{behavior:"deny",…};
+                //           return {...M, updatedInput:rs.updatedInput} }   // M is the ASK
+                //   return{behavior:"allow",...rs}};
+                // ```
+                //
+                // `xe` is `v.hookAskFloor===!0`, and `De` is only ever called on
+                // the allow paths. The classifier still RUNS under the floor and
+                // its DENY arms return before `De` ever sees them — so a hook
+                // `ask` in front of a blocked action is still a deny upstream.
+                // Skipping the classifier outright (what this did) kept the
+                // allow side right and silently dropped the deny side, turning
+                // every hook-asked dangerous action into a user prompt.
+                let fallback_decision_reason = match self
+                    .auto_mode_classifier_result(
+                        mode,
+                        reason,
+                        name,
+                        input,
+                        ctx.is_non_interactive_session,
+                        accept_edits_fast_path,
+                    )
+                    .await?
+                {
+                    AutoModeClassifierResult::Classified(classified) => {
+                        if ctx.hook_ask_floor
+                            && matches!(classified, PermissionResult::Allow { .. })
+                        {
+                            // `De`'s `xe` arm: keep `M`, the hook's ask. It
+                            // falls through to the normal path below, which
+                            // prompts interactively and denies headless.
+                            None
+                        } else {
                             return Ok(self.classified_result_to_outcome(classified, name));
                         }
-                        AutoModeClassifierResult::PromptFallback { decision_reason } => {
-                            Some(decision_reason)
-                        }
-                        AutoModeClassifierResult::NoDecision => None,
                     }
-                } else {
-                    None
+                    AutoModeClassifierResult::PromptFallback { decision_reason } => {
+                        Some(decision_reason)
+                    }
+                    AutoModeClassifierResult::NoDecision => None,
                 };
                 if read_only_default_auto_allows(name, reason, mode) {
                     self.record_auto_mode_non_deny(mode);
@@ -1399,7 +1413,10 @@ impl PolicyPermissionGate {
         match result {
             PermissionResult::Allow { ref reason, .. } => Ok(PermissionResolution::Allow {
                 rule_source: rule_settings_source(reason),
-                classifier_approved: matches!(reason, PermissionDecisionReason::ClassifierApproved { .. }),
+                classifier_approved: matches!(
+                    reason,
+                    PermissionDecisionReason::ClassifierApproved { .. }
+                ),
             }),
             PermissionResult::Deny {
                 reason,
@@ -1457,7 +1474,10 @@ impl PolicyPermissionGate {
                 if read_only_default_auto_allows(name, reason, mode) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allowed, no prompt. No rule matched, so no scope.
-                    Ok(PermissionResolution::Allow { rule_source: None, classifier_approved: false })
+                    Ok(PermissionResolution::Allow {
+                        rule_source: None,
+                        classifier_approved: false,
+                    })
                 } else {
                     // A would-be prompt (a mutating tool, OR an explicit `ask`
                     // rule on a read-only tool): the turn loop fires
@@ -1696,6 +1716,75 @@ impl PolicyPermissionGate {
                         metadata: PermissionMetadata::default(),
                     },
                 ))
+            }
+            // `dKo`'s `Yn.unavailable` / `Yn.refusedBySafeguard` arms: deny
+            // fail-closed with retry guidance, but do NOT call `ZJ(v,xft)` —
+            // the classifier never judged the action, so it cannot advance the
+            // consecutive-denial counter. Three provider hiccups would
+            // otherwise trip the breaker and drop Auto mode back to prompting
+            // for the rest of the session, which is the failure the whole
+            // classifier path exists to avoid. `record_auto_mode_non_deny` is
+            // not called either: this is still a deny, it just isn't counted.
+            AutoModeClassifierVerdict::NoVerdict { reason, message } => {
+                tracing::warn!(
+                    target: "permission",
+                    "Auto mode classifier gave no verdict for {name} ({reason}); denying (fail closed, exempt from the denial counter)"
+                );
+                Ok(AutoModeClassifierResult::Classified(
+                    PermissionResult::Deny {
+                        reason: PermissionDecisionReason::ClassifierRejected {
+                            classifier: ClassifierKind::Transcript,
+                            score: crate::classifier::RULE_MATCH_SCORE,
+                            reason,
+                        },
+                        explanation: Some(message),
+                        metadata: PermissionMetadata::default(),
+                    },
+                ))
+            }
+            // `dKo`'s `Yn.transcriptTooLong` arm, which does NOT deny — it
+            // hands the call back to normal permission handling and names
+            // `/compact` as the way out. Two carve-outs come first:
+            //
+            // ```js
+            // if(e.name===ht) return{behavior:"allow",updatedInput:n,decisionReason:{type:"mode",mode:"auto"}};
+            // …
+            // if(F.shouldAvoidPermissionPrompts) throw new Ye("Agent aborted: …");
+            // …
+            // return {...M, decisionReason:Wmt(M,{type:"other",reason:eut})}
+            // ```
+            //
+            // `ht` is `"Agent"`: spawning a subagent is how a session ESCAPES an
+            // over-long transcript, so gating it behind a transcript it cannot
+            // shorten would be a deadlock.
+            AutoModeClassifierVerdict::TranscriptTooLong => {
+                if crate::rule::normalize_legacy_tool_name(name) == "Agent" {
+                    // No `ZJ(v,D6)` here: unlike the acceptEdits and allowlist
+                    // fast paths, this arm does NOT reset the consecutive-denial
+                    // counter upstream.
+                    return Ok(AutoModeClassifierResult::Classified(
+                        PermissionResult::Allow {
+                            reason: PermissionDecisionReason::PermissionMode {
+                                mode: PermissionMode::Auto,
+                            },
+                            updated_input: None,
+                            update_destination: None,
+                            metadata: PermissionMetadata::default(),
+                        },
+                    ));
+                }
+                if is_non_interactive_session {
+                    return Err(PermissionAbort {
+                        message: crate::loop_llm::TRANSCRIPT_TOO_LONG_HEADLESS_ABORT.to_string(),
+                    });
+                }
+                tracing::warn!(
+                    target: "permission",
+                    "Auto mode classifier transcript too long, falling back to normal permission handling"
+                );
+                Ok(AutoModeClassifierResult::PromptFallback {
+                    decision_reason: crate::loop_llm::TRANSCRIPT_TOO_LONG.to_string(),
+                })
             }
             AutoModeClassifierVerdict::Pass { .. } => Ok(AutoModeClassifierResult::NoDecision),
         }

@@ -1,7 +1,7 @@
 //! Session-owned provider binding for the loop permission classifier.
 use crate::ConversationOrchestrator;
 use permission::classifier::{AutoModeClassifierVerdict, LoopPermissionClassifier};
-use permission::loop_llm::{self, Query, Reply, Transport};
+use permission::loop_llm::{self, Query, QueryError, Reply, Transport};
 use protocol::{ContentBlock, ConversationMessage};
 use serde_json::{json, Value};
 use std::sync::{Arc, Weak};
@@ -34,10 +34,12 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
         deny_rules: &[String],
     ) -> AutoModeClassifierVerdict {
         let Some(orch) = self.orchestrator.upgrade() else {
-            return AutoModeClassifierVerdict::Deny {
-                score: 1.0,
+            // No verdict, not a judgment: the session went away before the
+            // classifier could look at the action, so this must not feed the
+            // consecutive-denial breaker.
+            return AutoModeClassifierVerdict::NoVerdict {
                 reason: "Classifier session ended".into(),
-                hard: false,
+                message: permission::loop_llm::unavailable_message(name, "The classifier", ""),
             };
         };
         let (main_model, profile, history) = {
@@ -97,6 +99,7 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
         };
         loop_llm::classify(
             &transport,
+            name,
             transcript_blocks(&history, name, input, host_context),
         )
         .await
@@ -290,7 +293,10 @@ struct ProviderTransport {
 }
 #[async_trait::async_trait]
 impl Transport for ProviderTransport {
-    async fn query(&self, query: Query) -> Result<Reply, String> {
+    fn model(&self) -> &str {
+        &self.model
+    }
+    async fn query(&self, query: Query) -> Result<Reply, QueryError> {
         let can_disable_thinking = self.model.contains("claude-3-")
             || [
                 "opus-4-0",
@@ -332,7 +338,7 @@ impl Transport for ProviderTransport {
                 Some(query.temperature),
                 Some("auto_mode"),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| QueryError::Unavailable(error.to_string()))?;
         request.system = vec![llm_client::SystemBlock {
             text: self.system.clone(),
             cache_control: Some(llm_client::CacheControl::Ephemeral),
@@ -372,7 +378,13 @@ impl Transport for ProviderTransport {
             .service
             .execute_classifier_request(request, query.max_retries)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                // `Yn.transcriptTooLong`, kept typed across the boundary: a
+                // stringified `ContextOverflow` is indistinguishable from an
+                // outage, and the two are resolved in opposite directions.
+                llm_client::LlmError::ContextOverflow { .. } => QueryError::TranscriptTooLong,
+                other => QueryError::Unavailable(other.to_string()),
+            })?;
         Ok(Reply {
             text: response
                 .content
@@ -438,7 +450,9 @@ mod tests {
                             .unwrap()
                             .iter()
                             .map(|block| match block["type"].as_str().unwrap() {
-                                "text" => ContentBlock::Text { text: block["text"].as_str().unwrap().into() },
+                                "text" => ContentBlock::Text {
+                                    text: block["text"].as_str().unwrap().into(),
+                                },
                                 "tool_use" => ContentBlock::ToolUse {
                                     id: protocol::ToolUseId::new(),
                                     name: block["name"].as_str().unwrap().into(),

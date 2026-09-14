@@ -530,5 +530,283 @@ async fn a_soft_local_deny_still_goes_to_the_classifier() {
     )
     .await;
     assert_eq!(classified, 1, "a soft deny is the classifier's call");
-    assert!(matches!(decision, PermissionDecision::Allow), "{decision:?}");
+    assert!(
+        matches!(decision, PermissionDecision::Allow),
+        "{decision:?}"
+    );
+}
+
+/// Runs `calls` sequential Auto-mode checks through ONE gate, so the
+/// consecutive-denial breaker sees them as one run.
+/// Returns `(decisions, prompt_calls)`.
+async fn auto_run(
+    calls: usize,
+    verdict: AutoModeClassifierVerdict,
+) -> (Vec<PermissionDecision>, usize) {
+    let prompt = Arc::new(Prompt(AtomicUsize::new(0)));
+    let classifier = Arc::new(Recording {
+        calls: AtomicUsize::new(0),
+        verdict,
+    });
+    let gate = PolicyPermissionGate::new(
+        Arc::new(PermissionPolicy::new(PermissionMode::Auto)),
+        prompt.clone(),
+    );
+    assert!(gate.loop_classifier_handle().set(classifier).is_ok());
+    let mut decisions = Vec::new();
+    for index in 0..calls {
+        decisions.push(
+            gate.check(
+                "Bash",
+                &json!({ "command": format!("./deploy.sh {index}") }),
+            )
+            .await,
+        );
+    }
+    (decisions, prompt.0.load(Ordering::SeqCst))
+}
+
+/// `dKo`'s `Yn.unavailable` arm denies fail-closed but returns BEFORE
+/// `ZJ(v,xft)`, and `Mo` (the counter's telemetry gate) excludes it outright:
+/// `Mo=Yn.shouldBlock&&!Yn.unavailable&&!Yn.transcriptTooLong&&!Yn.refusedBySafeguard`.
+/// So a classifier that cannot be reached must never trip the local breaker —
+/// otherwise three provider hiccups silently convert Auto mode into
+/// prompt-on-everything for the rest of the session, which is exactly the
+/// complaint the classifier path exists to answer.
+#[tokio::test]
+async fn a_classifier_that_gives_no_verdict_never_trips_the_denial_breaker() {
+    let calls = permission::denial_tracking::limits::MAX_CONSECUTIVE as usize + 2;
+    let (decisions, prompted) = auto_run(
+        calls,
+        AutoModeClassifierVerdict::NoVerdict {
+            reason: permission::loop_llm::UNAVAILABLE_REASON.into(),
+            message: permission::loop_llm::unavailable_message(
+                "Bash",
+                "claude-test-model",
+                " (timed out)",
+            ),
+        },
+    )
+    .await;
+    assert_eq!(
+        prompted, 0,
+        "an unreachable classifier must not fall back to prompting"
+    );
+    for (index, decision) in decisions.iter().enumerate() {
+        match decision {
+            PermissionDecision::Deny { reason } => assert!(
+                reason.contains("is temporarily unavailable (timed out), so auto mode cannot determine the safety of Bash right now.")
+                    && reason.contains("read-only operations do not require the classifier"),
+                "call {index} must carry $7t's retry guidance, not a blocked-action claim: {reason}"
+            ),
+            other => panic!("call {index}: expected a fail-closed deny, got {other:?}"),
+        }
+    }
+}
+
+/// Premise for the test above: the breaker IS live on this path. Without this,
+/// "no trip" would be equally true if the counter had simply stopped working,
+/// or if a gate ahead of it had stopped the calls from arriving.
+#[tokio::test]
+async fn a_classifier_that_blocks_does_trip_the_denial_breaker() {
+    let calls = permission::denial_tracking::limits::MAX_CONSECUTIVE as usize + 2;
+    let (decisions, prompted) = auto_run(
+        calls,
+        AutoModeClassifierVerdict::Deny {
+            score: 1.0,
+            reason: "Unrequested deployment".into(),
+            hard: false,
+        },
+    )
+    .await;
+    assert!(
+        prompted >= 1,
+        "{} real denials must trip the breaker and fall back to the prompt",
+        permission::denial_tracking::limits::MAX_CONSECUTIVE
+    );
+    assert!(
+        decisions
+            .iter()
+            .any(|decision| matches!(decision, PermissionDecision::Deny { reason } if reason.contains("Unrequested deployment"))),
+        "the counted denials must be the classifier's own: {decisions:?}"
+    );
+}
+
+/// A PreToolUse hook's `ask` is a FLOOR on the allow side only. `dKo` applies
+/// it inside `De`, its ALLOW callback (`if(xe) return {...M, updatedInput}` —
+/// `M` being the ask); the classifier's DENY arms return before `De` is ever
+/// called. So the floor must not buy a blocked action a user prompt: the
+/// classifier still runs, and its block still blocks.
+#[tokio::test]
+async fn a_hook_ask_floor_does_not_turn_a_classifier_block_into_a_prompt() {
+    let prompt = Arc::new(Prompt(AtomicUsize::new(0)));
+    let classifier = Arc::new(Recording {
+        calls: AtomicUsize::new(0),
+        verdict: AutoModeClassifierVerdict::Deny {
+            score: 1.0,
+            reason: "Publishes to production".into(),
+            hard: false,
+        },
+    });
+    let gate = PolicyPermissionGate::new(
+        Arc::new(PermissionPolicy::new(PermissionMode::Auto)),
+        prompt.clone(),
+    );
+    assert!(gate
+        .loop_classifier_handle()
+        .set(classifier.clone())
+        .is_ok());
+    let ctx = permission::gate::PermissionCheckContext {
+        hook_ask_floor: true,
+        ..Default::default()
+    };
+    let outcome = gate
+        .check_with_context("Bash", &json!({ "command": "./deploy.sh prod" }), &ctx)
+        .await;
+    assert_eq!(
+        classifier.calls.load(Ordering::SeqCst),
+        1,
+        "the floor must not skip the classifier"
+    );
+    match outcome {
+        permission::gate::PermissionOutcome::Deny { reason } => assert!(
+            reason.contains("Publishes to production"),
+            "the classifier's own block must survive the floor: {reason}"
+        ),
+        other => panic!("expected the classifier's deny, got {other:?}"),
+    }
+    assert_eq!(
+        prompt.0.load(Ordering::SeqCst),
+        0,
+        "a blocked action must not reach the prompt just because a hook asked"
+    );
+}
+
+/// The allow side of the same seam, and the premise for the test above: with
+/// the floor set, a classifier ALLOW is discarded and the hook's ask stands.
+#[tokio::test]
+async fn a_hook_ask_floor_still_discards_a_classifier_allow() {
+    let prompt = Arc::new(Prompt(AtomicUsize::new(0)));
+    let classifier = Arc::new(Recording {
+        calls: AtomicUsize::new(0),
+        verdict: allow_verdict(),
+    });
+    let gate = PolicyPermissionGate::new(
+        Arc::new(PermissionPolicy::new(PermissionMode::Auto)),
+        prompt.clone(),
+    );
+    assert!(gate
+        .loop_classifier_handle()
+        .set(classifier.clone())
+        .is_ok());
+    let ctx = permission::gate::PermissionCheckContext {
+        hook_ask_floor: true,
+        ..Default::default()
+    };
+    let outcome = gate
+        .check_with_context("Bash", &json!({ "command": "./deploy.sh prod" }), &ctx)
+        .await;
+    assert_eq!(
+        classifier.calls.load(Ordering::SeqCst),
+        1,
+        "the classifier runs under the floor upstream, allow or not"
+    );
+    assert_eq!(
+        prompt.0.load(Ordering::SeqCst),
+        1,
+        "the hook's ask must still reach the prompt"
+    );
+    assert!(
+        matches!(outcome, permission::gate::PermissionOutcome::Deny { ref reason } if reason == "PROMPTED"),
+        "{outcome:?}"
+    );
+}
+
+/// Builds a gate with a fixed classifier verdict and returns `(gate, prompt)`
+/// so a test can drive it through `check_with_context`.
+fn auto_gate(
+    verdict: AutoModeClassifierVerdict,
+) -> (PolicyPermissionGate, Arc<Prompt>, Arc<Recording>) {
+    let prompt = Arc::new(Prompt(AtomicUsize::new(0)));
+    let classifier = Arc::new(Recording {
+        calls: AtomicUsize::new(0),
+        verdict,
+    });
+    let gate = PolicyPermissionGate::new(
+        Arc::new(PermissionPolicy::new(PermissionMode::Auto)),
+        prompt.clone(),
+    );
+    assert!(gate
+        .loop_classifier_handle()
+        .set(classifier.clone())
+        .is_ok());
+    (gate, prompt, classifier)
+}
+
+/// `dKo`'s `Yn.transcriptTooLong` arm is NOT a deny — it hands the call back to
+/// normal permission handling and names `/compact` as the way out. Treating it
+/// as an unavailable classifier would deny the action AND tell the model to
+/// "wait a moment and try this action again", advice that can never come true:
+/// the transcript only grows.
+#[tokio::test]
+async fn an_over_long_transcript_falls_back_to_the_prompt_not_a_deny() {
+    let (gate, prompt, classifier) = auto_gate(AutoModeClassifierVerdict::TranscriptTooLong);
+    let outcome = gate
+        .check_with_context(
+            "Bash",
+            &json!({ "command": "./deploy.sh prod" }),
+            &permission::gate::PermissionCheckContext::default(),
+        )
+        .await;
+    assert_eq!(classifier.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        prompt.0.load(Ordering::SeqCst),
+        1,
+        "the call must reach the normal permission path"
+    );
+    assert!(
+        matches!(outcome, permission::gate::PermissionOutcome::Deny { ref reason } if reason == "PROMPTED"),
+        "the prompt decides, not the classifier: {outcome:?}"
+    );
+}
+
+/// `if(e.name===ht) return {behavior:"allow",…}` — `ht` is `"Agent"`. Spawning a
+/// subagent is how a session ESCAPES an over-long transcript, so gating it
+/// behind a transcript it cannot shorten would deadlock.
+#[tokio::test]
+async fn an_over_long_transcript_still_lets_the_agent_tool_through() {
+    for name in ["Agent", "Task"] {
+        let (gate, prompt, _) = auto_gate(AutoModeClassifierVerdict::TranscriptTooLong);
+        let decision = gate
+            .check(name, &json!({ "prompt": "summarize the diff" }))
+            .await;
+        assert!(
+            matches!(decision, PermissionDecision::Allow),
+            "{name}: {decision:?}"
+        );
+        assert_eq!(prompt.0.load(Ordering::SeqCst), 0, "{name} must not prompt");
+    }
+}
+
+/// The headless arm: `if(F.shouldAvoidPermissionPrompts) throw new Ye(…)`.
+/// There is no prompt to fall back to, so the run stops instead of silently
+/// denying every remaining action.
+#[tokio::test]
+async fn an_over_long_transcript_aborts_a_session_that_cannot_prompt() {
+    let (gate, prompt, _) = auto_gate(AutoModeClassifierVerdict::TranscriptTooLong);
+    let ctx = permission::gate::PermissionCheckContext {
+        is_non_interactive_session: true,
+        ..Default::default()
+    };
+    let outcome = gate
+        .check_with_context("Bash", &json!({ "command": "./deploy.sh prod" }), &ctx)
+        .await;
+    match outcome {
+        permission::gate::PermissionOutcome::Deny { reason } => assert_eq!(
+            reason,
+            permission::loop_llm::TRANSCRIPT_TOO_LONG_HEADLESS_ABORT
+        ),
+        other => panic!("expected the headless abort, got {other:?}"),
+    }
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 0);
 }

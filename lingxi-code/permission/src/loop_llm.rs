@@ -59,8 +59,49 @@ pub fn system_prompt(settings: &serde_json::Value, deny_rules: &[String]) -> Str
 pub const FAST_SUFFIX: &str = "\nErr on the side of blocking. Stage 1 does NOT apply user intent or ALLOW exceptions — stage 2 will handle those. Judge the action by its full effect — what it runs, sends, publishes, or enables — not its surface form. Block if ANY rule could apply. Your ENTIRE response MUST begin with <block>. Do NOT output any analysis, reasoning, or commentary before <block>. No \"Looking at...\" or similar preamble.";
 /// Second-stage suffix (TVo).
 pub const THINKING_SUFFIX: &str = "\nReview the classification process and follow it carefully, making sure you deny actions that should be blocked. As a reminder, explicit (not suggestive or implicit) user confirmation is required to override blocks. Use <thinking> before responding with <block>. Think longer on ambiguous or borderline actions; keep reasoning brief for clear-cut ones.";
-/// Exact unavailable-classifier denial copy (Gsn + e$e).
+/// Exact PARSE-FAILURE denial copy — `e$e(stage, failureKind, stopReason)` with
+/// a `failureKind` other than `policy_refusal` (`Gsn` + the `--debug` tail).
+/// This is a real block upstream (`shouldBlock:!0` with no `unavailable` flag),
+/// so it keeps feeding the denial counter.
 pub const UNAVAILABLE: &str = "Auto mode could not evaluate this action and is blocking it for safety — run with --debug for details";
+/// `e$e("stage 1","policy_refusal","refusal")` — the reason a safety safeguard
+/// refusal carries. Upstream marks it `refusedBySafeguard`, which is a
+/// [`AutoModeClassifierVerdict::NoVerdict`], not a judgment on the action.
+pub const REFUSED: &str = "Auto mode could not evaluate this action and is blocking it for safety — a safety check separate from auto mode blocked this request because of earlier conversation content — it isn't about the action itself — run with --debug for details";
+/// `eut` — the decision reason recorded when the classifier transcript overran
+/// the context window and the call falls back to manual approval.
+pub const TRANSCRIPT_TOO_LONG: &str = "Auto mode classifier transcript exceeded context window — falling back to manual approval (try /compact to reduce conversation size)";
+/// The headless abort raised instead of that fall-back when no prompt can be
+/// surfaced (`throw new Ye(…)`).
+pub const TRANSCRIPT_TOO_LONG_HEADLESS_ABORT: &str =
+    "Agent aborted: auto mode classifier transcript exceeded context window in headless mode";
+/// `gde` — the `decisionReason.reason` on `dKo`'s unavailable-classifier deny.
+pub const UNAVAILABLE_REASON: &str = "Classifier unavailable";
+/// `ove` — appended to every no-verdict message.
+const READ_ONLY_NOTE: &str = "Note: reading files, searching code, and other read-only operations do not require the classifier and can still be used.";
+/// `SBr` — the retry tail on the transient-unavailability message.
+const KEEP_FAILING_NOTE: &str = "If it keeps failing, continue with other tasks that don't require this action and come back to it later.";
+
+/// `$7t`'s general arm: the classifier could not be reached for `tool`.
+///
+/// `detail` is `q$t(httpStatus, errorKind)`'s parenthetical (`" (timed out)"`,
+/// `" (rate-limited)"`, …) or empty. The server-verdict arms of `$7t` have no
+/// port counterpart — this build has no server classifier — so only the
+/// transient arm is rendered.
+#[must_use]
+pub fn unavailable_message(tool: &str, model: &str, detail: &str) -> String {
+    format!(
+        "{model} is temporarily unavailable{detail}, so auto mode cannot determine the safety of {tool} right now. Wait a moment and then try this action again. {KEEP_FAILING_NOTE} {READ_ONLY_NOTE}"
+    )
+}
+
+/// `Det(reason,{refused:!0})` — a safeguard refusal will keep firing, so the
+/// model is told NOT to rework the action to get around it.
+fn refused_message(reason: &str) -> String {
+    format!(
+        "{reason}. This is not a judgment that the action is unsafe. Retrying it will hit the same refusal, so don't rewrite or rework the action to get around this — it reacts to earlier conversation content, not to the action itself, and it will keep firing for the rest of this conversation. Continue with other tasks that don't require this action. If it is essential, stop and tell the user that auto mode could not evaluate it, and suggest running this action outside auto mode (switch back to the default permission mode) or starting a fresh session. {READ_ONLY_NOTE}"
+    )
+}
 
 /// One bounded classifier request; hosts supply provider/session routing.
 #[derive(Debug, Clone, PartialEq)]
@@ -88,11 +129,33 @@ pub struct Reply {
     pub stop_reason: String,
 }
 
+/// Why a classifier query came back with no reply.
+///
+/// Upstream splits the same two cases (`rn`, the transcript token overflow, vs
+/// `Nn`, the error kind) and resolves them in opposite directions, so the
+/// distinction has to survive the transport boundary — flattening both to a
+/// string here is what made an over-long conversation look like a provider
+/// outage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryError {
+    /// The classifier could not be reached: HTTP error, timeout, no session.
+    Unavailable(String),
+    /// The request exceeded the classifier model's context window
+    /// (`Yn.transcriptTooLong`). Retrying is futile until the conversation is
+    /// shorter.
+    TranscriptTooLong,
+}
+
 /// Injectable physical query boundary for production and deterministic tests.
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
     /// Execute through the session's provider, without main-turn tool execution.
-    async fn query(&self, request: Query) -> Result<Reply, String>;
+    async fn query(&self, request: Query) -> Result<Reply, QueryError>;
+    /// The classifier model id, named in `$7t`'s unavailability copy
+    /// (`Yn.model`). Required, not defaulted: a transport that silently
+    /// answered `""` would leave the unavailability message naming nothing,
+    /// and nothing else in the crate would go red.
+    fn model(&self) -> &str;
 }
 
 static THINKING: LazyLock<Regex> =
@@ -124,7 +187,7 @@ fn reason(text: &str) -> Option<String> {
         .map(|capture| capture[1].trim().to_owned())
 }
 
-async fn stage(transport: &dyn Transport, request: Query) -> Result<Reply, String> {
+async fn stage(transport: &dyn Transport, request: Query) -> Result<Reply, QueryError> {
     let timeout = request.timeout_ms;
     tokio::time::timeout(std::time::Duration::from_millis(timeout), async {
         let mut reply = transport.query(request.clone()).await?;
@@ -144,12 +207,16 @@ async fn stage(transport: &dyn Transport, request: Query) -> Result<Reply, Strin
         Ok(reply)
     })
     .await
-    .map_err(|_| "classifier timed out".to_string())?
+    .map_err(|_| QueryError::Unavailable("classifier timed out".to_string()))?
 }
 
 /// LVo's default `both` arm: fast allow returns; all other results get review.
+///
+/// `tool_name` names the action in `$7t`'s unavailability copy; it is only read
+/// when no verdict comes back.
 pub async fn classify(
     transport: &dyn Transport,
+    tool_name: &str,
     transcript_blocks: Vec<String>,
 ) -> AutoModeClassifierVerdict {
     let mut fast = transcript_blocks.clone();
@@ -168,7 +235,10 @@ pub async fn classify(
     .await;
     let fast = match fast {
         Ok(reply) => reply,
-        Err(_) => return denied(UNAVAILABLE.into()),
+        Err(QueryError::TranscriptTooLong) => return AutoModeClassifierVerdict::TranscriptTooLong,
+        Err(QueryError::Unavailable(error)) => {
+            return unreachable_classifier(tool_name, transport.model(), &error)
+        }
     };
     if parse_block(&fast.text) == Some(false) {
         return AutoModeClassifierVerdict::Allow {
@@ -192,7 +262,10 @@ pub async fn classify(
     .await
     {
         Ok(reply) => reply,
-        Err(_) => return denied(UNAVAILABLE.into()),
+        Err(QueryError::TranscriptTooLong) => return AutoModeClassifierVerdict::TranscriptTooLong,
+        Err(QueryError::Unavailable(error)) => {
+            return unreachable_classifier(tool_name, transport.model(), &error)
+        }
     };
     match parse_block(&reply.text) {
         Some(false) => AutoModeClassifierVerdict::Allow {
@@ -200,9 +273,19 @@ pub async fn classify(
             reason: reason(&reply.text).unwrap_or_else(|| "No reason provided".into()),
         },
         Some(true) => denied(reason(&reply.text).unwrap_or_else(|| "No reason provided".into())),
+        // `stage1VerdictStands`: stage 2 was refused but stage 1 already said
+        // block, so stage 1's verdict IS the answer — a real block, counted.
         None if reply.stop_reason == "refusal" && parse_block(&fast.text) == Some(true) => {
             denied(reason(&fast.text).unwrap_or_else(|| "Blocked by fast classifier".into()))
         }
+        // A refusal with no verdict behind it is `refusedBySafeguard`: it
+        // reacts to earlier conversation content, not to this action, so it is
+        // exempt from the denial counter.
+        None if reply.stop_reason == "refusal" => AutoModeClassifierVerdict::NoVerdict {
+            reason: REFUSED.into(),
+            message: refused_message(REFUSED),
+        },
+        // Everything else is a parse failure, which upstream blocks and counts.
         None => denied(UNAVAILABLE.into()),
     }
 }
@@ -212,6 +295,27 @@ fn denied(reason: String) -> AutoModeClassifierVerdict {
         score: 1.0,
         reason,
         hard: false,
+    }
+}
+
+/// `dKo`'s `Yn.unavailable` arm: "Auto mode classifier unavailable, denying
+/// with retry guidance (fail closed)" — a deny that never advances the
+/// consecutive-denial counter.
+fn unreachable_classifier(tool: &str, model: &str, error: &str) -> AutoModeClassifierVerdict {
+    AutoModeClassifierVerdict::NoVerdict {
+        reason: UNAVAILABLE_REASON.into(),
+        message: unavailable_message(tool, model, error_detail(error)),
+    }
+}
+
+/// `q$t(httpStatus, errorKind)`, over the one failure this port's transport can
+/// name. A bare provider error carries no status here, so it renders nothing
+/// rather than inventing a parenthetical.
+fn error_detail(error: &str) -> &'static str {
+    if error.contains("timed out") {
+        " (timed out)"
+    } else {
+        ""
     }
 }
 
@@ -233,16 +337,23 @@ mod tests {
     struct Mock {
         replies: Mutex<std::collections::VecDeque<Reply>>,
         requests: Mutex<Vec<Query>>,
+        error: Mutex<Option<QueryError>>,
     }
     #[async_trait::async_trait]
     impl Transport for Mock {
-        async fn query(&self, request: Query) -> Result<Reply, String> {
+        async fn query(&self, request: Query) -> Result<Reply, QueryError> {
             self.requests.lock().unwrap().push(request);
+            if let Some(error) = self.error.lock().unwrap().take() {
+                return Err(error);
+            }
             self.replies
                 .lock()
                 .unwrap()
                 .pop_front()
-                .ok_or_else(|| "missing reply".into())
+                .ok_or_else(|| QueryError::Unavailable("missing reply".into()))
+        }
+        fn model(&self) -> &str {
+            "claude-test-model"
         }
     }
     fn mock(replies: &[&str]) -> Mock {
@@ -257,13 +368,19 @@ mod tests {
                     .collect(),
             ),
             requests: Mutex::new(vec![]),
+            error: Mutex::new(None),
         }
     }
     #[tokio::test]
     async fn fast_allow_makes_one_real_query() {
         let transport = mock(&["<block>no"]);
         assert!(matches!(
-            classify(&transport, vec!["<transcript>\n</transcript>\n".into()]).await,
+            classify(
+                &transport,
+                "Bash",
+                vec!["<transcript>\n</transcript>\n".into()]
+            )
+            .await,
             AutoModeClassifierVerdict::Allow { .. }
         ));
         let requests = transport.requests.lock().unwrap();
@@ -279,7 +396,7 @@ mod tests {
             "<thinking>user authorized it</thinking><block>no</block>",
         ]);
         assert!(matches!(
-            classify(&transport, vec![]).await,
+            classify(&transport, "Bash", vec![]).await,
             AutoModeClassifierVerdict::Allow { .. }
         ));
         let requests = transport.requests.lock().unwrap();
@@ -296,12 +413,113 @@ mod tests {
             "<block>yes</block><reason>Unrequested operation</reason>",
         ]);
         assert!(
-            matches!(classify(&transport, vec![]).await, AutoModeClassifierVerdict::Deny { reason, .. } if reason == "Unrequested operation")
+            matches!(classify(&transport, "Bash", vec![]).await, AutoModeClassifierVerdict::Deny { reason, .. } if reason == "Unrequested operation")
         );
         assert_eq!(transport.requests.lock().unwrap().len(), 3);
         assert_eq!(
             parse_block("<thinking><block>yes</thinking><block>no"),
             None
         );
+    }
+
+    /// `dKo`'s `Yn.unavailable` arm. A transport that never answers produced no
+    /// verdict, so it must not come back as a block: the message tells the model
+    /// to retry the action as-is and that read-only tools still work, and the
+    /// variant keeps it out of the denial counter.
+    #[tokio::test]
+    async fn an_unanswered_query_is_a_no_verdict_with_retry_guidance() {
+        let transport = mock(&[]);
+        match classify(&transport, "Bash", vec![]).await {
+            AutoModeClassifierVerdict::NoVerdict { reason, message } => {
+                assert_eq!(reason, UNAVAILABLE_REASON);
+                assert_eq!(
+                    message,
+                    "claude-test-model is temporarily unavailable, so auto mode cannot determine \
+                     the safety of Bash right now. Wait a moment and then try this action again. \
+                     If it keeps failing, continue with other tasks that don't require this action \
+                     and come back to it later. Note: reading files, searching code, and other \
+                     read-only operations do not require the classifier and can still be used."
+                );
+            }
+            other => panic!("expected a no-verdict, got {other:?}"),
+        }
+    }
+
+    /// `Yn.transcriptTooLong` must not look like an outage: the typed
+    /// `ContextOverflow` survives the transport boundary and resolves the other
+    /// way — back to normal permission handling, not a fail-closed deny.
+    #[tokio::test]
+    async fn a_context_overflow_is_a_transcript_too_long_not_an_outage() {
+        let transport = mock(&[]);
+        *transport.error.lock().unwrap() = Some(QueryError::TranscriptTooLong);
+        assert_eq!(
+            classify(&transport, "Bash", vec![]).await,
+            AutoModeClassifierVerdict::TranscriptTooLong
+        );
+    }
+
+    /// `Yn.refusedBySafeguard`: stage 2 was refused and stage 1 had no block to
+    /// stand on, so nothing judged the action — "exempt from the denial counter"
+    /// in `dKo`'s own log line.
+    #[tokio::test]
+    async fn a_bare_refusal_is_a_no_verdict_not_a_block() {
+        let transport = Mock {
+            replies: Mutex::new(
+                [
+                    // Stage 1 is refused too, so it leaves no verdict behind.
+                    Reply {
+                        text: String::new(),
+                        stop_reason: "refusal".into(),
+                    },
+                    Reply {
+                        text: String::new(),
+                        stop_reason: "refusal".into(),
+                    },
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            requests: Mutex::new(vec![]),
+            error: Mutex::new(None),
+        };
+        match classify(&transport, "Bash", vec![]).await {
+            AutoModeClassifierVerdict::NoVerdict { reason, message } => {
+                assert_eq!(reason, REFUSED);
+                assert!(
+                    message.starts_with(REFUSED)
+                        && message.contains("This is not a judgment that the action is unsafe."),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a no-verdict, got {other:?}"),
+        }
+    }
+
+    /// The other side of the same seam: a refusal that stage 1 already blocked
+    /// IS a verdict (`stage1VerdictStands`), so it stays a counted `Deny`.
+    #[tokio::test]
+    async fn a_refusal_behind_a_fast_block_keeps_stage_ones_verdict() {
+        let transport = Mock {
+            replies: Mutex::new(
+                [
+                    Reply {
+                        text: "<block>yes</block><reason>Publishes to production</reason>".into(),
+                        stop_reason: "end_turn".into(),
+                    },
+                    Reply {
+                        text: String::new(),
+                        stop_reason: "refusal".into(),
+                    },
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            requests: Mutex::new(vec![]),
+            error: Mutex::new(None),
+        };
+        assert!(matches!(
+            classify(&transport, "Bash", vec![]).await,
+            AutoModeClassifierVerdict::Deny { reason, .. } if reason == "Publishes to production"
+        ));
     }
 }

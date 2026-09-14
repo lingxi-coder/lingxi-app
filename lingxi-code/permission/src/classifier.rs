@@ -59,6 +59,46 @@ pub enum AutoModeClassifierVerdict {
         /// `true` for hard-deny policy hits.
         hard: bool,
     },
+    /// The classifier produced NO verdict at all — it could not be reached
+    /// (transport error, timeout, session gone) or a safety safeguard refused
+    /// the request before it was judged.
+    ///
+    /// `dKo` keeps this separate from [`Self::Deny`] and the difference is
+    /// observable twice over. It denies fail-closed, but:
+    ///
+    /// * it does **not** advance the consecutive-denial counter —
+    ///   `Mo=Yn.shouldBlock&&!Yn.unavailable&&…` gates the counter, the
+    ///   `Yn.unavailable` / `Yn.refusedBySafeguard` arms return before
+    ///   `ZJ(v,xft)`, and the refusal arm even logs "denying (exempt from the
+    ///   denial counter)". Folding it into `Deny` lets three provider hiccups
+    ///   trip the local breaker ([`crate::denial_tracking::limits::MAX_CONSECUTIVE`])
+    ///   and drop Auto mode back to prompting for the rest of the session.
+    /// * it carries its own copy (`$7t` / `Det(reason,{refused:!0})`), which
+    ///   tells the model to retry the action as-is and that read-only tools
+    ///   still work — not "Auto mode classifier blocked action: …", which
+    ///   claims a judgment that was never made.
+    NoVerdict {
+        /// The deny `decisionReason.reason`: `gde` ("Classifier unavailable")
+        /// when the classifier was unreachable, the `e$e` refusal copy when a
+        /// safeguard refused it.
+        reason: String,
+        /// The model-facing deny message — `$7t` (unavailable) or
+        /// `Det(reason,{refused:!0})` (refused), rendered by the producer,
+        /// which is the only layer that knows the model and the failure kind.
+        message: String,
+    },
+    /// The transcript plus the action exceeded the classifier model's context
+    /// window (`Yn.transcriptTooLong`).
+    ///
+    /// Distinct from [`Self::NoVerdict`] because `dKo` resolves it the other
+    /// way: it is not a deny at all but a fall-back to normal permission
+    /// handling ("try /compact to reduce conversation size"), with two carve-
+    /// outs — `Agent` is allowed outright, since spawning a subagent is the way
+    /// OUT of an over-long transcript, and a session that cannot prompt aborts.
+    /// Retrying changes nothing until the conversation is shorter, so the
+    /// unavailable copy's "wait a moment and try this action again" would be
+    /// advice that can never come true.
+    TranscriptTooLong,
     /// The classifier cannot safely decide; fall back to the prompt path.
     Pass {
         /// Why no automatic decision was made.

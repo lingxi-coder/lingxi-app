@@ -1216,7 +1216,10 @@ mod tests {
                 )
                 .await
                 .expect("default impl never aborts"),
-            PermissionResolution::Allow { rule_source: None, classifier_approved: false }
+            PermissionResolution::Allow {
+                rule_source: None,
+                classifier_approved: false
+            }
         );
 
         let deny = RecordingInner::new(PermissionDecision::Deny {
@@ -1343,7 +1346,10 @@ mod tests {
             gate.resolve_detailed("Read", &serde_json::json!({})).await,
             // No rule matched — the auto-allow carries no settings scope, so
             // `ZX_`'s default arm labels it "config".
-            PermissionResolution::Allow { rule_source: None, classifier_approved: false }
+            PermissionResolution::Allow {
+                rule_source: None,
+                classifier_approved: false
+            }
         );
         assert_eq!(inner.calls(), 0, "read-only auto-allow never prompts");
     }
@@ -1397,7 +1403,10 @@ mod tests {
         let allow = RecordingInner::new(PermissionDecision::Allow);
         assert_eq!(
             allow.resolve_detailed("Bash", &serde_json::json!({})).await,
-            PermissionResolution::Allow { rule_source: None, classifier_approved: false }
+            PermissionResolution::Allow {
+                rule_source: None,
+                classifier_approved: false
+            }
         );
         let deny = RecordingInner::new(PermissionDecision::Deny {
             reason: "nope".into(),
@@ -2290,9 +2299,12 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     async fn hook_ask_floor_prevents_classifier_from_defeating_hook_ask() {
         // HOOK-ASKFLOOR-03: Auto mode + a safe local shell the classifier WOULD
         // allow. Without the floor the classifier auto-allows (inner untouched);
-        // WITH the floor (a PreToolUse hook returned `ask`) the classifier is
-        // SKIPPED, so the ask delegates to the inner transport (prompt / headless
-        // deny) — the hook's ask is honored, not silently re-allowed.
+        // WITH the floor (a PreToolUse hook returned `ask`) the classifier still
+        // runs — `dKo` applies the floor inside `De`, its ALLOW callback — and
+        // its ALLOW is discarded, so the ask delegates to the inner transport
+        // (prompt / headless deny). The hook's ask is honored, not silently
+        // re-allowed. A classifier DENY under the same floor still denies; see
+        // `a_hook_ask_floor_does_not_turn_a_classifier_block_into_a_prompt`.
         let input = serde_json::json!({ "command": "cargo test -p permission" });
 
         // No floor → classifier allows, inner not consulted.
@@ -2313,7 +2325,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         );
         assert_eq!(inner.calls(), 0, "no floor: classifier skips the prompt");
 
-        // Floor set → classifier skipped, ask delegated to inner (→ Deny here).
+        // Floor set → the classifier's allow is discarded, ask delegated to inner (→ Deny here).
         let policy2 = Arc::new(PermissionPolicy::from_rules(
             PermissionMode::Auto,
             std::iter::empty(),

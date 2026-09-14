@@ -8,12 +8,12 @@ Oracle: `~/.local/share/claude/versions/2.1.270` (released 2026-09-13), split on
 
 ## Landing status
 
-🚨 Not all of this has landed, and the reason is not review — it is that §1 and
-§2b sit on top of another session's UNCOMMITTED work. The two-stage LLM
-classifier (`permission/src/loop_llm.rs`, `permission/src/bundled/`,
-`orchestrator/src/loop_permission_classifier.rs`, and the async rewrite of
-`policy_gate::auto_mode_classifier_result`) is not in the history yet, so the
-change that un-gates it cannot be either.
+Everything below has landed. §1 and §2b waited on another session's
+uncommitted classifier substrate (`permission/src/loop_llm.rs`,
+`permission/src/bundled/`, `orchestrator/src/loop_permission_classifier.rs`,
+and the async rewrite of `policy_gate::auto_mode_classifier_result`); that
+substrate and this change went in together as `af24c7042`, because
+`policy_gate.rs` interleaves the two at line level.
 
 | § | change | status |
 |---|---|---|
@@ -24,12 +24,14 @@ change that un-gates it cannot be either.
 | 6a | plan-mode bypass needs an interactive launch | landed |
 | 6b | the dead `provider` auto-denial reason, deleted | landed |
 | 6c | Shift+Tab can reach Auto | landed |
-| 2a | wiring that set into the Auto path | **in the working tree, blocked** |
-| 2b | the acceptEdits simulation (its policy-side guard IS landed) | **blocked** |
-| 1 | the classifier judges every tool | **blocked** |
+| 2a | wiring that set into the Auto path | landed (`af24c7042`) |
+| 2b | the acceptEdits simulation (its policy-side guard IS landed) | landed (`af24c7042`) |
+| 1 | the classifier judges every tool | landed (`af24c7042`) |
 
-Everything blocked is written, tested and green in the working tree; it lands
-once the classifier work it builds on is committed.
+A second pass the same day went back over "Remaining known divergences" below:
+it fixed one of them, found that another was recorded backwards (and fixed the
+real defect it had been hiding), and turned up a third that this report missed
+entirely. All three are in §7.
 
 ---
 
@@ -312,18 +314,156 @@ downgrade) and threaded to the bottom pane.
    fails closed to a prompt.
 2. **`fd(e) = e==="auto" || e==="plan" && xS()`** — the "plan mode with auto
    active" arm has no port counterpart; Plan mode never reaches the classifier.
-3. **Classifier-unavailable handling.** Upstream denies fail-closed with retry
-   guidance (`$7t`); this port falls through to a prompt when no classifier is
-   bound. Strictly more permissive-to-the-user, strictly less autonomous.
+   `xS()` is a session latch (`$$().active`, set by `Rk`) that survives entering
+   Plan mode only via `IQe`, which also stamps `prePlanMode:"auto"` on the
+   context. The port has NEITHER: `grep -rn 'pre_plan_mode\|auto_active'` is
+   empty, and plan exit here does not return to the pre-plan mode at all. So
+   this is not a one-line predicate change — the latch has nowhere to live until
+   the plan enter/exit state machine exists.
+3. ~~**Classifier-unavailable handling.**~~ Half of this was wrong and the other
+   half is now fixed; see §7.1. What remains is narrower: when NO classifier is
+   bound at all (a host that never filled `loop_classifier_handle`), the local
+   table's verdict stands and a `Pass` still prompts. That is deliberate — a
+   bare `PolicyPermissionGate` has no provider to fail closed against.
 4. **`R8`'s new `fast-mode` tail.** 2.1.270 adds a fifth reason
    (`auto mode unavailable while fast mode is on · run /fast off`) plus `iBe()`'s
    null fallback (`auto mode is unavailable right now`). This port has a fast
    mode but feeds no breaker latch into the gate; adding the variant without the
    latch would be a reason no code path can reach. Wire the latch first.
-5. **One wasted round-trip on a hook `ask`.** `resolve_detailed_or_abort` does
-   not carry `hook_ask_floor`, so the classifier runs and the turn loop then
-   upgrades its `Allow` back to `Ask` (turn_loop.rs, the `hook_ask` arm). The
-   OUTCOME is correct — the floor holds — but the call is paid for.
+   Re-verified 2026-09-13: `R8()` returns `AFn()` (`fastModeBreakerReason`), and
+   the only writer is `PQe`, which sets it from
+   `PFn({model,fastMode,disableFastMode}) → s = disableFastMode && (fastMode || xwr(model))`.
+   `disableFastMode` is a REMOTE `tengu_auto_mode_config` field. With no remote
+   config to read it from, the port's latch would be pinned false and the reason
+   permanently unreachable — cf. [[a-graduated-rollout-flag-leaves-the-gate-off-forever]].
+5. ~~**One wasted round-trip on a hook `ask`.**~~ **Wrong, and backwards.**
+   `dKo` pays that round-trip too: `xe = v.hookAskFloor===!0` is read inside
+   `De`, the ALLOW callback, and the classifier runs before it. So
+   `resolve_detailed_or_abort` running the classifier and having the turn loop
+   restore the `Ask` was the FAITHFUL path all along. The divergence was on the
+   other path, which skipped the classifier entirely — see §7.2.
+
+---
+
+## 7. Second pass, 2026-09-13 — three more defects in the auto path
+
+### 7.1 A classifier that gives no verdict was counted as a denial
+
+`dKo` keeps three deny-shaped outcomes OUT of the consecutive-denial counter,
+and says so twice — once structurally, once in a log line:
+
+```js
+let Mo = Yn.shouldBlock && !Yn.unavailable && !Yn.transcriptTooLong
+         && !Yn.refusedBySafeguard && Jr===void 0;
+…
+if(Yn.unavailable){ … t("Auto mode classifier unavailable, denying with retry guidance (fail closed)")
+                    return {behavior:"deny",decisionReason:{…,reason:gde},message:$7t(e.name,Yn.model,Yn.httpStatus,Yn.errorKind)} }
+if(Yn.refusedBySafeguard){ … t("… denying (exempt from the denial counter)")
+                    return {behavior:"deny",decisionReason:{…,noVerdict:!0},message:Det(Yn.reason,{refused:!0})} }
+…
+let rs = ZJ(v, xft);      // ← the counter, reached ONLY by a real block
+```
+
+The port folded all of it into one `AutoModeClassifierVerdict::Deny`, which
+`auto_mode_classifier_result` feeds straight into
+`denial_tracking::record_auto_deny`. `limits::MAX_CONSECUTIVE` is 3, so **three
+provider hiccups in a row tripped the local breaker** and dropped Auto mode back
+to prompting for the rest of the session — the exact failure the classifier path
+exists to prevent, reached without anything ever judging an action.
+
+The second, quieter half: the model was told `Auto mode classifier blocked
+action: …`, a judgment that was never made, instead of `$7t`'s "wait a moment
+and try this action again … read-only operations do not require the classifier".
+
+Fixed by giving the verdict enum a fourth arm, `NoVerdict { reason, message }`,
+produced by `loop_llm::classify` for a transport error, a timeout, and a bare
+safeguard refusal, and denied by `policy_gate` without touching the counter.
+A parse failure stays a counted `Deny` — upstream's `e$e` arms carry
+`shouldBlock:!0` with no `unavailable` flag, so they are real blocks.
+
+| test | plant that turns it red |
+|---|---|
+| `a_classifier_that_gives_no_verdict_never_trips_the_denial_breaker` | `record_auto_deny` + `trip` back in the `NoVerdict` arm |
+| `a_classifier_that_blocks_does_trip_the_denial_breaker` (premise) | — it is the premise: it proves the counter is live on this path |
+| `loop_llm::tests::an_unanswered_query_is_a_no_verdict_with_retry_guidance` | pins `$7t`'s copy byte-for-byte |
+| `loop_llm::tests::a_bare_refusal_is_a_no_verdict_not_a_block` | |
+| `loop_llm::tests::a_refusal_behind_a_fast_block_keeps_stage_ones_verdict` | the other side: `stage1VerdictStands` IS a verdict, still counted |
+
+### 7.2 A hook `ask` floor threw away the classifier's DENY
+
+`dKo` applies `hookAskFloor` inside `De`, and `De` is only ever called on the
+allow paths:
+
+```js
+let De=(rs)=>{ …
+  if(xe){ if(U==="dontAsk") return {behavior:"deny",…};
+          return {...M, updatedInput:rs.updatedInput} }   // M is the ASK
+  return {behavior:"allow",...rs}};
+```
+
+Every `Yn.shouldBlock` arm returns its deny *before* `De` exists in the control
+flow. So upstream: the classifier runs under the floor, its ALLOW is discarded
+(the hook's ask stands), and its BLOCK still blocks.
+
+`decide_outcome_with_context` skipped the classifier outright when the floor was
+set. That got the allow side right for the wrong reason and silently dropped the
+deny side: a PreToolUse hook returning `ask` in front of a genuinely dangerous
+action turned it into a user prompt instead of a denial. (The *other* port
+path, `resolve_with_mode`, never knew about the floor and was therefore already
+faithful — see the correction to remaining divergence 5.)
+
+| test | plant that turns it red |
+|---|---|
+| `a_hook_ask_floor_does_not_turn_a_classifier_block_into_a_prompt` | restore `if ctx.hook_ask_floor { None } else { … }` around the classifier call |
+| `a_hook_ask_floor_still_discards_a_classifier_allow` | same plant (it asserts the classifier ran) |
+
+### 7.3 An over-long transcript was reported as a provider outage
+
+`Yn.transcriptTooLong` is the one classifier failure `dKo` does NOT resolve as a
+deny:
+
+```js
+if(Yn.transcriptTooLong){ …
+  if(e.name===ht) return {behavior:"allow",updatedInput:n,decisionReason:{type:"mode",mode:"auto"}};
+  …
+  if(F.shouldAvoidPermissionPrompts) throw new Ye("Agent aborted: auto mode classifier transcript exceeded context window in headless mode");
+  … return {...M, decisionReason:Wmt(M,{type:"other",reason:eut})} }
+```
+
+`ht` is `"Agent"` — spawning a subagent is how a session ESCAPES an over-long
+transcript, so gating it behind a transcript it cannot shorten deadlocks.
+
+The port lost the distinction at the transport boundary: `ProviderTransport`
+did `.map_err(|error| error.to_string())`, so `LlmError::ContextOverflow` — a
+TYPED error the crate already raises — arrived as an anonymous string and
+resolved as an outage. Every action in a long Auto-mode conversation would have
+been denied with "wait a moment and then try this action again", advice that can
+never come true: the transcript only grows.
+
+Fixed by giving `Transport::query` a two-arm error type (`QueryError::{Unavailable,
+TranscriptTooLong}`) that keeps the two apart, and adding
+`AutoModeClassifierVerdict::TranscriptTooLong` with all three of `dKo`'s arms —
+`Agent` allowed, headless aborted, everything else back to the prompt with
+`eut`'s "/compact" copy.
+
+| test | plant that turns it red |
+|---|---|
+| `an_over_long_transcript_falls_back_to_the_prompt_not_a_deny` | return a fail-closed deny from the `TranscriptTooLong` arm |
+| `an_over_long_transcript_still_lets_the_agent_tool_through` | same plant |
+| `an_over_long_transcript_aborts_a_session_that_cannot_prompt` | same plant |
+| `loop_llm::tests::a_context_overflow_is_a_transcript_too_long_not_an_outage` | route the `TranscriptTooLong` transport error back through `unreachable_classifier` |
+
+Not ported: the `q$t` parentheticals beyond `" (timed out)"` (this build's
+transport carries no HTTP status), `$7t`'s six server-verdict arms (there is no
+server classifier here), and the `type:"other"` decision-reason tag — the port's
+prompt fallback types it `"classifier"`.
+
+### 7.4 Still open
+
+Divergences 1, 2 and 4 above are unchanged. 2 (`fd`'s `plan && xS()` arm) is the
+largest: it needs a session-level auto-active latch AND `prePlanMode`, neither of
+which this port has — plan exit here does not return to the pre-plan mode at all,
+so the latch has nowhere to live yet.
 
 ## Test state
 

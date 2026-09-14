@@ -539,19 +539,45 @@ Landed here: the module now holds the 2.1.270 copy byte-for-byte — including a
 test that no string says `sub-agent` — the dead flag and the always-`None`
 function are gone, and the module doc states the gap instead of denying it.
 
-**NOT landed: the wiring, which is not contained in one clean crate.** It needs
+### 8.1 The wiring, landed
 
-1. a handoff-shaped classifier seam — `LoopPermissionClassifier` takes
-   `(tool_name, input, host_context, deny_rules)`; a handoff takes the
-   subagent's messages plus its final text;
-2. a path from the agent tool to it — `self.ctx.permission_gate` is a
-   `&dyn PermissionGate` and cannot see `PolicyPermissionGate::loop_classifier_handle`;
-3. the subagent transcript at the completion site, which today holds only the
-   terminal result JSON.
+The three blockers listed here resolved once the crates they cross were clean:
 
-The prepend itself already has its home: `tools/agent/src/agent.rs` builds
-`content_texts` and unshifts the max-turns harness note with
-`content_texts.insert(0, …)`, which is exactly `[{type:"text",text:warning},...content]`.
+1. **The seam.** `LoopPermissionClassifier` gained `classify_handoff(transcript,
+   final_text)`, defaulted to `Pass` so a host that binds only the tool-call
+   classifier keeps today's behaviour. The transcript crosses as a PATH, not as
+   messages, so the reading and rendering stay in the orchestrator, where the
+   file-IO helper (`auto_mode_io::secure_read_capped`) and the transcript
+   renderer already live.
+2. **The path from the agent tool.** `PermissionGate::review_subagent_handoff`
+   (default: review nothing) returns a `HandoffReview` —
+   `Flagged{reason}` / `Refused` / `Unavailable{model,detail}`, `EZe`'s
+   `{warning, kind}` minus the copy, which stays with the agent tool that
+   renders it.
+3. **The transcript.** `SubagentSpawner::transcript_path` already existed; the
+   JSONL-to-messages recipe is the one `tasks/handlers/human_resume.rs` uses.
+
+`PolicyPermissionGate` applies `EZe`'s two port-reachable gates — `mode ==
+"auto"`, and "nothing to review" when there is neither a transcript nor a
+hand-back — before paying for a round-trip. The `handback` kinds
+(`send`/`flagged`/`withheld`) have no port counterpart. Whatever the review
+concludes, the work is still DELIVERED: this path returns copy to prepend,
+never a denial.
+
+| test | plant that turns it red |
+|---|---|
+| `a_flagged_handoff_review_is_prepended_to_the_subagent_result` (end to end, through `AgentTool::call`) | disable the call site → `content` comes back `[]` |
+| `a_handoff_review_maps_each_verdict_to_its_own_warning` | — all four arms in one test |
+| `only_auto_mode_reviews_a_handoff` | asserts the CALL COUNT is 0, not just the outcome |
+| `a_handoff_with_nothing_to_review_skips_the_round_trip` | same |
+| `a_child_transcript_renders_the_reviewable_calls_only` | the render is what the review judges; a torn last line must not cost the verdict |
+| `a_hand_back_cannot_forge_the_tags_around_it` | `Qk` — agent-authored text must not break out of its own fence |
+
+Still not ported: `$mt(wke().value, $pr)`'s severity site (a remote config, so
+only `dVo`'s non-severity instruction is reachable), the `handback` kinds, and
+`kae`'s parameterised arm — the verdict does not carry the model or failure kind
+back, so the port renders `kae("")`, the same arm upstream's own `.catch` sites
+take.
 
 ---
 

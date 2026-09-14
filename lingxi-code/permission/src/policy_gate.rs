@@ -41,9 +41,9 @@
 use crate::classifier::{reason_allows_classifier, AutoModeClassifierVerdict};
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
-    AutoModePrompt, MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
-    PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionResolution,
-    PromptDefault,
+    AutoModePrompt, HandoffReview, MatchedAskRule, PermissionAbort, PermissionCheckContext,
+    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionOutcome,
+    PermissionResolution, PromptDefault,
 };
 use crate::headless_gate::headless_deny_message;
 use crate::layers::{
@@ -2276,6 +2276,58 @@ impl PermissionGate for PolicyPermissionGate {
             PermissionOutcome::Deny { .. } => {}
         }
         outcome
+    }
+
+    /// `EZe` — review a finished subagent's work before its parent reads it.
+    ///
+    /// ```js
+    /// if(r.mode!=="auto"||M==="send"||M==="flagged")return null;
+    /// if(!x$n(e,n)&&!S?.trim())return null;
+    /// let U=await bke(e,A$n(S,…),n,r,s,{isSubagentLoop:!0,…});
+    /// if(U.shouldBlock){ refused → …; unavailable → kae(…); else → flagged } return null
+    /// ```
+    ///
+    /// The `handback` kinds (`send`/`flagged`/`withheld`) have no port
+    /// counterpart, so only the mode gate and the nothing-to-review gate are
+    /// applied. Whatever the review concludes, the work is still DELIVERED:
+    /// this returns copy to prepend, never a denial.
+    async fn review_subagent_handoff(
+        &self,
+        transcript: Option<&std::path::Path>,
+        final_text: &str,
+    ) -> Option<HandoffReview> {
+        if self.effective_mode() != PermissionMode::Auto {
+            return None;
+        }
+        // `!x$n(e,n) && !S?.trim()` — nothing to review.
+        if transcript.is_none() && final_text.trim().is_empty() {
+            return None;
+        }
+        let classifier = self.loop_classifier.get()?;
+        match classifier.classify_handoff(transcript, final_text).await {
+            AutoModeClassifierVerdict::Deny { reason, .. } => {
+                Some(HandoffReview::Flagged { reason })
+            }
+            AutoModeClassifierVerdict::NoVerdict { reason, .. } => {
+                if reason == crate::loop_llm::REFUSED {
+                    Some(HandoffReview::Refused)
+                } else {
+                    // `kae("")` — the arm upstream's own `.catch` sites take.
+                    // The verdict does not carry the model or the failure kind
+                    // back, so the parameterised arm is not reachable here; the
+                    // rendered copy is upstream's, for the no-model case.
+                    Some(HandoffReview::Unavailable {
+                        model: String::new(),
+                        detail: String::new(),
+                    })
+                }
+            }
+            // A transcript too long to classify is not a finding about the
+            // subagent; `EZe` has no arm for it and returns null.
+            AutoModeClassifierVerdict::Allow { .. }
+            | AutoModeClassifierVerdict::Pass { .. }
+            | AutoModeClassifierVerdict::TranscriptTooLong => None,
+        }
     }
 
     async fn check_with_context_or_abort(

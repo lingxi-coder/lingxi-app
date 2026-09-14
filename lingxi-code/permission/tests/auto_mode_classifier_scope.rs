@@ -810,3 +810,158 @@ async fn an_over_long_transcript_aborts_a_session_that_cannot_prompt() {
     }
     assert_eq!(prompt.0.load(Ordering::SeqCst), 0);
 }
+
+/// A classifier bound only for handoff reviews, recording whether it ran.
+struct HandoffOnly {
+    calls: AtomicUsize,
+    verdict: AutoModeClassifierVerdict,
+}
+#[async_trait::async_trait]
+impl LoopPermissionClassifier for HandoffOnly {
+    async fn classify(
+        &self,
+        _: &str,
+        _: &Value,
+        _: &[permission::host_context::HostContextRecord],
+        _: &[String],
+    ) -> AutoModeClassifierVerdict {
+        unreachable!("the handoff tests never take the tool path")
+    }
+    async fn classify_handoff(
+        &self,
+        _: Option<&std::path::Path>,
+        _: &str,
+    ) -> AutoModeClassifierVerdict {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.verdict.clone()
+    }
+}
+
+/// Runs one handoff review. Returns `(outcome, classifier_calls)`.
+async fn handoff(
+    mode: PermissionMode,
+    final_text: &str,
+    verdict: AutoModeClassifierVerdict,
+) -> (Option<permission::gate::HandoffReview>, usize) {
+    let classifier = Arc::new(HandoffOnly {
+        calls: AtomicUsize::new(0),
+        verdict,
+    });
+    let gate = PolicyPermissionGate::new(
+        Arc::new(PermissionPolicy::new(mode)),
+        Arc::new(Prompt(AtomicUsize::new(0))),
+    );
+    assert!(gate
+        .loop_classifier_handle()
+        .set(classifier.clone())
+        .is_ok());
+    let outcome = gate.review_subagent_handoff(None, final_text).await;
+    (outcome, classifier.calls.load(Ordering::SeqCst))
+}
+
+/// `EZe`'s three warning arms, each mapped from the verdict that produces it.
+/// The work is delivered in every case — a handoff review never denies.
+#[tokio::test]
+async fn a_handoff_review_maps_each_verdict_to_its_own_warning() {
+    use permission::gate::HandoffReview;
+    let (flagged, calls) = handoff(
+        PermissionMode::Auto,
+        "I pushed it to the public mirror",
+        AutoModeClassifierVerdict::Deny {
+            score: 1.0,
+            reason: "Published to an external destination".into(),
+            hard: false,
+        },
+    )
+    .await;
+    assert_eq!(calls, 1);
+    assert_eq!(
+        flagged,
+        Some(HandoffReview::Flagged {
+            reason: "Published to an external destination".into()
+        })
+    );
+
+    let (refused, _) = handoff(
+        PermissionMode::Auto,
+        "done",
+        AutoModeClassifierVerdict::NoVerdict {
+            reason: permission::loop_llm::REFUSED.into(),
+            message: "…".into(),
+        },
+    )
+    .await;
+    assert_eq!(refused, Some(HandoffReview::Refused));
+
+    let (unavailable, _) = handoff(
+        PermissionMode::Auto,
+        "done",
+        AutoModeClassifierVerdict::NoVerdict {
+            reason: permission::loop_llm::UNAVAILABLE_REASON.into(),
+            message: "…".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        unavailable,
+        Some(HandoffReview::Unavailable {
+            model: String::new(),
+            detail: String::new()
+        })
+    );
+
+    let (clean, _) = handoff(
+        PermissionMode::Auto,
+        "done",
+        AutoModeClassifierVerdict::Allow {
+            score: 1.0,
+            reason: "Nothing to flag".into(),
+        },
+    )
+    .await;
+    assert_eq!(clean, None, "a clean review prepends nothing");
+}
+
+/// `if(r.mode!=="auto") return null` — and it must return before paying for a
+/// round-trip, not after. Asserting the CALL COUNT rather than the outcome is
+/// the difference between "the gate held" and "the gate was never reached".
+#[tokio::test]
+async fn only_auto_mode_reviews_a_handoff() {
+    for mode in [
+        PermissionMode::Default,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Plan,
+        PermissionMode::BypassPermissions,
+    ] {
+        let (outcome, calls) = handoff(
+            mode,
+            "I pushed it to the public mirror",
+            AutoModeClassifierVerdict::Deny {
+                score: 1.0,
+                reason: "Published to an external destination".into(),
+                hard: false,
+            },
+        )
+        .await;
+        assert_eq!(outcome, None, "{mode:?}");
+        assert_eq!(calls, 0, "{mode:?} must not pay for a review");
+    }
+}
+
+/// `if(!x$n(e,n)&&!S?.trim())return null` — no transcript and nothing handed
+/// back is nothing to judge.
+#[tokio::test]
+async fn a_handoff_with_nothing_to_review_skips_the_round_trip() {
+    let (outcome, calls) = handoff(
+        PermissionMode::Auto,
+        "   \n  ",
+        AutoModeClassifierVerdict::Deny {
+            score: 1.0,
+            reason: "would have flagged".into(),
+            hard: false,
+        },
+    )
+    .await;
+    assert_eq!(outcome, None);
+    assert_eq!(calls, 0);
+}

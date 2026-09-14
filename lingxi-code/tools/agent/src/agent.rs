@@ -26,10 +26,10 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use platform_api::budget::BudgetError;
 use platform_api::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
-    FusionOrigin, FusionPreset, FusionProgress, FusionRequest, FusionRunControl, FusionRunId,
-    FusionRunIdentity, FusionStage, FusionStatus, FusionSubmission, FUSION_MAX_PANEL,
-    FUSION_MIN_PANEL, FusionRunRecorder, FusionTerminalCapability, FusionPreparedSummary,
-    FusionRunFactsRecorder, FusionRunRecorderFactory, PreparedFusionRun,
+    FusionOrigin, FusionPreparedSummary, FusionPreset, FusionProgress, FusionRequest,
+    FusionRunControl, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunRecorder,
+    FusionRunRecorderFactory, FusionStage, FusionStatus, FusionSubmission,
+    FusionTerminalCapability, PreparedFusionRun, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
 use platform_api::subagent_spawn::{
     StructuredOutputMode, SubagentInheritance, SubagentListingEntry, SubagentResult,
@@ -740,6 +740,20 @@ fn budget_limit_reached_error(current_nano_usd: u64, limit_nano_usd: u64) -> Str
     )
 }
 
+/// Render a handoff review into the block `EZe` prepends, in its own copy.
+fn render_handoff_review(review: &platform_api::permission_gate::HandoffReview) -> String {
+    use platform_api::permission_gate::HandoffReview;
+    match review {
+        HandoffReview::Flagged { reason } => {
+            crate::classifier_handoff::format_security_warning(reason)
+        }
+        HandoffReview::Refused => crate::classifier_handoff::SAFEGUARD_REFUSED_WARNING.to_string(),
+        HandoffReview::Unavailable { model, detail } => {
+            crate::classifier_handoff::classifier_unavailable_warning(model, detail)
+        }
+    }
+}
+
 /// Extract claude's `content: [{type:'text', text}]` array from a subagent's
 /// terminal result JSON.
 ///
@@ -808,8 +822,8 @@ struct BackgroundDecision {
 /// answer for an explicit `run_in_background: false`, which the schema does not
 /// advertise while fork is on.
 fn should_run_in_background(d: BackgroundDecision) -> bool {
-    let auto_background = !d.caller_is_in_process_teammate
-        && (d.is_coordinator || d.wants_background != Some(false));
+    let auto_background =
+        !d.caller_is_in_process_teammate && (d.is_coordinator || d.wants_background != Some(false));
     (d.wants_background == Some(true)
         || d.definition_background
         || (!d.is_builtin_web_fetch && auto_background))
@@ -817,7 +831,14 @@ fn should_run_in_background(d: BackgroundDecision) -> bool {
         && !d.caller_is_in_process_teammate
 }
 
-fn async_launch_result(launch: platform_api::subagent_spawn::AsyncLaunch, task_id: Option<String>, prompt: &str, description: &str, resolved_model: &str, can_read_output_file: bool) -> ToolCallResult {
+fn async_launch_result(
+    launch: platform_api::subagent_spawn::AsyncLaunch,
+    task_id: Option<String>,
+    prompt: &str,
+    description: &str,
+    resolved_model: &str,
+    can_read_output_file: bool,
+) -> ToolCallResult {
     let agent_id_str = launch.agent_id.as_uuid().to_string();
     let prefix = format!("Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime.");
     let tail = if can_read_output_file {
@@ -827,8 +848,17 @@ fn async_launch_result(launch: platform_api::subagent_spawn::AsyncLaunch, task_i
     };
     let mut data = json!({"isAsync": true, "status": "async_launched", "agentId": agent_id_str, "prompt": prompt, "description": description, "resolvedModel": resolved_model,
         "outputFile": launch.output_file, "canReadOutputFile": can_read_output_file, "model_content": format!("{prefix}\n{tail}")});
-    if let Some(task_id) = task_id { data["task_id"] = json!(task_id); }
-    ToolCallResult {data, model_content: None, new_messages: vec![], context_modifier: None, is_error: false, mcp_meta: None}
+    if let Some(task_id) = task_id {
+        data["task_id"] = json!(task_id);
+    }
+    ToolCallResult {
+        data,
+        model_content: None,
+        new_messages: vec![],
+        context_modifier: None,
+        is_error: false,
+        mcp_meta: None,
+    }
 }
 
 #[path = "foreground_task.rs"]
@@ -1137,7 +1167,10 @@ fn fusion_tool_result_with_settlement(
     let mut output = fusion_tool_result(result);
     if let Some(settlement) = settlement {
         output.data["attemptSettlement"] = json!(settlement);
-        if matches!(settlement, platform_api::FusionAttemptSettlementStatus::Failed { .. }) {
+        if matches!(
+            settlement,
+            platform_api::FusionAttemptSettlementStatus::Failed { .. }
+        ) {
             output.data["computationStatus"] = output.data["status"].clone();
             output.data["status"] = json!("failed");
             output.is_error = true;
@@ -1944,9 +1977,8 @@ impl AgentTool {
                 };
                 let prepared = PreparedFusionRun::failed(summary, control, error.clone());
                 let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
-                    prepared.with_terminal_capability(
-                        FusionTerminalCapability::new(recorder.clone()),
-                    )
+                    prepared
+                        .with_terminal_capability(FusionTerminalCapability::new(recorder.clone()))
                 } else {
                     prepared
                 };
@@ -2145,14 +2177,30 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     // function return) does not act on it again.
                     guard.disarm();
                 }
-                if matches!(&facts.attempt_settlement, Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })) {
-                    Self::emit_failed(bus, invocation_id, "fusion_accounting_failed", started.elapsed().as_millis() as u64).await;
+                if matches!(
+                    &facts.attempt_settlement,
+                    Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })
+                ) {
+                    Self::emit_failed(
+                        bus,
+                        invocation_id,
+                        "fusion_accounting_failed",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
                 } else {
                     Self::emit_completed(
-                        bus, invocation_id, started.elapsed().as_millis() as u64, FUSION_AGENT_TYPE,
-                    ).await;
+                        bus,
+                        invocation_id,
+                        started.elapsed().as_millis() as u64,
+                        FUSION_AGENT_TYPE,
+                    )
+                    .await;
                 }
-                Ok(fusion_tool_result_with_settlement(result, facts.attempt_settlement.as_ref()))
+                Ok(fusion_tool_result_with_settlement(
+                    result,
+                    facts.attempt_settlement.as_ref(),
+                ))
             }
             Err(err) => {
                 // F008: only a PREFLIGHT error guarantees zero provider
@@ -3274,7 +3322,14 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 let can_read_output_file = ctx.subagent_registry.as_ref().is_some_and(|reg| {
                     reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
                 });
-                Ok(async_launch_result(launch, None, &parsed.prompt, &parsed.description, &selected.resolved_model, can_read_output_file))
+                Ok(async_launch_result(
+                    launch,
+                    None,
+                    &parsed.prompt,
+                    &parsed.description,
+                    &selected.resolved_model,
+                    can_read_output_file,
+                ))
             }
             Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {
                 self.release_spawn_reservation();
@@ -4359,8 +4414,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         let run_in_background = should_run_in_background(BackgroundDecision {
             wants_background: parsed.run_in_background,
             definition_background: selected.background,
-            is_builtin_web_fetch: selected.is_built_in
-                && effective_type == WEB_FETCH_AGENT_TYPE,
+            is_builtin_web_fetch: selected.is_built_in && effective_type == WEB_FETCH_AGENT_TYPE,
             is_coordinator: self
                 .ctx
                 .coordinator_mode
@@ -4673,21 +4727,52 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
         });
 
-        let (outcome, foreground_worktree_result) = if let Some(registry) = self.ctx.task_registry.clone() {
-            match foreground_task::run(spawner.clone(), request, inherit, prog_tx, progress.clone(), ctx.tool_use_id.clone(), registry, self.ctx.clone()).await {
-                foreground_task::ForegroundResult::Finished(result, worktree) => (result, Some(worktree)),
-                foreground_task::ForegroundResult::Backgrounded(launch, task_id) => {
-                    if let Some(name) = parsed.name.as_deref() {
-                        if let Some(names) = self.ctx.agent_name_registry.as_ref() { names.register(name, launch.agent_id).await; }
-                        else { spawner.register_name(name, launch.agent_id).await; }
+        let (outcome, foreground_worktree_result) =
+            if let Some(registry) = self.ctx.task_registry.clone() {
+                match foreground_task::run(
+                    spawner.clone(),
+                    request,
+                    inherit,
+                    prog_tx,
+                    progress.clone(),
+                    ctx.tool_use_id.clone(),
+                    registry,
+                    self.ctx.clone(),
+                )
+                .await
+                {
+                    foreground_task::ForegroundResult::Finished(result, worktree) => {
+                        (result, Some(worktree))
                     }
-                    let can_read = ctx.subagent_registry.as_ref().is_some_and(|reg| reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some());
-                    return Ok(async_launch_result(launch, Some(task_id), &parsed.prompt, &parsed.description, &selected.resolved_model, can_read));
+                    foreground_task::ForegroundResult::Backgrounded(launch, task_id) => {
+                        if let Some(name) = parsed.name.as_deref() {
+                            if let Some(names) = self.ctx.agent_name_registry.as_ref() {
+                                names.register(name, launch.agent_id).await;
+                            } else {
+                                spawner.register_name(name, launch.agent_id).await;
+                            }
+                        }
+                        let can_read = ctx.subagent_registry.as_ref().is_some_and(|reg| {
+                            reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
+                        });
+                        return Ok(async_launch_result(
+                            launch,
+                            Some(task_id),
+                            &parsed.prompt,
+                            &parsed.description,
+                            &selected.resolved_model,
+                            can_read,
+                        ));
+                    }
                 }
-            }
-        } else {
-            (spawner.spawn_with_progress(request, inherit, Some(prog_tx)).await, None)
-        };
+            } else {
+                (
+                    spawner
+                        .spawn_with_progress(request, inherit, Some(prog_tx))
+                        .await,
+                    None,
+                )
+            };
         // `prog_tx` is now dropped → the forwarder drains and exits.
         let _ = forwarder.await;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -4721,11 +4806,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
         let worktree_result: Option<(String, String)> = match foreground_worktree_result {
             Some(result) => result,
             None => match &agent_worktree {
-            Some(handle) => {
-                platform_api::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle)
+                Some(handle) => {
+                    platform_api::worktree::agent_worktree_result(
+                        self.ctx.worktree.as_ref(),
+                        handle,
+                    )
                     .await
-            }
-            None => None,
+                }
+                None => None,
             },
         };
 
@@ -4801,6 +4889,28 @@ Use /mcp to configure and authenticate the required MCP servers.",
                         !raw_content_texts.is_empty(),
                     );
                     content_texts.insert(0, note);
+                }
+                // `EZe` — the auto-mode classifier's second consumer. A
+                // subagent's hand-back is agent-authored untrusted output that
+                // the parent model is about to act on, so auto mode reviews it
+                // and PREPENDS its verdict:
+                // `cu.content=[{type:"text",text:xg.warning},...cu.content]`.
+                // In front of the harness notes too, matching upstream, which
+                // unshifts onto the already-noted content. The work is always
+                // delivered — this only ever adds a warning.
+                if let Some(gate) = self.ctx.permission_gate.as_ref() {
+                    let transcript = self
+                        .ctx
+                        .subagent_spawner
+                        .as_ref()
+                        .and_then(|spawner| spawner.transcript_path(agent_id));
+                    let handed_back = content_texts.join("\n");
+                    if let Some(review) = gate
+                        .review_subagent_handoff(transcript.as_deref(), &handed_back)
+                        .await
+                    {
+                        content_texts.insert(0, render_handoff_review(&review));
+                    }
                 }
                 let content_blocks: Vec<Value> = content_texts
                     .iter()

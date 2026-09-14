@@ -5,9 +5,9 @@
 #![forbid(unsafe_code)]
 
 pub use platform_api::permission_gate::{
-    AutoModePrompt, MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
-    PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionRequestSource,
-    PermissionResolution, PromptWorker,
+    AutoModePrompt, HandoffReview, MatchedAskRule, PermissionAbort, PermissionCheckContext,
+    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionOutcome,
+    PermissionRequestSource, PermissionResolution, PromptWorker,
 };
 pub use platform_api::prompting_gate::{
     PermissionRequest, PermissionResponse, PromptDecision, PromptDefault, PromptError,

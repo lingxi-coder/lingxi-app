@@ -26,6 +26,27 @@ pub trait LoopPermissionClassifier: Send + Sync {
         host_context: &[crate::host_context::HostContextRecord],
         deny_rules: &[String],
     ) -> AutoModeClassifierVerdict;
+
+    /// Review a finished subagent's work before its parent acts on it — `EZe`,
+    /// the classifier's second consumer.
+    ///
+    /// `transcript` is the child's persisted transcript (the spawner's
+    /// `transcript_path`), which the implementor reads and renders; `None` when
+    /// the spawner keeps none. `final_text` is the hand-back the parent would
+    /// otherwise read unreviewed.
+    ///
+    /// Defaulted to `Pass` so a host that binds only the tool-call classifier
+    /// keeps today's behaviour: no review, and no fabricated verdict either.
+    async fn classify_handoff(
+        &self,
+        transcript: Option<&std::path::Path>,
+        final_text: &str,
+    ) -> AutoModeClassifierVerdict {
+        let _ = (transcript, final_text);
+        AutoModeClassifierVerdict::Pass {
+            reason: "No handoff classifier bound".to_string(),
+        }
+    }
 }
 
 /// Classifier score used for deterministic rule hits.

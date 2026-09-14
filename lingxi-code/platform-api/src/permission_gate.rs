@@ -49,7 +49,10 @@ impl PermissionPauseObserver {
     }
 
     pub fn begin(&self) -> PermissionPauseGuard {
-        PermissionPauseGuard { observer: self.clone(), started: std::time::Instant::now() }
+        PermissionPauseGuard {
+            observer: self.clone(),
+            started: std::time::Instant::now(),
+        }
     }
 }
 impl std::fmt::Debug for PermissionPauseObserver {
@@ -58,7 +61,9 @@ impl std::fmt::Debug for PermissionPauseObserver {
     }
 }
 impl PartialEq for PermissionPauseObserver {
-    fn eq(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.0, &other.0) }
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 impl Eq for PermissionPauseObserver {}
 
@@ -558,6 +563,29 @@ pub enum PermissionResolution {
 /// `lingxi-orchestrator::test_support`. M5-05 promotes it to the traits
 /// crate so that `lingxi-permission` can carry the real
 /// `InteractivePromptingGate` impl without a circular dep.
+/// What a subagent handoff review concluded — `EZe`'s `{warning, kind}` minus
+/// the rendered copy, which belongs to the agent tool that prepends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandoffReview {
+    /// `kind: "flagged"` — the classifier judged the work and blocked it. The
+    /// work is still delivered, carrying the classifier's own reason.
+    Flagged {
+        /// The classifier's human-readable reason, interpolated into the copy.
+        reason: String,
+    },
+    /// `kind: "refused"` — an upstream safety filter refused to perform the
+    /// review. Not a verdict on the work; it reacts to the subagent's own
+    /// transcript, which the subagent controls.
+    Refused,
+    /// `kind: "unavailable"` — the review could not run at all.
+    Unavailable {
+        /// The classifier model, named in the warning; empty when unknown.
+        model: String,
+        /// `q$t`'s parenthetical (`" (timed out)"`, …) or empty.
+        detail: String,
+    },
+}
+
 #[async_trait]
 pub trait PermissionGate: Send + Sync {
     /// Authorize a tool call by `name` with `input`.
@@ -700,6 +728,26 @@ pub trait PermissionGate: Send + Sync {
     ) -> PermissionOutcome {
         self.check_with_context("ExitPlanMode", &serde_json::json!({ "plan": plan }), ctx)
             .await
+    }
+
+    /// Review a finished subagent's work before its parent reads it — the port
+    /// of `EZe`, the auto-mode classifier's second consumer.
+    ///
+    /// Returns the outcome to render as a prepended warning block, or `None`
+    /// when there is nothing to say: not auto mode, no classifier bound, or the
+    /// review came back clean. `transcript` is the child's persisted transcript
+    /// path; `final_text` is the hand-back the parent would otherwise act on
+    /// unreviewed.
+    ///
+    /// The default reviews nothing, so a gate without a classifier keeps
+    /// today's behaviour instead of inventing a verdict.
+    async fn review_subagent_handoff(
+        &self,
+        transcript: Option<&Path>,
+        final_text: &str,
+    ) -> Option<HandoffReview> {
+        let _ = (transcript, final_text);
+        None
     }
 
     /// Like [`Self::check_with_context`], but preserves a terminal
@@ -923,7 +971,10 @@ pub trait PermissionGate: Send + Sync {
     ) -> Result<PermissionResolution, PermissionAbort> {
         let _ = ctx;
         Ok(match self.check_in_plan_mode(name, input).await {
-            PermissionDecision::Allow => PermissionResolution::Allow { rule_source: None, classifier_approved: false },
+            PermissionDecision::Allow => PermissionResolution::Allow {
+                rule_source: None,
+                classifier_approved: false,
+            },
             PermissionDecision::Deny { reason } => PermissionResolution::Deny {
                 reason,
                 source: PermissionDecisionSource::Unspecified,
@@ -957,7 +1008,10 @@ pub trait PermissionGate: Send + Sync {
     /// types.) Additive DEFAULTED (frozen-trait safe).
     async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
         match self.check(name, input).await {
-            PermissionDecision::Allow => PermissionResolution::Allow { rule_source: None, classifier_approved: false },
+            PermissionDecision::Allow => PermissionResolution::Allow {
+                rule_source: None,
+                classifier_approved: false,
+            },
             PermissionDecision::Deny { reason } => PermissionResolution::Deny {
                 reason,
                 source: PermissionDecisionSource::Unspecified,

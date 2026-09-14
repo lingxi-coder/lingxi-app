@@ -942,9 +942,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             ::platform_api::prepared_from_oneshot(
                 submission,
                 timeout,
-                move |_request, _inherit, _progress| async move {
-                    Err(this.error.clone())
-                },
+                move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
             )
         }
 
@@ -988,9 +986,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             ::platform_api::prepared_from_oneshot(
                 submission,
                 timeout,
-                move |_request, _inherit, _progress| async move {
-                    Err(this.error.clone())
-                },
+                move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
             )
         }
 
@@ -1450,7 +1446,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let result = sample_fusion_result(platform_api::FusionStatus::Completed);
         let answer = result.final_text.clone();
         let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreparedAllocationFusion {
-            result, allocated_panels: 3, settlement_failure: Some("durable receipt rejected".into()),
+            result,
+            allocated_panels: 3,
+            settlement_failure: Some("durable receipt rejected".into()),
         }));
         let output = tool.call(serde_json::json!({"description":"deliberate","prompt":"review this","subagent_type":"fusion"}),
             fresh_ctx_with_registry(Arc::new(ToolRegistry::new())), fresh_tx()).await.expect("computed answer remains available");
@@ -1458,12 +1456,27 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(output.data["status"], "failed");
         assert_eq!(output.data["computationStatus"], "completed");
         assert_eq!(output.data["attemptSettlement"]["status"], "failed");
-        assert_eq!(output.data["attemptSettlement"]["reason"], "durable receipt rejected");
+        assert_eq!(
+            output.data["attemptSettlement"]["reason"],
+            "durable receipt rejected"
+        );
         assert!(output.model_content.as_ref().unwrap().contains(&answer));
-        assert!(output.model_content.as_ref().unwrap().contains("accounting failed"));
+        assert!(output
+            .model_content
+            .as_ref()
+            .unwrap()
+            .contains("accounting failed"));
         let events = sink.events().await;
-        assert_eq!(events.iter().filter(|event| event.name == AGENT_FAILED).count(), 1);
-        assert!(!events.iter().any(|event| event.name == AGENT_COMPLETED_M4_05));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.name == AGENT_FAILED)
+                .count(),
+            1
+        );
+        assert!(!events
+            .iter()
+            .any(|event| event.name == AGENT_COMPLETED_M4_05));
     }
 
     /// [round-4 review, finding 9] The Ok-path spawn-quota release counts
@@ -4179,6 +4192,81 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             result.data["model_content"].as_str().unwrap(),
             expected,
             "async_launched model_content must be byte-exact vs CC 2.1.223"
+        );
+    }
+
+    /// End to end for `EZe`: a flagged handoff review must reach the parent as
+    /// the FIRST content block, ahead of everything else, exactly as
+    /// `cu.content=[{type:"text",text:xg.warning},...cu.content]` does.
+    ///
+    /// This is the test the seam actually needs: every layer below it can be
+    /// green while the call site is never reached, which is how the previous
+    /// handoff module sat unwired behind a dead flag.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_flagged_handoff_review_is_prepended_to_the_subagent_result() {
+        struct ReviewingGate;
+        #[async_trait::async_trait]
+        impl platform_api::PermissionGate for ReviewingGate {
+            async fn check(
+                &self,
+                _: &str,
+                _: &serde_json::Value,
+            ) -> platform_api::PermissionDecision {
+                platform_api::PermissionDecision::Allow
+            }
+            async fn review_subagent_handoff(
+                &self,
+                _: Option<&std::path::Path>,
+                _: &str,
+            ) -> Option<platform_api::permission_gate::HandoffReview> {
+                Some(platform_api::permission_gate::HandoffReview::Flagged {
+                    reason: "Published to an external destination".into(),
+                })
+            }
+        }
+
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let mut bctx = wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate =
+            Some(Arc::new(ReviewingGate) as Arc<dyn platform_api::PermissionGate>);
+        let result = AgentTool::new(bctx)
+            .call(
+                serde_json::json!({
+                    "description": "foreground override",
+                    "prompt": "go",
+                    "run_in_background": false
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("explicit foreground launch");
+
+        assert_eq!(result.data["status"], "completed");
+        let expected = crate::classifier_handoff::format_security_warning(
+            "Published to an external destination",
+        );
+        assert_eq!(
+            result.data["content"][0]["text"].as_str(),
+            Some(expected.as_str()),
+            "the warning must be the FIRST block: {:?}",
+            result.data["content"]
+        );
+        assert!(
+            result.data["model_content"]
+                .as_str()
+                .is_some_and(|text| text.contains(&expected)),
+            "and it must reach the model, not only the structured content: {:?}",
+            result.data["model_content"]
         );
     }
 

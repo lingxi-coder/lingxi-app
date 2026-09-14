@@ -2872,6 +2872,7 @@ struct SpawnDeallocGuard {
     agent_id: AgentId,
     observer_events: crate::api::ObserverEventSink,
     armed: bool,
+    startup_error: Option<String>,
     mcp_cleanups: Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>,
     agent_type: String,
 }
@@ -2890,6 +2891,7 @@ impl Drop for SpawnDeallocGuard {
             let observer_events = self.observer_events.clone();
             let mcp_cleanups = std::mem::take(&mut self.mcp_cleanups);
             let agent_type = std::mem::take(&mut self.agent_type);
+            let startup_error = self.startup_error.take();
             handle.spawn(async move {
                 // claude-code `Cre`: the agent is stopping but has NOT stopped.
                 // `UserInterrupt` is cooperative and the runner only races it at
@@ -2925,7 +2927,6 @@ impl Drop for SpawnDeallocGuard {
                 }
                 let _ = pool.deallocate(&id).await;
                 // Emit the caller-visible terminal observation BEFORE
-    startup_error: Option<String>,
                 // running MCP teardown, mirroring the normal terminal
                 // path's ordering (see "Normal terminal path" above): a
                 // wedged MCP `disconnect` must not be able to block the
@@ -2947,7 +2948,6 @@ impl Drop for SpawnDeallocGuard {
 }
 
 #[async_trait]
-            let startup_error = self.startup_error.take();
 impl SubagentSpawner for PoolSubagentSpawner {
     async fn resume_foreground(
         &self,
@@ -3144,6 +3144,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
             agent_id,
             observer_events: observer_events.clone(),
             armed: true,
+            startup_error: None,
             // Ownership moves out of `mcp_guard` synchronously here — no
             // await separates the take from the guard that receives them.
             mcp_cleanups: mcp_guard.take(),
@@ -3205,7 +3206,6 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         })
                         .unwrap_or(0);
                     let cumulative_usage_rollup = subagent_usage_from_llm_usage(&cumulative_usage);
-            startup_error: None,
                     break SubagentResult::Completed {
                         agent_id: child_id,
                         content: result,
@@ -3769,6 +3769,7 @@ impl PoolSubagentSpawner {
             agent_id,
             observer_events: crate::api::ObserverEventSink::new(observers.clone()),
             armed: true,
+            startup_error: None,
             mcp_cleanups: mcp_guard.take(),
             agent_type: resolved_agent_type.clone(),
         };
@@ -3849,7 +3850,6 @@ impl PoolSubagentSpawner {
                         terminal_death_seen = true;
                         observer_events.emit_terminal(SubagentObservation::Killed {
                             agent_id: forward_agent_id,
-            startup_error: None,
                         })
                     }
                     SubagentEvent::Progress { .. } => {}
@@ -4630,6 +4630,43 @@ mod tests {
                 request,
                 SubagentInheritance {
                     tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            spawn_result.is_err(),
+            "the hanging MCP cleanup must still be in flight when the caller times out"
+        );
+
+        // Let the event sink's background task drain whatever was already
+        // sent before the future was dropped.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let terminal_count = observer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SubagentObservation::Completed { .. }
+                        | SubagentObservation::Failed { .. }
+                        | SubagentObservation::Killed { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            terminal_count,
+            1,
+            "the child's terminal event must reach the observer even when the caller drops \
+             the spawn future while it is stuck in post-completion cleanup; got: {:?}",
+            observer.events.lock().unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn rejected_startup_reports_failure_instead_of_killed_without_calling_model() {
         struct RejectStartup;
@@ -4672,43 +4709,6 @@ mod tests {
                 if error.contains("control binding failed")));
             assert_eq!(api.calls.load(Ordering::SeqCst), 0);
         }
-    }
-
-                    budget: Arc::new(DummyBudget),
-                },
-            ),
-        )
-        .await;
-        assert!(
-            spawn_result.is_err(),
-            "the hanging MCP cleanup must still be in flight when the caller times out"
-        );
-
-        // Let the event sink's background task drain whatever was already
-        // sent before the future was dropped.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let terminal_count = observer
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    SubagentObservation::Completed { .. }
-                        | SubagentObservation::Failed { .. }
-                        | SubagentObservation::Killed { .. }
-                )
-            })
-            .count();
-        assert_eq!(
-            terminal_count,
-            1,
-            "the child's terminal event must reach the observer even when the caller drops \
-             the spawn future while it is stuck in post-completion cleanup; got: {:?}",
-            observer.events.lock().unwrap()
-        );
     }
 
     /// G007 / F012: dropping the `spawn` future mid-flight (Fusion panel

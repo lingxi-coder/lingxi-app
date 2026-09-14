@@ -20,18 +20,15 @@
 //! `<error>Command was aborted before completion</error>` marker is appended
 //! to stderr and `is_error` follows `interrupted`. See `interrupted_result`.
 
-//! ## CLI-5 `bashEditDiffEnabled` — NOT implemented; the contract, extracted
+//! ## CLI-5 `bashEditDiffEnabled` — the contract, and what is built
 //!
-//! 2.1.269 shows a diff of the files a Bash command changed and hands the
-//! changed-file list to `PostToolUse` Bash hooks in `tool_response`. This port
-//! has none of it. The backlog called it a settings key; it is a subsystem, and
-//! the whole of it was read at the 2.1.270 oracle on 2026-09-14 so whoever
-//! builds it does not start from a grep.
+//! 2.1.269 shows a diff of the files a Bash command changed. The machinery
+//! lives in [`crate::bash_edit_diff`]; this is the contract it implements,
+//! read at the 2.1.270 oracle on 2026-09-14.
 //!
-//! ⚠️ NO settings key is declared for it here, deliberately. A
-//! `bashEditDiffEnabled` a user can set that does nothing is the defect shape
-//! this port keeps finding in itself (`sparsePaths` written and never read,
-//! `autoDreamEnabled` with no scheduler). Add the key WITH the machinery.
+//! ⚠️ RESIDUAL, deliberately out: the changed-file list is not handed to
+//! `PostToolUse` Bash hooks in `tool_response`. That is a hook-payload change,
+//! not part of the tool result, and it has no consumer here yet.
 //!
 //! ### The gate — `y0r(mode)`
 //!
@@ -94,6 +91,20 @@
 //!   `moreFiles` reports the remainder.
 //!
 //! Identical before/after trees return `null` — no diff section at all.
+//!
+//! ### Per call — `Sn = y0r(mode) && !run_in_background && !SNt(input)`
+//!
+//! A backgrounded command has no "after" yet; a command permission classifies
+//! as READ-ONLY cannot have changed anything; and the snapshot additionally
+//! requires `!_0r(command)` — a bare `git checkout`/`switch`/… would diff the
+//! branch, not the command. See `edit_diff_eligible` in `call`.
+//!
+//! ⚠️ The MODE half of the gate is resolved once, at the composition root,
+//! rather than per call as `y0r(s.permissions().mode)` is upstream. Every other
+//! input to the gate (env, tiers, merged value, rollout flag) is fixed for a
+//! session, so the only divergence is a mid-session mode switch INTO `auto` /
+//! `bypassPermissions` — and that arm needs `tengu_thrifty_sonic`, which
+//! defaults false upstream too, so it is unreachable in a stock install.
 
 use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
@@ -2616,6 +2627,36 @@ impl Tool for BashTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
             .to_string();
+        // CLI-5: snapshot the worktree BEFORE the command runs, when the
+        // feature is on and the cwd is inside a repository. Presence of
+        // `bash_edit_diff` is the gate — the composition root already answered
+        // `y0r`, because the answer needs the settings TIERS.
+        //
+        // The three per-call conjuncts are the oracle's:
+        //   `Sn = y0r(mode) && !run_in_background && !SNt(input)`, and the
+        //   snapshot itself additionally requires `!_0r(command)`.
+        // * a BACKGROUNDED command returns before it has changed anything, so
+        //   there is no "after" to diff against;
+        // * a command permission classifies as READ-ONLY cannot have changed a
+        //   file, so snapshotting it is pure cost;
+        // * a bare `git checkout`/`switch`/… moves the whole worktree, and its
+        //   diff would describe the branch rather than the command.
+        //
+        // Every failure answers `None` and the command proceeds: a diff is a
+        // convenience, and a shell command must never fail because git did.
+        let edit_diff_eligible = !input
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !self.is_read_only(&input)
+            && !crate::bash_edit_diff::is_branch_moving_git(&cmd_str);
+        let edit_diff_before = match (self.ctx.bash_edit_diff.as_ref(), ctx.cwd.as_ref()) {
+            (Some(setup), Some(cwd)) if edit_diff_eligible => {
+                crate::bash_edit_diff::snapshot_before(&setup.shadow_root, cwd).await
+            }
+            _ => None,
+        };
+
         // 2.1.266 `a0` (`src_163219561.js` @1939367): refuse to start a process
         // while THIS agent's own stop is still completing, so a dying agent
         // cannot leave one running behind it.
@@ -3571,6 +3612,21 @@ impl Tool for BashTool {
                 // Model sees the plain-text `[stdout, stderr].join("\n")` render
                 // (`content` in the binary's tool_result mapper), NOT the JSON
                 // object — which stays for the TUI / PostToolUse hook.
+                // CLI-5: the AFTER snapshot, and the diff it implies. Taken
+                // here rather than in a `Drop`, so a command that never reached
+                // this point (aborted, refused) never pays for it.
+                let edit_diff = match edit_diff_before.as_ref() {
+                    Some((shadow, before)) => {
+                        crate::bash_edit_diff::diff_after(shadow, before).await
+                    }
+                    None => None,
+                };
+                let trailing_notes = match edit_diff.as_ref() {
+                    Some(diff) => {
+                        format!("{trailing_notes}{}", crate::bash_edit_diff::render(diff))
+                    }
+                    None => trailing_notes,
+                };
                 let model_content = bash_model_content(
                     &stdout_final,
                     &stderr_clean,
@@ -7359,5 +7415,228 @@ mod tests {
                 "test must exercise the pre-2s path"
             );
         }
+    }
+
+    // ===== CLI-5 `bashEditDiffEnabled` wiring =============================
+
+    /// A `ProcessRunner` that actually CHANGES the worktree, so the before and
+    /// after snapshots genuinely differ.
+    ///
+    /// The ordinary `StubProcess` returns canned output and touches nothing, so
+    /// every snapshot it produces is identical and no diff can ever appear —
+    /// a test built on it would pass with the whole feature removed.
+    struct EditingProcess {
+        write: std::path::PathBuf,
+    }
+
+    #[async_trait]
+    impl platform_api::process::ProcessRunner for EditingProcess {
+        async fn run(
+            &self,
+            _cmd: &platform_api::sandbox::SandboxedCommand,
+        ) -> Result<platform_api::process::ProcessOutput, platform_api::process::ProcessError> {
+            std::fs::write(&self.write, "written by the command\n").unwrap();
+            Ok(platform_api::process::ProcessOutput {
+                stdout: "done\n".into(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+
+        async fn spawn_background(
+            &self,
+            _cmd: &platform_api::sandbox::SandboxedCommand,
+        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
+        {
+            Err(platform_api::process::ProcessError::Unsupported)
+        }
+
+        async fn kill(
+            &self,
+            _handle: &platform_api::process::ProcessHandle,
+        ) -> Result<(), platform_api::process::ProcessError> {
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn git_in(cwd: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    /// A repo, a `BashTool` whose context has CLI-5 on, and a `ToolUseContext`
+    /// rooted in that repo.
+    fn edit_diff_fixture() -> (
+        std::sync::RwLockReadGuard<'static, ()>,
+        tempfile::TempDir,
+        BashTool,
+        ToolUseContext,
+    ) {
+        // The `powershell` tests in this binary replace PATH; `git` is resolved
+        // from it here and inside `bash_edit_diff`. See `crate::test_path_env`.
+        let path_guard = crate::test_path_env::read();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_in(&repo, &["init", "-q", "-b", "main"]);
+        git_in(&repo, &["config", "user.email", "t@example.invalid"]);
+        git_in(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("kept.txt"), "one\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-qm", "seed"]);
+
+        let mut bctx = tool_api::test_support::shell_test_ctx_in(
+            ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            },
+            repo.clone(),
+        );
+        bctx.process = Arc::new(EditingProcess {
+            write: repo.join("touched.txt"),
+        });
+        bctx.bash_edit_diff = Some(Arc::new(tool_api::BashEditDiffSetup {
+            shadow_root: tmp.path().join("shadow"),
+        }));
+        let tool = BashTool::new(bctx);
+        let mut ctx = use_ctx();
+        ctx.cwd = Some(repo);
+        (path_guard, tmp, tool, ctx)
+    }
+
+    /// The MODEL-facing render, which is where the diff lands — not `data`,
+    /// which is the TUI / `PostToolUse` metadata object.
+    fn rendered(res: &ToolCallResult) -> String {
+        format!("{:?} {:?}", res.model_content, res.data)
+    }
+
+    /// The end-to-end wiring: a command that changed a file reports the diff.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_command_that_changed_a_file_reports_the_diff() {
+        let (_path, _tmp, tool, ctx) = edit_diff_fixture();
+        let res = tool
+            .call(json!({"command": "sh -c 'touch touched.txt'"}), ctx, fresh_tx())
+            .await
+            .expect("call");
+        let text = rendered(&res);
+        assert!(
+            text.contains("Files changed by this command:"),
+            "the diff section is missing from the tool result: {text}"
+        );
+        assert!(
+            text.contains("touched.txt"),
+            "the diff must name the file the command wrote: {text}"
+        );
+    }
+
+    /// `!run_in_background` — a backgrounded command has no "after" yet, so it
+    /// must not even pay for the BEFORE snapshot.
+    ///
+    /// 🚨 Asserting "the result carries no diff" would be vacuous here: the
+    /// background arm returns through a different builder that never appends
+    /// one, so that assertion holds with the conjunct deleted. The observable
+    /// consequence of the conjunct is that no shadow repository is created at
+    /// all — pinned against a foreground control that proves the fixture does
+    /// create one.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_backgrounded_command_never_takes_a_snapshot() {
+        let shadow_of = |tool: &BashTool| {
+            tool.ctx
+                .bash_edit_diff
+                .as_ref()
+                .expect("the fixture wires CLI-5")
+                .shadow_root
+                .clone()
+        };
+
+        let (_path, _tmp, tool, ctx) = edit_diff_fixture();
+        let shadow = shadow_of(&tool);
+        let _ = tool
+            .call(
+                json!({"command": "sh -c 'touch touched.txt'", "run_in_background": true}),
+                ctx,
+                fresh_tx(),
+            )
+            .await;
+        assert!(
+            !shadow.exists(),
+            "a backgrounded command must not snapshot the worktree"
+        );
+
+        let (_path2, _tmp2, tool2, ctx2) = edit_diff_fixture();
+        let shadow2 = shadow_of(&tool2);
+        let _ = tool2
+            .call(json!({"command": "sh -c 'touch touched.txt'"}), ctx2, fresh_tx())
+            .await
+            .expect("call");
+        assert!(
+            shadow2.exists(),
+            "…and the same fixture DOES snapshot in the foreground, so the \
+             assertion above is about `run_in_background` and not about the \
+             fixture being unable to snapshot at all"
+        );
+    }
+
+    /// `!SNt(input)` — a command permission classifies as READ-ONLY cannot have
+    /// changed a file, so snapshotting it is pure cost.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_read_only_command_is_never_diffed() {
+        let (_path, _tmp, tool, ctx) = edit_diff_fixture();
+        assert!(
+            tool.is_read_only(&json!({"command": "ls"})),
+            "`ls` must classify as read-only, or this test proves nothing"
+        );
+        let res = tool
+            .call(json!({"command": "ls"}), ctx, fresh_tx())
+            .await
+            .expect("call");
+        assert!(
+            !rendered(&res).contains("Files changed by this command:"),
+            "a read-only command must not be diffed"
+        );
+    }
+
+    /// `!_0r(command)` — a bare `git checkout` moves the whole worktree, and
+    /// its diff would describe the branch rather than the command.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_branch_moving_git_command_is_never_diffed() {
+        let (_path, _tmp, tool, ctx) = edit_diff_fixture();
+        let res = tool
+            .call(json!({"command": "git checkout main"}), ctx, fresh_tx())
+            .await
+            .expect("call");
+        assert!(
+            !rendered(&res).contains("Files changed by this command:"),
+            "a bare branch-moving git call must not be diffed"
+        );
+    }
+
+    /// PRESENCE is the gate: a host that never wires the setup behaves exactly
+    /// as it did before CLI-5 existed.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unwired_host_reports_no_diff_at_all() {
+        let (_path, _tmp, mut tool, ctx) = edit_diff_fixture();
+        tool.ctx.bash_edit_diff = None;
+        let res = tool
+            .call(json!({"command": "sh -c 'touch touched.txt'"}), ctx, fresh_tx())
+            .await
+            .expect("call");
+        assert!(!rendered(&res).contains("Files changed by this command:"));
     }
 }

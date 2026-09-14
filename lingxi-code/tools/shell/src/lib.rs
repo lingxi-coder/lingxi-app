@@ -22,6 +22,7 @@
     clippy::manual_let_else
 )]
 
+pub mod bash_edit_diff;
 pub mod bash;
 pub mod command_semantics;
 pub mod powershell;
@@ -32,6 +33,9 @@ pub mod repl;
 pub mod search_read;
 pub mod shared;
 pub mod silent;
+
+#[cfg(test)]
+pub(crate) mod test_path_env;
 
 pub use bash::BashTool;
 pub use powershell::PowerShellTool;

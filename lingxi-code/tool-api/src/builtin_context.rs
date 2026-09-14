@@ -61,6 +61,15 @@ pub type LiveCwdCell = Arc<std::sync::Mutex<PathBuf>>;
 /// [`crate::context::ToolUseOptions::model_profile`] is absent.
 pub type MainLoopModelProfileProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// Where a Bash edit-diff snapshot keeps its private git directories.
+#[derive(Debug, Clone)]
+pub struct BashEditDiffSetup {
+    /// Root under which one shadow git directory is kept per repository.
+    /// ⛔ Never a path inside the user's own `.git`.
+    pub shadow_root: std::path::PathBuf,
+}
+
+
 /// Static surface every builtin tool needs at construction time.
 ///
 /// Cloning is cheap — every field is `Arc` or a small owned vec.
@@ -197,6 +206,15 @@ pub struct BuiltinToolContext {
     /// Production wires the boot gate (`PolicyPermissionGate` when
     /// `LINGXI_ENFORCE_PERMISSIONS` is set, else the no-op gate).
     pub permission_gate: Option<Arc<dyn PermissionGate>>,
+
+    /// Bash edit-diff setup (CLI-5), or `None` when the feature is off.
+    ///
+    /// PRESENCE is the gate: the composition root evaluates
+    /// `tool_shell::bash_edit_diff::enabled` — which needs the settings TIERS,
+    /// not just the merged value — and fills this only when the answer is yes.
+    /// The tool therefore carries no settings plumbing, and a host that never
+    /// sets it behaves exactly as before.
+    pub bash_edit_diff: Option<Arc<BashEditDiffSetup>>,
 
     // ===== M4-07 wiring (Phase 7) =====
     /// MCP registry — the 4 MCP builtin tools (`MCPTool`, `McpAuthTool`,

@@ -8523,6 +8523,122 @@ fn load_effective_settings_for_config(
     .ok()
 }
 
+/// `Bk("bashEditDiffEnabled")[0]` — the value as the USER / flag / policy tiers
+/// alone see it, ignoring project and project-local settings.
+///
+/// 🚨 This is NOT `effective_settings.settings.bash_edit_diff_enabled`, and it
+/// is not recoverable from the provenance trace either: for an `Override` field
+/// the trace keeps only the WINNING layer, so a user `true` under a project
+/// `false` leaves no trace entry naming the user tier. The tier has to be
+/// resolved by loading the tier stack on its own.
+///
+/// The distinction is the security property of `y0r`: a `true` from these tiers
+/// turns the feature on in any mode, so a checked-in `.lingxi/settings.json`
+/// must not be able to reach that arm. A `false` from ANY layer still wins,
+/// which is why the merged value is read separately and both are passed to
+/// [`tool_shell::bash_edit_diff::enabled`].
+fn load_trusted_tier_bash_edit_diff(
+    cfg: &DesktopConfig,
+    managed_raw_tiers: &[String],
+) -> Option<bool> {
+    let env: BTreeMap<String, String> = BTreeMap::new();
+    let managed_layers: Vec<lingxi_core::settings::SettingsJson> = managed_raw_tiers
+        .iter()
+        .filter_map(|raw| serde_json::from_str(raw).ok())
+        .collect();
+    let include_user = !cfg.restricted && cfg.setting_source_scope.0;
+    lingxi_core::settings::Settings::load_with_layers_from_user_path(
+        lingxi_core::settings::LoadInputs {
+            // Deliberately EMPTY: `CLAUDE_CODE_BASH_EDIT_DIFF` is the gate's
+            // first arm and is read there. Letting the env layer contribute
+            // here would make an env value look like a policy tier.
+            env: &env,
+            project_dir: &cfg.cwd,
+            defaults: lingxi_core::settings::schema::SettingsJson::default(),
+        },
+        lingxi_core::settings::FileLayerScope {
+            include_user,
+            include_project: false,
+            include_local: false,
+        },
+        lingxi_core::settings::SupplementalLayers {
+            cli_layer: cfg.flag_settings.as_ref(),
+            managed_layers: &managed_layers,
+        },
+        Some(&cfg.lingxi_home.join("settings.json")),
+    )
+    .ok()
+    .and_then(|effective| effective.settings.bash_edit_diff_enabled)
+}
+
+/// Resolve CLI-5's gate and, when it is on, the per-session shadow root.
+///
+/// `None` IS the off state — `BuiltinToolContext::bash_edit_diff` carries no
+/// separate boolean, so a host that never calls this behaves exactly as before.
+///
+/// The shadow root is per SESSION (oracle `eNt` names each shadow
+/// `<session>-<repo>-<random>` under a 0700 cache dir), so two sessions working
+/// the same checkout never share one shadow index.
+fn resolve_bash_edit_diff(
+    cfg: &DesktopConfig,
+    effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
+    managed_raw_tiers: &[String],
+    session_id: &str,
+) -> Option<Arc<tool_api::builtin_context::BashEditDiffSetup>> {
+    let env_override = std::env::var("CLAUDE_CODE_BASH_EDIT_DIFF")
+        .ok()
+        .map(|raw| !matches!(raw.trim(), "" | "0" | "false"));
+    // `Aot()`: the env var when defined, else the `tengu_thrifty_sonic` cohort,
+    // which defaults FALSE. So the "on in auto mode" arm is DEAD in an
+    // unconfigured install — upstream too. The feature is opt-in.
+    let rollout = std::env::var("CLAUDE_CODE_THRIFTY_SONIC").map_or_else(
+        |_| telemetry::flag_bool("tengu_thrifty_sonic", false),
+        |raw| !matches!(raw.trim(), "" | "0" | "false"),
+    );
+    resolve_bash_edit_diff_with(
+        cfg,
+        effective_settings,
+        managed_raw_tiers,
+        session_id,
+        env_override,
+        rollout,
+    )
+}
+
+/// [`resolve_bash_edit_diff`] with its two process-global env reads lifted out.
+///
+/// ⚠️ The split is not cosmetic: a gate that reads `std::env` cannot be tested
+/// without `set_var`, which is process-global and flakes the parallel suite —
+/// and the resulting failure looks like a concurrent session's fault. Resolve
+/// the env at the edge, pass it as a parameter.
+fn resolve_bash_edit_diff_with(
+    cfg: &DesktopConfig,
+    effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
+    managed_raw_tiers: &[String],
+    session_id: &str,
+    env_override: Option<bool>,
+    rollout: bool,
+) -> Option<Arc<tool_api::builtin_context::BashEditDiffSetup>> {
+    let trusted_tier = load_trusted_tier_bash_edit_diff(cfg, managed_raw_tiers);
+    let merged = effective_settings.and_then(|e| e.settings.bash_edit_diff_enabled);
+    let permissive = matches!(
+        cfg.permission_mode,
+        permission::PermissionMode::Auto | permission::PermissionMode::BypassPermissions
+    );
+    if !tool_shell::bash_edit_diff::enabled(
+        env_override,
+        trusted_tier,
+        merged,
+        permissive,
+        rollout,
+    ) {
+        return None;
+    }
+    Some(Arc::new(tool_api::builtin_context::BashEditDiffSetup {
+        shadow_root: cfg.lingxi_home.join("bash-edit-diff").join(session_id),
+    }))
+}
+
 static SETTINGS_CACHE: OnceLock<Mutex<Option<MergedSettingsCacheEntry>>> = OnceLock::new();
 
 fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
@@ -14633,6 +14749,15 @@ pub async fn build_with_credential_stack(
         // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so
         // spawned subagents are gated by the same boot gate as the main loop.
         permission_gate: Some(perms.clone()),
+        // (CLI-5) PRESENCE is the gate — `None` when `y0r` says off, which is
+        // the unconfigured default (its auto-mode arm needs a rollout flag that
+        // defaults false, upstream included).
+        bash_edit_diff: resolve_bash_edit_diff(
+            &cfg,
+            effective_settings.as_ref(),
+            &managed_settings_for_strict,
+            &main_session_uuid,
+        ),
         // G14: the AgentTool registers async-agent `name → agentId` in the
         // spawner's OWN internal registry (PoolSubagentSpawner::register_name),
         // so no separate ctx-level registry is wired here. A shared
@@ -28241,4 +28366,146 @@ pub fn supervisor_exit_sink(
         manager,
         path.to_path_buf(),
     ))
+}
+
+#[cfg(test)]
+mod bash_edit_diff_wiring_tests {
+    use super::*;
+
+    fn write_settings(path: &std::path::Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn effective(cfg: &DesktopConfig) -> Option<lingxi_core::settings::EffectiveSettings> {
+        load_effective_settings_for_config(cfg, &[])
+    }
+
+    /// A config whose USER settings file is not also its PROJECT settings file.
+    ///
+    /// 🚨 `test_config` puts `lingxi_home` at `<cwd>/.lingxi`, which is exactly
+    /// where the project layer lives — so writing "the project's settings"
+    /// there writes the user's too, and a tier test passes for the wrong
+    /// reason. Asserted below rather than assumed.
+    fn distinct_layer_config() -> (tempfile::TempDir, DesktopConfig) {
+        let (tmp, mut cfg) = tests::test_config(true);
+        cfg.lingxi_home = tmp.path().join("home");
+        cfg.permission_mode = permission::PermissionMode::Default;
+        assert_ne!(
+            cfg.lingxi_home.join("settings.json"),
+            cfg.cwd.join(".lingxi").join("settings.json"),
+            "the user and project settings paths must differ"
+        );
+        (tmp, cfg)
+    }
+
+    /// 🚨 The security property of `y0r`. A checked-in project settings file
+    /// must not be able to turn the feature on: only the USER / flag / policy
+    /// tiers reach the arm that enables it outside a permissive mode.
+    #[test]
+    fn a_project_settings_file_cannot_turn_the_diff_on() {
+        let (_tmp, cfg) = distinct_layer_config();
+        write_settings(
+            &cfg.cwd.join(".lingxi").join("settings.json"),
+            r#"{"bashEditDiffEnabled": true}"#,
+        );
+
+        let eff = effective(&cfg);
+        assert_eq!(
+            eff.as_ref()
+                .and_then(|e| e.settings.bash_edit_diff_enabled),
+            Some(true),
+            "the project layer must actually be reaching the merged settings, \
+             or this test proves nothing"
+        );
+        assert!(
+            resolve_bash_edit_diff_with(&cfg, eff.as_ref(), &[], "s", None, false).is_none(),
+            "a project `true` reached the enabling arm — a repository can now \
+             make Claude hash and diff its files"
+        );
+    }
+
+    /// …and the USER tier can, in the same (non-permissive) mode.
+    #[test]
+    fn the_user_tier_turns_the_diff_on() {
+        let (_tmp, cfg) = distinct_layer_config();
+        write_settings(
+            &cfg.lingxi_home.join("settings.json"),
+            r#"{"bashEditDiffEnabled": true}"#,
+        );
+
+        let setup = resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "sess", None, false)
+            .expect("the user tier enables it");
+        assert_eq!(
+            setup.shadow_root,
+            cfg.lingxi_home.join("bash-edit-diff").join("sess"),
+            "the shadow root is per SESSION, so two sessions on one checkout \
+             never share a shadow index"
+        );
+    }
+
+    /// A `false` from ANY layer still wins — including the project layer the
+    /// enabling arm ignores. The two reads are not the same read.
+    #[test]
+    fn a_project_false_turns_off_what_the_user_tier_turned_on() {
+        let (_tmp, cfg) = distinct_layer_config();
+        write_settings(
+            &cfg.lingxi_home.join("settings.json"),
+            r#"{"bashEditDiffEnabled": true}"#,
+        );
+        write_settings(
+            &cfg.cwd.join(".lingxi").join("settings.json"),
+            r#"{"bashEditDiffEnabled": false}"#,
+        );
+        assert!(
+            resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "s", None, false)
+                .is_none(),
+            "the merged value is read separately from the tier, and a `false` \
+             from any layer wins"
+        );
+    }
+
+    /// Unconfigured, in auto mode, the feature is OFF: its last arm needs the
+    /// `tengu_thrifty_sonic` rollout, which defaults false upstream too.
+    #[test]
+    fn an_unconfigured_install_is_off_even_in_auto_mode() {
+        let (_tmp, mut cfg) = distinct_layer_config();
+        cfg.permission_mode = permission::PermissionMode::Auto;
+        assert!(
+            resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "s", None, false)
+                .is_none()
+        );
+        assert!(
+            resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "s", None, true)
+                .is_some(),
+            "…and it is the ROLLOUT that is missing, not the mode"
+        );
+    }
+
+    /// `build()` must actually FILL the context field. Every test above passes
+    /// with the call site deleted — the resolver would simply never run, and
+    /// the whole feature would be dead code with a green suite. No runtime test
+    /// can observe this without standing up the desktop stack, so the gate
+    /// reads this file's own source. Needles are assembled at runtime so they
+    /// cannot match the comment that explains them.
+    #[test]
+    fn build_fills_the_bash_edit_diff_context_field_from_the_resolver() {
+        const SRC: &str = include_str!("lib.rs");
+        let production = SRC
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(SRC, |(prod, _)| prod);
+        let field = "bash_edit_dif".to_string() + "f: resolve_bash_edit_diff(";
+        assert_eq!(
+            production.matches(&field).count(),
+            1,
+            "BuiltinToolContext must be built with `{field}…)`, or CLI-5 never runs"
+        );
+        let tier_call = "load_trusted_tier_bash_edit_dif".to_string() + "f(cfg,";
+        assert_eq!(
+            production.matches(&tier_call).count(),
+            1,
+            "the gate must read the TIER separately (`{tier_call}…`); the merged \
+             value alone lets a project settings file enable the feature"
+        );
+    }
 }

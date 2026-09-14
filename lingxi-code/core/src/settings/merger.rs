@@ -143,6 +143,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         include_git_instructions: next
             .include_git_instructions
             .or(prev.include_git_instructions),
+        bash_edit_diff_enabled: next
+            .bash_edit_diff_enabled
+            .or(prev.bash_edit_diff_enabled),
         enable_workflows: next.enable_workflows.or(prev.enable_workflows),
         workflow_size_guideline: next
             .workflow_size_guideline

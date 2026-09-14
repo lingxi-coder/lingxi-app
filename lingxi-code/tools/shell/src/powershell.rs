@@ -444,17 +444,21 @@ mod tests {
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     // PATH is process-global, and several tests install different temporary
-    // `pwsh` binaries. Serialize those overrides and restore them on every exit
-    // path (including panic) so parallel tests cannot resolve a sibling's stub.
-    static PATH_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct PathOverride(Option<OsString>);
+    // `pwsh` binaries. The override CARRIES the crate-wide writer guard, so it
+    // is restored on every exit path (including panic) and cannot be taken
+    // without excluding both the sibling overrides here AND the tests in other
+    // modules that resolve a program by bare name — see `crate::test_path_env`.
+    struct PathOverride(
+        Option<OsString>,
+        Option<std::sync::RwLockWriteGuard<'static, ()>>,
+    );
 
     impl PathOverride {
         fn set(value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let guard = crate::test_path_env::write();
             let prior = std::env::var_os("PATH");
             std::env::set_var("PATH", value);
-            Self(prior)
+            Self(prior, Some(guard))
         }
     }
 
@@ -464,6 +468,7 @@ mod tests {
                 Some(path) => std::env::set_var("PATH", path),
                 None => std::env::remove_var("PATH"),
             }
+            drop(self.1.take());
         }
     }
 
@@ -523,7 +528,6 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn powershell_completion_records_git_counters_with_the_oracle_skip_guard() {
         let _otel = OTEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = telemetry::otel::OtelConfig::from_lookup(|key| match key {
             telemetry::otel::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
             "OTEL_METRICS_EXPORTER" => Some("prometheus".to_string()),
@@ -633,7 +637,6 @@ mod tests {
     #[test]
     fn resolve_path_unix_scans_path_env() {
         use std::os::unix::fs::PermissionsExt;
-        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("pwsh");
         std::fs::write(&fake, "#!/bin/sh\necho stub\n").unwrap();
@@ -671,7 +674,6 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn pwsh_missing_returns_invalid_input_with_diagnostic() {
-        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _path = PathOverride::set("");
         let ctx = shell_test_ctx(ProcessOutput {
             stdout: String::new(),
@@ -693,7 +695,6 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn foreground_zero_exit_returns_stdout() {
         use std::os::unix::fs::PermissionsExt;
-        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ctx = shell_test_ctx(ProcessOutput {
             stdout: "ok\n".into(),
             stderr: String::new(),
@@ -774,8 +775,6 @@ mod tests {
     async fn sandbox_branch_routes_through_injected_runner_and_cleans_up() {
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Arc;
-
-        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let runner = Arc::new(RecordingSandboxRunner::default());
         let mut ctx = shell_test_ctx(ProcessOutput {

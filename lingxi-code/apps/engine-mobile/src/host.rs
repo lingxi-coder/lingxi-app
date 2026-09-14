@@ -4679,6 +4679,9 @@ async fn build_mobile_inner_with_ask(
         // connection-scoped `AdapterPermissionGate`; never leave a tool with
         // an approval seam unbound on mobile.
         permission_gate: Some(perms.clone()),
+        // (CLI-5) Mobile never registers the shell tools at all, so there is
+        // nothing to gate — and no git binary to snapshot with.
+        bash_edit_diff: None,
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: platform.camera(),

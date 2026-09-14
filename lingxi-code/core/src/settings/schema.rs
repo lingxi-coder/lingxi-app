@@ -396,6 +396,18 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_git_instructions: Option<bool>,
 
+    /// Scalar field (later source wins). When enabled, a Bash command that
+    /// changes files reports a diff of them in its tool result (CLI-5).
+    ///
+    /// 🚨 Read the TIER, not just this merged value. claude-code's `y0r()`
+    /// consults `Bk("bashEditDiffEnabled")` — the USER / flag / policy tiers
+    /// only — for the arm that turns the feature ON, so a checked-in project
+    /// settings file cannot make Claude start hashing and diffing the repo.
+    /// A tier or merged `false` turns it off from ANY layer. See
+    /// `tool_shell::bash_edit_diff::enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bash_edit_diff_enabled: Option<bool>,
+
     /// Scalar field (later source wins). When enabled, a literal `ultracode`
     /// token in a submitted prompt emits the Workflow authorization reminder.
     #[serde(default, skip_serializing_if = "Option::is_none")]

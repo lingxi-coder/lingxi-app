@@ -82,6 +82,10 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
             "workflowSizeGuideline",
             layer.workflow_size_guideline.is_some(),
         ),
+        (
+            "bashEditDiffEnabled",
+            layer.bash_edit_diff_enabled.is_some(),
+        ),
         ("enableWorkflows", layer.enable_workflows.is_some()),
         ("enabledTools", layer.enabled_tools.is_some()),
         ("additionalIncludes", layer.additional_includes.is_some()),

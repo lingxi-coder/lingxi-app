@@ -228,10 +228,32 @@ struct BoundAgent {
 /// demo rows or synthetic transcript text enter the client event stream.
 pub struct DesktopSessionAgentObserver {
     event_sink: Arc<dyn ClientEventSink>,
-    session_id: String,
+    session_id: std::sync::RwLock<String>,
     bound_agents: tokio::sync::Mutex<HashMap<String, BoundAgent>>,
     tool_indexes: tokio::sync::Mutex<HashMap<String, client_adapter::turn::ToolUseIndex>>,
     message_indexes: tokio::sync::Mutex<HashMap<String, u64>>,
+    // Process-owned facts, never restored from JSONL. Retain terminal summaries
+    // so a concurrent disk read cannot resurrect an older running record.
+    observed_agents: std::sync::Mutex<HashMap<String, ObservedAgent>>,
+}
+
+/// One agent as THIS process has observed it.
+///
+/// `terminal` is tracked separately from `agent.status` on purpose. The status
+/// is a WIRE label the clients render; whether an agent can still be revived is
+/// an engine fact, and the two stopped agreeing once a parked persistent agent
+/// started reporting claude-code's `completed` (it renders as `done`) instead of
+/// the port's invented `idle`. Reading liveness off the label would have made
+/// `Allocated` treat a parked-but-resumable agent as dead and silently refuse to
+/// re-register it — a resumed agent that emits nothing, with every test still
+/// green because none of them resume one.
+#[derive(Clone)]
+struct ObservedAgent {
+    session_id: String,
+    agent: SessionAgentSummaryDto,
+    /// The agent reached a real end (`completed` one-shot / `failed` / `killed`)
+    /// and must never be re-registered. A parked persistent agent is NOT this.
+    terminal: bool,
 }
 
 impl DesktopSessionAgentObserver {
@@ -239,15 +261,85 @@ impl DesktopSessionAgentObserver {
     pub fn new(event_sink: Arc<dyn ClientEventSink>, session_id: impl Into<String>) -> Self {
         Self {
             event_sink,
-            session_id: session_id.into(),
+            session_id: std::sync::RwLock::new(session_id.into()),
             bound_agents: tokio::sync::Mutex::new(HashMap::new()),
             tool_indexes: tokio::sync::Mutex::new(HashMap::new()),
             message_indexes: tokio::sync::Mutex::new(HashMap::new()),
+            observed_agents: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
+    /// Move the default owner for future allocations after an in-process
+    /// session switch. Existing observations keep their original owner.
+    pub fn set_session_id(&self, session_id: impl Into<String>) {
+        *self
+            .session_id
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = session_id.into();
+    }
+
+    /// Current process observations for one session. A fresh engine starts
+    /// with an empty set even when historical transcripts say "running".
+    #[must_use]
+    pub fn snapshot(&self, session_id: &str) -> HashMap<String, SessionAgentSummaryDto> {
+        self.observed_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, observed)| observed.session_id == session_id)
+            .map(|(id, observed)| (id.clone(), observed.agent.clone()))
+            .collect()
+    }
+
+    fn remember(&self, session_id: &str, agent: &SessionAgentSummaryDto, terminal: bool) {
+        self.observed_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                agent.agent_id.clone(),
+                ObservedAgent {
+                    session_id: session_id.to_string(),
+                    agent: agent.clone(),
+                    terminal,
+                },
+            );
+    }
+
+    async fn emit_activity(&self, agent_id: protocol::AgentId, activity: String) {
+        // A workflow retry can arrive through a different observer worker.
+        // Check and update under one lock so delayed telemetry cannot revive
+        // an idle or terminal child between separate liveness checks.
+        let event = {
+            let mut agents = self
+                .observed_agents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(observed) = agents.get_mut(&agent_id.to_string()) else {
+                return;
+            };
+            if observed.agent.status != "running" {
+                return;
+            }
+            observed.agent.latest_activity = Some(activity);
+            observed.agent.updated_at_ms = Some(unix_time_ms());
+            ClientEvent::SessionAgentUpdated {
+                session_id: observed.session_id.clone(),
+                agent: observed.agent.clone(),
+            }
+        };
+        self.event_sink.emit(event).await;
+    }
+
+    async fn emit_observed(&self, event: ClientEvent, terminal: bool) {
+        if let ClientEvent::SessionAgentUpdated { session_id, agent } = &event {
+            self.remember(session_id, agent, terminal);
+        }
+        self.event_sink.emit(event).await;
+    }
+
     fn allocated_session_id(&self, origin_session_id: Option<protocol::SessionId>) -> String {
-        // Use the owner resolved with the actual transcript path at spawn time.
+        // The spawner resolves this together with the child's hook and actual
+        // transcript directory before allocation crosses an async boundary.
         if let Some(session_id) = origin_session_id {
             return session_id.as_uuid().to_string();
         }
@@ -261,12 +353,43 @@ impl DesktopSessionAgentObserver {
         {
             return session_id;
         }
-        self.session_id.clone()
+        self.session_id
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
 #[async_trait]
 impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgentObserver {
+    fn on_allocated(&self, event: &platform_api::subagent_spawn::SubagentObservation) {
+        if let platform_api::subagent_spawn::SubagentObservation::Allocated {
+            agent_id,
+            agent_type,
+            name,
+            model,
+            model_profile,
+            origin_session_id,
+            ..
+        } = event
+        {
+            self.remember(
+                &self.allocated_session_id(*origin_session_id),
+                &SessionAgentSummaryDto {
+                    agent_id: agent_id.to_string(),
+                    name: name.clone().unwrap_or_else(|| agent_type.clone()),
+                    agent_type: agent_type.clone(),
+                    model: Some(model.clone()),
+                    model_profile: model_profile.clone(),
+                    status: "running".to_string(),
+                    latest_activity: None,
+                    updated_at_ms: Some(unix_time_ms()),
+                },
+                false,
+            );
+        }
+    }
+
     async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
         use platform_api::subagent_spawn::SubagentObservation;
         match event {
@@ -280,7 +403,24 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                 initial_message_index,
                 origin_session_id,
             } => {
-                let session_id = self.allocated_session_id(origin_session_id);
+                let receipt = self
+                    .observed_agents
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&agent_id.to_string())
+                    .cloned();
+                // A REAL end, not merely a `completed` label: a parked
+                // persistent agent now reports `completed` too (claude-code's
+                // vocabulary — it renders as `done`), and it is precisely the
+                // one that must still be allowed to re-register when it is
+                // resumed.
+                if receipt.as_ref().is_some_and(|observed| observed.terminal) {
+                    return;
+                }
+                let session_id = receipt.map_or_else(
+                    || self.allocated_session_id(origin_session_id),
+                    |observed| observed.session_id,
+                );
                 let name = name.unwrap_or_else(|| agent_type.clone());
                 self.bound_agents.lock().await.insert(
                     agent_id.to_string(),
@@ -297,24 +437,36 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                     .lock()
                     .await
                     .insert(agent_id.to_string(), initial_message_index);
-                self.event_sink
-                    .emit(ClientEvent::SessionAgentUpdated {
-                        session_id,
-                        agent: SessionAgentSummaryDto {
-                            agent_id: agent_id.to_string(),
-                            name,
-                            agent_type,
-                            model: Some(model),
-                            model_profile,
-                            status: "running".to_string(),
-                            latest_activity: None,
-                            updated_at_ms: Some(unix_time_ms()),
-                        },
-                    })
-                    .await;
+                self.emit_observed(ClientEvent::SessionAgentUpdated {
+                    session_id,
+                    agent: SessionAgentSummaryDto {
+                        agent_id: agent_id.to_string(),
+                        name,
+                        agent_type,
+                        model: Some(model),
+                        model_profile,
+                        status: "running".to_string(),
+                        latest_activity: None,
+                        updated_at_ms: Some(unix_time_ms()),
+                    },
+                }, false)
+                .await;
             }
             SubagentObservation::Message { agent_id, message } => {
                 if !conversation_is_visible(&message) {
+                    // A parked worker can wake on a task-notification input.
+                    // Publish the lifecycle edge, never its hidden contents —
+                    // but carry the remembered activity forward, because
+                    // `remember` replaces the record wholesale and `None` here
+                    // would erase whatever `Progress`/`Retry` just published.
+                    let latest_activity = self
+                        .observed_agents
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(&agent_id.to_string())
+                        .and_then(|observed| observed.agent.latest_activity.clone());
+                    self.emit_update(agent_id, "running", latest_activity, false)
+                        .await;
                     return;
                 }
                 let key = agent_id.to_string();
@@ -343,21 +495,20 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                         message: dto,
                     })
                     .await;
-                self.event_sink
-                    .emit(ClientEvent::SessionAgentUpdated {
-                        session_id: bound.session_id,
-                        agent: SessionAgentSummaryDto {
-                            agent_id: key,
-                            name: bound.name,
-                            agent_type: bound.agent_type,
-                            model: Some(bound.model),
-                            model_profile: bound.model_profile,
-                            status: "running".to_string(),
-                            latest_activity: activity(&message),
-                            updated_at_ms: Some(unix_time_ms()),
-                        },
-                    })
-                    .await;
+                self.emit_observed(ClientEvent::SessionAgentUpdated {
+                    session_id: bound.session_id,
+                    agent: SessionAgentSummaryDto {
+                        agent_id: key,
+                        name: bound.name,
+                        agent_type: bound.agent_type,
+                        model: Some(bound.model),
+                        model_profile: bound.model_profile,
+                        status: "running".to_string(),
+                        latest_activity: activity(&message),
+                        updated_at_ms: Some(unix_time_ms()),
+                    },
+                }, false)
+                .await;
             }
             SubagentObservation::Completed { agent_id, .. } => {
                 let persistent = self
@@ -366,11 +517,21 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                     .await
                     .get(&agent_id.to_string())
                     .is_some_and(|bound| bound.persistent);
-                if persistent {
-                    self.emit_update(agent_id, "idle", None, false).await;
-                } else {
-                    self.emit_terminal(agent_id, "completed").await;
-                }
+                // claude-code has no `idle` status for a finished background
+                // agent: its task row is `completed` and renders as `(done)`
+                // (`quietlyParked` picks `(parked)` instead, and an unsurfaced
+                // completion adds `, unread`). `idle` there is the name of the
+                // FOOTER GROUP such rows collapse into, and of a teammate's
+                // state — the port borrowed the group's word for a row's
+                // status, which is why one finished agent showed as `idle` on
+                // the Subagents row and `completed` on its own task row.
+                //
+                // A persistent agent still differs from a one-shot one: it
+                // keeps its binding so a later message can resume it. That
+                // difference now lives in `clear_state` alone, where it is a
+                // fact about the engine rather than a word the user reads.
+                self.emit_update(agent_id, "completed", None, !persistent)
+                    .await;
             }
             SubagentObservation::Failed { agent_id, error } => {
                 self.emit_terminal_with_activity(agent_id, "failed", Some(error))
@@ -379,7 +540,31 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
             SubagentObservation::Killed { agent_id } => {
                 self.emit_terminal(agent_id, "killed").await
             }
-            SubagentObservation::Progress { .. } | SubagentObservation::Retry { .. } => {}
+            SubagentObservation::Progress {
+                agent_id,
+                tool_use_count,
+                token_count,
+            } => {
+                self.emit_activity(
+                    agent_id,
+                    format!("{tool_use_count} tool uses · {token_count} tokens"),
+                )
+                .await;
+            }
+            SubagentObservation::Retry {
+                agent_id,
+                attempt,
+                reason,
+            } => {
+                self.emit_activity(
+                    agent_id,
+                    format!("Retrying (attempt {attempt}): {reason}")
+                        .chars()
+                        .take(160)
+                        .collect(),
+                )
+                .await;
+            }
         }
     }
 }
@@ -409,23 +594,46 @@ impl DesktopSessionAgentObserver {
     ) {
         let key = agent_id.to_string();
         let Some(bound) = self.bound_agents.lock().await.get(&key).cloned() else {
+            // before_start may fail after the synchronous allocation receipt
+            // but before asynchronous Allocated delivery creates the binding.
+            if clear_state {
+                let receipt = self
+                    .observed_agents
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&key)
+                    .cloned();
+                if let Some(observed) = receipt {
+                    let mut agent = observed.agent;
+                    agent.status = status.to_string();
+                    agent.latest_activity = latest_activity;
+                    agent.updated_at_ms = Some(unix_time_ms());
+                    self.emit_observed(
+                        ClientEvent::SessionAgentUpdated {
+                            session_id: observed.session_id,
+                            agent,
+                        },
+                        clear_state,
+                    )
+                    .await;
+                }
+            }
             return;
         };
-        self.event_sink
-            .emit(ClientEvent::SessionAgentUpdated {
-                session_id: bound.session_id,
-                agent: SessionAgentSummaryDto {
-                    agent_id: key.clone(),
-                    name: bound.name,
-                    agent_type: bound.agent_type,
-                    model: Some(bound.model),
-                    model_profile: bound.model_profile,
-                    status: status.to_string(),
-                    latest_activity,
-                    updated_at_ms: Some(unix_time_ms()),
-                },
-            })
-            .await;
+        self.emit_observed(ClientEvent::SessionAgentUpdated {
+            session_id: bound.session_id,
+            agent: SessionAgentSummaryDto {
+                agent_id: key.clone(),
+                name: bound.name,
+                agent_type: bound.agent_type,
+                model: Some(bound.model),
+                model_profile: bound.model_profile,
+                status: status.to_string(),
+                latest_activity,
+                updated_at_ms: Some(unix_time_ms()),
+            },
+        }, clear_state)
+        .await;
         if clear_state {
             // Terminal rows remain in the client roster, but one-shot/failed/
             // killed children must not retain per-agent indexes forever.
@@ -477,6 +685,207 @@ mod tests {
             assistant_message_count: 0,
             last_request_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn live_snapshot_is_process_scoped_and_allocation_precedes_async_delivery() {
+        let observer =
+            DesktopSessionAgentObserver::new(client_adapter::MockSink::arc(), "session-a");
+        let agent_id = protocol::AgentId::new();
+        let allocation = SubagentObservation::Allocated {
+            agent_id,
+            agent_type: "reviewer".into(),
+            name: Some("code-review".into()),
+            model: "test-model".into(),
+            model_profile: None,
+            persistent: false,
+            initial_message_index: 0,
+            origin_session_id: None,
+        };
+        observer.on_allocated(&allocation);
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "running"
+        );
+        assert!(observer.snapshot("session-b").is_empty());
+        // Reconnect uses this same instance; restart owns a fresh empty instance.
+        assert_eq!(observer.snapshot("session-a").len(), 1);
+        let restarted =
+            DesktopSessionAgentObserver::new(client_adapter::MockSink::arc(), "session-a");
+        assert!(restarted.snapshot("session-a").is_empty());
+        observer
+            .on_event(SubagentObservation::Killed { agent_id })
+            .await;
+        observer.on_event(allocation).await; // Late allocation cannot revive a cancelled startup.
+        observer
+            .on_event(SubagentObservation::Killed { agent_id })
+            .await;
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "killed"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_switch_keeps_existing_receipts_and_moves_future_allocations() {
+        let observer =
+            DesktopSessionAgentObserver::new(client_adapter::MockSink::arc(), "session-a");
+        let old_id = protocol::AgentId::new();
+        let event = SubagentObservation::Allocated {
+            agent_id: old_id,
+            agent_type: "reviewer".into(),
+            name: None,
+            model: "test-model".into(),
+            model_profile: None,
+            persistent: false,
+            initial_message_index: 0,
+            origin_session_id: None,
+        };
+        observer.on_allocated(&event);
+        observer.set_session_id("session-b");
+        observer.on_event(event).await;
+        let new_id = protocol::AgentId::new();
+        allocate(&observer, new_id, false, 0).await;
+        assert!(observer
+            .snapshot("session-a")
+            .contains_key(&old_id.to_string()));
+        assert!(!observer
+            .snapshot("session-b")
+            .contains_key(&old_id.to_string()));
+        assert!(observer
+            .snapshot("session-b")
+            .contains_key(&new_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn explicit_spawn_owner_survives_session_switch_and_delayed_delivery() {
+        let sink = client_adapter::MockSink::arc();
+        let session_a = protocol::SessionId::new();
+        let session_b = protocol::SessionId::new();
+        let owner_a = session_a.as_uuid().to_string();
+        let owner_b = session_b.as_uuid().to_string();
+        let observer = DesktopSessionAgentObserver::new(sink.clone(), &owner_a);
+        observer.set_session_id(&owner_b);
+
+        // The old background parent creates a child after the switch. Its
+        // explicit origin wins over the observer's current-session fallback.
+        for (owner, synchronous_receipt) in [(session_a, true), (session_b, false)] {
+            let agent_id = protocol::AgentId::new();
+            let allocation = SubagentObservation::Allocated {
+                agent_id,
+                agent_type: "reviewer".into(),
+                name: None,
+                model: "test-model".into(),
+                model_profile: None,
+                persistent: false,
+                initial_message_index: 0,
+                origin_session_id: Some(owner),
+            };
+            if synchronous_receipt {
+                observer.on_allocated(&allocation);
+            }
+            // A subsequent switch before async delivery cannot change ownership,
+            // including when the synchronous receipt was not available.
+            observer.set_session_id("session-c");
+            observer.on_event(allocation).await;
+            observer.on_event(completed(agent_id)).await;
+            let expected = owner.as_uuid().to_string();
+            assert_eq!(
+                observer.snapshot(&expected)[&agent_id.to_string()].status,
+                "completed"
+            );
+            assert!(observer.snapshot("session-c").is_empty());
+            assert!(sink.events().await.iter().any(|event| matches!(
+                event,
+                ClientEvent::SessionAgentUpdated { session_id, agent }
+                    if session_id == &expected && agent.agent_id == agent_id.to_string()
+                        && agent.status == "completed"
+            )));
+        }
+        assert_eq!(observer.snapshot(&owner_a).len(), 1);
+        assert_eq!(observer.snapshot(&owner_b).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn progress_and_retry_are_live_activity_not_a_resurrection_signal() {
+        let sink = client_adapter::MockSink::arc();
+        let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
+        let agent_id = protocol::AgentId::new();
+        allocate(&observer, agent_id, true, 0).await;
+        observer
+            .on_event(SubagentObservation::Progress {
+                agent_id,
+                tool_use_count: 3,
+                token_count: 42,
+            })
+            .await;
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()]
+                .latest_activity
+                .as_deref(),
+            Some("3 tool uses · 42 tokens")
+        );
+        observer
+            .on_event(SubagentObservation::Retry {
+                agent_id,
+                attempt: 2,
+                reason: "waiting for response".into(),
+            })
+            .await;
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()]
+                .latest_activity
+                .as_deref(),
+            Some("Retrying (attempt 2): waiting for response")
+        );
+        observer.on_event(completed(agent_id)).await;
+        let events = sink.events().await.len();
+        observer
+            .on_event(SubagentObservation::Progress {
+                agent_id,
+                tool_use_count: 4,
+                token_count: 43,
+            })
+            .await;
+        observer
+            .on_event(SubagentObservation::Retry {
+                agent_id,
+                attempt: 3,
+                reason: "late".into(),
+            })
+            .await;
+        assert_eq!(sink.events().await.len(), events);
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_notification_wakes_idle_without_exposing_internal_input() {
+        let sink = client_adapter::MockSink::arc();
+        let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
+        let agent_id = protocol::AgentId::new();
+        allocate(&observer, agent_id, true, 0).await;
+        observer.on_event(completed(agent_id)).await;
+        let before = sink.events().await.len();
+        observer
+            .on_event(SubagentObservation::Message {
+                agent_id,
+                message: ConversationMessage::user_meta(
+                    protocol::MessageId::new(),
+                    "private task notification".into(),
+                ),
+            })
+            .await;
+        let events = sink.events().await;
+        assert!(
+            matches!(&events[before..], [ClientEvent::SessionAgentUpdated { agent, .. }] if agent.status == "running" && agent.latest_activity.is_none())
+        );
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "running"
+        );
     }
 
     #[test]
@@ -610,8 +1019,70 @@ mod tests {
         assert!(observer.message_indexes.lock().await.is_empty());
     }
 
+    /// A PARKED persistent agent must still be able to come back.
+    ///
+    /// The allocation gate used to read liveness off the status STRING
+    /// (`"killed" | "failed" | "cancelled" | "completed"`). The moment a parked
+    /// persistent agent started reporting claude-code's `completed`, that gate
+    /// would have swallowed its resume: `Allocated` returns early, the agent
+    /// never re-registers, and it emits nothing for the rest of the session —
+    /// with every other test still green, because none of them resume one.
+    /// Hence the separate `terminal` flag, and hence this test.
     #[tokio::test]
-    async fn persistent_completion_is_idle_and_keeps_restored_index_for_resume() {
+    async fn a_parked_persistent_agent_can_be_reallocated() {
+        let sink = client_adapter::MockSink::arc();
+        let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
+        let agent_id = protocol::AgentId::new();
+        allocate(&observer, agent_id, true, 0).await;
+        observer.on_event(completed(agent_id)).await;
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "completed",
+            "precondition: parking reports claude-code's completed, the exact \
+             value the old string gate treated as dead",
+        );
+
+        allocate(&observer, agent_id, true, 0).await;
+
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "running",
+            "a resumed persistent agent must re-register",
+        );
+        assert!(observer
+            .bound_agents
+            .lock()
+            .await
+            .contains_key(&agent_id.to_string()));
+    }
+
+    /// The other half of the same gate: a one-shot agent that really ended must
+    /// NOT be revived by a late or duplicate `Allocated`. Both sides have to be
+    /// pinned — a flag that is always false would pass the test above on its own.
+    #[tokio::test]
+    async fn a_terminal_agent_is_never_reallocated() {
+        let sink = client_adapter::MockSink::arc();
+        let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
+        let agent_id = protocol::AgentId::new();
+        allocate(&observer, agent_id, false, 0).await;
+        observer.on_event(completed(agent_id)).await;
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "completed"
+        );
+
+        allocate(&observer, agent_id, false, 0).await;
+
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "completed",
+            "a finished one-shot agent stays finished",
+        );
+        assert!(observer.bound_agents.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_completion_is_completed_and_keeps_restored_index_for_resume() {
         let sink = client_adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
         let agent_id = protocol::AgentId::new();
@@ -621,7 +1092,10 @@ mod tests {
         assert!(sink.events().await.iter().any(|event| matches!(
             event,
             ClientEvent::SessionAgentUpdated { agent, .. }
-                if agent.agent_id == agent_id.to_string() && agent.status == "idle"
+                // claude-code's word for a finished background agent, parked
+                // or not — it renders as `(done)`. `idle` named the footer
+                // GROUP, never the row.
+                if agent.agent_id == agent_id.to_string() && agent.status == "completed"
         )));
         assert!(observer
             .bound_agents

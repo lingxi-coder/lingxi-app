@@ -2157,8 +2157,6 @@ pub struct OutputStyleListing {
 
 /// Public handle to the orchestrator that slash commands operate against.
 ///
-/// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
-/// `ConversationOrchestrator` does NOT yet implement it.
 /// Summarize direction — oracle `xer`'s second parameter, defaulting `"from"`.
 ///
 /// The two options differ in which HALF of the conversation survives verbatim,
@@ -2196,6 +2194,8 @@ impl SummarizeDirection {
     }
 }
 
+/// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
+/// `ConversationOrchestrator` does NOT yet implement it.
 #[async_trait]
 pub trait OrchestratorHandle: Send + Sync {
     /// The session id currently driving the conversation.

@@ -52,6 +52,12 @@ pub struct ResolvedOutputStyle {
     pub prompt: String,
     /// `keepCodingInstructions` (see [`DiskOutputStyle::keep_coding_instructions`]).
     pub keep_coding_instructions: bool,
+    /// The style's own per-turn reminder sentence, when it has one — see
+    /// [`crate::BuiltinOutputStyle::turn_reminder`]. Always `None` for a DISK
+    /// or PLUGIN style: `turnReminder` is not a frontmatter key upstream (its
+    /// only occurrences in the binary are the two built-in table entries, the
+    /// producer and the renderer), so a file cannot supply one.
+    pub turn_reminder: Option<&'static str>,
 }
 
 /// Frontmatter fields we read from an output-style file (all optional). The
@@ -227,12 +233,14 @@ pub fn resolve_output_style_from(
             name: d.name.clone(),
             prompt: d.prompt.clone(),
             keep_coding_instructions: d.keep_coding_instructions,
+            turn_reminder: None,
         });
     }
     resolve_builtin_output_style(setting).map(|b| ResolvedOutputStyle {
         name: b.name.to_string(),
         prompt: b.prompt.to_string(),
         keep_coding_instructions: b.keep_coding_instructions,
+        turn_reminder: b.turn_reminder,
     })
 }
 

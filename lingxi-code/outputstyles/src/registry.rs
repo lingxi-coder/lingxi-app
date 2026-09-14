@@ -6,7 +6,10 @@
 //! in [`crate::builtin`]; this module wraps them in [`BuiltinOutputStyle`]
 //! configs and resolves the active one from the `output_style` setting.
 
-use crate::builtin::{EXPLANATORY_PROMPT, LEARNING_PROMPT};
+use crate::builtin::{
+    CONCISE_PROMPT, CONCISE_TURN_REMINDER, EXPLANATORY_PROMPT, LEARNING_PROMPT,
+    PROACTIVE_PROMPT, PROACTIVE_TURN_REMINDER, PROACTIVE_WAITING_TURN_REMINDER,
+};
 use crate::disk::ResolvedOutputStyle;
 use crate::model::{OutputFormat, OutputStyle, OutputStyleFrontmatter, OutputStyleSource};
 use protocol::PluginId;
@@ -41,9 +44,31 @@ pub struct BuiltinOutputStyle {
     pub prompt: &'static str,
     /// TS `keepCodingInstructions`. When `true`, claude-code keeps the
     /// coding-instructions section (`getSimpleDoingTasksSection`) in the
-    /// prompt; both builtins set this `true`. Carried here for the
+    /// prompt; every builtin sets this `true`. Carried here for the
     /// coding-section-omission follow-up (OUTSTYLE.2 (c)).
     pub keep_coding_instructions: bool,
+    /// TS `turnReminder` — this style's own per-turn reminder sentence, which
+    /// REPLACES the generic "Remember to follow the specific guidelines for
+    /// this style." (the renderer's `${e.turnReminder ?? …}` fallback).
+    /// `None` for the styles that carry none upstream.
+    pub turn_reminder: Option<&'static str>,
+    /// TS `waitingTurnReminder` — used instead of [`Self::turn_reminder`] on a
+    /// turn whose only remaining work is waiting on a background task or
+    /// monitor the MAIN agent started.
+    ///
+    /// ⚠️ CARRIED, NOT SELECTED. Upstream's producer picks it when
+    /// `agentId === undefined` and some registry task is `running` with a
+    /// `toolUseId`, not owned by a subagent, and is either a monitor
+    /// (`type === "local_bash" && kind === "monitor"`, `monitor_mcp`, or a
+    /// non-ambient `monitor_ws`) or — interactive sessions only — a
+    /// backgrounded `local_bash`. The orchestrator holds no task-registry
+    /// handle, so that decision needs a session-scoped probe published at the
+    /// composition roots (the shape `platform_api::read_auto_allow` uses).
+    /// Until then every turn renders [`Self::turn_reminder`], which is the
+    /// same text minus the "don't poll" clause — a weaker hint, never a wrong
+    /// one. This field is a recorded contract, not a trap: wiring it is more
+    /// work, not a behaviour change waiting to go wrong.
+    pub waiting_turn_reminder: Option<&'static str>,
 }
 
 /// Builtin `Explanatory` config (`outputStyles.ts:43-55`).
@@ -52,6 +77,9 @@ const EXPLANATORY: BuiltinOutputStyle = BuiltinOutputStyle {
     description: "Claude explains its implementation choices and codebase patterns",
     prompt: EXPLANATORY_PROMPT,
     keep_coding_instructions: true,
+    // Upstream's `Explanatory` entry carries neither reminder.
+    turn_reminder: None,
+    waiting_turn_reminder: None,
 };
 
 /// Builtin `Learning` config (`outputStyles.ts:56-134`).
@@ -60,16 +88,36 @@ const LEARNING: BuiltinOutputStyle = BuiltinOutputStyle {
     description: "Claude pauses and asks you to write small pieces of code for hands-on practice",
     prompt: LEARNING_PROMPT,
     keep_coding_instructions: true,
+    turn_reminder: None,
+    waiting_turn_reminder: None,
 };
 
-/// Every compiled-in style, in the order `/output-style` lists them.
-///
-/// ⚠️ 2.1.270 ships FOUR built-ins — `Proactive` and `Concise` in addition to
-/// these two — each with a verbatim prompt body plus `turnReminder` /
-/// `waitingTurnReminder` surfaces this port has no analogue for. Porting those
-/// is its own item; listing the two that exist is still the whole selectable
-/// set HERE, so the listing is honest about what this build can switch to.
-pub const BUILTIN_OUTPUT_STYLES: [BuiltinOutputStyle; 2] = [EXPLANATORY, LEARNING];
+/// Builtin `Proactive` config — added upstream after the 2.1.183 table this
+/// port was first cut from, which is why it was missing here.
+const PROACTIVE: BuiltinOutputStyle = BuiltinOutputStyle {
+    name: "Proactive",
+    description: "Claude executes immediately, minimizes interruptions, and prefers action over planning",
+    prompt: PROACTIVE_PROMPT,
+    keep_coding_instructions: true,
+    turn_reminder: Some(PROACTIVE_TURN_REMINDER),
+    waiting_turn_reminder: Some(PROACTIVE_WAITING_TURN_REMINDER),
+};
+
+/// Builtin `Concise` config.
+const CONCISE: BuiltinOutputStyle = BuiltinOutputStyle {
+    name: "Concise",
+    description: "Claude responds tersely, leading with results and skipping preamble and narration",
+    prompt: CONCISE_PROMPT,
+    keep_coding_instructions: true,
+    turn_reminder: Some(CONCISE_TURN_REMINDER),
+    // Upstream gives `Concise` no waiting variant.
+    waiting_turn_reminder: None,
+};
+
+/// Every compiled-in style, in upstream's own table order — which is the order
+/// `/output-style` lists them in.
+pub const BUILTIN_OUTPUT_STYLES: [BuiltinOutputStyle; 4] =
+    [PROACTIVE, CONCISE, EXPLANATORY, LEARNING];
 
 /// Resolve the active builtin output style from the engine settings
 /// `output_style` value (the `Option<String>` from `lingxi_core::settings`).
@@ -98,6 +146,8 @@ pub fn resolve_builtin_output_style(setting: Option<&str>) -> Option<BuiltinOutp
         return None;
     }
     match name {
+        "Proactive" => Some(PROACTIVE),
+        "Concise" => Some(CONCISE),
         "Explanatory" => Some(EXPLANATORY),
         "Learning" => Some(LEARNING),
         // Unknown / custom (disk/plugin) names: out of scope -> no builtin.
@@ -213,6 +263,8 @@ impl OutputStyleRegistry {
             name: style.name.clone(),
             prompt: style.system_prompt_addendum.clone(),
             keep_coding_instructions: style.frontmatter.keep_coding_instructions,
+            // A plugin style is a FILE like a disk style: it cannot declare one.
+            turn_reminder: None,
         })
     }
 
@@ -358,5 +410,95 @@ mod tests {
         assert!(s.prompt.contains("routine implementation yourself.   \n"));
         assert_eq!(s.prompt.chars().count(), 4888);
         assert_eq!(s.prompt.len(), 5076);
+    }
+
+    /// The two built-ins cc2.1.270 ships that this port had never carried.
+    /// Lengths are byte-locked the same way the older two are, so a re-extract
+    /// that silently loses (or gains) a character fails here rather than in a
+    /// prompt nobody diffs.
+    #[test]
+    fn proactive_and_concise_match_the_oracle_table() {
+        let p = resolve_builtin_output_style(Some("Proactive")).expect("Proactive");
+        assert_eq!(p.name, "Proactive");
+        assert_eq!(
+            p.description,
+            "Claude executes immediately, minimizes interruptions, and prefers action over planning"
+        );
+        assert!(p.keep_coding_instructions);
+        assert!(p.prompt.starts_with(
+            "You are an interactive CLI tool that helps users with software engineering tasks. \
+             You should work proactively and autonomously"
+        ));
+        assert!(p.prompt.contains("\n\n# Proactive Style Active\nThe user chose continuous"));
+        // Chars AND bytes, like the `Learning` lock below: the six U+2014 em
+        // dashes make the two numbers differ, and a mojibake re-extract that
+        // replaced them with ASCII hyphens would keep the char count.
+        assert_eq!(p.prompt.chars().count(), 1330);
+        assert_eq!(p.prompt.len(), 1342);
+        assert_eq!(p.prompt.matches('\u{2014}').count(), 6);
+
+        let c = resolve_builtin_output_style(Some("Concise")).expect("Concise");
+        assert_eq!(c.name, "Concise");
+        assert_eq!(
+            c.description,
+            "Claude responds tersely, leading with results and skipping preamble and narration"
+        );
+        assert!(c.keep_coding_instructions);
+        assert!(c.prompt.contains("\n\n# Concise Style Active\nThe user chose brevity"));
+        assert_eq!(c.prompt.chars().count(), 1349);
+        assert_eq!(c.prompt.len(), 1361);
+        assert_eq!(c.prompt.matches('\u{2014}').count(), 6);
+    }
+
+    /// The reminders, including the one that is CARRIED but not yet selected.
+    /// Pinning `waiting_turn_reminder` here is the difference between a
+    /// recorded contract and a field that quietly rots: whoever wires the
+    /// task-registry probe gets the text already verified.
+    #[test]
+    fn the_per_style_reminders_match_the_oracle() {
+        let p = resolve_builtin_output_style(Some("Proactive")).expect("Proactive");
+        assert_eq!(
+            p.turn_reminder,
+            Some("Execute autonomously, minimize interruptions, prefer action over planning.")
+        );
+        assert_eq!(
+            p.waiting_turn_reminder,
+            Some(
+                "Execute autonomously and minimize interruptions. If the only work left is \
+                 waiting for a background task or monitor you started, end your turn now: you \
+                 will be notified when it finishes or fires. Do not poll, sleep, or re-read its \
+                 output while you wait."
+            )
+        );
+
+        let c = resolve_builtin_output_style(Some("Concise")).expect("Concise");
+        assert_eq!(
+            c.turn_reminder,
+            Some(
+                "Be concise: lead with the result, skip preamble and narration, keep only what \
+                 the user needs."
+            )
+        );
+        assert_eq!(
+            c.waiting_turn_reminder, None,
+            "upstream gives Concise no waiting variant"
+        );
+
+        // The older two carry neither, so they keep the generic sentence.
+        for name in ["Explanatory", "Learning"] {
+            let s = resolve_builtin_output_style(Some(name)).expect(name);
+            assert_eq!(s.turn_reminder, None, "{name}");
+            assert_eq!(s.waiting_turn_reminder, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_builtin_is_resolvable_by_name() {
+        assert_eq!(BUILTIN_OUTPUT_STYLES.len(), 4);
+        for style in BUILTIN_OUTPUT_STYLES {
+            let resolved = resolve_builtin_output_style(Some(style.name))
+                .unwrap_or_else(|| panic!("{} must resolve by its own name", style.name));
+            assert_eq!(resolved.name, style.name);
+        }
     }
 }

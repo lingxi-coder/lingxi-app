@@ -68,33 +68,23 @@ impl ConversationOrchestrator {
             );
             return None;
         }
-        // The oracle's `${e.turnReminder??"Remember to follow the specific
-        // guidelines for this style."}` fallback is what renders here, and for
-        // this port that is the ONLY reachable arm — re-checked at the oracle
-        // rather than assumed:
+        // The renderer is
+        // `` `${escape(style)} output style is active. ${e.turnReminder ??
+        //    "Remember to follow the specific guidelines for this style."}` ``.
         //
-        // * `turnReminder` exists on exactly TWO entries of the built-in style
-        //   table `lqe` (@287919803 `Proactive: {…, turnReminder: j3S}` and
-        //   @287920185 `Concise: {…, turnReminder: q3S}`, where
-        //   `j3S = "Execute autonomously, minimize interruptions, prefer action
-        //   over planning."` @287916942 and `q3S = "Be concise: lead with the
-        //   result, skip preamble and narration, keep only what the user
-        //   needs."` @287918225). `Explanatory` and `Learning` carry none.
-        // * The port ships exactly `Explanatory` and `Learning`
-        //   (`outputstyles::registry`) — neither of the two styles that have a
-        //   `turnReminder`.
-        // * A DISK style cannot supply one either: the whole binary has six
-        //   `turnReminder` occurrences (V8 string table, the two built-ins, the
-        //   producer `s3T` @296531424/439 and the renderer @296737701) and none
-        //   of them is a frontmatter key.
+        // This file used to argue at length that the fallback was the ONLY
+        // reachable arm, because the two styles carrying a `turnReminder`
+        // (`Proactive`, `Concise`) were not ported. They are now, so the arm is
+        // live and the style's own sentence wins.
         //
-        // So every style this port can resolve renders the fallback sentence,
-        // byte-for-byte. Should the Proactive/Concise built-ins ever be ported,
-        // `ResolvedOutputStyle` needs a `turn_reminder` field carrying `j3S`/
-        // `q3S` and this format string must prefer it.
+        // A DISK or PLUGIN style still renders the fallback: `turnReminder` is
+        // not a frontmatter key upstream, so a file cannot supply one — see
+        // `ResolvedOutputStyle::turn_reminder`.
+        let reminder = resolved.turn_reminder.unwrap_or(
+            "Remember to follow the specific guidelines for this style.",
+        );
         let content = format!(
-            "<system-reminder>\n{} output style is active. \
-             Remember to follow the specific guidelines for this style.\n</system-reminder>",
+            "<system-reminder>\n{} output style is active. {reminder}\n</system-reminder>",
             crate::prompt::sanitize::escape_reminder_text(name)
         );
         Some(ConversationMessage::user_meta(MessageId::new(), content))

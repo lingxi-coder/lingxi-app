@@ -206,12 +206,86 @@ async fn the_listing_contains_default_plus_every_builtin() {
     let listing = orch.output_styles().await.expect("a listing");
     assert_eq!(listing.current, "Learning");
     let names: Vec<&str> = listing.styles.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, vec!["default", "Explanatory", "Learning"]);
+    // Upstream table order, `default` first.
+    assert_eq!(
+        names,
+        vec!["default", "Proactive", "Concise", "Explanatory", "Learning"]
+    );
     assert!(
         listing.styles[0].1.is_none(),
         "`default` carries no description upstream"
     );
     assert!(listing.styles[1].1.is_some());
+}
+
+/// A style that carries its own `turnReminder` must render THAT sentence, not
+/// the generic fallback. This arm was unreachable until `Proactive` and
+/// `Concise` were ported, and the file used to argue at length that it always
+/// would be.
+#[tokio::test]
+async fn a_style_with_its_own_turn_reminder_renders_it_instead_of_the_fallback() {
+    for (style, sentence) in [
+        (
+            "Proactive",
+            "Execute autonomously, minimize interruptions, prefer action over planning.",
+        ),
+        (
+            "Concise",
+            "Be concise: lead with the result, skip preamble and narration, keep only what the user needs.",
+        ),
+    ] {
+        let orch = orch_with(config_with_style(style));
+        let msg = orch
+            .output_style_reminder_message()
+            .await
+            .expect("a non-default style reminds every turn");
+        assert_eq!(
+            text_of(&msg),
+            format!("<system-reminder>\n{style} output style is active. {sentence}\n</system-reminder>")
+        );
+    }
+}
+
+/// …and a style that carries none keeps the generic sentence, so adding the
+/// field did not quietly change what `Explanatory` / `Learning` send.
+#[tokio::test]
+async fn a_style_without_one_keeps_the_generic_reminder() {
+    let orch = orch_with(config_with_style("Explanatory"));
+    assert_eq!(
+        text_of(&orch.output_style_reminder_message().await.expect("reminder")),
+        EXPLANATORY_REMINDER
+    );
+}
+
+/// The two new builtins have to be real styles, not just names in a listing:
+/// selecting one must put its verbatim body into the system prompt.
+#[tokio::test]
+async fn the_new_builtins_resolve_to_their_verbatim_bodies() {
+    for (style, opening, heading) in [
+        (
+            "Proactive",
+            "You should work proactively and autonomously",
+            "# Proactive Style Active",
+        ),
+        (
+            "Concise",
+            "Keep your responses short and direct",
+            "# Concise Style Active",
+        ),
+    ] {
+        let orch = orch_with(config_with_style(style));
+        let resolved = orch
+            .resolve_active_output_style()
+            .await
+            .unwrap_or_else(|| panic!("{style} must resolve"));
+        assert_eq!(resolved.name, style);
+        assert!(resolved.prompt.contains(opening), "{style}: preamble");
+        assert!(resolved.prompt.contains(heading), "{style}: heading");
+        assert!(
+            resolved.keep_coding_instructions,
+            "{style}: keepCodingInstructions is true for every builtin"
+        );
+    }
 }
 
 // ----- batched driver (`run_turn` / `execute_one_turn`) -----

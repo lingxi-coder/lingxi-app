@@ -471,7 +471,7 @@ async fn live_orchestrator_prompt_uses_production_context() {
     );
 }
 
-/// Byte lock for the two builtin output-style bodies. Its lengths and
+/// Byte lock for the four builtin output-style bodies. Its lengths and
 /// digests share the PROVENANCE block above
 /// `production_prompt_bodies_match_their_byte_locks` — read it
 /// before changing a number here, and record WHY the number moved.
@@ -481,6 +481,17 @@ fn production_output_style_bodies_match_their_byte_locks() {
     let cwd = temp.path().canonicalize().expect("physical cwd");
     let memory_dir = cwd.join(".lingxi/projects/oracle/memory");
     let cases = [
+        // cc2.1.270 built-ins this port had never shipped.
+        (
+            "Proactive",
+            10_455,
+            "42f817633fe318b5411275733e670555b0508c3894b4d5c3742b14a8b37fc460",
+        ),
+        (
+            "Concise",
+            10_472,
+            "ae01b874c2384a31c722f5661db14c4eac3d26ed2cd219af6677c55051edd7eb",
+        ),
         (
             "Explanatory",
             10_312,

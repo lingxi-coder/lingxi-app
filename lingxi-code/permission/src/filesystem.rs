@@ -436,17 +436,32 @@ fn posix_relative(base: &Path, target: &Path) -> String {
     parts.join("/")
 }
 
+/// Outcome of testing ONE gitignore-style permission rule pattern against a
+/// path — the per-pattern half of claude-code's per-source `ignore` matcher.
+///
+/// claude-code compiles every rule of one settings source into a SINGLE
+/// `ignore` matcher (`Zr`, `permissions.ts`), so a `!`-prefixed pattern is a
+/// gitignore NEGATION: it does not produce a match of its own, it cancels an
+/// earlier match from that same source. Reporting the polarity separately lets
+/// the caller replay that state machine over the source's rules — see
+/// [`crate::policy`]'s `decide_in_source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RulePatternMatch {
+    /// The pattern does not cover this path.
+    NoMatch,
+    /// The pattern covers this path and is an ordinary (positive) rule.
+    Match,
+    /// The pattern covers this path and is `!`-negated — it CANCELS an earlier
+    /// match from the same settings source rather than producing one.
+    Negated,
+}
+
 /// Test whether `input_path` (a tool's raw path arg) matches a single rule
 /// `pattern` tagged with `source` — the per-rule slice of claude-code
-/// `matchingRuleForInput`.
-///
-/// 1. Expand the input path to an absolute, normalized path.
-/// 2. Resolve the pattern's `(relativePattern, root)` via [`pattern_with_root`]
-///    (`None` root ⇒ cwd, mirroring `root ?? getCwd()`).
-/// 3. Compute the path relative to that root; bail if it escapes the root
-///    (`..`-prefixed) or is empty (claude-code skips both).
-/// 4. Strip a trailing `/**` (the `ignore` lib treats `path` as matching the
-///    path AND everything inside it) and gitignore-test the relative path.
+/// `matchingRuleForInput`. Ignores gitignore negation: a `!`-prefixed pattern
+/// reports `false`, which is what a caller that cannot see the rest of its
+/// settings source must assume. Source-aware callers use
+/// [`test_rule_pattern`].
 #[must_use]
 pub fn path_matches_rule_pattern(
     input_path: &str,
@@ -455,6 +470,46 @@ pub fn path_matches_rule_pattern(
     behavior: crate::rule::PermissionBehavior,
     roots: &FsRoots,
 ) -> bool {
+    matches!(
+        test_rule_pattern(input_path, pattern, source, behavior, roots),
+        RulePatternMatch::Match
+    )
+}
+
+/// Test `pattern` against `input_path`, reporting gitignore negation polarity —
+/// the per-rule slice of claude-code `matchingRuleForInput`.
+///
+/// 1. Expand the input path to an absolute, normalized path.
+/// 2. Resolve the pattern's `(relativePattern, root)` via [`pattern_with_root`]
+///    (`None` root ⇒ cwd, mirroring `root ?? getCwd()`).
+/// 3. Compute the path relative to that root; bail if it escapes the root
+///    (`..`-prefixed) or is empty (claude-code skips both).
+/// 4. Strip a trailing `/**` (the `ignore` lib treats `path` as matching the
+///    path AND everything inside it) and gitignore-test the relative path.
+/// 5. Split off a leading `!` (claude-code hands the `!`-prefixed pattern to
+///    `ignore` verbatim and lets the library apply gitignore negation) and
+///    report it as [`RulePatternMatch::Negated`].
+///
+/// A BARE `!` — nothing but whitespace after it — is dropped outright, matching
+/// `Ki`'s `/^!\s*$/` guard ("a negation of every path"). ⚠️ `Ki` applies that
+/// guard only to non-allow rules; for an ALLOW rule upstream keeps the bare `!`
+/// and hands it to `ignore`, where it is a negation over the allow matcher.
+/// Dropping it on both sides can only make this port refuse where upstream
+/// might allow, which is the safe direction, and the alternative depends on
+/// npm-`ignore`'s behaviour for an empty pattern body — not something to guess.
+///
+/// ⚠️ The negation is resolved on the pattern AFTER [`pattern_with_root`], not
+/// before: `!` is not one of the root sigils (`/`, `~/`, `./`), so a
+/// `!`-prefixed pattern is always rooted at the cwd upstream too. Stripping the
+/// `!` first would silently re-root `!/abs/path` at `/abs`.
+#[must_use]
+pub fn test_rule_pattern(
+    input_path: &str,
+    pattern: &str,
+    source: PermissionRuleSource,
+    behavior: crate::rule::PermissionBehavior,
+    roots: &FsRoots,
+) -> RulePatternMatch {
     let file_abs = expand_path(input_path, roots);
     let (rel_pattern, root_opt) = pattern_with_root(pattern, source, roots);
     let effective_root = root_opt.unwrap_or_else(|| roots.cwd.clone());
@@ -467,7 +522,7 @@ pub fn path_matches_rule_pattern(
         // `"/.."` (which carries a `ParentDir` component) from reaching the
         // builder, and the outcome is unchanged (TS's `ig.test("..")` also
         // yields no match for any real glob).
-        return false;
+        return RulePatternMatch::NoMatch;
     }
 
     // Port of the oracle's `FTm` (matchingRuleForInput's pattern rewrite):
@@ -518,14 +573,32 @@ pub fn path_matches_rule_pattern(
     // ourselves (above) — rather than handing the absolute path to the builder
     // — avoids the `ignore` crate's prefix-strip mis-matching paths that sit
     // OUTSIDE the root (it would otherwise glob-test the unstripped absolute).
+    // Split the gitignore negation off LAST, once `pattern_with_root` and the
+    // `/**` rewrite have both run on the `!`-prefixed spelling (claude-code's
+    // `Xn` keeps a `/^[!#]/` remainder unanchored for exactly this reason).
+    let (stripped, negated) = match stripped.strip_prefix('!') {
+        // `Ki`: a bare `!` is "a negation of every path" and is dropped.
+        Some(rest) if rest.trim().is_empty() => return RulePatternMatch::NoMatch,
+        Some(rest) => (rest, true),
+        None => (stripped, false),
+    };
+
     let gitignore = cached_gitignore(stripped);
     let Some(gitignore) = gitignore.as_ref() else {
-        return false;
+        return RulePatternMatch::NoMatch;
     };
     let target = Path::new("/").join(&rel_str);
-    gitignore
+    if !gitignore
         .matched_path_or_any_parents(&target, false)
         .is_ignore()
+    {
+        return RulePatternMatch::NoMatch;
+    }
+    if negated {
+        RulePatternMatch::Negated
+    } else {
+        RulePatternMatch::Match
+    }
 }
 
 fn cached_gitignore(pattern: &str) -> Option<std::sync::Arc<ignore::gitignore::Gitignore>> {
@@ -1348,5 +1421,100 @@ mod tests {
             !path_in_allowed_working_path(&cycle, &[workspace], &roots),
             "an unresolvable target path must keep fail-closed behavior"
         );
+    }
+
+    // ---- HP-7: gitignore `!` negation in permission rule patterns ----------
+
+    fn kind_of(input: &str, pattern: &str, source: PermissionRuleSource) -> RulePatternMatch {
+        test_rule_pattern(
+            input,
+            pattern,
+            source,
+            crate::rule::PermissionBehavior::Deny,
+            &roots(),
+        )
+    }
+
+    #[test]
+    fn a_negated_pattern_reports_its_polarity_instead_of_a_match() {
+        // claude-code hands `!src/public/**` to the `ignore` library verbatim,
+        // where it is a gitignore NEGATION over that source's matcher. The
+        // pattern still has to COVER the path — it just cancels instead of
+        // matching.
+        assert_eq!(
+            kind_of(
+                "/proj/src/public/index.html",
+                "!src/public/**",
+                PermissionRuleSource::ProjectSettings
+            ),
+            RulePatternMatch::Negated
+        );
+        // A path the negation does not cover is simply unmatched.
+        assert_eq!(
+            kind_of(
+                "/proj/src/secret.rs",
+                "!src/public/**",
+                PermissionRuleSource::ProjectSettings
+            ),
+            RulePatternMatch::NoMatch
+        );
+        // The source-blind wrapper keeps the conservative answer: a caller that
+        // cannot see the rest of the settings source must not read a negation
+        // as a match.
+        assert!(!path_matches_rule_pattern(
+            "/proj/src/public/index.html",
+            "!src/public/**",
+            PermissionRuleSource::ProjectSettings,
+            crate::rule::PermissionBehavior::Deny,
+            &roots(),
+        ));
+    }
+
+    #[test]
+    fn a_negation_is_rooted_at_the_cwd_because_the_bang_hides_the_root_sigil() {
+        // `!` is not one of `$We`'s root sigils (`/`, `~/`, `./`), so upstream
+        // resolves a `!`-prefixed pattern against the CWD — even when the text
+        // after the `!` looks absolute. Stripping the `!` before the root
+        // resolution would silently re-root this at `/etc` and let a project
+        // file un-deny `/etc/passwd`.
+        assert_eq!(
+            kind_of(
+                "/etc/passwd",
+                "!/etc/**",
+                PermissionRuleSource::ProjectSettings
+            ),
+            RulePatternMatch::NoMatch
+        );
+        // Same spelling under the cwd DOES resolve — proving the assertion
+        // above is about the ROOT, not about the pattern failing to compile.
+        assert_eq!(
+            kind_of(
+                "/proj/etc/passwd",
+                "!/etc/**",
+                PermissionRuleSource::ProjectSettings
+            ),
+            RulePatternMatch::Negated
+        );
+    }
+
+    #[test]
+    fn a_bare_bang_covers_nothing() {
+        // `Ki`'s `/^!\s*$/` guard: "a negation of every path" is dropped.
+        // ⚠️ This pins BEHAVIOUR, not the guard — with the explicit early
+        // return removed the `ignore` crate also treats the empty remainder as
+        // a blank line and matches nothing, so seeding the guard away does not
+        // redden this. The guard is kept because it states the oracle's rule
+        // rather than leaning on a third-party blank-line convention.
+        for pattern in ["!", "!  "] {
+            assert_eq!(
+                kind_of(
+                    "/proj/src/main.rs",
+                    pattern,
+                    PermissionRuleSource::ProjectSettings
+                ),
+                RulePatternMatch::NoMatch,
+                "bare {pattern:?} must not cover anything"
+            );
+        }
     }
 }

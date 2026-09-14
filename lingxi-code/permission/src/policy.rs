@@ -8,8 +8,8 @@ use crate::auto_edit_safety::{check_path_safety_for_auto_edit, AutoEditSafety};
 use crate::defaults_per_tool::tool_default;
 use crate::denial_tracking::DenialTrackingState;
 use crate::filesystem::{
-    file_tool_kind, input_path_for_tool, path_in_allowed_working_path, path_matches_rule_pattern,
-    FileToolKind, FsRoots,
+    file_tool_kind, input_path_for_tool, path_in_allowed_working_path, test_rule_pattern,
+    FileToolKind, FsRoots, RulePatternMatch,
 };
 use crate::gate::PromptDefault;
 use crate::mode::PermissionMode;
@@ -1549,9 +1549,12 @@ impl PermissionPolicy {
         } else {
             for src in &sources {
                 if let Some(rules) = self.allow_rules.get(src) {
-                    if let Some(rule) = rules.iter().find(|r| {
-                        self.rule_is_available_in_mode(r, mode)
-                            && self.rule_matches(r, tool_name, input)
+                    if let Some(rule) = decide_in_source(rules, |r| {
+                        if self.rule_is_available_in_mode(r, mode) {
+                            self.rule_match_kind(r, tool_name, input)
+                        } else {
+                            RulePatternMatch::NoMatch
+                        }
                     }) {
                         return allow_with_rule(rule);
                     }
@@ -1867,23 +1870,38 @@ impl PermissionPolicy {
     ///     DENY rule never blocks a read (claude-code `checkRead` only consults
     ///     `read` deny rules) — the `behavior == Allow` clause enforces this
     ///     because deny rules are only ever evaluated from the deny bucket.
+    /// `rule_matches` for the callers that cannot see the rest of the settings
+    /// source, and therefore cannot honour a gitignore negation: a `!`-negated
+    /// rule reports "no match".
     fn rule_matches(
         &self,
         rule: &PermissionRule,
         tool_name: &str,
         input: &serde_json::Value,
     ) -> bool {
+        matches!(
+            self.rule_match_kind(rule, tool_name, input),
+            RulePatternMatch::Match
+        )
+    }
+
+    fn rule_match_kind(
+        &self,
+        rule: &PermissionRule,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> RulePatternMatch {
         let Some(roots) = self.roots.as_ref() else {
             // No roots → phase-2: file/shell content is ignored (matched
             // tool-wide). Tool-wide rules (`rule_content == None`) honor the
             // MCP server-level prefix match (PERM.2, claude-code
             // `toolMatchesRule`); content rules keep the phase-2 exact
             // tool-name match.
-            return if rule.value.rule_content.is_none() {
+            return kind(if rule.value.rule_content.is_none() {
                 tool_wide_name_matches_opts(&rule.value.tool_name, tool_name, rule_uses_glob(rule))
             } else {
                 rule.value.tool_name == tool_name
-            };
+            });
         };
         let Some(pattern) = rule.value.rule_content.as_deref() else {
             // PERM.2 — tool-wide rule → tool-name match, INCLUDING the MCP
@@ -1892,11 +1910,11 @@ impl PermissionPolicy {
             // matches all of that server's tools). GLOB-01: DENY/ASK rules also
             // glob-match (`h8`/`kqe` pass `globMatching:!0`); ALLOW rules do not
             // (`nes` default opts).
-            return tool_wide_name_matches_opts(
+            return kind(tool_wide_name_matches_opts(
                 &rule.value.tool_name,
                 tool_name,
                 rule_uses_glob(rule),
-            );
+            ));
         };
         // GENFIELD-01: generic `field:pattern` content matcher (claude-code
         // `Mjr`), used by the DENY and ASK content walks ONLY (`Mjr(o,e,t,"deny")`
@@ -1913,7 +1931,7 @@ impl PermissionPolicy {
                 if Some(field) != tool_rule_content_field(tool_name) {
                     if let Some(value) = input.get(field).and_then(stringify_primitive) {
                         if glob_name_matches(pat, value.trim()) {
-                            return true;
+                            return RulePatternMatch::Match;
                         }
                     }
                 }
@@ -1927,9 +1945,9 @@ impl PermissionPolicy {
                 // path. Other non-file tools keep tool-wide matching.
                 if shell_command::is_shell_tool(tool_name) && rule.value.tool_name == tool_name {
                     let Some(command) = shell_command::command_from_input(input) else {
-                        return false;
+                        return RulePatternMatch::NoMatch;
                     };
-                    return shell_command::rule_matches_any_subcommand(pattern, command);
+                    return kind(shell_command::rule_matches_any_subcommand(pattern, command));
                 }
                 // PERM.3 — other NON-file tools: a CONTENT rule applies ONLY when
                 // the rule's content equals the tool-specific content key derived
@@ -1940,19 +1958,19 @@ impl PermissionPolicy {
                 // match on content (fail-safe, so an over-broad rule cannot deny
                 // unrelated calls).
                 if rule.value.tool_name != tool_name {
-                    return false;
+                    return RulePatternMatch::NoMatch;
                 }
                 let Some(key) = tool_content_key(tool_name, input) else {
-                    return false;
+                    return RulePatternMatch::NoMatch;
                 };
                 // WebFetch `domain:` rules support normalization + wildcards
                 // (claude-code `y$n`/`v$a`/`bRp`, #31); other content tools
                 // (Agent) stay raw-equality.
-                return if tool_name == "WebFetch" {
+                return kind(if tool_name == "WebFetch" {
                     domain_rule_matches(pattern, &key)
                 } else {
                     key == pattern
-                };
+                });
             }
             FileToolKind::Editor => rule.value.tool_name == "Edit",
             FileToolKind::Reader => {
@@ -1962,12 +1980,15 @@ impl PermissionPolicy {
             }
         };
         if !group_ok {
-            return false;
+            return RulePatternMatch::NoMatch;
         }
         let Some(path) = input_path_for_tool(tool_name, input, roots) else {
-            return false;
+            return RulePatternMatch::NoMatch;
         };
-        path_matches_rule_pattern(&path, pattern, rule.source, rule.behavior, roots)
+        // The polarity is carried OUT of this function, not collapsed here: a
+        // `!`-negated rule cancels an earlier match from the same settings
+        // source, which only `decide_in_source` can see.
+        test_rule_pattern(&path, pattern, rule.source, rule.behavior, roots)
     }
 
     fn rule_is_available_in_mode(&self, rule: &PermissionRule, mode: PermissionMode) -> bool {
@@ -1995,9 +2016,12 @@ impl PermissionPolicy {
     ) -> Option<&'a PermissionRule> {
         for src in sources {
             if let Some(rules) = bucket.get(src) {
-                if let Some(rule) = rules.iter().find(|r| {
-                    r.value.rule_content.is_some() == content
-                        && self.rule_matches(r, tool_name, input)
+                if let Some(rule) = decide_in_source(rules, |r| {
+                    if r.value.rule_content.is_some() == content {
+                        self.rule_match_kind(r, tool_name, input)
+                    } else {
+                        RulePatternMatch::NoMatch
+                    }
                 }) {
                     return Some(rule);
                 }
@@ -2392,26 +2416,26 @@ impl PermissionPolicy {
                 let Some(rules) = self.deny_rules.get(src) else {
                     continue;
                 };
-                for rule in rules {
+                if let Some(rule) = decide_in_source(rules, |rule| {
                     if rule.value.tool_name != rule_tool {
-                        continue;
+                        return RulePatternMatch::NoMatch;
                     }
                     let Some(pattern) = rule.value.rule_content.as_deref() else {
-                        continue;
+                        return RulePatternMatch::NoMatch;
                     };
-                    if path_matches_rule_pattern(
+                    test_rule_pattern(
                         &target.resolved,
                         pattern,
                         rule.source,
                         rule.behavior,
                         roots,
-                    ) {
-                        return Some(PermissionResult::Deny {
-                            reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
-                            explanation: Some(target.blocked_message.clone()),
-                            metadata: PermissionMetadata::default(),
-                        });
-                    }
+                    )
+                }) {
+                    return Some(PermissionResult::Deny {
+                        reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+                        explanation: Some(target.blocked_message.clone()),
+                        metadata: PermissionMetadata::default(),
+                    });
                 }
             }
         }
@@ -2429,28 +2453,22 @@ impl PermissionPolicy {
                 let Some(rules) = self.deny_rules.get(src) else {
                     continue;
                 };
-                for rule in rules {
+                if let Some(rule) = decide_in_source(rules, |rule| {
                     if rule.value.tool_name != "Edit" {
-                        continue;
+                        return RulePatternMatch::NoMatch;
                     }
                     let Some(pattern) = rule.value.rule_content.as_deref() else {
-                        continue;
+                        return RulePatternMatch::NoMatch;
                     };
-                    if path_matches_rule_pattern(
-                        &target,
-                        pattern,
-                        rule.source,
-                        rule.behavior,
-                        roots,
-                    ) {
-                        return Some(PermissionResult::Deny {
-                            reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
-                            explanation: Some(format!(
-                                "Output redirection to '{target}' was blocked by a deny rule."
-                            )),
-                            metadata: PermissionMetadata::default(),
-                        });
-                    }
+                    test_rule_pattern(&target, pattern, rule.source, rule.behavior, roots)
+                }) {
+                    return Some(PermissionResult::Deny {
+                        reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+                        explanation: Some(format!(
+                            "Output redirection to '{target}' was blocked by a deny rule."
+                        )),
+                        metadata: PermissionMetadata::default(),
+                    });
                 }
             }
         }
@@ -2468,28 +2486,22 @@ impl PermissionPolicy {
                 let Some(rules) = self.deny_rules.get(src) else {
                     continue;
                 };
-                for rule in rules {
+                if let Some(rule) = decide_in_source(rules, |rule| {
                     if rule.value.tool_name != "Read" {
-                        continue;
+                        return RulePatternMatch::NoMatch;
                     }
                     let Some(pattern) = rule.value.rule_content.as_deref() else {
-                        continue;
+                        return RulePatternMatch::NoMatch;
                     };
-                    if path_matches_rule_pattern(
-                        &target,
-                        pattern,
-                        rule.source,
-                        rule.behavior,
-                        roots,
-                    ) {
-                        return Some(PermissionResult::Deny {
-                            reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
-                            explanation: Some(format!(
-                                "Input redirection from '{target}' was blocked by a deny rule."
-                            )),
-                            metadata: PermissionMetadata::default(),
-                        });
-                    }
+                    test_rule_pattern(&target, pattern, rule.source, rule.behavior, roots)
+                }) {
+                    return Some(PermissionResult::Deny {
+                        reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+                        explanation: Some(format!(
+                            "Input redirection from '{target}' was blocked by a deny rule."
+                        )),
+                        metadata: PermissionMetadata::default(),
+                    });
                 }
             }
         }
@@ -2507,7 +2519,7 @@ impl PermissionPolicy {
     /// (1) a TOOL-WIDE Read deny rule from a source NOT in
     /// `$$y = {toolsNarrowing, cliArg, command}` (`toolsNarrowing` is unported),
     /// OR (2) a read/deny CONTENT rule covering the resolved path
-    /// ([`path_matches_rule_pattern`] handles the raw+resolved `Yy` variants).
+    /// ([`test_rule_pattern`] handles the raw+resolved `Yy` variants).
     /// Roots-gated (returns `false` without roots).
     fn edit_covered_by_read_deny(&self, tool_name: &str, input: &serde_json::Value) -> bool {
         let Some(roots) = self.roots.as_ref() else {
@@ -2538,16 +2550,18 @@ impl PermissionPolicy {
             let Some(rules) = self.deny_rules.get(&src) else {
                 continue;
             };
-            for rule in rules {
+            if decide_in_source(rules, |rule| {
                 if rule.value.tool_name != "Read" {
-                    continue;
+                    return RulePatternMatch::NoMatch;
                 }
                 let Some(pattern) = rule.value.rule_content.as_deref() else {
-                    continue;
+                    return RulePatternMatch::NoMatch;
                 };
-                if path_matches_rule_pattern(&path, pattern, rule.source, rule.behavior, roots) {
-                    return true;
-                }
+                test_rule_pattern(&path, pattern, rule.source, rule.behavior, roots)
+            })
+            .is_some()
+            {
+                return true;
             }
         }
         false
@@ -3166,6 +3180,76 @@ fn url_hostname(url: &str) -> Option<String> {
 /// wildcard match. (`y$n`'s exact-over-wildcard PRECEDENCE across a bucket is a
 /// separate, finer nuance handled at the rule-walk level; this is the per-rule
 /// predicate.)
+/// Lift a plain boolean match into a [`RulePatternMatch`]. Only file-path rule
+/// CONTENT carries gitignore negation, so every other rule kind is `Match` or
+/// `NoMatch`.
+fn kind(matched: bool) -> RulePatternMatch {
+    if matched {
+        RulePatternMatch::Match
+    } else {
+        RulePatternMatch::NoMatch
+    }
+}
+
+/// Which rule of ONE settings source decides this call — claude-code's
+/// per-source `ignore` matcher (`Zr`, `permissions.ts`), replayed rule by rule.
+///
+/// claude-code compiles all of a source's rules into a single `ignore` matcher
+/// and reads back `{ignored, rule}`. npm `ignore` evaluates a pattern only when
+/// it could FLIP the current state (`if (unignored === negative && ignored !==
+/// unignored) return`), so:
+///
+/// - the first positive match wins and later positive patterns are skipped —
+///   which is exactly the "first match in the source" walk this port already
+///   did, so a rule set with no `!` behaves bit-for-bit as before;
+/// - a `!`-negated pattern is evaluated only while the source is in the
+///   "matched" state, and cancels it — the source then yields NOTHING and the
+///   walk falls through to the next (lower-priority) source, so a negation
+///   never reaches across settings sources;
+/// - a positive pattern AFTER a negation can match again and re-establish the
+///   decision.
+///
+/// `kind_of` is the per-rule test; rules it reports `NoMatch` for (wrong tool,
+/// wrong tier, non-matching path) never touch the state.
+///
+/// ⚠️ Divergence, recorded rather than hidden: gitignore's "a file cannot be
+/// re-included once a parent DIRECTORY is excluded" rule is a property of the
+/// combined matcher. This port tests each pattern separately (each already via
+/// `matched_path_or_any_parents`), so a `!` can re-include under an excluded
+/// parent where upstream would not. That direction is permissive, and it only
+/// fires for a rule set that spells both halves.
+fn decide_in_source<'a>(
+    rules: impl IntoIterator<Item = &'a PermissionRule>,
+    mut kind_of: impl FnMut(&'a PermissionRule) -> RulePatternMatch,
+) -> Option<&'a PermissionRule> {
+    // `None` = nothing has matched yet; `Some(true)` = matched; `Some(false)` =
+    // a negation cancelled the match (npm `ignore`'s `ignored`/`unignored` pair).
+    let mut state: Option<bool> = None;
+    let mut matched: Option<&'a PermissionRule> = None;
+    for rule in rules {
+        match kind_of(rule) {
+            RulePatternMatch::NoMatch => {}
+            RulePatternMatch::Match => {
+                if state != Some(true) {
+                    state = Some(true);
+                    matched = Some(rule);
+                }
+            }
+            RulePatternMatch::Negated => {
+                if state != Some(false) {
+                    state = Some(false);
+                    matched = Some(rule);
+                }
+            }
+        }
+    }
+    if state == Some(true) {
+        matched
+    } else {
+        None
+    }
+}
+
 fn domain_rule_matches(pattern: &str, key: &str) -> bool {
     if pattern == key {
         return true;

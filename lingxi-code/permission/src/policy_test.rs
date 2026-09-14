@@ -4940,4 +4940,162 @@ mod tests {
             "a confined session must still honour deny rules"
         );
     }
+
+    // ---- HP-7: `!`-negated rules carve exceptions WITHIN one source --------
+
+    /// A policy whose rules come from one or more named settings sources, in
+    /// the order given. Rule ORDER inside a source is the whole point here:
+    /// claude-code compiles a source's patterns into a single `ignore` matcher,
+    /// where a later `!` cancels an earlier pattern.
+    fn policy_from(layers: &[(PermissionRuleSource, &str)]) -> PermissionPolicy {
+        let mut rules = Vec::new();
+        for (source, raw) in layers {
+            rules.extend(
+                crate::loader::permission_rules_from_settings_json(raw, *source)
+                    .expect("settings fixture parses"),
+            );
+        }
+        PermissionPolicy::from_rules_confined(PermissionMode::Default, rules, false).with_roots(
+            crate::filesystem::FsRoots {
+                cwd: std::path::PathBuf::from("/proj"),
+                home: Some(std::path::PathBuf::from("/home/u")),
+                lingxi_home: std::path::PathBuf::from("/home/u/.lingxi"),
+            },
+        )
+    }
+
+    fn denies(policy: &PermissionPolicy, path: &str) -> bool {
+        matches!(
+            policy.authorize("Read", &read(path)),
+            PermissionResult::Deny { .. }
+        )
+    }
+
+    #[test]
+    fn a_negation_carves_an_exception_out_of_a_deny_in_the_same_source() {
+        let policy = policy_from(&[(
+            PermissionRuleSource::ProjectSettings,
+            r#"{"permissions":{"deny":["Read(src/**)","Read(!src/public/**)"]}}"#,
+        )]);
+        assert!(
+            denies(&policy, "/proj/src/secret.rs"),
+            "the broad deny must still bind outside the exception"
+        );
+        assert!(
+            !denies(&policy, "/proj/src/public/index.html"),
+            "`Read(!src/public/**)` must cancel the deny it follows"
+        );
+    }
+
+    #[test]
+    fn a_positive_rule_after_a_negation_denies_again() {
+        // gitignore order semantics: the state can flip back. `ignore` only
+        // evaluates a pattern that could change the current verdict, so this is
+        // the third flip in one source.
+        let policy = policy_from(&[(
+            PermissionRuleSource::ProjectSettings,
+            r#"{"permissions":{"deny":[
+                "Read(src/**)",
+                "Read(!src/public/**)",
+                "Read(src/public/keys/**)"
+            ]}}"#,
+        )]);
+        assert!(denies(&policy, "/proj/src/secret.rs"));
+        assert!(!denies(&policy, "/proj/src/public/index.html"));
+        assert!(
+            denies(&policy, "/proj/src/public/keys/id_rsa"),
+            "a positive pattern after the negation must re-establish the deny"
+        );
+    }
+
+    #[test]
+    fn a_negation_does_not_reach_into_another_settings_source() {
+        // Upstream buckets DENY rules per source (`ee = L ? null : D.source`)
+        // and walks one matcher per source, so a negation is scoped to the file
+        // that spells it. Both directions matter.
+        let user_denies = policy_from(&[
+            (
+                PermissionRuleSource::UserSettings,
+                r#"{"permissions":{"deny":["Read(src/**)"]}}"#,
+            ),
+            (
+                PermissionRuleSource::ProjectSettings,
+                r#"{"permissions":{"deny":["Read(!src/public/**)"]}}"#,
+            ),
+        ]);
+        assert!(
+            denies(&user_denies, "/proj/src/public/index.html"),
+            "a project-level `!` must not cancel a USER-level deny"
+        );
+
+        let user_negates = policy_from(&[
+            (
+                PermissionRuleSource::UserSettings,
+                r#"{"permissions":{"deny":["Read(!src/public/**)"]}}"#,
+            ),
+            (
+                PermissionRuleSource::ProjectSettings,
+                r#"{"permissions":{"deny":["Read(src/**)"]}}"#,
+            ),
+        ]);
+        assert!(
+            denies(&user_negates, "/proj/src/public/index.html"),
+            "a user-level `!` must not cancel a PROJECT-level deny either"
+        );
+    }
+
+    #[test]
+    fn a_lone_negation_denies_nothing() {
+        let policy = policy_from(&[(
+            PermissionRuleSource::ProjectSettings,
+            r#"{"permissions":{"deny":["Read(!src/**)"]}}"#,
+        )]);
+        assert!(
+            !denies(&policy, "/proj/src/main.rs"),
+            "a negation with nothing to cancel must not become a deny"
+        );
+        // Not vacuous: the same harness DOES deny when the pattern is positive.
+        let positive = policy_from(&[(
+            PermissionRuleSource::ProjectSettings,
+            r#"{"permissions":{"deny":["Read(src/**)"]}}"#,
+        )]);
+        assert!(denies(&positive, "/proj/src/main.rs"));
+    }
+
+    #[test]
+    fn a_bare_bang_rule_denies_nothing_and_cancels_nothing() {
+        let policy = policy_from(&[(
+            PermissionRuleSource::ProjectSettings,
+            r#"{"permissions":{"deny":["Read(src/**)","Read(!)"]}}"#,
+        )]);
+        assert!(
+            denies(&policy, "/proj/src/main.rs"),
+            "`Ki` drops a bare `!` (\"a negation of every path\"); it must not \
+             blank out the deny standing next to it"
+        );
+    }
+
+    #[test]
+    fn a_rule_set_without_a_negation_still_reports_its_FIRST_match() {
+        // The per-source state machine must be a no-op for every rule set that
+        // spells no `!`: npm `ignore` skips a positive pattern once the source
+        // is already in the matched state, so the rule NAMED in the decision
+        // stays the first one — which is what this port reported before HP-7
+        // and what every existing expectation is written against.
+        let policy = policy_from(&[(
+            PermissionRuleSource::ProjectSettings,
+            r#"{"permissions":{"deny":["Read(src/**)","Read(src/main.rs)"]}}"#,
+        )]);
+        match policy.authorize("Read", &read("/proj/src/main.rs")) {
+            PermissionResult::Deny {
+                reason: PermissionDecisionReason::MatchedRule { rule },
+                ..
+            } => assert_eq!(
+                rule.value.rule_content.as_deref(),
+                Some("src/**"),
+                "the first matching rule must remain the one reported"
+            ),
+            other => panic!("expected a rule-matched deny, got {other:?}"),
+        }
+    }
 }

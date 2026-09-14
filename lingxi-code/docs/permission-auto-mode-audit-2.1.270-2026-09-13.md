@@ -465,6 +465,76 @@ largest: it needs a session-level auto-active latch AND `prePlanMode`, neither o
 which this port has — plan exit here does not return to the pre-plan mode at all,
 so the latch has nowhere to live yet.
 
+---
+
+## 8. The classifier's OTHER consumer: the subagent handoff review
+
+`dKo` is not the only caller of the two-stage classifier. `EZe` is the second,
+reached from the subagent-completion paths:
+
+```js
+async function EZe({agentMessages:e,tools:n,toolPermissionContext:r,…,handback:M}){
+  if(r.mode!=="auto"||M==="send"||M==="flagged")return null;
+  if(M==="withheld")S=void 0;
+  if(!x$n(e,n)&&!S?.trim())return null;
+  let U=await bke(e,A$n(S,{severity:F!==null}),n,r,s,{isSubagentLoop:!0,severityEligible:!0,severitySite:$pr,…});
+  …}
+```
+
+and its verdict is PREPENDED to what the parent model reads:
+`cu.content=[{type:"text",text:xg.warning},...cu.content]`, on both the async-
+and sync-agent completion paths.
+
+⚠️ Scope of that claim: `mode !== "auto"` is `EZe`'s OWN gate, which is the half
+that matters against a port gate that can never open. The two call sites add
+conditions of their own (`if(!pe()){if(F){…}}` on the async path) that this pass
+did NOT resolve — the locals are minified and the names are reused across
+scopes in that chunk. So: every auto-mode handoff is admitted by `EZe`; whether
+every completion reaches `EZe` is unverified.
+
+**In this port it never runs, and the reason recorded in the code is stale on
+both halves.** `tools/agent/src/classifier_handoff.rs` gated everything on
+`feature('TRANSCRIPT_CLASSIFIER')` behind an OFF-by-default env var, and
+documented the result as "a faithful Rust port is a NO-OP on the common path".
+
+1. **The flag no longer exists.** `TRANSCRIPT_CLASSIFIER` is 0 hits across all
+   1697 chunks of 2.1.270. `EZe`'s only gate is `mode !== "auto"` plus the
+   `handback` kind, so every auto-mode handoff is admitted to the review. This
+   is the
+   [[a-graduated-rollout-flag-leaves-the-gate-off-forever]] shape again: the
+   port's gate cannot open, and its tests stay green because they assert the
+   OFF default.
+2. **The classifier it was waiting for is here.** The module calls the
+   two-stage classifier "a LARGE deferred subsystem with no Rust analog"; that
+   is `permission::loop_llm` plus `SessionLoopClassifier`, landed in
+   `af24c7042`. `EZe` calls the same `bke` the tool path calls, differing only
+   in its options.
+3. **It was never wired at all.** `classify_handoff_if_needed` had ZERO call
+   sites repo-wide — the env flag was not even the first thing stopping it.
+
+The copy had drifted too: 2.1.270 spells it `subagent` throughout where the
+port pinned `sub-agent`, the unavailable warning is now a builder
+(`kae(model, httpStatus, errorKind)`) rather than a fixed string, and there is a
+third outcome (`kind:"refused"`) the port did not carry.
+
+Landed here: the module now holds the 2.1.270 copy byte-for-byte — including a
+test that no string says `sub-agent` — the dead flag and the always-`None`
+function are gone, and the module doc states the gap instead of denying it.
+
+**NOT landed: the wiring, which is not contained in one clean crate.** It needs
+
+1. a handoff-shaped classifier seam — `LoopPermissionClassifier` takes
+   `(tool_name, input, host_context, deny_rules)`; a handoff takes the
+   subagent's messages plus its final text;
+2. a path from the agent tool to it — `self.ctx.permission_gate` is a
+   `&dyn PermissionGate` and cannot see `PolicyPermissionGate::loop_classifier_handle`;
+3. the subagent transcript at the completion site, which today holds only the
+   terminal result JSON.
+
+The prepend itself already has its home: `tools/agent/src/agent.rs` builds
+`content_texts` and unshifts the max-turns harness note with
+`content_texts.insert(0, …)`, which is exactly `[{type:"text",text:warning},...content]`.
+
 ## Test state
 
 `permission` + `tool-ui`: **1822 passed / 0 failed** (14 binaries, `--all-features`).

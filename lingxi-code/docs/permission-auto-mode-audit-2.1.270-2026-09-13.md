@@ -745,6 +745,51 @@ Four hazards for whoever does it, each confirmed from two independent records:
    never runs them, so a green JVM run says nothing about whether the catalog
    still resolves.
 
+### 10.1 A trust-gate hole in the same cluster — carry this when you land it
+
+The review pass also found a workspace-trust bypass in that automation work.
+**It is not on main and main is not vulnerable**: every symbol on the path is
+absent from HEAD —
+
+```
+mod cron_native            0 files at HEAD
+set_automation_firer       0
+should_start_native_scheduler  0
+dispatch_automations       0
+NativeCronFirer            0
+cron/src/automation        0
+```
+
+It lives entirely in the unshipped cluster, so there is nothing to fix here and
+nothing was committed for it. It is written down because the fix currently
+exists only in a working-tree copy of an UNTRACKED file, which the recovery ref
+predates — landing the cluster without this would land the hole.
+
+**The defect.** `should_start_native_scheduler` requires only
+`config.host_workspace_trusted.is_none()`, so the native automation firer is
+attached even when the user DECLINED the trust dialog; and `CronScheduler::tick`
+calls `dispatch_automations()` before its own `!session_cron_enabled` early
+return, so that function is reached with no trust gate of its own. Cloning a
+hostile repo that carries `<repo>/.lingxi/scheduled_tasks.json` with an active
+`automation` entry and a due cron then runs the attacker's prompt, with tool
+use, on the first tick — after the user said no.
+
+**The fix, for whoever lands it.** Gate the EXECUTION edge, not the wiring —
+`NativeCronFirer::fire_automation`, before handing the run to the supervisor:
+
+```rust
+if let Some(orchestrator) = self.current.upgrade() {
+    if !orchestrator.workspace_trusted().await {
+        return Err("paused:Trust this workspace before running scheduled tasks".into());
+    }
+}
+```
+
+Gating the wiring instead would be wrong twice over: it cannot see a trust
+decision made mid-session, and it leaves `dispatch_automations`'s own path
+ungated. The `paused:` prefix matches the bridge's `run_scheduled_turn`, so the
+run is RETRIED once trust is granted rather than retired.
+
 ## Test state
 
 `cargo test -p permission --all-features`: **1640 unit + 22 auto-mode-scope + 10

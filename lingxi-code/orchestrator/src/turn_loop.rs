@@ -2256,6 +2256,50 @@ pub(crate) fn goal_cleared_after_error_message(label: &str, condition: &str) -> 
 /// telemetry with the bucket's errorCode, and surface the warning as a SYSTEM
 /// notice — `jBt(text,"warning")`, not an assistant message, so it never enters
 /// the model-facing history.
+/// The retry/pause tiers of oracle `Kps` — what an active goal says about a
+/// turn that ended badly but does not warrant clearing the goal.
+///
+/// Reached only from the `else` arm of `goal_clear_bucket`, so the clear tier
+/// keeps its existing behaviour untouched.
+///
+/// SCOPE (recorded, not an oversight): this announces the PAUSE tier. The retry
+/// tier additionally arms a delayed re-prompt (`X7n(..., delayMs)`), which needs
+/// a goal re-prompt timer this port does not have yet — the goal check-in timer
+/// (`sync_goal_checkin_idle_task`) is the shape to follow. Announcing "retrying
+/// in N min" without that timer would tell the user something untrue, so a
+/// retry-tier cause is currently left silent rather than mis-announced. The
+/// decision layer for it is complete and tested in
+/// [`crate::prompt::goal_interruption`].
+async fn announce_goal_interruption(
+    orch: &ConversationOrchestrator,
+    reason: GoalClearReason<'_>,
+) {
+    use crate::prompt::goal_interruption::{
+        classify_api_error_interruption, GoalInterruption,
+    };
+    let GoalClearReason::ApiError {
+        error_kind,
+        is_transient,
+    } = reason
+    else {
+        return;
+    };
+    // `quotaLimits` (the account's usage cap) and the host's `hasIntent()` wait
+    // have no port analogue yet, so a rate limit reports the burst-limit
+    // sentence. Both refinements only change WHICH pause sentence is shown.
+    let Some(interruption) =
+        classify_api_error_interruption(error_kind, is_transient, false, false)
+    else {
+        return;
+    };
+    let GoalInterruption::Pause(cause) = interruption else {
+        return;
+    };
+    // Same surface as the clear tier: a SYSTEM notice, never an assistant
+    // message, so it does not enter the model-facing history.
+    orch.output.emit_system_notice(cause.text(), false).await;
+}
+
 pub(crate) async fn clear_goal_after_unrecoverable_error(
     orch: &ConversationOrchestrator,
     reason: GoalClearReason<'_>,
@@ -2273,6 +2317,11 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
         return;
     }
     let Some(bucket) = goal_clear_bucket(reason) else {
+        // OR-4 (2.1.269): not every bad turn CLEARS the goal. The two tiers
+        // 2.1.269 added — retry and pause — live here; before them a turn that
+        // failed without qualifying for a clear left the goal silently sitting
+        // there, which is the reported stall.
+        announce_goal_interruption(orch, reason).await;
         return;
     };
     // `t.sessionHooksRegistry.remove(...)` + `cFe(e, …)` + `yield {type:"active_goal",value:void 0}`

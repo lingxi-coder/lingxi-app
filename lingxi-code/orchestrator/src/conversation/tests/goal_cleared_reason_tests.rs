@@ -24,6 +24,36 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
+/// Like [`orch`], but keeps the output stream so a test can read what the user
+/// was actually shown.
+fn orch_with_output(bus: Arc<telemetry::AnalyticsBus>) -> (ConversationOrchestrator, MockOutputStream) {
+    let output = MockOutputStream::new();
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(output.clone()),
+        Arc::new(StaticMemoryProvider::with_files(vec![])),
+        PathBuf::from("/work/repo"),
+    )
+    .with_analytics_bus(bus);
+    (orch, output)
+}
+
+async fn system_notices(output: &MockOutputStream) -> Vec<String> {
+    output
+        .snapshot()
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            platform_api::OutputEvent::SystemNotice { body, .. } => Some(body),
+            _ => None,
+        })
+        .collect()
+}
+
 fn orch(bus: Arc<telemetry::AnalyticsBus>) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -148,4 +178,109 @@ async fn replacing_a_live_goal_reports_superseded() {
         vec!["superseded".to_string()],
         "a goal replaced by a newer one is torn down and must say so"
     );
+}
+
+/// OR-4 (2.1.269) — a turn that failed WITHOUT qualifying for a clear used to
+/// leave the goal silently sitting there. That is the reported stall: the goal
+/// evaluation runs off the Stop hook, a failed turn yields no disposition, and
+/// nothing told the user. The goal now says why it stopped driving.
+#[tokio::test]
+async fn a_rejected_request_pauses_the_goal_out_loud() {
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    let (orch, output) = orch_with_output(bus);
+    set_goal(&orch, "ship the port").await;
+
+    clear_goal_after_unrecoverable_error(
+        &orch,
+        GoalClearReason::ApiError {
+            error_kind: Some("invalid_request"),
+            is_transient: false,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        system_notices(&output).await,
+        vec![
+            "Goal paused · the API rejected the last request · send a message to continue, or run /goal clear"
+                .to_string()
+        ]
+    );
+    // PAUSED, not cleared: the goal stays set so a message resumes it.
+    assert!(
+        orch.session.lock().await.active_goal.is_some(),
+        "a pause must not clear the goal"
+    );
+}
+
+/// A rate limit is its own sentence, and likewise does not clear the goal.
+#[tokio::test]
+async fn a_rate_limit_pauses_with_its_own_sentence() {
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    let (orch, output) = orch_with_output(bus);
+    set_goal(&orch, "ship the port").await;
+
+    clear_goal_after_unrecoverable_error(
+        &orch,
+        GoalClearReason::ApiError {
+            error_kind: Some("rate_limit"),
+            is_transient: false,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        system_notices(&output).await,
+        vec!["Goal paused · the request was rate limited · send a message to retry".to_string()]
+    );
+    assert!(orch.session.lock().await.active_goal.is_some());
+}
+
+/// The CLEAR tier is untouched: it still clears, and it still shows its own
+/// warning rather than a pause sentence.
+#[tokio::test]
+async fn the_clear_tier_still_clears_and_says_so() {
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    let (orch, output) = orch_with_output(bus);
+    set_goal(&orch, "ship the port").await;
+
+    clear_goal_after_unrecoverable_error(
+        &orch,
+        GoalClearReason::ApiError {
+            error_kind: Some("billing_error"),
+            is_transient: false,
+        },
+    )
+    .await;
+
+    let notices = system_notices(&output).await;
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].starts_with("Goal cleared after an unrecoverable error (credit balance too low)"),
+        "got {:?}",
+        notices[0]
+    );
+    assert!(
+        orch.session.lock().await.active_goal.is_none(),
+        "the clear tier must still clear"
+    );
+}
+
+/// With NO goal set, a failed turn says nothing at all — the pause tier must not
+/// start narrating errors to users who never ran `/goal`.
+#[tokio::test]
+async fn without_an_active_goal_nothing_is_announced() {
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    let (orch, output) = orch_with_output(bus);
+
+    clear_goal_after_unrecoverable_error(
+        &orch,
+        GoalClearReason::ApiError {
+            error_kind: Some("invalid_request"),
+            is_transient: false,
+        },
+    )
+    .await;
+
+    assert!(system_notices(&output).await.is_empty());
 }

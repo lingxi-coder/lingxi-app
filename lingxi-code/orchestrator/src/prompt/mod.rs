@@ -16,6 +16,7 @@ pub mod env_meta;
 pub mod file_tree;
 pub mod git_status;
 pub mod goal_checkin;
+pub mod goal_interruption;
 pub mod locked_templates;
 pub mod memory_block;
 pub mod memory_section;

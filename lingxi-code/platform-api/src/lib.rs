@@ -40,6 +40,41 @@
 /// identifier derives from this one constant — including the LSP `clientInfo`,
 /// which kept its own copy until this bump and would have been the next thing to
 /// drift (oracle: `clientInfo:{name:"Claude Code",version:{…}.VERSION}`).
+///
+/// ## 2.1.270 sweep, 2026-09-14 — HELD at 2.1.267, deliberately
+///
+/// The 2.1.270 backlog is now swept to the bottom: every item is implemented,
+/// verified as not-a-gap, or sized against the code with its evidence recorded
+/// next to the thing that makes it true. This number still does NOT move, and
+/// the reason is the rule above rather than an oversight.
+///
+/// Implemented this round: the `!` rule negation (HP-7, 2.1.269), inline-skill
+/// `disallowed-tools` (MP-1), `/output-style`'s reinstatement (CLI-1, 2.1.269)
+/// with a runtime switch that actually takes effect, the `Proactive` and
+/// `Concise` built-in output styles with their per-turn reminders, the 1 GiB
+/// persisted-tool-result cap (TL-6, 2.1.266), and the keep-recent clear's
+/// persist hook (CMP-2).
+///
+/// Four remain, each a subsystem rather than a patch, each sized at the oracle:
+///
+/// * **CLI-4** `/cost` prompt-cache reporting — needs a per-request cache
+///   ledger with MISS ATTRIBUTION (diffing system prompt, tools and messages
+///   across requests to name a cause), plus the `prompt_cache` status field.
+/// * **CLI-5** `bashEditDiffEnabled` — a git tree-snapshot differ with a
+///   per-repo failure ledger, index-lock handling, `status --porcelain=v2`
+///   tree construction and `diff-tree` parsing with file/hunk caps.
+/// * **HP-6** `sandbox.credentials.awsPairs` — one field of a credential-masking
+///   MITM proxy that substitutes sentinels for real secrets and RE-SIGNS AWS
+///   SigV4 requests; the field is meaningless without the proxy.
+/// * **CMP-1** summarize / summarize-up-to — needs the rewind dispatch
+///   redesigned: it currently unwinds the TUI and mutates on disk, while a
+///   summarize needs a live model call over the CURRENT conversation before
+///   anything unwinds.
+///
+/// ⇒ Raising the number now would tell servers, child processes and language
+/// servers that those four exist. Under-claiming is the recoverable direction;
+/// the port has been burned by the other one. Raise it WITH the last of the
+/// four, and add the line saying what the sweep verified.
 pub const CLAUDE_CODE_VERSION: &str = "2.1.267";
 
 pub mod agent_name_registry;

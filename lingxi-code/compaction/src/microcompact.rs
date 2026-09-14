@@ -206,6 +206,72 @@ pub fn collect_compactable_tool_ids(messages: &[ConversationMessage]) -> Vec<pro
     ids
 }
 
+/// The `(tool_use_id, content)` pairs a keep-recent clear would hand to a
+/// persist hook — upstream `NTn`'s `candidates`, whose `.content` `Sir` passes
+/// to `persist(content, tool_use_id)` before substituting the placeholder.
+///
+/// Only results with TEXT content are returned: upstream guards with
+/// `P.content ? await persist(...) : null`, and a result carrying image or
+/// document blocks is never replaced by a file reference (see
+/// [`Microcompactor::compact_with_persisted`]). Order follows the messages, so
+/// a caller persisting in sequence writes oldest-first.
+#[must_use]
+pub fn keep_recent_persist_candidates(
+    messages: &[ConversationMessage],
+    keep_recent: usize,
+) -> Vec<(protocol::ToolUseId, String)> {
+    let estimate = estimate_keep_recent(messages, keep_recent);
+    let mut out = Vec::new();
+    for message in messages {
+        let ConversationMessage::User { content, .. } = message else {
+            continue;
+        };
+        for block in content {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                content_blocks,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            if !estimate.candidate_ids.contains(tool_use_id) {
+                continue;
+            }
+            if content.is_empty() || has_media_blocks(content_blocks.as_deref()) {
+                continue;
+            }
+            out.push((tool_use_id.clone(), content.clone()));
+        }
+    }
+    out
+}
+
+/// `content_blocks` of a `ToolResult` block, if it is one.
+#[must_use]
+fn media_blocks_of(block: &ContentBlock) -> Option<Vec<serde_json::Value>> {
+    match block {
+        ContentBlock::ToolResult { content_blocks, .. } => content_blocks.clone(),
+        _ => None,
+    }
+}
+
+/// Does this result carry an image or document block? Upstream's `lCt` picks
+/// the PLAIN placeholder for those even when a persisted reference exists —
+/// the file would hold a JSON blob the model cannot usefully `Read`.
+#[must_use]
+fn has_media_blocks(blocks: Option<&[serde_json::Value]>) -> bool {
+    blocks.is_some_and(|blocks| {
+        blocks.iter().any(|b| {
+            matches!(
+                b.get("type").and_then(serde_json::Value::as_str),
+                Some("image" | "document")
+            )
+        })
+    })
+}
+
 /// Scan-only estimate of what a keep-recent microcompact WOULD clear.
 ///
 /// 1:1 with claude-code `ARs` (2.1.220 @232865874), which the binary factors
@@ -331,7 +397,26 @@ impl Microcompactor {
     pub fn compact(
         &self,
         messages: Vec<ConversationMessage>,
+        now: SystemTime,
+    ) -> MicrocompactResult {
+        self.compact_with_persisted(messages, now, &std::collections::HashMap::new())
+    }
+
+    /// [`Self::compact`] with the persist step's results folded in — upstream
+    /// `Sir`, whose `v` map is built by awaiting `persist` per candidate and
+    /// then handed to the pure `lCt`.
+    ///
+    /// `persisted` maps a cleared result's id to the reference text that
+    /// replaces it. A missing entry, or a result carrying image/document
+    /// blocks, falls back to [`TIME_BASED_MC_CLEARED_MESSAGE`] — upstream's
+    /// `r?.get(id) ?? Z2e` plus its media guard. A persist FAILURE is therefore
+    /// indistinguishable from no persist at all, which is the point: the clear
+    /// still happens and the model is still told the content is gone.
+    pub fn compact_with_persisted(
+        &self,
+        messages: Vec<ConversationMessage>,
         _now: SystemTime,
+        persisted: &std::collections::HashMap<protocol::ToolUseId, String>,
     ) -> MicrocompactResult {
         // Pass 1 + the scan-only pass, both via `estimate_keep_recent` — the
         // oracle's own factoring (`qsd` calls `ARs`), so the "would this be
@@ -379,9 +464,24 @@ impl Microcompactor {
                             } = &b
                             {
                                 if candidate_ids.contains(tool_use_id) {
+                                    // `lCt`: a media-carrying result always
+                                    // takes the plain placeholder, even when a
+                                    // reference exists for it.
+                                    let replacement = if has_media_blocks(
+                                        media_blocks_of(&b).as_deref(),
+                                    ) {
+                                        TIME_BASED_MC_CLEARED_MESSAGE.to_string()
+                                    } else {
+                                        persisted
+                                            .get(tool_use_id)
+                                            .cloned()
+                                            .unwrap_or_else(|| {
+                                                TIME_BASED_MC_CLEARED_MESSAGE.to_string()
+                                            })
+                                    };
                                     return ContentBlock::ToolResult {
                                         tool_use_id: tool_use_id.clone(),
-                                        content: TIME_BASED_MC_CLEARED_MESSAGE.into(),
+                                        content: replacement,
                                         is_error: *is_error,
                                         // Preserve the provider id through content clearing.
                                         provider_tool_use_id: provider_tool_use_id.clone(),
@@ -790,5 +890,114 @@ mod tests {
         assert!(evaluate_time_based_trigger(&cfg, Some(recent), now).is_none());
         // No timestamp does not fire.
         assert!(evaluate_time_based_trigger(&cfg, None, now).is_none());
+    }
+
+    // ---- CMP-2: the keep-recent clear's persist hook ----------------------
+
+    #[test]
+    fn candidates_carry_the_content_a_persist_hook_needs() {
+        // Six compactable results, keep_recent = 2 ⇒ the four oldest are
+        // candidates, and each must come back WITH its body: upstream's
+        // `persist(P.content, P.tool_use_id)` has nothing to write otherwise.
+        let mut msgs = Vec::new();
+        for i in 0..6 {
+            msgs.push(assistant_tool_use("Bash", ToolUseId::from(format!("t{i}"))));
+            msgs.push(user_tool_result(ToolUseId::from(format!("t{i}")), &format!("body-{i}")));
+        }
+        let got = keep_recent_persist_candidates(&msgs, 2);
+        let ids: Vec<&str> = got.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["t0", "t1", "t2", "t3"]);
+        assert_eq!(got[0].1, "body-0");
+        assert_eq!(got[3].1, "body-3");
+    }
+
+    #[test]
+    fn a_persisted_reference_replaces_the_bare_placeholder() {
+        let mut msgs = Vec::new();
+        for i in 0..6 {
+            msgs.push(assistant_tool_use("Bash", ToolUseId::from(format!("t{i}"))));
+            msgs.push(user_tool_result(
+                ToolUseId::from(format!("t{i}")),
+                &"x".repeat(30_000),
+            ));
+        }
+        let mut persisted = std::collections::HashMap::new();
+        persisted.insert(
+            ToolUseId::from("t0"),
+            "<persisted-output>Tool result saved to: /t/t0.txt\n\nUse Read to view</persisted-output>"
+                .to_string(),
+        );
+        let compactor = Microcompactor {
+            config: TimeBasedMCConfig {
+                enabled: true,
+                keep_recent: 2,
+                ..TimeBasedMCConfig::default()
+            },
+        };
+        let out = compactor.compact_with_persisted(
+            msgs,
+            SystemTime::now(),
+            &persisted,
+        );
+        let cleared: Vec<String> = out
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                ConversationMessage::User { content, .. } => Some(content),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id.as_str() == "t0" || tool_use_id.as_str() == "t1" => {
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            cleared[0].starts_with("<persisted-output>Tool result saved to: /t/t0.txt"),
+            "the id WITH a reference must get it: {:?}",
+            cleared[0]
+        );
+        assert_eq!(
+            cleared[1], TIME_BASED_MC_CLEARED_MESSAGE,
+            "an id with no reference falls back to the bare placeholder — a \
+             persist failure must still clear"
+        );
+    }
+
+    #[test]
+    fn a_media_carrying_result_is_never_given_a_file_reference() {
+        // `lCt`'s guard: the file would hold a JSON blob the model cannot
+        // usefully Read, so those always take the plain placeholder even when
+        // a reference exists for them.
+        let blocks = vec![serde_json::json!({"type": "image"})];
+        assert!(has_media_blocks(Some(&blocks)));
+        assert!(!has_media_blocks(Some(&[serde_json::json!({"type": "text"})])));
+        assert!(!has_media_blocks(None));
+
+        let mut msgs = Vec::new();
+        for i in 0..6 {
+            msgs.push(assistant_tool_use("Bash", ToolUseId::from(format!("t{i}"))));
+            let mut block = user_tool_result(ToolUseId::from(format!("t{i}")), &"x".repeat(30_000));
+            if i == 0 {
+                if let ConversationMessage::User { content, .. } = &mut block {
+                    if let Some(ContentBlock::ToolResult { content_blocks, .. }) =
+                        content.first_mut()
+                    {
+                        *content_blocks = Some(blocks.clone());
+                    }
+                }
+            }
+            msgs.push(block);
+        }
+        // …and it is not even offered to the persist hook.
+        let candidates = keep_recent_persist_candidates(&msgs, 2);
+        let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["t1", "t2", "t3"], "t0 carries an image");
     }
 }

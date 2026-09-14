@@ -218,6 +218,30 @@ pub fn wrap(
     )
 }
 
+/// The substitution a keep-recent microcompact leaves in place of a cleared
+/// tool result whose content was persisted — upstream `ZMy`:
+///
+/// ```js
+/// `${nle}Tool result saved to: ${s.filepath}${d}\n\nUse ${rt} to view${VPn}`
+/// ```
+///
+/// where `d` is `""` when the body fit and
+/// `" (truncated to the first ${N} of the output)"` when it did not.
+///
+/// ⚠️ Note the shape differs from [`wrap`]: no newline after the opening tag,
+/// and it names the `Read` tool rather than previewing the content. This is the
+/// "it is gone, here is where it went" form, not the "here is a preview" form.
+#[must_use]
+pub fn microcompact_replacement(filepath: &str, truncated_at: Option<usize>) -> String {
+    let truncated = match truncated_at {
+        None => String::new(),
+        Some(cap) => format!(" (truncated to the first {} of the output)", format_bytes(cap)),
+    };
+    format!(
+        "{PERSISTED_OUTPUT_OPEN}Tool result saved to: {filepath}{truncated}\n\nUse Read to view{PERSISTED_OUTPUT_CLOSE}"
+    )
+}
+
 /// The envelope's first sentence — `hee`'s ternary. The truncated arm prints
 /// the CAP twice and never mentions the original size, which is upstream's
 /// choice: once a body is cut, "how big it was" is less actionable than "how

@@ -260,6 +260,21 @@ pub struct HintEdits {
 /// this module would fork a second persistence path.
 #[must_use]
 pub fn apply_hint_edits(messages: Vec<ConversationMessage>) -> HintEdits {
+    apply_hint_edits_with_persisted(messages, &std::collections::HashMap::new())
+}
+
+/// [`apply_hint_edits`] with the persist step's results folded in.
+///
+/// `persisted` maps a cleared result's id to the `<persisted-output>Tool result
+/// saved to: …</persisted-output>` substitution — build it with
+/// [`crate::microcompact::keep_recent_persist_candidates`] plus
+/// `orchestrator::tool_result_persistence`. An EMPTY map is the pre-persist
+/// behaviour exactly: every cleared result gets the bare placeholder.
+#[must_use]
+pub fn apply_hint_edits_with_persisted(
+    messages: Vec<ConversationMessage>,
+    persisted: &std::collections::HashMap<protocol::ToolUseId, String>,
+) -> HintEdits {
     let pre = estimate_message_tokens(&messages);
     let estimate = estimate_keep_recent(&messages, CONTEXT_HINT_KEEP_RECENT);
 
@@ -288,7 +303,7 @@ pub fn apply_hint_edits(messages: Vec<ConversationMessage>) -> HintEdits {
             ..TimeBasedMCConfig::default()
         },
     };
-    let result = compactor.compact(messages, SystemTime::now());
+    let result = compactor.compact_with_persisted(messages, SystemTime::now(), persisted);
     let post = estimate_message_tokens(&result.messages);
     // `qsd`'s own line fires first (it logs inside the compact), then `jtp`'s.
     tracing::debug!(
@@ -322,7 +337,17 @@ pub fn handle_hint_reject(
     messages: Vec<ConversationMessage>,
     request_id: Option<String>,
 ) -> (HintEdits, ContextHintRejectEvent) {
-    let edits = apply_hint_edits(messages);
+    handle_hint_reject_with_persisted(messages, request_id, &std::collections::HashMap::new())
+}
+
+/// [`handle_hint_reject`] carrying the persist step's results.
+#[must_use]
+pub fn handle_hint_reject_with_persisted(
+    messages: Vec<ConversationMessage>,
+    request_id: Option<String>,
+    persisted: &std::collections::HashMap<protocol::ToolUseId, String>,
+) -> (HintEdits, ContextHintRejectEvent) {
+    let edits = apply_hint_edits_with_persisted(messages, persisted);
     let event = ContextHintRejectEvent {
         request_id,
         pre_compact_token_estimate: edits.pre_compact_token_estimate,
@@ -438,13 +463,25 @@ impl ContextHintController {
         facts: &HttpErrorFacts,
         messages: Vec<ConversationMessage>,
     ) -> HintErrorOutcome {
+        self.on_request_error_with_persisted(facts, messages, &std::collections::HashMap::new())
+    }
+
+    /// [`Self::on_request_error`] carrying the persist step's results, used by
+    /// the turn loop after it has written the about-to-be-cleared results to
+    /// the session's `tool-results/` directory.
+    pub fn on_request_error_with_persisted(
+        &mut self,
+        facts: &HttpErrorFacts,
+        messages: Vec<ConversationMessage>,
+        persisted: &std::collections::HashMap<protocol::ToolUseId, String>,
+    ) -> HintErrorOutcome {
         if !self.sent || self.done {
             return HintErrorOutcome::NotHandled;
         }
         let request_id = facts.request_id.clone();
         if is_hint_reject(facts) {
             self.done = true;
-            let (edits, event) = handle_hint_reject(messages, request_id);
+            let (edits, event) = handle_hint_reject_with_persisted(messages, request_id, persisted);
             return HintErrorOutcome::Reject(Box::new(edits), event);
         }
         if is_unsupported_beta(facts) {

@@ -1684,8 +1684,23 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     let s = orch.session.lock().await;
                     s.model_context_history()
                 };
+                // CMP-2 / TL-6: write the about-to-be-cleared tool results to
+                // the session's `tool-results/` directory FIRST, so the clear
+                // leaves the model a file it can `Read` instead of only
+                // "[Old tool result content cleared]". Upstream's `Sir` awaits
+                // `persist` per candidate and hands `lCt` the resulting map;
+                // this is that map, built ahead of the (sync) controller call.
+                //
+                // Gated on `is_hint_reject`, because every OTHER error outcome
+                // clears nothing — persisting there would write files for
+                // results that stay in the conversation.
+                let persisted_clears = if compaction::context_hint::is_hint_reject(&facts) {
+                    persist_keep_recent_clears(orch, &raw_history).await
+                } else {
+                    std::collections::HashMap::new()
+                };
                 if let compaction::context_hint::HintErrorOutcome::Reject(edits, _event) =
-                    c.on_request_error(&facts, raw_history)
+                    c.on_request_error_with_persisted(&facts, raw_history, &persisted_clears)
                 {
                     let retry_raw = edits.messages.clone();
                     {
@@ -3713,6 +3728,67 @@ async fn apply_tool_result_persistence_with_process_output(
         content_blocks,
     )
     .await
+}
+
+/// Persist every tool result a keep-recent microcompact is about to clear, and
+/// return the `<persisted-output>…</persisted-output>` substitution for each.
+///
+/// Best-effort per candidate: a failed write simply leaves that id out of the
+/// map, and the clear then substitutes the bare placeholder — upstream's
+/// `persist(...) ?? Z2e`. An absent `config_home` (tests, minimal embedders)
+/// skips the whole step, which is the pre-CMP-2 behaviour exactly.
+async fn persist_keep_recent_clears(
+    orch: &ConversationOrchestrator,
+    messages: &[ConversationMessage],
+) -> std::collections::HashMap<ToolUseId, String> {
+    use crate::tool_result_persistence as trp;
+
+    let mut out = std::collections::HashMap::new();
+    let Some(home) = orch.config_home.as_ref() else {
+        return out;
+    };
+    let candidates = compaction::microcompact::keep_recent_persist_candidates(
+        messages,
+        compaction::context_hint::CONTEXT_HINT_KEEP_RECENT,
+    );
+    if candidates.is_empty() {
+        return out;
+    }
+    let session_uuid = {
+        let session = orch.session.lock().await;
+        session.session_id.as_uuid().to_string()
+    };
+    let dir = trp::tool_results_dir(home, &orch.current_cwd().to_string_lossy(), &session_uuid);
+    for (tool_use_id, content) in candidates {
+        match trp::persist(
+            home,
+            &dir,
+            tool_use_id.as_str(),
+            &content,
+            false,
+            trp::MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        {
+            Ok(persisted) => {
+                out.insert(
+                    tool_use_id,
+                    trp::microcompact_replacement(
+                        &persisted.filepath.to_string_lossy(),
+                        persisted.truncated_at,
+                    ),
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    tool_use_id = %tool_use_id.as_str(),
+                    %error,
+                    "keep-recent clear could not persist a tool result; using the bare placeholder"
+                );
+            }
+        }
+    }
+    out
 }
 
 async fn apply_tool_result_persistence(

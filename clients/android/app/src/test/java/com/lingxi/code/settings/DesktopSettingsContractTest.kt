@@ -136,4 +136,99 @@ class DesktopSettingsContractTest {
             assertNull("must not guess a project from $path", projectDirectoryFromFiles("[{\"layer\":\"project\",\"path\":\"$path\"}]"))
         }
     }
+
+    private fun providers(json: String) = JSONObject(json)
+
+    /** The historical single-connection shape must keep validating unchanged. */
+    @Test
+    fun flatProviderStillValidates() {
+        validateProviderDefinitions(providers("""
+            {"p":{"type":"openai","baseUrl":"https://x.example.com/v1","models":[{"id":"m"}]}}
+        """.trimIndent()))
+    }
+
+    /**
+     * A provider reachable several ways carries baseUrl/models on its
+     * CONNECTIONS. Requiring them of the provider row rejected the whole config.
+     */
+    @Test
+    fun multiConnectionProviderValidates() {
+        validateProviderDefinitions(providers("""
+            {"deepseek":{"type":"openai","models":[{"id":"deepseek-flash"}],
+              "connections":[
+                {"id":"intl","baseUrl":"https://api.deepseek.test"},
+                {"id":"cn","baseUrl":"https://cn.deepseek.test/v1"}],
+              "fallback":{"on":["rate_limit","auth"]}}}
+        """.trimIndent()))
+    }
+
+    /** Each connection is checked as the flat provider it desugars to. */
+    @Test
+    fun aBrokenConnectionIsRejectedEvenWhenSiblingsAreValid() {
+        assertThrows(IllegalArgumentException::class.java) {
+            validateProviderDefinitions(providers("""
+                {"p":{"type":"openai","models":[{"id":"m"}],
+                  "connections":[{"id":"good","baseUrl":"https://good.test/v1"},{"id":"bad"}]}}
+            """.trimIndent()))
+        }
+    }
+
+    /** An id with a reference separator would produce an unroutable model ref. */
+    @Test
+    fun connectionIdsRejectReferenceSeparators() {
+        for (bad in listOf("a/b", "a:b", "a#b")) {
+            assertThrows(IllegalArgumentException::class.java) {
+                validateProviderDefinitions(providers("""
+                    {"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],
+                      "connections":[{"id":"$bad"}]}}
+                """.trimIndent()))
+            }
+        }
+    }
+
+    /** Two rows with one id would desugar to two profiles sharing a name. */
+    @Test
+    fun duplicateConnectionIdsAreRejected() {
+        assertThrows(IllegalArgumentException::class.java) {
+            validateProviderDefinitions(providers("""
+                {"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],
+                  "connections":[{"id":"a"},{"id":"a"}]}}
+            """.trimIndent()))
+        }
+    }
+
+    /** An empty list must be rejected rather than read as "no connections". */
+    @Test
+    fun emptyConnectionsArrayIsRejected() {
+        assertThrows(IllegalArgumentException::class.java) {
+            validateProviderDefinitions(providers("""
+                {"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"connections":[]}}
+            """.trimIndent()))
+        }
+    }
+
+    /** `credentialIds` names stored credentials: distinct and non-blank. */
+    @Test
+    fun credentialIdsMustBeDistinctAndNonBlank() {
+        validateProviderDefinitions(providers("""
+            {"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"credentialIds":["k1","k2"]}}
+        """.trimIndent()))
+        assertThrows(IllegalArgumentException::class.java) {
+            validateProviderDefinitions(providers("""
+                {"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"credentialIds":["k1","k1"]}}
+            """.trimIndent()))
+        }
+    }
+
+    /** A typo in a trigger silently disables failover, so it must be named. */
+    @Test
+    fun unknownFallbackTriggerIsRejected() {
+        assertThrows(IllegalArgumentException::class.java) {
+            validateProviderDefinitions(providers("""
+                {"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],
+                  "connections":[{"id":"a"}],"fallback":{"on":["rate_limits"]}}}
+            """.trimIndent()))
+        }
+    }
+
 }

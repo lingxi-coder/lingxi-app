@@ -302,17 +302,21 @@ fn a_connection_overrides_provider_level_defaults() {
     );
 }
 
-/// Several keys on one connection become hidden sibling slots that differ only
-/// in credential — the mechanism that makes key rotation free.
+/// Several stored credentials on one connection become hidden sibling slots
+/// that differ only in credential — the mechanism that makes key rotation free.
+///
+/// The field is `credentialIds`, not `apiKeys`: these name secrets already in
+/// the keychain, and a settings key spelled `apiKeys` invites pasting the real
+/// secret into `settings.json`.
 #[test]
-fn api_keys_expand_to_hidden_slots_differing_only_in_credential() {
+fn credential_ids_expand_to_hidden_slots_differing_only_in_credential() {
     let (profiles, warnings) = parse(serde_json::json!({
         "deepseek": {
             "type": "openai",
             "models": [{ "id": "deepseek-flash" }],
             "connections": [
                 { "id": "cn", "baseUrl": "https://api.deepseek.cn/v1",
-                  "apiKeys": ["ds-cn-a", "ds-cn-b"] }
+                  "credentialIds": ["ds-cn-a", "ds-cn-b"] }
             ]
         }
     }));

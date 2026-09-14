@@ -71,13 +71,13 @@ test('an empty connections array is rejected rather than silently meaning "none"
   assert.match(String(validateCustomProvider(draft)), /非空数组/);
 });
 
-test('apiKeys must be distinct non-empty strings, at provider or connection level', () => {
-  assert.equal(validateCustomProvider({ ...flat, apiKeys: ['a', 'b'] }), null);
-  assert.match(String(validateCustomProvider({ ...flat, apiKeys: [] })), /非空数组/);
-  assert.match(String(validateCustomProvider({ ...flat, apiKeys: ['a', 'a'] })), /不能重复/);
-  assert.match(String(validateCustomProvider({ ...flat, apiKeys: [''] })), /非空字符串/);
+test('credentialIds must be distinct non-empty strings, at provider or connection level', () => {
+  assert.equal(validateCustomProvider({ ...flat, credentialIds: ['a', 'b'] }), null);
+  assert.match(String(validateCustomProvider({ ...flat, credentialIds: [] })), /非空数组/);
+  assert.match(String(validateCustomProvider({ ...flat, credentialIds: ['a', 'a'] })), /不能重复/);
+  assert.match(String(validateCustomProvider({ ...flat, credentialIds: [''] })), /非空字符串/);
 
-  const draft = { type: 'openai', baseUrl: 'https://x.example.com/v1', models: [{ id: 'm' }], connections: [{ id: 'cn', apiKeys: ['k1', 'k1'] }] };
+  const draft = { type: 'openai', baseUrl: 'https://x.example.com/v1', models: [{ id: 'm' }], connections: [{ id: 'cn', credentialIds: ['k1', 'k1'] }] };
   assert.match(String(validateCustomProvider(draft)), /不能重复/);
 });
 

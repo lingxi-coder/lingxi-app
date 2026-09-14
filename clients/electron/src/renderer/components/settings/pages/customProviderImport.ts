@@ -7,7 +7,7 @@ export const SUPPORTED_PROVIDER_TYPES = [
 export type SupportedProviderType = (typeof SUPPORTED_PROVIDER_TYPES)[number];
 export interface CustomProviderModelDraft { id: string; aliases?: string[]; [key: string]: unknown }
 export interface CustomProviderConnectionDraft { id: string; [key: string]: unknown }
-export interface CustomProviderDraft { type: string; baseUrl?: string; apiKeyEnv?: string; models: CustomProviderModelDraft[]; connections?: CustomProviderConnectionDraft[]; apiKeys?: string[]; [key: string]: unknown }
+export interface CustomProviderDraft { type: string; baseUrl?: string; apiKeyEnv?: string; models: CustomProviderModelDraft[]; connections?: CustomProviderConnectionDraft[]; credentialIds?: string[]; [key: string]: unknown }
 export interface ImportDiagnostic { severity: 'error' | 'warning'; message: string }
 export interface ProviderImportEntry {
   name: string;
@@ -38,10 +38,10 @@ function mergeConnection(draft: CustomProviderDraft, connection: CustomProviderC
   const base = { ...draft };
   delete base.connections;
   delete base.fallback;
-  delete base.apiKeys;
+  delete base.credentialIds;
   const merged = { ...base } as Record<string, unknown>;
   for (const [key, value] of Object.entries(connection)) {
-    if (key === 'id' || key === 'apiKeys') continue;
+    if (key === 'id' || key === 'credentialIds') continue;
     merged[key] = value;
   }
   return merged as CustomProviderDraft;
@@ -49,12 +49,18 @@ function mergeConnection(draft: CustomProviderDraft, connection: CustomProviderC
 
 const FALLBACK_TRIGGERS = ['rate_limit', 'overloaded', 'server_error', 'network', 'auth'];
 
-/** `apiKeys` must be a non-empty list of distinct non-empty credential ids. */
-function validateApiKeys(value: unknown, label: string): string | null {
+/**
+ * `credentialIds` must be a non-empty list of distinct non-empty credential ids.
+ *
+ * These name secrets already in the keychain. The field is deliberately not
+ * `apiKeys`: a settings key spelled that way invites pasting a real key into
+ * `settings.json`, which the clients' secret-free guards reject outright.
+ */
+function validateCredentialIds(value: unknown, label: string): string | null {
   if (value === undefined) return null;
-  if (!Array.isArray(value) || !value.length) return `${label}apiKeys 必须是非空数组。`;
-  if (value.some((key) => !nonempty(key))) return `${label}apiKeys 的每一项必须是非空字符串。`;
-  if (new Set(value.map((key) => (key as string).trim())).size !== value.length) return `${label}apiKeys 不能重复。`;
+  if (!Array.isArray(value) || !value.length) return `${label}credentialIds 必须是非空数组。`;
+  if (value.some((key) => !nonempty(key))) return `${label}credentialIds 的每一项必须是非空字符串。`;
+  if (new Set(value.map((key) => (key as string).trim())).size !== value.length) return `${label}credentialIds 不能重复。`;
   return null;
 }
 
@@ -76,7 +82,7 @@ function validateConnections(draft: CustomProviderDraft): string | null {
     if (/[/:#]/.test(trimmed)) return `连接 id ${JSON.stringify(trimmed)} 不能包含 '/'、':' 或 '#'。`;
     if (seen.has(trimmed)) return `连接 id ${JSON.stringify(trimmed)} 重复。`;
     seen.add(trimmed);
-    const keysError = validateApiKeys(connection.apiKeys, `连接 ${JSON.stringify(trimmed)} 的 `);
+    const keysError = validateCredentialIds(connection.credentialIds, `连接 ${JSON.stringify(trimmed)} 的 `);
     if (keysError) return keysError;
     const merged = mergeConnection(draft, connection as CustomProviderConnectionDraft);
     const error = validateCustomProvider(merged);
@@ -100,7 +106,7 @@ export function validateCustomProvider(draft: CustomProviderDraft): string | nul
   // the provider entry itself only supplies defaults, so it need not satisfy
   // baseUrl/models on its own.
   if (record(draft) && draft.connections !== undefined) return validateConnections(draft);
-  const keysError = validateApiKeys(draft.apiKeys, '');
+  const keysError = validateCredentialIds(draft.credentialIds, '');
   if (keysError) return keysError;
   if (!record(draft) || !SUPPORTED_PROVIDER_TYPES.includes(draft.type as SupportedProviderType)) return `请选择支持的协议：${SUPPORTED_PROVIDER_TYPES.join(', ')}`;
   if (!Array.isArray(draft.models) || !draft.models.length) return 'models 至少需要一个模型。';

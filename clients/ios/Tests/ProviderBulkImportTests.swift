@@ -63,11 +63,11 @@ final class ProviderBulkImportTests: XCTestCase {
         XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: true))
     }
 
-    /// `apiKeys` names stored credentials; it must be distinct non-empty ids.
-    func testApiKeysMustBeDistinctNonEmptyStrings() throws {
-        let ok = #"{"providers":{"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"apiKeys":["k1","k2"]}}}"#
+    /// `credentialIds` names stored credentials; it must be distinct non-empty ids.
+    func testCredentialIdsMustBeDistinctNonEmptyStrings() throws {
+        let ok = #"{"providers":{"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"credentialIds":["k1","k2"]}}}"#
         XCTAssertNil(ProviderBulkImport.validate(try XCTUnwrap(ProviderBulkImport.parse(ok, existing: [:]).entries.first), credentialConfigured: true))
-        let dupe = #"{"providers":{"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"apiKeys":["k1","k1"]}}}"#
+        let dupe = #"{"providers":{"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],"credentialIds":["k1","k1"]}}}"#
         XCTAssertNotNil(ProviderBulkImport.validate(try XCTUnwrap(ProviderBulkImport.parse(dupe, existing: [:]).entries.first), credentialConfigured: true))
     }
 

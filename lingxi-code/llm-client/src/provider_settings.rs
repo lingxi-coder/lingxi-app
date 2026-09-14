@@ -207,7 +207,7 @@ struct ExpandedConnection {
     profile_name: String,
     entry: Value,
     identity: ConnectionSpec,
-    /// Keychain credential id from `apiKeys`, when this is one key slot.
+    /// Keychain credential id from `credentialIds`, when this is one key slot.
     credential_override: Option<String>,
 }
 
@@ -219,9 +219,9 @@ fn merge_connection(base: &Map<String, Value>, overrides: &Map<String, Value>) -
     let mut merged = base.clone();
     merged.remove("connections");
     merged.remove("fallback");
-    merged.remove("apiKeys");
+    merged.remove("credentialIds");
     for (k, v) in overrides {
-        if k == "id" || k == "apiKeys" {
+        if k == "id" || k == "credentialIds" {
             continue;
         }
         merged.insert(k.clone(), v.clone());
@@ -229,7 +229,7 @@ fn merge_connection(base: &Map<String, Value>, overrides: &Map<String, Value>) -
     Value::Object(merged)
 }
 
-/// Expand one `apiKeys` list into sibling key slots of the same connection.
+/// Expand one `credentialIds` list into sibling key slots of the same connection.
 ///
 /// Each slot is a full profile differing ONLY in its credential, so key rotation
 /// reuses the connection failover walk instead of needing a key index threaded
@@ -262,29 +262,33 @@ fn expand_key_slots(
     }
 }
 
-/// Read an `apiKeys` list, rejecting anything that is not a list of non-empty
+/// Read a `credentialIds` list, rejecting anything that is not a list of non-empty
 /// distinct strings.
-fn parse_api_keys(
+///
+/// These are KEYCHAIN IDS, never secrets. The field is deliberately not called
+/// `apiKeys`: a settings key spelled that way invites pasting a real key into
+/// `settings.json`, which is exactly what the clients' secret-free guards reject.
+fn parse_credential_ids(
     obj: &Map<String, Value>,
     label: &str,
 ) -> Result<Option<Vec<String>>, String> {
-    let Some(raw) = obj.get("apiKeys") else {
+    let Some(raw) = obj.get("credentialIds") else {
         return Ok(None);
     };
     let arr = raw
         .as_array()
-        .ok_or_else(|| format!("{label}: \"apiKeys\" must be an array of credential ids"))?;
+        .ok_or_else(|| format!("{label}: \"credentialIds\" must be an array of credential ids"))?;
     if arr.is_empty() {
-        return Err(format!("{label}: \"apiKeys\" must not be empty"));
+        return Err(format!("{label}: \"credentialIds\" must not be empty"));
     }
     let mut keys = Vec::with_capacity(arr.len());
     for item in arr {
         let key = item
             .as_str()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| format!("{label}: \"apiKeys\" entries must be non-empty strings"))?;
+            .ok_or_else(|| format!("{label}: \"credentialIds\" entries must be non-empty strings"))?;
         if keys.iter().any(|existing| existing == key) {
-            return Err(format!("{label}: duplicate apiKeys entry {key:?}"));
+            return Err(format!("{label}: duplicate credentialIds entry {key:?}"));
         }
         keys.push(key.to_string());
     }
@@ -327,11 +331,11 @@ fn parse_failover(obj: &Map<String, Value>, name: &str) -> Result<FailoverTrigge
 
 /// Desugar a provider entry into its connections.
 ///
-/// No `connections` and no `apiKeys` reproduces the historical single flat
+/// No `connections` and no `credentialIds` reproduces the historical single flat
 /// profile exactly, identity included, so every pre-existing config and every
 /// built-in preset is untouched.
 fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<ExpandedConnection>, String> {
-    let provider_keys = parse_api_keys(obj, &format!("provider {name:?}"))?;
+    let provider_keys = parse_credential_ids(obj, &format!("provider {name:?}"))?;
     let failover = parse_failover(obj, name)?;
 
     let Some(raw) = obj.get("connections") else {
@@ -340,7 +344,7 @@ fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<Expand
         let mut order = 0;
         match provider_keys {
             Some(keys) => expand_key_slots(name, &entry, name, "default", &keys, failover, &mut order, &mut out),
-            // No connections and no apiKeys: the historical single profile.
+            // No connections and no credentialIds: the historical single profile.
             // Its chain is always empty, so it never fails over regardless.
             None => out.push(ExpandedConnection {
                 profile_name: name.to_string(),
@@ -390,7 +394,7 @@ fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<Expand
         let entry = merge_connection(obj, conn);
         let profile_name = format!("{name}:{id}");
         let label = format!("provider {name:?} connection {id:?}");
-        let keys = match parse_api_keys(conn, &label)? {
+        let keys = match parse_credential_ids(conn, &label)? {
             Some(keys) => Some(keys),
             None => provider_keys.clone(),
         };
@@ -426,7 +430,7 @@ struct ProviderParseResult {
 
 /// Parse one `settings.providers` entry into its connections.
 ///
-/// A provider with `connections` (or `apiKeys`) yields several profiles that
+/// A provider with `connections` (or `credentialIds`) yields several profiles that
 /// share one group; everything else yields exactly one, byte-identical to the
 /// pre-`connections` behaviour.
 fn parse_one_provider(
@@ -553,7 +557,7 @@ fn parse_flat_provider(
     if kind.requires_api_key_env()
         && options.credential_mode == ProviderCredentialMode::Env
         && env_var.is_none()
-        // An `apiKeys` slot names a stored credential outright, so there is no
+        // A `credentialIds` slot names a stored credential outright, so there is no
         // env var to require.
         && credential_override.is_none()
     {

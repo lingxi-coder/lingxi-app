@@ -146,12 +146,79 @@ private fun RoutingFields(value: String, onChange: (String) -> Unit, readOnly: B
     }
 }
 
+/**
+ * Merge one connection over its provider's defaults.
+ *
+ * Shallow, matching the engine's desugaring: a connection that restates `models`
+ * means "this endpoint serves exactly these", not "add to the provider's list".
+ */
+private fun mergedConnection(provider: JSONObject, connection: JSONObject): JSONObject {
+    val merged = JSONObject(provider.toString())
+    merged.remove("connections")
+    merged.remove("fallback")
+    merged.remove("credentialIds")
+    connection.keys().asSequence().forEach { key ->
+        if (key != "id" && key != "credentialIds") merged.put(key, connection.get(key))
+    }
+    return merged
+}
+
+/**
+ * `credentialIds` names stored credentials: distinct, non-blank ids.
+ *
+ * Deliberately NOT `apiKeys` — `requireProviderSecretFree` rejects any key
+ * matching `api.?key`, and it is right to: a settings field spelled that way
+ * invites pasting the real secret into settings instead of the keychain.
+ */
+private fun requireValidCredentialIds(owner: JSONObject, label: String) {
+    val keys = owner.optJSONArray("credentialIds") ?: return
+    require(keys.length() > 0) { "$label credentialIds must not be empty" }
+    val ids = (0 until keys.length()).map { keys.optString(it).trim() }
+    require(ids.all(String::isNotBlank)) { "$label credentialIds entries must be nonempty" }
+    require(ids.distinct().size == ids.size) { "$label credentialIds must be distinct" }
+}
+
 internal fun validateProviderDefinitions(providers: JSONObject?) {
     if (providers == null) return
     providers.keys().asSequence().forEach { id ->
         require(Regex("[a-z0-9][a-z0-9._-]{0,63}").matches(id) && id !in setOf("builtin", "claude", "prototype", "constructor")) { "Invalid profile ID: $id" }
         val provider = providers.getJSONObject(id)
         requireProviderSecretFree(provider)
+        requireValidCredentialIds(provider, id)
+        // A provider reachable several ways is validated CONNECTION BY
+        // CONNECTION: the provider entry only supplies defaults, so requiring
+        // baseUrl/models of it would reject a perfectly valid multi-connection
+        // config outright.
+        val connections = provider.optJSONArray("connections")
+        if (connections != null) {
+            require(connections.length() > 0) { "$id: connections must not be empty; omit it for a single connection" }
+            val seen = mutableSetOf<String>()
+            for (index in 0 until connections.length()) {
+                val connection = connections.optJSONObject(index)
+                require(connection != null) { "$id: connections[$index] must be an object" }
+                val connectionId = connection.optString("id").trim()
+                require(connectionId.isNotBlank()) { "$id: connections[$index] needs an id" }
+                // The id becomes part of a qualified model reference
+                // (`provider:connection/model`), so a separator inside it
+                // produces a reference that cannot be routed.
+                require(connectionId.none { it == '/' || it == ':' || it == '#' }) {
+                    "$id: connection id \"$connectionId\" must not contain '/', ':' or '#'"
+                }
+                require(seen.add(connectionId)) { "$id: duplicate connection id \"$connectionId\"" }
+                requireValidCredentialIds(connection, "$id:$connectionId")
+                validateProviderDefinitions(JSONObject().put(id, mergedConnection(provider, connection)))
+            }
+            provider.optJSONObject("fallback")?.let { fallback ->
+                fallback.optJSONArray("on")?.let { triggers ->
+                    for (index in 0 until triggers.length()) {
+                        require(triggers.optString(index) in setOf("rate_limit", "overloaded", "server_error", "network", "auth")) {
+                            "$id: unsupported fallback.on trigger"
+                        }
+                    }
+                }
+            }
+            return@forEach
+        }
         val type = provider.optString("type")
         require(type in setOf("openai", "openai-responses", "anthropic", "gemini", "azure-openai", "bedrock-claude", "vertex-claude", "vertex-gemini", "foundry-claude")) { "Choose a supported provider protocol" }
         if (type == "bedrock-claude") require(provider.optString("region").isNotBlank()) { "Bedrock requires a region" }
@@ -204,10 +271,18 @@ internal fun McpServerFields(value: String, onChange: (String) -> Unit, readOnly
     }
 }
 
+/**
+ * Reject provider configuration that carries a secret.
+ *
+ * `apiKeyEnv` and `credentialIds` are exceptions because they are REFERENCES —
+ * an environment variable name and keychain ids respectively — not secrets. They
+ * are named explicitly rather than loosened out of the pattern, so any other
+ * credential-shaped key is still refused.
+ */
 private fun requireProviderSecretFree(value: Any?) {
     when (value) {
         is JSONObject -> value.keys().asSequence().forEach { key ->
-            require(key !in setOf("__proto__","prototype","constructor") && (key == "apiKeyEnv" || !Regex("(?:api.?key|secret|password|authorization|credential|headers)|^(?:access|refresh|auth|bearer)?[_-]?token$",RegexOption.IGNORE_CASE).containsMatchIn(key))) {
+            require(key !in setOf("__proto__","prototype","constructor") && (key == "apiKeyEnv" || key == "credentialIds" || !Regex("(?:api.?key|secret|password|authorization|credential|headers)|^(?:access|refresh|auth|bearer)?[_-]?token$",RegexOption.IGNORE_CASE).containsMatchIn(key))) {
                 "Store secrets in provider credentials, not provider configuration"
             }
             requireProviderSecretFree(value.opt(key))

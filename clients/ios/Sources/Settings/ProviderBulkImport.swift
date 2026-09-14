@@ -25,9 +25,9 @@ enum ProviderBulkImport {
     static let supportedTypes = ["openai", "openai-responses", "anthropic", "gemini", "azure-openai", "bedrock-claude", "vertex-claude", "vertex-gemini", "foundry-claude"]
     /// Keys carried through from an imported provider. Anything absent here is
     /// dropped with a warning, so a provider reachable several ways MUST list
-    /// `connections` / `apiKeys` / `fallback` — otherwise importing a
+    /// `connections` / `credentialIds` / `fallback` — otherwise importing a
     /// multi-connection config silently yields a single-connection provider.
-    private static let providerFields: Set<String> = ["type", "baseUrl", "apiKeyEnv", "models", "region", "apiVersion", "supportsWebsockets", "supportsWebsocketCompression", "websocketConnectTimeoutMs", "visionDelegate", "pricing", "billingMode", "connections", "apiKeys", "fallback"]
+    private static let providerFields: Set<String> = ["type", "baseUrl", "apiKeyEnv", "models", "region", "apiVersion", "supportsWebsockets", "supportsWebsocketCompression", "websocketConnectTimeoutMs", "visionDelegate", "pricing", "billingMode", "connections", "credentialIds", "fallback"]
     private static let fallbackTriggers: Set<String> = ["rate_limit", "overloaded", "server_error", "network", "auth"]
     private static let modelFields: Set<String> = ["id", "aliases", "capabilities", "metadata"]
     private static let forbidden: Set<String> = ["__proto__", "prototype", "constructor"]
@@ -71,12 +71,12 @@ enum ProviderBulkImport {
         var merged = draft
         merged.removeValue(forKey: "connections")
         merged.removeValue(forKey: "fallback")
-        merged.removeValue(forKey: "apiKeys")
-        for (key, value) in connection where key != "id" && key != "apiKeys" { merged[key] = value }
+        merged.removeValue(forKey: "credentialIds")
+        for (key, value) in connection where key != "id" && key != "credentialIds" { merged[key] = value }
         return merged
     }
 
-    private static func validateApiKeys(_ value: Any?) -> String? {
+    private static func validateCredentialIds(_ value: Any?) -> String? {
         guard let value else { return nil }
         guard let keys = value as? [Any], !keys.isEmpty else { return localized("settings_parity_provider_validation_invalid") }
         let ids = keys.compactMap { $0 as? String }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -95,7 +95,7 @@ enum ProviderBulkImport {
         guard let connections = draft["connections"] as? [[String: Any]], !connections.isEmpty else {
             return localized("settings_parity_provider_validation_invalid")
         }
-        if let error = validateApiKeys(draft["apiKeys"]) { return error }
+        if let error = validateCredentialIds(draft["credentialIds"]) { return error }
         var seen: Set<String> = []
         for connection in connections {
             guard let rawID = connection["id"] as? String else { return localized("settings_parity_provider_validation_invalid") }
@@ -106,7 +106,7 @@ enum ProviderBulkImport {
                 return localized("settings_parity_provider_validation_invalid")
             }
             seen.insert(id)
-            if let error = validateApiKeys(connection["apiKeys"]) { return error }
+            if let error = validateCredentialIds(connection["credentialIds"]) { return error }
             var merged = entry
             merged.draft = mergedConnection(draft, connection)
             if let error = validate(merged, credentialConfigured: credentialConfigured) { return error }
@@ -131,7 +131,7 @@ enum ProviderBulkImport {
         if let error = entry.errors.first { return error }
         let draft = entry.draft
         if draft["connections"] != nil { return validateConnections(entry, credentialConfigured: credentialConfigured) }
-        if let error = validateApiKeys(draft["apiKeys"]) { return error }
+        if let error = validateCredentialIds(draft["credentialIds"]) { return error }
         guard let type = draft["type"] as? String, supportedTypes.contains(type) else { return localized("settings_parity_provider_validation_protocol") }
         guard let models = draft["models"] as? [[String: Any]], !models.isEmpty else { return localized("settings_parity_provider_validation_models") }
         let ids = models.compactMap { $0["id"] as? String }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -244,7 +244,11 @@ enum ProviderBulkImport {
                             if let models = normalizedModels(value, entry: &entry) { sanitized[field] = models }
                         } else if ["id", "baseUrl", "apiKeyEnv"].contains(field), let text = value as? String {
                             sanitized[field] = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        } else if unsafeKey(field) {
+                        } else if field != "credentialIds" && unsafeKey(field) {
+                            // `credentialIds` is a REFERENCE — keychain ids, not
+                            // secrets — so it is named as an exception here the
+                            // way `apiKeyEnv` is at the provider level. Every
+                            // other credential-shaped key is still refused.
                             entry.errors.append(localized("settings_parity_provider_validation_secret"))
                         } else {
                             sanitized[field] = safe(value, errors: &entry.errors)

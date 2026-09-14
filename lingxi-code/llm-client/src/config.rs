@@ -52,7 +52,7 @@ pub struct AzureConfig {
 /// Every field defaults to `false`, so a profile that never opts in behaves
 /// exactly as it did before connections existed: the drive loop's retry/fallback
 /// decisions are reached untouched. Only a provider that actually declares
-/// `connections` or `apiKeys` gets [`Self::DEFAULT`].
+/// `connections` or `credentialIds` gets [`Self::DEFAULT`].
 ///
 /// Deliberately excluded: `ModelUnavailable` (it conflates a local registry miss
 /// with a provider 404, so a config typo would masquerade as a dead endpoint and

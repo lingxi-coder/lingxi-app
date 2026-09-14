@@ -446,6 +446,40 @@ struct DesktopPermissionsPage: View {
     }
 }
 
+/// One editable row of a provider's `connections` list.
+///
+/// A provider reachable several ways — a domestic and an international host, or
+/// several API keys — holds one of these per way. Anything left blank inherits
+/// the provider-level value, which is why every field here is optional except
+/// the id.
+private struct ProviderConnectionRow: Identifiable, Equatable {
+    let id = UUID()
+    var connectionID = ""
+    var baseURL = ""
+    var type = ""
+    var apiKeyEnv = ""
+
+    /// The settings dictionary this row writes, omitting inherited fields.
+    var settingsValue: [String: Any] {
+        var out: [String: Any] = ["id": connectionID.trimmingCharacters(in: .whitespacesAndNewlines)]
+        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let env = apiKeyEnv.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !base.isEmpty { out["baseUrl"] = base }
+        if !type.isEmpty { out["type"] = type }
+        if !env.isEmpty { out["apiKeyEnv"] = env }
+        return out
+    }
+
+    init() {}
+
+    init(_ value: [String: Any]) {
+        connectionID = value["id"] as? String ?? ""
+        baseURL = value["baseUrl"] as? String ?? ""
+        type = value["type"] as? String ?? ""
+        apiKeyEnv = value["apiKeyEnv"] as? String ?? ""
+    }
+}
+
 struct DesktopCustomProvidersPage: View {
     @State private var repository = DesktopSettingsRepository.shared
     @State private var layer = DesktopSettingsLayer.user
@@ -457,6 +491,7 @@ struct DesktopCustomProvidersPage: View {
     @State private var apiKeyEnv = ""
     @State private var apiVersion = ""
     @State private var modelIDs = ""
+    @State private var connections: [ProviderConnectionRow] = []
     @State private var alias = ""
     @State private var aliasTarget = ""
     @State private var fallbackFrom = ""
@@ -496,6 +531,39 @@ struct DesktopCustomProvidersPage: View {
                     if providerType == "azure-openai" { TextField("API version", text: $apiVersion) }
                     TextField("Model IDs, comma separated", text: $modelIDs)
                     Button("settings_save") { saveProvider() }.accessibilityIdentifier("settings.providers.save")
+                }.textFieldStyle(.roundedBorder).autocorrectionDisabled().textInputAutocapitalization(.never)
+                    .disabled(!repository.canEdit(key: "providers", layer: layer))
+            }
+            GroupBox("Connections") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("One provider can be reached several ways — a domestic and an international address, or several keys. Blank fields inherit the values above. Requests try them in order and move to the next one when a connection fails.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if connections.isEmpty {
+                        Text("Single connection: the address and authentication above are used.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach($connections) { $connection in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                TextField("Connection id, e.g. cn", text: $connection.connectionID)
+                                    .accessibilityIdentifier("settings.providers.connection.id")
+                                Button("settings_parity_remove", role: .destructive) {
+                                    connections.removeAll { $0.id == connection.id }
+                                }
+                            }
+                            TextField("settings_parity_base_url", text: $connection.baseURL).keyboardType(.URL)
+                            Picker("Protocol", selection: $connection.type) {
+                                Text("Inherit \(providerType)").tag("")
+                                ForEach(types, id: \.self) { Text($0).tag($0) }
+                            }
+                            TextField("settings_parity_api_key_env", text: $connection.apiKeyEnv)
+                            Text("Credentials are stored per connection, under \(profileID.isEmpty ? "provider" : profileID):\(connection.connectionID.isEmpty ? "…" : connection.connectionID).")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    Button("Add connection") { connections.append(ProviderConnectionRow()) }
+                        .accessibilityIdentifier("settings.providers.connection.add")
                 }.textFieldStyle(.roundedBorder).autocorrectionDisabled().textInputAutocapitalization(.never)
                     .disabled(!repository.canEdit(key: "providers", layer: layer))
             }
@@ -541,8 +609,9 @@ struct DesktopCustomProvidersPage: View {
         apiKeyEnv = value["apiKeyEnv"] as? String ?? ""
         apiVersion = value["apiVersion"] as? String ?? ""
         modelIDs = (value["models"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }.joined(separator: ", ")
+        connections = (value["connections"] as? [[String: Any]] ?? []).map(ProviderConnectionRow.init)
     }
-    private func reset() { select(nil); alias = ""; aliasTarget = ""; fallbackFrom = ""; fallbackTo = "" }
+    private func reset() { select(nil); alias = ""; aliasTarget = ""; fallbackFrom = ""; fallbackTo = "" }  // select() reloads `connections`
     private func split(_ text: String) -> [String] { text.split(whereSeparator: { $0 == "," || $0 == "\n" }).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } }
     private func saveProvider() {
         let id = profileID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -556,6 +625,7 @@ struct DesktopCustomProvidersPage: View {
         }
         if !apiKeyEnv.isEmpty && apiKeyEnv.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) == nil { repository.errorMessage = String(localized: "settings_parity_provider_validation_env"); return }
         if providerType == "azure-openai" && apiVersion.isEmpty { repository.errorMessage = String(localized: "settings_parity_provider_validation_invalid"); return }
+        if let error = validateConnections() { repository.errorMessage = error; return }
         var provider = own[id] ?? [:]
         let oldModels = provider["models"] as? [[String: Any]] ?? []
         provider["type"] = providerType
@@ -563,9 +633,49 @@ struct DesktopCustomProvidersPage: View {
         provider["apiKeyEnv"] = apiKeyEnv.isEmpty ? nil : apiKeyEnv
         if !apiVersion.isEmpty { provider["apiVersion"] = apiVersion }
         provider["models"] = models.map { id in oldModels.first { $0["id"] as? String == id } ?? ["id": id] }
+        // An empty list must REMOVE the key rather than persist `connections: []`,
+        // which the engine rejects as "declare connections or omit the field".
+        provider["connections"] = connections.isEmpty ? nil : connections.map(\.settingsValue)
         var next = own; next[id] = provider
         save("providers", next)
     }
+    /// Reject connection rows the engine would refuse, naming the reason.
+    ///
+    /// Mirrors the desktop editor and the engine's own desugaring: an id becomes
+    /// part of a qualified model reference (`provider:connection/model`), so a
+    /// separator inside one produces a reference that cannot be routed, and two
+    /// rows sharing an id would desugar to two profiles with the same name.
+    private func validateConnections() -> String? {
+        guard !connections.isEmpty else { return nil }
+        var seen: Set<String> = []
+        for connection in connections {
+            let id = connection.connectionID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty, !id.contains("/"), !id.contains(":"), !id.contains("#") else {
+                return String(localized: "settings_parity_provider_validation_invalid")
+            }
+            guard seen.insert(id).inserted else {
+                return String(localized: "settings_parity_provider_validation_invalid")
+            }
+            // Each connection is validated as the flat provider it desugars to:
+            // its own address when it sets one, otherwise the inherited address,
+            // and at least one of the two must be usable.
+            let effective = connection.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? baseURL : connection.baseURL
+            let trimmed = effective.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                return String(localized: "settings_parity_provider_validation_url")
+            }
+            guard let url = URL(string: trimmed), ["http", "https"].contains(url.scheme ?? ""), url.host != nil else {
+                return String(localized: "settings_parity_provider_validation_url")
+            }
+            let env = connection.apiKeyEnv.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !env.isEmpty, env.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) == nil {
+                return String(localized: "settings_parity_provider_validation_env")
+            }
+        }
+        return nil
+    }
+
     private func saveRouting(_ key: String, _ value: Any) { var next = routing; next[key] = value; save("routing", next) }
     private func save(_ key: String, _ value: Any) { Task { await repository.save(key: key, json: DesktopSettingsRepository.json(value), layer: layer) } }
 }

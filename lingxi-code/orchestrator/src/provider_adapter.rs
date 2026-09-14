@@ -180,6 +180,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     async fn messages_create_hook_prompt(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: &str,
         msgs: Vec<ConversationMessage>,
     ) -> Result<LlmResponse, LlmError> {
@@ -187,7 +188,6 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             model, profile, Some(system), msgs,
             serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
             None, None, Some(llm_client::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
-        profile: Option<&str>,
         ).await?;
         llm_client::stream_accumulator::accumulate_stream_salvaging(stream)
             .await

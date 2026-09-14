@@ -4156,15 +4156,15 @@ async fn build_mobile_inner_with_ask(
     // executor is built BEFORE the orchestrator that owns the JSONL writer;
     // `attach` fills the cell once `orch` exists (step 8 below).
     let hook_attachment_sink = Arc::new(orchestrator::JsonlHookAttachmentSink::new());
-    let hooks: Arc<hooks::HookExecutorImpl> = Arc::new(
-        hooks::HookExecutorImpl::new(
-            hook_registry.clone(),
     // Same late-bound shape for the prompt-hook evaluator: it needs the
     // session's live model/profile (a non-Anthropic session evaluates on its
     // own model), and the session does not exist yet. `attach`ed in step 8.
     let hook_prompt_runner = Arc::new(orchestrator::ApiClientHookPromptRunner::new(
         api_client.clone(),
     ));
+    let hooks: Arc<hooks::HookExecutorImpl> = Arc::new(
+        hooks::HookExecutorImpl::new(
+            hook_registry.clone(),
             http.clone(),
             Arc::new(platform_posix_minimal::PosixRuntime::new())
                 as Arc<dyn platform_api::RuntimeSpawner>,
@@ -5282,6 +5282,7 @@ async fn build_mobile_inner_with_ask(
     // JSONL writer) exists. The sink holds a `Weak`, so this does not create an
     // orchestrator↔hook-executor reference cycle.
     hook_attachment_sink.attach(&orch);
+    hook_prompt_runner.attach(&orch);
 
     // H-CHG-02: wire the enforcing gate's live `set_permission_mode` auto gate to
     // the LIVE `session.model` (mutated by `/model` switches / resume), so a
@@ -5299,7 +5300,6 @@ async fn build_mobile_inner_with_ask(
             session.try_lock().ok().map(|state| {
                 let profile = state
                     .model_profile
-    hook_prompt_runner.attach(&orch);
                     .as_ref()
                     .or_else(|| model_provider_profiles.get(&state.model));
                 let provider = profile

@@ -13213,6 +13213,12 @@ pub async fn build(
     // `attach` fills the cell once `orch` exists (step 4.x below), the same
     // shape as `subagent_hook_executor_cell`.
     let hook_attachment_sink = Arc::new(orchestrator::JsonlHookAttachmentSink::new());
+    // Same late-bound shape for the prompt-hook evaluator: it needs the
+    // session's live model/profile (a non-Anthropic session evaluates on its
+    // own model), and the session does not exist yet. `attach` below.
+    let hook_prompt_runner = Arc::new(orchestrator::ApiClientHookPromptRunner::new(
+        api_client.clone(),
+    ));
     let hook_mcp_invoker = DesktopHookMcpInvoker::default();
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
@@ -13303,12 +13309,6 @@ pub async fn build(
         }
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
         mcp::XaaIdpSettings::from_settings_tiers(&refs).map(|settings| {
-    // Same late-bound shape for the prompt-hook evaluator: it needs the
-    // session's live model/profile (a non-Anthropic session evaluates on its
-    // own model), and the session does not exist yet. `attach` below.
-    let hook_prompt_runner = Arc::new(orchestrator::ApiClientHookPromptRunner::new(
-        api_client.clone(),
-    ));
             // Build the server→(AS client_id, server_key) lookup from the known
             // MCP configs so the provider can resolve the AS `client_secret`.
             let lookup = mcp::MapServerOAuthLookup::from_specs(
@@ -15512,6 +15512,7 @@ pub async fn build(
     // transcript `attachment` line. The sink holds a `Weak`, so this does not
     // create an orchestrator↔hook-executor reference cycle.
     hook_attachment_sink.attach(&orch);
+    hook_prompt_runner.attach(&orch);
 
     // Publish the orchestrator's shared output-token pool to the workflow
     // handler (registered above with a still-empty cell). From here, a launched
@@ -15645,7 +15646,6 @@ pub async fn build(
                     .map_or("firstParty", String::as_str);
                 let provider = if profile_provider == "firstParty" {
                     first_party_environment_provider.clone()
-    hook_prompt_runner.attach(&orch);
                 } else {
                     profile_provider.to_string()
                 };

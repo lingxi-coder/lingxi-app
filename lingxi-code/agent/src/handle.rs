@@ -2925,13 +2925,17 @@ impl Drop for SpawnDeallocGuard {
                 }
                 let _ = pool.deallocate(&id).await;
                 // Emit the caller-visible terminal observation BEFORE
+    startup_error: Option<String>,
                 // running MCP teardown, mirroring the normal terminal
                 // path's ordering (see "Normal terminal path" above): a
                 // wedged MCP `disconnect` must not be able to block the
                 // `Killed` observation forever [round-3 finding B1 — a
                 // regression introduced while fixing finding 17, which put
                 // the cleanup await before this emit].
-                observer_events.emit_terminal(SubagentObservation::Killed { agent_id: id });
+                observer_events.emit_terminal(match startup_error {
+                    Some(error) => SubagentObservation::Failed { agent_id: id, error },
+                    None => SubagentObservation::Killed { agent_id: id },
+                });
                 // §24b: mirror the normal terminal path's
                 // `run_agent_mcp_cleanups` call so a spawn whose future is
                 // dropped before reaching that line does not leak the MCP
@@ -2943,6 +2947,7 @@ impl Drop for SpawnDeallocGuard {
 }
 
 #[async_trait]
+            let startup_error = self.startup_error.take();
 impl SubagentSpawner for PoolSubagentSpawner {
     async fn resume_foreground(
         &self,
@@ -3146,8 +3151,15 @@ impl SubagentSpawner for PoolSubagentSpawner {
         };
         drop(mcp_guard);
         for observer in &observers {
-            observer.before_start(&allocation_event).await?;
-            observer.on_model_selected(&allocation_event, display_effort.as_deref()).await;
+            if let Err(error) = observer.before_start(&allocation_event).await {
+                // Cleanup is still required, but a rejected startup is a failure,
+                // not a user cancellation. Preserve its reason for clients.
+                dealloc_guard.startup_error = Some(error.to_string());
+                return Err(error);
+            }
+            observer
+                .on_model_selected(&allocation_event, display_effort.as_deref())
+                .await;
         }
         let _ = start.send(());
         observer_events.try_emit(allocation_event);
@@ -3193,6 +3205,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         })
                         .unwrap_or(0);
                     let cumulative_usage_rollup = subagent_usage_from_llm_usage(&cumulative_usage);
+            startup_error: None,
                     break SubagentResult::Completed {
                         agent_id: child_id,
                         content: result,
@@ -3761,8 +3774,15 @@ impl PoolSubagentSpawner {
         };
         drop(mcp_guard);
         for observer in &observers {
-            observer.before_start(&allocation_event).await?;
-            observer.on_model_selected(&allocation_event, display_effort.as_deref()).await;
+            if let Err(error) = observer.before_start(&allocation_event).await {
+                // Cleanup is still required, but a rejected startup is a failure,
+                // not a user cancellation. Preserve its reason for clients.
+                dealloc_guard.startup_error = Some(error.to_string());
+                return Err(error);
+            }
+            observer
+                .on_model_selected(&allocation_event, display_effort.as_deref())
+                .await;
         }
         if !dealloc_guard.mcp_cleanups.is_empty() {
             self.persistent_agent_mcp_cleanups
@@ -3829,6 +3849,7 @@ impl PoolSubagentSpawner {
                         terminal_death_seen = true;
                         observer_events.emit_terminal(SubagentObservation::Killed {
                             agent_id: forward_agent_id,
+            startup_error: None,
                         })
                     }
                     SubagentEvent::Progress { .. } => {}
@@ -4609,6 +4630,50 @@ mod tests {
                 request,
                 SubagentInheritance {
                     tool_invoker: Arc::new(DummyInvoker),
+    #[tokio::test]
+    async fn rejected_startup_reports_failure_instead_of_killed_without_calling_model() {
+        struct RejectStartup;
+        #[async_trait]
+        impl SubagentSpawnObserver for RejectStartup {
+            async fn before_start(&self, _: &SubagentObservation) -> Result<(), SubagentSpawnError> {
+                Err(SubagentSpawnError::Internal("control binding failed".into()))
+            }
+            async fn on_event(&self, _: SubagentObservation) {}
+        }
+        for persistent in [false, true] {
+            let pool = Arc::new(StateMachinePool::new(Arc::new(CountingRuntimeSpawner::default()), 4));
+            let api = Arc::new(QueueApi {
+                responses: Mutex::new(VecDeque::new()),
+                calls: AtomicUsize::new(0),
+            });
+            let observer = Arc::new(RecordingLifecycleObserver::default());
+            let spawner = PoolSubagentSpawner::new(pool)
+                .with_api_client(api.clone())
+                .with_spawn_observer(observer.clone());
+            let result = if persistent {
+                spawner.spawn_persistent_with_observer(
+                    minimal_spawn_request("plan"), dummy_inherit(), Arc::new(RejectStartup),
+                ).await.map(|_| ())
+            } else {
+                spawner.spawn_with_observer(
+                    minimal_spawn_request("plan"), dummy_inherit(), None, Some(Arc::new(RejectStartup)),
+                ).await.map(|_| ())
+            };
+            assert!(result.is_err());
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if !observer.events.lock().unwrap().is_empty() { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("startup cleanup reports a terminal event");
+            let events = observer.events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert!(matches!(&events[0], SubagentObservation::Failed { error, .. }
+                if error.contains("control binding failed")));
+            assert_eq!(api.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
                     budget: Arc::new(DummyBudget),
                 },
             ),

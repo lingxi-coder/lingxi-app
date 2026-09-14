@@ -974,7 +974,7 @@ impl TaskRegistryHandle for TaskRegistry {
         id: &str,
         killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>,
     ) -> Result<(), TaskRegistryError> {
-        TaskRegistry::bind_background_bash_process(self, id, None, killer)
+        TaskRegistry::bind_background_killer(self, id, killer)
             .await
             .map_err(task_err_to_registry_err)
     }

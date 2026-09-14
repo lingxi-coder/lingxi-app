@@ -543,7 +543,7 @@ pub fn lower_model_listing(listing: llm_client::ModelListing) -> platform_api::M
     platform_api::ModelListing {
         display_model: listing.display_model,
         request_model: listing.request_model,
-        provider_label: provider_label(&listing.profile_name).to_string(),
+        provider_label: provider_label_owned(&listing.profile_name),
         provider_id: listing.profile_name,
         description: listing.description,
         supports_reasoning: capabilities.reasoning,
@@ -714,6 +714,27 @@ pub(crate) fn model_description(request_model: &str) -> Option<&'static str> {
         Some("Efficient for routine tasks")
     } else {
         None
+    }
+}
+
+/// Human provider header for a catalog profile name, connection-aware.
+///
+/// A provider reachable several ways names each connection
+/// `<group>:<connection>` (+ `#<n>` per extra key slot). Labelling that raw
+/// would put `deepseek:cn#1` in the settings model directory as if it were a
+/// vendor, so the label is built from the VENDOR plus the connection using the
+/// same parser the TUI picker and the desktop header use.
+fn provider_label_owned(profile_name: &str) -> String {
+    let (group, connection, slot) = platform_api::split_connection_profile(profile_name);
+    if connection.is_none() && slot.is_none() {
+        return provider_label(profile_name).to_string();
+    }
+    let base = provider_label(group).to_string();
+    match (connection, slot) {
+        (Some(connection), Some(slot)) => format!("{base} · {connection} · key {}", slot + 1),
+        (Some(connection), None) => format!("{base} · {connection}"),
+        (None, Some(slot)) => format!("{base} · key {}", slot + 1),
+        (None, None) => base,
     }
 }
 
@@ -988,6 +1009,25 @@ impl StreamingApiClient for ProviderApiAdapter {
 
 #[cfg(test)]
 mod tests {
+
+    /// The settings model directory must not show a raw connection profile name
+    /// as if it were a vendor. This is the third copy of the profile-name→label
+    /// mapping (with `engine-desktop` and the TUI picker) and was the one left
+    /// behind, so `deepseek:cn#1` reached the desktop and mobile catalog.
+    #[test]
+    fn provider_label_is_connection_aware() {
+        assert_eq!(super::provider_label_owned("deepseek"), "DeepSeek");
+        assert_eq!(super::provider_label_owned("deepseek:cn"), "DeepSeek · cn");
+        assert_eq!(
+            super::provider_label_owned("deepseek:cn#1"),
+            "DeepSeek · cn · key 2"
+        );
+        // `#` is a key slot only when a number follows it: an unknown provider
+        // keeps its WHOLE name rather than losing half of it to a phantom slot.
+        // (This adapter returns unknown names verbatim; only the desktop header
+        // title-cases them.)
+        assert_eq!(super::provider_label_owned("weird#name"), "weird#name");
+    }
     use super::*;
     use llm_client::model::user_agent::UserAgentEnv;
     use llm_client::DefaultLlmClient;

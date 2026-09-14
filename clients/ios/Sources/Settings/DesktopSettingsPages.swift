@@ -452,21 +452,29 @@ struct DesktopPermissionsPage: View {
 /// several API keys — holds one of these per way. Anything left blank inherits
 /// the provider-level value, which is why every field here is optional except
 /// the id.
-private struct ProviderConnectionRow: Identifiable, Equatable {
+private struct ProviderConnectionRow: Identifiable {
     let id = UUID()
     var connectionID = ""
     var baseURL = ""
     var type = ""
     var apiKeyEnv = ""
+    /// Everything this editor does NOT surface — `models`, `credentialIds`,
+    /// `region`, `apiVersion`, `pricing`, `capabilities` — kept verbatim.
+    ///
+    /// Saving replaces the whole `connections` array, so without this a user who
+    /// merely opened the page and tapped Save would silently delete every one of
+    /// those fields. The provider row above takes the same care with its models.
+    private var passthrough: [String: Any] = [:]
 
-    /// The settings dictionary this row writes, omitting inherited fields.
+    /// The settings dictionary this row writes: the untouched keys, with the
+    /// edited ones applied and blank ones REMOVED so they inherit again.
     var settingsValue: [String: Any] {
-        var out: [String: Any] = ["id": connectionID.trimmingCharacters(in: .whitespacesAndNewlines)]
-        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let env = apiKeyEnv.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !base.isEmpty { out["baseUrl"] = base }
-        if !type.isEmpty { out["type"] = type }
-        if !env.isEmpty { out["apiKeyEnv"] = env }
+        var out = passthrough
+        out["id"] = connectionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        for (key, value) in [("baseUrl", baseURL), ("type", type), ("apiKeyEnv", apiKeyEnv)] {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { out.removeValue(forKey: key) } else { out[key] = trimmed }
+        }
         return out
     }
 
@@ -477,6 +485,18 @@ private struct ProviderConnectionRow: Identifiable, Equatable {
         baseURL = value["baseUrl"] as? String ?? ""
         type = value["type"] as? String ?? ""
         apiKeyEnv = value["apiKeyEnv"] as? String ?? ""
+        passthrough = value
+        for key in ["id", "baseUrl", "type", "apiKeyEnv"] { passthrough.removeValue(forKey: key) }
+    }
+}
+
+extension ProviderConnectionRow: Equatable {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id
+            && lhs.connectionID == rhs.connectionID
+            && lhs.baseURL == rhs.baseURL
+            && lhs.type == rhs.type
+            && lhs.apiKeyEnv == rhs.apiKeyEnv
     }
 }
 
@@ -557,7 +577,7 @@ struct DesktopCustomProvidersPage: View {
                                 ForEach(types, id: \.self) { Text($0).tag($0) }
                             }
                             TextField("settings_parity_api_key_env", text: $connection.apiKeyEnv)
-                            Text("Credentials are stored per connection, under \(profileID.isEmpty ? "provider" : profileID):\(connection.connectionID.isEmpty ? "…" : connection.connectionID).")
+                            Text("Uses \(profileID.isEmpty ? "the provider" : profileID)'s saved key unless this connection lists its own credentialIds.")
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 4)

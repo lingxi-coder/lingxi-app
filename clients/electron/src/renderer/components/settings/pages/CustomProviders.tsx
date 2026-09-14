@@ -25,7 +25,7 @@ export { isEditableLayer };
 
 export { SUPPORTED_PROVIDER_TYPES, validateCustomProvider } from './customProviderImport';
 export type { CustomProviderDraft, CustomProviderModelDraft, SupportedProviderType } from './customProviderImport';
-import { validateCustomProvider, validateProfileName, parseProviderImport, validateImportEntry, mergeProviderImport, type CustomProviderDraft, type CustomProviderModelDraft, type ProviderImportEntry } from './customProviderImport';
+import { validateCustomProvider, validateProfileName, parseProviderImport, validateImportEntry, mergeProviderImport, type CustomProviderDraft, type CustomProviderModelDraft, type ProviderImportEntry, connectionsCarryAuth } from './customProviderImport';
 import { trimProviderDraft, editableProviderDraft } from './customProviderDraft';
 import { ProviderEditorFields } from './ProviderEditorFields';
 
@@ -215,7 +215,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
     const normalizedDraft = trimProviderDraft(draft);
     const error = (!originalName ? validateProfileName(name) : null) || validateCustomProvider(normalizedDraft);
     if (error) { setFormError(error); return; }
-    if (draft.type !== 'bedrock-claude' && !apiKey.trim() && !draft.apiKeyEnv?.trim() && !bridge.bootstrap?.providerCredentials?.some((entry) => entry.providerId === name && entry.configured)) { setFormError('请填写 API Key 或环境变量名称。'); return; }
+    if (draft.type !== 'bedrock-claude' && !apiKey.trim() && !draft.apiKeyEnv?.trim() && !connectionsCarryAuth(draft) && !bridge.bootstrap?.providerCredentials?.some((entry) => entry.providerId === name && entry.configured)) { setFormError('请填写 API Key 或环境变量名称。'); return; }
     if (!originalName && providers[name]) { setFormError('该 Profile 已存在，请从列表编辑。'); return; }
     setFormError(null);
     void persist({ ...providers, [name]: normalizedDraft }, apiKey.trim() ? { [name]: apiKey.trim() } : {});

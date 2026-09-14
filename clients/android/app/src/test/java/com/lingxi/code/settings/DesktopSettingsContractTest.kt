@@ -231,4 +231,27 @@ class DesktopSettingsContractTest {
         }
     }
 
+
+    /** A non-object `fallback` used to pass here and fail in the engine. */
+    @Test
+    fun nonObjectFallbackIsRejected() {
+        assertThrows(IllegalArgumentException::class.java) {
+            validateProviderDefinitions(providers("""
+                {"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],
+                  "connections":[{"id":"a"}],"fallback":"rate_limit"}}
+            """.trimIndent()))
+        }
+    }
+
+    /** `fallback` is real on a provider without `connections` too. */
+    @Test
+    fun fallbackIsValidatedWithoutConnections() {
+        assertThrows(IllegalArgumentException::class.java) {
+            validateProviderDefinitions(providers("""
+                {"p":{"type":"openai","baseUrl":"https://x.test/v1","models":[{"id":"m"}],
+                  "credentialIds":["k"],"fallback":{"on":["nope"]}}}
+            """.trimIndent()))
+        }
+    }
+
 }

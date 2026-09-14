@@ -63,7 +63,7 @@ export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft,
             </select></label>
             <label style={field}>环境变量名称<input aria-label={`连接 ${index + 1} apiKeyEnv`} value={typeof connection.apiKeyEnv === 'string' ? connection.apiKeyEnv : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { apiKeyEnv: event.target.value || undefined }))} placeholder="MY_PROVIDER_CN_API_KEY" spellCheck={false} style={input} /></label>
           </div>
-          <span style={{ color: t.text4, fontSize: 11.5 }}>凭据按「{name || 'provider'}:{typeof connection.id === 'string' && connection.id ? connection.id : '…'}」保存。</span>
+          <span style={{ color: t.text4, fontSize: 11.5 }}>默认使用「{name || 'provider'}」上保存的凭据；需要不同的 Key 时在该连接上填写 credentialIds。</span>
         </div>)}
       <button type="button" style={{ ...ghostButtonStyle(t), justifySelf: 'start' }} onClick={() => onDraft(addProviderConnection(draft))}>＋ 添加连接方式</button>
     </div>

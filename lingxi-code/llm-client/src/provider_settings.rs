@@ -577,6 +577,18 @@ fn parse_flat_provider(
             ProviderCredentialMode::Env => CredentialConfig::Env {
                 var: env_var.clone().expect("apiKeyEnv was validated above"),
             },
+            // A connection inherits the PROVIDER's stored credential unless it
+            // named its own through `credentialIds`. Without this, `assemble`'s
+            // "no credential => Static{profile_name}" rule would look for
+            // `deepseek:cn`, while every editor saves the key under `deepseek` —
+            // so a multi-connection provider authenticated through the UI would
+            // fail auth with no indication why. It also makes the ordinary case
+            // right: one key, two regions.
+            ProviderCredentialMode::DeferredStatic if group != profile_name => {
+                CredentialConfig::Static {
+                    id: group.to_string(),
+                }
+            }
             ProviderCredentialMode::DeferredStatic => CredentialConfig::None,
         }
     };

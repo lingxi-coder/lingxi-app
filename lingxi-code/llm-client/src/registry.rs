@@ -331,19 +331,70 @@ impl ModelRegistry {
             });
         }
 
+        // Two models of ONE profile answering to the same string is the old
+        // ambiguity and stays an error: they are different models on the same
+        // endpoint, so which to send is genuinely unknown.
+        if let Some((dup, _)) = matches.iter().find(|(p, _)| {
+            matches
+                .iter()
+                .filter(|(q, _)| q.profile_name == p.profile_name)
+                .count()
+                > 1
+        }) {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "model reference '{requested}' matches more than one model on profile \
+                     '{}' — rename or remove the duplicate alias",
+                    dup.profile_name
+                ),
+            });
+        }
+
         matches.sort_by(|(a, _), (b, _)| a.connection_sort_key().cmp(&b.connection_sort_key()));
         let (provider, model) = matches[0];
-        // Only fail over between connections billed the same way. A provider can
-        // publish the same model on a subscription endpoint AND a pay-per-token
-        // one (Zhipu ships exactly this: `glm-coding` and `zai` share eight model
-        // ids at different billing modes). Silently moving a rate-limited
-        // subscription request onto the metered endpoint would start charging
-        // real money for what the user believes their plan covers, so a
-        // cross-billing hop has to be an explicit choice, not a failover.
+
+        // Siblings come from the head's GROUP, not from whatever was in scope.
+        //
+        // The model picker hands back a CONNECTION profile (`ModelListing`'s
+        // `provider_id` is the profile name), so the session stores
+        // `deepseek:cn` and every real request arrives scoped to one connection.
+        // Building the chain from the in-scope matches therefore left it empty
+        // exactly when failover was needed, and the feature never ran outside
+        // its own tests. Scoping selects the connection to START on; it does not
+        // decide whether the rest of the group may be used.
+        //
+        // A hop must serve the SAME wire model — `advance_connection` only
+        // re-points the endpoint and credential, so a hop that changed the model
+        // would silently answer as something else.
+        //
+        // Only connections billed the same way are offered. A provider can
+        // publish one model on a subscription endpoint AND a metered one (Zhipu
+        // ships exactly this: `glm-coding` and `zai` share eight model ids at
+        // different billing modes), and moving a rate-limited subscription
+        // request onto the metered endpoint would start charging real money for
+        // what the plan covers.
         let billing = provider.pricing.billing_mode;
-        let connection_chain = matches[1..]
+        let group = provider.group();
+        let mut siblings: Vec<(&ProviderProfile, &ModelProfile)> = self
+            .config
+            .providers
             .iter()
-            .filter(|(p, _)| p.pricing.billing_mode == billing)
+            .filter(|candidate| {
+                candidate.group() == group
+                    && candidate.profile_name != provider.profile_name
+                    && candidate.pricing.billing_mode == billing
+            })
+            .filter_map(|candidate| {
+                candidate
+                    .models
+                    .iter()
+                    .find(|m| m.request_model == model.request_model)
+                    .map(|m| (candidate, m))
+            })
+            .collect();
+        siblings.sort_by(|(a, _), (b, _)| a.connection_sort_key().cmp(&b.connection_sort_key()));
+        let connection_chain = siblings
+            .into_iter()
             .map(|(p, m)| ConnectionHop {
                 profile_name: p.profile_name.clone(),
                 request_model: m.request_model.clone(),

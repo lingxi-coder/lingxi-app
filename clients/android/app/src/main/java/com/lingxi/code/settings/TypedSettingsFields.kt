@@ -185,6 +185,23 @@ internal fun validateProviderDefinitions(providers: JSONObject?) {
         val provider = providers.getJSONObject(id)
         requireProviderSecretFree(provider)
         requireValidCredentialIds(provider, id)
+        // Checked for every provider, not only ones with `connections`: a
+        // `fallback` on a credentialIds-only provider is equally real. A
+        // non-object used to pass silently here and then be rejected by the
+        // engine, which the TS and Swift mirrors both catch.
+        if (provider.has("fallback")) {
+            val fallback = provider.optJSONObject("fallback")
+            require(fallback != null) { "$id: fallback must be an object" }
+            if (fallback.has("on")) {
+                val triggers = fallback.optJSONArray("on")
+                require(triggers != null) { "$id: fallback.on must be an array" }
+                for (index in 0 until triggers.length()) {
+                    require(triggers.optString(index) in setOf("rate_limit", "overloaded", "server_error", "network", "auth")) {
+                        "$id: unsupported fallback.on trigger"
+                    }
+                }
+            }
+        }
         // A provider reachable several ways is validated CONNECTION BY
         // CONNECTION: the provider entry only supplies defaults, so requiring
         // baseUrl/models of it would reject a perfectly valid multi-connection
@@ -207,15 +224,6 @@ internal fun validateProviderDefinitions(providers: JSONObject?) {
                 require(seen.add(connectionId)) { "$id: duplicate connection id \"$connectionId\"" }
                 requireValidCredentialIds(connection, "$id:$connectionId")
                 validateProviderDefinitions(JSONObject().put(id, mergedConnection(provider, connection)))
-            }
-            provider.optJSONObject("fallback")?.let { fallback ->
-                fallback.optJSONArray("on")?.let { triggers ->
-                    for (index in 0 until triggers.length()) {
-                        require(triggers.optString(index) in setOf("rate_limit", "overloaded", "server_error", "network", "auth")) {
-                            "$id: unsupported fallback.on trigger"
-                        }
-                    }
-                }
             }
             return@forEach
         }

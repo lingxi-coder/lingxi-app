@@ -195,6 +195,28 @@ async fn a_rate_limited_connection_hands_the_request_to_the_next_one() {
     assert_eq!(response.model, "shared-model", "the model is unchanged");
 }
 
+/// The shape a real session sends: the picker hands back a CONNECTION profile,
+/// so `req.profile` is `grouped:intl`, not `None`.
+///
+/// Every other case here resolves unscoped, which is why the chain being empty
+/// under a connection scope went unnoticed — the feature was dead on the only
+/// path that matters.
+#[tokio::test]
+async fn a_request_scoped_to_a_connection_still_fails_over() {
+    let transport = ScriptedTransport::new(vec![429, 200]);
+    let api = service(transport.clone());
+
+    let _ = api
+        .messages_create("shared-model", Some("grouped:intl"), None, Vec::new(), Vec::new())
+        .await;
+
+    assert_eq!(
+        transport.connections(),
+        vec!["intl".to_string(), "cn".to_string()],
+        "a session pinned to one connection must still reach its sibling"
+    );
+}
+
 /// Streaming is the path desktop and mobile actually drive, and it had no
 /// fallback of any kind. A 429 on connect must reach the second connection.
 #[tokio::test]

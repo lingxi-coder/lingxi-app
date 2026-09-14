@@ -101,13 +101,32 @@ function validateConnections(draft: CustomProviderDraft): string | null {
   return null;
 }
 
+/**
+ * Whether authentication is satisfied at the CONNECTION level.
+ *
+ * `addProviderConnection` moves `apiKeyEnv` down onto the connections, so a
+ * multi-connection provider legitimately has none at provider level. Demanding
+ * one there rejected a provider whose every connection is authenticated.
+ */
+export function connectionsCarryAuth(draft: CustomProviderDraft): boolean {
+  const connections = Array.isArray(draft.connections) ? draft.connections : [];
+  if (!connections.length) return false;
+  return connections.every((connection) =>
+    nonempty((connection as Record<string, unknown>).apiKeyEnv) ||
+    (Array.isArray((connection as Record<string, unknown>).credentialIds) &&
+      ((connection as Record<string, unknown>).credentialIds as unknown[]).length > 0));
+}
+
 export function validateCustomProvider(draft: CustomProviderDraft): string | null {
   // A provider with `connections` is validated CONNECTION BY CONNECTION below;
   // the provider entry itself only supplies defaults, so it need not satisfy
   // baseUrl/models on its own.
-  if (record(draft) && draft.connections !== undefined) return validateConnections(draft);
+  // The provider-level list is checked FIRST either way: Rust, Swift and Kotlin
+  // all reject a bad one, so returning early on `connections` let a config pass
+  // here and fail in the engine.
   const keysError = validateCredentialIds(draft.credentialIds, '');
   if (keysError) return keysError;
+  if (record(draft) && draft.connections !== undefined) return validateConnections(draft);
   if (!record(draft) || !SUPPORTED_PROVIDER_TYPES.includes(draft.type as SupportedProviderType)) return `请选择支持的协议：${SUPPORTED_PROVIDER_TYPES.join(', ')}`;
   if (!Array.isArray(draft.models) || !draft.models.length) return 'models 至少需要一个模型。';
   if (draft.models.some(m => !record(m) || !nonempty(m.id))) return '每个 models 条目必须有非空 id。';
@@ -164,9 +183,10 @@ function validModelPricing(value: unknown): boolean {
   }
   return true;
 }
-const providerFields = new Set(['type','baseUrl','apiKeyEnv','models','region','apiVersion','supportsWebsockets','supportsWebsocketCompression','websocketConnectTimeoutMs','visionDelegate','pricing','billingMode']);
+const providerFields = new Set(['type','baseUrl','apiKeyEnv','models','region','apiVersion','supportsWebsockets','supportsWebsocketCompression','websocketConnectTimeoutMs','visionDelegate','pricing','connections','credentialIds','fallback','billingMode']);
 const modelFields = new Set(['id','aliases','capabilities','metadata']);
 const sdkTypes: Record<string, string> = { '@ai-sdk/openai-compatible': 'openai', '@ai-sdk/openai': 'openai-responses', '@ai-sdk/anthropic': 'anthropic', '@ai-sdk/google': 'gemini' };
+const referenceFields = new Set(['apiKeyEnv', 'credentialIds']);
 const secretField = /(?:api.?key|secret|password|authorization|credential|headers)|^(?:access|refresh|auth|bearer)?[_-]?token$/i;
 const diagnosticFields = new Set([...providerFields, ...modelFields, 'apiKey', 'accessToken', 'refreshToken', 'authorization', 'headers', 'timeout', 'fetch', 'includeUsage', 'compatibility', 'name', 'cost', 'limit', 'modalities', 'release_date', 'attachment', 'reasoning', 'temperature', 'tool_call', 'knowledge', 'open_weights', 'status', 'variants', 'options', 'provider', 'npm', 'whitelist', 'blacklist', 'plugin', 'plugins', 'routing', 'model', 'small_model', 'instructions', 'tools', 'mcp', 'agent']);
 const fieldLabel = (key: string): string => diagnosticFields.has(key) ? key : '（未知字段名已隐藏）';
@@ -176,7 +196,12 @@ function safeValue(value: unknown, diagnostics: ImportDiagnostic[], depth = 0): 
   if (Array.isArray(value)) return value.map(v => safeValue(v, diagnostics, depth + 1));
   if (!record(value)) return value;
   return Object.fromEntries(Object.entries(value).filter(([key]) => {
-    if (forbidden.has(key) || secretField.test(key)) { diagnostics.push({ severity: 'error', message: `高级字段 ${fieldLabel(key)} 包含凭据或不安全属性，已移除；请修改原始 JSON。` }); return false; }
+    // `apiKeyEnv` (an environment variable NAME) and `credentialIds` (keychain
+    // ids) are references, never secrets. They are allowed at the top level by
+    // `providerFields`, but this walker recurses, so a connection's own
+    // `apiKeyEnv` was being stripped as if it were a pasted key. The pattern
+    // itself is unchanged: every other credential-shaped key is still removed.
+    if (forbidden.has(key) || (!referenceFields.has(key) && secretField.test(key))) { diagnostics.push({ severity: 'error', message: `高级字段 ${fieldLabel(key)} 包含凭据或不安全属性，已移除；请修改原始 JSON。` }); return false; }
     return true;
   }).map(([key,v]) => [key, safeValue(v, diagnostics, depth + 1)]));
 }
@@ -263,7 +288,7 @@ export function parseProviderImport(text: string, existing: Record<string, Custo
 export function validateImportEntry(entry: ProviderImportEntry, options: { credentialConfigured?: boolean } = {}): string | null {
   const issue = validateProfileName(entry.name) ?? entry.diagnostics.find(d => d.severity === 'error')?.message ?? validateCustomProvider(trimProviderDraft(entry.draft));
   if (issue) return issue;
-  if (entry.draft.type !== 'bedrock-claude' && !nonempty(entry.apiKey) && !nonempty(entry.draft.apiKeyEnv) && !options.credentialConfigured) return '请填写 API Key 或环境变量名称。';
+  if (entry.draft.type !== 'bedrock-claude' && !nonempty(entry.apiKey) && !nonempty(entry.draft.apiKeyEnv) && !connectionsCarryAuth(entry.draft) && !options.credentialConfigured) return '请填写 API Key 或环境变量名称。';
   return null;
 }
 export function mergeProviderImport(current: Record<string, CustomProviderDraft>, entries: ProviderImportEntry[], options: { credentialConfigured?: (name: string) => boolean } = {}): { providers: Record<string, CustomProviderDraft>; credentials: Record<string, string> } {

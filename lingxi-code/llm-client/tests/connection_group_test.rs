@@ -115,10 +115,18 @@ fn group_qualified_ref_resolves_through_the_group() {
     assert_eq!(route.profile_name, "deepseek:intl");
 }
 
-/// Pinning one connection must still be possible, and must NOT offer a chain —
-/// the caller asked for that endpoint specifically.
+/// Naming one connection selects where to START; it does not disable the rest
+/// of the group.
+///
+/// This originally asserted the opposite — that a connection-qualified ref
+/// pinned one endpoint with no chain — which made the whole feature dead on the
+/// real path: `ModelListing.provider_id` IS the connection profile name, so the
+/// picker hands back `deepseek:cn`, `switch_model` stores it, and every live
+/// request arrives scoped to one connection. The chain was therefore empty
+/// exactly when failover was needed, and no test noticed because they all
+/// resolved unscoped.
 #[test]
-fn connection_qualified_ref_pins_one_connection_with_no_chain() {
+fn scoping_to_one_connection_still_offers_the_rest_of_the_group() {
     let registry = ModelRegistry::from_config(two_connection_group()).expect("registry");
 
     let route = registry
@@ -126,9 +134,53 @@ fn connection_qualified_ref_pins_one_connection_with_no_chain() {
         .expect("resolve");
 
     assert_eq!(route.profile_name, "deepseek:cn");
+    assert_eq!(
+        route
+            .connection_chain
+            .iter()
+            .map(|hop| hop.profile_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deepseek:intl"],
+        "the sibling connection must remain reachable"
+    );
+}
+
+/// The exact shape the session threads through after the user picks a model.
+#[test]
+fn a_session_scoped_to_a_connection_can_still_fail_over() {
+    let registry = ModelRegistry::from_config(two_connection_group()).expect("registry");
+
+    // `ApiService` passes `req.profile` straight to `resolve_in`.
+    let route = registry
+        .resolve_in("deepseek-flash", Some("deepseek:intl"))
+        .expect("resolve");
+
+    assert_eq!(route.profile_name, "deepseek:intl");
+    assert_eq!(route.connection_chain.len(), 1, "failover must be reachable");
+    assert_eq!(route.connection_chain[0].profile_name, "deepseek:cn");
+}
+
+/// A hop must send the SAME wire model: `advance_connection` re-points only the
+/// endpoint and credential, so a hop carrying a different model would answer as
+/// something the caller never asked for.
+#[test]
+fn a_duplicate_alias_within_one_profile_is_ambiguous_not_a_hop() {
+    let mut cfg = two_connection_group();
+    // One profile serving two models that both answer to "deepseek-flash".
+    let mut twin = cfg.providers[0].models[0].clone();
+    twin.display_model = "deepseek-flash-latest".to_string();
+    twin.request_model = "deepseek-flash-latest".to_string();
+    twin.aliases = vec!["deepseek-flash".to_string()];
+    cfg.providers[0].models.push(twin);
+
+    let registry = ModelRegistry::from_config(cfg).expect("registry");
+    let err = registry
+        .resolve_in("deepseek-flash", Some("deepseek:intl"))
+        .expect_err("two models of one endpoint answering to one string is ambiguous");
+    let message = format!("{err:?}");
     assert!(
-        route.connection_chain.is_empty(),
-        "an explicitly pinned connection must not silently fail over elsewhere"
+        message.contains("more than one model"),
+        "expected a same-profile ambiguity error, got: {message}"
     );
 }
 
@@ -299,6 +351,67 @@ fn a_connection_overrides_provider_level_defaults() {
         coding.models.len(),
         1,
         "a redeclared model list REPLACES the provider's, it does not extend it"
+    );
+}
+
+/// A connection with no `credentialIds` must use the PROVIDER's stored key.
+///
+/// Every editor saves the key under the provider name, so deriving the id from
+/// the connection's profile name (`deepseek:cn`) meant a multi-connection
+/// provider configured through the UI authenticated against a credential that
+/// was never written. It also breaks the ordinary case outright: one key, two
+/// regions.
+#[test]
+fn a_connection_without_its_own_keys_uses_the_providers_credential() {
+    let (profiles, warnings) = parse(serde_json::json!({
+        "deepseek": {
+            "type": "openai",
+            "models": [{ "id": "deepseek-flash" }],
+            "connections": [
+                { "id": "intl", "baseUrl": "https://api.deepseek.com" },
+                { "id": "cn", "baseUrl": "https://api.deepseek.cn/v1" }
+            ]
+        }
+    }));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    for profile in &profiles {
+        assert_eq!(
+            profile.credential,
+            CredentialConfig::Static {
+                id: "deepseek".to_string()
+            },
+            "{} must read the provider's stored key",
+            profile.profile_name
+        );
+    }
+}
+
+/// A connection that DOES name its own credentials keeps them.
+#[test]
+fn a_connection_with_credential_ids_overrides_the_inherited_one() {
+    let (profiles, _) = parse(serde_json::json!({
+        "deepseek": {
+            "type": "openai",
+            "models": [{ "id": "deepseek-flash" }],
+            "connections": [
+                { "id": "intl", "baseUrl": "https://api.deepseek.com" },
+                { "id": "cn", "baseUrl": "https://api.deepseek.cn/v1", "credentialIds": ["ds-cn"] }
+            ]
+        }
+    }));
+    let by_name: std::collections::BTreeMap<_, _> =
+        profiles.iter().map(|p| (p.profile_name.as_str(), p)).collect();
+    assert_eq!(
+        by_name["deepseek:intl"].credential,
+        CredentialConfig::Static {
+            id: "deepseek".to_string()
+        }
+    );
+    assert_eq!(
+        by_name["deepseek:cn#0"].credential,
+        CredentialConfig::Static {
+            id: "ds-cn".to_string()
+        }
     );
 }
 

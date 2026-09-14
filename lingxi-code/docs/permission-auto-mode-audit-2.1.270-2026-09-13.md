@@ -327,18 +327,36 @@ downgrade) and threaded to the bottom pane.
      `![…tiers].some(s => s?.[k] === false)` — true unless a tier explicitly
      says false. Default ON.
 
-   What actually blocks it is the port's plan-mode FLOOR. Upstream bails out of
-   the classifier for a plan-mode ask through a dedicated check
-   (`Tn = Z$n(M.decisionReason) && …` → `plan_mode_floor`), leaving every OTHER
-   ask in plan mode classifier-eligible. This port folds the floor into
-   `reason_allows_classifier`, which admits only `PermissionMode{Auto}` and
-   `SafetyCheck{classifier_approvable}` — and in Plan mode neither occurs.
-   Measured with the latch implemented and a classifier bound: `Edit` on a
-   `.lingxi/settings.json`, `Write` on `~/.ssh/config`, a safe `Bash`, a
-   dangerous `Bash`, and a `WebFetch` all gave **classifier_calls=0,
-   prompt=1**. The predicate change alone buys nothing; splitting the floor out
-   of `reason_allows_classifier` has to come first, and that widens what reaches
-   the classifier in Plan mode — a behaviour change that wants its own pass.
+   **Closed 2026-09-14: not an observable divergence.** The reachability probe
+   was run again, this time printing the ASK REASON rather than only the
+   outcome, in both modes:
+
+   | scenario | Auto | Plan |
+   |---|---|---|
+   | plain `Bash` | `PermissionMode{Auto}` → classifier | `PermissionMode{Plan}` → prompt |
+   | explicit ask rule | `MatchedRule` → prompt | `MatchedRule` → prompt |
+   | `Read` outside cwd | `PermissionMode{Auto}` | `PermissionMode{Plan}` |
+   | MCP tool | `PermissionMode{Auto}` → classifier | `PermissionMode{Plan}` → prompt |
+   | `Edit` on `~/.ssh/config` | `PermissionMode{Auto}` → classifier | `PermissionMode{Plan}` → prompt |
+   | `Bash` with a subshell | `PermissionMode{Auto}` → classifier (blocked) | `PermissionMode{Plan}` → prompt |
+   | unknown tool | `PermissionMode{Auto}` → classifier | `PermissionMode{Plan}` → prompt |
+   | `WebSearch` | `PermissionMode{Auto}` → classifier | `PermissionMode{Plan}` → prompt |
+
+   Every ask Plan mode raises carries `PermissionMode{Plan}`, and the only other
+   reason observed is `MatchedRule`. Upstream bails out of the classifier for
+   BOTH: `Tn = Z$n(M.decisionReason)` is the `plan_mode_floor` reason, and `Rt`
+   is the matched-ask-rule reason. So upstream prompts on exactly these too —
+   `fd`'s plan arm exists there to admit reasons this port never produces in
+   Plan mode, because the plan backstop raises the ask first and stamps its own
+   reason on it.
+
+   That also retires the follow-up this report proposed a day earlier (splitting
+   the floor out of `reason_allows_classifier`): the split would admit
+   non-plan reasons, and there are none to admit. The one theoretical opening is
+   a `SafetyCheck{classifier_approvable}` raised in Plan mode; the auto-edit
+   safety path that produces it is pre-empted by the plan backstop in every
+   shape measured (`.lingxi/settings.json`, `~/.ssh/config`). A future reason
+   producer that bypasses the backstop would reopen this.
 3. ~~**Classifier-unavailable handling.**~~ Half of this was wrong and the other
    half is now fixed; see §7.1. What remains is narrower: when NO classifier is
    bound at all (a host that never filled `loop_classifier_handle`), the local

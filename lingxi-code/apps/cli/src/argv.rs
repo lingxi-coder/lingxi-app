@@ -11,6 +11,19 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// clap value-parser for `--system-prompt-snapshot <on|off>`.
+///
+/// Oracle: `.choices(["on","off"]).argParser((F)=>{ if(F!=="on"&&F!=="off")
+/// throw new Ut("Allowed choices are on, off."); return F==="on" })` — the
+/// choice collapses to a BOOLEAN, and the message is byte-exact.
+fn parse_on_off(value: &str) -> Result<bool, String> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err("Allowed choices are on, off.".to_string()),
+    }
+}
+
 /// clap value-parser for `--max-budget-usd`. Mirrors claude-code's arg parser
 /// (`main.tsx`): `Number(value)` then reject `isNaN(amount) || amount <= 0`
 /// with the byte-identical error message. A non-numeric argument (which JS would
@@ -1105,6 +1118,29 @@ pub struct Argv {
     #[arg(long = "permission-prompts", value_name = "target")]
     pub permission_prompts: Option<String>,
 
+
+    /// (CLI-2) `--system-prompt-snapshot <on|off>` — record the system prompt
+    /// once per conversation and reuse it verbatim on every request and resume.
+    ///
+    /// Oracle help text: "on (the default): the prompt is rendered on the
+    /// conversation's first request — a --system-prompt or --append-system-prompt
+    /// included — sent, and recorded; every later request and resume sends the
+    /// record as-is, even when a later launch passes different text, until the
+    /// conversation is compacted. off: never record; the prompt is rendered
+    /// fresh every request (for iterating on prompt text)."
+    ///
+    /// The oracle's `argParser` collapses the choice to a BOOLEAN
+    /// (`F === "on"`), and `lje()` then treats absent / `on` / `off` as three
+    /// different answers — `off` overrules the session-kind and simple-mode
+    /// disjuncts, absent defers to them. So this is `Option<bool>`, not a
+    /// `bool` with a default.
+    #[arg(
+        long = "system-prompt-snapshot",
+        value_name = "on|off",
+        value_parser = parse_on_off,
+        hide = true
+    )]
+    pub system_prompt_snapshot: Option<bool>,
 
     /// (2.1.261) `--append-subagent-system-prompt-file <path>` — read the
     /// subagent system-prompt suffix from a FILE, "for prompts too large to pass

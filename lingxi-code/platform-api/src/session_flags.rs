@@ -51,6 +51,15 @@ static BRIEF_MODE_REMINDER: AtomicU8 = AtomicU8::new(0);
 /// and never mutated afterwards.
 static TODO_TOOLS_OPT_IN: AtomicBool = AtomicBool::new(false);
 
+/// CLI `--system-prompt-snapshot <on|off>` — oracle `lje(e)`'s
+/// `e.systemPromptSnapshot`, which is `undefined` unless the flag was passed.
+/// Tri-state because "not passed" is a THIRD answer, not a default: it hands
+/// the decision to the session-kind/simple-mode disjuncts, while an explicit
+/// `off` overrules every one of them.
+///
+/// 0 = not passed, 1 = `on`, 2 = `off`.
+static SYSTEM_PROMPT_SNAPSHOT: AtomicU8 = AtomicU8::new(0);
+
 /// Model-facing reminder emitted after `/brief` enables Brief-only mode.
 pub const BRIEF_MODE_ENABLED_REMINDER: &str = "<system-reminder>\nBrief mode is now enabled. Use the SendUserMessage tool for all user-facing output — plain text outside it is hidden from the user's view.\n</system-reminder>";
 
@@ -453,6 +462,28 @@ pub fn set_todo_tools_opt_in(opted_in: bool) {
 #[must_use]
 pub fn todo_tools_opt_in() -> bool {
     TODO_TOOLS_OPT_IN.load(Ordering::Relaxed)
+}
+
+/// Publish the launch-time `--system-prompt-snapshot` choice. `None` is the
+/// flag being absent, which is NOT the same as `Some(false)`.
+pub fn set_system_prompt_snapshot(choice: Option<bool>) {
+    let encoded = match choice {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    };
+    SYSTEM_PROMPT_SNAPSHOT.store(encoded, Ordering::Relaxed);
+}
+
+/// The launch-time `--system-prompt-snapshot` choice, or `None` when the flag
+/// was not passed.
+#[must_use]
+pub fn system_prompt_snapshot() -> Option<bool> {
+    match SYSTEM_PROMPT_SNAPSHOT.load(Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
 }
 
 /// Flip the current session's Brief-only mode and return the new value.

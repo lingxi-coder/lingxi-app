@@ -72,7 +72,6 @@ fn prompt_snapshot_resume_uses_last_valid_attachment() {
 #[tokio::test]
 async fn prompt_snapshot_appends_only_new_inline_tools_after_success() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    std::env::set_var("CLAUDE_CODE_CARVED_SLATE", "1");
     std::env::remove_var("CLAUDE_CODE_SIMPLE");
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -112,13 +111,11 @@ async fn prompt_snapshot_appends_only_new_inline_tools_after_success() {
             .collect::<Vec<_>>(),
         vec![("Read", "frozen Read"), ("Write", "new Write")]
     );
-    std::env::remove_var("CLAUDE_CODE_CARVED_SLATE");
 }
 
 #[tokio::test]
 async fn resumed_session_without_snapshot_never_creates_one() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    std::env::set_var("CLAUDE_CODE_CARVED_SLATE", "1");
     std::env::remove_var("CLAUDE_CODE_SIMPLE");
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -136,5 +133,93 @@ async fn resumed_session_without_snapshot_never_creates_one() {
     orch.record_prompt_snapshot_if_needed(Some("live prompt"), &[])
         .await;
     assert!(orch.prompt_runtime.prompt_snapshot.lock().await.is_none());
+}
+
+/// Oracle `lje(e)`'s truth table. `explicit` is the `--system-prompt-snapshot`
+/// choice, which is THREE-valued: absent defers to the disjuncts, `off`
+/// overrules all of them, `on` forces the feature regardless of session kind.
+#[test]
+fn the_snapshot_gate_matches_the_oracle_truth_table() {
+    use ConversationOrchestrator as O;
+    // `if (e.systemPromptSnapshot === false) return false` comes FIRST, so an
+    // explicit `off` beats every disjunct that would otherwise enable it.
+    assert!(!O::snapshot_gate(Some(false), true, false));
+    assert!(!O::snapshot_gate(Some(false), false, false));
+    assert!(!O::snapshot_gate(Some(false), true, true));
+
+    // An explicit `on` forces it even in simple mode.
+    assert!(O::snapshot_gate(Some(true), false, true));
+
+    // Absent: `SESSION_KIND === "bg" || !CLAUDE_CODE_SIMPLE`.
+    assert!(O::snapshot_gate(None, true, true), "bg wins over simple");
+    assert!(!O::snapshot_gate(None, false, true), "simple alone disables");
+    assert!(
+        O::snapshot_gate(None, false, false),
+        "the DEFAULT is on: 2.1.270 has no rollout flag left to wait for"
+    );
+}
+
+/// The regression this fixes: with no env set and no flag passed, the snapshot
+/// must be ELIGIBLE. The port used to require `tengu_carved_slate` /
+/// `CLAUDE_CODE_CARVED_SLATE`, a 2.1.252 rollout flag that no longer exists
+/// anywhere in the 2.1.270 binary — so the whole recorded-prompt feature was
+/// implemented, tested, restored on resume, and unreachable.
+#[tokio::test]
+async fn a_plain_session_records_its_prompt_without_any_env_opt_in() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    std::env::remove_var("CLAUDE_CODE_SIMPLE");
     std::env::remove_var("CLAUDE_CODE_CARVED_SLATE");
+    std::env::remove_var("LINGXI_SESSION_KIND");
+    platform_api::session_flags::set_system_prompt_snapshot(None);
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    assert!(
+        orch.prompt_snapshot_eligible(),
+        "no env, no flag — 2.1.270 records by default"
+    );
+    orch.record_prompt_snapshot_if_needed(Some("static prompt"), &[])
+        .await;
+    assert!(
+        orch.prompt_runtime.prompt_snapshot.lock().await.is_some(),
+        "an eligible session must actually record, not merely qualify"
+    );
+}
+
+/// `--system-prompt-snapshot off` is the escape hatch the flag exists for:
+/// "never record; the prompt is rendered fresh every request (for iterating on
+/// prompt text)". It must beat the default that the test above pins.
+#[tokio::test]
+async fn the_off_flag_stops_recording_a_session_that_would_otherwise_record() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    std::env::remove_var("CLAUDE_CODE_SIMPLE");
+    std::env::remove_var("LINGXI_SESSION_KIND");
+    platform_api::session_flags::set_system_prompt_snapshot(Some(false));
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    assert!(!orch.prompt_snapshot_eligible());
+    orch.record_prompt_snapshot_if_needed(Some("static prompt"), &[])
+        .await;
+    assert!(
+        orch.prompt_runtime.prompt_snapshot.lock().await.is_none(),
+        "`off` must mean no record at all"
+    );
+    platform_api::session_flags::set_system_prompt_snapshot(None);
 }

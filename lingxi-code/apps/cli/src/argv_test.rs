@@ -1791,3 +1791,65 @@ mod permission_prompts_tests {
         assert!(!arg.is_hide_set());
     }
 }
+
+#[cfg(test)]
+mod system_prompt_snapshot_tests {
+    use crate::argv::{parse_on_off, Argv};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Argv {
+        Argv::try_parse_from(std::iter::once("lingxi-cli").chain(args.iter().copied()))
+            .expect("parses")
+    }
+
+    /// Oracle `.choices(["on","off"])` with a byte-exact rejection message.
+    /// The value collapses to a BOOLEAN, so `off` is `Some(false)` — distinct
+    /// from the flag being absent, which is `None`.
+    #[test]
+    fn only_on_and_off_are_accepted() {
+        assert_eq!(parse_on_off("on"), Ok(true));
+        assert_eq!(parse_on_off("off"), Ok(false));
+        for bad in ["ON", "Off", "true", "1", "yes", "", " on"] {
+            assert_eq!(
+                parse_on_off(bad),
+                Err("Allowed choices are on, off.".to_string()),
+                "{bad:?} must be rejected with the oracle's message"
+            );
+        }
+    }
+
+    /// Absent must stay absent. If this defaulted to `Some(false)` the gate
+    /// would read it as an explicit `off` and disable the feature for every
+    /// session that never passed the flag.
+    #[test]
+    fn an_unpassed_flag_stays_none() {
+        assert_eq!(
+            parse(&[]).system_prompt_snapshot,
+            None,
+            "absent is a third state, not `off`"
+        );
+        assert_eq!(
+            parse(&["--system-prompt-snapshot", "on"]).system_prompt_snapshot,
+            Some(true)
+        );
+        assert_eq!(
+            parse(&["--system-prompt-snapshot", "off"]).system_prompt_snapshot,
+            Some(false)
+        );
+    }
+
+    /// Parsing it is not using it. The gate reads a process-global, so a flag
+    /// that is never published is inert — pin the publication against the
+    /// launcher's own source (needle assembled at runtime so it cannot match
+    /// itself inside `include_str!`).
+    #[test]
+    fn the_launcher_publishes_the_choice() {
+        const SRC: &str = include_str!("lib.rs");
+        let wiring = "set_system_prompt_snapsho".to_string() + "t(parsed.system_prompt_snapshot)";
+        assert!(
+            SRC.contains(&wiring),
+            "--system-prompt-snapshot must be published to session_flags, or the \
+             gate can never see it"
+        );
+    }
+}

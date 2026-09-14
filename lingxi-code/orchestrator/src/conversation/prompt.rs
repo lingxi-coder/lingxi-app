@@ -286,20 +286,54 @@ impl ConversationOrchestrator {
         prompt
     }
 
-    /// Whether the Claude 2.1.252 static-system-prompt snapshot gate is active
-    /// for this main conversation. An explicit env opt-in is supported for
-    /// provider-neutral hosts; telemetry remains the default-off GrowthBook
-    /// equivalent. Auxiliary query sources and custom prompts are excluded.
+    /// Oracle `lje(e)` (`src_169588164.js`) — whether the static-system-prompt
+    /// snapshot is active for this session:
+    ///
+    /// ```js
+    /// function lje(e){
+    ///   if (e.systemPromptSnapshot === false) return false;
+    ///   return e.systemPromptSnapshot === true
+    ///       || a.CLAUDE_CODE_SESSION_KIND === "bg"
+    ///       || a.CLAUDE_CODE_REMOTE
+    ///       || !U2();                       // U2() = a.CLAUDE_CODE_SIMPLE
+    /// }
+    /// ```
+    ///
+    /// An explicit `--system-prompt-snapshot off` overrules every disjunct;
+    /// `on` forces it regardless of session kind. With the flag absent the
+    /// default is `!simple`, i.e. ON — 2.1.252's `tengu_carved_slate` rollout
+    /// flag GRADUATED and no longer exists anywhere in the 2.1.270 binary
+    /// (verified: 2347 distinct `tengu_` flags present, that one absent). The
+    /// port had kept requiring it, so this whole recorded-prompt feature —
+    /// implemented, tested, and restored on resume — could never switch on.
+    ///
+    /// `CLAUDE_CODE_REMOTE` is deliberately omitted: remote surfaces are out of
+    /// scope for this port, and it is a pure disjunct, so the only behaviour it
+    /// could add is for a session that is remote AND simple.
+    pub(crate) fn snapshot_gate(explicit: Option<bool>, background_session: bool, simple_mode: bool) -> bool {
+        if explicit == Some(false) {
+            return false;
+        }
+        explicit == Some(true) || background_session || !simple_mode
+    }
+
+    /// Whether the static-system-prompt snapshot gate is active for this main
+    /// conversation. Auxiliary query sources and custom prompts are excluded —
+    /// upstream applies those at the recording seam (`swt`), and the port
+    /// carries them here because one predicate feeds both record and reuse.
     pub(crate) fn prompt_snapshot_eligible(&self) -> bool {
-        let static_enabled = platform_api::env::is_env_truthy(
-            std::env::var("CLAUDE_CODE_CARVED_SLATE").ok().as_deref(),
-        ) || telemetry::flag_bool("tengu_carved_slate", false);
         let simple =
             platform_api::env::is_env_truthy(std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref());
+        // `CLAUDE_CODE_SESSION_KIND` in claude-code; the port already spells it
+        // `LINGXI_SESSION_KIND` at its other reader (`tool_api::defer`).
+        let background_session =
+            std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg");
         let source = crate::config::sanitize_query_source(&self.config.query_source);
-        static_enabled
-            && !simple
-            && self.config.system_prompt_override.is_none()
+        Self::snapshot_gate(
+            platform_api::session_flags::system_prompt_snapshot(),
+            background_session,
+            simple,
+        ) && self.config.system_prompt_override.is_none()
             && source != "auxiliary"
             && !source.starts_with("auxiliary:")
     }

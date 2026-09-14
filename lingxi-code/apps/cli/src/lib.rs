@@ -710,6 +710,12 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // the other argv-derived session flags.
     platform_api::session_flags::set_todo_tools_opt_in(parsed.todo_tools_opt_in());
 
+    // (CLI-2) `--system-prompt-snapshot <on|off>` feeds oracle `lje(e)`'s
+    // `e.systemPromptSnapshot`. Launch-time immutable like the flags above, and
+    // published BEFORE any conversation is built, since the gate is read on the
+    // very first request (that is the request whose prompt gets recorded).
+    platform_api::session_flags::set_system_prompt_snapshot(parsed.system_prompt_snapshot);
+
     // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` (@307414302) pins
     // the cross-session messaging socket instead of the auto-generated path.
     // Recorded here, before ANY code path can bind the inbox

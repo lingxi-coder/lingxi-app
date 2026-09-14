@@ -8,6 +8,7 @@ import { SETTINGS_NAV, searchNav, type NavPage } from './nav';
 import { About } from './pages/About';
 import { Account } from './pages/Account';
 import { Appearance } from './pages/Appearance';
+import { Notifications } from './pages/Notifications';
 import { CustomProviders } from './pages/CustomProviders';
 import { Fusion } from './pages/Fusion';
 import { Diagnostics } from './pages/Diagnostics';
@@ -169,6 +170,7 @@ export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps
   general: General,
   account: Account,
   appearance: Appearance,
+  notifications: Notifications,
   voice: Voice,
   projects: Projects,
   'archived-chats': ArchivedChats,

@@ -6,6 +6,7 @@ import {
   defaultSettings,
   isPermissionModeId,
   parseModelPickerVisibility,
+  parseNotificationPreferences,
   parseSettings,
   parseVoicePreferences,
   publicSettings,
@@ -148,6 +149,7 @@ export class SettingsStore {
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
+    notifications?: unknown;
     modelPickerVisibility?: unknown;
   }): PublicSettings {
     if ('collapseThoughtsByDefault' in patch && typeof patch.collapseThoughtsByDefault !== 'boolean') {
@@ -173,6 +175,13 @@ export class SettingsStore {
       // Android's `save()` each write the full snapshot at once, never a
       // partial merge of individual fields).
       this.settings.voice = parseVoicePreferences(patch.voice);
+    }
+    if ('notifications' in patch) {
+      // Whole-object replace, normalized leniently — same reasoning as `voice`
+      // above, and the same reason `parseNotificationPreferences` never turns a
+      // gate OFF for a malformed field: a corrupt value must not silently
+      // disable notifications, the one failure the settings page cannot show.
+      this.settings.notifications = parseNotificationPreferences(patch.notifications);
     }
     if ('modelPickerVisibility' in patch) {
       const parsed = parseModelPickerVisibility(patch.modelPickerVisibility);

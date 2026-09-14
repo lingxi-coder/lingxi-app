@@ -122,6 +122,7 @@ export interface LingxiApi {
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
+    notifications?: unknown;
     modelPickerVisibility?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;

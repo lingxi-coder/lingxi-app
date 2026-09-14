@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, shell, type Session } from 'electron';
+import { app, BrowserWindow, dialog, shell, Notification, type Session } from 'electron';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,6 +12,7 @@ import {
 } from './credential-broker.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { HostController } from './host.js';
+import { HostNotifier } from './notifications.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
 import { requestMicrophoneAccess } from './microphoneAccess.js';
@@ -27,7 +28,15 @@ const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
 let nativeAudio: NativeAudioManager | null = null;
+let notifier: HostNotifier | null = null;
 let quitting = false;
+
+/**
+ * Whether the main window has OS focus. Net-new state: nothing here tracked it
+ * before, and `HostNotifier` needs it to avoid putting a banner over the window
+ * the user is already looking at.
+ */
+let windowFocused = false;
 
 function developmentRendererUrl(): string | undefined {
   if (app.isPackaged) return undefined;
@@ -120,6 +129,13 @@ function createWindow(): BrowserWindow {
   mainWindow.on('hide', releaseAudio);
   mainWindow.on('minimize', releaseAudio);
   mainWindow.on('closed', releaseAudio);
+  // Taking focus is the strongest available proof the user came back, which is
+  // exactly what `idle_prompt` re-checks before firing.
+  mainWindow.on('focus', () => { windowFocused = true; notifier?.noteInteraction(); });
+  mainWindow.on('blur', () => { windowFocused = false; });
+  mainWindow.on('hide', () => { windowFocused = false; });
+  mainWindow.on('minimize', () => { windowFocused = false; });
+  mainWindow.on('closed', () => { windowFocused = false; });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -176,7 +192,22 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     resourcesPath: process.resourcesPath,
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
   });
+  /** The one place an OS notification is raised. Clicking it restores the
+   * session the notification came from, then raises the window. */
+  const showNotification = (title: string, body: string, ref?: SessionRef): void => {
+    if (!Notification.isSupported()) return;
+    const notification = new Notification({ title, body });
+    notification.on('click', () => {
+      if (ref) void host?.restoreProjectSession(ref.projectPath, ref).catch((error: unknown) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
+      const window = BrowserWindow.getAllWindows()[0];
+      window?.show(); window?.focus();
+    });
+    notification.show();
+  };
+  notifier = new HostNotifier({ show: showNotification, isWindowFocused: () => windowFocused });
+  notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
+    notifier,
     getSavedPermissionMode: () => settings.getLastPermissionMode(),
     onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
     isPackaged: app.isPackaged,
@@ -263,6 +294,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
+  host.attachNotifier(notifier);
   host.registerIpc();
   createWindow();
 
@@ -299,6 +331,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   quitting = true;
   host?.dispose();
   host = null;
+  notifier?.dispose();
+  notifier = null;
   const currentAudio = nativeAudio;
   nativeAudio = null;
   const currentBridge = bridge;

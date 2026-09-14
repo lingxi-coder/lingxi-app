@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import type { HostNotifier } from './notifications.js';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -322,6 +323,7 @@ export class HostController {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly workspaceFiles = new WorkspaceFileSearch();
+  private notifier?: HostNotifier;
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
@@ -348,6 +350,13 @@ export class HostController {
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
+
+  /**
+   * The notifier holds ARMED TIMERS, so it cannot poll the settings store — a
+   * preference written while an idle timer is already counting down has to be
+   * pushed at it. `CH_SETTINGS_UPDATE` is the one writer.
+   */
+  attachNotifier(notifier: HostNotifier): void { this.notifier = notifier; }
 
   registerWindow(webContents: WebContents, rendererUrl: string): void {
     const allowedOrigin = origin(rendererUrl);
@@ -389,7 +398,7 @@ export class HostController {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'modelPickerVisibility')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'notifications' && key !== 'modelPickerVisibility')) throw new Error('unsupported setting');
       const restartsBridge = 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
       // `model` is applied to a live session through `set_model`, then mirrored
@@ -405,8 +414,12 @@ export class HostController {
         model?: string | null;
         apiBaseUrl?: string | null;
         voice?: unknown;
+        notifications?: unknown;
         modelPickerVisibility?: unknown;
       });
+      // Pushed, not polled: the notifier holds armed timers and cannot notice a
+      // value it is never told about.
+      if ('notifications' in patch) this.notifier?.setPreferences(result.notifications);
       if (restartsBridge) await this.restartIfConfigured();
       return result;
     });

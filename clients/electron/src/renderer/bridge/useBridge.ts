@@ -40,6 +40,7 @@ import {
   type NativeAudioSnapshot,
 } from '../../shared/nativeAudio.js';
 import type { VoicePreferences } from '../../shared/voicePreferences';
+import type { NotificationPreferences } from '../../shared/notificationPreferences';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings';
 import {
   appendPendingUserPrompt,
@@ -219,6 +220,13 @@ export interface UseBridge {
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
   setCollapseThoughtsByDefault(collapseThoughtsByDefault: boolean): Promise<void>;
+  /**
+   * Writes the WHOLE notification-preferences object at once, like
+   * `setVoicePreferences`. The main process pushes the result straight at
+   * `HostNotifier`, which holds armed timers and so cannot notice a change it
+   * is not told about.
+   */
+  setNotificationPreferences(notifications: NotificationPreferences): Promise<void>;
   /** The device-level (Electron store) custom API base URL override — `null` clears it. Distinct from `updateEngineSettings` below, which writes to an engine settings FILE layer. */
   setApiBaseUrl(apiBaseUrl: string | null): Promise<void>;
   /**
@@ -1989,6 +1997,11 @@ export function useBridge(): UseBridge {
     try { patchBootstrap({ settings: await host.updateSettings({ voice }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
 
+  const setNotificationPreferences = useCallback(async (notifications: NotificationPreferences) => {
+    if (!host) return;
+    try { patchBootstrap({ settings: await host.updateSettings({ notifications }) }); } catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
   const setModelPickerVisibility = useCallback(async (modelPickerVisibility: ModelPickerVisibilitySettings) => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ modelPickerVisibility }) }); } catch (cause) { capture(cause); }
@@ -2442,6 +2455,7 @@ export function useBridge(): UseBridge {
     setCollapseThoughtsByDefault,
     setApiBaseUrl,
     setVoicePreferences,
+    setNotificationPreferences,
     setModelPickerVisibility,
     updateProviderSettings,
     updateEngineSettings,

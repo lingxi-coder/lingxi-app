@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { SETTINGS_NAV, searchNav } from '../src/renderer/components/settings/nav';
 import { PAGE_CONTENT } from '../src/renderer/components/settings/SettingsScreen';
 
-test('the nav declares all seventeen pages across four groups', () => {
-  assert.equal(SETTINGS_NAV.length, 17);
+test('the nav declares all eighteen pages across four groups', () => {
+  assert.equal(SETTINGS_NAV.length, 18);
   assert.deepEqual(
     [...new Set(SETTINGS_NAV.map((p) => p.group))],
     ['个人', '模型与服务', '编码', '高级'],
@@ -33,7 +33,7 @@ test('layered is a data property, not a group property — three pages break the
 });
 
 test('client-owned pages do not need the engine', () => {
-  for (const id of ['account', 'appearance', 'projects', 'diagnostics', 'about', 'voice']) {
+  for (const id of ['account', 'appearance', 'projects', 'diagnostics', 'about', 'voice', 'notifications']) {
     assert.equal(
       SETTINGS_NAV.find((p) => p.id === id)?.needsEngine, false,
       `${id} lives in the client and must stay usable with no engine`,

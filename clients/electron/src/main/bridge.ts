@@ -1,4 +1,5 @@
 import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
+import type { HostNotifier } from './notifications.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -108,6 +109,13 @@ export interface BridgeManagerOptions {
   /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */
   listProcessCommands?: () => readonly ProcessCommand[];
   onModelChanged?: (model: string) => void;
+  /**
+   * OS notifications. Lives here rather than in the renderer because the
+   * renderer's session denies every Web permission but `media`, and because
+   * `permission_request` never reaches the renderer as a `ClientEvent` — it is
+   * a separate `Frame` arm handled by `client.on('permission')` below.
+   */
+  notifier?: HostNotifier;
   /** Persist only an explicitly requested, engine-confirmed model selection. */
   onModelSelected?: (model: string) => void;
   getSavedModel?: () => string | undefined;
@@ -973,6 +981,65 @@ export class SessionRuntime {
     return [...this.pendingAskUserQuestionRequests.values()].map((entry) => entry.request);
   }
 
+  /** Human descriptions for background tasks, so `agent_completed` can name
+   * the task instead of printing a uuid. `task_row` is the only event that
+   * carries one; `task_status_changed` carries just the id. */
+  private readonly taskLabels = new Map<string, string>();
+
+  /** `undefined` until both halves are real — a notification click restores a
+   * session from this, and half a ref restores nothing. */
+  private get notificationRef(): SessionRef | undefined {
+    const projectPath = this.projectPath || this.activeWorkspace || '';
+    if (!projectPath || !isSessionId(this.sessionId)) return undefined;
+    return { projectPath, sessionId: this.sessionId };
+  }
+
+  /**
+   * Drives `HostNotifier` off the same event stream the renderer sees.
+   *
+   * Note what is NOT here: a "turn finished" notification. Upstream has none —
+   * `turn_ended` only ARMS the idle timer, which fires `idle_prompt` a minute
+   * later and only if the user never came back.
+   */
+  private updateNotifier(event: ClientEvent): void {
+    const notifier = this.opts.notifier;
+    if (!notifier) return;
+    const ref = this.notificationRef;
+    switch (event.type) {
+      case 'turn_started': notifier.turnStarted(this.sessionId, ref); break;
+      case 'turn_ended': notifier.turnEnded(this.sessionId, ref); break;
+      case 'session_ended':
+        notifier.sessionEnded(this.sessionId);
+        this.taskLabels.clear();
+        return;
+      case 'ask_user_question':
+        // Only for a request that actually got queued; one rejected by the
+        // pending-limit has no card for the user to answer.
+        if (this.pendingAskUserQuestionIds.has(event.request.request_id)) {
+          notifier.askUserQuestion(this.sessionId, event.request.request_id, ref);
+        }
+        break;
+      case 'permission_request_resolved':
+        notifier.permissionSettled(this.sessionId, event.request_id);
+        break;
+      case 'task_row':
+        if (event.task.description) this.taskLabels.set(event.task.task_id, event.task.description);
+        break;
+      case 'task_status_changed': {
+        const status = event.status.type;
+        if (status !== 'completed' && status !== 'failed') break;
+        notifier.taskFinished(
+          this.sessionId, event.task_id, this.taskLabels.get(event.task_id),
+          status === 'failed', ref,
+        );
+        this.taskLabels.delete(event.task_id);
+        break;
+      }
+      default: break;
+    }
+    notifier.setDialogsOnScreen(this.sessionId, this.pendingInteractions, ref);
+  }
+
   get pendingInteractions(): number {
     return this.pendingPermissionIds.size
       + this.pendingComputerAccessIds.size
@@ -1736,6 +1803,7 @@ export class SessionRuntime {
         || event.type === 'ask_user_question_resolved'
         || event.type === 'permission_request_resolved'
       ) this.notifyActivityChanged();
+      this.updateNotifier(event);
       this.broadcastClientEvent(event);
     });
     client.on('permission', (request: PermissionRequest) => {
@@ -1761,6 +1829,18 @@ export class SessionRuntime {
         this.pendingPermissionIds.set(request.request_id, request);
         this.notifyActivityChanged();
         this.broadcast(CH_PERMISSION, request);
+        // Armed only AFTER the forward. Every early return above is a request
+        // the renderer will never draw a prompt for, and a notification about a
+        // prompt that does not exist sends the user somewhere with nothing to
+        // do. Upstream's 6s delay means a prompt answered promptly — the common
+        // case when the window is already in front of you — fires nothing.
+        this.opts.notifier?.permissionRequested(
+          this.sessionId,
+          request.request_id,
+          request.kind.type === 'tool_use_confirm' ? request.kind.tool_name : request.kind.type,
+          this.notificationRef,
+        );
+        this.opts.notifier?.setDialogsOnScreen(this.sessionId, this.pendingInteractions, this.notificationRef);
       }
     });
     client.on('computerAccess', (request: ComputerAccessRequestDto) => {

@@ -14,6 +14,8 @@ import type {
 } from '../shared/settings.js';
 import { parseVoicePreferences } from '../shared/voicePreferences.js';
 import type { VoicePreferences } from '../shared/voicePreferences.js';
+import { parseNotificationPreferences } from '../shared/notificationPreferences.js';
+import type { NotificationPreferences } from '../shared/notificationPreferences.js';
 
 export { SETTINGS_VERSION } from '../shared/settings.js';
 export type {
@@ -24,6 +26,8 @@ export type {
 } from '../shared/settings.js';
 export type { VoicePreferences } from '../shared/voicePreferences.js';
 export { parseVoicePreferences } from '../shared/voicePreferences.js';
+export type { NotificationPreferences } from '../shared/notificationPreferences.js';
+export { parseNotificationPreferences } from '../shared/notificationPreferences.js';
 
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
@@ -89,6 +93,9 @@ export interface PersistedSettings {
   /** Voice recognition/synthesis preferences — see `shared/voicePreferences.ts`.
    * Omitted (not defaulted) until the first `SettingsStore.update({ voice })` call. */
   voice?: VoicePreferences;
+  /** OS-notification preferences — see `shared/notificationPreferences.ts`.
+   * Omitted until the first `SettingsStore.update({ notifications })`. */
+  notifications?: NotificationPreferences;
   /** Device-local conversation model picker visibility by provider id. */
   modelPickerVisibility?: ModelPickerVisibilitySettings;
 }
@@ -164,6 +171,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   if (value['voice'] !== undefined) {
     settings.voice = parseVoicePreferences(value['voice']);
   }
+  if (value['notifications'] !== undefined) {
+    settings.notifications = parseNotificationPreferences(value['notifications']);
+  }
   if (value['modelPickerVisibility'] !== undefined) {
     settings.modelPickerVisibility = parseModelPickerVisibility(value['modelPickerVisibility']);
   }
@@ -233,7 +243,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
-    bypassPermissionsModeAccepted, voice, modelPickerVisibility, collapseThoughtsByDefault,
+    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, collapseThoughtsByDefault,
   } = settings;
   return {
     version,
@@ -248,6 +258,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     ...(typeof collapseThoughtsByDefault === 'boolean' ? { collapseThoughtsByDefault } : {}),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
     ...(voice ? { voice: { ...voice } } : {}),
+    ...(notifications ? { notifications: { ...notifications } } : {}),
     ...(modelPickerVisibility ? { modelPickerVisibility: cloneModelPickerVisibility(modelPickerVisibility) } : {}),
   };
 }

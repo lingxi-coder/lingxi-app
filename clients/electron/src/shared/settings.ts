@@ -23,6 +23,8 @@
 
 import type { VoicePreferences } from './voicePreferences.js';
 export type { VoicePreferences } from './voicePreferences.js';
+import type { NotificationPreferences } from './notificationPreferences.js';
+export type { NotificationPreferences } from './notificationPreferences.js';
 
 /** Schema version of the persisted device settings file. */
 export const SETTINGS_VERSION = 1 as const;
@@ -87,5 +89,13 @@ export interface PublicSettings {
    * field here.
    */
   voice?: VoicePreferences;
+  /**
+   * OS-notification preferences (`shared/notificationPreferences.ts`). The
+   * vocabulary is upstream Claude Code's (`inputNeededNotifEnabled`,
+   * `taskCompleteNotifEnabled`, `messageIdleNotifThresholdMs`). Omitted (not
+   * defaulted) when never written — readers take
+   * `defaultNotificationPreferences()` for the undefined case.
+   */
+  notifications?: NotificationPreferences;
   modelPickerVisibility?: ModelPickerVisibilitySettings;
 }

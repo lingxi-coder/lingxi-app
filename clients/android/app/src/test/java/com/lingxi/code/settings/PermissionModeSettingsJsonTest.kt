@@ -7,6 +7,25 @@ import org.junit.Test
 
 class PermissionModeSettingsJsonTest {
     @Test
+    fun engineSelectionTakesPrecedenceOverLegacyDefault() {
+        assertEquals("plan", PermissionModeSettingsJson.load(
+            """{"permissions":{"defaultMode":"auto"}}""",
+            """{"mode":"plan"}""",
+        ))
+        assertEquals("bypassPermissions", PermissionModeSettingsJson.load(
+            null,
+            """{"mode":"bypassPermissions"}""",
+        ))
+    }
+
+    @Test
+    fun malformedOrUnknownSelectionFallsBackToLegacyDefault() {
+        val legacy = """{"permissions":{"defaultMode":"acceptEdits"}}"""
+        assertEquals("acceptEdits", PermissionModeSettingsJson.load(legacy, "broken"))
+        assertEquals("acceptEdits", PermissionModeSettingsJson.load(legacy, """{"mode":"unknown"}"""))
+    }
+
+    @Test
     fun missingOrInvalidModeFallsBackToAuto() {
         assertEquals("auto", PermissionModeSettingsJson.load(null))
         assertEquals("auto", PermissionModeSettingsJson.load("{\"permissions\":{\"defaultMode\":\"auto-model\"}}"))

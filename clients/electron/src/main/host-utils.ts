@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
+import type { PermissionModeId } from '@lingxi/bridge-client';
+
 import { SETTINGS_VERSION } from '../shared/settings.js';
 import type {
   ModelPickerVisibilitySettings,
@@ -72,6 +74,8 @@ export interface PersistedSettings {
   theme?: 'dark' | 'light' | 'system';
   collapseThoughtsByDefault?: boolean;
   model?: string;
+  /** Last user-selected permission mode on this device. */
+  lastPermissionMode?: PermissionModeId;
   apiBaseUrl?: string;
   activeProject?: string;
   activeSession?: SessionRef;
@@ -131,6 +135,11 @@ function boundedStringArray(value: unknown, maxItems: number): string[] {
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+export function isPermissionModeId(value: unknown): value is PermissionModeId {
+  return value === 'default' || value === 'acceptEdits' || value === 'plan'
+    || value === 'auto' || value === 'dontAsk' || value === 'bypassPermissions';
+}
+
 export function parseSettings(value: unknown): PersistedSettings {
   if (!isPlainObject(value) || value['version'] !== SETTINGS_VERSION) {
     return defaultSettings();
@@ -145,6 +154,9 @@ export function parseSettings(value: unknown): PersistedSettings {
     settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
   }
   settings.model = boundedString(value['model'], 256);
+  if (isPermissionModeId(value['lastPermissionMode'])) {
+    settings.lastPermissionMode = value['lastPermissionMode'];
+  }
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   if (value['bypassPermissionsModeAccepted'] === true) {
     settings.bypassPermissionsModeAccepted = true;

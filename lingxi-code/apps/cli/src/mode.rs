@@ -1526,39 +1526,34 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 }
             });
         };
-    let on_switch_model = move |model: String, profile: Option<String>| {
-        let orch = switch_orch.clone();
-        let tx = switch_turn_tx.clone();
-        switch_handle.spawn(async move {
-            // Persist the pick only when the live switch succeeded (best-effort
-            // writes; a failure never breaks the switch): `settings.model`
-            // (qualified) so the choice survives a restart — the boot path
-            // reads it back via `load_settings_model` — plus a `recentModels`
-            // entry, the boot connected-provider fallback's first-preference
-            // pass. This recording was lost in the iocraft-TUI deletion; the
-            // ratatui picker previously only mutated in-memory session state.
-            if let Err(error) = orch
-                .switch_model_with_source(&model, profile.as_deref(), "picker")
-                .await
+    // One consumer preserves picker order across the live switch, persistence,
+    // and the UI acknowledgement, without waiting for the running turn.
+    let (model_selection_tx, mut model_selection_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+    switch_handle.spawn(async move {
+        while let Some((model, profile)) = model_selection_rx.recv().await {
+            match crate::model_selection::apply(
+                switch_orch.as_ref(),
+                &model,
+                profile.as_deref(),
+                crate::model_selection::settings_path().as_deref(),
+            )
+            .await
             {
-                let _ = tx.send(tui::TurnEvent::SystemNotice {
-                    body: format!("Could not change model: {error}"),
-                    is_error: true,
-                });
-            } else {
-                let _ = tx.send(tui::TurnEvent::ModelChanged {
-                    model: model.clone(),
-                    profile: profile.clone(),
-                });
-                match profile.as_deref() {
-                    Some(p) => {
-                        tui_core::recent_models::record_default_model(&format!("{p}/{model}"));
-                        tui_core::recent_models::record_recent_model(p, &model);
-                    }
-                    None => tui_core::recent_models::record_default_model(&model),
+                Ok(()) => {
+                    let _ = switch_turn_tx.send(tui::TurnEvent::ModelChanged { model, profile });
+                }
+                Err(error) => {
+                    let _ = switch_turn_tx.send(tui::TurnEvent::SystemNotice {
+                        body: format!("Could not change model: {error}"),
+                        is_error: true,
+                    });
                 }
             }
-        });
+        }
+    });
+    let on_switch_model = move |model: String, profile: Option<String>| {
+        let _ = model_selection_tx.send((model, profile));
     };
     // (/web async effects) The picker/config views return `WebAction`s
     // synchronously from the blocking ratatui loop; the actual persistence
@@ -1790,13 +1785,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
         plan_handle.spawn(async move {
             let already_in_plan_mode = orch.plan_mode().await;
             if !already_in_plan_mode {
-                if orch.set_plan_mode(true).await.is_err() {
+                if orch.set_permission_mode("plan").await.is_err()
+                    || orch.set_plan_mode(true).await.is_err()
+                {
                     let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
                         body: "Error entering plan mode".to_string(),
                         is_error: true,
                     });
                     return;
                 }
+                crate::permission_mode_preference::remember("plan");
+                let _ = tx.send(tui::TurnEvent::PermissionModeChanged("plan".to_string()));
                 let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
                     body: "Enabled plan mode".to_string(),
                     is_error: false,
@@ -1853,6 +1852,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     is_error: true,
                 });
             } else {
+                crate::permission_mode_preference::remember(&mode);
                 platform_api::live_sessions::set_process_permission_mode(&mode, bypass_available);
                 if let Some(reg) = set_mode_reg.as_ref() {
                     reg.set_permission_class(platform_api::live_sessions::permission_class_for(
@@ -4638,10 +4638,14 @@ mod tests {
         }
         async fn switch_model(
             &self,
-            _model: &str,
+            model: &str,
             _profile: Option<&str>,
         ) -> Result<(), platform_api::HandleError> {
-            unreachable!("unused recording handle method")
+            if model == "blocked-model" {
+                return Err(platform_api::HandleError::ActionFailed("blocked by hook".into()));
+            }
+            self.0.lock().unwrap().push(model.to_string());
+            Ok(())
         }
         async fn request_exit(&self) {
             unreachable!("unused recording handle method")
@@ -4693,6 +4697,29 @@ mod tests {
             self.0.lock().unwrap().push(prompt.to_string());
             Ok(platform_api::TurnOutcome::EndTurn)
         }
+    }
+
+    #[tokio::test]
+    async fn model_picker_only_persists_successful_selections() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let handle = RecordingHostTurns::default();
+        crate::model_selection::apply(&handle, "first", Some("provider"), Some(&path))
+            .await
+            .unwrap();
+        assert!(
+            crate::model_selection::apply(&handle, "blocked-model", None, Some(&path))
+                .await
+                .is_err()
+        );
+        let saved = migrations::global_config::read_map(&path).unwrap();
+        assert_eq!(saved["model"], "provider/first");
+        crate::model_selection::apply(&handle, "latest", None, Some(&path))
+            .await
+            .unwrap();
+        let saved = migrations::global_config::read_map(&path).unwrap();
+        assert_eq!(saved["model"], "latest");
+        assert_eq!(*handle.0.lock().unwrap(), vec!["first", "latest"]);
     }
 
     fn pause_next_queue_consumer(

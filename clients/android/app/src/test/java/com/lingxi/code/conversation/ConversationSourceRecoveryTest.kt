@@ -17,6 +17,23 @@ import org.junit.Test
 class ConversationSourceRecoveryTest {
 
     @Test
+    fun failedRecoveryRejectsModelSelection() = kotlinx.coroutines.test.runTest {
+        val source = RecoveringConversationSource(
+            kotlinx.coroutines.CompletableDeferred<EngineConversationSource?>().apply { complete(null) },
+            DefaultConversationStrings,
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.Legacy),
+        )
+        try {
+            source.setModel("openai/gpt-5.6-sol")
+            fail("expected unavailable engine to reject model selection")
+        } catch (expected: IllegalStateException) {
+            assertEquals("engine is not connected", expected.message)
+        } finally {
+            source.close()
+        }
+    }
+
+    @Test
     fun recoveryScopeKeyUsesStableWorkspaceIdentityAndMode() {
         val chat = ConversationRecoverySpec(
             projectId = "weather",

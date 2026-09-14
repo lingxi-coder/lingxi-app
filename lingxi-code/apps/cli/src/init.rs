@@ -595,7 +595,7 @@ fn load_always_thinking_enabled(
 }
 
 /// Load the persisted `settings.model` (the `/model` picker writes it via
-/// `tui_core::recent_models::record_default_model`, wired in `mode.rs`'s
+/// `crate::model_selection`, wired in `mode.rs`'s
 /// `on_switch_model`). Used as the default model when
 /// `--model` is absent, so the picker choice survives a restart. `None` when
 /// unset / on any load failure → the caller keeps the built-in default.
@@ -1024,6 +1024,7 @@ pub(crate) fn resolve_desktop_config_at(
         // selected main-thread agent's frontmatter `permissionMode` with the
         // oracle precedence: explicit CLI override > agent frontmatter >
         // settings `defaultMode`.
+        permission_mode_preference: crate::permission_mode_preference::load(argv),
         permission_mode_cli: argv.permission_mode.clone(),
         permission_mode_cli_explicit: argv.permission_mode.is_some()
             || argv.dangerously_skip_permissions,
@@ -1491,6 +1492,12 @@ pub async fn build_runtime_for_tui_inner_with_parent(
     let emoji_completion_enabled =
         load_settings_emoji_completion_enabled(incl_user, incl_project).unwrap_or(true);
     let startup_view_mode = load_settings_view_mode(incl_user, incl_project);
+    let permission_mode = runtime
+        .orchestrator
+        .permission_mode()
+        .as_deref()
+        .map(permission::permission_mode_from_cli_string)
+        .unwrap_or(permission_mode);
     Ok(TuiBuild {
         runtime,
         initial_permission_mode: permission_mode,

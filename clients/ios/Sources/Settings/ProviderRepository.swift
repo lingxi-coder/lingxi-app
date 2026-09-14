@@ -2472,8 +2472,8 @@ final class ProviderRepository {
     ///
     /// Only an api key or a base URL override evidences a CONFIGURED Anthropic
     /// provider. `Keychain.model` alone does NOT: since the multi-provider
-    /// picker landed, `applyActiveModel` writes the engine's active model there
-    /// on every `ModelList`/`ModelChanged` — so a user who never configured any
+    /// picker originally wrote the engine's active model there on every
+    /// `ModelList`/`ModelChanged` — so a user who never configured any
     /// provider still has that slot filled. Treating it as evidence fabricated
     /// an enabled, default Anthropic profile out of thin air, and because that
     /// slot now holds a provider-QUALIFIED reference, the fabricated profile

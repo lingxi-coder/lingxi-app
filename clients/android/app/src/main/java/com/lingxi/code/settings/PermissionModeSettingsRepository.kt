@@ -9,7 +9,9 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
 /**
- * Persists the engine's shared `permissions.defaultMode` setting.
+ * Reads the last successful engine selection, falling back to legacy
+ * `permissions.defaultMode`. The engine owns last-selection persistence;
+ * offline callers can still update the legacy default through [save].
  *
  * The Rust loader owns precedence and safety gating; this repository only
  * edits the app-private user tier and deliberately preserves every unrelated
@@ -19,10 +21,14 @@ import java.nio.file.StandardCopyOption
 class PermissionModeSettingsRepository(context: Context) {
     private val settingsDir = File(context.applicationContext.filesDir, ".lingxi")
     private val settingsFile = File(settingsDir, "settings.json")
+    private val lastModeFile = File(settingsDir, "last-permission-mode.json")
     private val lock = Any()
 
     fun load(): String = synchronized(lock) {
-        PermissionModeSettingsJson.load(runCatching { readRoot()?.toString() }.getOrNull())
+        PermissionModeSettingsJson.load(
+            raw = runCatching { readRoot()?.toString() }.getOrNull(),
+            lastSelection = runCatching { lastModeFile.readText(StandardCharsets.UTF_8) }.getOrNull(),
+        )
     }
 
     fun save(mode: String) {
@@ -64,7 +70,11 @@ class PermissionModeSettingsRepository(context: Context) {
 
 /** Pure JSON seam kept separate so unknown-field preservation is JVM-testable. */
 internal object PermissionModeSettingsJson {
-    fun load(raw: String?): String {
+    fun load(raw: String?, lastSelection: String? = null): String {
+        val selected = runCatching {
+            lastSelection?.let { JSONObject(it).optString("mode") }
+        }.getOrNull()
+        if (selected != null && selected in PermissionModeOptions.values) return selected
         val root = try {
             raw?.let { JSONObject(it) }
         } catch (_: Exception) {

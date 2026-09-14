@@ -15,6 +15,7 @@ import {
   type ClientEvent,
   type ComputerAccessRequestDto,
   type PermissionRequest,
+  type PermissionModeId,
 } from '@lingxi/bridge-client';
 
 import { buildBridgeArguments, buildBridgeEnvironment, buildCredentialEnvelope, diagnosticEvent, DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
@@ -107,6 +108,11 @@ export interface BridgeManagerOptions {
   /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */
   listProcessCommands?: () => readonly ProcessCommand[];
   onModelChanged?: (model: string) => void;
+  /** Persist only an explicitly requested, engine-confirmed model selection. */
+  onModelSelected?: (model: string) => void;
+  getSavedModel?: () => string | undefined;
+  getSavedPermissionMode?: () => PermissionModeId | undefined;
+  onPermissionModeSelected?: (mode: PermissionModeId) => void;
   /** Resolve a broker-owned credential only when this session first selects its provider. */
   resolveProviderCredential?: (providerId: string) => Promise<string | undefined>;
   /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
@@ -693,9 +699,74 @@ export class SessionRuntime {
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
   private credentialRoutingSettings: unknown = undefined;
-  private pendingModelSwitch: { model: string; sent: boolean; promise: Promise<void>; complete(): void; fail(error: Error): void } | undefined;
+  private pendingModelSwitch: { model: string; sent: boolean; slash: boolean; promise: Promise<void>; complete(selected?: string): void; fail(error: Error): void } | undefined;
 
-  private switchModel(model: string): Promise<void> {
+  private pendingPermissionSwitch: {
+    mode: PermissionModeId;
+    complete(): void;
+    fail(error: Error): void;
+  } | undefined;
+
+  private applyPermissionMode(mode: PermissionModeId, persist: boolean): Promise<void> {
+    if (this.pendingPermissionSwitch) return Promise.reject(new Error('A permission mode change is already in progress.'));
+    const client = this.requireClient();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => pending.fail(new Error('Permission mode change timed out.')), 10_000);
+      timer.unref();
+      const finish = (error?: Error) => {
+        if (this.pendingPermissionSwitch !== pending) return;
+        this.pendingPermissionSwitch = undefined;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      };
+      const pending = {
+        mode,
+        complete: () => {
+          try {
+            if (persist) this.opts.onPermissionModeSelected?.(mode);
+            finish();
+          } catch (error) {
+            finish(new Error(`Could not save permission mode: ${sanitizeDiagnostic(error)}`));
+          }
+        },
+        fail: (error: Error) => finish(error),
+      };
+      this.pendingPermissionSwitch = pending;
+      try { client.sendCommand({ type: 'set_permission_mode', mode }); }
+      catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
+    });
+  }
+
+  private async restorePermissionMode(): Promise<void> {
+    const mode = this.opts.getSavedPermissionMode?.();
+    if (!mode) return;
+    try {
+      if (mode === 'bypassPermissions' && !(await this.opts.confirmBypassPermissions?.())) {
+        throw new Error('Saved Bypass Permissions mode was not accepted.');
+      }
+      await this.applyPermissionMode(mode, false);
+    } catch (error) {
+      // A changed policy/provider may reject a previously valid preference.
+      // Keep the engine usable so the user can select another mode.
+      const message = `Could not restore permission mode: ${sanitizeDiagnostic(error)}`;
+      this.diagnostics.add('warn', 'host', message);
+      this.broadcastClientEvent({ type: 'error', kind: { type: 'rejected' }, message });
+    }
+  }
+
+  private async restoreModel(): Promise<void> {
+    const model = this.opts.getSavedModel?.();
+    if (!model || model === this.selectedModelReference) return;
+    try {
+      await this.switchModel(model, false);
+    } catch (error) {
+      const message = `Could not restore model: ${sanitizeDiagnostic(error)}`;
+      this.diagnostics.add('warn', 'host', message);
+      this.broadcastClientEvent({ type: 'error', kind: { type: 'rejected' }, message });
+    }
+  }
+
+  private switchModel(model: string, persist = true, slashCommand?: Extract<ClientCommand, { type: 'run_slash_command' }>): Promise<void> {
     if (this.pendingModelSwitch) return Promise.reject(new Error('A model switch is already in progress.'));
     const generation = this.generation;
     const client = this.requireClient();
@@ -709,7 +780,18 @@ export class SessionRuntime {
       if (error) reject(error); else resolve();
       this.notifyActivityChanged();
     };
-    const pending = { model, sent: false, promise, complete: () => finish(), fail: (error: Error) => finish(error) };
+    const pending = {
+      model, sent: false, slash: !!slashCommand, promise,
+      complete: (selected = model) => {
+        try {
+          if (persist) this.opts.onModelSelected?.(selected);
+          finish();
+        } catch (error) {
+          finish(new Error(`Could not save model: ${sanitizeDiagnostic(error)}`));
+        }
+      },
+      fail: (error: Error) => finish(error),
+    };
     const timer = setTimeout(() => finish(new Error('Model switch confirmation timed out.')), 10_000);
     this.pendingModelSwitch = pending;
     this.notifyActivityChanged();
@@ -721,7 +803,7 @@ export class SessionRuntime {
           throw new Error('Model switch was interrupted.');
         }
         pending.sent = true;
-        client.sendCommand({ type: 'set_model', model });
+        client.sendCommand(slashCommand ?? { type: 'set_model', model });
       } catch (error) {
         pending.fail(error instanceof Error ? error : new Error(String(error)));
       }
@@ -824,6 +906,18 @@ export class SessionRuntime {
 
   manageCron(request: CronRequestDto): Promise<CronJobDto[]> {
     return this.sendCronCommand({ type: 'cron_manage', request_id: randomUUID(), request });
+  }
+
+  private readonly modelCatalogWaiters = new Set<(event: Extract<ClientEvent, { type: 'model_list' }>) => void>();
+
+  scheduledModelCatalog(): Promise<Extract<ClientEvent, { type: 'model_list' }>> {
+    return new Promise((resolve, reject) => {
+      const done = (event: Extract<ClientEvent, { type: 'model_list' }>) => { clearTimeout(timer); this.modelCatalogWaiters.delete(done); resolve(event); };
+      const timer = setTimeout(() => { this.modelCatalogWaiters.delete(done); reject(new Error('Model catalog timed out.')); }, 15_000);
+      this.modelCatalogWaiters.add(done);
+      try { this.requireClient().sendCommand({ type: 'list_models' }); }
+      catch (error) { clearTimeout(timer); this.modelCatalogWaiters.delete(done); reject(error); }
+    });
   }
 
   private sendCronCommand(command: Extract<ClientCommand, { type: 'cron_manage' }>): Promise<CronJobDto[]> {
@@ -1166,7 +1260,7 @@ export class SessionRuntime {
           && (!access.workspace || access.workspace === this.projectPath),
         );
         try {
-          await this.connectBridgeClient(reusable.lockfilePath, generation);
+          await this.connectBridgeClient(reusable.lockfilePath, generation, false);
           this.diagnostics.add('info', 'host', diagnosticEvent('bridge_adopted', {
             pid: reusable.pid,
             sessionId: this.sessionId,
@@ -1241,7 +1335,7 @@ export class SessionRuntime {
     }
   }
 
-  private async connectBridgeClient(lockfilePath: string, generation: number): Promise<void> {
+  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true): Promise<void> {
     this.setState({ status: 'connecting' });
     const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
     this.client = client;
@@ -1258,6 +1352,8 @@ export class SessionRuntime {
       'bridge',
       bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
     );
+    if (restorePermission) await this.restorePermissionMode();
+    if (generation !== this.generation || this.disposed) return;
     this.setState({ status: 'connected' });
     // Status refreshes use attribute-only broker queries; they do not
     // decrypt every saved credential or expose secret bytes to the renderer.
@@ -1495,6 +1591,7 @@ export class SessionRuntime {
   private wireClient(client: BridgeClient, generation: number): void {
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation) return;
+      if (event.type === 'model_list') for (const waiter of this.modelCatalogWaiters) waiter(event);
       if (isTurnOwnedEvent(event) && !this.activeTurn) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
@@ -1558,6 +1655,12 @@ export class SessionRuntime {
           this.completePendingSessionResumeIfReady();
         }
       }
+      if (event.type === 'permission_mode_changed' && event.mode === this.pendingPermissionSwitch?.mode) {
+        this.pendingPermissionSwitch.complete();
+      }
+      if (event.type === 'error' && event.message.startsWith('set_permission_mode failed:')) {
+        this.pendingPermissionSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
+      }
       if (event.type === 'error') {
         this.pendingCredentialSettings?.reject(new Error('Provider settings loading failed.'));
         this.pendingModelSwitch?.fail(new Error('Model switch failed.'));
@@ -1576,9 +1679,20 @@ export class SessionRuntime {
         this.cancellingTurn = false;
         this.clearTurnInteractions();
       }
+      if (event.type === 'slash_command_result' && this.pendingModelSwitch?.slash && this.pendingModelSwitch.sent) {
+        const pending = this.pendingModelSwitch;
+        if (event.is_error) pending.fail(new Error('Model switch failed.'));
+        else void this.scheduledModelCatalog().then(catalog => {
+          if (this.pendingModelSwitch !== pending) return;
+          // Bare model ids may be returned qualified with their actual provider.
+          if (catalog.current === pending.model || catalog.current.includes('/') && catalog.current.slice(catalog.current.indexOf('/') + 1) === pending.model) {
+            pending.complete(catalog.current);
+          } else pending.fail(new Error('Model switch was not confirmed.'));
+        }, error => pending.fail(error instanceof Error ? error : new Error(String(error))));
+      }
       if (event.type === 'model_changed') {
         this.selectedModelReference = event.model;
-        if (this.pendingModelSwitch?.sent && this.pendingModelSwitch.model === event.model) this.pendingModelSwitch.complete();
+        if (this.pendingModelSwitch?.sent && !this.pendingModelSwitch.slash && this.pendingModelSwitch.model === event.model) this.pendingModelSwitch.complete();
         try { this.opts.onModelChanged?.(event.model); }
         catch (error) { this.diagnostics.add('warn', 'host', error); }
         const pending = this.pendingSessionResume;
@@ -1951,8 +2065,13 @@ export class SessionRuntime {
       await this.sendCronCommand(validated);
       return;
     }
-    if (validated.type === 'set_model' && this.pendingModelSwitch) throw new Error('A model switch is already in progress.');
+    if ((validated.type === 'set_model' || validated.type === 'run_slash_command') && this.pendingModelSwitch) throw new Error('A model switch is already in progress.');
     assertCommandAllowedDuringTurn(validated, this.turnActive);
+    // Preserve slash hook provenance and confirm the actual model before saving.
+    if (validated.type === 'run_slash_command' && this.opts.onModelSelected) {
+      const model = /^\/model\s+([\s\S]+)$/.exec(validated.raw.trim())?.[1]?.trim();
+      if (model) return this.switchModel(model, true, validated);
+    }
     if (validated.type === 'set_permission_mode' && validated.mode === 'bypassPermissions') {
       const accepted = (await this.opts.confirmBypassPermissions?.()) ?? false;
       if (!accepted) {
@@ -1965,8 +2084,11 @@ export class SessionRuntime {
       // would race a real reply the engine has already accepted.
       this.outstandingResponderRequests.delete(validated.request_id);
     }
-    if (validated.type === 'set_model' && this.opts.resolveProviderCredential) {
+    if (validated.type === 'set_model' && (this.opts.resolveProviderCredential || this.opts.onModelSelected)) {
       return this.switchModel(validated.model);
+    }
+    if (validated.type === 'set_permission_mode' && (this.opts.getSavedPermissionMode || this.opts.onPermissionModeSelected)) {
+      return this.applyPermissionMode(validated.mode, true);
     }
     this.requireClient().sendCommand(validated);
   }
@@ -2058,6 +2180,9 @@ export class SessionRuntime {
       } catch (error) {
         this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)));
       }
+    }).then(async () => {
+      await this.restoreModel();
+      await this.restorePermissionMode();
     });
   }
 
@@ -2135,6 +2260,7 @@ export class SessionRuntime {
   private setState(next: ConnectionState): void {
     this.state = next;
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
+      this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
     }
     if (
@@ -2161,6 +2287,7 @@ export class SessionRuntime {
     this.pendingCron.clear();
     ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
+    this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
     this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
     this.pendingCredentialSettings?.reject(new Error('Provider settings loading was interrupted.'));
     this.pendingCredentialSettings = undefined;

@@ -1,8 +1,10 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import {
   defaultSettings,
+  isPermissionModeId,
   parseModelPickerVisibility,
   parseSettings,
   parseVoicePreferences,
@@ -192,6 +194,37 @@ export class SettingsStore {
     this.settings = setWorkspaceTrust(this.settings, workspace, trusted);
     this.persist();
     return workspaceTrust(this.settings, workspace);
+  }
+
+  /** Commit the confirmed model without changing the in-memory default on write failure. */
+  setLastModel(model: string): void {
+    const validated = validateString(model, 'model', 256);
+    const previous = this.settings;
+    this.settings = { ...previous, model: validated };
+    try {
+      this.persist();
+    } catch (error) {
+      this.settings = previous;
+      throw error;
+    }
+  }
+
+  /** Restore Bypass only after the existing one-time acknowledgement. */
+  getLastPermissionMode(): PermissionModeId | undefined {
+    const mode = this.settings.lastPermissionMode;
+    return mode === 'bypassPermissions' && !this.getBypassPermissionsAccepted() ? undefined : mode;
+  }
+
+  setLastPermissionMode(mode: PermissionModeId): void {
+    if (!isPermissionModeId(mode)) throw new Error('invalid permission mode');
+    const previous = this.settings;
+    this.settings = { ...previous, lastPermissionMode: mode };
+    try {
+      this.persist();
+    } catch (error) {
+      this.settings = previous;
+      throw error;
+    }
   }
 
   /** Whether the user has previously accepted Bypass Permissions mode. */

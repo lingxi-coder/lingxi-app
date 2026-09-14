@@ -1251,11 +1251,10 @@ enum ConversationSourceFactory {
             let isPreview = env["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
             if !isPreview {
                 let root = appSandboxRoot()
-                // SHIP-BLOCKER #2: NEVER seed the engine with a branded mock id
-                // ("lx-72b" → Anthropic 400). Use the user's last-picked real model
-                // from the Keychain when set; otherwise pass "" so `buildIosEngine`
-                // falls back to `MobileConfig.default_model` (a real Anthropic wire
-                // id). `fromEnvironment` still lets `LINGXI_MODEL` override for dev.
+                // The shared engine restores its last confirmed model when the
+                // provider is still available. These values only seed its fallback:
+                // configured provider first, then the legacy Keychain model for
+                // installs that have not migrated their provider configuration.
                 let storedModel = options.defaultModelID ?? Keychain.get(.model) ?? ""
                 let config = EngineConfig.fromEnvironment(
                     appSandboxRoot: root,
@@ -5377,7 +5376,7 @@ final class MockConversationSource: ConversationSource {
                 }
 
             case let .modelChanged(model: newModel):
-                // The engine confirmed a switch (1:1 with a successful `SetModel`).
+                // Reflect the authoritative model, including slash-command changes.
                 applyActiveModel(newModel)
 
             case let .conversationControlsChanged(controls):
@@ -6495,15 +6494,12 @@ final class MockConversationSource: ConversationSource {
 
         // MARK: model selection (SHIP-BLOCKER #2)
 
-        /// Adopt the engine's reported active model id. Updates the out-of-band
-        /// `activeModelId`, persists it to the Keychain (so a relaunch resumes this
-        /// real model instead of falling back to the engine default), and keeps the
-        /// friendly chip in sync when the id maps to a known mock entry (a friendly
-        /// label is optional — the picker itself is driven by `availableModels`).
+        /// Reflect the engine's active model without saving a new preference.
+        /// Boot, listings, and resumed sessions can also report a model; only a
+        /// successful explicit switch in the shared engine owns persistence.
         private func applyActiveModel(_ id: String) {
             guard !id.isEmpty else { return }
             model.activeModelId = id
-            Keychain.set(.model, id)
             if let opt = MockData.models.first(where: { $0.id == id || $0.name == id }) {
                 model.model = opt
             }

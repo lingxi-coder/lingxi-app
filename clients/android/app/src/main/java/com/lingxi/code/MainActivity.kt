@@ -358,7 +358,9 @@ class MainActivity : ComponentActivity() {
                             accentId = prefs.accentId,
                             store = settingsStore,
                             onPermissionModeChanged = { mode ->
-                                activeConversationSource?.setPermissionMode(mode)
+                                val source = activeConversationSource
+                                    ?: error("engine is not connected")
+                                source.setPermissionMode(mode)
                             },
                             onTypescriptLspModeChanged = { mode ->
                                 val source = activeConversationSource

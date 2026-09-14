@@ -1547,11 +1547,13 @@ internal class RecoveringConversationSource(
     }
 
     override suspend fun setPermissionMode(mode: String) {
-        pendingSource.await()?.setPermissionMode(mode)
+        val source = pendingSource.await() ?: error("engine is not connected")
+        source.setPermissionMode(mode)
     }
 
     override suspend fun setModel(id: String) {
-        pendingSource.await()?.setModel(id)
+        val source = pendingSource.await() ?: error("engine is not connected")
+        source.setModel(id)
     }
 
     override suspend fun approvePermission(requestId: ULong, response: PermissionResponseDto) {
@@ -2062,8 +2064,8 @@ class EngineConversationSource private constructor(
                 apiKey = creds.apiKey,
                 // Empty `creds.model` → the engine starts on MobileConfig.default_model
                 // (a real Anthropic wire id), never a branded `lx-*` mock id. A
-                // dev-set LINGXI_MODEL still overrides; the secure store doesn't
-                // persist a model, so a fresh install always uses the real default.
+                // The shared engine restores the last confirmed model for an
+                // interactive launch; this is the provider fallback for new installs.
                 model = creds.model.ifBlank { providerLaunch.defaultModel },
                 providerProfilesJson = providerLaunch.providerProfilesJson,
                 routingJson = providerLaunch.routingJson,

@@ -35,6 +35,8 @@
 
 mod settings_commands;
 mod configuration_admin;
+mod permission_preference;
+mod model_preference;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -433,6 +435,8 @@ pub fn parse_mobile_provider_config_json(
 /// runtime); F3-05 adds the async `submit` that drives the orchestrator and
 /// resolves the permission gate.
 pub struct MobileRuntime {
+    /// Only interactive hosts inherit device-owned permission preferences.
+    interactive_launch: bool,
     /// The fully-constructed orchestrator, bound to the adapter output stream
     /// and the id-keyed permission gate.
     pub orchestrator: Arc<ConversationOrchestrator>,
@@ -3382,8 +3386,11 @@ async fn build_mobile_inner_with_ask(
     // moves it). `display_model`/`provider_label` are immaterial to parsing, so
     // we reuse `request_model` / the profile name for both fields.
     let default_listings = model_listings(&assembled.client_config.providers);
-    let (default_model_id, default_model_profile) =
-        resolve_default_model_ref(&cfg.default_model, &default_listings);
+    let interactive_launch = mobile_launch_is_interactive(cfg.host_environment.as_ref());
+    let saved_model = interactive_launch.then(|| model_preference::load(&cfg.lingxi_home)).flatten();
+    let (default_model_id, default_model_profile) = saved_model.as_deref()
+        .and_then(|model| model_preference::resolve(model, &default_listings))
+        .unwrap_or_else(|| resolve_default_model_ref(&cfg.default_model, &default_listings));
     let profile_auto_mode_provider: std::collections::BTreeMap<String, String> = assembled
         .client_config
         .providers
@@ -3544,7 +3551,6 @@ async fn build_mobile_inner_with_ask(
     // subscriber (`SubscriberState::default()` — api-key-only inference), and
     // binds no live subscription slot / availability map / CostTracker (out of
     // scope; mobile parity did not).
-    let interactive_launch = mobile_launch_is_interactive(cfg.host_environment.as_ref());
     let api_service = Arc::new(
         llm_client::ApiService::new_with_routing(
             llm_client,
@@ -5452,6 +5458,17 @@ async fn build_mobile_inner_with_ask(
         }
     }
     orch.fire_instructions_loaded().await;
+    if interactive_launch {
+        if let Some(preference) = permission_preference::load(&cfg.lingxi_home) {
+            match permission_policy_gate.restore_session_permission_mode(preference.wire_str()).await {
+                Ok(()) => {
+                    let _ = platform_api::OrchestratorHandle::set_plan_mode(orch.as_ref(), preference == PermissionMode::Plan).await;
+                    requested_permission_mode = preference.wire_str().to_string();
+                }
+                Err(error) => tracing::warn!(%error, "saved mobile permission mode rejected by current policy"),
+            }
+        }
+    }
     // Publish the effective boot mode as an authoritative event. Auto may be
     // downgraded to Default by the model/provider/killswitch gate, so clients
     // must not infer the effective value from their persisted preference.
@@ -5465,6 +5482,7 @@ async fn build_mobile_inner_with_ask(
         .await;
 
     Ok(MobileRuntime {
+        interactive_launch,
         orchestrator: orch,
         dispatcher,
         slash_registry: shared_command_registry,
@@ -6968,6 +6986,38 @@ impl MobileEngineHandle {
             .and_then(|value| session::jsonl::SessionMode::from_str(value))
     }
 
+    async fn restore_preferred_permission_mode(
+        &self,
+        fallback: &str,
+    ) -> Result<String, ClientError> {
+        if let Some(preference) = self
+            .inner
+            .interactive_launch
+            .then(|| permission_preference::load(&self.lingxi_home))
+            .flatten()
+        {
+            match self
+                .restore_session_permission_mode(preference.wire_str())
+                .await
+            {
+                Ok(active) => return Ok(active),
+                Err(ClientError::Rejected { message }) => {
+                    // A policy change can invalidate a saved choice. Keep the engine's
+                    // validated current mode rather than preventing all session changes.
+                    tracing::warn!(%message, "saved mobile permission mode rejected by current policy");
+                    let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                    let current = handle
+                        .permission_mode()
+                        .await
+                        .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
+                    return self.restore_session_permission_mode(&current).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.restore_session_permission_mode(fallback).await
+    }
+
     async fn restore_session_permission_mode(&self, mode: &str) -> Result<String, ClientError> {
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
         let result = if mode == "bypassPermissions" {
@@ -6988,6 +7038,12 @@ impl MobileEngineHandle {
             .permission_mode()
             .await
             .unwrap_or_else(|| mode.to_string());
+        handle
+            .set_plan_mode(active == "plan")
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("restore plan state failed: {error}"),
+            })?;
         if let Ok(mut requested) = self.inner.requested_permission_mode.lock() {
             *requested = active.clone();
         }
@@ -7127,15 +7183,16 @@ impl MobileEngineHandle {
                     .permission_mode()
                     .await
                     .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
-                let target_permission_mode = if resume_plan_mode {
+                let fallback_permission_mode = if resume_plan_mode {
                     "plan".to_string()
                 } else {
                     recorded_permission_mode
                         .clone()
                         .unwrap_or_else(|| self.inner.session_default_permission_mode.clone())
                 };
-                self.restore_session_permission_mode(&target_permission_mode)
+                let target_permission_mode = self.restore_preferred_permission_mode(&fallback_permission_mode)
                     .await?;
+                let resume_runtime = self.resume_runtime_with_model_preference(replayed.handle_runtime_snapshot()).await;
                 if let Err(error) = handle
                     .resume_session(
                         protocol::SessionId::from_uuid(uuid),
@@ -7150,7 +7207,7 @@ impl MobileEngineHandle {
                                 tokens_at_start: goal.tokens_at_start,
                             }
                         }),
-                        replayed.handle_runtime_snapshot(),
+                        resume_runtime,
                     )
                     .await
                 {
@@ -7161,8 +7218,8 @@ impl MobileEngineHandle {
                         message: format!("resume_session failed: {error}"),
                     });
                 }
-                if resume_plan_mode {
-                    if let Err(error) = handle.set_plan_mode(true).await {
+                {
+                    if let Err(error) = handle.set_plan_mode(target_permission_mode == "plan").await {
                         let _ = self
                             .restore_session_permission_mode(&previous_permission_mode)
                             .await;
@@ -7171,6 +7228,8 @@ impl MobileEngineHandle {
                         });
                     }
                 }
+                let current_model = handle.get_status_snapshot().await;
+                self.inner.local_apps_llm.set_model(current_model.model, current_model.model_profile);
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
@@ -7228,10 +7287,9 @@ impl MobileEngineHandle {
                     .permission_mode()
                     .await
                     .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
-                let target_permission_mode = recorded_permission_mode
-                    .clone()
+                let fallback_permission_mode = recorded_permission_mode.clone()
                     .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
-                self.restore_session_permission_mode(&target_permission_mode)
+                let target_permission_mode = self.restore_preferred_permission_mode(&fallback_permission_mode)
                     .await?;
                 if let Err(resume_error) = handle
                     .resume_session(
@@ -7239,7 +7297,7 @@ impl MobileEngineHandle {
                         Vec::new(),
                         None,
                         None,
-                        platform_api::ResumeRuntimeSnapshot::default(),
+                        self.resume_runtime_with_model_preference(platform_api::ResumeRuntimeSnapshot::default()).await,
                     )
                     .await
                 {
@@ -7250,6 +7308,12 @@ impl MobileEngineHandle {
                         message: format!("resume empty session failed: {resume_error}"),
                     });
                 }
+                handle.set_plan_mode(target_permission_mode == "plan").await
+                    .map_err(|error| ClientError::Internal {
+                        message: format!("resume empty session plan mode failed: {error}"),
+                    })?;
+                let current_model = handle.get_status_snapshot().await;
+                self.inner.local_apps_llm.set_model(current_model.model, current_model.model_profile);
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
@@ -8845,6 +8909,8 @@ impl MobileEngineHandle {
 
             ClientCommand::SetPermissionMode { mode } => {
                 let requested_mode = mode.clone();
+                let previous_requested = self.inner.requested_permission_mode.lock()
+                    .ok().map(|value| value.clone());
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 let previous_mode = handle
                     .permission_mode()
@@ -8859,7 +8925,28 @@ impl MobileEngineHandle {
                 let active = handle.permission_mode().await.unwrap_or(mode);
                 if let Err(error) = self.persist_session_permission_mode(&active).await {
                     let _ = self.restore_session_permission_mode(&previous_mode).await;
+                    if let (Some(previous), Ok(mut requested)) = (
+                        previous_requested.as_ref(), self.inner.requested_permission_mode.lock(),
+                    ) {
+                        *requested = previous.clone();
+                    }
                     return Err(error);
+                }
+                if let Err(error) = if self.inner.interactive_launch {
+                    permission_preference::save(&self.lingxi_home, &active)
+                } else {
+                    Ok(())
+                } {
+                    let _ = self.restore_session_permission_mode(&previous_mode).await;
+                    if let (Some(previous), Ok(mut requested)) = (
+                        previous_requested.as_ref(), self.inner.requested_permission_mode.lock(),
+                    ) {
+                        *requested = previous.clone();
+                    }
+                    let _ = self.persist_session_permission_mode(&previous_mode).await;
+                    return Err(ClientError::Internal {
+                        message: format!("save permission preference failed: {error}"),
+                    });
                 }
                 if let Ok(mut requested) = self.inner.requested_permission_mode.lock() {
                     *requested = requested_mode;
@@ -9091,12 +9178,7 @@ impl MobileEngineHandle {
             ClientCommand::SetModel { model } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 let (model_id, profile) = self.resolve_routable_model(&model).await?;
-                handle
-                    .switch_model(&model_id, profile.as_deref())
-                    .await
-                    .map_err(|e| ClientError::Internal {
-                        message: format!("switch_model failed: {e}"),
-                    })?;
+                let selected = self.switch_model_and_remember(&model_id, profile.as_deref(), "sdk").await?;
                 if let Some(controls) = handle.conversation_controls().await {
                     if !matches!(
                         controls.requested_reasoning_selection,
@@ -9109,23 +9191,6 @@ impl MobileEngineHandle {
                             .await;
                     }
                 }
-                // The local-app LLM stages (author/plan/write-source) ride
-                // their OWN `ApiServiceModel`, not the orchestrator's model
-                // selection — without this they would stay silently pinned
-                // to whatever was live at engine build time even after a
-                // `/model` switch. `local_apps_llm` is stable for this
-                // connection's whole lifetime (only a reconnect gets a new
-                // one, via `profile_apps`'s `SharedLlm::replace`), so
-                // mutating it in place here is exactly the model every
-                // future authoring/planning/generation call will read.
-                self.inner
-                    .local_apps_llm
-                    .set_model(model_id.clone(), profile.clone());
-                let snapshot = handle.get_status_snapshot().await;
-                let selected = platform_api::qualified_model_ref(
-                    &snapshot.model,
-                    snapshot.model_profile.as_deref(),
-                );
                 self.event_sink
                     .emit(ClientEvent::ModelChanged { model: selected })
                     .await;
@@ -9161,6 +9226,34 @@ impl MobileEngineHandle {
                                 is_error: true,
                             })
                             .await;
+                        return Ok(());
+                    }
+                }
+                if let Some(parsed) = command_api::parse_slash_command(&raw) {
+                    let is_builtin_model = parsed.name == "model"
+                        && !parsed.raw_args.trim().is_empty()
+                        && self.inner.slash_registry.read().await.resolve(&parsed.name)
+                            .is_some_and(|command| command.source == command_api::model::CommandSource::Builtin);
+                    if is_builtin_model {
+                        let result = async {
+                            let (model, profile) = self.resolve_routable_model(parsed.raw_args.trim()).await?;
+                            let selected = self.switch_model_and_remember(&model, profile.as_deref(), "command").await?;
+                            Ok::<_, ClientError>((model, selected))
+                        }.await;
+                        match result {
+                            Ok((model, selected)) => {
+                                self.event_sink.emit(ClientEvent::SlashCommandResult {
+                                    turn_id, display: format!("Switched to model: {model}"), is_error: false,
+                                }).await;
+                                self.event_sink.emit(ClientEvent::ModelChanged { model: selected }).await;
+                                self.emit_controls_snapshot().await;
+                            }
+                            Err(error) => {
+                                self.event_sink.emit(ClientEvent::SlashCommandResult {
+                                    turn_id, display: format!("Could not switch model: {error}"), is_error: true,
+                                }).await;
+                            }
+                        }
                         return Ok(());
                     }
                 }
@@ -9490,10 +9583,9 @@ impl MobileEngineHandle {
                     .permission_mode()
                     .await
                     .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
-                let new_session_permission_mode =
-                    self.inner.session_default_permission_mode.clone();
-                self.restore_session_permission_mode(&new_session_permission_mode)
-                    .await?;
+                let new_session_permission_mode = self.restore_preferred_permission_mode(
+                    &self.inner.session_default_permission_mode,
+                ).await?;
                 if let Err(error) = handle.clear_session().await {
                     let _ = self
                         .restore_session_permission_mode(&previous_permission_mode)
@@ -9502,6 +9594,8 @@ impl MobileEngineHandle {
                         message: format!("new session (clear_session) failed: {error}"),
                     });
                 }
+                handle.set_plan_mode(new_session_permission_mode == "plan").await
+                    .map_err(|error| ClientError::Internal { message: error.to_string() })?;
                 let new_session_id = handle.current_session_id().await;
                 self.retarget_session_writer(new_session_id, &self.session_cwd)
                     .await;
@@ -9522,12 +9616,7 @@ impl MobileEngineHandle {
                 self.persist_session_permission_mode(&new_session_permission_mode)
                     .await?;
                 if let Some((model_id, profile)) = requested_model {
-                    handle
-                        .switch_model(&model_id, profile.as_deref())
-                        .await
-                        .map_err(|e| ClientError::Internal {
-                            message: format!("new session model switch failed: {e}"),
-                        })?;
+                    self.switch_model_and_remember(&model_id, profile.as_deref(), "sdk").await?;
                 }
                 // Mobile clients persist this value as the resumable catalog key.
                 // `SessionId::Display` is presentation-oriented (`sess:<uuid>`),
@@ -10488,6 +10577,66 @@ impl MobileEngineHandle {
         model_listings(&providers)
     }
 
+    async fn resume_runtime_with_model_preference(
+        &self,
+        mut runtime: platform_api::ResumeRuntimeSnapshot,
+    ) -> platform_api::ResumeRuntimeSnapshot {
+        if self.inner.interactive_launch {
+            if let Some(saved) = model_preference::load(&self.lingxi_home) {
+                // Picker listings can fall back to unavailable built-ins. Only
+                // live, enabled routes may restore an implicit preference.
+                let listings = &self.inner.routable_listings;
+                let current = self.inner.orchestrator.get_status_snapshot().await;
+                let (model, profile) = model_preference::resolve(&saved, listings)
+                    .unwrap_or((current.model, current.model_profile));
+                runtime.model = model;
+                runtime.model_profile = profile;
+            }
+        }
+        runtime
+    }
+
+    async fn switch_model_and_remember(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        source: &str,
+    ) -> Result<String, ClientError> {
+        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+        let previous = handle.get_status_snapshot().await;
+        handle
+            .switch_model_with_source(model, profile, source)
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("switch_model failed: {error}"),
+            })?;
+        let current = handle.get_status_snapshot().await;
+        let selected =
+            platform_api::qualified_model_ref(&current.model, current.model_profile.as_deref());
+        if self.inner.interactive_launch {
+            if let Err(error) = model_preference::save(&self.lingxi_home, &selected) {
+                let rollback = handle
+                    .switch_model_with_source(
+                        &previous.model,
+                        previous.model_profile.as_deref(),
+                        "resume",
+                    )
+                    .await;
+                let message = match rollback {
+                    Ok(()) => format!("save model preference failed: {error}"),
+                    Err(rollback_error) => format!("save model preference failed: {error}; restore previous model failed: {rollback_error}"),
+                };
+                return Err(ClientError::Internal { message });
+            }
+        }
+        // Local-app authoring uses a separate API model and must follow the
+        // same committed choice, including explicit NewSession overrides.
+        self.inner
+            .local_apps_llm
+            .set_model(current.model, current.model_profile);
+        Ok(selected)
+    }
+
     /// Resolve a client-supplied model reference into the `(wire id, profile)`
     /// pair the orchestrator takes, REFUSING one no configured provider serves.
     ///
@@ -10500,8 +10649,8 @@ impl MobileEngineHandle {
         &self,
         model: &str,
     ) -> Result<(String, Option<String>), ClientError> {
-        let listings = self.routable_model_listings().await;
-        let (model_id, profile) = platform_api::parse_model_ref(model, &listings);
+        let listings = &self.inner.routable_listings;
+        let (model_id, profile) = platform_api::parse_model_ref(model, listings);
         let routable = listings.iter().any(|listing| {
             listing.request_model == model_id
                 && profile
@@ -13195,6 +13344,8 @@ pub fn build_mobile_engine_inner(
 
 #[cfg(test)]
 mod tests {
+    include!("host/permission_preference_tests.rs");
+    include!("host/model_preference_tests.rs");
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

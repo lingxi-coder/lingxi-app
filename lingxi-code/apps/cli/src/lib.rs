@@ -75,9 +75,11 @@ pub mod idle_notify;
 pub mod init;
 pub mod logging;
 pub mod mode;
+mod model_selection;
 pub mod output;
 pub mod output_adapter;
 pub mod permission_prompt_notify;
+mod permission_mode_preference;
 pub(crate) mod process_wrapper;
 pub mod queued_commands;
 pub mod repl;
@@ -1518,7 +1520,11 @@ pub(crate) fn auto_mode_cycle_available(argv: &Argv) -> bool {
 }
 
 pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMode, Option<String>) {
-    let settings = read_cli_mode_settings(argv);
+    let mut settings = read_cli_mode_settings(argv);
+    if let Some(mode) = permission_mode_preference::load(argv) {
+        settings.default_mode = Some(mode);
+        settings.auto_default_from_trusted = mode == permission::PermissionMode::Auto;
+    }
     // MODE-ENV-SCRUB-03: `LINGXI_SUBPROCESS_ENV_SCRUB` (the port's spelling of
     // `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, `platforms/posix` runner) forces the
     // permission mode to `default` — a hardened / scrubbed subprocess must not

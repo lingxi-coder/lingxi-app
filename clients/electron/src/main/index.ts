@@ -177,6 +177,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
   });
   bridge = new SessionRuntimeManager({
+    getSavedPermissionMode: () => settings.getLastPermissionMode(),
+    onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     bridgeRoot,
@@ -197,7 +199,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         return { workspace: ref.projectPath, trusted: false };
       }
     },
-    onModelChanged: (_ref, model) => { settings.update({ model }); },
+    onModelSelected: (model) => settings.setLastModel(model),
+    getSavedModel: () => settings.getPublic().model,
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
     sessionIdAvailable: async (ref) => {

@@ -1202,6 +1202,8 @@ struct BootPermissionTiers {
     /// Highest-priority `permissions.defaultMode` (tiers are read in ascending
     /// priority, so the last write — the managed tier — wins).
     mode: permission::PermissionMode,
+    /// Explicit flag/managed defaults override a remembered user choice.
+    mode_preference_allowed: bool,
     /// Sticky `disableBypassPermissionsMode: "disable"` killswitch — true when
     /// ANY tier (managed included) disables `BypassPermissions` mode.
     bypass_disabled: bool,
@@ -1458,10 +1460,15 @@ async fn load_boot_permission_tiers_with_flag(
     if allow_managed_permission_rules_only {
         rules.retain(|r| r.source == permission::PermissionRuleSource::PolicySettings);
     }
+    let mode_preference_allowed = !managed_tiers.iter().any(|raw| {
+        permission::default_mode_from_settings_json(raw).is_some()
+    }) && flag_settings.and_then(|settings| serde_json::to_string(settings).ok())
+        .and_then(|raw| permission::default_mode_from_settings_json(&raw)).is_none();
     raw_tiers.extend(managed_tiers);
     BootPermissionTiers {
         rules,
         mode,
+        mode_preference_allowed,
         bypass_disabled,
         auto_mode_disabled,
         classify_all_shell,
@@ -5793,6 +5800,7 @@ impl std::fmt::Debug for DesktopAudio {
 ///     // and whether it was given explicitly to apply the oracle's precedence
 ///     // (CLI/dangerous-skip > agent frontmatter > settings defaultMode).
 ///     permission_mode_cli: None,
+///     permission_mode_preference: None,
 ///     permission_mode_cli_explicit: false,
 ///     allow_dangerously_skip_permissions: false,
 ///     connect_prompt: None,
@@ -6027,6 +6035,8 @@ pub struct DesktopConfig {
     /// frontmatter permission mode with the oracle's precedence
     /// (CLI/dangerous-skip > agent frontmatter > settings defaultMode).
     pub permission_mode_cli: Option<String>,
+    /// Last user-selected mode; explicit flags, agent configuration and policy win.
+    pub permission_mode_preference: Option<permission::PermissionMode>,
     /// Whether a CLI-surface permission override was explicitly requested via
     /// `--permission-mode` or `--dangerously-skip-permissions`. This differs
     /// from the resolved [`Self::permission_mode`]: an explicit
@@ -6605,6 +6615,7 @@ impl Default for DesktopConfig {
             memory_provider: None,
             permission_mode: permission::PermissionMode::Auto,
             permission_mode_cli: None,
+            permission_mode_preference: None,
             permission_mode_cli_explicit: false,
             allow_dangerously_skip_permissions: false,
             connect_prompt: None,
@@ -12755,6 +12766,7 @@ pub async fn build(
         let BootPermissionTiers {
             mut rules,
             mut mode,
+            mode_preference_allowed,
             bypass_disabled,
             auto_mode_disabled,
             classify_all_shell,
@@ -12836,6 +12848,15 @@ pub async fn build(
         let env_scrub_active = platform_api::env::is_env_truthy(
             std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref(),
         );
+        if mode_preference_allowed && !env_scrub_active && !cfg.restricted {
+            if let Some(preference) = cfg.permission_mode_preference {
+                if preference != permission::PermissionMode::BypassPermissions
+                    || (cfg.allow_dangerously_skip_permissions && !bypass_disabled)
+                {
+                    mode = preference;
+                }
+            }
+        }
         if cfg.permission_mode_cli_explicit {
             mode = cfg.permission_mode;
         } else if !env_scrub_active {
@@ -19691,6 +19712,7 @@ still flip to available"
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
             permission_mode_cli: None,
+            permission_mode_preference: None,
             permission_mode_cli_explicit: false,
             allow_dangerously_skip_permissions: false,
             connect_prompt: None,
@@ -24713,6 +24735,42 @@ must be filtered out: got {after:?}"
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         std::fs::create_dir_all(cwd.path().join(branding::DOT_DIR)).expect("mk .lingxi");
         (home, cwd)
+    }
+
+    #[tokio::test]
+    async fn permission_preference_respects_flag_and_managed_default_modes() {
+        let _guard = MANAGED_ENV_LOCK.lock().unwrap();
+        let managed = tempfile::tempdir().unwrap();
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed.path());
+        let (home, cwd) = perm_tier_dirs();
+        std::fs::write(
+            home.path().join("settings.json"),
+            r#"{"permissions":{"defaultMode":"plan"}}"#,
+        )
+        .unwrap();
+        let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        assert!(
+            tiers.mode_preference_allowed,
+            "ordinary defaults can yield to the last selection"
+        );
+        let flags = serde_json::from_str(r#"{"permissions":{"defaultMode":"default"}}"#).unwrap();
+        let tiers = super::load_boot_permission_tiers_with_flag(
+            home.path(),
+            cwd.path(),
+            (true, true),
+            Some(&flags),
+        )
+        .await;
+        assert!(!tiers.mode_preference_allowed, "explicit settings must win");
+        std::fs::write(
+            managed.path().join("managed-settings.json"),
+            r#"{"permissions":{"defaultMode":"default"}}"#,
+        )
+        .unwrap();
+        let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        assert!(!tiers.mode_preference_allowed, "managed defaults must win");
+        assert_eq!(tiers.mode, permission::PermissionMode::Default);
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
     }
 
     /// (P1-10 T1) managed `permissions.deny: ["Bash(rm:*)"]` + a user-tier

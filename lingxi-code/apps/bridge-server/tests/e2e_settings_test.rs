@@ -152,6 +152,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         memory_provider: None,
         permission_mode: permission::PermissionMode::Default,
         permission_mode_cli: None,
+        permission_mode_preference: None,
         permission_mode_cli_explicit: false,
         allow_dangerously_skip_permissions: false,
         connect_prompt: None,

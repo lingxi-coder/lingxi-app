@@ -174,6 +174,25 @@ import SwiftUI
             XCTAssertFalse(source.model.controlsPending)
         }
 
+        func testReportedModelsDoNotOverwriteLegacyLaunchFallback() {
+            let previous = Keychain.get(.model)
+            defer {
+                if let previous { Keychain.set(.model, previous) }
+                else { Keychain.clear(.model) }
+            }
+            XCTAssertTrue(Keychain.set(.model, "anthropic/legacy-model"))
+            let source = makeSource()
+
+            source.applyForTesting(.modelList(
+                models: ["openai/current-model"], current: "openai/current-model", details: []))
+            XCTAssertEqual(source.model.activeModelId, "openai/current-model")
+            XCTAssertEqual(Keychain.get(.model), "anthropic/legacy-model")
+
+            source.applyForTesting(.modelChanged(model: "other-profile/confirmed-model"))
+            XCTAssertEqual(source.model.activeModelId, "other-profile/confirmed-model")
+            XCTAssertEqual(Keychain.get(.model), "anthropic/legacy-model")
+        }
+
         func testModelSwitchWaitsForConfirmationWhileStreaming() async {
             let source = makeSource()
             source.model.activeModelId = "provider/old"
@@ -224,6 +243,68 @@ import SwiftUI
                 return XCTFail("expected a plan permission-mode command")
             }
             XCTAssertFalse(source.model.controlsPending)
+        }
+
+        func testSettingsPermissionSelectionUsesTheSameEnginePersistenceCommand() async throws {
+            let source = makeSource()
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { submitted.append($0) }
+
+            // SettingsHost calls this path, whereas the composer calls
+            // setPermissionMode. Both must reach the engine's persisted setter.
+            try await source.submitEngineCommand(.setPermissionMode(mode: "acceptEdits"))
+
+            XCTAssertEqual(submitted.count, 1)
+            guard case .setPermissionMode(mode: "acceptEdits")? = submitted.first else {
+                return XCTFail("expected the shared engine permission-mode setter")
+            }
+        }
+
+        func testRejectedPermissionSelectionKeepsThePreviousMode() async {
+            let source = makeSource()
+            source.model.requestedPermissionMode = "acceptEdits"
+            source.model.effectivePermissionMode = "acceptEdits"
+            source.model.streaming = true
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting {
+                submitted.append($0)
+                throw NSError(domain: "PermissionSelection", code: 1)
+            }
+
+            source.setPermissionMode("plan")
+            await waitForSubmittedCommands(1, commands: submitted)
+
+            XCTAssertEqual(source.model.requestedPermissionMode, "acceptEdits")
+            XCTAssertEqual(source.model.effectivePermissionMode, "acceptEdits")
+            XCTAssertFalse(source.model.controlsPending)
+            XCTAssertNotNil(source.model.controlsError)
+            XCTAssertTrue(source.model.streaming)
+        }
+
+        func testRejectedBypassConfirmationDoesNotSubmitOrSuppressTheWarning() async throws {
+            let suiteName = "RejectedBypassTests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let repository = PermissionModeConfigurationRepository(defaults: defaults)
+            let source = makeSource(permissionModeRepository: repository)
+            source.model.requestedPermissionMode = "acceptEdits"
+            var submitted: [ClientCommand] = []
+            var confirmations = 0
+            source.setBypassPermissionsConfirmerForTesting {
+                confirmations += 1
+                throw NSError(domain: "BypassConfirmation", code: 1)
+            }
+            source.setCommandSubmitterForTesting { submitted.append($0) }
+
+            source.confirmAndSetBypassPermissions(suppressWarning: true)
+            for _ in 0..<50 where source.model.controlsPending { await Task.yield() }
+
+            XCTAssertEqual(confirmations, 1)
+            XCTAssertTrue(submitted.isEmpty)
+            XCTAssertEqual(source.model.requestedPermissionMode, "acceptEdits")
+            XCTAssertFalse(repository.bypassWarningSuppressed())
+            XCTAssertFalse(source.model.controlsPending)
+            XCTAssertNotNil(source.model.controlsError)
         }
 
         private func flushTasks(_ count: Int = 4) async {

@@ -1716,7 +1716,10 @@ async fn dispatch_control_request(
             // echoes `{mode}`, an invalid/disallowed mode returns an error frame.
             let mode = field("mode").and_then(|v| v.as_str()).unwrap_or("default");
             match orchestrator.set_permission_mode(mode).await {
-                Ok(()) => writer.reply_success(request_id, Some(json!({"mode": mode}))),
+                Ok(()) => {
+                    crate::permission_mode_preference::remember(mode);
+                    writer.reply_success(request_id, Some(json!({"mode": mode})));
+                }
                 Err(e) => writer.reply_error(request_id, &e),
             }
         }
@@ -4091,7 +4094,13 @@ async fn resume_resolved_session(
     // the replayed history — but the supplied `runtime` is the standard
     // sink-adapter build, so seed its session here too before running.
     let (resolved_permission_mode, _notice) = crate::resolve_permission_mode(argv);
-    let explicit_permission_mode = resume_has_explicit_permission_mode(argv);
+    let resolved_permission_mode = runtime
+        .orchestrator
+        .permission_mode()
+        .as_deref()
+        .map(permission::permission_mode_from_cli_string)
+        .unwrap_or(resolved_permission_mode);
+    let explicit_permission_mode = resume_has_permission_mode_override(argv);
     if let Some(p) = &argv.prompt {
         if !p.trim().is_empty() {
             if let Err(error) = seed_orchestrator_session(
@@ -4100,6 +4109,7 @@ async fn resume_resolved_session(
                 &messages,
                 resolved_permission_mode,
                 explicit_permission_mode,
+                resume_has_model_override(argv, runtime.model_provenance),
             )
             .await
             {
@@ -4240,8 +4250,7 @@ async fn mount_resumed_tui_inner(
     if resumed_argv.effort.is_none() {
         resumed_argv.effort = orchestrator::runtime_metadata_from_messages(&messages).effort;
     }
-    let (resolved_permission_mode, _notice) = crate::resolve_permission_mode(&resumed_argv);
-    let explicit_permission_mode = resume_has_explicit_permission_mode(argv);
+    let explicit_permission_mode = resume_has_permission_mode_override(argv);
     // Build with the RESUMED session id as the JSONL writer's file name, so new
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
@@ -4265,8 +4274,9 @@ async fn mount_resumed_tui_inner(
         &tui_build.runtime.orchestrator,
         session_id,
         &messages,
-        resolved_permission_mode,
+        tui_build.initial_permission_mode,
         explicit_permission_mode,
+        resume_has_model_override(argv, tui_build.runtime.model_provenance),
     )
     .await
     {
@@ -4322,17 +4332,22 @@ async fn mount_resumed_tui_inner(
                 .await;
         }
         let _ = orch.set_fast_mode(state.fast_mode).await;
-        let _ = orch.set_plan_mode(state.plan_mode).await;
+        if state.permission_mode.is_none() {
+            let _ = orch.set_plan_mode(state.plan_mode).await;
+        }
         // Restore the live permission mode the user was in (Shift+Tab): apply it
         // to BOTH the freshly-built enforcing gate (so tool checks follow it) and
         // the indicator seed (`initial_permission_mode` drives the bottom-of-
         // composer badge). Without this the re-mount reset the mode to the
         // CLI/config default even though the process never restarted.
         if let Some(wire) = state.permission_mode {
-            if let Some(gate) = tui_build.runtime.enforcing_permission_gate.as_ref() {
-                let _ = gate.set_permission_mode(&wire).await;
+            if let Err(error) = orch.set_permission_mode(&wire).await {
+                tracing::warn!(%error, "could not restore the live permission mode");
             }
-            tui_build.initial_permission_mode = permission::permission_mode_from_cli_string(&wire);
+            if let Some(mode) = orch.permission_mode() {
+                tui_build.initial_permission_mode =
+                    permission::permission_mode_from_cli_string(&mode);
+            }
         }
         boot_notice = state.notice;
     }
@@ -4954,6 +4969,7 @@ pub(crate) async fn seed_orchestrator_session(
     messages: &[JsonlMessage],
     resolved_permission_mode: permission::PermissionMode,
     explicit_cli_permission_mode: bool,
+    preserve_boot_model: bool,
 ) -> Result<permission::PermissionMode, String> {
     let replayed = orchestrator::state_from_messages(session_id, messages);
     let effective_permission_mode = effective_resume_permission_mode(
@@ -4982,17 +4998,14 @@ pub(crate) async fn seed_orchestrator_session(
     session.transcript_only_messages = replayed.transcript_only_messages;
     session.compact_summary_messages = replayed.compact_summary_messages;
     session.active_goal = replayed.active_goal;
-    // Restore the saved model (recovered from the last assistant line by
-    // `state_from_messages`) so a resumed session continues on — and shows — its
-    // saved model, not the launch default. `state_from_messages` yields
-    // `DEFAULT_MODEL` when the transcript has no assistant lines, which is the
-    // correct fallback.
-    session.model = replayed.model;
-    // Newer transcripts persist the provider profile beside each real
-    // assistant response. Legacy transcripts reconstruct `None`, preserving
-    // the safe global-by-model-id fallback instead of keeping the launch
-    // default provider's stale routing hint.
-    session.model_profile = replayed.model_profile;
+    // A picker choice is durable before the next assistant response exists.
+    // Explicit/configured boot selections therefore win over stale transcript
+    // model metadata, including its provider routing profile. With no configured
+    // selection the old conversation retains its own model.
+    if !preserve_boot_model {
+        session.model = replayed.model;
+        session.model_profile = replayed.model_profile;
+    }
     session.plan_mode = effective_permission_mode == permission::PermissionMode::Plan;
     if session.plan_mode {
         session.plan_reminder_shown = false;
@@ -5005,8 +5018,16 @@ pub(crate) async fn seed_orchestrator_session(
     Ok(effective_permission_mode)
 }
 
-fn resume_has_explicit_permission_mode(argv: &Argv) -> bool {
-    argv.permission_mode.is_some() || argv.dangerously_skip_permissions
+fn resume_has_model_override(argv: &Argv, provenance: platform_api::ModelProvenance) -> bool {
+    argv.model.is_some()
+        || argv.agent.is_some()
+        || provenance != platform_api::ModelProvenance::ProviderCatalogTier
+}
+
+fn resume_has_permission_mode_override(argv: &Argv) -> bool {
+    argv.permission_mode.is_some()
+        || argv.dangerously_skip_permissions
+        || crate::permission_mode_preference::load(argv).is_some()
 }
 
 fn effective_resume_permission_mode(
@@ -5800,6 +5821,7 @@ mod tests {
             &messages,
             permission::PermissionMode::Default,
             false,
+            false,
         )
         .await
         .expect("resume seed");
@@ -5815,6 +5837,59 @@ mod tests {
             Some("deepseek"),
             "the persisted provider profile replaces the stale startup profile"
         );
+    }
+
+    #[test]
+    fn resume_keeps_explicit_and_saved_model_selections() {
+        use platform_api::ModelProvenance::{
+            ManagedAdministratorDefault, ProviderCatalogTier, UserOrEnv,
+        };
+        let mut argv = tui_argv();
+        assert!(!resume_has_model_override(&argv, ProviderCatalogTier));
+        assert!(resume_has_model_override(&argv, UserOrEnv));
+        assert!(resume_has_model_override(
+            &argv,
+            ManagedAdministratorDefault
+        ));
+        argv.model = Some("selected-model".into());
+        assert!(resume_has_model_override(&argv, ProviderCatalogTier));
+    }
+
+    #[tokio::test]
+    async fn seed_resume_keeps_boot_model_and_provider_over_stale_assistant() {
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let session_handle = build.runtime.orchestrator.session();
+        {
+            let mut session = session_handle.lock().await;
+            // The startup resolver has already accepted the saved picker choice
+            // (or explicit --model); no new assistant turn has run on it yet.
+            session.model = "latest-model".into();
+            session.model_profile = Some("latest-provider".into());
+        }
+        let assistant: JsonlMessage = serde_json::from_value(serde_json::json!({
+            "type": "assistant", "uuid": Uuid::new_v4().to_string(),
+            "parentUuid": null, "sessionId": Uuid::new_v4().to_string(),
+            "timestamp": "2026-09-13T12:00:00.000Z", "cwd": "/tmp/workproj",
+            "version": "0.8.0", "modelProfile": "old-provider",
+            "message": {"content": "old answer", "model": "old-model"}
+        }))
+        .unwrap();
+        seed_orchestrator_session(
+            &build.runtime.orchestrator,
+            Uuid::new_v4(),
+            &[assistant],
+            permission::PermissionMode::Default,
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        let session = session_handle.lock().await;
+        assert_eq!(session.model, "latest-model");
+        assert_eq!(session.model_profile.as_deref(), Some("latest-provider"));
+        assert_eq!(session.history.len(), 1);
     }
 
     #[tokio::test]
@@ -5895,6 +5970,7 @@ mod tests {
             &messages,
             permission::PermissionMode::Default,
             false,
+            false,
         )
         .await
         .expect("resume seed");
@@ -5948,6 +6024,7 @@ mod tests {
             std::slice::from_ref(&plan_line),
             permission::PermissionMode::Default,
             false,
+            false,
         )
         .await
         .expect("resume seed");
@@ -5986,6 +6063,7 @@ mod tests {
             std::slice::from_ref(&plan_line),
             permission::PermissionMode::Plan,
             true,
+            false,
         )
         .await
         .expect("resume seed");
@@ -6024,6 +6102,7 @@ mod tests {
             std::slice::from_ref(&plan_line),
             permission::PermissionMode::Default,
             true,
+            false,
         )
         .await
         .expect("resume seed");
@@ -6044,13 +6123,13 @@ mod tests {
         let mut argv = tui_argv();
         argv.dangerously_skip_permissions = true;
         assert!(
-            resume_has_explicit_permission_mode(&argv),
+            resume_has_permission_mode_override(&argv),
             "--dangerously-skip-permissions must suppress transcript plan restoration just like an explicit --permission-mode"
         );
         assert_eq!(
             effective_resume_permission_mode(
                 permission::PermissionMode::BypassPermissions,
-                resume_has_explicit_permission_mode(&argv),
+                resume_has_permission_mode_override(&argv),
                 true,
             ),
             permission::PermissionMode::BypassPermissions

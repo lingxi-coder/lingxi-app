@@ -600,6 +600,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
             permission::PermissionMode::Default
         },
         permission_mode_cli: None,
+        permission_mode_preference: None,
         permission_mode_cli_explicit: false,
         // Plan 3c: bridge has no interactive secure prompt; headless no-op.
         connect_prompt: None,
@@ -2237,6 +2238,7 @@ mod tests {
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
             permission_mode_cli: None,
+            permission_mode_preference: None,
             permission_mode_cli_explicit: false,
             allow_dangerously_skip_permissions: false,
             connect_prompt: None,

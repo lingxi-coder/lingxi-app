@@ -25,6 +25,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Mutable settings state — the Android analog of the iOS `SettingsStore`
@@ -165,39 +168,28 @@ class SettingsStore(
     fun setBioLock(on: Boolean) = _state.update { it.copy(bioLock = on) }
     fun setTelemetry(on: Boolean) = _state.update { it.copy(telemetry = on) }
     fun setAutoUpdate(on: Boolean) = _state.update { it.copy(autoUpdate = on) }
+    private val permissionModeUpdates = Mutex()
+
     fun setPermissionMode(mode: String, onApply: (suspend (String) -> Unit)? = null) {
         if (mode !in PermissionModeOptions.values) return
-        val previous = _state.value.permissionMode
-        val previousEffective = _state.value.effectivePermissionMode
-        try {
-            permissionModeRepo?.save(mode)
-        } catch (error: Exception) {
-            _state.update {
-                it.copy(permissionModeError = error.message ?: "permission mode could not be saved")
-            }
-            return
-        }
-        _state.update { it.copy(permissionMode = mode, permissionModeError = null) }
-        if (onApply != null) {
-            viewModelScope.launch {
-                runCatching { onApply(mode) }.onFailure { error ->
-                    // The engine's PermissionModeChanged event is authoritative;
-                    // a rejected killswitch/availability gate rolls the optimistic
-                    // UI and persisted preference back to the prior selection.
-                    val rollbackError = runCatching { permissionModeRepo?.save(previous) }
-                        .exceptionOrNull()
+        viewModelScope.launch {
+            permissionModeUpdates.withLock {
+                try {
+                    // Only a successfully applied explicit selection becomes the
+                    // preference. Engine snapshots (including EnterPlan) remain
+                    // separate, effective state and never overwrite this value.
+                    if (onApply != null) {
+                        // The engine persists the acknowledged user selection.
+                        onApply(mode)
+                    } else {
+                        permissionModeRepo?.save(mode)
+                    }
+                    _state.update { it.copy(permissionMode = mode, permissionModeError = null) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
                     _state.update {
-                        it.copy(
-                            permissionMode = previous,
-                            effectivePermissionMode = previousEffective,
-                            permissionModeError = buildString {
-                                append(error.message ?: "permission mode rejected")
-                                if (rollbackError != null) {
-                                    append("; failed to restore saved preference: ")
-                                    append(rollbackError.message ?: "unknown persistence error")
-                                }
-                            },
-                        )
+                        it.copy(permissionModeError = error.message ?: "permission mode could not be saved")
                     }
                 }
             }

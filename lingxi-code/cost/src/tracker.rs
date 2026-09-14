@@ -2179,15 +2179,53 @@ impl CostTracker {
     /// `Pt.totalLinesAdded += added; Pt.totalLinesRemoved += removed`).
     pub async fn record_code_change(&self, added: u64, removed: u64) {
         let authority = self.selected_entry();
-        let session_id = authority.session_id;
-        let state_cell = authority.state.clone();
-        let durability_turn = match self.enter_durable_mutation().await {
+        let turn = match self.register_durable_mutation_for(&authority) {
             Ok(turn) => turn,
             Err(error) => {
                 authority.durability_gate.freeze(error.to_string());
                 return;
             }
         };
+        let Some(turn) = turn else {
+            self.record_code_change_inner(added, removed, None).await;
+            return;
+        };
+        let tracker = self.scoped(authority.session_id);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            authority
+                .durability_gate
+                .freeze("code-change persistence ownership requires an async runtime");
+            return;
+        };
+        // Streaming tools are borrowed futures, not independently scheduled
+        // tasks. Their driver may stop polling them while awaiting the next
+        // model settlement, which is queued behind this mutation. The owned
+        // writer waiter must release our FIFO turn after the exact ack even
+        // when that tool future is parked or dropped.
+        let worker = runtime.spawn(async move {
+            tracker
+                .record_code_change_inner(added, removed, Some(turn))
+                .await;
+        });
+        if let Err(error) = worker.await {
+            authority
+                .durability_gate
+                .freeze(format!("code-change persistence worker failed: {error}"));
+        }
+    }
+
+    async fn record_code_change_inner(
+        &self,
+        added: u64,
+        removed: u64,
+        mut durability_turn: Option<CostDurabilityTurn>,
+    ) {
+        let authority = self.selected_entry();
+        let session_id = authority.session_id;
+        let state_cell = authority.state.clone();
+        if let Some(turn) = durability_turn.as_mut() {
+            turn.wait().await;
+        }
         let permit = match self.acquire_persist_permit(session_id).await {
             Ok(permit) => permit,
             Err(error) => {
@@ -2439,6 +2477,77 @@ mod tests {
             captured.validate_attempt_host_binding(session),
             Err(CostPersistError::Frozen(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn parked_code_change_caller_does_not_block_durable_preflight() {
+        let (persist_tx, _legacy_rx) = mpsc::channel(1);
+        let session_id = SessionId::new();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tracker = CostTracker::new(
+            session_id,
+            Arc::new(PricingCatalog::builtin_reference()),
+            persist_tx,
+        )
+        .try_with_durable_persistence(
+            hydration(session_id),
+            Arc::new(TestPersistence {
+                requests: requests_tx,
+            }),
+            Arc::new(TestLease(session_id.to_string())),
+            CostDurabilityGate::default(),
+        )
+        .unwrap();
+        let mut edit = Box::pin(tracker.record_code_change(1, 1));
+        let request = tokio::select! {
+            result = &mut edit => panic!("edit completed before durable acknowledgment: {result:?}"),
+            request = requests_rx.recv() => request.unwrap(),
+        };
+        request
+            .ack
+            .send(Ok(CostPersistAck {
+                mutation_id: request.mutation_id,
+                journal_revision: 257,
+                cost_revision: request.cost_revision,
+            }))
+            .unwrap();
+        // The streaming driver can park this borrowed tool future while it
+        // waits for another settlement. The durable owner must still release
+        // the FIFO position without another poll of `edit`.
+        let turn =
+            tokio::time::timeout(Duration::from_secs(1), tracker.acquire_durable_preflight())
+                .await
+                .expect("parked tool future retained the acknowledged cost turn")
+                .unwrap();
+        drop(turn);
+        edit.await;
+        assert_eq!(tracker.snapshot().await.total_lines_added, 1);
+        assert!(tracker.durability_gate().frozen_reason().is_none());
+
+        // Cancellation after the edit was accepted also leaves its durable
+        // owner alive; dropping the UI/tool waiter must not freeze the ledger.
+        let mut cancelled_edit = Box::pin(tracker.record_code_change(2, 0));
+        let request = tokio::select! {
+            result = &mut cancelled_edit => panic!("edit completed before acknowledgment: {result:?}"),
+            request = requests_rx.recv() => request.unwrap(),
+        };
+        drop(cancelled_edit);
+        request
+            .ack
+            .send(Ok(CostPersistAck {
+                mutation_id: request.mutation_id,
+                journal_revision: 258,
+                cost_revision: request.cost_revision,
+            }))
+            .unwrap();
+        let turn =
+            tokio::time::timeout(Duration::from_secs(1), tracker.acquire_durable_preflight())
+                .await
+                .expect("cancelled tool waiter prevented durable completion")
+                .unwrap();
+        drop(turn);
+        assert_eq!(tracker.snapshot().await.total_lines_added, 3);
+        assert!(tracker.durability_gate().frozen_reason().is_none());
     }
 
     #[tokio::test]

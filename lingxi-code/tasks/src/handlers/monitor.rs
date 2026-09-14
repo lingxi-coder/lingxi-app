@@ -49,6 +49,43 @@ const TRUNCATION_SUFFIX: &str = "...(truncated)";
 /// U+2014 EM DASH with one ASCII space either side.
 const TIMEOUT_MARKER: &str = "[Monitor timed out \u{2014} re-arm if needed.]";
 
+/// 2.1.270 `Az()`: bounded Monitor rollout, independently gated from availability.
+pub fn bounded_monitors_enabled() -> bool {
+    telemetry::flag_bool("tengu_breezy_crescent", false)
+}
+
+/// 2.1.270 `Vye()`: ten minutes for single-shot print, thirty otherwise.
+pub fn bounded_monitor_timeout_ms() -> u64 {
+    if platform_api::session_flags::is_single_shot_print_session() {
+        600_000
+    } else {
+        1_800_000
+    }
+}
+
+/// Upstream `Lt(ms, {hideTrailingZeros:true})` formatting.
+pub fn monitor_duration(ms: u64) -> String {
+    let text = platform_api::shell_support::format_duration_ms(ms);
+    let mut parts: Vec<_> = text.split(' ').collect();
+    while parts.len() > 1 && parts.last().is_some_and(|part| part.starts_with('0')) {
+        parts.pop();
+    }
+    parts.join(" ")
+}
+
+fn timeout_notice(timeout_ms: u64, events: usize, bounded: bool) -> String {
+    if !bounded {
+        return TIMEOUT_MARKER.into();
+    }
+    let duration = monitor_duration(timeout_ms);
+    if events == 0 {
+        format!("[Monitor expired after {duration} with no events delivered. Re-arm it if you still need the watch — and widen the filter if silence was unexpected.]")
+    } else {
+        let noun = if events == 1 { "event" } else { "events" };
+        format!("[Monitor expired after {duration} with {events} {noun} delivered. Re-arm it if you still need the watch.]")
+    }
+}
+
 /// Truncate to `limit` UTF-16 code units, returning `None` when nothing needed
 /// cutting.
 ///
@@ -91,6 +128,7 @@ struct BatchState {
     last_suppressed: Option<Instant>,
     high_volume_since: Option<Instant>,
     suppressed: usize,
+    delivered: usize,
     stop_reason: Option<String>,
 }
 
@@ -104,6 +142,7 @@ impl Default for BatchState {
             last_suppressed: None,
             high_volume_since: None,
             suppressed: 0,
+            delivered: 0,
             stop_reason: None,
         }
     }
@@ -149,6 +188,7 @@ impl BatchState {
         self.pending.clear();
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
+            self.delivered += 1;
             // Oracle `if(p>0){ if(GM(notice), p=0, E!==void 0 && now-E > aEe*3) _=void 0 }`.
             // That head is a COMMA EXPRESSION: the notice is emitted and the
             // count zeroed UNCONDITIONALLY, and only the window reset is
@@ -177,7 +217,7 @@ impl BatchState {
             self.last_suppressed = Some(now);
             let started = *self.high_volume_since.get_or_insert(now);
             let window = now.duration_since(started);
-            if window >= HIGH_VOLUME_STOP {
+            if window > HIGH_VOLUME_STOP {
                 // Oracle stop message, DELIVERED before the kill. `${s}` is
                 // `Math.round((now - windowStart) / 1000)`.
                 let secs = window.as_secs_f64().round() as u64;
@@ -419,6 +459,7 @@ impl MonitorHandler {
                 return;
             }
             let reg = source.registration;
+            let bounded = bounded_monitors_enabled();
             let timed = !reg.task.persistent && reg.task.timeout_ms != 0;
             let deadline = tokio::time::sleep(Duration::from_millis(if timed {
                 reg.task.timeout_ms
@@ -430,7 +471,12 @@ impl MonitorHandler {
                 biased;
                 _ = worker_cancel.cancelled() => None,
                 _ = &mut deadline, if timed => {
-                    status.notify_monitor_event(&worker_id, TIMEOUT_MARKER, true).await;
+                    if bounded { sink.flush().await; }
+                    // Read the counter first: a guard created inside the argument
+                    // list lives until the end of the statement, i.e. across the
+                    // `notify_monitor_event` await, blocking the flush worker.
+                    let delivered = sink.batch.lock().await.delivered;
+                    status.notify_monitor_event(&worker_id, &timeout_notice(reg.task.timeout_ms, delivered, bounded), true).await;
                     None
                 },
                 result = source.http.monitor_websocket(reg.url, reg.protocols) => Some(result),
@@ -456,7 +502,10 @@ impl MonitorHandler {
                                 biased;
                                 _ = worker_cancel.cancelled() => break,
                                 _ = &mut deadline, if timed => {
-                                    status.notify_monitor_event(&worker_id, TIMEOUT_MARKER, true).await;
+                                    if bounded { sink.flush().await; }
+                                    if worker_cancel.is_cancelled() { break; }
+                                    let delivered = sink.batch.lock().await.delivered;
+                                    status.notify_monitor_event(&worker_id, &timeout_notice(reg.task.timeout_ms, delivered, bounded), true).await;
                                     break;
                                 },
                                 _ = flush.tick() => sink.flush().await,
@@ -567,6 +616,8 @@ impl Task for MonitorHandler {
         // applies one of its own, so remember which kind this is before the
         // value is moved into the command.
         let had_deadline = timeout.is_some();
+        let timeout_ms = timeout.map_or(0, |duration| duration.as_millis() as u64);
+        let bounded = bounded_monitors_enabled();
         // MON-09: the Monitor TOOL made the `shouldUseSandbox` decision and, when
         // it said confine, handed us the wrapped command. The bypass below is
         // then only about how the `SandboxedCommand` is CONSTRUCTED — the
@@ -689,9 +740,15 @@ impl Task for MonitorHandler {
                 &result,
                 worker_cancel.is_cancelled(),
             ) {
+                let delivered = worker_sink.batch.lock().await.delivered;
                 status_sink
-                    .notify_monitor_event(&worker_id, TIMEOUT_MARKER, true)
+                    .notify_monitor_event(
+                        &worker_id,
+                        &timeout_notice(timeout_ms, delivered, bounded),
+                        true,
+                    )
                     .await;
+                worker_cancel.cancel();
             }
             // Before the terminal status, so the drain that reads the row can
             // already see it (same ordering rule as the exit code).
@@ -1531,5 +1588,67 @@ mod tests {
             events.last().map(String::as_str),
             Some("[WebSocket closed: 1000 done]")
         );
+    }
+    #[test]
+    fn bounded_expiry_notices_match_270_bytes() {
+        assert_eq!(timeout_notice(300_000, 0, false), TIMEOUT_MARKER);
+        assert_eq!(timeout_notice(1_800_000, 0, true), "[Monitor expired after 30m with no events delivered. Re-arm it if you still need the watch — and widen the filter if silence was unexpected.]");
+        assert_eq!(timeout_notice(600_000, 1, true), "[Monitor expired after 10m with 1 event delivered. Re-arm it if you still need the watch.]");
+        assert_eq!(timeout_notice(61_000, 2, true), "[Monitor expired after 1m 1s with 2 events delivered. Re-arm it if you still need the watch.]");
+        let mut batch = BatchState::default();
+        batch.pending = vec!["one".into(), "two".into()];
+        assert!(matches!(
+            batch.flush_decision(Instant::now()),
+            FlushOutcome::Deliver { .. }
+        ));
+        assert_eq!(
+            batch.delivered, 1,
+            "count delivered notifications, not stdout lines"
+        );
+    }
+    struct TimeoutRunner;
+    #[async_trait]
+    impl ProcessRunner for TimeoutRunner {
+        async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            Err(ProcessError::Timeout)
+        }
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn deadline_emits_notice_before_killed_status() {
+        let sink = Arc::new(RecordingSink::default());
+        let (handler, ctx) = make_handler(Arc::new(TimeoutRunner), sink.clone());
+        let mut input = monitor_input();
+        if let TaskSpawnInput::Monitor { timeout, .. } = &mut input {
+            *timeout = Some(Duration::from_secs(300));
+        }
+        handler.spawn(input, ctx).await.unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Killed);
+        assert_eq!(sink.events(), vec![TIMEOUT_MARKER.to_string()]);
+    }
+    #[test]
+    fn high_volume_stop_requires_more_than_thirty_seconds() {
+        let now = Instant::now();
+        let mut batch = state(now, 0.0, 42);
+        batch.high_volume_since = Some(now - Duration::from_secs(30));
+        batch.pending = vec!["at boundary".into()];
+        assert_eq!(batch.flush_decision(now), FlushOutcome::Nothing);
+        batch.pending = vec!["past boundary".into()];
+        assert!(matches!(
+            batch.flush_decision(now + Duration::from_millis(1)),
+            FlushOutcome::Stop(_)
+        ));
     }
 }

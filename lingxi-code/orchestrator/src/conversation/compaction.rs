@@ -11,7 +11,7 @@ impl ConversationOrchestrator {
         system_prompt: Option<&str>,
         cancel: Option<&CancellationToken>,
     ) -> Result<PreparedModelCall, OrchestratorError> {
-        let draft = {
+        let mut draft = {
             let s = self.session.lock().await;
             PreparedModelCall {
                 history_snapshot: s.model_context_history(),
@@ -20,6 +20,7 @@ impl ConversationOrchestrator {
                 outgoing_history_rewriter: None,
             }
         };
+        if let Some(settings) = crate::scheduled_turn::current() { draft.model = settings.model; draft.model_profile = Some(settings.provider); }
         let prepared = match self.model_runtime.model_call_preparer.as_ref() {
             Some(preparer) => {
                 preparer

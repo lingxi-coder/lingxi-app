@@ -89,6 +89,7 @@ pub mod run;
 pub mod session_cost;
 pub mod sigint;
 mod startup_resources;
+mod loop_wakeup;
 mod startup_trace;
 pub mod stream_json;
 pub mod stream_json_input;
@@ -717,6 +718,12 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // published BEFORE any conversation is built, since the gate is read on the
     // very first request (that is the request whose prompt gets recorded).
     platform_api::session_flags::set_system_prompt_snapshot(parsed.system_prompt_snapshot);
+    // 2.1.270 `oVn`: streaming input or an SDK URL makes print non-single-shot.
+    platform_api::session_flags::set_single_shot_print_session(
+        (parsed.print || parsed.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty()))
+            && parsed.input_format.as_deref() != Some("stream-json")
+            && parsed.sdk_url.as_deref().unwrap_or("").is_empty(),
+    );
 
     // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` (@307414302) pins
     // the cross-session messaging socket instead of the auto-generated path.

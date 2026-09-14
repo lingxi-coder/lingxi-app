@@ -322,10 +322,16 @@ func performXpcCall(requestData: Data, teamId: String, channel: String) throws -
     )
     connection.resume()
     let semaphore = DispatchSemaphore(value: 0)
+    let replyLock = NSLock()
+    var completed = false
     var replyData: Data?
     var replyError: Error?
     let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+        replyLock.lock()
+        guard !completed else { replyLock.unlock(); return }
+        completed = true
         replyError = error
+        replyLock.unlock()
         semaphore.signal()
     } as? LingXiCredentialBrokerXPC
     guard let proxy else {
@@ -333,19 +339,34 @@ func performXpcCall(requestData: Data, teamId: String, channel: String) throws -
         throw BrokerFailure.unavailable("credential broker proxy is unavailable")
     }
     proxy.perform(requestData as NSData) { responseData, errorText in
+        replyLock.lock()
+        guard !completed else { replyLock.unlock(); return }
+        completed = true
         if let errorText {
             replyError = BrokerFailure.unavailable(errorText as String)
         } else {
             replyData = responseData as Data?
         }
+        replyLock.unlock()
         semaphore.signal()
     }
-    _ = semaphore.wait(timeout: .now() + 15)
+    let waitResult = semaphore.wait(timeout: .now() + 15)
+    // A timeout or invalidate may race a reply on XPC's private queue. Close
+    // the result under the same lock before invalidating; late callbacks must
+    // not mutate data that the calling thread is reading.
+    replyLock.lock()
+    completed = true
+    let capturedError = replyError
+    let capturedData = replyData
+    replyLock.unlock()
     connection.invalidate()
-    if let replyError {
-        throw replyError
+    guard waitResult == .success else {
+        throw BrokerFailure.unavailable("credential broker XPC request timed out")
     }
-    guard let replyData else {
+    if let capturedError {
+        throw capturedError
+    }
+    guard let replyData = capturedData else {
         throw BrokerFailure.unavailable("credential broker did not return a response")
     }
     guard replyData.count <= maxBrokerMessageBytes else {

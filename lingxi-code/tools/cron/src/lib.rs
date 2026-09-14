@@ -43,20 +43,27 @@ pub use cron_delete::CronDeleteTool;
 pub use cron_list::CronListTool;
 pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
+mod runtime_wakeup;
+pub use cron::scheduler::{
+    CronScheduler as SessionCronScheduler, SessionCronDelivery, SessionCronFire,
+};
+pub use runtime_wakeup::{RuntimeWakeupScheduler, WakeupDelivery, WakeupTask};
+
 pub use wakeup::{
     arm_keepalive, arm_keepalive_with_runtime, build_prompt as build_schedule_wakeup_prompt,
     cancel_dynamic_loop_on_user_abort, clamp_delay_seconds, loop_wakeup_lines, maybe_arm_keepalive,
     maybe_arm_keepalive_with_runtime, note_loop_invoked, resolve_wakeup_prompt,
-    schedule_dynamic_wakeup, settle_loop_tick, stop_dynamic_loop, wakeup_target, KeepaliveOutcome,
-    PromptCacheTtl, ScheduleWakeupTool, WakeupScheduler, WakeupSchedulerCell,
-    SCHEDULE_WAKEUP_TOOL_NAME,
+    resolve_wakeup_prompt_at, schedule_dynamic_wakeup, settle_loop_tick, stop_dynamic_loop,
+    wakeup_target, KeepaliveOutcome, PromptCacheTtl, ScheduleWakeupTool, WakeupScheduler,
+    WakeupSchedulerCell, SCHEDULE_WAKEUP_TOOL_NAME,
 };
 /// PARITY 2.1.263 `EC()`: the cron tools are enabled unless the env kill
-/// switch is set (`CLAUDE_CODE_DISABLE_CRON` → `LINGXI_DISABLE_CRON`); the
+/// switch is set (`CLAUDE_CODE_DISABLE_CRON`); the
 /// `tengu_kairos_cron` gate defaults true and has no backend here.
 #[must_use]
 pub fn cron_tools_enabled() -> bool {
-    !platform_api::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref())
+    !std::env::var("CLAUDE_CODE_DISABLE_CRON").is_ok_and(|value| !value.is_empty())
+        && telemetry::flag_bool("tengu_kairos_cron", true)
 }
 
 /// Register the cron scheduling tools against `reg`.
@@ -110,4 +117,24 @@ pub fn register_all_with_auth(
     reg.register_builtin(Arc::new(wakeup_tool));
     reg.register_builtin(Arc::new(RemoteTriggerTool::new(ctx, auth)));
     (wakeup_cell, armed)
+}
+
+#[cfg(test)]
+mod local_env_tests {
+    #[test]
+    fn official_cron_disable_env_uses_raw_string_truthiness() {
+        let _guard = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_clear_flag("tengu_kairos_cron");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_CRON");
+        assert!(super::cron_tools_enabled());
+        for value in ["0", "false", " ", "1"] {
+            std::env::set_var("CLAUDE_CODE_DISABLE_CRON", value);
+            assert!(!super::cron_tools_enabled(), "nonempty {value:?} disables");
+        }
+        std::env::set_var("CLAUDE_CODE_DISABLE_CRON", "");
+        assert!(super::cron_tools_enabled());
+        std::env::remove_var("CLAUDE_CODE_DISABLE_CRON");
+    }
 }

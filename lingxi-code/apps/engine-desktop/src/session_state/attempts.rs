@@ -413,7 +413,11 @@ mod tests {
         drop(coordinator);
         let reopened = open(root.path(), session);
         assert_eq!(
-            reopened.hydrate_blocking().unwrap().state.unverified_nano_usd,
+            reopened
+                .hydrate_blocking()
+                .unwrap()
+                .state
+                .unverified_nano_usd,
             2000
         );
         let duplicate = reopened
@@ -446,7 +450,11 @@ mod tests {
             .unwrap();
         // A live hydration must not manufacture a receipt for in-flight work.
         assert_eq!(
-            coordinator.hydrate_blocking().unwrap().state.unverified_nano_usd,
+            coordinator
+                .hydrate_blocking()
+                .unwrap()
+                .state
+                .unverified_nano_usd,
             0
         );
         drop(coordinator);

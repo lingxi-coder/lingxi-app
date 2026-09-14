@@ -1,5 +1,5 @@
 //! `CronCreateTool` — schedule a prompt on a 5-field cron schedule and persist
-//! the job into the project's single `<root>/.lingxi/scheduled_tasks.json` file.
+//! the job into the project's single `<root>/.claude/scheduled_tasks.json` file.
 //!
 //! 1:1 parity rewrite of claude-code `CronCreateTool.ts`. The model supplies a
 //! 5-field cron expression plus the prompt to enqueue at each fire time, with
@@ -11,7 +11,7 @@
 //! - `id = [0-9a-f]{8}` (`randomUUID().slice(0, 8)`).
 //!
 //! Persistence (1:1 with claude-code `cronTasks.ts`): a DURABLE job is appended
-//! to the single project-relative file `<projectRoot>/.lingxi/scheduled_tasks.json`
+//! to the single project-relative file `<projectRoot>/.claude/scheduled_tasks.json`
 //! shaped `{ "tasks": [ CronTask, … ] }` (camelCase fields, `createdAt` in epoch
 //! **milliseconds**, NO `durable`/next-fire on disk — those are runtime-only).
 //! A SESSION-ONLY job (`durable:false`) is NOT written to disk at all (matching
@@ -25,7 +25,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -83,6 +83,7 @@ const FIELD_RANGES: [FieldRange; 5] = [
 
 #[derive(Debug, Clone)]
 struct CronExpression {
+    raw: String,
     minute: CronField,
     hour: CronField,
     dom: CronField,
@@ -166,7 +167,7 @@ fn match_star(part: &str) -> Option<u32> {
     if !all_digits(rest) {
         return None;
     }
-    rest.parse::<u32>().ok()
+    Some(rest.parse::<u32>().unwrap_or(u32::MAX))
 }
 
 /// Match `N-M` or `N-M/S`, returning `(lo, hi, step)` with `step` defaulting to
@@ -177,7 +178,7 @@ fn match_range(part: &str) -> Option<(u32, u32, u32)> {
             if !all_digits(s) {
                 return None;
             }
-            (r, s.parse::<u32>().ok()?)
+            (r, s.parse::<u32>().unwrap_or(u32::MAX))
         }
         None => (part, 1),
     };
@@ -198,11 +199,15 @@ fn match_single(part: &str) -> Option<u32> {
 }
 
 fn parse_cron(s: &str) -> Result<CronExpression, String> {
-    let parts: Vec<&str> = s.split_whitespace().collect();
+    let parts: Vec<&str> = s
+        .split(cron::schedule::is_cron_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.len() != 5 {
         return Err(format!("expected 5 fields, got {}", parts.len()));
     }
     Ok(CronExpression {
+        raw: s.to_owned(),
         minute: expand_field(parts[0], FIELD_RANGES[0])?,
         hour: expand_field(parts[1], FIELD_RANGES[1])?,
         dom: expand_field(parts[2], FIELD_RANGES[2])?,
@@ -261,7 +266,7 @@ impl CronExpression {
         let local = (secs as i64)
             .saturating_add(cron::schedule::local_offset_seconds(secs as i64))
             .max(0) as u64;
-        let (year, month, day, hour, minute, dow) = decompose(local);
+        let (_, month, day, hour, minute, dow) = decompose(local);
         // Standard cron day rule (claude-code `cron.ts`): when BOTH day-of-month
         // and day-of-week are restricted, the day matches if EITHER matches; when
         // one is `*` (its expanded set covers the whole domain — len 31 / 7), only
@@ -278,7 +283,6 @@ impl CronExpression {
             && field_match(&self.hour, hour)
             && field_match(&self.month, month)
             && day_matches
-            && year > 1970
     }
 }
 
@@ -293,20 +297,19 @@ pub const CRON_FILE_SUFFIX: &str = ".json";
 /// 6-field rejection message (retained for the wire-identifier parity lock).
 pub const SIX_FIELD_REJECTION: &str =
     "ScheduleCron: 6-field cron (with seconds) is not supported; use 5-field cron (minute hour day month weekday)";
-/// Search horizon for `next_fire_unix_secs`: 1 year of minutes (sane upper
-/// bound so an unsatisfiable expression doesn't loop forever).
+/// Legacy iteration-count constant; upstream counts calendar jumps, not minutes.
 pub const NEXT_FIRE_HORIZON_MINUTES: u64 = 60 * 24 * 366;
 /// Maximum number of scheduled jobs allowed at once (CronCreateTool.ts:25).
 const MAX_JOBS: usize = 50;
 
 /// Absolute path to the single project tasks file
-/// (`<project_root>/.lingxi/scheduled_tasks.json`). 1:1 with claude-code, which
+/// (`<project_root>/.claude/scheduled_tasks.json`). 1:1 with claude-code, which
 /// keys cron persistence off the project root (the session cwd), NOT the user
-/// config-home. Thin re-export of [`cron::tasks_file::scheduled_tasks_path`] so
+/// config-home. Thin re-export of [`cron::tasks_file::session_scheduled_tasks_path`] so
 /// every cron tool resolves the path identically.
 #[must_use]
 pub(crate) fn cron_file_path(project_root: &Path) -> PathBuf {
-    cron::tasks_file::scheduled_tasks_path(project_root)
+    cron::tasks_file::session_scheduled_tasks_path(project_root)
 }
 
 /// Generate a fresh eight-character lowercase hexadecimal cron id, matching
@@ -327,21 +330,16 @@ pub fn generate_cron_task_id() -> String {
     s
 }
 
-/// Compute the next fire time at or after `from` matching `expr`, capped by
-/// [`NEXT_FIRE_HORIZON_MINUTES`]. Returns `None` if no minute in the horizon
-/// satisfies the expression (the "no calendar date in the next year" case).
+/// Compute the next matching local calendar time, using the shared upstream
+/// calendar-advance iteration limit.
 fn next_fire_after(expr: &CronExpression, from: SystemTime) -> Option<SystemTime> {
-    // Round up to the next minute boundary.
-    let from_secs = from.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
-    let mut candidate_secs = (from_secs / 60 + 1) * 60;
-    for _ in 0..NEXT_FIRE_HORIZON_MINUTES {
-        let candidate = SystemTime::UNIX_EPOCH + Duration::from_secs(candidate_secs);
-        if expr.matches(candidate) {
-            return Some(candidate);
-        }
-        candidate_secs += 60;
-    }
-    None
+    // Share the calendar-jumping search with the scheduler: the upstream
+    // iteration limit is not a one-year time horizon (e.g. leap days).
+    let next = cron::schedule::parse_cron(&expr.raw)
+        .ok()?
+        .next_match_after(from)?;
+    debug_assert!(expr.matches(next));
+    Some(next)
 }
 
 /// Reject 6-field expressions (Quartz-style with seconds). Retained from the
@@ -375,15 +373,14 @@ pub fn cron_to_human(cron: &str) -> String {
     cron::human_schedule(cron)
 }
 
-/// Parse a semantic boolean: accepts a JSON bool, or the strings
-/// "true"/"false"/"yes"/"no"/"1"/"0" (case-insensitive). Anything else
-/// (missing, null, unrecognized string, non-bool) falls back to `default`.
+/// Match the upstream boolean preprocessor: only exact "true"/"false" strings
+/// become booleans. Schema validation rejects all other supplied non-booleans.
 fn semantic_bool(v: Option<&Value>, default: bool) -> bool {
     match v {
         Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => match s.trim().to_ascii_lowercase().as_str() {
-            "true" | "yes" | "1" => true,
-            "false" | "no" | "0" => false,
+        Some(Value::String(s)) => match s.as_str() {
+            "true" => true,
+            "false" => false,
             _ => default,
         },
         _ => default,
@@ -395,13 +392,13 @@ fn semantic_bool(v: Option<&Value>, default: bool) -> bool {
 /// `CronScheduler`, iOS/Android through their OS wake + `run_cron_task_if_due`.
 fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -> String {
     let where_ = if durable {
-        "Persisted to .lingxi/scheduled_tasks.json"
+        "Persisted to .claude/scheduled_tasks.json"
     } else {
         "Session-only (not written to disk, dies when Claude exits)"
     };
     if recurring {
-        // Accepted divergence: no 7-day auto-expiry in LingXi (per-task `expiresAt`).
-        format!("Scheduled recurring job {id} ({human}). {where_}. Runs until cancelled. Use CronDelete to cancel.")
+        // Claude Code 2.1.270 model-facing result, including its fixed seven-day limit.
+        format!("Scheduled recurring job {id} ({human}). {where_}. Auto-expires after 7 days. Use CronDelete to cancel sooner.")
     } else {
         format!(
             "Scheduled one-shot task {id} ({human}). {where_}. It will fire once then auto-delete."
@@ -409,12 +406,28 @@ fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -
     }
 }
 
+fn schedulable_job_count(doc: &cron::ScheduledTasks) -> usize {
+    doc.tasks
+        .iter()
+        .filter(|task| {
+            task.automation
+                .as_ref()
+                .is_none_or(|config| config.status != cron::AutomationStatus::Completed)
+        })
+        .count()
+}
+
 /// Count persisted jobs in the project's single `scheduled_tasks.json`
-/// (`tasks.len()`). A missing/garbage file counts as zero. Backs the
+/// excluding completed tasks. A missing/garbage file counts as zero. Backs the
 /// `MAX_JOBS = 50` limit (CronCreateTool.ts:25).
 async fn count_existing_jobs(ctx: &tool_api::BuiltinToolContext) -> usize {
-    let durable = match cron::tasks_file::read_tasks_body(ctx.fs.as_ref(), &ctx.cwd()).await {
-        Ok(body) => cron::tasks_file::parse_tasks(&body).tasks.len(),
+    let durable = match cron::tasks_file::read_tasks_body(
+        ctx.fs.as_ref(),
+        &ctx.session_cwd.project_root(),
+    )
+    .await
+    {
+        Ok(body) => schedulable_job_count(&cron::tasks_file::parse_tasks(&body)),
         Err(_) => 0,
     };
     let session = match &ctx.task_registry {
@@ -448,6 +461,7 @@ impl CronCreateTool {
 
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -461,15 +475,25 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "recurring": {
                 "type": "boolean",
-                "description": "true (default) = fire on every cron match until deleted. false = fire once at the next match, then auto-delete."
+                "description": "true (default) = fire on every cron match until deleted or auto-expired after 7 days. false = fire once at the next match, then auto-delete. Use false for \"remind me at X\" one-shot requests with pinned minute/hour/dom/month."
             },
             "durable": {
                 "type": "boolean",
-                "description": "true = persist to .lingxi/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions."
+                "description": "true = persist to .claude/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions."
             }
         },
         "required": ["cron", "prompt"]
     })
+});
+
+pub(crate) fn durable_enabled() -> bool {
+    telemetry::flag_bool("tengu_kairos_cron_durable", true)
+}
+
+static SESSION_ONLY_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    let mut schema = SCHEMA.clone();
+    schema["properties"]["durable"]["description"] = json!("Has no effect — durable persistence is not available. All jobs are session-only (in-memory, gone when this Claude session ends).");
+    schema
 });
 
 fn pii_str(s: &str) -> AnalyticsValue {
@@ -504,15 +528,25 @@ fn amber_sentinel_enabled() -> bool {
 }
 
 /// PARITY 2.1.263 `pbn(true)` — the CronCreate tool prompt with the durable
-/// gate on. `.claude/` → `.lingxi/` (accepted path divergence). The Monitor
+/// gate on. Storage-path literals match the upstream tool store. The Monitor
 /// section rides the same `QI()` gate the binary puts it behind, so it appears
 /// exactly when the Monitor tool itself is available. The 7-day paragraph is
 /// emitted only while the scheduler's recurring max age is set (see
 /// `cron::default_recurring_max_age`), so the model is never promised an expiry
 /// the scheduler does not enforce.
 fn build_prompt_text() -> String {
-    let durability = "## Durability\n\nBy default (durable: false) the job lives only in this Claude session — nothing is written to disk, and the job is gone when Claude exits. Pass durable: true to write to .lingxi/scheduled_tasks.json so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.";
-    let durable_runtime = "Durable jobs persist to .lingxi/scheduled_tasks.json and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. ";
+    let durability = "## Durability\n\nBy default (durable: false) the job lives only in this Claude session — nothing is written to disk, and the job is gone when Claude exits. Pass durable: true to write to .claude/scheduled_tasks.json so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.";
+    let durability = if durable_enabled() {
+        durability
+    } else {
+        "## Session-only\n\nJobs live only in this Claude session — nothing is written to disk, and the job is gone when Claude exits."
+    };
+    let durable_runtime = "Durable jobs persist to .claude/scheduled_tasks.json and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. ";
+    let durable_runtime = if durable_enabled() {
+        durable_runtime
+    } else {
+        ""
+    };
     // `${o}\n${QI()?`\n## Not for live watching\n\n…\n`:""}\n## Runtime behavior`
     // — the empty arm collapses to the single blank line the gate-off prompt has.
     let monitor = if amber_sentinel_enabled() {
@@ -539,9 +573,34 @@ impl Tool for CronCreateTool {
     fn search_hint(&self) -> Option<&str> {
         Some("schedule a recurring or one-shot prompt")
     }
-    fn input_schema(&self) -> &Value {
-        &SCHEMA
+    fn native_input_validation(&self) -> bool {
+        true
     }
+    fn input_schema(&self) -> &Value {
+        if durable_enabled() {
+            &SCHEMA
+        } else {
+            &SESSION_ONLY_SCHEMA
+        }
+    }
+    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+        let mut updated = input.clone();
+        let mut keys = Vec::new();
+        for key in ["recurring", "durable"] {
+            let value = match input.get(key).and_then(Value::as_str) {
+                Some("true") => true,
+                Some("false") => false,
+                _ => continue,
+            };
+            updated[key] = json!(value);
+            keys.push(key);
+        }
+        (!keys.is_empty()).then(|| tool_api::tool_trait::CoercedInput {
+            input: updated,
+            shape_class: keys.join(","),
+        })
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // PARITY 2.1.263 `EC()`: `!CLAUDE_CODE_DISABLE_CRON && gate(tengu_kairos_cron, true)`
         // — the env kill switch hides the tool from the model.
@@ -554,7 +613,9 @@ impl Tool for CronCreateTool {
         true
     }
     fn get_path(&self, _: &Value) -> Option<std::path::PathBuf> {
-        Some(cron::scheduled_tasks_path(&self.ctx.cwd()))
+        Some(cron::tasks_file::session_scheduled_tasks_path(
+            &self.ctx.session_cwd.project_root(),
+        ))
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -575,7 +636,7 @@ impl Tool for CronCreateTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronCreate persists a cron job to .lingxi/scheduled_tasks.json".into(),
+                reason: "CronCreate persists a cron job to .claude/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -584,8 +645,11 @@ impl Tool for CronCreateTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        // PARITY 2.1.263 `ubn(true)` (durable gate on); `.claude/` → `.lingxi/`.
-        "Schedule a prompt to run at a future time — either recurring on a cron schedule, or once at a specific time. Pass durable: true to persist to .lingxi/scheduled_tasks.json; otherwise session-only.".into()
+        if !durable_enabled() {
+            return "Schedule a prompt to run at a future time within this Claude session — either recurring on a cron schedule, or once at a specific time.".into();
+        }
+        // PARITY 2.1.270 durable gate on.
+        "Schedule a prompt to run at a future time — either recurring on a cron schedule, or once at a specific time. Pass durable: true to persist to .claude/scheduled_tasks.json; otherwise session-only.".into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
@@ -628,7 +692,13 @@ impl Tool for CronCreateTool {
             )));
         }
 
-        if semantic_bool(input.get("durable"), false) && teammate_owner(call_ctx).is_some() {
+        // Only refuse a durability the tool would actually honour: with the gate
+        // off the schema tells the caller `durable` "has no effect", so refusing
+        // a teammate for sending it denies a job that would have been created.
+        if semantic_bool(input.get("durable"), false)
+            && durable_enabled()
+            && teammate_owner(call_ctx).is_some()
+        {
             return Err(ValidationError(
                 "durable crons are not supported for teammates (teammates do not persist across sessions)".into(),
             ));
@@ -677,12 +747,13 @@ impl Tool for CronCreateTool {
         let recurring = semantic_bool(input.get("recurring"), true);
         let durable = semantic_bool(input.get("durable"), false);
         let owner = teammate_owner(&call_ctx);
-        if durable && owner.is_some() {
+        if durable && durable_enabled() && owner.is_some() {
             return Err(ToolError::InvalidInput(
                 "durable crons are not supported for teammates (teammates do not persist across sessions)".into(),
             ));
         }
 
+        let durable = durable && durable_enabled();
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("_PROTO_cron".into(), pii_str(&cron));
         md.insert("_PROTO_prompt".into(), pii_str(&prompt));
@@ -708,29 +779,31 @@ impl Tool for CronCreateTool {
         // live scheduler's session-owned store below.
         let mut bytes_written: usize = 0;
         if durable {
-            let path = cron_file_path(&self.ctx.cwd());
+            let path = cron_file_path(&self.ctx.session_cwd.project_root());
             // Serialize in-process contenders before taking the blocking OS
             // lock, then hold both locks across the entire read-modify-write.
             let _process_guard = cron::lock_cron_file().await;
-            let _file_guard =
-                match cron::tasks_file::lock_scheduled_tasks(self.ctx.fs.as_ref(), &self.ctx.cwd())
-                    .await
-                {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        emit_failed(&bus, "io_lock", started.elapsed().as_millis() as u64).await;
-                        return Err(ToolError::Io(format!(
-                            "CronCreate: io error at {}: {e}",
-                            path.display()
-                        )));
-                    }
-                };
+            let _file_guard = match cron::tasks_file::lock_scheduled_tasks(
+                self.ctx.fs.as_ref(),
+                &self.ctx.session_cwd.project_root(),
+            )
+            .await
+            {
+                Ok(guard) => guard,
+                Err(e) => {
+                    emit_failed(&bus, "io_lock", started.elapsed().as_millis() as u64).await;
+                    return Err(ToolError::Io(format!(
+                        "CronCreate: io error at {}: {e}",
+                        path.display()
+                    )));
+                }
+            };
             // Read-modify-write the single `{ "tasks": [...] }` document: load the
             // existing tasks (empty if absent/garbage), append the new CronTask,
             // and write the whole file back.
             let mut doc = match cron::tasks_file::read_tasks_body(
                 self.ctx.fs.as_ref(),
-                &self.ctx.cwd(),
+                &self.ctx.session_cwd.project_root(),
             )
             .await
             {
@@ -751,12 +824,27 @@ impl Tool for CronCreateTool {
             };
             // Re-check under the lock; validate_input's early check is only a
             // UX fast path and cannot enforce the cap against concurrent writers.
-            if doc.tasks.len() >= MAX_JOBS {
+            if schedulable_job_count(&doc) >= MAX_JOBS {
                 return Err(ToolError::InvalidInput(format!(
                     "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
                 )));
             }
             doc.tasks.push(cron::tasks_file::CronTask {
+                creator: cron::tasks_file::CronTaskCreator {
+                    created_by_session_id: call_ctx
+                        .origin_session_id
+                        .as_ref()
+                        .or(self.ctx.session_id.as_ref())
+                        // The scheduler compares this against the BARE uuid every
+                        // host feeds `set_session_id`; `SessionId`'s Display adds a
+                        // `sess:` prefix, which would never match.
+                        .map(|id| id.as_uuid().to_string()),
+                    created_by_pid: Some(std::process::id()),
+                    created_by_proc_start: platform_api::live_sessions::process_start_identity(
+                        std::process::id(),
+                    ),
+                },
+                automation: None,
                 id: id.clone(),
                 cron: cron.clone(),
                 prompt: prompt.clone(),
@@ -767,17 +855,16 @@ impl Tool for CronCreateTool {
                 recurring: recurring.then_some(true),
                 permanent: None,
                 expires_at: None,
-                session_id: call_ctx
-                    .origin_session_id
-                    .as_ref()
-                    .or(self.ctx.session_id.as_ref())
-                    .map(|id| id.as_uuid().to_string()),
+                session_id: None,
             });
             let body = cron::tasks_file::serialize_tasks(&doc);
             bytes_written = body.len();
-            if let Err(e) =
-                cron::tasks_file::write_tasks_body(self.ctx.fs.as_ref(), &self.ctx.cwd(), &body)
-                    .await
+            if let Err(e) = cron::tasks_file::write_tasks_body(
+                self.ctx.fs.as_ref(),
+                &self.ctx.session_cwd.project_root(),
+                &body,
+            )
+            .await
             {
                 emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::Io(format!(
@@ -860,26 +947,17 @@ impl Tool for CronCreateTool {
 mod tests {
     use super::*;
 
-    /// Fixture generated by script from the 2.1.263 chunk `src_160120926.js`
-    /// (`pbn(true)` with `QI()` false, `${nJ}`=7, `.claude/`→`.lingxi/`).
+    /// Latest 2.1.270 `aIn(true)` with Monitor disabled; no path normalization.
     #[test]
     fn prompt_matches_2_1_263_pbn() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
+        telemetry::test_clear_flag("tengu_kairos_cron_durable");
         let expected = include_str!("../tests/fixtures/cron_create_prompt_2_1_263.txt");
         let actual = build_prompt_text();
-        if cron::default_recurring_max_age().is_some() {
-            assert_eq!(actual, expected);
-        } else {
-            // No scheduler-side expiry ⇒ only the 7-day paragraph is withheld.
-            let without = expected.replace(
-                "Recurring tasks auto-expire after 7 days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the 7-day limit when scheduling recurring jobs.\n\n",
-                "",
-            );
-            assert_ne!(
-                without, expected,
-                "the fixture must carry the 7-day paragraph"
-            );
-            assert_eq!(actual, without);
-        }
+        assert_eq!(actual, expected);
     }
 
     /// PARITY `QI()` = `H("tengu_amber_sentinel", false)`: the Monitor section
@@ -925,9 +1003,9 @@ mod tests {
     }
 
     /// Read the parsed `{ "tasks": [...] }` document at
-    /// `<root>/.lingxi/scheduled_tasks.json` (empty if absent).
+    /// `<root>/.claude/scheduled_tasks.json` (empty if absent).
     async fn read_doc(root: &std::path::Path) -> cron::tasks_file::ScheduledTasks {
-        let path = cron::tasks_file::scheduled_tasks_path(root);
+        let path = cron::tasks_file::session_scheduled_tasks_path(root);
         match tokio::fs::read_to_string(&path).await {
             Ok(body) => cron::tasks_file::parse_tasks(&body),
             Err(_) => cron::tasks_file::ScheduledTasks::default(),
@@ -958,25 +1036,47 @@ mod tests {
     }
 
     #[test]
+    fn latest_boolean_preprocess_accepts_only_exact_lowercase_strings() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use platform_api::process::ProcessOutput;
+        use tool_api::test_support::shell_test_ctx_in;
+        let tool = CronCreateTool::new(shell_test_ctx_in(
+            ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            },
+            std::path::PathBuf::from("/tmp"),
+        ));
+        let coerced = tool
+            .coerce_input(&json!({"recurring":"false", "durable":"true"}))
+            .unwrap();
+        assert_eq!(coerced.input, json!({"recurring":false, "durable":true}));
+        for invalid in ["FALSE", "yes", "1", " true "] {
+            assert!(tool.coerce_input(&json!({"recurring":invalid})).is_none());
+        }
+    }
+
+    #[test]
     fn semantic_bool_parsing() {
-        // Missing -> default.
         assert!(semantic_bool(None, true));
         assert!(!semantic_bool(None, false));
-        // JSON bool.
         assert!(semantic_bool(Some(&json!(true)), false));
         assert!(!semantic_bool(Some(&json!(false)), true));
-        // Truthy strings (case-insensitive).
-        assert!(semantic_bool(Some(&json!("yes")), false));
-        assert!(semantic_bool(Some(&json!("TRUE")), false));
-        assert!(semantic_bool(Some(&json!("1")), false));
-        // Falsy strings (case-insensitive).
-        assert!(!semantic_bool(Some(&json!("no")), true));
-        assert!(!semantic_bool(Some(&json!("FALSE")), true));
-        assert!(!semantic_bool(Some(&json!("0")), true));
-        // Unrecognized / non-bool -> default.
-        assert!(semantic_bool(Some(&json!("maybe")), true));
-        assert!(!semantic_bool(Some(&json!("maybe")), false));
-        assert!(!semantic_bool(Some(&json!(5)), false));
+        assert!(semantic_bool(Some(&json!("true")), false));
+        assert!(!semantic_bool(Some(&json!("false")), true));
+        for invalid in [
+            json!("TRUE"),
+            json!("yes"),
+            json!("1"),
+            json!(" true "),
+            json!(5),
+        ] {
+            assert!(!semantic_bool(Some(&invalid), false));
+        }
     }
 
     #[test]
@@ -1002,11 +1102,11 @@ mod tests {
     fn result_content_variants() {
         assert_eq!(
             build_result_content("d12345678", "Every day at 9:00 AM", true, false),
-            "Scheduled recurring job d12345678 (Every day at 9:00 AM). Session-only (not written to disk, dies when Claude exits). Runs until cancelled. Use CronDelete to cancel."
+            "Scheduled recurring job d12345678 (Every day at 9:00 AM). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
         );
         assert_eq!(
             build_result_content("d87654321", "February 28 at 2:30pm", false, true),
-            "Scheduled one-shot task d87654321 (February 28 at 2:30pm). Persisted to .lingxi/scheduled_tasks.json. It will fire once then auto-delete."
+            "Scheduled one-shot task d87654321 (February 28 at 2:30pm). Persisted to .claude/scheduled_tasks.json. It will fire once then auto-delete."
         );
     }
 
@@ -1025,15 +1125,22 @@ mod tests {
         assert!(format!("{error}").contains("requires an active scheduler"));
 
         // No file written at all.
-        let path = cron::tasks_file::scheduled_tasks_path(tmp.path());
+        let path = cron::tasks_file::session_scheduled_tasks_path(tmp.path());
         assert!(!tokio::fs::try_exists(&path).await.unwrap());
         assert!(read_doc(tmp.path()).await.tasks.is_empty());
     }
 
     #[tokio::test]
     async fn durable_job_persists_to_single_project_file() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let ctx = shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf());
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        ctx.session_cwd.swap(nested.clone(), vec![]);
+        let tool = CronCreateTool::new(ctx);
         let mut call_ctx = fresh_ctx();
         let owner = protocol::SessionId::new();
         call_ctx.origin_session_id = Some(owner.clone());
@@ -1049,7 +1156,7 @@ mod tests {
 
         // The single `{ "tasks": [...] }` file carries one CronTask with the
         // camelCase, epoch-MILLISECONDS shape — and NO durable / next-fire keys.
-        let path = cron::tasks_file::scheduled_tasks_path(tmp.path());
+        let path = cron::tasks_file::session_scheduled_tasks_path(tmp.path());
         let written = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(written.contains("\"tasks\""));
         assert!(written.contains("\"cron\": \"*/5 9-17 * * 1-5\""));
@@ -1068,7 +1175,16 @@ mod tests {
         assert_eq!(doc.tasks[0].id, id);
         assert_eq!(doc.tasks[0].recurring, Some(true));
         assert_eq!(doc.tasks[0].last_fired_at, None);
-        assert_eq!(doc.tasks[0].session_id, Some(owner.as_uuid().to_string()));
+        assert_eq!(doc.tasks[0].session_id, None);
+        // The BARE uuid: the scheduler compares this against
+        // `set_session_id(current.as_uuid().to_string())`, so a `sess:` prefix
+        // would leave the job owned by nobody.
+        assert_eq!(
+            doc.tasks[0].creator.created_by_session_id.as_deref(),
+            Some(owner.as_uuid().to_string().as_str())
+        );
+        assert!(!written.contains("\"sessionId\""));
+        assert!(!cron::tasks_file::session_scheduled_tasks_path(&nested).exists());
         assert_eq!(doc.tasks[0].expires_at, None);
         // `createdAt` is derived from the clock in epoch MILLISECONDS. The test
         // StubClock is anchored at the Unix epoch, so this is 0 here — the ms
@@ -1078,12 +1194,55 @@ mod tests {
         assert!(written.contains("\"createdAt\": 0"));
     }
 
+    #[tokio::test]
+    async fn completed_history_does_not_consume_create_quota() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf());
+        let tasks: Vec<_> = (0..MAX_JOBS).map(|index| json!({
+            "id": format!("done-{index}"), "cron": "* * * * *", "prompt": "done", "createdAt": 1,
+            "automation": {"version": 2, "status": "completed", "model": "provider/model"}
+        })).collect();
+        let history_path = cron::tasks_file::scheduled_tasks_path(tmp.path());
+        tokio::fs::create_dir_all(history_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&history_path, json!({"tasks":tasks}).to_string())
+            .await
+            .unwrap();
+        assert_eq!(count_existing_jobs(&ctx).await, 0);
+        let tool = CronCreateTool::new(ctx);
+        tool.call(
+            json!({"cron":"* * * * *", "prompt":"new", "durable":true}),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let doc = read_doc(tmp.path()).await;
+        assert_eq!(doc.tasks.len(), 1);
+        assert_eq!(schedulable_job_count(&doc), 1);
+        let history = tokio::fs::read_to_string(cron::tasks_file::scheduled_tasks_path(tmp.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            cron::tasks_file::parse_tasks(&history).tasks.len(),
+            MAX_JOBS,
+            "task-center history stays in its own store"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn durable_job_refuses_symlinked_project_state_directory() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let victim = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(victim.path(), tmp.path().join(branding::DOT_DIR)).unwrap();
+        std::os::unix::fs::symlink(victim.path(), tmp.path().join(".claude")).unwrap();
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
 
         let err = tool
@@ -1103,6 +1262,9 @@ mod tests {
 
     #[tokio::test]
     async fn durable_creates_append_into_one_file() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Two durable creates accumulate in the SAME file (read-modify-write).
         let tmp = tempfile::tempdir().unwrap();
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
@@ -1121,6 +1283,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_durable_creates_do_not_lose_updates() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let first = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let second = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
@@ -1152,6 +1317,9 @@ mod tests {
 
     #[tokio::test]
     async fn one_shot_durable_result() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
@@ -1171,14 +1339,16 @@ mod tests {
         // live scheduler (mobile fires it from its own OS wake), so the result
         // is the oracle text.
         assert!(content.ends_with(
-            "Persisted to .lingxi/scheduled_tasks.json. It will fire once then auto-delete."
+            "Persisted to .claude/scheduled_tasks.json. It will fire once then auto-delete."
         ));
         // PARITY 2.1.263 `nCe`: recurring:false ⇒ the `recurring` key is omitted
         // on disk (and the reader normalises a literal `false` to absent too).
         let doc = read_doc(tmp.path()).await;
         assert_eq!(doc.tasks.len(), 1);
         assert_eq!(doc.tasks[0].recurring, None);
-        let raw = std::fs::read_to_string(cron::scheduled_tasks_path(tmp.path())).unwrap();
+        let raw =
+            std::fs::read_to_string(cron::tasks_file::session_scheduled_tasks_path(tmp.path()))
+                .unwrap();
         assert!(!raw.contains("\"recurring\""), "{raw}");
     }
 
@@ -1188,7 +1358,7 @@ mod tests {
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
-                json!({"cron": "0 9 * * *", "prompt": "x", "recurring": "no", "durable": "yes"}),
+                json!({"cron": "0 9 * * *", "prompt": "x", "recurring": "false", "durable": "true"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1200,6 +1370,9 @@ mod tests {
 
     #[tokio::test]
     async fn teammate_cannot_create_durable_job() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let mut call_ctx = fresh_ctx();
@@ -1216,7 +1389,7 @@ mod tests {
             .await
             .expect_err("call must enforce the boundary without pre-validation too");
         assert!(format!("{error}").contains("durable crons are not supported for teammates"));
-        assert!(!cron::tasks_file::scheduled_tasks_path(tmp.path()).exists());
+        assert!(!cron::tasks_file::session_scheduled_tasks_path(tmp.path()).exists());
     }
 
     #[tokio::test]
@@ -1359,5 +1532,58 @@ mod tests {
         // can't be asserted *here* because the test `StubClock` is anchored at the
         // Unix epoch and the matcher's `year > 1970` sentinel keeps the 366-day
         // horizon (all in 1970) from matching any narrow date.
+    }
+    #[tokio::test]
+    async fn all_local_tool_prompt_branches_match_latest_oracle_without_normalization() {
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cases: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/cron_contracts_2_1_270.json"
+        ))
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let create = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let delete = crate::cron_delete::CronDeleteTool::new(shell_test_ctx_in(
+            dummy_out(),
+            tmp.path().to_path_buf(),
+        ));
+        let list = crate::cron_list::CronListTool::new(shell_test_ctx_in(
+            dummy_out(),
+            tmp.path().to_path_buf(),
+        ));
+        for case in cases.as_array().unwrap() {
+            telemetry::test_set_flag(
+                "tengu_kairos_cron_durable",
+                case["durable"].as_bool().unwrap(),
+            );
+            telemetry::test_set_flag(AMBER_SENTINEL_FLAG, case["monitor"].as_bool().unwrap());
+            assert_eq!(build_prompt_text(), case["create"].as_str().unwrap());
+            assert_eq!(
+                create
+                    .description(
+                        &json!({}),
+                        &DescriptionOptions {
+                            is_non_interactive_session: false
+                        }
+                    )
+                    .await,
+                case["description"].as_str().unwrap()
+            );
+            assert_eq!(
+                create.input_schema()["properties"]["durable"]["description"],
+                case["durableDescription"]
+            );
+            assert_eq!(
+                delete.prompt(&PromptOptions::default()).await,
+                case["delete"].as_str().unwrap()
+            );
+            assert_eq!(
+                list.prompt(&PromptOptions::default()).await,
+                case["list"].as_str().unwrap()
+            );
+        }
+        telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
+        telemetry::test_clear_flag("tengu_kairos_cron_durable");
     }
 }

@@ -859,14 +859,28 @@ impl HookExecutorImpl {
     /// so its result is not silently dropped, but it is STILL excluded from the
     /// aggregate to preserve the "non-blocking can't block" contract.)
     pub async fn execute(&self, event: HookEvent, ctx: HookContext) -> AggregateHookResult {
+        self.execute_excluding_hook(event, ctx, None).await
+    }
+
+    /// Skip a deferred session goal before dispatch, preserving all other hooks.
+    pub async fn execute_excluding_hook(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        excluded: Option<protocol::HookId>,
+    ) -> AggregateHookResult {
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips
         // ALL hooks before any matching/dispatch.
         if let Some(skipped) = self.policy_disable_gate(&event) {
             return skipped;
         }
         let reg = self.registry.read().await;
-        let matched: Vec<HookDefinition> =
-            reg.match_event(&event, &ctx).into_iter().cloned().collect();
+        let matched: Vec<HookDefinition> = reg
+            .match_event(&event, &ctx)
+            .into_iter()
+            .filter(|hook| Some(hook.id) != excluded)
+            .cloned()
+            .collect();
         drop(reg);
         let mut agg = AggregateHookResult::default();
         let hook_event = format!("{:?}", event.event_type());
@@ -1434,10 +1448,7 @@ impl Dispatcher {
                     return HookResult {
                         outcome: HookOutcome::Error,
                         stdout: String::new(),
-                        stderr: format!(
-                            "Hook {} failed: no payload shape for this event",
-                            hook.id
-                        ),
+                        stderr: format!("Hook {} failed: no payload shape for this event", hook.id),
                         exit_code: None,
                         response: None,
                     };
@@ -1469,12 +1480,12 @@ impl Dispatcher {
                 let evaluated = tokio::task::spawn_blocking(move || {
                     sandbox.eval_abandonable(&source, &payload)
                 })
-                    .await
-                    .unwrap_or_else(|join| {
-                        Err(crate::function_hook::FunctionHookError::EngineUnavailable(
-                            join.to_string(),
-                        ))
-                    });
+                .await
+                .unwrap_or_else(|join| {
+                    Err(crate::function_hook::FunctionHookError::EngineUnavailable(
+                        join.to_string(),
+                    ))
+                });
                 match evaluated {
                     Ok(value) => {
                         let stdout = serde_json::to_string(&value).unwrap_or_default();

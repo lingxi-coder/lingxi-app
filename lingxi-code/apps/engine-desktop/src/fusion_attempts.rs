@@ -163,7 +163,9 @@ impl DesktopFusionAttempts {
         let output = match captured.inherit.output_scope.as_ref() {
             Some(scope) => scope.clone(),
             None if captured.control.identity().origin == platform_api::FusionOrigin::Workflow => {
-                return Err(fusion_error("workflow attempt requires its original output scope"));
+                return Err(fusion_error(
+                    "workflow attempt requires its original output scope",
+                ));
             }
             None => self.outputs.capture(session).map_err(fusion_error)?,
         };

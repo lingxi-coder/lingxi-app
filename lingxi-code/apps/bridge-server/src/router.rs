@@ -245,6 +245,8 @@ fn provider_model_catalog_from_listings(
 /// The production [`CommandRouter`]: wraps the real engine handles and lowers
 /// each reply with the pure `client_adapter::lowering` parity fns.
 pub struct EngineCommandRouter {
+    session_cron: Option<Arc<cron::CronScheduler>>,
+    cron_firer: Option<Arc<crate::cron_host::HostCronFirer>>,
     handle: Arc<dyn OrchestratorHandle>,
     auth: Arc<dyn AuthHandle>,
     tasks: Arc<dyn TaskRegistryHandle>,
@@ -259,6 +261,10 @@ pub struct EngineCommandRouter {
     /// Optional persisted-session catalog/replay context. Production boot wires
     /// it; lightweight users of the routing seam can omit it.
     session_store: Option<SessionStoreContext>,
+    /// Process-owned observer facts supplement the live task registry for
+    /// foreground children and allocation before the first transcript write.
+    session_agent_observer:
+        Option<Arc<engine_desktop::session_agents::DesktopSessionAgentObserver>>,
     /// Shared provider credential manager. Production bridge boot wires the
     /// exact manager used by the runtime; tests/embedded clients may omit it.
     credentials: Option<Arc<secret::CredentialManager>>,
@@ -341,7 +347,7 @@ async fn read_session_agent_summary(
     raw: &[u8],
 ) -> Option<SessionAgentSummaryDto> {
     let messages = engine_desktop::session_agents::lower_transcript(raw);
-    let mut status = "running".to_string();
+    let mut status = "unknown".to_string();
     let mut name = None;
     let mut agent_type = None;
     let mut model = None;
@@ -456,19 +462,42 @@ async fn read_session_agent_summary(
 }
 
 impl EngineCommandRouter {
+    pub(crate) fn with_session_cron(mut self, scheduler: Option<Arc<cron::CronScheduler>>) -> Self {
+        self.session_cron = scheduler;
+        self
+    }
+    pub(crate) fn with_cron_firer(mut self, firer: Arc<crate::cron_host::HostCronFirer>) -> Self {
+        self.cron_firer = Some(firer);
+        self
+    }
+
     /// Move this process's live-session presence only after the engine has
     /// successfully activated the destination session.  The bridge process
     /// owns one mutable presence record, while durable coordinators retain
     /// old-session leases independently for late background work; updating
     /// this record must therefore never unregister/release the old writer.
     async fn refresh_process_session_presence(
+        &self,
         previous: protocol::SessionId,
         current: protocol::SessionId,
     ) -> Option<String> {
-        engine_desktop::refresh_process_session_presence(previous, current)
-            .await
-            .err()
-            .map(|error| format!("session switched, but {error}"))
+        if let Some(observer) = &self.session_agent_observer {
+            observer.set_session_id(current.as_uuid().to_string());
+        }
+        // Collect, never early-return: the presence record is independent of the
+        // cron scheduler, and skipping it leaves this PID advertising the OLD
+        // session after a switch that already committed.
+        let mut problems: Vec<String> = Vec::new();
+        if let Some(scheduler) = &self.session_cron {
+            if let Err(error) = scheduler.set_session_id(current.as_uuid().to_string()).await {
+                problems.push(format!("scheduled tasks could not restart: {error}"));
+            }
+        }
+        if let Err(error) = engine_desktop::refresh_process_session_presence(previous, current).await
+        {
+            problems.push(error.to_string());
+        }
+        (!problems.is_empty()).then(|| format!("session switched, but {}", problems.join("; ")))
     }
 
     async fn dispatch_desktop_slash(&self, raw: &str) -> Option<platform_api::SlashDispatchResult> {
@@ -548,12 +577,15 @@ impl EngineCommandRouter {
         slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
     ) -> Self {
         Self {
+            cron_firer: None,
+            session_cron: None,
             handle,
             auth,
             tasks,
             dispatcher,
             slash_registry,
             session_store: None,
+            session_agent_observer: None,
             credentials: None,
             provider_model_catalog_listings: Vec::new(),
             provider_credentials_ephemeral: false,
@@ -599,6 +631,16 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_http(mut self, http: Arc<dyn platform_api::HttpTransport>) -> Self {
         self.http = Some(http);
+        self
+    }
+
+    /// Share the same process-local liveness source used for pushed agent events.
+    #[must_use]
+    pub fn with_session_agent_observer(
+        mut self,
+        observer: Arc<engine_desktop::session_agents::DesktopSessionAgentObserver>,
+    ) -> Self {
+        self.session_agent_observer = Some(observer);
         self
     }
 
@@ -2585,6 +2627,62 @@ impl EngineCommandRouter {
                 tracing::warn!(%error, "bridge-server: session agent transcript directory unreadable");
             }
         }
+        // Claude 2.1.269 background_tasks_changed is a process-scoped level:
+        // restarting clears liveness; reconnecting to this process retains it.
+        // Read live facts AFTER the disk walk so terminal pushes win over an
+        // older running JSONL record. Listing never rewrites transcript bytes.
+        let tasks = self.tasks.list(TaskListFilter::default()).await;
+        let observed = self
+            .session_agent_observer
+            .as_ref()
+            .map(|observer| observer.snapshot(&session_id.as_uuid().to_string()))
+            .unwrap_or_default();
+        // Allocation can precede its first JSONL append.
+        for current in observed.values() {
+            if !agents
+                .iter()
+                .any(|agent| agent.agent_id == current.agent_id)
+            {
+                agents.push(current.clone());
+            }
+        }
+        for agent in &mut agents[1..] {
+            let current = observed.get(&agent.agent_id);
+            if let Some(current) = current {
+                // Observer is sampled after the task read. This includes idle:
+                // Completed can reach the observer before the task consumer
+                // parks its row. The runner publishes resumed input before a
+                // new provider query, so that edge also has an observation.
+                *agent = current.clone();
+                continue;
+            }
+            let task = tasks.as_ref().ok().and_then(|rows| {
+                rows.iter().find(|row| {
+                    row.task_type == "local_agent"
+                        && row.owner_agent_id.as_deref() == Some(agent.agent_id.as_str())
+                })
+            });
+            if let Some(task) = task {
+                // Hosts without the observer still use the current registry,
+                // never historical transcript status, for live workers.
+                agent.status = if task.is_parked {
+                    "idle"
+                } else {
+                    task.status.as_str()
+                }
+                .to_string();
+            } else if matches!(agent.status.as_str(), "running" | "pending") {
+                if tasks.is_ok() {
+                    agent.status = "cancelled".to_string();
+                    agent.latest_activity =
+                        Some("Interrupted when the engine stopped.".to_string());
+                } else {
+                    agent.status = "unknown".to_string();
+                    agent.latest_activity =
+                        Some("Unable to verify whether this agent is still running.".to_string());
+                }
+            }
+        }
         agents[1..].sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
         sink.emit(ClientEvent::SessionAgentList {
             session_id: session_id.as_uuid().to_string(),
@@ -2776,10 +2874,7 @@ impl EngineCommandRouter {
                     row.task_type == "local_agent"
                         && row.owner_agent_id.as_deref() == Some(agent_id)
                         && (row.is_parked
-                            || matches!(
-                                row.status.as_str(),
-                                "pending" | "running" | "paused"
-                            ))
+                            || matches!(row.status.as_str(), "pending" | "running" | "paused"))
                 })
             })
     }
@@ -3105,11 +3200,39 @@ impl CommandRouter for EngineCommandRouter {
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
+            // Both arms write the durable automation store — `started` binds a
+            // session id into it, `complete` records a run result — so they sit
+            // behind the same trust gate as the `CronManage` mutations below.
+            // Without it an untrusted workspace can still mutate the file every
+            // other write path refuses to touch.
+            ClientCommand::CronRunStarted { run_id, session_id } => {
+                if !self.handle.workspace_trusted().await {
+                    return;
+                }
+                if let Some(firer) = &self.cron_firer {
+                    firer.started(&run_id, &session_id).await;
+                }
+            }
+            ClientCommand::CronRunCompleted {
+                run_id,
+                session_id,
+                summary,
+                error,
+            } => {
+                if !self.handle.workspace_trusted().await {
+                    return;
+                }
+                if let Some(firer) = &self.cron_firer {
+                    firer.complete(&run_id, session_id, summary, error).await;
+                }
+            }
             ClientCommand::CronManage {
                 request_id,
                 request,
             } => {
-                if request.action != "list" && !self.handle.workspace_trusted().await {
+                if !matches!(request.action.as_str(), "list" | "history")
+                    && !self.handle.workspace_trusted().await
+                {
                     sink.emit(ClientEvent::CronResult {
                         request_id,
                         jobs: Vec::new(),
@@ -3639,11 +3762,12 @@ impl CommandRouter for EngineCommandRouter {
                 match self.handle.clear_session().await {
                     Ok(()) => {
                         let current_session_id = self.handle.current_session_id().await;
-                        let presence_warning = Self::refresh_process_session_presence(
-                            previous_session_id,
-                            current_session_id,
-                        )
-                        .await;
+                        let presence_warning = self
+                            .refresh_process_session_presence(
+                                previous_session_id,
+                                current_session_id,
+                            )
+                            .await;
                         sink.emit(ClientEvent::SessionEnded).await;
                         if let Some(message) = presence_warning {
                             sink.emit(ClientEvent::SystemNotice {
@@ -3686,9 +3810,9 @@ impl CommandRouter for EngineCommandRouter {
                     return;
                 }
                 let current_session_id = self.handle.current_session_id().await;
-                let presence_warning =
-                    Self::refresh_process_session_presence(previous_session_id, current_session_id)
-                        .await;
+                let presence_warning = self
+                    .refresh_process_session_presence(previous_session_id, current_session_id)
+                    .await;
 
                 if let Some(model) = model {
                     let listings = self.handle.list_model_listings().await;
@@ -3844,11 +3968,12 @@ impl CommandRouter for EngineCommandRouter {
                     return;
                 }
 
-                let presence_warning = Self::refresh_process_session_presence(
-                    previous_session_id,
-                    protocol::SessionId::from_uuid(uuid),
-                )
-                .await;
+                let presence_warning = self
+                    .refresh_process_session_presence(
+                        previous_session_id,
+                        protocol::SessionId::from_uuid(uuid),
+                    )
+                    .await;
 
                 sink.emit(ClientEvent::SessionResumed {
                     session_id: uuid.to_string(),
@@ -3917,11 +4042,27 @@ impl CommandRouter for EngineCommandRouter {
             // notification reads "was stopped by user".
             ClientCommand::TaskMessage { task_id, message } => {
                 if !self.handle.workspace_trusted().await {
-                    sink.emit(ClientEvent::Error { kind: ErrorKindDto::Rejected, message: "Trust this workspace before messaging a task".into() }).await;
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: "Trust this workspace before messaging a task".into(),
+                    })
+                    .await;
                 } else {
                     match self.tasks.send_human_task_message(&task_id, &message).await {
-                        Ok(()) => sink.emit(ClientEvent::SystemNotice { message: format!("Message accepted for task {task_id}"), is_error: false }).await,
-                        Err(error) => sink.emit(ClientEvent::Error { kind: ErrorKindDto::Rejected, message: format!("task message failed: {error}") }).await,
+                        Ok(()) => {
+                            sink.emit(ClientEvent::SystemNotice {
+                                message: format!("Message accepted for task {task_id}"),
+                                is_error: false,
+                            })
+                            .await
+                        }
+                        Err(error) => {
+                            sink.emit(ClientEvent::Error {
+                                kind: ErrorKindDto::Rejected,
+                                message: format!("task message failed: {error}"),
+                            })
+                            .await
+                        }
                     }
                 }
             }
@@ -4029,7 +4170,7 @@ fn lower_reasoning_selection(
     }
 }
 
-fn decode_reasoning_selection(
+pub(crate) fn decode_reasoning_selection(
     selection: ReasoningSelectionDto,
 ) -> platform_api::ReasoningSelection {
     match selection {
@@ -4265,11 +4406,20 @@ mod fusion_catalog_refresh_tests {
     }
 
     #[derive(Default)]
-    struct MockTaskRegistry { human_messages: std::sync::Mutex<Vec<(String, String)>> }
+    struct MockTaskRegistry {
+        human_messages: std::sync::Mutex<Vec<(String, String)>>,
+    }
     #[async_trait::async_trait]
     impl TaskRegistryHandle for MockTaskRegistry {
-        async fn send_human_task_message(&self, task_id: &str, message: &str) -> Result<(), TaskRegistryError> {
-            self.human_messages.lock().unwrap().push((task_id.into(), message.into()));
+        async fn send_human_task_message(
+            &self,
+            task_id: &str,
+            message: &str,
+        ) -> Result<(), TaskRegistryError> {
+            self.human_messages
+                .lock()
+                .unwrap()
+                .push((task_id.into(), message.into()));
             Ok(())
         }
         async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
@@ -4314,22 +4464,223 @@ mod fusion_catalog_refresh_tests {
     struct TaskMessageSink(std::sync::Mutex<Vec<ClientEvent>>);
     #[async_trait::async_trait]
     impl ClientEventSink for TaskMessageSink {
-        async fn emit(&self, event: ClientEvent) { self.0.lock().unwrap().push(event); }
+        async fn emit(&self, event: ClientEvent) {
+            self.0.lock().unwrap().push(event);
+        }
     }
 
     #[tokio::test]
     async fn task_message_uses_trusted_registry_route_and_preserves_workspace_gate() {
         let handle = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
         let registry = Arc::new(MockTaskRegistry::default());
-        let router = EngineCommandRouter::new(handle.clone(), Arc::new(MockAuth), registry.clone(), None, None);
+        let router = EngineCommandRouter::new(
+            handle.clone(),
+            Arc::new(MockAuth),
+            registry.clone(),
+            None,
+            None,
+        );
         let sink = Arc::new(TaskMessageSink::default());
-        router.route(ClientCommand::TaskMessage { task_id: "a123".into(), message: "  continue\nnext".into() }, sink.clone()).await;
-        assert_eq!(*registry.human_messages.lock().unwrap(), vec![("a123".into(), "  continue\nnext".into())]);
-        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(event, ClientEvent::SystemNotice { is_error: false, .. })));
+        router
+            .route(
+                ClientCommand::TaskMessage {
+                    task_id: "a123".into(),
+                    message: "  continue\nnext".into(),
+                },
+                sink.clone(),
+            )
+            .await;
+        assert_eq!(
+            *registry.human_messages.lock().unwrap(),
+            vec![("a123".into(), "  continue\nnext".into())]
+        );
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(
+            event,
+            ClientEvent::SystemNotice {
+                is_error: false,
+                ..
+            }
+        )));
         handle.set_workspace_trusted(false);
-        router.route(ClientCommand::TaskMessage { task_id: "a123".into(), message: "denied".into() }, sink.clone()).await;
+        router
+            .route(
+                ClientCommand::TaskMessage {
+                    task_id: "a123".into(),
+                    message: "denied".into(),
+                },
+                sink.clone(),
+            )
+            .await;
         assert_eq!(registry.human_messages.lock().unwrap().len(), 1);
-        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(event, ClientEvent::Error { kind: client_protocol::events::ErrorKindDto::Rejected, .. })));
+        assert!(sink.0.lock().unwrap().iter().any(|event| matches!(
+            event,
+            ClientEvent::Error {
+                kind: client_protocol::events::ErrorKindDto::Rejected,
+                ..
+            }
+        )));
+    }
+
+    struct CronPermissionSink;
+    #[async_trait::async_trait]
+    impl client_adapter::PermissionRequestSink for CronPermissionSink {
+        async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
+    }
+
+    fn cron_request(action: &str) -> client_protocol::commands::CronRequestDto {
+        client_protocol::commands::CronRequestDto {
+            automation: None,
+            action: action.into(),
+            id: None,
+            cron: Some("0 9 1 1 *".into()),
+            prompt: Some("Prepare the daily report".into()),
+            recurring: Some(true),
+            durable: Some(true),
+            expires_at: None,
+            no_expiry: Some(true),
+        }
+    }
+
+    async fn route_cron(
+        router: &EngineCommandRouter,
+        request: client_protocol::commands::CronRequestDto,
+    ) -> Result<Vec<client_protocol::events::CronJobDto>, String> {
+        let sink = Arc::new(TaskMessageSink::default());
+        router
+            .route(
+                ClientCommand::CronManage {
+                    request_id: "cron-trust-regression".into(),
+                    request,
+                },
+                sink.clone(),
+            )
+            .await;
+        let mut events = sink.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match events.pop().unwrap() {
+            ClientEvent::CronResult {
+                request_id,
+                jobs,
+                error,
+            } => {
+                assert_eq!(request_id, "cron-trust-regression");
+                match error {
+                    Some(error) => {
+                        assert!(jobs.is_empty());
+                        Err(error)
+                    }
+                    None => Ok(jobs),
+                }
+            }
+            event => panic!("expected CronResult, got {event:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cron_host_trust_allows_persisted_crud_and_untrusted_mutations_are_rejected() {
+        use platform_api::OrchestratorHandle;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("project");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let runtime = Box::pin(engine_desktop::build(
+            engine_desktop::DesktopConfig {
+                cwd: cwd.clone(),
+                lingxi_home: home.clone(),
+                isolated_credential_storage: true,
+                credential_storage_policy: platform_api::CredentialStoragePolicy::PlainTextFixture,
+                host_workspace_trusted: Some(true),
+                restricted: true,
+                strict_mcp_config: true,
+                default_model_explicit: true,
+                ..Default::default()
+            },
+            Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            Arc::new(CronPermissionSink),
+        ))
+        .await
+        .unwrap();
+        assert!(runtime.orchestrator.workspace_trusted().await);
+        let trusted_router = || {
+            EngineCommandRouter::new(
+                runtime.orchestrator.clone(),
+                runtime.auth.clone(),
+                runtime.task_registry.clone(),
+                None,
+                None,
+            )
+            .with_session_store(super::SessionStoreContext::new(
+                home.clone(),
+                cwd.to_string_lossy().into_owned(),
+                Arc::new(platform_posix::PosixFileSystem::new(cwd.clone())),
+            ))
+        };
+        let router = trusted_router();
+        let created = route_cron(&router, cron_request("create")).await.unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].prompt, "Prepare the daily report");
+        assert!(created[0].durable);
+        let status = runtime.orchestrator.get_status_snapshot().await;
+        assert_eq!(
+            created[0].session_id.as_deref(),
+            Some(status.session_id.trim_start_matches("sess:"))
+        );
+        // A fresh router reloads the durable file rather than a UI-local draft.
+        assert_eq!(
+            route_cron(&trusted_router(), cron_request("list"))
+                .await
+                .unwrap(),
+            created
+        );
+
+        let untrusted_handle = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        untrusted_handle.set_status_snapshot(status);
+        untrusted_handle.set_workspace_trusted(false);
+        let untrusted = EngineCommandRouter::new(
+            untrusted_handle,
+            runtime.auth.clone(),
+            runtime.task_registry.clone(),
+            None,
+            None,
+        );
+        for action in ["create", "update", "delete"] {
+            let mut request = cron_request(action);
+            request.id = Some(created[0].id.clone());
+            assert_eq!(
+                route_cron(&untrusted, request).await.unwrap_err(),
+                "Trust this workspace before changing scheduled tasks"
+            );
+            assert_eq!(
+                route_cron(&untrusted, cron_request("list")).await.unwrap(),
+                created,
+                "{action} must leave persisted jobs unchanged and list must remain available"
+            );
+        }
+
+        let mut update = cron_request("update");
+        update.id = Some(created[0].id.clone());
+        update.prompt = Some("Prepare the revised report".into());
+        let updated = route_cron(&router, update).await.unwrap();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].id, created[0].id);
+        assert_eq!(updated[0].created_at, created[0].created_at);
+        assert_eq!(updated[0].prompt, "Prepare the revised report");
+        assert_eq!(
+            route_cron(&trusted_router(), cron_request("list"))
+                .await
+                .unwrap(),
+            updated
+        );
+        let mut delete = cron_request("delete");
+        delete.id = Some(created[0].id.clone());
+        assert!(route_cron(&router, delete).await.unwrap().is_empty());
+        assert!(route_cron(&trusted_router(), cron_request("list"))
+            .await
+            .unwrap()
+            .is_empty());
+        let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
+        assert!(shutdown.complete, "shutdown errors: {:?}", shutdown.errors);
     }
 
     async fn router_with_credentials(

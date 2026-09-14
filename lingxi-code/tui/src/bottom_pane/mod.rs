@@ -463,14 +463,22 @@ impl BottomPane {
         self.permission_mode
     }
 
-    /// Mark `BypassPermissions` as an available Shift+Tab cycle target (the
-    /// session was launched with the skip-permissions flag).
+    /// Mark `Auto` as an available Shift+Tab cycle target (claude-code `I1(e)`).
     pub fn set_auto_available(&mut self, available: bool) {
         self.auto_available = available;
     }
 
+    /// Mark `BypassPermissions` as an available Shift+Tab cycle target (the
+    /// session was launched with the skip-permissions flag).
     pub fn set_bypass_available(&mut self, available: bool) {
         self.bypass_available = available;
+    }
+
+    /// Whether the completion popup owns the next key press. Esc closes the
+    /// popup there, so it must not read as a session-level abort.
+    #[must_use]
+    pub fn completion_is_open(&self) -> bool {
+        self.completion.is_some()
     }
 
     /// Whether `name` (WITH the leading `/`) resolves to a registry-backed
@@ -1221,6 +1229,17 @@ impl BottomPane {
             crate::vim::VimMode::Insert => "INSERT",
             crate::vim::VimMode::Normal | crate::vim::VimMode::Visual => "NORMAL",
         })
+    }
+
+    /// Whether vim bindings are on AND the composer is in INSERT mode, i.e. an
+    /// Esc keypress will be consumed locally as a mode switch. A session-abort
+    /// gate must exclude that case: leaving INSERT is not a request to cancel
+    /// the turn.
+    #[must_use]
+    pub fn vim_insert_mode(&self) -> bool {
+        self.vim
+            .as_ref()
+            .is_some_and(|vim| vim.mode == crate::vim::VimMode::Insert)
     }
 
     /// Hide only the built-in vim indicator. Editing mode and the status-line

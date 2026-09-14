@@ -5,6 +5,10 @@
 //! refinement issues at the tool boundary. Diagnostics use 2.1.263 `zue`.
 
 use boon::{Compiler, Schemas, ValidationError};
+use tool_api::native_schema::{
+    format_issues, js_json, js_keys, js_number, js_value_eq, quoted_options, value_type,
+    NativeSchemaError as ToolSchemaError,
+};
 
 /// Recursively flatten a boon [`ValidationError`] into concise leaf messages.
 ///
@@ -84,10 +88,21 @@ pub(crate) fn validate_tool_input_schema(
 /// Zod v4's issue objects survive at the tool boundary for constraints that
 /// JSON Schema cannot express. `zue` groups structural errors, falling back to
 /// the two-space JSON representation of *all* issues only when none group.
+
 pub(crate) fn validate_tool_schema(
     tool: &dyn tool_api::Tool,
     input: &serde_json::Value,
 ) -> Result<(), String> {
+    validate_tool_schema_detailed(tool, input).map_err(|error| error.display)
+}
+
+pub(crate) fn validate_tool_schema_detailed(
+    tool: &dyn tool_api::Tool,
+    input: &serde_json::Value,
+) -> Result<(), ToolSchemaError> {
+    if let Some(parsed) = tool.parse_native_input(input) {
+        return parsed.map(|_| ());
+    }
     let mut issues = Vec::new();
     let fallback = validate_tool_input_schema(tool.input_validation_schema(), input).err();
     if !collect_issues(
@@ -96,7 +111,12 @@ pub(crate) fn validate_tool_schema(
         &[],
         &mut issues,
     ) {
-        return fallback.map_or(Ok(()), Err);
+        return fallback.map_or(Ok(()), |display| {
+            Err(ToolSchemaError {
+                raw: display.clone(),
+                display,
+            })
+        });
     }
     let structural_count = issues.len();
     for native in tool.input_validation_issues(input) {
@@ -118,7 +138,10 @@ pub(crate) fn validate_tool_schema(
             issue["path"].as_array().map_or(&[][..], Vec::as_slice),
         )
     });
-    Err(format_issues(tool.name(), &issues))
+    Err(ToolSchemaError {
+        display: format_issues(tool.name(), &issues),
+        raw: js_json(&serde_json::Value::Array(issues), true),
+    })
 }
 
 #[cfg(test)]
@@ -136,95 +159,6 @@ pub(crate) fn validate_named_tool_input_schema(
         }
     } else {
         validate_tool_input_schema(schema, input)
-    }
-}
-
-fn js_keys(object: &serde_json::Map<String, serde_json::Value>) -> Vec<&String> {
-    fn index(key: &str) -> Option<u32> {
-        let n = key.parse::<u32>().ok()?;
-        (n != u32::MAX && n.to_string() == key).then_some(n)
-    }
-    let mut keys: Vec<_> = object.keys().collect();
-    keys.sort_by_key(|key| index(key).map_or((1, 0), |n| (0, n)));
-    keys
-}
-
-fn js_number(value: &serde_json::Number) -> String {
-    let n = value
-        .as_f64()
-        .expect("JSON number has an f64 representation");
-    if n == 0.0 {
-        return "0".into();
-    }
-    if !n.is_finite() {
-        return "null".into();
-    }
-    if n.abs() >= 1e21 || n.abs() < 1e-6 {
-        let scientific = format!("{n:e}");
-        let (mantissa, exponent) = scientific.split_once('e').expect("scientific exponent");
-        let exponent: i32 = exponent.parse().expect("numeric exponent");
-        format!(
-            "{mantissa}e{}{exponent}",
-            if exponent >= 0 { "+" } else { "" }
-        )
-    } else {
-        n.to_string()
-    }
-}
-
-/// JSON.stringify(value, null, 2), including JS Number and property ordering.
-fn js_json(value: &serde_json::Value, pretty: bool) -> String {
-    fn render(value: &serde_json::Value, level: usize, pretty: bool) -> String {
-        use serde_json::Value;
-        match value {
-            Value::Number(n) => js_number(n),
-            Value::Array(array) if !array.is_empty() => {
-                let values: Vec<_> = array.iter().map(|v| render(v, level + 1, pretty)).collect();
-                if pretty {
-                    format!(
-                        "[\n{}{}\n{}]",
-                        "  ".repeat(level + 1),
-                        values.join(&format!(",\n{}", "  ".repeat(level + 1))),
-                        "  ".repeat(level)
-                    )
-                } else {
-                    format!("[{}]", values.join(","))
-                }
-            }
-            Value::Object(object) if !object.is_empty() => {
-                let values: Vec<_> = js_keys(object)
-                    .into_iter()
-                    .map(|key| {
-                        format!(
-                            "{}:{}{}",
-                            serde_json::to_string(key).unwrap(),
-                            if pretty { " " } else { "" },
-                            render(&object[key], level + 1, pretty)
-                        )
-                    })
-                    .collect();
-                if pretty {
-                    format!(
-                        "{{\n{}{}\n{}}}",
-                        "  ".repeat(level + 1),
-                        values.join(&format!(",\n{}", "  ".repeat(level + 1))),
-                        "  ".repeat(level)
-                    )
-                } else {
-                    format!("{{{}}}", values.join(","))
-                }
-            }
-            _ => serde_json::to_string(value).expect("JSON value"),
-        }
-    }
-    render(value, 0, pretty)
-}
-
-fn js_value_eq(left: &serde_json::Value, right: &serde_json::Value) -> bool {
-    if left.is_number() && right.is_number() {
-        left.as_f64() == right.as_f64()
-    } else {
-        left == right
     }
 }
 
@@ -258,95 +192,6 @@ fn declaration_order(schema: &serde_json::Value, path: &[serde_json::Value]) -> 
     order
 }
 
-fn issue_path(path: &[serde_json::Value]) -> String {
-    let mut result = String::new();
-    for (index, part) in path.iter().enumerate() {
-        if let Some(key) = part.as_str() {
-            if index != 0 {
-                result.push('.');
-            }
-            result.push_str(key);
-        } else {
-            result.push_str(&format!("[{part}]"));
-        }
-    }
-    result
-}
-
-fn format_issues(name: &str, issues: &[serde_json::Value]) -> String {
-    let mut missing = Vec::new();
-    let mut unexpected = Vec::new();
-    let mut types = Vec::new();
-    for issue in issues {
-        let path = issue_path(issue["path"].as_array().map_or(&[][..], Vec::as_slice));
-        let message = issue["message"].as_str().unwrap_or("");
-        match issue["code"].as_str() {
-            Some("invalid_type") if message.contains("received undefined") => {
-                missing.push(format!("The required parameter `{path}` is missing"))
-            }
-            Some("invalid_type") => {
-                let received = message
-                    .split_once("received ")
-                    .map(|(_, suffix)| {
-                        suffix
-                            .chars()
-                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                            .collect::<String>()
-                    })
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "unknown".into());
-                let expected = issue["expected"].as_str().unwrap_or("undefined");
-                types.push(format!("The parameter `{path}` type is expected as `{expected}` but provided as `{received}`"));
-            }
-            Some("unrecognized_keys") => {
-                if let Some(keys) = issue["keys"].as_array() {
-                    unexpected.extend(
-                        keys.iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(|key| format!("An unexpected parameter `{key}` was provided")),
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-    let messages: Vec<_> = missing.into_iter().chain(unexpected).chain(types).collect();
-    if messages.is_empty() {
-        js_json(&serde_json::Value::Array(issues.to_vec()), true)
-    } else {
-        format!(
-            "{name} failed due to the following {}:\n{}",
-            if messages.len() == 1 {
-                "issue"
-            } else {
-                "issues"
-            },
-            messages.join("\n")
-        )
-    }
-}
-
-fn value_type(value: Option<&serde_json::Value>) -> &'static str {
-    use serde_json::Value;
-    match value {
-        None => "undefined",
-        Some(Value::Null) => "null",
-        Some(Value::Bool(_)) => "boolean",
-        Some(Value::Number(_)) => "number",
-        Some(Value::String(_)) => "string",
-        Some(Value::Array(_)) => "array",
-        Some(Value::Object(_)) => "object",
-    }
-}
-
-fn quoted_options(values: &[serde_json::Value], separator: &str) -> String {
-    values
-        .iter()
-        .map(|value| js_json(value, false))
-        .collect::<Vec<_>>()
-        .join(separator)
-}
-
 fn collect_issues(
     schema: &serde_json::Value,
     input: Option<&serde_json::Value>,
@@ -354,6 +199,14 @@ fn collect_issues(
     issues: &mut Vec<serde_json::Value>,
 ) -> bool {
     use serde_json::{json, Value};
+    if path.is_empty() {
+        if let Some(flat) =
+            input.and_then(|input| tool_api::native_schema::collect_flat_issues(schema, input))
+        {
+            issues.extend(flat);
+            return true;
+        }
+    }
     let Some(object) = schema.as_object() else {
         return schema == &json!(true);
     };
@@ -510,11 +363,15 @@ fn collect_issues(
         if schema.get("additionalProperties") == Some(&json!(false)) {
             let keys: Vec<_> = js_keys(input)
                 .into_iter()
-                .filter(|key| !properties.is_some_and(|p| p.contains_key(*key)))
+                // Native Zod intentionally ignores __proto__ while walking
+                // object keys, even for strict objects.
+                .filter(|key| {
+                    key.as_str() != "__proto__" && !properties.is_some_and(|p| p.contains_key(*key))
+                })
                 .cloned()
                 .collect();
             if !keys.is_empty() {
-                issues.push(json!({"code":"unrecognized_keys","keys":keys,"path":path,"message":format!("Unrecognized key(s) in object: {}", keys.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(", "))}));
+                issues.push(json!({"code":"unrecognized_keys","keys":keys,"path":path,"message":format!("Unrecognized key{}: {}", if keys.len() == 1 { "" } else { "s" }, keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", "))}));
             }
         } else if let Some(extra_schema) =
             schema.get("additionalProperties").filter(|v| v.is_object())
@@ -696,6 +553,245 @@ mod tests {
         validate_named_tool_input_schema, validate_tool_input_schema, validate_tool_output_schema,
     };
     use serde_json::json;
+
+    struct NativeCronSchema {
+        name: String,
+        schema: serde_json::Value,
+    }
+    #[async_trait::async_trait]
+    impl tool_api::Tool for NativeCronSchema {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1000
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        fn is_enabled(&self, _: &tool_api::tool_trait::ToolStaticContext) -> bool {
+            true
+        }
+        async fn description(
+            &self,
+            _: &serde_json::Value,
+            _: &tool_api::tool_trait::DescriptionOptions,
+        ) -> String {
+            unreachable!()
+        }
+        async fn prompt(&self, _: &tool_api::tool_trait::PromptOptions) -> String {
+            unreachable!()
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &tool_api::context::ToolUseContext,
+        ) -> permission::PermissionResult {
+            unreachable!()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            _: tool_api::context::ToolUseContext,
+            _: tool_api::progress::ToolProgressSender,
+        ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn cron_outer_diagnostics_match_executed_native_2_1_270_zod() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tools/cron/tests/fixtures/malformed_input_2_1_270.json"
+        ))
+        .unwrap();
+        for (index, case) in oracle["cases"].as_array().unwrap().iter().enumerate() {
+            let name = case["tool"].as_str().unwrap();
+            let tool = NativeCronSchema {
+                name: name.into(),
+                schema: oracle["schemas"][name].clone(),
+            };
+            // The companion tool-cron test locks the real Tool::coerce_input
+            // output to these actual native preprocessors before this gate.
+            let result = super::validate_tool_schema_detailed(&tool, &case["coerced"]);
+            if case["success"] == true {
+                assert!(result.is_ok(), "case {index}: {case}: {result:?}");
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.display,
+                    case["display"].as_str().unwrap(),
+                    "display case {index}"
+                );
+                assert_eq!(error.raw, case["raw"].as_str().unwrap(), "raw case {index}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cron_main_dispatch_keeps_native_raw_and_model_diagnostics_distinct() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tools/cron/tests/fixtures/malformed_input_2_1_270.json"
+        ))
+        .unwrap();
+        let mut registry = tool_api::registry::ToolRegistry::new();
+        for name in ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList"] {
+            registry.register_builtin(Arc::new(NativeCronSchema {
+                name: name.into(),
+                schema: oracle["schemas"][name].clone(),
+            }));
+        }
+        let orch = crate::conversation::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::path::PathBuf::from("/tmp"),
+        );
+        for (index, case) in oracle["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(_, case)| case["success"] == false)
+        {
+            let id = protocol::ToolUseId::new();
+            let uses = vec![(
+                id.clone(),
+                case["tool"].as_str().unwrap().into(),
+                case["coerced"].clone(),
+                None,
+            )];
+            let (blocks, _, _, _) =
+                crate::turn_loop::dispatch_tool_uses_tracked(&orch, &uses, None)
+                    .await
+                    .unwrap();
+            let protocol::ContentBlock::ToolResult {
+                content, is_error, ..
+            } = &blocks[0]
+            else {
+                panic!("expected tool result")
+            };
+            assert!(*is_error);
+            assert_eq!(
+                content,
+                &format!(
+                    "<tool_use_error>InputValidationError: {}</tool_use_error>",
+                    case["display"].as_str().unwrap()
+                ),
+                "model {index}"
+            );
+            assert_eq!(
+                orch.transcript
+                    .tool_use_results
+                    .lock()
+                    .await
+                    .get(&id.to_string()),
+                Some(&json!(format!(
+                    "InputValidationError: {}",
+                    case["raw"].as_str().unwrap()
+                ))),
+                "persisted {index}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn monitor_main_dispatch_matches_native_270_schema_corpus() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+        telemetry::test_set_flag("tengu_amber_sentinel", true);
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tools/task/tests/fixtures/monitor_schema_2_1_270.json"
+        ))
+        .unwrap();
+        let context =
+            tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+        let tool: Arc<dyn tool_api::Tool> = Arc::new(tool_task::monitor::MonitorTool::new(context));
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool.clone());
+        let orch = crate::conversation::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::path::PathBuf::from("/tmp"),
+        );
+        for (index, case) in oracle["cases"].as_array().unwrap().iter().enumerate() {
+            telemetry::test_set_flag("tengu_breezy_crescent", case["mode"] == "bounded");
+            if case["success"] == true {
+                assert_eq!(
+                    tool.parse_native_input(&case["input"]).unwrap().unwrap(),
+                    case["normalized"],
+                    "parsed {index}"
+                );
+                assert!(
+                    super::validate_tool_schema_detailed(tool.as_ref(), &case["input"]).is_ok()
+                );
+                continue;
+            }
+            let id = protocol::ToolUseId::new();
+            let uses = vec![(id.clone(), "Monitor".into(), case["input"].clone(), None)];
+            let (blocks, _, _, _) =
+                crate::turn_loop::dispatch_tool_uses_tracked(&orch, &uses, None)
+                    .await
+                    .unwrap();
+            let protocol::ContentBlock::ToolResult {
+                content, is_error, ..
+            } = &blocks[0]
+            else {
+                panic!("expected tool result")
+            };
+            assert!(*is_error);
+            assert_eq!(
+                content,
+                &format!(
+                    "<tool_use_error>InputValidationError: {}</tool_use_error>",
+                    case["display"].as_str().unwrap()
+                ),
+                "model {index}"
+            );
+            assert_eq!(
+                orch.transcript
+                    .tool_use_results
+                    .lock()
+                    .await
+                    .get(&id.to_string()),
+                Some(&json!(format!(
+                    "InputValidationError: {}",
+                    case["raw"].as_str().unwrap()
+                ))),
+                "raw {index}"
+            );
+        }
+        telemetry::test_clear_flag("tengu_amber_sentinel");
+        telemetry::test_clear_flag("tengu_breezy_crescent");
+    }
 
     #[test]
     fn issue_json_uses_javascript_numbers_and_integer_key_order() {

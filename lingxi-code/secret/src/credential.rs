@@ -117,6 +117,13 @@ pub struct OpenAiOAuthTokens {
     pub fedramp: bool,
 }
 
+/// Receives rotations for a host-owned persistent OAuth session.
+#[async_trait::async_trait]
+pub trait OpenAiOAuthObserver: Send + Sync {
+    /// Publish a successfully stored session without exposing it to logs.
+    async fn updated(&self, tokens: OpenAiOAuthTokens);
+}
+
 /// Non-secret session metadata persisted alongside the `OpenAI` OAuth tokens.
 /// Serialized to JSON and stored in the `openai-oauth-meta` entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +191,7 @@ pub struct CredentialManager {
     /// second copy through Rust secure storage.
     plugin_secret_cache: RwLock<HashMap<(String, String), Secret<String>>>,
     api_key_ttl: Duration,
+    openai_oauth_observer: std::sync::RwLock<Option<Arc<dyn OpenAiOAuthObserver>>>,
 }
 
 impl CredentialManager {
@@ -205,7 +213,16 @@ impl CredentialManager {
             provider_key_cache: RwLock::new(HashMap::new()),
             plugin_secret_cache: RwLock::new(HashMap::new()),
             api_key_ttl: Duration::from_secs(300),
+            openai_oauth_observer: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Attach the packaged host's session persistence observer before boot.
+    pub fn set_openai_oauth_observer(&self, observer: Arc<dyn OpenAiOAuthObserver>) {
+        *self
+            .openai_oauth_observer
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
     }
 
     /// Returns the Anthropic API key, loading from [`SecureStorage`] on cache
@@ -845,6 +862,23 @@ impl CredentialManager {
                 SecureStorageData::new(meta_json, meta_meta),
             )
             .await?;
+        let observer = self
+            .openai_oauth_observer
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            observer
+                .updated(OpenAiOAuthTokens {
+                    access_token: Secret::new(access.to_string()),
+                    refresh_token: refresh.map(|value| Secret::new(value.to_string())),
+                    expires_at,
+                    scopes: meta.scopes,
+                    account_id: account_id.map(str::to_string),
+                    fedramp,
+                })
+                .await;
+        }
         Ok(())
     }
 
@@ -1022,6 +1056,48 @@ mod oauth_tests {
             Arc::new(NoHttp),
         );
         (storage, cm)
+    }
+
+    #[tokio::test]
+    async fn openai_oauth_observer_receives_rotated_session() {
+        struct Observer(tokio::sync::Mutex<Vec<OpenAiOAuthTokens>>);
+        #[async_trait::async_trait]
+        impl OpenAiOAuthObserver for Observer {
+            async fn updated(&self, tokens: OpenAiOAuthTokens) {
+                self.0.lock().await.push(tokens);
+            }
+        }
+        let (_, manager) = manager();
+        let observer = Arc::new(Observer(tokio::sync::Mutex::new(vec![])));
+        manager.set_openai_oauth_observer(observer.clone());
+        let expiry = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+        manager
+            .store_openai_oauth_tokens(
+                "access",
+                Some("rotated"),
+                expiry,
+                vec![],
+                Some("acct"),
+                false,
+            )
+            .await
+            .unwrap();
+        let sessions = observer.0.lock().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].refresh_token.as_ref().unwrap().expose_secret(),
+            "rotated"
+        );
+        assert_eq!(sessions[0].account_id.as_deref(), Some("acct"));
+        assert_eq!(
+            manager
+                .get_openai_oauth_tokens()
+                .await
+                .unwrap()
+                .unwrap()
+                .expires_at,
+            expiry
+        );
     }
 
     #[tokio::test]

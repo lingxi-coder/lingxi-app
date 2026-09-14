@@ -31,7 +31,9 @@
 pub mod audio_bridge;
 pub mod boot;
 pub use configuration_admin::config_admin;
+pub mod desktop_terminal;
 pub mod driver;
+mod cron_host;
 pub use configuration_admin::hook_admin;
 pub use configuration_admin::mcp_admin;
 pub use configuration_admin::mcp_bridge;

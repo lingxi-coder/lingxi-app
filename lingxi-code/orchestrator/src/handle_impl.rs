@@ -64,6 +64,7 @@ impl ConversationOrchestrator {
     /// these caches would make the new session depend on the previously mounted
     /// transcript.
     async fn reset_session_scoped_runtime(&self) {
+        self.reset_goal_interruption();
         let protocol_session_id = self.session.lock().await.session_id;
         let session_id = protocol_session_id.to_string();
         compaction::invoked_skills::clear_session(&session_id);
@@ -507,7 +508,7 @@ impl ConversationOrchestrator {
                 resumed_profile.as_deref(),
                 selection,
             );
-        } else {
+        } else if !runtime.model.is_empty() || resumed_effort.is_some() {
             self.restore_effort_from_resume(
                 &resumed_model,
                 resumed_profile.as_deref(),
@@ -697,6 +698,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await;
         }
         let mut s = self.session.lock().await;
+        self.reset_goal_interruption();
         s.active_goal = Some(lingxi_core::session::ActiveGoalState {
             condition: condition.to_string(),
             set_at: SystemTime::now(),
@@ -717,7 +719,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             let mut metadata = telemetry::LogEventMetadata::new();
             metadata.insert(
                 "promptLength".into(),
-                telemetry::AnalyticsValue::Int(condition.len() as i64),
+                telemetry::AnalyticsValue::Int(condition.encode_utf16().count() as i64),
             );
             metadata.insert(
                 "via".into(),

@@ -107,8 +107,11 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
-use platform_api::{ActiveGoalSnapshot, OrchestratorHandle};
+#[cfg(test)]
+use platform_api::ActiveGoalSnapshot;
+use platform_api::OrchestratorHandle;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::SystemTime;
 
 /// `wEt` — the max goal-condition length (v2.1.198).
@@ -207,8 +210,11 @@ impl GoalHandler {
                     1 => "1 turn".to_string(),
                     count => format!("{count} turns"),
                 };
-                let last_check = match g.last_reason.as_deref() {
-                    Some(reason) => format!("\nLast check: {}", first_line(reason.trim())),
+                let last_check = match g.last_reason.as_deref().filter(|reason| !reason.is_empty())
+                {
+                    Some(reason) => {
+                        format!("\nLast check: {}", first_line(trim_js_whitespace(reason)))
+                    }
                     None => String::new(),
                 };
                 format!("Goal active: {} ({evaluations}){last_check}", g.condition)
@@ -233,14 +239,15 @@ impl GoalHandler {
     /// prompt:nrr(n)} `` — see the module doc's `CommandResult` mapping note
     /// for why only the `prompt` half is representable here).
     async fn set(&self, condition: &str) -> CommandResult {
-        if !self.handle.workspace_trusted().await {
-            return CommandResult::Done {
-                display: Some(TRUST_GATE_MESSAGE.to_string()),
-            };
-        }
+        // 2.1.270 `ust`: hooks restrictions take precedence over trust.
         if self.handle.hooks_restricted().await {
             return CommandResult::Done {
                 display: Some(HOOKS_RESTRICTED_MESSAGE.to_string()),
+            };
+        }
+        if !self.handle.workspace_trusted().await {
+            return CommandResult::Done {
+                display: Some(TRUST_GATE_MESSAGE.to_string()),
             };
         }
         self.handle.set_active_goal(condition).await;
@@ -253,7 +260,7 @@ impl GoalHandler {
 #[async_trait]
 impl BuiltinCommandHandler for GoalHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
-        let trimmed = args.raw_args.trim();
+        let trimmed = trim_js_whitespace(&args.raw_args);
 
         // 1) empty → status.
         if trimmed.is_empty() {
@@ -269,8 +276,8 @@ impl BuiltinCommandHandler for GoalHandler {
             };
         }
 
-        // 3) too long → fixed error (counts characters, not bytes).
-        let n = trimmed.chars().count();
+        // 2.1.270 `e.length`: JavaScript counts UTF-16 code units.
+        let n = trimmed.encode_utf16().count();
         if n > MAX_CONDITION_CHARS {
             telemetry::emit_command_failed(TELEMETRY_GOAL_SET_EVENT, TELEMETRY_TOO_LONG_PROPERTY);
             return CommandResult::Done {
@@ -296,6 +303,11 @@ impl BuiltinCommandHandler for GoalHandler {
     }
 }
 
+/// Match ECMAScript `String.trim()`, including BOM but excluding U+0085.
+fn trim_js_whitespace(s: &str) -> &str {
+    s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
+}
+
 /// `Hr(t)` = `pt(t,"\n")` (2.1.266 `src_157781101.js`) — everything before the
 /// first newline, so a multi-line evaluator reason renders as ONE line.
 fn first_line(s: &str) -> &str {
@@ -309,6 +321,17 @@ fn first_line(s: &str) -> &str {
 mod tests {
     use super::*;
     use orchestrator::test_support::MockOrchestratorHandle;
+
+    #[test]
+    fn goal_directive_matches_latest_oracle_bytes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/goal_2_1_270.json")).unwrap();
+        let expected = fixture["directive"]
+            .as_str()
+            .unwrap()
+            .replace("{condition}", "ship it");
+        assert_eq!(directive_for("ship it").as_bytes(), expected.as_bytes());
+    }
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -378,6 +401,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latest_oracle_counts_utf16_units_for_goal_limit() {
+        let h = handler();
+        let exact = "😀".repeat(2000);
+        assert!(matches!(
+            h.handle(&args(&exact)).await,
+            CommandResult::InjectMessage { .. }
+        ));
+        let long = format!("{exact}x");
+        match h.handle(&args(&long)).await {
+            CommandResult::Done {
+                display: Some(text),
+            } => assert_eq!(
+                text,
+                "Goal condition is limited to 4000 characters (got 4001)"
+            ),
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_oracle_uses_javascript_trim_and_reason_truthiness() {
+        let (handle, h) = mock_handler();
+        assert!(matches!(
+            h.handle(&args("\u{feff}clear\u{feff}")).await,
+            CommandResult::Done { .. }
+        ));
+        assert!(matches!(
+            h.handle(&args("\u{85}")).await,
+            CommandResult::InjectMessage { .. }
+        ));
+        for (reason, suffix) in [
+            ("", ""),
+            ("   ", "\nLast check: "),
+            ("\u{feff}evidence\u{feff}", "\nLast check: evidence"),
+        ] {
+            handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
+                condition: "ship".to_string(),
+                set_at: SystemTime::now(),
+                last_reason: Some(reason.to_string()),
+                iterations: 1,
+                tokens_at_start: 0,
+            }));
+            assert_eq!(
+                h.status().await,
+                format!("Goal active: ship (1 turn){suffix}")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn setting_a_goal_injects_the_fixed_directive() {
         let h = handler();
         match h.handle(&args("ship the release notes")).await {
@@ -409,6 +482,20 @@ mod tests {
             handle.get_active_goal().await.is_none(),
             "the trust gate must reject before /goal mutates state or registers hooks"
         );
+    }
+
+    #[tokio::test]
+    async fn latest_oracle_checks_hook_policy_before_workspace_trust() {
+        let (handle, h) = mock_handler();
+        handle.set_workspace_trusted(false);
+        handle.set_hooks_restricted(true);
+        match h.handle(&args("ship")).await {
+            CommandResult::Done {
+                display: Some(text),
+            } => assert_eq!(text, HOOKS_RESTRICTED_MESSAGE),
+            other => panic!("expected hook-policy rejection, got {other:?}"),
+        }
+        assert!(handle.get_active_goal().await.is_none());
     }
 
     #[tokio::test]

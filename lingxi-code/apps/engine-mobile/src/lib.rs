@@ -778,6 +778,9 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
     ctx: BuiltinToolContext,
     config_home: Option<std::path::PathBuf>,
     ask_resolver: Option<Arc<dyn AskUserQuestionResolver>>,
+) -> (
+    tool_cron::WakeupSchedulerCell,
+    Arc<std::sync::atomic::AtomicBool>,
 ) {
     // ----- cross-platform subset (also linked by engine-desktop) -----------
     tool_file::register_all(reg, ctx.clone());
@@ -796,7 +799,7 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
     // saved/listed/deletable but does NOT auto-fire on this platform; CronCreate's
     // result text says so (see schedule_cron.rs `scheduler_active`). RemoteTrigger
     // is independent of the local scheduler (it triggers a cloud-side run).
-    tool_cron::register_all(reg, ctx.clone());
+    let wakeup_scheduler = tool_cron::register_all_with_auth(reg, ctx.clone(), None);
     // Mobile Linux carries plugin-provided language servers over its raw
     // stdio transport. The tool remains self-gated until a plugin server is
     // registered and the platform transport reports available.
@@ -815,6 +818,7 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
     tool_shell_mobile::register_all(reg, ctx.clone());
     // P4: mobile structured git tool. Same pre-gate rule as shell.
     tool_git_mobile::register_all(reg, ctx);
+    wakeup_scheduler
 }
 
 /// Audit fix (#14): the FFI sibling of [`mobile_tool_registry`] that wires a
@@ -855,6 +859,32 @@ pub fn mobile_tool_registry_with_skill_loader_and_ask_resolver(
         skill_loader,
     )));
     reg
+}
+
+/// Internal host builder retains the cell that ScheduleWakeup actually reads.
+#[cfg(feature = "uniffi")]
+pub(crate) fn mobile_tool_registry_with_wakeup(
+    ctx: BuiltinToolContext,
+    config_home: std::path::PathBuf,
+    skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
+    ask_resolver: Option<Arc<dyn AskUserQuestionResolver>>,
+) -> (
+    ToolRegistry,
+    tool_cron::WakeupSchedulerCell,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut reg = ToolRegistry::new();
+    let (cell, armed) = register_mobile_non_skill_tools_with_ask_resolver(
+        &mut reg,
+        ctx.clone(),
+        Some(config_home),
+        ask_resolver,
+    );
+    reg.register_builtin(Arc::new(tool_skill::SkillTool::with_loader(
+        ctx,
+        skill_loader,
+    )));
+    (reg, cell, armed)
 }
 
 /// Register Android Computer Use only when both the Direct-build Cargo feature
@@ -1017,7 +1047,7 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
     // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
     // job is inert, but the skill's listing/usage path is harmless and faithful.
     let cron_enabled =
-        !platform_api::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
+        tool_cron::cron_tools_enabled();
     command_core::register_bundled_skills(reg, cron_enabled);
 }
 

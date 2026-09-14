@@ -90,6 +90,21 @@ impl TurnDriver for CredentialRequiredTurnDriver {
     async fn run_turn_with_images(&self, _prompt: String, _images: Vec<ImageRefDto>) {
         self.reject_turn().await;
     }
+
+    /// Without this override the trait default answers "Scheduled session
+    /// execution is unavailable", which the host surfaces verbatim as the run's
+    /// failure — so a boot with no credentials tells the user the scheduler is
+    /// broken instead of telling them to sign in. `paused:` keeps the run
+    /// retryable rather than retiring the task, exactly as the default did.
+    async fn run_scheduled_turn(
+        &self,
+        _prompt: String,
+        _model: String,
+        _reasoning: client_protocol::controls::ReasoningSelectionDto,
+        _cancel: CancellationToken,
+    ) -> Result<String, String> {
+        Err(format!("paused:{CREDENTIAL_REQUIRED_MESSAGE}"))
+    }
 }
 
 /// A msgqueue-backed [`orchestrator::prompt::mid_turn_input::MidTurnInputSource`].
@@ -145,6 +160,12 @@ impl MsgQueueMidTurnInput {
 
 #[async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTurnInput {
+    fn supports_goal_retries(&self) -> bool { true }
+    async fn has_queued_goal_work(&self) -> bool { self.queue.has_main_thread_commands().await }
+    async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
+        self.queue.enqueue_goal_retry(id, body, cancel).await;
+    }
+
     async fn take_mid_turn_input(&self) -> Option<String> {
         let taken = self.queue.take_mid_turn_prompt().await;
         if taken.is_some() {
@@ -153,6 +174,13 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
         }
         taken
     }
+}
+
+struct PendingWakeup {
+    handle: platform_api::BackgroundTaskHandle,
+    prompt: String,
+    command_id: String,
+    cancel: CancellationToken,
 }
 
 /// A msgqueue-backed [`tool_cron::WakeupScheduler`] — the composition-root impl
@@ -164,11 +192,9 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 /// [`WakeupScheduler::schedule`] spawns ONE background task that
 /// [`RuntimeSpawner::sleep`]s for `delay`, resolves the autonomous sentinel via
 /// [`tool_cron::resolve_wakeup_prompt`], and ENQUEUEs the resolved prompt at
-/// [`msgqueue::QueuePriority::Next`] so the between-turn / mid-turn drain folds
-/// it into the session as its own follow-up turn.
-///
-/// `Next` (not `Now`) is deliberate: a self-wakeup should resume work between
-/// turns, not abort an in-flight turn the user may be watching.
+/// [`msgqueue::QueuePriority::Later`] so it runs only after the current turn.
+/// This matches the upstream scheduled notification's `later` priority,
+/// `isMeta: true`, and `skipSlashCommands: true`.
 ///
 /// WIRING: attached at `boot::assemble`. The `ScheduleWakeupTool` is built deep
 /// inside `engine_desktop::build` (via `tool_cron::register_all_with_auth`)
@@ -185,12 +211,14 @@ pub struct MsgQueueWakeupScheduler {
     /// entries), each paired with the prompt it will re-inject. A new schedule
     /// supersedes them; `stop: true` and a user abort cancel them AND forget
     /// those prompts' loop records (`Ort`), which is why the prompt is kept.
-    pending: Arc<std::sync::Mutex<Vec<(platform_api::BackgroundTaskHandle, String)>>>,
+    pending: Arc<std::sync::Mutex<Vec<PendingWakeup>>>,
     /// The connection's event sink, used at fire time to announce the wakeup
     /// (binary `onFireTask`'s transcript append) and, after quiet ticks, the
     /// no-op fold's streak line. `None` ⇒ the wakeup fires silently (tests, and
     /// any host assembled without a sink).
     events: Option<Arc<dyn ClientEventSink>>,
+    /// Persist fire boundaries alongside conversation history before publishing.
+    orchestrator: Option<std::sync::Weak<orchestrator::ConversationOrchestrator>>,
 }
 
 impl MsgQueueWakeupScheduler {
@@ -206,6 +234,7 @@ impl MsgQueueWakeupScheduler {
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             pending: Arc::new(std::sync::Mutex::new(Vec::new())),
             events: None,
+            orchestrator: None,
         }
     }
 
@@ -222,7 +251,18 @@ impl MsgQueueWakeupScheduler {
             loop_runtime,
             pending: Arc::new(std::sync::Mutex::new(Vec::new())),
             events: None,
+            orchestrator: None,
         }
+    }
+
+    /// Retain structured wakeup metadata so resume reconstructs no-op folds.
+    #[must_use]
+    pub fn with_orchestrator(
+        mut self,
+        orchestrator: Arc<orchestrator::ConversationOrchestrator>,
+    ) -> Self {
+        self.orchestrator = Some(Arc::downgrade(&orchestrator));
+        self
     }
 
     /// Announce each firing wakeup on `events` (binary `onFireTask`). Additive
@@ -237,17 +277,22 @@ impl MsgQueueWakeupScheduler {
 
 #[async_trait]
 impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
-    async fn schedule(&self, delay: std::time::Duration, prompt: String, reason: String) {
+    async fn schedule(&self, delay: std::time::Duration, prompt: String, _reason: String) {
         let queue = self.queue.clone();
         let runtime = self.runtime.clone();
         let pending = self.pending.clone();
         let events = self.events.clone();
+        let orchestrator = self.orchestrator.clone();
         let loop_runtime = self.loop_runtime.clone();
         // The task body consumes `prompt`; keep the un-resolved text for the
         // pending list so `cancel_pending` can report it back for `Ort`.
         let prompt_for_pending = prompt.clone();
-        let task_id_slot = Arc::new(std::sync::Mutex::new(None::<u64>));
-        let task_id_for_task = task_id_slot.clone();
+        let task = tool_cron::WakeupTask::new(delay, &prompt);
+        let command_id = task.command_id();
+        let task_command_id = command_id.clone();
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let (registered, registration) = tokio::sync::oneshot::channel();
         // Spawn a detached one-shot timer (engine code must not call
         // `tokio::spawn` directly — D17 — so go through the runtime seam).
         let spawned = runtime
@@ -255,13 +300,18 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
             .spawn(
                 "loop-wakeup",
                 Box::pin(async move {
+                    tokio::select! {
+                        biased;
+                        () = task_cancel.cancelled() => {},
+                        () = async {
+                    // Even a zero-delay test timer must remain discoverable by
+                    // cancellation until persistence/publication/enqueue finish.
+                    if registration.await.is_err() { return; }
                     runtime.sleep(delay).await;
-                    // Fired: this handle is no longer pending.
-                    if let Some(id) = *task_id_for_task.lock().unwrap_or_else(|e| e.into_inner()) {
-                        pending
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .retain(|(h, _)| h.task_id != id);
+                    // The upstream scheduler skips its tick while loading. Keep
+                    // this timer cancellable until the current turn has settled.
+                    while queue.has_active_turn().await {
+                        runtime.sleep(std::time::Duration::from_millis(100)).await;
                     }
                     // PARITY `onFireTask`'s loop branch (`s.replace(f => D(f,
                     // u, U(t), l))`): announce the resume, carrying the no-op
@@ -281,73 +331,110 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
                         // groups to collapse — the oracle's `foldedUuids`,
                         // expressed as a count because a LingXi wakeup is one
                         // turn.
+                        let since_ms = streak.map_or(0, |(_, since)| {
+                            since.duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                        });
+                        if let Some(orchestrator) = orchestrator.as_ref().and_then(std::sync::Weak::upgrade) {
+                            if let Err(error) = orchestrator.append_scheduled_loop_wakeup(
+                                message.clone(), companion.clone(), streak.map_or(0, |(count, _)| count), since_ms,
+                                orchestrator::ScheduledLoopFire { fire_id: task.fire_id, task_id: task.task_id.clone(), cron: task.cron.clone(), prompt: task.display_prompt.clone(), task_kind_loop: true },
+                            ).await {
+                                tracing::warn!(%error, "could not persist /loop wakeup boundary");
+                            }
+                        }
                         sink.emit(ClientEvent::LoopWakeup {
                             message,
                             companion,
                             streak: streak.map_or(0, |(streak, _)| streak),
-                            since_ms: streak.map_or(0, |(_, since)| {
-                                since
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-                            }),
+                            since_ms,
                         })
                         .await;
                     }
-                    // Resolve the `<<autonomous-loop-dynamic>>` sentinel at fire
-                    // time (else passthrough).
-                    let resolved = tool_cron::resolve_wakeup_prompt(&prompt);
+                    // Preserve the sentinel as the loop identity. The drain
+                    // resolves it for this turn; keepalive must re-read loop.md.
                     queue
                         .enqueue(msgqueue::QueuedCommand {
-                            uuid: format!("loop-wakeup-{}", uuid_like(&reason)),
-                            content: msgqueue::QueuedCommandContent::UserInput { text: resolved },
-                            priority: msgqueue::QueuePriority::Next,
+                            scheduled_task_id: Some(task.task_id.clone()),
+                            scheduled_fire_id: Some(task.fire_id.as_uuid().to_string()),
+                            uuid: task_command_id.clone(),
+                            content: msgqueue::QueuedCommandContent::UserInput { text: prompt },
+                            priority: msgqueue::QueuePriority::Later,
                             queued_at: std::time::SystemTime::now(),
                             source: msgqueue::QueueSource::Cron,
                             agent_id: None,
-                            // The resolved text is a /loop input meant for the
-                            // model (it may begin with `/`); the dynamic-mode
-                            // contract re-fires the same input, so route it as a
-                            // slash command when applicable — leave the default
-                            // (false) so a leading `/` IS treated as a slash
-                            // command, matching how the user originally typed it.
-                            skip_slash_commands: false,
-                            is_meta: false,
+                            // Scheduled prompts are model instructions, including
+                            // slash-like text, and never become mid-turn user input.
+                            skip_slash_commands: true,
+                            is_meta: true,
                         })
                         .await;
+                    pending.lock().unwrap_or_else(|e| e.into_inner())
+                        .retain(|entry| entry.command_id != task_command_id);
+                        } => {},
+                    }
                 }),
             )
             .await;
         if let Ok(handle) = spawned {
-            *task_id_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.task_id);
             self.pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((handle, prompt_for_pending));
+                .push(PendingWakeup {
+                    handle,
+                    prompt: prompt_for_pending,
+                    command_id,
+                    cancel,
+                });
+            let _ = registered.send(());
         }
     }
 
     async fn cancel_pending(&self) -> Vec<String> {
         let armed: Vec<_> =
             std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut cancelled = Vec::with_capacity(armed.len());
-        let mut still_armed = Vec::new();
-        for (handle, prompt) in armed {
-            if self.runtime.cancel(&handle).await.is_ok() {
-                cancelled.push(prompt);
-            } else {
-                // The timer is still going to fire and re-inject this prompt.
-                // Dropping it from `pending` would make it invisible to a later
-                // `stop: true` / user abort while it silently resumes the loop,
-                // so put it back and say so.
-                tracing::warn!("[loop/dynamic] could not cancel a pending wakeup; still armed");
-                still_armed.push((handle, prompt));
-            }
+        // Logical cancellation also covers a timer blocked in persistence, and
+        // hosts whose RuntimeSpawner cannot abort a task that has begun firing.
+        for entry in &armed {
+            entry.cancel.cancel();
         }
-        if !still_armed.is_empty() {
-            self.pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(still_armed);
+        let mut cancelled = Vec::with_capacity(armed.len());
+        for entry in armed {
+            let _ = self.runtime.cancel(&entry.handle).await;
+            self.queue
+                .remove(&[entry.command_id], "dynamic loop cancelled")
+                .await;
+            cancelled.push(entry.prompt);
+        }
+        // A wakeup that ALREADY fired retired itself from `pending` the moment
+        // it enqueued, so the loop above sees nothing to remove while its
+        // `Later`-priority command still sits in the queue — and the drain
+        // between turns then runs the tick the user just stopped. Sweep the
+        // queue for those too. `tool_cron::RuntimeWakeupScheduler::cancel_pending`
+        // does the same through `delivery.cancel_queued()`; this is the msgqueue
+        // spelling of it.
+        let stranded: Vec<_> = self
+            .queue
+            .snapshot()
+            .await
+            .into_iter()
+            .filter(|command| {
+                command.source == msgqueue::QueueSource::Cron
+                    && command.uuid.starts_with("loop-wakeup-")
+            })
+            .collect();
+        if !stranded.is_empty() {
+            let ids: Vec<_> = stranded.iter().map(|command| command.uuid.clone()).collect();
+            self.queue.remove(&ids, "dynamic loop cancelled").await;
+            for command in stranded {
+                if let Some(text) = command.text() {
+                    // One pending wakeup per prompt: count the
+                    // enqueue -> pending-retirement handoff once.
+                    if !cancelled.iter().any(|prompt| prompt == text) {
+                        cancelled.push(text.to_string());
+                    }
+                }
+            }
         }
         cancelled
     }
@@ -357,15 +444,51 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
     }
 }
 
-/// Cheap pseudo-unique suffix for the wakeup command uuid, derived from the
-/// reason + the current nanos. Not cryptographic — only needs to disambiguate
-/// concurrent wakeups for trace correlation.
-fn uuid_like(reason: &str) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos}-{}", reason.len())
+#[async_trait]
+impl cron::scheduler::SessionCronDelivery for MsgQueueWakeupScheduler {
+    async fn clear_queued(&self) {
+        let ids: Vec<_> = self.queue.snapshot().await.into_iter()
+            .filter(|command| command.source == msgqueue::QueueSource::Cron && command.uuid.starts_with("cron-fire-"))
+            .map(|command| command.uuid).collect();
+        self.queue.remove(&ids, "session changed").await;
+    }
+    async fn is_loading(&self) -> bool { self.queue.has_active_turn().await }
+    async fn enqueue(&self, fire: cron::scheduler::SessionCronFire) -> Result<(), String> {
+        if fire.cron.is_empty() {
+            self.queue.enqueue(msgqueue::QueuedCommand {
+                scheduled_task_id: None,
+                scheduled_fire_id: None,
+                uuid: format!("cron-fire-{}", fire.id),
+                content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
+                priority: msgqueue::QueuePriority::Later,
+                queued_at: std::time::SystemTime::now(), source: msgqueue::QueueSource::Cron,
+                agent_id: None, skip_slash_commands: true, is_meta: true,
+            }).await;
+            return Ok(());
+        }
+        let task = tool_cron::WakeupTask::scheduled(&fire);
+        let now = std::time::SystemTime::now();
+        let now_ms = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let (message, _) = task.lines(now_ms, None);
+        if let Some(orch) = self.orchestrator.as_ref().and_then(std::sync::Weak::upgrade) {
+            orch.append_scheduled_loop_wakeup(message.clone(), None, 0, 0,
+                orchestrator::ScheduledLoopFire { fire_id: task.fire_id, task_id: task.task_id.clone(), cron: task.cron.clone(),
+                    prompt: task.display_prompt.clone(), task_kind_loop: false }).await.map_err(|e| e.to_string())?;
+        }
+        if let Some(sink) = &self.events {
+            sink.emit(ClientEvent::ScheduledTaskFire { message }).await;
+        }
+        self.queue.enqueue(msgqueue::QueuedCommand {
+            scheduled_task_id: Some(task.task_id.clone()),
+            scheduled_fire_id: Some(task.fire_id.as_uuid().to_string()),
+            uuid: task.command_id(),
+            content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
+            priority: msgqueue::QueuePriority::Later, queued_at: now,
+            source: msgqueue::QueueSource::Cron, agent_id: None,
+            skip_slash_commands: true, is_meta: true,
+        }).await;
+        Ok(())
+    }
 }
 
 /// A production [`TurnDriver`] backed by a real [`ConversationOrchestrator`].
@@ -581,6 +704,18 @@ impl OrchestratorTurnDriver {
         notification_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
         in_human_turn: bool,
     ) {
+        self.drive_turn_with_inputs(prompt, sources, cancel, notification_registry, in_human_turn, None).await;
+    }
+
+    async fn drive_turn_with_inputs(
+        &self,
+        prompt: String,
+        sources: Vec<ImageSource>,
+        cancel: CancellationToken,
+        notification_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+        in_human_turn: bool,
+        inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
+    ) {
         platform_api::live_sessions::set_process_status("busy", None);
         if let Some(output) = &self.message_output {
             output.reset_message_buffer().await;
@@ -608,17 +743,13 @@ impl OrchestratorTurnDriver {
             self.orchestrator
                 .run_task_notification_rewake(registry.as_ref(), cancel)
                 .await
+        } else if let Some(inputs) = inputs {
+            self.orchestrator.run_queued_prompt_batch(inputs, cancel).await
         } else {
             self.orchestrator
                 .run_turn_streaming_with_origin(&prompt, sources, cancel, None, in_human_turn)
                 .await
         };
-        // Clear the active-turn token at turn end (graceful OR error): a later
-        // `Now` enqueue between turns then has nothing to abort and simply waits
-        // for the between-turn drain. No-op when no queue is wired.
-        if let Some(queue) = self.queue.as_ref() {
-            queue.clear_active_turn().await;
-        }
         // USER ABORT (binary `t3t`): the user interrupted this turn, so every
         // pending dynamic-loop wakeup is cancelled, the in-flight tick is
         // dropped, their chain-start records are forgotten and the loop ends
@@ -662,6 +793,7 @@ impl OrchestratorTurnDriver {
                 .map_or(0, |c| c.load(std::sync::atomic::Ordering::Relaxed))
                 .saturating_sub(foreign_inputs_before);
             if span.compactions > 0 {
+                runtime.reset_autonomous_loop_delivered();
                 runtime.veto_tick(tool_cron::LoopFoldVeto::BlockingSystemInSpan);
             }
             if user_aborted || span.aborts > 0 {
@@ -675,6 +807,11 @@ impl OrchestratorTurnDriver {
             }
             if cancel_probe.is_cancelled() && !user_aborted {
                 runtime.veto_tick(tool_cron::LoopFoldVeto::QueuedCommand);
+            }
+            if runtime.in_flight_prompt().is_none()
+                && (in_human_turn || span.compactions > 0 || span.denials > 0 || span.aborts > 0)
+            {
+                runtime.invalidate_noop_streak();
             }
             tool_cron::settle_loop_tick(
                 runtime,
@@ -692,6 +829,11 @@ impl OrchestratorTurnDriver {
             } else {
                 tool_cron::maybe_arm_keepalive(scheduler).await;
             }
+        }
+        // Release the scheduler only after no-op/abort/keepalive bookkeeping:
+        // a due wakeup must observe the settled streak, never the prior tick.
+        if let Some(queue) = self.queue.as_ref() {
+            queue.clear_active_turn().await;
         }
         match result {
             // Success / cancellation / max-turns all already produced their
@@ -733,6 +875,99 @@ impl OrchestratorTurnDriver {
 
 #[async_trait]
 impl TurnDriver for OrchestratorTurnDriver {
+    async fn stop_dynamic_loop(&self) {
+        tool_cron::stop_dynamic_loop(self.wakeup_scheduler.as_ref()).await;
+        if let Some(runtime) = &self.loop_runtime {
+            runtime.reset();
+        }
+    }
+
+    fn resolve_loop_prompt(&self, prompt: &str) -> std::io::Result<String> {
+        let fallback = tool_cron::LoopRuntime::default();
+        let runtime = self.loop_runtime.as_deref().unwrap_or(&fallback);
+        runtime.try_resolve_loop_default_fire(prompt, &self.orchestrator.project_root(), &self.orchestrator.current_cwd())
+    }
+
+    async fn loop_prompt_failed(&self, error: std::io::Error) {
+        if let Some(sink) = &self.error_sink {
+            sink.emit(Self::error_event(&orchestrator::OrchestratorError::Internal(error.to_string()))).await;
+        } else {
+            tracing::warn!(%error, "could not read scheduled loop instructions");
+        }
+    }
+
+    async fn run_scheduled_turn(
+        &self,
+        prompt: String,
+        model: String,
+        reasoning: client_protocol::controls::ReasoningSelectionDto,
+        cancel: CancellationToken,
+    ) -> Result<String, String> {
+        use platform_api::OrchestratorHandle;
+        if !self.orchestrator.workspace_trusted().await {
+            return Err("paused:Trust this workspace before running scheduled tasks".into());
+        }
+        let reasoning = crate::router::decode_reasoning_selection(reasoning);
+        if let Some(output) = &self.message_output {
+            output.reset_message_buffer().await;
+        }
+        if let Some(queue) = &self.queue {
+            queue.register_active_turn(cancel.clone()).await;
+        }
+        let cancel_probe = cancel.clone();
+        let result = self
+            .orchestrator
+            .run_scheduled_turn(&prompt, &model, reasoning, cancel)
+            .await;
+        if let Some(queue) = &self.queue {
+            queue.clear_active_turn().await;
+        }
+        // `run_scheduled_turn_locked` emits `TurnStarted` before it can fail, and
+        // a client releases `activeTurn` only on `TurnEnded`/`SessionEnded` —
+        // `ScheduledRunFinished` is host-private. Propagating the error with `?`
+        // therefore left the composer locked and the Stop button live forever.
+        // Same terminal shape `drive_turn_with_inputs` emits on a hard failure.
+        let result = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(sink) = &self.error_sink {
+                    sink.emit(ClientEvent::TurnEnded {
+                        outcome: if cancel_probe.is_cancelled() {
+                            TurnOutcomeDto::Cancelled
+                        } else {
+                            TurnOutcomeDto::EndTurn
+                        },
+                        stop_reason: Some("error".to_string()),
+                        cost: lower_cost_snapshot(&self.orchestrator.snapshot_cost_real().await),
+                    })
+                    .await;
+                }
+                return Err(error.into());
+            }
+        };
+        match result {
+            orchestrator::conversation::TurnOutcome::EndTurn => Ok(self
+                .orchestrator
+                .snapshot_history()
+                .await
+                .iter()
+                .rev()
+                .find(|message| matches!(message, protocol::ConversationMessage::Assistant { .. }))
+                .map(protocol::ConversationMessage::text_content)
+                .unwrap_or_default()),
+            orchestrator::conversation::TurnOutcome::Cancelled => {
+                Err("cancelled:Scheduled run cancelled".into())
+            }
+            _ => Err("Scheduled run reached its turn limit".into()),
+        }
+    }
+
+    async fn run_queued_batch(&self, inputs: Vec<orchestrator::QueuedPromptInput>, cancel: CancellationToken) {
+        let human = inputs.iter().any(|input| !input.is_meta);
+        self.announce_engine_initiated_turn().await;
+        self.drive_turn_with_inputs(String::new(), Vec::new(), cancel, None, human, Some(inputs)).await;
+    }
+
     async fn run_queued_turn(
         &self,
         prompt: String,
@@ -847,6 +1082,32 @@ mod tests {
             PathBuf::from("/tmp"),
         ));
         OrchestratorTurnDriver::new(orchestrator)
+    }
+
+    #[test]
+    fn loop_file_resolution_uses_session_directory_and_rereads_edits() {
+        let _serial = LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        tool_cron::reset_autonomous_loop_delivered();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("loop.md"), "First session task").unwrap();
+        let driver = build_driver(streaming_one_turn());
+        let orchestrator = Arc::try_unwrap(driver.orchestrator)
+            .ok()
+            .unwrap()
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(
+                directory.path().to_path_buf(),
+            )));
+        let driver = OrchestratorTurnDriver::new(Arc::new(orchestrator));
+        assert!(driver
+            .resolve_loop_prompt("<<loop.md-dynamic>>").unwrap()
+            .contains("First session task"));
+        std::fs::write(directory.path().join("loop.md"), "Updated session task").unwrap();
+        assert!(driver
+            .resolve_loop_prompt("<<loop.md-dynamic>>").unwrap()
+            .contains("Updated session task"));
+        tool_cron::reset_autonomous_loop_delivered();
     }
 
     /// [`build_driver`] plus the orchestrator it wraps, for tests that read the
@@ -1042,6 +1303,54 @@ mod tests {
         );
     }
 
+    /// The batched sibling of the test above: several queued commands joined
+    /// into ONE follow-up turn is still one turn, and still announces once.
+    #[tokio::test]
+    async fn a_queued_batch_announces_itself_once() {
+        let (driver, sink) = build_driver_with_sink(streaming_one_turn());
+
+        driver
+            .run_queued_batch(
+                vec![
+                    orchestrator::QueuedPromptInput {
+                    goal_retry_id: None,
+                        text: "first".to_string(),
+                        is_meta: false,
+                        message_id: None,
+                        queue_priority: None,
+                        scheduled_task_id: None,
+                        scheduled_fire_id: None,
+                    },
+                    orchestrator::QueuedPromptInput {
+                    goal_retry_id: None,
+                        text: "second".to_string(),
+                        is_meta: false,
+                        message_id: None,
+                        queue_priority: None,
+                        scheduled_task_id: None,
+                        scheduled_fire_id: None,
+                    },
+                ],
+                CancellationToken::new(),
+            )
+            .await;
+
+        let events = sink.events().await;
+        assert_eq!(
+            events.first(),
+            Some(&client_protocol::events::ClientEvent::TurnStarted { turn_id: None }),
+            "a queue-drained batch must open with TurnStarted; got {events:?}",
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, client_protocol::events::ClientEvent::TurnStarted { .. }))
+                .count(),
+            1,
+            "one turn announces once, however many commands were folded into it",
+        );
+    }
+
     // ========================================================================
     // §27 mid-turn drain adapter (`MsgQueueMidTurnInput`) + Now-abort wiring.
     // ========================================================================
@@ -1055,6 +1364,8 @@ mod tests {
 
     fn user_cmd(uuid: &str, prio: QueuePriority, text: &str) -> QueuedCommand {
         QueuedCommand {
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
             uuid: uuid.to_string(),
             content: QueuedCommandContent::UserInput {
                 text: text.to_string(),
@@ -1222,7 +1533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wakeup_scheduler_enqueues_resolved_prompt_after_delay() {
+    async fn wakeup_scheduler_preserves_sentinel_until_between_turn_drain() {
         use super::MsgQueueWakeupScheduler;
         use tool_cron::WakeupScheduler;
 
@@ -1253,17 +1564,103 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
+        assert!(
+            queue.take_mid_turn_prompt().await.is_none(),
+            "scheduled input must wait until the active turn ends"
+        );
         let cmd = queue
             .dequeue()
             .await
             .expect("wakeup must have enqueued one command");
-        assert_eq!(cmd.priority, QueuePriority::Next);
+        assert_eq!(cmd.priority, QueuePriority::Later);
+        assert!(cmd.is_meta);
+        assert!(cmd.skip_slash_commands);
         assert_eq!(cmd.source, msgqueue::QueueSource::Cron);
+        assert_eq!(cmd.scheduled_task_id.as_deref().unwrap().len(), 8);
+        assert!(protocol::MessageId::parse_prefixed(cmd.scheduled_fire_id.as_deref().unwrap()).is_some());
+        assert!(cmd.uuid.ends_with(cmd.scheduled_fire_id.as_deref().unwrap()));
         let text = cmd.text().expect("user-input text");
-        // The sentinel resolved to the autonomous-loop instruction block.
-        assert_ne!(text, "<<autonomous-loop-dynamic>>");
-        assert!(text.contains("autonomous"));
-        assert!(text.contains("ScheduleWakeup"));
+        assert_eq!(
+            text, "<<autonomous-loop-dynamic>>",
+            "the keepalive identity must retain the sentinel, not frozen task text"
+        );
+    }
+
+    #[tokio::test]
+    async fn due_wakeup_waits_for_busy_turn_without_mid_turn_injection() {
+        use tool_cron::WakeupScheduler;
+        let queue = Arc::new(MessageQueueManager::new());
+        queue.register_active_turn(CancellationToken::new()).await;
+        let sched = super::MsgQueueWakeupScheduler::new(queue.clone(), Arc::new(TestRuntime));
+        sched
+            .schedule(
+                std::time::Duration::ZERO,
+                "check again".into(),
+                "tick".into(),
+            )
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert_eq!(
+            queue.len().await,
+            0,
+            "busy turns must not receive wakeup announcements or prompts"
+        );
+        assert!(queue.take_mid_turn_prompt().await.is_none());
+        queue.clear_active_turn().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while queue.len().await == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the due wakeup fires once after idle");
+        assert!(queue.take_mid_turn_prompt().await.is_none());
+        let command = queue.dequeue().await.unwrap();
+        assert_eq!(command.text(), Some("check again"));
+        assert!(command.is_meta && command.skip_slash_commands);
+        assert_eq!(command.priority, QueuePriority::Later);
+        assert_eq!(queue.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_wakeup_while_announcement_is_blocked() {
+        use tool_cron::WakeupScheduler;
+        struct BlockedSink {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl client_adapter::ClientEventSink for BlockedSink {
+            async fn emit(&self, _: client_protocol::events::ClientEvent) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        }
+        let queue = Arc::new(MessageQueueManager::new());
+        let sink = Arc::new(BlockedSink {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let scheduler = super::MsgQueueWakeupScheduler::new(queue.clone(), Arc::new(TestRuntime))
+            .with_event_sink(sink.clone());
+        scheduler
+            .schedule(
+                std::time::Duration::ZERO,
+                "stopped prompt".into(),
+                "tick".into(),
+            )
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), sink.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(scheduler.cancel_pending().await, vec!["stopped prompt"]);
+        sink.release.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            queue.len().await,
+            0,
+            "stop must cancel even after the timer starts publication"
+        );
     }
 
     #[tokio::test]
@@ -1519,6 +1916,38 @@ mod tests {
 
     /// A NON-loop turn (no in-flight tick) never arms a keepalive, even with a
     /// scheduler wired and the flags on.
+    #[tokio::test]
+    async fn human_turn_between_fires_invalidates_settled_noop_streak() {
+        let _serial = LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let runtime = Arc::new(tool_cron::LoopRuntime::default());
+        runtime.begin_tick("quiet tick".into());
+        runtime.mark_noop_reported(true);
+        runtime.settle_tick(
+            std::time::SystemTime::now(),
+            tool_cron::LoopSpanCounts {
+                tool_uses: 1,
+                span_len: 2,
+            },
+        );
+        runtime.take_in_flight_prompt();
+        assert!(runtime.noop_streak().is_some());
+        let scheduler = Arc::new(KaRec {
+            calls: std::sync::Mutex::new(Vec::new()),
+            runtime: runtime.clone(),
+        });
+        build_driver(streaming_one_turn())
+            .with_wakeup_scheduler(scheduler)
+            .run_turn("new user work".into())
+            .await;
+        assert_eq!(
+            runtime.noop_streak(),
+            None,
+            "the next fire must not fold intervening user work"
+        );
+    }
+
     #[tokio::test]
     async fn keepalive_not_armed_for_user_turn() {
         let _serial = LOOP_KA_TEST_SERIAL

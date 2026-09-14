@@ -552,9 +552,8 @@ enum StopHookDisposition {
     /// TS `query/stopHooks.ts:257-262`), NOT the transcript-only systemMessage.
     Continue(String),
     /// A session-scoped `/goal` Stop Prompt hook blocked natural completion.
-    /// Unlike a generic Stop-hook block, this bypasses the dedicated
-    /// stop-hook block-cap logic; the normal turn-loop boundaries (cancel,
-    /// hard budget, max_turns at loop top) remain the only escapes.
+    /// Shares the Stop-hook block cap; the distinct variant lets a capped
+    /// goal announce why it paused without clearing the condition.
     GoalContinue(String),
     /// A Stop hook requested `continue: false` — terminate the agent loop
     /// (TS `query.ts:1278`); the turn ends as `StopHookPrevented`. The carried
@@ -573,20 +572,7 @@ const GOAL_PROMPT_TIMEOUT_SECS: u64 = 30;
 const GOAL_STOP_HOOK_NAME: &str = "__session_goal_stop";
 const GOAL_STOP_HOOK_PRIORITY: i32 = 1_000_000;
 
-fn goal_stop_hook_prompt(condition: &str) -> String {
-    format!(
-        "Evaluate whether the active session goal has been fully met.\nGoal condition:\n{condition}\nUse this Stop hook payload JSON as the current stop state:\n$ARGUMENTS"
-    )
-}
 
-fn strip_goal_prompt_block_reason(reason: &str) -> String {
-    if let Some(stripped) = reason.strip_prefix('[') {
-        if let Some((_, tail)) = stripped.split_once("]: ") {
-            return tail.to_string();
-        }
-    }
-    reason.to_string()
-}
 
 enum StopHookFlow {
     /// Terminate the turn loop, returning this outcome (`emit_end_turn` already
@@ -1436,8 +1422,11 @@ pub struct ConversationOrchestrator {
 mod compaction_impl;
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
+pub use drivers_impl::QueuedPromptInput;
 #[path = "conversation/hooks.rs"]
 mod hooks_impl;
+#[path = "conversation/goal_retry.rs"]
+mod goal_retry_impl;
 #[path = "conversation/model.rs"]
 mod model_impl;
 #[path = "conversation/prompt.rs"]
@@ -1448,22 +1437,23 @@ mod reminders_impl;
 mod tooling_impl;
 #[path = "conversation/transcript.rs"]
 mod transcript_impl;
+pub use transcript_impl::ScheduledLoopFire;
 #[path = "conversation/wiring.rs"]
 mod wiring_impl;
 
-#[path = "conversation/runtime.rs"]
-mod runtime_impl;
 #[path = "conversation/output_accounting.rs"]
 mod output_accounting_impl;
+#[path = "conversation/runtime.rs"]
+mod runtime_impl;
 
 use drivers_impl::parse_generated_session_name;
-pub use runtime_impl::{
-    CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle,
-};
 use runtime_impl::{
     camelize_json_keys, compact_file_reference_body, extend_session_memory_fork_context,
     find_unresolved_tool_use_in_history, read_utf8_prefix, CompactionRuntime, LifecycleRuntime,
     ModelRuntime, PromptRuntime, SessionMemoryInFlightReset, TranscriptStore,
+};
+pub use runtime_impl::{
+    CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle,
 };
 
 /// Internal no-op streaming client used by [`ConversationOrchestrator::new`]

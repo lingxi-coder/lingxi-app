@@ -21,6 +21,29 @@ pub trait BundledPromptFn: Send + Sync {
     /// implementation does its own trimming/branching (mirrors the reference's
     /// `args.trim()` inside `getPromptForCommand`, `loop.ts:85`).
     fn build(&self, args: &str) -> String;
+
+    /// Build instructions for agent skill preloading, without treating the load
+    /// as a user invocation. Stateless builders can use the normal expansion.
+    fn build_for_preload(&self, args: &str) -> String {
+        self.build(args)
+    }
+
+    /// Expand in the owning session's project root and current directory.
+    /// File-backed builders propagate read errors instead of silently selecting
+    /// different instructions. Preloading must not activate a command.
+    fn try_build_at(
+        &self,
+        args: &str,
+        _project_root: &std::path::Path,
+        _cwd: &std::path::Path,
+        is_preload: bool,
+    ) -> std::io::Result<String> {
+        Ok(if is_preload {
+            self.build_for_preload(args)
+        } else {
+            self.build(args)
+        })
+    }
 }
 
 impl std::fmt::Debug for dyn BundledPromptFn {

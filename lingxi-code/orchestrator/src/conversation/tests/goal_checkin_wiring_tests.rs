@@ -292,3 +292,92 @@ async fn an_idle_teammate_does_not_defer_but_a_working_teammate_does() {
     teammate.is_idle = false;
     assert!(orch.goal_checkin_pass(&[teammate]).await);
 }
+
+#[derive(Default)]
+struct IdleQueue(std::sync::Mutex<Vec<String>>);
+#[async_trait::async_trait]
+impl crate::prompt::mid_turn_input::MidTurnInputSource for IdleQueue {
+    fn supports_goal_retries(&self) -> bool {
+        true
+    }
+    async fn enqueue_goal_retry(
+        &self,
+        _: String,
+        body: String,
+        _: tokio_util::sync::CancellationToken,
+    ) {
+        self.0.lock().unwrap().push(body);
+    }
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        None
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_checkin_queues_a_turn_including_when_background_work_has_finished() {
+    for finished in [false, true] {
+        let provider: Arc<dyn crate::StopHookSnapshotProvider> = if finished {
+            Arc::new(EmptyGoalStopSnapshot)
+        } else {
+            Arc::new(GoalStopSnapshot)
+        };
+        let mut base = orch().with_stop_hook_snapshot(provider);
+        base.config.interactive_session = true;
+        let orch = Arc::new(base);
+        orch.enable_goal_retries();
+        let queue = Arc::new(IdleQueue::default());
+        orch.set_mid_turn_input(queue.clone());
+        set_goal(&orch, "ship it").await;
+        orch.lifecycle_runtime
+            .goal_checkin
+            .lock()
+            .unwrap()
+            .deferred_since = Some(0);
+        orch.sync_goal_checkin_idle_task().await;
+        tokio::time::timeout(std::time::Duration::from_secs(61), async {
+            while queue.0.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("idle check-in must wake the host queue");
+        let queued = queue.0.lock().unwrap().clone();
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].contains(if finished {
+            "no longer running"
+        } else {
+            "background work is still running"
+        }));
+        assert!(
+            orch.session.lock().await.history.is_empty(),
+            "the host must admit and persist the queued turn exactly once"
+        );
+    }
+}
+
+#[tokio::test]
+async fn turn_end_checkin_drives_another_round_without_duplicate_feedback() {
+    let orch = orch().with_stop_hook_snapshot(Arc::new(GoalStopSnapshot));
+    set_goal(&orch, "ship it").await;
+    orch.lifecycle_runtime
+        .goal_checkin
+        .lock()
+        .unwrap()
+        .deferred_since = Some(0);
+    let mut active = false;
+    let mut count = 0;
+    let flow = orch
+        .handle_stop_at_end(
+            "end_turn",
+            &mut active,
+            &mut count,
+            1,
+            protocol::MessageId::new(),
+            false,
+        )
+        .await;
+    assert!(matches!(flow, crate::conversation::StopHookFlow::LoopAgain));
+    let history = orch.session.lock().await.history.clone();
+    assert_eq!(history.len(), 1);
+    assert!(history[0].text_content().starts_with("Goal check-in:"));
+}

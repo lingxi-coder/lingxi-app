@@ -431,11 +431,16 @@ impl ConversationOrchestrator {
             .remove(&only)
     }
 
+    /// The configured session project root, independent of shell directory changes.
+    pub fn project_root(&self) -> std::path::PathBuf {
+        self.session_cwd.project_root()
+    }
+
     /// The CURRENT working directory for hook payloads (the post-`cd` shell cwd
     /// when a firer is wired, else the static init `cwd`). Clones out of the
     /// shared cell so no lock is held across an await; a poisoned lock falls
     /// back to the static `cwd`.
-    pub(crate) fn current_cwd(&self) -> std::path::PathBuf {
+    pub fn current_cwd(&self) -> std::path::PathBuf {
         self.current_cwd
             .lock()
             .map_or_else(|_| self.cwd.clone(), |g| g.clone())
@@ -468,7 +473,9 @@ impl ConversationOrchestrator {
         if writer.durable_transcript_enabled() {
             writer
                 .activate_session_target(session_id, target.clone(), self.current_cwd())
-                .map_err(|error| format!("activate transcript for session {session_id}: {error}"))?;
+                .map_err(|error| {
+                    format!("activate transcript for session {session_id}: {error}")
+                })?;
         } else {
             // Compatibility writers have no cross-process/session authority;
             // retain their historical in-process retarget behavior.
@@ -1365,6 +1372,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     pub(crate) async fn maybe_swap_to_refusal_fallback(&self) -> bool {
+        if crate::scheduled_turn::current().is_some() {
+            return false;
+        }
         // The CASCADE: an ordered chain of models, each tried as the previous
         // one refuses. An empty chain falls back to the historical single
         // `refusal_fallback_model`, which is exactly a one-element chain — so
@@ -1818,13 +1828,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             self.lifecycle_runtime
                 .goal_checkin_idle_running
                 .store(true, std::sync::atomic::Ordering::Release);
-            let writer = self.transcript.jsonl_writer.clone();
+            let owner = self.lifecycle_runtime.goal_retry_owner.get().cloned();
             let session = Arc::clone(&self.session);
             let turn_gate = Arc::clone(&self.turn_gate);
             let goal_checkin = Arc::clone(&self.lifecycle_runtime.goal_checkin);
-            let last_jsonl_uuid = Arc::clone(&self.transcript.last_jsonl_uuid);
-            let current_cwd = Arc::clone(&self.current_cwd);
-            let fallback_cwd = self.cwd.clone();
             let running = Arc::clone(&self.lifecycle_runtime.goal_checkin_idle_running);
             let generation_counter =
                 Arc::clone(&self.lifecycle_runtime.goal_checkin_idle_generation);
@@ -1832,13 +1839,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let handle = tokio::spawn(async move {
                 ConversationOrchestrator::run_goal_checkin_idle_loop(
                     provider,
-                    writer,
+                    owner,
                     session,
                     turn_gate,
                     goal_checkin,
-                    last_jsonl_uuid,
-                    current_cwd,
-                    fallback_cwd,
                     running,
                     generation_counter,
                     generation,
@@ -2132,6 +2136,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
     #[must_use]
     pub fn current_reasoning_selection(&self) -> platform_api::ReasoningSelection {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            return settings.reasoning;
+        }
         self.model_runtime
             .current_reasoning_selection
             .read()
@@ -2630,6 +2637,120 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    /// Execute a saved automation using request-local settings and the existing
+    /// turn gate. No session model/reasoning default is changed or persisted.
+    pub async fn run_scheduled_turn(
+        &self,
+        prompt: &str,
+        model: &str,
+        reasoning: platform_api::ReasoningSelection,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, String> {
+        let turn_guard = self
+            .turn_gate
+            .try_lock()
+            .map_err(|_| "busy:Target session is running".to_string())?;
+        let settings = self.scheduled_turn_settings(model, reasoning)?;
+        self.run_scheduled_turn_locked(&turn_guard, prompt, settings, cancel)
+            .await
+    }
+
+    /// Pin a scheduled turn to an exact live session. The same gate protects
+    /// target validation, the host's durable binding, execution and result capture.
+    pub async fn run_scheduled_turn_in_session<F>(
+        &self,
+        expected_session: protocol::SessionId,
+        prompt: &str,
+        model: &str,
+        reasoning: platform_api::ReasoningSelection,
+        cancel: CancellationToken,
+        before_start: F,
+    ) -> Result<(TurnOutcome, protocol::SessionId, String), String>
+    where
+        F: std::future::Future<Output = Result<(), String>> + Send,
+    {
+        let turn_guard = self
+            .turn_gate
+            .try_lock()
+            .map_err(|_| "busy:Target session is running".to_string())?;
+        if self.session.lock().await.session_id != expected_session {
+            return Err("busy:Target session changed before execution".into());
+        }
+        let settings = self.scheduled_turn_settings(model, reasoning)?;
+        before_start.await?;
+        let outcome = self
+            .run_scheduled_turn_locked(&turn_guard, prompt, settings, cancel)
+            .await?;
+        let session = self.session.lock().await;
+        let summary = session
+            .history
+            .iter()
+            .rev()
+            .find(|message| matches!(message, protocol::ConversationMessage::Assistant { .. }))
+            .map(protocol::ConversationMessage::text_content)
+            .unwrap_or_default();
+        Ok((outcome, session.session_id, summary))
+    }
+
+    fn scheduled_turn_settings(
+        &self,
+        model: &str,
+        reasoning: platform_api::ReasoningSelection,
+    ) -> Result<crate::scheduled_turn::ScheduledSettings, String> {
+        let listing = self
+            .api
+            .list_model_listings()
+            .into_iter()
+            .find(|row| {
+                platform_api::qualified_model_ref(&row.request_model, Some(&row.provider_id))
+                    == model
+            })
+            .ok_or_else(|| "paused:Scheduled model is unavailable; choose a model".to_string())?;
+        let (validated, thinking, effort, _) = self.reasoning_request_state(
+            &listing.request_model,
+            Some(&listing.provider_id),
+            &reasoning,
+        );
+        if validated != reasoning {
+            return Err("paused:Scheduled reasoning setting is no longer supported".into());
+        }
+        Ok(crate::scheduled_turn::ScheduledSettings {
+            model: listing.request_model,
+            provider: listing.provider_id,
+            reasoning,
+            thinking,
+            effort,
+        })
+    }
+
+    async fn run_scheduled_turn_locked(
+        &self,
+        turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        prompt: &str,
+        settings: crate::scheduled_turn::ScheduledSettings,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, String> {
+        // A scheduled run drives the LIVE session's output stream, so the client
+        // has to learn a turn started — otherwise the composer stays unlocked,
+        // no Stop button appears, and any permission prompt this turn raises
+        // belongs to a turn the client was never told about.
+        self.output.emit_turn_started().await;
+        crate::scheduled_turn::SETTINGS
+            .scope(
+                settings,
+                self.run_turn_streaming_with_origin_locked(
+                    turn_guard,
+                    prompt,
+                    Vec::new(),
+                    cancel,
+                    None,
+                    false,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     /// Apply a LIVE session permission-mode change (stream-json
     /// `set_permission_mode` control_request). Delegates to the gate's
     /// [`platform_api::PermissionGate::set_permission_mode`]; only the enforcing
@@ -2675,6 +2796,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.perms.permission_mode()
     }
 }
+
+#[cfg(test)]
+#[path = "tests/live_permission_mode_tests.rs"]
+mod live_permission_mode_tests;
 
 #[cfg(test)]
 mod session_sidecar_tests {
@@ -2909,10 +3034,6 @@ mod session_sidecar_tests {
         assert!(!last_response_is_api_error(&[assistant("end_turn")]));
     }
 }
-
-#[cfg(test)]
-#[path = "tests/live_permission_mode_tests.rs"]
-mod live_permission_mode_tests;
 
 #[cfg(test)]
 mod side_question_reminder_tests {

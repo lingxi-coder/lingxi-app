@@ -40,6 +40,224 @@ use crate::{ConversationOrchestrator, OrchestratorConfig, OrchestratorError};
 
 const WAIT_BOUND: Duration = Duration::from_secs(2);
 
+struct DurablePatchTool;
+
+#[async_trait]
+impl tool_api::Tool for DurablePatchTool {
+    fn name(&self) -> &str {
+        "DurablePatch"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({"type": "object", "properties": {}}))
+    }
+    fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        false
+    }
+    async fn validate_input(
+        &self,
+        _: &serde_json::Value,
+        _: &tool_api::ToolUseContext,
+    ) -> Result<(), tool_api::ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _: &serde_json::Value,
+        _: &tool_api::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: Default::default(),
+        }
+    }
+    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+        "return an edit result".into()
+    }
+    async fn prompt(&self, _: &tool_api::PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _: serde_json::Value,
+        _: tool_api::ToolUseContext,
+        _: tool_api::ToolProgressSender,
+    ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+        Ok(tool_api::ToolCallResult {
+            data: serde_json::json!({"structuredPatch": [{"lines": ["-old", "+new"]}]}),
+            model_content: None,
+            new_messages: vec![],
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+        })
+    }
+}
+
+struct PatchBarrierStream {
+    calls: AtomicUsize,
+    edit_enqueued: Arc<AsyncLatch>,
+    response_stopped: Arc<AsyncLatch>,
+}
+
+#[async_trait]
+impl crate::conversation::StreamingApiClient for PatchBarrierStream {
+    async fn stream(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Vec<ConversationMessage>,
+        _: Vec<serde_json::Value>,
+    ) -> Result<futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, LlmError>>, LlmError>
+    {
+        use crate::test_support_stream::{content_block_start_tool_use, input_json_delta};
+        use futures::StreamExt;
+        let call = self.calls.fetch_add(1, Ordering::AcqRel);
+        if call > 0 {
+            return Ok(futures::stream::iter(
+                vec![
+                    message_start_with_usage(
+                        "after-edit",
+                        "claude-opus-4-8",
+                        llm_usage(2, 0, 0, 0),
+                    ),
+                    content_block_start_text(0),
+                    text_delta(0, "edit finished"),
+                    content_block_stop(0),
+                    message_delta_stop_with_usage("end_turn", llm_usage(0, 1, 0, 0)),
+                    message_stop(),
+                ]
+                .into_iter()
+                .map(Ok),
+            )
+            .boxed());
+        }
+        let edit_enqueued = self.edit_enqueued.clone();
+        let response_stopped = self.response_stopped.clone();
+        let first = futures::stream::iter(
+            vec![
+                message_start_with_usage("edit-stream", "claude-opus-4-8", llm_usage(3, 0, 0, 0)),
+                content_block_start_tool_use(0, protocol::ToolUseId::new(), "DurablePatch"),
+                input_json_delta(0, "{}"),
+                content_block_stop(0),
+            ]
+            .into_iter()
+            .map(Ok),
+        );
+        // MessageStop cannot race ahead of the edit acquiring the ledger turn.
+        let end = futures::stream::once(async move {
+            edit_enqueued.wait().await;
+            Ok(message_delta_stop_with_usage(
+                "tool_use",
+                llm_usage(0, 1, 0, 0),
+            ))
+        })
+        .chain(futures::stream::once(async move {
+            response_stopped.open();
+            Ok(message_stop())
+        }));
+        Ok(first.chain(end).boxed())
+    }
+}
+
+/// The edit's durability ack must be consumed while response settlement waits
+/// behind that edit. A driver that stops polling tools at MessageStop deadlocks.
+#[tokio::test]
+async fn streaming_edit_ack_is_driven_while_model_cost_settlement_waits() {
+    let edit_enqueued = Arc::new(AsyncLatch::default());
+    let response_stopped = Arc::new(AsyncLatch::default());
+    let streaming = Arc::new(PatchBarrierStream {
+        calls: AtomicUsize::new(0),
+        edit_enqueued: edit_enqueued.clone(),
+        response_stopped: response_stopped.clone(),
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register_builtin(Arc::new(DurablePatchTool));
+    let base = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        streaming.clone(),
+        Arc::new(registry),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    let session_id = base.session().lock().await.session_id;
+    let (sender, mut requests) = mpsc::channel::<CostPersistRequest>(8);
+    let tracker = durable_tracker(
+        session_id,
+        Arc::new(BoundedPersistence::new(sender)),
+        CostDurabilityGate::default(),
+    );
+    let orchestrator = Arc::new(base.with_cost_tracker(tracker.clone()));
+    let turn = tokio::spawn({
+        let orchestrator = orchestrator.clone();
+        async move { orchestrator.run_turn_streaming("make an edit").await }
+    });
+    let edit = tokio::time::timeout(WAIT_BOUND, requests.recv())
+        .await
+        .expect("streaming executor begins edit persistence before MessageStop")
+        .unwrap();
+    assert_eq!(edit.source, CostMutationSource::Administrative);
+    assert_eq!(edit.state.total_lines_added, 1);
+    assert_eq!(edit.state.total_lines_removed, 1);
+    edit_enqueued.open();
+    tokio::time::timeout(WAIT_BOUND, response_stopped.wait())
+        .await
+        .expect("stream ends while edit ack is withheld");
+    // This current-thread test releases the ack only after the turn has consumed
+    // MessageStop and yielded. The tool future still owns the edit ledger turn.
+    edit.ack
+        .send(Ok(CostPersistAck {
+            mutation_id: edit.mutation_id,
+            cost_revision: edit.cost_revision,
+            journal_revision: 1,
+        }))
+        .expect("edit future still awaits its ack");
+    for revision in 2..=3 {
+        let response = tokio::time::timeout(WAIT_BOUND, requests.recv())
+            .await
+            .expect(
+                "model settlement must progress after the edit ack without starving the executor",
+            )
+            .unwrap();
+        assert_eq!(response.source, CostMutationSource::ModelResponse);
+        assert_eq!(response.cost_revision, revision);
+        response
+            .ack
+            .send(Ok(CostPersistAck {
+                mutation_id: response.mutation_id,
+                cost_revision: revision,
+                journal_revision: revision,
+            }))
+            .unwrap();
+    }
+    tokio::time::timeout(WAIT_BOUND, turn)
+        .await
+        .expect("turn completes")
+        .unwrap()
+        .unwrap();
+    assert_eq!(streaming.calls.load(Ordering::Acquire), 2);
+    assert_answer_reached_history(&orchestrator, "edit finished").await;
+    assert_eq!(tracker.snapshot().await.cost_revision, 3);
+}
+
 #[derive(Default)]
 struct AsyncLatch {
     open: AtomicBool,
@@ -526,7 +744,8 @@ fn vision_route() -> MediaRoute {
             reasoning: false,
             structured_output: false,
         },
-        connection_chain: Vec::new(), failover: Default::default(),
+        connection_chain: Vec::new(),
+        failover: Default::default(),
     };
     MediaRoute {
         main: route("claude-opus-4-8", false),

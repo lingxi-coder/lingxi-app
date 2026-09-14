@@ -9,7 +9,8 @@
 //! `lingxi-platform-common::mcp_ws` and `claude-code/src/services/mcp/client.ts`.
 
 use crate::wire::Frame;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::BoxFuture, FutureExt, SinkExt, StreamExt};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::net::{TcpListener, TcpStream};
@@ -116,9 +117,9 @@ impl FrameSink {
 ///
 /// For each inbound text frame the endpoint deserializes a [`Frame`] and calls
 /// [`on_frame`](FramePump::on_frame), handing it the connection's [`FrameSink`]
-/// for replies/pushes. `on_frame` should return promptly: long-running work
-/// (driving an orchestrator turn) is spawned by the pump itself, keeping a
-/// clone of the sink to stream events. One pump instance is shared across all
+/// for replies/pushes. Ordinary callbacks execute in receive order alongside
+/// socket I/O; explicitly classified cancellation and interaction replies can
+/// bypass a pending callback. One pump instance is shared across all
 /// connections (`Arc<dyn FramePump>`); per-connection state lives behind the
 /// `&self`/`FrameSink` boundary.
 #[async_trait::async_trait]
@@ -130,6 +131,12 @@ pub trait FramePump: Send + Sync + 'static {
     /// dropping it on shutdown is unsafe. Long-running commands should support
     /// cooperative cancellation or own their work in the host lifecycle.
     async fn on_frame(&self, frame: Frame, out: FrameSink);
+
+    /// Whether this frame may bypass a pending ordinary command. Authentication
+    /// and connection ownership must still be checked by `on_frame`.
+    fn is_priority_frame(&self, _frame: &Frame) -> bool {
+        false
+    }
 
     /// Called exactly once when the connection ends — the client disconnected,
     /// sent a Close, or the read side errored. The default is a no-op so
@@ -400,8 +407,7 @@ async fn run_frame_pump<S>(
     addr: SocketAddr,
     pump: Arc<dyn FramePump>,
     mut shutdown: watch::Receiver<bool>,
-)
-where
+) where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
         + Send
@@ -411,13 +417,49 @@ where
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
     let sink = FrameSink { tx: out_tx };
 
+    // Run callbacks alongside socket I/O. Ordinary commands have one ordered
+    // lane; only host-classified cancellation/interaction replies may bypass it.
+    // Bound queued bytes as frames can individually contain large attachments.
+    let mut ordinary: Option<BoxFuture<'static, ()>> = None;
+    let mut priority: Option<BoxFuture<'static, ()>> = None;
+    let mut ordinary_started = false;
+    let mut priority_started = false;
+    let mut queued = VecDeque::<(Frame, usize)>::new();
+    let mut urgent = VecDeque::<(Frame, usize)>::new();
+    let mut queued_bytes = 0usize;
     loop {
+        for (active, started, queue) in [
+            (&mut ordinary, &mut ordinary_started, &mut queued),
+            (&mut priority, &mut priority_started, &mut urgent),
+        ] {
+            if active.is_none() {
+                if let Some((frame, bytes)) = queue.pop_front() {
+                    queued_bytes -= bytes;
+                    let pump = pump.clone();
+                    let sink = sink.clone();
+                    *started = false;
+                    *active = Some(async move { pump.on_frame(frame, sink).await }.boxed());
+                }
+            }
+        }
         tokio::select! {
             biased;
             changed = shutdown.changed() => {
                 let _ = changed;
                 tracing::debug!(?addr, "bridge: endpoint shutdown; ending pump");
                 break;
+            }
+            () = async {
+                priority_started = true;
+                priority.as_mut().expect("guarded priority callback").await
+            }, if priority.is_some() => {
+                priority = None;
+            }
+            () = async {
+                ordinary_started = true;
+                ordinary.as_mut().expect("guarded ordinary callback").await
+            }, if ordinary.is_some() => {
+                ordinary = None;
             }
             // Outbound: a frame the pump queued → serialize + write. `recv`
             // only yields `None` once EVERY `FrameSink` clone is dropped; the
@@ -452,11 +494,20 @@ where
                 match maybe_in {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<Frame>(&text) {
-                            // Unlike a network send, an accepted command is
-                            // not generally cancellation-safe. Finish its
-                            // commit before observing shutdown on the next
-                            // loop iteration and invoking the close hook.
-                            Ok(frame) => pump.on_frame(frame, sink.clone()).await,
+                            Ok(frame) => {
+                                if queued.len() + urgent.len() >= 64
+                                    || queued_bytes.saturating_add(text.len()) > 32 * 1024 * 1024
+                                {
+                                    tracing::warn!(?addr, "bridge: pending command limit exceeded");
+                                    break;
+                                }
+                                queued_bytes += text.len();
+                                if pump.is_priority_frame(&frame) {
+                                    urgent.push_back((frame, text.len()));
+                                } else {
+                                    queued.push_back((frame, text.len()));
+                                }
+                            },
                             Err(e) => {
                                 tracing::debug!(?addr, error = %e, "bridge: undecodable inbound frame ignored");
                             }
@@ -477,6 +528,27 @@ where
             }
         }
     }
+
+    // Never cancel a callback that may have started a durable transaction.
+    // Queued callbacks have not been dispatched and are discarded like unread
+    // socket frames. Promotion alone does not dispatch: shutdown can win before
+    // the callback is first polled. Only finish actually started callbacks.
+    tokio::join!(
+        async {
+            if ordinary_started {
+                if let Some(callback) = ordinary {
+                    callback.await;
+                }
+            }
+        },
+        async {
+            if priority_started {
+                if let Some(callback) = priority {
+                    callback.await;
+                }
+            }
+        },
+    );
 
     // The connection ended (disconnect / Close / read error). Notify the pump so
     // it can run fail-closed teardown (the bridge-server connection drains its
@@ -624,6 +696,175 @@ mod tests {
         }
         result.unwrap().unwrap();
         assert_eq!(pump.closes.load(Ordering::SeqCst), 1);
+    }
+
+    struct LiveControlPump {
+        started: Notify,
+        release: Notify,
+        seen: std::sync::Mutex<Vec<u64>>,
+        shutdown_on_release: Option<watch::Sender<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl FramePump for LiveControlPump {
+        fn is_priority_frame(&self, frame: &Frame) -> bool {
+            matches!(frame, Frame::Request(request) if matches!(request.method.as_str(), "cancel" | "approve"))
+        }
+        async fn on_frame(&self, frame: Frame, out: FrameSink) {
+            let Frame::Request(request) = &frame else {
+                panic!("request")
+            };
+            self.seen.lock().unwrap().push(request.id);
+            if request.id == 1 {
+                assert!(out.send(frame.clone()));
+                self.started.notify_one();
+                self.release.notified().await;
+                if let Some(shutdown) = &self.shutdown_on_release {
+                    shutdown.send(true).unwrap();
+                }
+            } else {
+                assert!(out.send(frame));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_control_preserves_order_without_blocking_output_or_cancel() {
+        let pump = Arc::new(LiveControlPump {
+            started: Notify::new(),
+            release: Notify::new(),
+            seen: std::sync::Mutex::new(Vec::new()),
+            shutdown_on_release: None,
+        });
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            server_io,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        let mut client = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client_io,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(run_frame_pump(
+            server,
+            "127.0.0.1:1".parse().unwrap(),
+            pump.clone(),
+            shutdown_rx,
+        ));
+        for (id, method) in [(1, "model"), (2, "model"), (3, "cancel"), (4, "approve")] {
+            let frame = Frame::Request(crate::wire::BridgeRequest {
+                id,
+                method: method.into(),
+                params: serde_json::Value::Null,
+            });
+            client
+                .send(Message::Text(serde_json::to_string(&frame).unwrap()))
+                .await
+                .unwrap();
+        }
+        pump.started.notified().await;
+        let observed = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut ids = Vec::new();
+            for _ in 0..3 {
+                let message = client.next().await.unwrap().unwrap();
+                let Frame::Request(request) =
+                    serde_json::from_str::<Frame>(message.to_text().unwrap()).unwrap()
+                else {
+                    panic!("request")
+                };
+                ids.push(request.id);
+            }
+            ids
+        })
+        .await;
+        let before_release = pump.seen.lock().unwrap().clone();
+        pump.release.notify_one();
+        if observed.is_ok() {
+            let message = tokio::time::timeout(Duration::from_secs(1), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let Frame::Request(request) =
+                serde_json::from_str::<Frame>(message.to_text().unwrap()).unwrap()
+            else {
+                panic!("request")
+            };
+            assert_eq!(request.id, 2);
+        }
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap();
+        assert_eq!(
+            observed.expect("output and cancellation must bypass a slow control"),
+            vec![1, 3, 4]
+        );
+        assert_eq!(
+            before_release,
+            vec![1, 3, 4],
+            "ordinary controls stay ordered"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_start_a_promoted_but_unpolled_command() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let pump = Arc::new(LiveControlPump {
+            started: Notify::new(),
+            release: Notify::new(),
+            seen: std::sync::Mutex::new(Vec::new()),
+            shutdown_on_release: Some(shutdown_tx),
+        });
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            server_io,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        let mut client = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client_io,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let task = tokio::spawn(run_frame_pump(
+            server,
+            "127.0.0.1:1".parse().unwrap(),
+            pump.clone(),
+            shutdown_rx,
+        ));
+        for (id, method) in [(1, "model"), (2, "model"), (3, "approve")] {
+            let frame = Frame::Request(crate::wire::BridgeRequest {
+                id,
+                method: method.into(),
+                params: serde_json::Value::Null,
+            });
+            client
+                .send(Message::Text(serde_json::to_string(&frame).unwrap()))
+                .await
+                .unwrap();
+        }
+        // The priority echo proves B has already been read and queued. A
+        // raises shutdown during its last poll, after select polled shutdown
+        // as Pending. B will be promoted on the next loop but must not start.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for _ in 0..2 {
+                client.next().await.unwrap().unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        pump.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*pump.seen.lock().unwrap(), vec![1, 3]);
     }
 
     #[tokio::test]

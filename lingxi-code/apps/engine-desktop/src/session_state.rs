@@ -1201,9 +1201,8 @@ impl SessionStateCoordinator {
                         // shutdown leaves a current one behind.
                         let worker = state.clone();
                         let _ = tokio::task::spawn_blocking(move || {
-                            let revision = worker
-                                .last_journal_revision
-                                .load(AtomicOrdering::Acquire);
+                            let revision =
+                                worker.last_journal_revision.load(AtomicOrdering::Acquire);
                             worker.write_projection_snapshot(revision);
                         })
                         .await;
@@ -2676,11 +2675,12 @@ mod tests {
             "the fresh ledger starts from zero"
         );
 
-        let quarantined: Vec<_> = std::fs::read_dir(coordinator.journal().root().join("quarantine"))
-            .expect("a quarantine directory exists")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect();
+        let quarantined: Vec<_> =
+            std::fs::read_dir(coordinator.journal().root().join("quarantine"))
+                .expect("a quarantine directory exists")
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .collect();
         let ledger = quarantined
             .iter()
             .find(|path| {
@@ -2760,8 +2760,8 @@ mod tests {
     fn a_freeze_does_not_follow_the_process_into_a_new_session() {
         let directory = tempfile::tempdir().unwrap();
         let frozen_id = SessionId::new();
-        let frozen = SessionStateCoordinator::open(directory.path(), frozen_id, lease(frozen_id))
-            .unwrap();
+        let frozen =
+            SessionStateCoordinator::open(directory.path(), frozen_id, lease(frozen_id)).unwrap();
         frozen.durability_gate().freeze("ledger volume went away");
         assert!(frozen.durability_gate().frozen_reason().is_some());
 
@@ -3499,6 +3499,49 @@ mod tests {
             .flush_all()
             .await
             .expect("draining accepted work bypasses the paid-work freeze gate");
+    }
+
+    #[tokio::test]
+    async fn code_change_ack_progresses_past_256_with_a_stale_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = SessionId::new();
+        let manager = SessionStateManager::new(directory.path());
+        let coordinator = manager.ensure_coordinator(session_id).await.unwrap();
+        let hydration = coordinator.hydrate(session_id).await.unwrap();
+        let (legacy_tx, _legacy_rx) = tokio::sync::mpsc::channel(1);
+        let tracker = CostTracker::new(
+            session_id,
+            Arc::new(cost::PricingCatalog::builtin_reference()),
+            legacy_tx,
+        )
+        .try_with_durable_persistence(
+            hydration,
+            coordinator.clone() as Arc<dyn CostPersistence>,
+            coordinator.writer_lease(),
+            coordinator.durability_gate(),
+        )
+        .unwrap();
+        let snapshot_path = coordinator
+            .journal()
+            .root()
+            .join(session::jsonl::SNAPSHOT_FILE_NAME);
+        let initial_snapshot = std::fs::read(&snapshot_path).unwrap();
+        for _ in 0..258 {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tracker.record_code_change(1, 1),
+            )
+            .await
+            .expect("an acknowledged edit must allow the tool turn to continue");
+        }
+        let state = tracker.snapshot().await;
+        assert_eq!(state.total_lines_added, 258);
+        assert_eq!(state.total_lines_removed, 258);
+        assert!(coordinator.durability_gate().frozen_reason().is_none());
+        let replay = coordinator.journal().replay().unwrap();
+        assert!(replay.entries.last().unwrap().journal_revision > 257);
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), initial_snapshot);
+        manager.close_and_drain().await.unwrap();
     }
 
     #[tokio::test]

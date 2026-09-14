@@ -962,6 +962,20 @@ pub enum ClientCommand {
         task_id: String,
         message: String,
     },
+    CronRunStarted { run_id: String, session_id: String },
+    ScheduledRunTurn {
+        run_id: String,
+        prompt: String,
+        model: String,
+        reasoning: ReasoningSelectionDto,
+    },
+    /// Terminal acknowledgement for an authenticated host scheduled run.
+    CronRunCompleted {
+        run_id: String,
+        session_id: Option<String>,
+        summary: Option<String>,
+        error: Option<String>,
+    },
 }
 
 /// A writable MCP server-definition scope, as named on the wire. Deliberately
@@ -1243,6 +1257,8 @@ pub enum AudioResultDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CronRequestDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<CronAutomationDto>,
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -1258,4 +1274,52 @@ pub struct CronRequestDto {
     pub expires_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_expiry: Option<bool>,
+}
+
+/// Versioned scheduled execution settings shared by native clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct CronAutomationDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub version: u32,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    pub model: String,
+    pub reasoning: ReasoningSelectionDto,
+    pub run_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_id: Option<String>,
+    pub notification_policy: String,
+    #[serde(default)]
+    pub runs: Vec<CronRunDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct CronRunDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    /// Identifies the current claim, independently of the stable occurrence ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_generation: Option<u64>,
+    /// Host identity for a manual occurrence, including adopted legacy retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_occurrence_at: Option<u64>,
+    pub id: String,
+    pub task_id: String,
+    pub scheduled_at: u64,
+    pub started_at: Option<u64>,
+    pub finished_at: Option<u64>,
+    pub status: String,
+    pub model: String,
+    pub reasoning: ReasoningSelectionDto,
+    pub session_id: Option<String>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
 }

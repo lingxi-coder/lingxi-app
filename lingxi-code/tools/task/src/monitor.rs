@@ -139,6 +139,9 @@ Each text frame becomes one notification (multiline frames stay as one event). B
 
 Prefer this over `command: 'websocat wss://…'` — it avoids the extra process and line-buffering pitfalls. Use bash when you need to transform or filter frames with shell tools before they become events."#;
 
+#[path = "monitor_schema.rs"]
+mod native_schema;
+
 fn websocket_host(ws: &Value) -> Result<String, ValidationError> {
     let invalid = || {
         ValidationError(
@@ -146,39 +149,10 @@ fn websocket_host(ws: &Value) -> Result<String, ValidationError> {
         )
     };
     let raw = ws.get("url").and_then(Value::as_str).ok_or_else(invalid)?;
-    if !raw.is_ascii() || raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if native_schema::hidden_control(raw) {
         return Err(invalid());
     }
-    let rest = raw
-        .strip_prefix("wss://")
-        .or_else(|| raw.strip_prefix("ws://"))
-        .ok_or_else(invalid)?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
-        return Err(invalid());
-    }
-    let host = if let Some(ipv6) = authority.strip_prefix('[') {
-        let (host, suffix) = ipv6.split_once(']').ok_or_else(invalid)?;
-        host.parse::<std::net::Ipv6Addr>().map_err(|_| invalid())?;
-        if !suffix.is_empty()
-            && suffix
-                .strip_prefix(':')
-                .and_then(|p| p.parse::<u16>().ok())
-                .is_none()
-        {
-            return Err(invalid());
-        }
-        host
-    } else {
-        let (host, port) = authority
-            .split_once(':')
-            .map_or((authority, None), |(h, p)| (h, Some(p)));
-        if host.is_empty() || port.is_some_and(|p| p.parse::<u16>().is_err()) || host.contains('%')
-        {
-            return Err(invalid());
-        }
-        host
-    };
+    let host = permission::monitor_websocket_url_host(raw).ok_or_else(invalid)?;
     if let Some(protocols) = ws.get("protocols") {
         let values = protocols
             .as_array()
@@ -209,7 +183,12 @@ fn cjr() -> String {
     } else {
         (CJR_ONE_SHOT_BACKGROUND, CJR_UNBOUNDED_BACKGROUND)
     };
-    format!("{CJR_HEAD}{one_shot}{CJR_MID}{unbounded}{CJR_TAIL}")
+    let tail = if cron::bounded_monitors_enabled() {
+        CJR_TAIL.replace("Timeout → killed. Set `persistent: true` for session-length watches (PR monitoring, log tails) — the monitor runs until you call TaskStop or the session ends.", &format!("Every monitor expires after `timeout_ms` (default 5 minutes, at most {} minutes): it is killed and you get one notice with the event count. Re-arm it if you still need the watch; for a long watch (PR monitoring, log tails) set `timeout_ms` to the maximum and re-arm on each expiry, and widen the filter if an expiry with no events was unexpected.", cron::bounded_monitor_timeout_ms() / 60_000))
+    } else {
+        CJR_TAIL.into()
+    };
+    format!("{CJR_HEAD}{one_shot}{CJR_MID}{unbounded}{tail}")
 }
 
 /// 2.1.263 `ybn()` (`src_160113288.js` @1041; `lJr()` in the older builds) —
@@ -261,21 +240,35 @@ fn shell_available() -> bool {
 /// Binary `Mnl` (`applyCcrTimeoutCap`): under `LINGXI_REMOTE` a persistent
 /// monitor is capped to a 30-minute timeout (persistent→false); otherwise the
 /// requested `(timeout_ms, persistent)` pass through unchanged.
+#[cfg(test)]
 fn apply_ccr_timeout_cap(timeout_ms: u64, persistent: bool) -> (u64, bool) {
-    let remote = platform_api::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref());
+    let (timeout, persistent) = apply_ccr_timeout_cap_number(timeout_ms as f64, persistent);
+    (timeout as u64, persistent)
+}
+
+fn apply_ccr_timeout_cap_number(timeout_ms: f64, persistent: bool) -> (f64, bool) {
+    if cron::bounded_monitors_enabled() {
+        return (
+            timeout_ms.min(cron::bounded_monitor_timeout_ms() as f64),
+            false,
+        );
+    }
+    // Upstream tests the environment string directly, so even "0" is truthy.
+    let remote = std::env::var_os("LINGXI_REMOTE").is_some_and(|value| !value.is_empty());
     if !remote {
         return (timeout_ms, persistent);
     }
     if persistent {
-        (CCR_TIMEOUT_CAP_MS, false)
+        (CCR_TIMEOUT_CAP_MS as f64, false)
     } else {
-        (timeout_ms.min(CCR_TIMEOUT_CAP_MS), false)
+        (timeout_ms.min(CCR_TIMEOUT_CAP_MS as f64), false)
     }
 }
 
 /// Binary `yVp` — the input schema (`hVp` + `command`). Byte-exact field describes.
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -302,16 +295,44 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "type": "object", "additionalProperties": false,
                 "properties": {
                     "url": {"type": "string"},
-                    "protocols": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+                    "protocols": {"type": "array", "items": {"type": "string", "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"}}
                 },
                 "required": ["url"],
                 "description": "WebSocket to open. Each text frame is an event; binary frames are reported as a placeholder line. Socket close ends the watch. Cannot be combined with command."
             }
         },
-        "required": ["description"],
-        "oneOf": [{"required": ["command"]}, {"required": ["ws"]}]
+        "required": ["description", "timeout_ms", "persistent"]
     })
 });
+
+fn bounded_input_schema(max_ms: u64) -> Value {
+    let mut schema = INPUT_SCHEMA.clone();
+    schema["required"] = json!(["description", "timeout_ms"]);
+    schema["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("persistent");
+    schema["properties"]["timeout_ms"]["maximum"] = json!(MAX_TIMEOUT_MS);
+    schema["properties"]["timeout_ms"]["description"] = json!(format!("Kill the monitor after this deadline. Default 300000ms. Deadlines above {max_ms}ms are capped to {max_ms}ms. You are notified at expiry and can re-arm."));
+    schema
+}
+
+static BOUNDED_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| bounded_input_schema(1_800_000));
+static SINGLE_SHOT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| bounded_input_schema(600_000));
+
+fn started_message(task_id: &str, timeout_ms: f64, persistent: bool) -> String {
+    let deadline = if persistent {
+        "persistent — runs until TaskStop or session end".into()
+    } else if cron::bounded_monitors_enabled() {
+        format!("expires in {} unless the source ends first; you get one notice at expiry — re-arm if you still need the watch", cron::monitor_duration(timeout_ms as u64))
+    } else {
+        format!(
+            "timeout {}ms",
+            tool_api::native_schema::js_json(&json!(timeout_ms), false)
+        )
+    };
+    format!("Monitor started (task {task_id}, {deadline}). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply.")
+}
 
 /// Binary `TVp` — the output schema.
 static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -355,7 +376,27 @@ impl Tool for MonitorTool {
     }
 
     fn input_schema(&self) -> &Value {
-        &INPUT_SCHEMA
+        if !cron::bounded_monitors_enabled() {
+            &INPUT_SCHEMA
+        } else if cron::bounded_monitor_timeout_ms() == 600_000 {
+            &SINGLE_SHOT_INPUT_SCHEMA
+        } else {
+            &BOUNDED_INPUT_SCHEMA
+        }
+    }
+
+    fn native_input_validation(&self) -> bool {
+        true
+    }
+
+    fn parse_native_input(
+        &self,
+        input: &Value,
+    ) -> Option<Result<Value, tool_api::native_schema::NativeSchemaError>> {
+        Some(native_schema::parse(
+            input,
+            cron::bounded_monitors_enabled(),
+        ))
     }
 
     fn output_schema(&self) -> Option<&Value> {
@@ -387,44 +428,10 @@ impl Tool for MonitorTool {
 
     async fn validate_input(
         &self,
-        input: &Value,
+        _input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let command_present = input
-            .get("command")
-            .and_then(Value::as_str)
-            .is_some_and(|c| !c.is_empty());
-        if command_present == input.get("ws").is_some() {
-            return Err(ValidationError("exactly one of command or ws".into()));
-        }
-        if let Some(ws) = input.get("ws") {
-            websocket_host(ws)?;
-        }
-        let command = input.get("command").and_then(Value::as_str).unwrap_or("");
-        // Binary `fVp` refine (`mVp`): reject control chars hidden in the approval dialog.
-        if command
-            .chars()
-            .any(|c| c.is_control() && c != '\n' && c != '\t')
-        {
-            return Err(ValidationError(
-                "command contains control characters that would be hidden in the approval dialog"
-                    .to_string(),
-            ));
-        }
-        // Binary `_Vp` refine (`gVp`): `persistent || timeout_ms <= 3_600_000`.
-        let persistent = input
-            .get("persistent")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if !persistent {
-            if let Some(t) = input.get("timeout_ms").and_then(Value::as_u64) {
-                if t > MAX_TIMEOUT_MS {
-                    return Err(ValidationError(
-                        "timeout_ms must be \u{2264} 3600000".to_string(),
-                    ));
-                }
-            }
-        }
+        // Structural checks/refinements belong to safeParse, before this hook.
         Ok(())
     }
 
@@ -478,7 +485,38 @@ impl Tool for MonitorTool {
                 .get("protocols")
                 .and_then(Value::as_array)
                 .filter(|protocols| !protocols.is_empty())
-                .map(|protocols| format!(" (subprotocols: {})", json!(protocols)))
+                .map(|protocols| {
+                    // .270 RYe: bounded permission preview, not a JSON array.
+                    let shown = protocols
+                        .iter()
+                        .take(4)
+                        .map(|protocol| {
+                            let value = protocol.as_str().unwrap_or_default();
+                            // Measure in the SAME unit the cut uses. `str::len`
+                            // is bytes while `chars().take(48)` is scalar
+                            // values, so a 20-character CJK protocol (60 bytes)
+                            // took the truncating branch, kept every character,
+                            // and still got an ellipsis claiming a truncation
+                            // that never happened. The oracle's `.length > 48` /
+                            // `.slice(0, 48)` are both UTF-16 units, which agree
+                            // with chars for every non-astral protocol token.
+                            let value = if value.chars().count() > 48 {
+                                format!("{}…", value.chars().take(48).collect::<String>())
+                            } else {
+                                value.to_string()
+                            };
+                            format!("\"{value}\"")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let rest = protocols.len().saturating_sub(4);
+                    let overflow = if rest > 0 {
+                        format!(" (+{rest} more)")
+                    } else {
+                        String::new()
+                    };
+                    format!(" (subprotocols: {shown}{overflow})")
+                })
                 .unwrap_or_default();
             let message = format!(
                 "Monitor will open a WebSocket to {}{suffix}",
@@ -547,8 +585,8 @@ impl Tool for MonitorTool {
             .to_string();
         let requested_timeout = input
             .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_TIMEOUT_MS);
+            .and_then(Value::as_f64)
+            .unwrap_or(DEFAULT_TIMEOUT_MS as f64);
         let requested_persistent = input
             .get("persistent")
             .and_then(Value::as_bool)
@@ -556,7 +594,14 @@ impl Tool for MonitorTool {
 
         // PARITY: `Mnl(t)` — CCR timeout cap.
         let (timeout_ms, persistent) =
-            apply_ccr_timeout_cap(requested_timeout, requested_persistent);
+            apply_ccr_timeout_cap_number(requested_timeout, requested_persistent);
+        let reported_timeout = if persistent {
+            json!(0)
+        } else if timeout_ms.fract() == 0.0 {
+            json!(timeout_ms as u64)
+        } else {
+            json!(timeout_ms)
+        };
 
         if let Some(ws) = input.get("ws") {
             websocket_host(ws).map_err(|error| ToolError::InvalidInput(error.0))?;
@@ -573,7 +618,7 @@ impl Tool for MonitorTool {
                 .preflight_monitor_websocket(ws["url"].as_str().unwrap_or_default())
                 .await
                 .map_err(|error| ToolError::InvalidInput(format!("Monitor: {error}")))?;
-            let timeout_field = if persistent { 0 } else { timeout_ms };
+            let timeout_field = if persistent { 0 } else { timeout_ms as u64 };
             let task_id = registry
                 .spawn_websocket_monitor(
                     WebSocketMonitorRegistration {
@@ -604,9 +649,12 @@ impl Tool for MonitorTool {
                 .await
                 .map_err(|error| ToolError::Internal(format!("Monitor: {error}")))?;
             return Ok(ToolCallResult {
-                data: json!({"taskId":task_id,"timeoutMs":timeout_field,"persistent":persistent}),
-                model_content: Some(format!("Monitor started (task {task_id}, {}). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply.", if persistent { "persistent — runs until TaskStop or session end".into() } else { format!("timeout {timeout_ms}ms") })),
-                is_error:false,new_messages:vec![],context_modifier:None,mcp_meta:None,
+                data: json!({"taskId":task_id,"timeoutMs":reported_timeout,"persistent":persistent}),
+                model_content: Some(started_message(&task_id, timeout_ms, persistent)),
+                is_error: false,
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
             });
         }
 
@@ -699,7 +747,7 @@ impl Tool for MonitorTool {
             }
         };
 
-        let timeout_field = if persistent { 0 } else { timeout_ms };
+        let timeout_field = if persistent { 0 } else { timeout_ms as u64 };
         let task_id = registry
             .spawn_monitor(MonitorRegistration {
                 command,
@@ -716,15 +764,12 @@ impl Tool for MonitorTool {
             .await
             .map_err(|e| ToolError::Internal(format!("Monitor: {e}")))?;
 
-        let model_content = if persistent {
-            format!("Monitor started (task {task_id}, persistent \u{2014} runs until TaskStop or session end). You will be notified on each event. Keep working \u{2014} do not poll or sleep. Events may arrive while you are waiting for the user \u{2014} an event is not their reply.")
-        } else {
-            format!("Monitor started (task {task_id}, timeout {timeout_ms}ms). You will be notified on each event. Keep working \u{2014} do not poll or sleep. Events may arrive while you are waiting for the user \u{2014} an event is not their reply.")
-        };
+        let model_content = started_message(&task_id, timeout_ms, persistent);
+
         Ok(ToolCallResult {
             data: json!({
                 "taskId": task_id,
-                "timeoutMs": timeout_field,
+                "timeoutMs": reported_timeout,
                 "persistent": persistent,
             }),
             model_content: Some(model_content),
@@ -828,6 +873,8 @@ mod tests {
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_REMOTE");
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
+        telemetry::test_clear_flag("tengu_breezy_crescent");
+        platform_api::session_flags::set_single_shot_print_session(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
         platform_api::session_flags::set_agent_push_notif_enabled(false);
         g
@@ -1159,32 +1206,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_rejects_control_chars_and_huge_timeout() {
+    async fn native_monitor_schema_matches_270_on_actual_nested_dispatch() {
+        use platform_api::tool_invoker::{
+            SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker,
+        };
+        fn invocation_context() -> SubagentInvocationContext {
+            SubagentInvocationContext {
+                permission_pause_observer: None,
+                parent_agent_id: None,
+                origin_session_id: None,
+                tool_execution_policy: ToolExecutionPolicy::Ordinary,
+                agent_name: None,
+                team_name: None,
+                is_async: false,
+                is_non_interactive_session: true,
+                can_show_permission_prompts: false,
+                cwd: None,
+                tool_use_id: None,
+                assistant_message_id: None,
+                depth: 0,
+                observer: None,
+                parent_model: None,
+                parent_model_profile: None,
+                mode_override: None,
+                request_source: None,
+                frozen_command_denies: Vec::new(),
+            }
+        }
+
+        let _g = guard();
+        let oracle: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/monitor_schema_2_1_270.json"
+        ))
+        .unwrap();
+        let monitor = Arc::new(tool());
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(monitor.clone());
+        let invoker = tool_api::RegistryToolInvoker::new(Arc::new(registry));
+        for (index, case) in oracle["cases"].as_array().unwrap().iter().enumerate() {
+            let bounded = case["mode"] == "bounded";
+            telemetry::test_set_flag("tengu_breezy_crescent", bounded);
+            let expected_schema = oracle["schemas"][case["mode"].as_str().unwrap()].clone();
+            assert_eq!(*monitor.input_schema(), expected_schema, "schema {index}");
+            let parsed = monitor.parse_native_input(&case["input"]).unwrap();
+            if case["success"] == true {
+                assert_eq!(parsed.unwrap(), case["normalized"], "parsed {index}");
+            } else {
+                let error = parsed.unwrap_err();
+                assert_eq!(error.raw, case["raw"].as_str().unwrap(), "raw {index}");
+                assert_eq!(
+                    error.display,
+                    case["display"].as_str().unwrap(),
+                    "display {index}"
+                );
+                let error = invoker
+                    .invoke("Monitor", case["input"].clone(), invocation_context())
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.model_tool_result_content(),
+                    format!(
+                        "<tool_use_error>InputValidationError: {}</tool_use_error>",
+                        case["display"].as_str().unwrap()
+                    ),
+                    "nested {index}"
+                );
+            }
+        }
+        telemetry::test_clear_flag("tengu_breezy_crescent");
+        let tasks = Arc::new(RecordingRegistry::default());
+        let tool = tool_with_registry(tasks.clone());
+        let input =
+            json!({"description":"fractional", "command":"echo ready", "timeout_ms":1000.5});
+        let parsed = tool.parse_native_input(&input).unwrap().unwrap();
+        let result = tool.call(parsed, fresh_ctx(), fresh_tx()).await.unwrap();
+        assert_eq!(result.data["timeoutMs"], json!(1000.5));
+        assert_eq!(
+            result.model_content.as_deref(),
+            oracle["fractionalResult"].as_str()
+        );
+        assert_eq!(
+            tasks.monitor.lock().unwrap().as_ref().unwrap().timeout_ms,
+            1000
+        );
+    }
+
+    #[test]
+    fn schema_rejects_control_chars_and_huge_timeout() {
         let _g = guard();
         let t = tool();
+        for input in [
+            json!({"description":"d","command":"echo \u{7}hi"}),
+            json!({"description":"d","command":"echo ok","timeout_ms":9000000}),
+        ] {
+            assert!(t.parse_native_input(&input).unwrap().is_err());
+        }
+        assert!(t.parse_native_input(&json!({"description":"d","command":"echo ok","timeout_ms":9000000,"persistent":true})).unwrap().is_ok());
         assert!(t
-            .validate_input(
-                &json!({"description":"d","command":"echo \u{7}hi"}),
-                &fresh_ctx()
-            )
-            .await
-            .is_err());
-        assert!(t
-            .validate_input(
-                &json!({"description":"d","command":"echo ok","timeout_ms": 9_000_000}),
-                &fresh_ctx()
-            )
-            .await
-            .is_err());
-        assert!(t.validate_input(&json!({"description":"d","command":"echo ok","timeout_ms": 9_000_000, "persistent": true}), &fresh_ctx()).await.is_ok());
-        assert!(t
-            .validate_input(
-                &json!({"description":"d","command":"tail -f x"}),
-                &fresh_ctx()
-            )
-            .await
+            .parse_native_input(&json!({"description":"d","command":"tail -f x"}))
+            .unwrap()
             .is_ok());
     }
+
     #[tokio::test]
     async fn websocket_schema_validation_permission_and_dispatch_are_connected() {
         let _g = guard();
@@ -1217,13 +1340,45 @@ mod tests {
             json!({"description":"x","ws":{"url":"wss://u:p@example.com"}}),
             json!({"description":"x","ws":{"url":"wss://example.com","protocols":["v1","v1"]}}),
         ] {
-            assert!(t.validate_input(&bad, &fresh_ctx()).await.is_err(), "{bad}");
+            assert!(t.parse_native_input(&bad).unwrap().is_err(), "{bad}");
         }
         assert!(matches!(
             t.check_permissions(&json!({"ws":{"url":"ws://169.254.169.254"}}), &fresh_ctx())
                 .await,
             PermissionResult::Deny { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn websocket_permission_protocol_preview_matches_270_bytes() {
+        let _g = guard();
+        let tool = MonitorTool::new(shell_test_ctx(dummy_out()));
+        for (protocols, suffix) in [
+            (json!([]), String::new()),
+            (
+                json!(["v1", "v2"]),
+                " (subprotocols: \"v1\", \"v2\")".into(),
+            ),
+            (
+                json!(["a".repeat(49), "b", "c", "d", "e"]),
+                format!(
+                    " (subprotocols: \"{}…\", \"b\", \"c\", \"d\" (+1 more))",
+                    "a".repeat(48)
+                ),
+            ),
+        ] {
+            let input =
+                json!({"ws":{"url":"wss://events.example.com/feed", "protocols":protocols}});
+            let PermissionResult::Ask { prompt, .. } =
+                tool.check_permissions(&input, &fresh_ctx()).await
+            else {
+                panic!("public WebSocket should request permission");
+            };
+            assert_eq!(
+                prompt.message,
+                format!("Monitor will open a WebSocket to wss://events.example.com/feed{suffix}")
+            );
+        }
     }
     struct PreflightHttp {
         allow: bool,
@@ -1271,5 +1426,51 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(registry.websocket.lock().unwrap().is_none());
+    }
+    #[tokio::test]
+    async fn bounded_monitor_schema_cap_and_result_match_270() {
+        let _guard = guard();
+        telemetry::test_set_flag("tengu_breezy_crescent", true);
+        let t = tool();
+        assert!(t.input_schema()["properties"].get("persistent").is_none());
+        assert_eq!(
+            t.input_schema()["properties"]["timeout_ms"]["maximum"],
+            3_600_000
+        );
+        assert_eq!(t.input_schema()["properties"]["timeout_ms"]["description"], "Kill the monitor after this deadline. Default 300000ms. Deadlines above 1800000ms are capped to 1800000ms. You are notified at expiry and can re-arm.");
+        assert_eq!(apply_ccr_timeout_cap(3_600_000, true), (1_800_000, false));
+        assert_eq!(started_message("b123", 1_800_000.0, false), "Monitor started (task b123, expires in 30m unless the source ends first; you get one notice at expiry — re-arm if you still need the watch). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply.");
+        assert!(cjr().contains(
+            "Every monitor expires after `timeout_ms` (default 5 minutes, at most 30 minutes)"
+        ));
+        assert!(t.parse_native_input(&json!({"description":"d","command":"echo ok","timeout_ms":9_000_000,"persistent":true})).unwrap().is_err());
+        platform_api::session_flags::set_single_shot_print_session(true);
+        assert_eq!(apply_ccr_timeout_cap(3_600_000, false), (600_000, false));
+        assert_eq!(t.input_schema()["properties"]["timeout_ms"]["description"], "Kill the monitor after this deadline. Default 300000ms. Deadlines above 600000ms are capped to 600000ms. You are notified at expiry and can re-arm.");
+        let registry = Arc::new(RecordingRegistry::default());
+        let out = tool_with_registry(registry.clone()).call(
+            json!({"description":"ci", "command":"tail -f log", "timeout_ms":3_600_000, "persistent":true}),
+            fresh_ctx(), fresh_tx(),
+        ).await.expect("bounded monitor starts");
+        let launched = registry.monitor.lock().unwrap().clone().unwrap();
+        assert_eq!(launched.timeout_ms, 600_000);
+        assert!(!launched.persistent);
+        assert_eq!(out.data["timeoutMs"], 600_000);
+        assert_eq!(out.data["persistent"], false);
+        assert!(out
+            .model_content
+            .unwrap()
+            .contains("expires in 10m unless the source ends first"));
+        platform_api::session_flags::set_single_shot_print_session(false);
+        telemetry::test_clear_flag("tengu_breezy_crescent");
+    }
+    #[test]
+    fn legacy_remote_cap_uses_javascript_environment_truthiness() {
+        let _guard = guard();
+        assert_eq!(apply_ccr_timeout_cap(3_600_000, true), (3_600_000, true));
+        std::env::set_var("LINGXI_REMOTE", "0");
+        assert_eq!(apply_ccr_timeout_cap(3_600_000, true), (1_800_000, false));
+        assert_eq!(apply_ccr_timeout_cap(300_000, false), (300_000, false));
+        std::env::remove_var("LINGXI_REMOTE");
     }
 }

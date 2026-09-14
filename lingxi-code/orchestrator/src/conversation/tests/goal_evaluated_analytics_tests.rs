@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Three details make this event easy to port wrong, and each has a test below:
-//! `D` is the QUERY start, not the evaluation's; `...Xe` is set in exactly one
+//! `D` is the Stop-handler start (2.1.270), not the model query's; `...Xe` is set in exactly one
 //! branch; and `iterations` is bumped only by the three verdict outcomes, so a
 //! deferred or cancelled dispatch must report the count unchanged.
 
@@ -270,11 +270,9 @@ async fn a_non_deferred_evaluation_carries_no_task_counts() {
     );
 }
 
-/// `durationMs: Date.now() - D`, and `D` is stamped at the TOP of the query
-/// generator — the same base `tengu_stop_hook_error`'s `duration` uses. Reading
-/// a clock started at the goal evaluation instead would report ~0 here.
+/// 2.1.270 starts D at the Stop-handler entry, excluding the model query.
 #[tokio::test]
-async fn the_duration_is_measured_from_the_query_start() {
+async fn the_duration_excludes_the_model_query() {
     let (bus, sink) = bus_and_sink().await;
     let orch = orch(bus);
     set_goal(&orch, 0).await;
@@ -288,9 +286,8 @@ async fn the_duration_is_measured_from_the_query_start() {
     stop_dispatch(&orch, false).await;
 
     assert!(
-        int_field(&the_event(&sink).await, "durationMs") >= 700,
-        "the query started 750ms ago; a duration near zero means the event is \
-         timing the goal evaluation instead"
+        int_field(&the_event(&sink).await, "durationMs") < 700,
+        "Stop evaluation must not include the earlier model query"
     );
 }
 
@@ -319,7 +316,8 @@ async fn only_a_real_verdict_bumps_the_iteration_count() {
             origin: lingxi_core::session::GoalOrigin::User,
         };
 
-        orch.fire_goal_evaluated(&goal, outcome, false, &[]).await;
+        orch.fire_goal_evaluated(&goal, outcome, false, &[], std::time::Duration::ZERO)
+            .await;
 
         let md = the_event(&sink).await;
         assert_eq!(

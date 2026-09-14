@@ -88,10 +88,20 @@ const FIELD_RANGES: [FieldRange; 5] = [
     FieldRange { min: 0, max: 6 },
 ];
 
+/// ECMAScript whitespace used by the upstream cron parser's trim/split.
+/// Rust additionally treats NEL as whitespace and excludes the BOM.
+#[must_use]
+pub fn is_cron_whitespace(ch: char) -> bool {
+    (ch.is_whitespace() && ch != '\u{0085}') || ch == '\u{feff}'
+}
+
 /// Parse a 5-field cron expression (claude-code `parseCronExpression`: trim,
 /// split on whitespace, exactly five fields, each expanded by [`expand_field`]).
 pub fn parse_cron(s: &str) -> Result<CronExpression, CronParseError> {
-    let parts: Vec<&str> = s.split_whitespace().collect();
+    let parts: Vec<&str> = s
+        .split(is_cron_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.len() != 5 {
         return Err(CronParseError::FieldCount(parts.len()));
     }
@@ -252,8 +262,8 @@ impl CronExpression {
     }
 
     /// The smallest minute boundary STRICTLY after `from` at which this
-    /// expression matches, searching up to ~366 days ahead. `None` if no match
-    /// is found within that horizon (e.g. an impossible expression like
+    /// expression matches, searching up to 527,040 calendar advances. `None` if no match
+    /// is found within that iteration limit (e.g. an impossible expression like
     /// `0 0 30 2 *`).
     ///
     /// The missed-run CATCH-UP primitive: a recurring job is due when the next
@@ -286,15 +296,66 @@ impl CronExpression {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .ok()?;
-        // Start at the next whole minute strictly after `from`.
-        let start_minute = from_secs / 60 + 1;
-        const HORIZON_MINUTES: u64 = 366 * 24 * 60;
-        (0..HORIZON_MINUTES).find_map(|m| {
-            let cand_secs = (start_minute + m) * 60;
-            let candidate = SystemTime::UNIX_EPOCH + Duration::from_secs(cand_secs);
-            self.matches_at_offset(candidate, offset_for(cand_secs))
-                .then_some(candidate)
-        })
+        // Upstream Date setters advance local calendar fields, not UTC minutes.
+        // The 527,040 bound counts iterations (including month/day/hour jumps).
+        // In particular a leap day several years away is a valid next match.
+        let to_utc = |local: u64, anchor: u64| {
+            let guess = local.saturating_add_signed(-offset_for(anchor));
+            let before = offset_for(guess.saturating_sub(86_400));
+            let after = offset_for(guess.saturating_add(86_400));
+            let a = local.saturating_add_signed(-before);
+            let b = local.saturating_add_signed(-after);
+            let valid_a = a.saturating_add_signed(offset_for(a)) == local;
+            let valid_b = b.saturating_add_signed(offset_for(b)) == local;
+            match (valid_a, valid_b) {
+                (true, true) => a.min(b), // repeated local time: earlier occurrence
+                (true, false) => a,
+                (false, true) => b,
+                (false, false) => a.max(b), // nonexistent local time: advance by gap
+            }
+        };
+        let local = from_secs.saturating_add_signed(offset_for(from_secs));
+        let mut candidate = to_utc((local / 60 + 1) * 60, from_secs);
+        for _ in 0..527_040 {
+            let local = candidate.saturating_add_signed(offset_for(candidate));
+            let (year, month, day, hour, minute, _, dow) = decompose(local);
+            let day_start = local / 86_400 * 86_400;
+            let dom_wild = self.dom.is_wild(1, 31);
+            let dow_wild = self.dow.is_wild(0, 6);
+            let day_matches = match (dom_wild, dow_wild) {
+                (true, true) => true,
+                (false, true) => self.dom.contains(day),
+                (true, false) => self.dow.contains(dow),
+                (false, false) => self.dom.contains(day) || self.dow.contains(dow),
+            };
+            let next_local = if !self.month.contains(month) {
+                let days = match month {
+                    2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+                    2 => 28,
+                    4 | 6 | 9 | 11 => 30,
+                    _ => 31,
+                };
+                day_start + u64::from(days - day + 1) * 86_400
+            } else if !day_matches {
+                day_start + 86_400
+            } else if !self.hour.contains(hour) {
+                (local / 3600 + 1) * 3600
+            } else if !self.minute.contains(minute) {
+                (local / 60 + 1) * 60
+            } else if candidate > from_secs {
+                return Some(SystemTime::UNIX_EPOCH + Duration::from_secs(candidate));
+            } else {
+                // DST fall-back: the local minute occurs twice and `to_utc`
+                // resolves it to the EARLIER UTC instant, which can be at or
+                // before `from`. Returning it would break the strictly-after
+                // contract this function documents, and a recurring job whose
+                // `lastFiredAt` lands in the repeated hour would then read as
+                // due on every tick. Skip to the next local minute instead.
+                (local / 60 + 1) * 60
+            };
+            candidate = to_utc(next_local, candidate);
+        }
+        None
     }
 }
 
@@ -317,9 +378,19 @@ pub fn human_schedule(cron: &str) -> String {
     fn all_digits(s: &str) -> bool {
         !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
     }
-    fn step(s: &str) -> Option<u32> {
+    fn step(s: &str) -> Option<f64> {
         let rest = s.strip_prefix("*/")?;
         all_digits(rest).then(|| rest.parse().ok()).flatten()
+    }
+    fn number(value: f64) -> String {
+        if value.is_infinite() {
+            return "Infinity".into();
+        }
+        if value >= 1e21 {
+            let scientific = format!("{value:e}");
+            return scientific.replace('e', "e+");
+        }
+        value.to_string()
     }
     fn time(minute: u32, hour: u32) -> String {
         let period = if hour < 12 { "AM" } else { "PM" };
@@ -329,7 +400,10 @@ pub fn human_schedule(cron: &str) -> String {
         };
         format!("{h12}:{minute:02} {period}")
     }
-    let parts: Vec<&str> = cron.trim().split_whitespace().collect();
+    let parts: Vec<&str> = cron
+        .split(is_cron_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.len() != 5 {
         return cron.to_string();
     }
@@ -339,10 +413,10 @@ pub fn human_schedule(cron: &str) -> String {
             return "Every minute".to_string();
         }
         if let Some(n) = step(minute) {
-            return if n == 1 {
+            return if n == 1.0 {
                 "Every minute".to_string()
             } else {
-                format!("Every {n} minutes")
+                format!("Every {} minutes", number(n))
             };
         }
     }
@@ -362,10 +436,10 @@ pub fn human_schedule(cron: &str) -> String {
                 } else {
                     format!(" at :{m:02}")
                 };
-                return if n == 1 {
+                return if n == 1.0 {
                     format!("Every hour{suffix}")
                 } else {
-                    format!("Every {n} hours{suffix}")
+                    format!("Every {} hours{suffix}", number(n))
                 };
             }
         }
@@ -775,6 +849,52 @@ mod tests {
         assert_eq!((y, m, d, h, min), (2023, 11, 15, 9, 0));
     }
 
+    /// Differential outputs from 2.1.270 Nje/JO, TZ=America/Los_Angeles.
+    /// Oracle binary SHA256: a506b6d970a4cf44f6abdb53a81ddcd5d3b0ce042a95c502fe9d1f946bdb8807.
+    #[test]
+    fn parser_matches_javascript_whitespace_and_large_steps() {
+        assert!(parse_cron("\u{feff}* * * * *\u{feff}").is_ok());
+        assert!(parse_cron("*\u{0085}* * * *").is_err());
+        assert_eq!(
+            parse_cron("*/4294967296 * * * *").unwrap().minute.values(),
+            &[0]
+        );
+    }
+
+    #[test]
+    fn latest_oracle_calendar_jumps_and_dst() {
+        // UTC epoch seconds; offset closure models the relevant 2026 DST transitions.
+        let cases = [
+            ("0 0 29 2 *", 1740787200, 1835424000),
+            ("* * * * *", 1793523540, 1793527200),
+            ("30 1 * * *", 1793522700, 1793611800),
+            ("* * * * *", 1772963940, 1772964000),
+            ("30 2 * * *", 1772960400, 1773048600),
+        ];
+        let offset = |seconds| {
+            if (1772964000..1793523600).contains(&seconds) {
+                -7 * 3600
+            } else {
+                -8 * 3600
+            }
+        };
+        for (cron, anchor, expected) in cases {
+            assert_eq!(
+                parse_cron(cron)
+                    .unwrap()
+                    .next_match_after_with(at(anchor), offset),
+                Some(at(expected)),
+                "{cron} from {anchor}"
+            );
+        }
+        assert_eq!(
+            parse_cron("0 0 29 2 *")
+                .unwrap()
+                .next_match_after_with(at(1740787200), |_| 0),
+            Some(at(1835395200))
+        );
+    }
+
     #[test]
     fn next_match_after_impossible_expression_is_none() {
         // Feb 30 never occurs → no match within the ~366-day horizon.
@@ -809,5 +929,18 @@ mod tests {
             (-12 * 3600..=14 * 3600).contains(&off),
             "implausible UTC offset {off}"
         );
+    }
+    #[test]
+    fn human_schedule_matches_latest_upstream_bytes() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("bundled/human_schedule_2_1_270.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let input = case["cron"].as_str().unwrap();
+            assert_eq!(
+                human_schedule(input),
+                case["text"].as_str().unwrap(),
+                "{input:?}"
+            );
+        }
     }
 }

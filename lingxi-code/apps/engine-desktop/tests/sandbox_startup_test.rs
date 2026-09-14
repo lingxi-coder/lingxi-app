@@ -73,6 +73,8 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     std::fs::write(lingxi_home.join("settings.json"), settings_json).expect("write settings.json");
 
     let cfg = DesktopConfig {
+        enable_automation_scheduler: true,
+        host_workspace_trusted: None,
         // Sandboxed boot: inherit no machine credentials, so the
         // assertions do not depend on the developer's env/keychain.
         isolated_credential_storage: true,

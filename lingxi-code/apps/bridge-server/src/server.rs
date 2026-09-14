@@ -88,6 +88,24 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// parked permission `check()`); the implementation streams its events out
     /// through the connection's [`ClientEventSink`] as a side effect.
     async fn run_turn(&self, prompt: String);
+    /// Cancel session-local timers before replacing the conversation.
+    async fn stop_dynamic_loop(&self) {}
+
+    /// Resolve a scheduled sentinel against this session's working directory.
+    fn resolve_loop_prompt(&self, prompt: &str) -> std::io::Result<String> {
+        let cwd = std::env::current_dir()?;
+        tool_cron::LoopRuntime::default().try_resolve_loop_default_fire(prompt, &cwd, &cwd)
+    }
+    async fn loop_prompt_failed(&self, error: std::io::Error) {
+        tracing::warn!(%error, "could not read scheduled loop instructions");
+    }
+    async fn run_scheduled_turn(&self, _prompt: String, _model: String, _reasoning: client_protocol::controls::ReasoningSelectionDto, _cancel: CancellationToken) -> Result<String, String> {
+        Err("paused:Scheduled session execution is unavailable".into())
+    }
+    async fn run_queued_batch(&self, inputs: Vec<orchestrator::QueuedPromptInput>, cancel: CancellationToken) {
+        let human = inputs.iter().any(|input| !input.is_meta);
+        self.run_queued_turn(inputs.into_iter().map(|input| input.text).collect::<Vec<_>>().join("\n"), human, cancel).await;
+    }
     async fn run_queued_turn(
         &self,
         prompt: String,
@@ -158,6 +176,8 @@ type SharedAskUserQuestionBroker = Arc<StdMutex<Option<Weak<BridgeAskUserQuestio
 /// [`Frame::Event`] on the connection's outbound channel.
 struct FrameEventSink {
     out: SharedFrameSink,
+    pending_openai_oauth: Arc<Mutex<Option<ClientEvent>>>,
+    handshaken: Arc<AtomicBool>,
     active_turn: ActiveTurnControl,
     ask_user_question_broker: SharedAskUserQuestionBroker,
 }
@@ -200,6 +220,22 @@ fn is_owned_turn_event(event: &ClientEvent) -> bool {
 #[async_trait]
 impl ClientEventSink for FrameEventSink {
     async fn emit(&self, mut event: ClientEvent) {
+        if matches!(&event, ClientEvent::OpenAiOAuthUpdated { .. }) {
+            let out = self.out.lock().await;
+            let mut pending = self.pending_openai_oauth.lock().await;
+            if self.handshaken.load(Ordering::SeqCst) {
+                if let Some(sink) = out.as_ref() {
+                    if sink.send(Frame::Event(event.clone())) {
+                        *pending = None;
+                        return;
+                    }
+                }
+            }
+            // Boot may rotate an expired token before the host handshakes.
+            *pending = Some(event);
+            return;
+        }
+
         // AskUserQuestion is parked in the broker before this event reaches
         // the sink. Resolve it fail-closed before applying the generic event
         // filter, otherwise an unowned/terminal request would be dropped while
@@ -412,6 +448,7 @@ impl AudioRequestSink for FrameAudioSink {
 /// [`TurnDriver`] and yields the pump.
 pub struct BridgeConnection {
     out: SharedFrameSink,
+    pending_openai_oauth: Arc<Mutex<Option<ClientEvent>>>,
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
     gate: Option<Arc<AdapterPermissionGate>>,
     /// The `computer`-tool `request_access` broker (Electron-facing sibling of
@@ -675,6 +712,8 @@ fn prompt_command(text: String) -> QueuedCommand {
     // commands by uuid, so each queued prompt needs a distinct id.
     static SEQ: AtomicU64 = AtomicU64::new(0);
     QueuedCommand {
+        scheduled_task_id: None,
+        scheduled_fire_id: None,
         uuid: format!("prompt-{}", SEQ.fetch_add(1, Ordering::Relaxed)),
         content: QueuedCommandContent::UserInput { text },
         priority: QueuePriority::Next,
@@ -697,14 +736,14 @@ async fn drain_main_thread(
     interactions: &TurnInteractions,
 ) {
     loop {
-        // Snapshot the highest-priority main-thread, non-slash prompts so a run
-        // of consecutive prompts merges into a single follow-up turn.
-        let batch = queue
-            .get_by_max_priority(QueuePriority::Later, |c| {
-                c.is_main_thread() && !c.is_slash_command()
-            })
-            .await;
-        let Some((joined, consumed)) = join_prompt_values(&batch) else {
+        // Native hJe selects the head by priority, then Rr collects compatible
+        // messages in insertion order. Each retains its own origin in the batch.
+        let batch = if queue.peek(|c| c.is_main_thread()).await
+            .is_some_and(|head| !head.is_slash_command()) {
+            queue.snapshot().await.into_iter()
+                .filter(|c| c.is_main_thread() && !c.is_slash_command()).collect::<Vec<_>>()
+        } else { Vec::new() };
+        let Some((joined, mut consumed)) = join_prompt_values(&batch) else {
             // No batchable (non-slash) prompt left. Pop the next main-thread
             // command and, if it carries prompt text (e.g. a slash command typed
             // mid-turn), run it as its own follow-up turn — IDENTICAL to how the
@@ -719,7 +758,7 @@ async fn drain_main_thread(
                         if !t.is_empty() {
                             tag_loop_tick_in_flight(
                                 loop_runtime,
-                                cmd.source == QueueSource::Cron,
+                                cmd.source == QueueSource::Cron && cmd.uuid.starts_with("loop-wakeup-"),
                                 t,
                             );
                             let (generation, cancel) = active_turn.begin(None);
@@ -746,11 +785,53 @@ async fn drain_main_thread(
         // consumed `QueueSource::Cron` command's text as the in-flight prompt.
         let cron_tick = batch
             .iter()
-            .find(|c| c.source == QueueSource::Cron && consumed.contains(&c.uuid))
+            .find(|c| c.source == QueueSource::Cron && c.uuid.starts_with("loop-wakeup-") && consumed.contains(&c.uuid))
             .and_then(|c| c.text().map(str::to_string));
         match cron_tick {
             Some(ref t) => tag_loop_tick_in_flight(loop_runtime, true, t),
             None => tag_loop_tick_in_flight(loop_runtime, false, &joined),
+        }
+        // Resolve only consumed prompts: touching a later sentinel early would
+        // incorrectly mark its preamble/loop.md as already delivered.
+        // A batch mixes origins (a `/loop` wakeup and a typed prompt can be
+        // drained together), so a `loop.md` read failure must retire ONLY the
+        // sentinel that could not be resolved. Consuming the whole batch here
+        // silently destroyed the user's typed message.
+        let mut inputs = Vec::new();
+        let mut loop_failure = None;
+        let mut failed_uuids = Vec::new();
+        for command in batch.iter().filter(|command| consumed.contains(&command.uuid)) {
+            let Some(text) = command.text() else { continue };
+            let text = if command.source == QueueSource::Cron {
+                match driver.resolve_loop_prompt(text) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        failed_uuids.push(command.uuid.clone());
+                        loop_failure.get_or_insert(error);
+                        continue;
+                    }
+                }
+            } else {
+                text.to_string()
+            };
+            inputs.push(orchestrator::QueuedPromptInput {
+                    goal_retry_id: command.uuid.starts_with("goal-retry-").then(|| command.uuid.clone()),
+                text,
+                is_meta: command.is_meta || command.source != QueueSource::PromptInput,
+                message_id: None,
+                queue_priority: (command.priority == QueuePriority::Later).then(|| "later".to_string()),
+                scheduled_task_id: command.scheduled_task_id.clone(),
+                scheduled_fire_id: command.scheduled_fire_id.clone(),
+            });
+        }
+        if let Some(error) = loop_failure {
+            queue.consume(&failed_uuids, "loop instruction read failed").await;
+            consumed.retain(|uuid| !failed_uuids.contains(uuid));
+            loop_runtime.take_in_flight_prompt();
+            driver.loop_prompt_failed(error).await;
+            if inputs.is_empty() {
+                continue;
+            }
         }
         queue
             .consume(&consumed, "drained into follow-up turn")
@@ -759,7 +840,10 @@ async fn drain_main_thread(
         let in_human_turn = batch.iter().any(|cmd| {
             consumed.contains(&cmd.uuid) && cmd.source == QueueSource::PromptInput && !cmd.is_meta
         });
-        driver.run_queued_turn(joined, in_human_turn, cancel).await;
+        if cron_tick.is_some() && in_human_turn {
+            loop_runtime.veto_tick(tool_cron::LoopFoldVeto::ForeignUserInput);
+        }
+        driver.run_queued_batch(inputs, cancel).await;
         interactions.drain().await;
         active_turn.finish(generation);
     }
@@ -774,6 +858,7 @@ fn tag_loop_tick_in_flight(loop_runtime: &tool_cron::LoopRuntime, is_cron: bool,
         loop_runtime.begin_tick(text.to_string());
     } else {
         loop_runtime.take_in_flight_prompt();
+        loop_runtime.invalidate_noop_streak();
     }
 }
 
@@ -796,6 +881,7 @@ impl BridgeConnection {
     pub fn new() -> Self {
         Self {
             out: Arc::new(Mutex::new(None)),
+            pending_openai_oauth: Arc::new(Mutex::new(None)),
             tool_names: Arc::new(Mutex::new(HashMap::new())),
             gate: None,
             computer_access_broker: None,
@@ -842,6 +928,7 @@ impl BridgeConnection {
         };
         let queue = self.queue.clone();
         let running = self.turn_running.clone();
+        let turn_handoff = self.turn_handoff.clone();
         let handshaken = self.handshaken.clone();
         let active_turn = self.active_turn.clone();
         let active_task = self.active_turn_task.clone();
@@ -858,7 +945,7 @@ impl BridgeConnection {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if handshaken.load(Ordering::SeqCst)
                     && running.load(Ordering::SeqCst)
-                    && queue.has_main_thread_commands().await
+                    && !queue.get_by_max_priority(QueuePriority::Next, |command| command.is_main_thread()).await.is_empty()
                     && !platform_api::env::background_tasks_disabled()
                 {
                     if let Some(registry) = &registry {
@@ -870,6 +957,9 @@ impl BridgeConnection {
                     }
                     continue;
                 }
+                // Serialize the idle claim with clear/new/resume, without
+                // marking a transition as an active model turn.
+                let _handoff = turn_handoff.lock().await;
                 let pending_notifications = match &registry {
                     Some(registry) => registry.has_pending_task_notifications_for(None).await,
                     None => false,
@@ -925,6 +1015,8 @@ impl BridgeConnection {
     pub fn event_sink(&self) -> Arc<dyn ClientEventSink> {
         Arc::new(FrameEventSink {
             out: self.out.clone(),
+            pending_openai_oauth: self.pending_openai_oauth.clone(),
+            handshaken: self.handshaken.clone(),
             active_turn: self.active_turn.clone(),
             ask_user_question_broker: self.ask_user_question_broker_ref.clone(),
         })
@@ -1204,6 +1296,14 @@ impl BridgeConnection {
 
         if let Some(sink) = self.out.lock().await.as_ref() {
             let _ = sink.send(Frame::Response(response));
+            if self.handshaken.load(Ordering::SeqCst) {
+                let mut pending = self.pending_openai_oauth.lock().await;
+                if let Some(event) = pending.take() {
+                    if !sink.send(Frame::Event(event.clone())) {
+                        *pending = Some(event);
+                    }
+                }
+            }
         }
     }
 
@@ -1222,6 +1322,9 @@ impl BridgeConnection {
                 ..
             } => {
                 self.handle_send_prompt(text, images, turn_id).await;
+            }
+            ClientCommand::ScheduledRunTurn {run_id, prompt, model, reasoning} => {
+                self.handle_prompt_seed(prompt, Vec::new(), None, Some((run_id, model, reasoning))).await;
             }
             ClientCommand::Cancel { turn_id } => {
                 self.cancel_active_turn(turn_id).await;
@@ -1296,7 +1399,23 @@ impl BridgeConnection {
                 // ownership, which also covers queued follow-up turns.
                 let is_compact = command_api::parser::parse_slash_command(&raw)
                     .is_some_and(|parsed| parsed.name.eq_ignore_ascii_case("compact"));
-                let _handoff = if is_compact {
+                // Match the ALIAS SPELLINGS the registry accepts, not just the
+                // canonical builtin: `commands/core/src/register.rs` maps both
+                // `new` and `reset` onto `clear`, and `dispatch_slash` resolves
+                // through that map. Missing a spelling here does not stop the
+                // conversation from being replaced — it only skips
+                // `stop_loop_for_session_transition`, so the armed `/loop`
+                // wakeup and its already-queued `loop-wakeup-*` command leak
+                // into the new session.
+                let changes_session = command_api::parser::parse_slash_command(&raw).is_some_and(
+                    |parsed| {
+                        matches!(
+                            parsed.name.to_ascii_lowercase().as_str(),
+                            "clear" | "new" | "reset"
+                        )
+                    },
+                );
+                let _handoff = if is_compact || changes_session {
                     Some(self.turn_handoff.lock().await)
                 } else {
                     None
@@ -1311,6 +1430,10 @@ impl BridgeConnection {
                         .await;
                     return;
                 }
+                if changes_session {
+                    self.stop_loop_for_session_transition().await;
+                }
+                if is_compact { self.loop_runtime.reset_autonomous_loop_delivered(); }
                 let outcome = match self.router.as_ref() {
                     Some(router) => router.dispatch_slash(&raw).await,
                     None => None,
@@ -1378,6 +1501,16 @@ impl BridgeConnection {
                     self.unscoped_event_sink().emit(event).await;
                 }
             }
+            command @ (ClientCommand::ClearSession | ClientCommand::NewSession { .. } | ClientCommand::ResumeSession { .. }) => {
+                let _handoff = self.turn_handoff.lock().await;
+                // The router accepts this transition whether or not a turn is
+                // running, so the old conversation's armed `/loop` timers and
+                // queued wakeups must be torn down unconditionally.
+                self.stop_loop_for_session_transition().await;
+                if let Some(router) = &self.router {
+                    router.route(command, self.event_sink()).await;
+                }
+            }
             // The FULL command surface (model, listings, slash, tasks, session
             // control) is delegated to the bound [`CommandRouter`] (F2-08), which
             // reaches the engine handles and pushes replies out through the
@@ -1415,12 +1548,28 @@ impl BridgeConnection {
     /// directly-dispatched seed prompt) — matching claude-code, where a queued
     /// command's images are carried as `pastedContents`/`ContentBlockParam[]`
     /// but the bridge run loop here drives the text-only `run_turn` entry.
+    async fn stop_loop_for_session_transition(&self) {
+        if let Some(driver) = &self.driver { driver.stop_dynamic_loop().await; }
+        let queued: Vec<_> = self.queue.snapshot().await.into_iter()
+            .filter(|command| command.source == QueueSource::Cron && command.uuid.starts_with("loop-wakeup-"))
+            .map(|command| command.uuid).collect();
+        self.queue.remove(&queued, "conversation replaced").await;
+        self.loop_runtime.reset();
+    }
+
     async fn handle_send_prompt(
         &self,
         text: String,
         images: Vec<ImageRefDto>,
         turn_id: Option<u64>,
     ) {
+        self.handle_prompt_seed(text, images, turn_id, None).await;
+    }
+
+    async fn handle_prompt_seed(&self, text: String, images: Vec<ImageRefDto>, turn_id: Option<u64>, scheduled: Option<(String, String, client_protocol::controls::ReasoningSelectionDto)>) {
+        // A new seed turn is intervening work, even if the prior loop tick
+        // already finished and its keepalive consumed the in-flight marker.
+        self.loop_runtime.invalidate_noop_streak();
         let Some(driver) = self.driver.clone() else {
             return;
         };
@@ -1433,6 +1582,10 @@ impl BridgeConnection {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
+            if let Some((run_id, _, _)) = scheduled {
+                self.unscoped_event_sink().emit(ClientEvent::ScheduledRunFinished {run_id, summary: None, error: Some("busy:Target session is running".into())}).await;
+                return;
+            }
             self.queue.enqueue(prompt_command(text)).await;
             if !platform_api::env::background_tasks_disabled() {
                 if let Some(registry) = &self.task_notification_registry {
@@ -1460,11 +1613,16 @@ impl BridgeConnection {
         // Claim the active owner before spawning. Cancel can now safely arrive
         // immediately after SendPrompt without missing the driver's token.
         let (seed_generation, seed_cancel) = active_turn.begin(turn_id);
+        let scheduled_sink = self.unscoped_event_sink();
         let task = tokio::spawn(async move {
             // Seed turn — the prompt that won the loop (carries its images).
-            driver
-                .run_turn_with_images_and_cancel(text, images, seed_cancel)
-                .await;
+            if let Some((run_id, model, reasoning)) = scheduled {
+                let result = driver.run_scheduled_turn(text, model, reasoning, seed_cancel).await;
+                let (summary, error) = match result { Ok(summary) => (Some(summary), None), Err(error) => (None, Some(error)) };
+                scheduled_sink.emit(ClientEvent::ScheduledRunFinished {run_id, summary, error}).await;
+            } else {
+                driver.run_turn_with_images_and_cancel(text, images, seed_cancel).await;
+            }
             interactions.drain().await;
             active_turn.finish(seed_generation);
 
@@ -1638,6 +1796,31 @@ impl BridgeConnection {
 
 #[async_trait]
 impl FramePump for BridgeConnection {
+    fn is_priority_frame(&self, frame: &Frame) -> bool {
+        let Frame::Request(request) = frame else {
+            return false;
+        };
+        if request.method == "hello" {
+            return false;
+        }
+        match serde_json::from_value::<ClientCommand>(request.params.clone()) {
+            // A cancel for a prompt still queued behind a slow control must
+            // remain behind that prompt. Otherwise it is ignored before the
+            // prompt has claimed an owner and the cancelled work starts later.
+            Ok(ClientCommand::Cancel { turn_id }) => {
+                self.active_turn.cancellation_target(turn_id).is_some()
+            }
+            Ok(ClientCommand::ApprovePermission { .. }
+                | ClientCommand::DenyPermission { .. }
+                | ClientCommand::ApproveComputerAccess { .. }
+                | ClientCommand::DenyComputerAccess { .. }
+                | ClientCommand::AudioResponse { .. }
+                | ClientCommand::AnswerAskUserQuestion { .. }
+                | ClientCommand::CancelAskUserQuestion { .. }) => true,
+            _ => false,
+        }
+    }
+
     async fn on_frame(&self, frame: Frame, out: FrameSink) {
         if !self.claim_outbound(&out).await {
             if let Frame::Request(request) = frame {
@@ -1918,6 +2101,28 @@ mod tests {
     #[async_trait]
     impl PermissionRequestSink for NoopPermissionSink {
         async fn emit_request(&self, _request: PermissionRequest) {}
+    }
+
+    #[tokio::test]
+    async fn codex_rotation_before_host_connect_is_retained_without_turn() {
+        let connection = BridgeConnection::new();
+        let session = client_protocol::events::OpenAiOAuthSessionDto {
+            access_token: "rotated".into(),
+            refresh_token: Some("next-refresh".into()),
+            expires_at: 2_000_000_000,
+            account_id: Some("acct".into()),
+            fedramp: false,
+        };
+        connection
+            .event_sink()
+            .emit(ClientEvent::OpenAiOAuthUpdated {
+                session: session.clone(),
+            })
+            .await;
+        assert_eq!(
+            *connection.pending_openai_oauth.lock().await,
+            Some(ClientEvent::OpenAiOAuthUpdated { session })
+        );
     }
 
     #[tokio::test]
@@ -2344,6 +2549,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cancellation_priority_requires_an_existing_matching_turn() {
+        use bridge::wire::{BridgeRequest, Frame};
+        use bridge::FramePump;
+        let connection = BridgeConnection::new();
+        let cancel = |turn_id| Frame::Request(BridgeRequest {
+            id: 1,
+            method: "command".into(),
+            params: serde_json::to_value(ClientCommand::Cancel { turn_id }).unwrap(),
+        });
+        // Slow SetModel -> queued SendPrompt(42) -> Cancel(42): cancellation
+        // must stay behind the prompt until it has claimed the active slot.
+        assert!(!connection.is_priority_frame(&cancel(Some(42))));
+        assert!(!connection.is_priority_frame(&cancel(None)));
+        let (generation, _) = connection.active_turn.begin(Some(41));
+        assert!(!connection.is_priority_frame(&cancel(Some(42))));
+        assert!(connection.is_priority_frame(&cancel(Some(41))));
+        assert!(connection.is_priority_frame(&cancel(None)));
+        connection.active_turn.finish(generation);
+        let (generation, _) = connection.active_turn.begin(Some(42));
+        assert!(connection.is_priority_frame(&cancel(Some(42))));
+        connection.active_turn.finish(generation);
+        assert!(!connection.is_priority_frame(&cancel(Some(42))));
+    }
+
     #[tokio::test]
     async fn cancel_matches_turn_id_and_keeps_slot_until_block_owner_finishes() {
         let started = Arc::new(Notify::new());
@@ -2609,7 +2839,9 @@ mod tests {
 
     fn drain_test_command(text: &str, source: super::QueueSource) -> super::QueuedCommand {
         super::QueuedCommand {
-            uuid: format!("drain-ka-{text}"),
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
+            uuid: if source == super::QueueSource::Cron { format!("loop-wakeup-{text}") } else { format!("drain-ka-{text}") },
             content: super::QueuedCommandContent::UserInput {
                 text: text.to_string(),
             },
@@ -2620,6 +2852,29 @@ mod tests {
             skip_slash_commands: false,
             is_meta: false,
         }
+    }
+
+    #[tokio::test]
+    async fn session_transition_cancels_dynamic_work_and_preserves_other_queue_entries() {
+        struct StopRecorder(Arc<std::sync::atomic::AtomicUsize>);
+        #[async_trait]
+        impl TurnDriver for StopRecorder {
+            async fn run_turn(&self, _: String) {}
+            async fn stop_dynamic_loop(&self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut connection = BridgeConnection::new();
+        connection.driver = Some(Arc::new(StopRecorder(stops.clone())));
+        let mut wakeup = drain_test_command("old loop", super::QueueSource::Cron);
+        wakeup.uuid = "loop-wakeup-old-session".into();
+        connection.queue.enqueue(wakeup).await;
+        connection.queue.enqueue(drain_test_command("keep user input", super::QueueSource::PromptInput)).await;
+        connection.loop_runtime.begin_tick("old loop".into());
+        connection.stop_loop_for_session_transition().await;
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert_eq!(connection.loop_runtime.in_flight_prompt(), None);
+        assert_eq!(connection.queue.len().await, 1);
+        assert_eq!(connection.queue.dequeue().await.unwrap().text(), Some("keep user input"));
     }
 
     #[test]
@@ -2677,6 +2932,65 @@ mod tests {
             "the batched drain branch must tag a Cron tick as in-flight"
         );
         tool_cron::reset_loop_runtime_state();
+    }
+
+    #[tokio::test]
+    async fn mixed_queue_batch_retains_insertion_order_and_each_origin() {
+        struct BatchRecorder(Arc<Mutex<Vec<Vec<(String, bool)>>>>);
+        #[async_trait]
+        impl TurnDriver for BatchRecorder {
+            async fn run_turn(&self, _: String) { panic!("expected a batch"); }
+            async fn run_queued_batch(&self, inputs: Vec<orchestrator::QueuedPromptInput>, _: CancellationToken) {
+                self.0.lock().await.push(inputs.into_iter().map(|input| (input.text, input.is_meta)).collect());
+            }
+        }
+        let queue = Arc::new(super::MessageQueueManager::new());
+        let mut scheduled = drain_test_command("scheduled first", super::QueueSource::Cron);
+        scheduled.priority = super::QueuePriority::Later;
+        scheduled.is_meta = true;
+        scheduled.skip_slash_commands = true;
+        queue.enqueue(scheduled).await;
+        let mut human = drain_test_command("human second", super::QueueSource::PromptInput);
+        human.priority = super::QueuePriority::Now;
+        queue.enqueue(human).await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let driver: Arc<dyn TurnDriver> = Arc::new(BatchRecorder(captured.clone()));
+        let runtime = Arc::new(tool_cron::LoopRuntime::default());
+        super::drain_main_thread(&driver, &queue, &runtime, &super::ActiveTurnControl::default(), &super::TurnInteractions::default()).await;
+        assert_eq!(*captured.lock().await, vec![vec![("scheduled first".into(), true), ("human second".into(), false)]]);
+    }
+
+    #[tokio::test]
+    async fn fixed_cron_resolves_in_main_turn_without_dynamic_keepalive() {
+        let queue = Arc::new(super::MessageQueueManager::new());
+        let mut command = drain_test_command("/scheduled raw instruction", super::QueueSource::Cron);
+        command.uuid = "cron-fire-01234567".into();
+        command.priority = super::QueuePriority::Later;
+        command.skip_slash_commands = true;
+        command.is_meta = true;
+        queue.enqueue(command).await;
+        let captured = Arc::new(Mutex::new(None));
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver { captured: captured.clone(), notify: Arc::new(Notify::new()) });
+        let runtime = Arc::new(tool_cron::LoopRuntime::default());
+        super::drain_main_thread(&driver, &queue, &runtime, &super::ActiveTurnControl::default(), &super::TurnInteractions::default()).await;
+        assert_eq!(runtime.in_flight_prompt(), None);
+        assert_eq!(captured.lock().await.as_ref().unwrap().0, "/scheduled raw instruction");
+    }
+
+    #[tokio::test]
+    async fn drain_resolves_loop_sentinel_but_keeps_original_keepalive_identity() {
+        let _serial = crate::driver::LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let queue = Arc::new(super::MessageQueueManager::new());
+        queue.enqueue(drain_test_command("<<autonomous-loop-dynamic>>", super::QueueSource::Cron)).await;
+        let captured = Arc::new(Mutex::new(None));
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver { captured: captured.clone(), notify: Arc::new(Notify::new()) });
+        let runtime = Arc::new(tool_cron::LoopRuntime::default());
+        super::drain_main_thread(&driver, &queue, &runtime, &super::ActiveTurnControl::default(), &super::TurnInteractions::default()).await;
+        assert_eq!(runtime.in_flight_prompt().as_deref(), Some("<<autonomous-loop-dynamic>>"));
+        let result = captured.lock().await;
+        let text = &result.as_ref().unwrap().0;
+        assert_ne!(text, "<<autonomous-loop-dynamic>>");
+        assert!(text.contains("ScheduleWakeup"));
     }
 
     /// A normal user prompt (non-Cron) through the same batched drain branch must

@@ -438,12 +438,15 @@ pub struct PoolSubagentSpawner {
     subagents_dir_provider: Option<Arc<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>>,
     /// Resolve an explicitly owned child independently of the active session.
     subagents_dir_for_session_provider: Option<
-        Arc<dyn Fn(protocol::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError> + Send + Sync>,
+        Arc<
+            dyn Fn(protocol::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError>
+                + Send
+                + Sync,
+        >,
     >,
     /// Allocation-pinned paths remain available after a runner exits, for resume.
-    allocated_transcript_paths: Arc<
-        std::sync::Mutex<HashMap<AgentId, (std::path::PathBuf, Option<protocol::SessionId>)>>,
-    >,
+    allocated_transcript_paths:
+        Arc<std::sync::Mutex<HashMap<AgentId, (std::path::PathBuf, Option<protocol::SessionId>)>>>,
     /// Filesystem the child uses to APPEND its conversation to
     /// `<hook_subagents_dir>/agent-<id>.jsonl`. Set with the subagents dir at
     /// boot: naming the path without wiring a writer is what left the
@@ -1276,7 +1279,9 @@ impl PoolSubagentSpawner {
     pub fn with_subagents_dir_for_session_provider(
         mut self,
         provider: Arc<
-            dyn Fn(protocol::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError> + Send + Sync,
+            dyn Fn(protocol::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError>
+                + Send
+                + Sync,
         >,
     ) -> Self {
         self.subagents_dir_for_session_provider = Some(provider);
@@ -1728,8 +1733,19 @@ impl PoolSubagentSpawner {
     ///   `fork_context_messages ++ prompt_messages`, so `[]` prompt_messages
     ///   yields exactly the forked prefix — AgentTool.tsx:630 / spec note (A)).
     #[cfg(test)]
-    fn make_subagent_context(def: AgentDefinition, prompt: &str, fork_context_messages: Option<Vec<ConversationMessage>>, fork_parent_system_prompt: Option<String>) -> SubagentContext {
-        Self::make_subagent_context_with_id(def, prompt, fork_context_messages, fork_parent_system_prompt, AgentId::new())
+    fn make_subagent_context(
+        def: AgentDefinition,
+        prompt: &str,
+        fork_context_messages: Option<Vec<ConversationMessage>>,
+        fork_parent_system_prompt: Option<String>,
+    ) -> SubagentContext {
+        Self::make_subagent_context_with_id(
+            def,
+            prompt,
+            fork_context_messages,
+            fork_parent_system_prompt,
+            AgentId::new(),
+        )
     }
 
     fn make_subagent_context_with_id(
@@ -1880,7 +1896,8 @@ impl PoolSubagentSpawner {
         ),
         SubagentSpawnError,
     > {
-        self.build_subagent_context_with_id(request, inherit, persistent, None, None).await
+        self.build_subagent_context_with_id(request, inherit, persistent, None, None)
+            .await
     }
 
     /// Run the `agent.spawn` function hooks and return the possibly-rewritten
@@ -1950,9 +1967,8 @@ impl PoolSubagentSpawner {
 
         // `modified_input` carries the rewrite, reusing the same field every
         // other hook kind uses to mutate what it gates.
-        let rewritten =
-            apply_spawn_rewrite(request, aggregate.modified_input.as_ref())
-                .map_err(SubagentSpawnError::DeniedByHook)?;
+        let rewritten = apply_spawn_rewrite(request, aggregate.modified_input.as_ref())
+            .map_err(SubagentSpawnError::DeniedByHook)?;
 
         // 🚨 RE-CHECK the deny rule against the REWRITTEN type.
         //
@@ -2008,7 +2024,9 @@ impl PoolSubagentSpawner {
             .as_ref()
             .and_then(|(_, owner)| *owner)
             .or_else(|| self.resolved_origin_session_id(request));
-        let rewritten = self.apply_agent_spawn_hook(request, origin_session_id).await?;
+        let rewritten = self
+            .apply_agent_spawn_hook(request, origin_session_id)
+            .await?;
         let request = rewritten.as_ref().unwrap_or(request);
 
         // The parent / main-loop model this spawn resolves against: the request's
@@ -2254,7 +2272,16 @@ impl PoolSubagentSpawner {
         // include them. Unwired builder (tests / minimal builds) ⇒ empty —
         // byte-identical legacy.
         let mut agent_mcp = match self.mcp_tool_builder.get() {
-            Some(builder) => builder(ctx.agent_id, ctx.agent_definition.clone(), identity_reservation.clone().map(|reservation| reservation as crate::agent_mcp_tools::AgentMcpConstructionLease)).await,
+            Some(builder) => {
+                builder(
+                    ctx.agent_id,
+                    ctx.agent_definition.clone(),
+                    identity_reservation.clone().map(|reservation| {
+                        reservation as crate::agent_mcp_tools::AgentMcpConstructionLease
+                    }),
+                )
+                .await
+            }
             None => crate::agent_mcp_tools::AgentMcpToolSet::default(),
         };
         if let Some(reservation) = identity_reservation {
@@ -2266,7 +2293,10 @@ impl PoolSubagentSpawner {
                 cleanup.run = Arc::new(move || {
                     let reservation = reservation.clone();
                     let future = run();
-                    Box::pin(async move { let _reservation = reservation; future.await })
+                    Box::pin(async move {
+                        let _reservation = reservation;
+                        future.await
+                    })
                 });
             }
         }
@@ -2443,10 +2473,15 @@ pub trait StreamingSubagentSpawner: Send + Sync {
     /// Implementations without stable allocation must refuse rather than
     /// silently route child notifications to a different agent.
     async fn restore_persistent_with_observer(
-        &self, _agent_id: AgentId, _request: SubagentSpawnRequest,
-        _inherit: SubagentInheritance, _observer: Arc<dyn SubagentSpawnObserver>,
+        &self,
+        _agent_id: AgentId,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _observer: Arc<dyn SubagentSpawnObserver>,
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
-        Err(SubagentSpawnError::Runtime("stable agent restore unsupported".into()))
+        Err(SubagentSpawnError::Runtime(
+            "stable agent restore unsupported".into(),
+        ))
     }
 
     /// Resume a resting persistent subagent by delivering a user `message` (the
@@ -2492,7 +2527,8 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
-        self.spawn_persistent_internal(request, inherit, None, None).await
+        self.spawn_persistent_internal(request, inherit, None, None)
+            .await
     }
 
     async fn spawn_persistent_with_observer(
@@ -2517,11 +2553,19 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
     }
 
     async fn restore_persistent_with_observer(
-        &self, agent_id: AgentId, request: SubagentSpawnRequest,
-        inherit: SubagentInheritance, observer: Arc<dyn SubagentSpawnObserver>,
+        &self,
+        agent_id: AgentId,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        observer: Arc<dyn SubagentSpawnObserver>,
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
-        if request.resumed_history.is_none() { return Err(SubagentSpawnError::Runtime("stable restore requires recovered history".into())); }
-        self.spawn_persistent_internal(request, inherit, Some(observer), Some(agent_id)).await
+        if request.resumed_history.is_none() {
+            return Err(SubagentSpawnError::Runtime(
+                "stable restore requires recovered history".into(),
+            ));
+        }
+        self.spawn_persistent_internal(request, inherit, Some(observer), Some(agent_id))
+            .await
     }
 
     async fn resume(&self, agent_id: &AgentId, message: String) -> Result<(), SubagentSpawnError> {
@@ -2539,9 +2583,7 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
     }
 
     async fn stop(&self, agent_id: &AgentId) -> Result<(), SubagentSpawnError> {
-        // claude-code `Cre`, persistent twin: `UserExit` is cooperative and the
-        // MCP teardown below is awaited before `deallocate`, so the runner is
-        // still live across both. Close the spawn gate until this settles.
+        // Close the spawn gate throughout cooperative cancellation and teardown.
         let _stop_pending = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
         // Cooperative exit first: a parked runner wakes on `UserExit` and emits
         // a clean `Killed` before the hard cancel. A send failure means the slot
@@ -2551,6 +2593,17 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
             .pool
             .send_event(agent_id, lingxi_core::Event::UserExit)
             .await;
+        // Sending an exit is not its acknowledgement: immediate deallocation
+        // aborts the runner before it can flush `cancelled` and emit `Killed`.
+        // Claude 2.1.269's EM requests cancellation; the async loop settles its
+        // cancelled result and cleanup. Give this detached Rust runner the same
+        // opportunity, bounded by the existing hard-cancel grace.
+        let _ = tokio::time::timeout(SPAWN_CANCEL_GRACE, async {
+            while !self.pool.agent_runner_finished(agent_id).await {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
         // §24b: settle any agent-scoped MCP teardown this persistent spawn
         // parked. Runs BEFORE `deallocate` so a teardown failure cannot leave
         // the slot held, and is idempotent — the entry is removed, so a second
@@ -2828,8 +2881,8 @@ impl Drop for McpCleanupGuard {
     }
 }
 
-/// Grace period [`SpawnDeallocGuard`]'s early-drop path gives the runner to
-/// observe a cooperative `UserInterrupt` — reach its own `record_terminal`
+/// Grace period persistent `stop` and [`SpawnDeallocGuard`]'s early-drop path
+/// give the runner to observe a cooperative exit — reach its own `record_terminal`
 /// transcript write and return on its own — before the hard `abort()`
 /// fallback. Kept short: this directly extends how long a caller that dropped
 /// the spawn future (Fusion panel timeout/cancel racing
@@ -3062,7 +3115,8 @@ impl SubagentSpawner for PoolSubagentSpawner {
             }
         }
         let display_effort = match ctx.agent_definition.effort.as_ref() {
-            Some(crate::definition::AgentEffort::Level(level)) => Some(level.clone()), _ => None,
+            Some(crate::definition::AgentEffort::Level(level)) => Some(level.clone()),
+            _ => None,
         };
         let resolved_model = crate::runner::resolve_model(&ctx);
         let resolved_model_profile = ctx.model_profile.clone();
@@ -3078,10 +3132,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
             initial_message_index,
             origin_session_id: ctx.origin_session_id,
         };
-        let transcript_path = ctx
-            .transcript_fs
-            .as_ref()
-            .map(|_| ctx.transcript_subdir.join(format!("agent-{agent_id}.jsonl")));
+        let transcript_path = ctx.transcript_fs.as_ref().map(|_| {
+            ctx.transcript_subdir
+                .join(format!("agent-{agent_id}.jsonl"))
+        });
         let origin_session_id = ctx.origin_session_id;
         let allocation_receipt = (!observers.is_empty() || transcript_path.is_some()).then(|| {
             let allocated_transcript_paths = self.allocated_transcript_paths.clone();
@@ -3419,14 +3473,18 @@ impl SubagentSpawner for PoolSubagentSpawner {
         watchdog: platform_api::WorkflowQueryWatchdog,
         permit: platform_api::PanelPoolPermit,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        let permit = self.panel_pool.take_panel_permit(permit)
+        let permit = self
+            .panel_pool
+            .take_panel_permit(permit)
             .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
         // Keep this scope's immediate callee callback-free: the spawn entry
         // must take the token before it can suspend or run third-party code.
-        PANEL_POOL_PERMIT_OVERRIDE.scope(
-            std::cell::RefCell::new(Some(permit)),
-            self.spawn_workflow_with_observer(request, inherit, progress, observer, watchdog),
-        ).await
+        PANEL_POOL_PERMIT_OVERRIDE
+            .scope(
+                std::cell::RefCell::new(Some(permit)),
+                self.spawn_workflow_with_observer(request, inherit, progress, observer, watchdog),
+            )
+            .await
     }
 
     async fn concurrent_subagent_count(&self) -> usize {
@@ -3680,12 +3738,21 @@ impl PoolSubagentSpawner {
         // unconditional teardown list and fires on the async path too.
         // Reserve before MCP construction or observer setup can touch state
         // keyed by this persisted identity. The same token moves into the slot.
-        let identity_reservation = restored_agent_id.map(|id| self.pool.reserve_identity(id))
-            .transpose().map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        let identity_reservation = restored_agent_id
+            .map(|id| self.pool.reserve_identity(id))
+            .transpose()
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
         let activity_observer = self.activity_observer(&request, &inherit).await;
         let request_name = request.name.clone().or_else(|| request.description.clone());
-        let (ctx, agent_mcp_cleanups) =
-            self.build_subagent_context_with_id(&request, inherit, true, restored_agent_id, identity_reservation.clone()).await?;
+        let (ctx, agent_mcp_cleanups) = self
+            .build_subagent_context_with_id(
+                &request,
+                inherit,
+                true,
+                restored_agent_id,
+                identity_reservation.clone(),
+            )
+            .await?;
         let agent_id = ctx.agent_id;
         let resolved_agent_type = ctx.agent_definition.agent_type.clone();
         // [round-5 finding 11] Same window as the one-shot path, and worse:
@@ -3696,7 +3763,8 @@ impl PoolSubagentSpawner {
         // unowned windows unless the handles live in a guard.
         let mut mcp_guard = McpCleanupGuard::new(agent_mcp_cleanups, resolved_agent_type.clone());
         let display_effort = match ctx.agent_definition.effort.as_ref() {
-            Some(crate::definition::AgentEffort::Level(level)) => Some(level.clone()), _ => None,
+            Some(crate::definition::AgentEffort::Level(level)) => Some(level.clone()),
+            _ => None,
         };
         let resolved_model = crate::runner::resolve_model(&ctx);
         let resolved_model_profile = ctx.model_profile.clone();
@@ -3722,10 +3790,10 @@ impl PoolSubagentSpawner {
             initial_message_index,
             origin_session_id: ctx.origin_session_id,
         };
-        let transcript_path = ctx
-            .transcript_fs
-            .as_ref()
-            .map(|_| ctx.transcript_subdir.join(format!("agent-{agent_id}.jsonl")));
+        let transcript_path = ctx.transcript_fs.as_ref().map(|_| {
+            ctx.transcript_subdir
+                .join(format!("agent-{agent_id}.jsonl"))
+        });
         let origin_session_id = ctx.origin_session_id;
         let allocation_receipt = (!observers.is_empty() || transcript_path.is_some()).then(|| {
             let allocated_transcript_paths = self.allocated_transcript_paths.clone();
@@ -3746,7 +3814,12 @@ impl PoolSubagentSpawner {
         let (start, started) = tokio::sync::oneshot::channel();
         let (_aid, mut rx) = match self
             .pool
-            .allocate_with_reserved_identity(ctx, allocation_receipt, Some(started), identity_reservation)
+            .allocate_with_reserved_identity(
+                ctx,
+                allocation_receipt,
+                Some(started),
+                identity_reservation,
+            )
             .await
         {
             Ok(pair) => pair,
@@ -3852,7 +3925,15 @@ impl PoolSubagentSpawner {
                             agent_id: forward_agent_id,
                         })
                     }
-                    SubagentEvent::Progress { .. } => {}
+                    SubagentEvent::Progress {
+                        tool_use_count,
+                        token_count,
+                        ..
+                    } => observer_events.try_emit(SubagentObservation::Progress {
+                        agent_id: forward_agent_id,
+                        tool_use_count: *tool_use_count,
+                        token_count: *token_count,
+                    }),
                 }
                 if forwarding && tx.send(event).await.is_err() {
                     // The task-side consumer disappeared, but this wrapper is
@@ -4145,10 +4226,17 @@ mod tests {
         // must not consume its response or graft its answer onto the child.
         // The positive one-shot + persistent wiring is covered by
         // real_spawn_paths_feed_observer_sidecars_without_changing_child_result.
-        assert_eq!(content.get("text").and_then(Value::as_str), Some("worker result"));
+        assert_eq!(
+            content.get("text").and_then(Value::as_str),
+            Some("worker result")
+        );
         assert!(content.get("observer").is_none());
         assert_eq!(api.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(api.responses.lock().unwrap().len(), 1, "unregistered observer must not run");
+        assert_eq!(
+            api.responses.lock().unwrap().len(),
+            1,
+            "unregistered observer must not run"
+        );
         std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
@@ -4156,38 +4244,75 @@ mod tests {
     async fn restored_identity_is_reserved_before_mcp_build_and_cleanup_runs_once() {
         struct Observer;
         #[async_trait]
-        impl SubagentSpawnObserver for Observer { async fn on_event(&self, _: SubagentObservation) {} }
+        impl SubagentSpawnObserver for Observer {
+            async fn on_event(&self, _: SubagentObservation) {}
+        }
         let ids = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = ids.clone();
         let cleaned = cleanups.clone();
-        let builder: crate::agent_mcp_tools::AgentMcpToolBuilder = Arc::new(move |id, _, _lease| {
-            seen.lock().unwrap().push(id);
-            let cleaned = cleaned.clone();
-            Box::pin(async move {
-                crate::agent_mcp_tools::AgentMcpToolSet {
-                    tools: vec![],
-                    cleanups: vec![crate::agent_mcp_tools::AgentMcpCleanupHandle {
-                        server_name: "restore-probe".into(),
-                        run: Arc::new(move || {
-                            let cleaned = cleaned.clone();
-                            Box::pin(async move { cleaned.fetch_add(1, Ordering::SeqCst); Ok(()) })
-                        }),
-                    }],
-                }
-            })
-        });
-        let pool = Arc::new(StateMachinePool::new(Arc::new(MockRuntimeSpawner::default()), 2));
-        let spawner = PoolSubagentSpawner::new(pool).with_tool_registry(registry_with(&[])).with_mcp_tool_builder(builder);
+        let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |id, _, _lease| {
+                seen.lock().unwrap().push(id);
+                let cleaned = cleaned.clone();
+                Box::pin(async move {
+                    crate::agent_mcp_tools::AgentMcpToolSet {
+                        tools: vec![],
+                        cleanups: vec![crate::agent_mcp_tools::AgentMcpCleanupHandle {
+                            server_name: "restore-probe".into(),
+                            run: Arc::new(move || {
+                                let cleaned = cleaned.clone();
+                                Box::pin(async move {
+                                    cleaned.fetch_add(1, Ordering::SeqCst);
+                                    Ok(())
+                                })
+                            }),
+                        }],
+                    }
+                })
+            });
+        let pool = Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            2,
+        ));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&[]))
+            .with_mcp_tool_builder(builder);
         let old_id = AgentId::new();
         let mut request = minimal_spawn_request("do not replay");
-        request.resumed_history = Some(vec![ConversationMessage::user(MessageId::new(), "recovered history".into())]);
-        let (actual, _events) = spawner.restore_persistent_with_observer(old_id, request.clone(), dummy_inherit(), Arc::new(Observer)).await.unwrap();
+        request.resumed_history = Some(vec![ConversationMessage::user(
+            MessageId::new(),
+            "recovered history".into(),
+        )]);
+        let (actual, _events) = spawner
+            .restore_persistent_with_observer(
+                old_id,
+                request.clone(),
+                dummy_inherit(),
+                Arc::new(Observer),
+            )
+            .await
+            .unwrap();
         assert_eq!(actual, old_id);
-        assert_eq!(*ids.lock().unwrap(), [old_id], "MCP must be constructed using the same persisted identity as the runner");
-        assert!(spawner.restore_persistent_with_observer(old_id, request, dummy_inherit(), Arc::new(Observer)).await.is_err());
-        assert_eq!(*ids.lock().unwrap(), [old_id], "duplicate restore must be rejected before creating or reconfiguring MCP resources");
-        assert_eq!(cleanups.load(Ordering::SeqCst), 0, "a rejected collision must not tear down the live agent's MCP");
+        assert_eq!(
+            *ids.lock().unwrap(),
+            [old_id],
+            "MCP must be constructed using the same persisted identity as the runner"
+        );
+        assert!(spawner
+            .restore_persistent_with_observer(old_id, request, dummy_inherit(), Arc::new(Observer))
+            .await
+            .is_err());
+        assert_eq!(
+            *ids.lock().unwrap(),
+            [old_id],
+            "duplicate restore must be rejected before creating or reconfiguring MCP resources"
+        );
+        assert_eq!(
+            cleanups.load(Ordering::SeqCst),
+            0,
+            "a rejected collision must not tear down the live agent's MCP"
+        );
         spawner.stop(&old_id).await.unwrap();
         spawner.stop(&old_id).await.unwrap();
         assert_eq!(cleanups.load(Ordering::SeqCst), 1);
@@ -4218,7 +4343,10 @@ mod tests {
             .expect("persistent spawn should accept the preallocated identity");
 
         assert_eq!(actual_id, requested_id);
-        spawner.stop(&requested_id).await.expect("stop should succeed");
+        spawner
+            .stop(&requested_id)
+            .await
+            .expect("stop should succeed");
     }
 
     /// §24b PRODUCTION reachability: a wired `mcp_tool_builder` must (a) have
@@ -4503,6 +4631,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_startup_reports_failure_instead_of_killed_without_calling_model() {
+        struct RejectStartup;
+        #[async_trait]
+        impl SubagentSpawnObserver for RejectStartup {
+            async fn before_start(&self, _: &SubagentObservation) -> Result<(), SubagentSpawnError> {
+                Err(SubagentSpawnError::Internal("control binding failed".into()))
+            }
+            async fn on_event(&self, _: SubagentObservation) {}
+        }
+        for persistent in [false, true] {
+            let pool = Arc::new(StateMachinePool::new(Arc::new(CountingRuntimeSpawner::default()), 4));
+            let api = Arc::new(QueueApi {
+                responses: Mutex::new(VecDeque::new()),
+                calls: AtomicUsize::new(0),
+            });
+            let observer = Arc::new(RecordingLifecycleObserver::default());
+            let spawner = PoolSubagentSpawner::new(pool)
+                .with_api_client(api.clone())
+                .with_spawn_observer(observer.clone());
+            let result = if persistent {
+                spawner.spawn_persistent_with_observer(
+                    minimal_spawn_request("plan"), dummy_inherit(), Arc::new(RejectStartup),
+                ).await.map(|_| ())
+            } else {
+                spawner.spawn_with_observer(
+                    minimal_spawn_request("plan"), dummy_inherit(), None, Some(Arc::new(RejectStartup)),
+                ).await.map(|_| ())
+            };
+            assert!(result.is_err());
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if !observer.events.lock().unwrap().is_empty() { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("startup cleanup reports a terminal event");
+            let events = observer.events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert!(matches!(&events[0], SubagentObservation::Failed { error, .. }
+                if error.contains("control binding failed")));
+            assert_eq!(api.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn observer_receives_resolved_type_and_ordered_terminal_event() {
         let runtime = Arc::new(CountingRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
@@ -4668,47 +4840,145 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_startup_reports_failure_instead_of_killed_without_calling_model() {
-        struct RejectStartup;
-        #[async_trait]
-        impl SubagentSpawnObserver for RejectStartup {
-            async fn before_start(&self, _: &SubagentObservation) -> Result<(), SubagentSpawnError> {
-                Err(SubagentSpawnError::Internal("control binding failed".into()))
-            }
-            async fn on_event(&self, _: SubagentObservation) {}
-        }
-        for persistent in [false, true] {
-            let pool = Arc::new(StateMachinePool::new(Arc::new(CountingRuntimeSpawner::default()), 4));
-            let api = Arc::new(QueueApi {
-                responses: Mutex::new(VecDeque::new()),
+    async fn persistent_spawn_forwards_progress_to_observer_and_task_consumer() {
+        let pool = Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            4,
+        ));
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+        let mut response = text_response("done");
+        response.usage.billable_tokens.input = 7;
+        response.usage.billable_tokens.output = 11;
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(Arc::new(QueueApi {
+                responses: Mutex::new(VecDeque::from([response])),
                 calls: AtomicUsize::new(0),
-            });
-            let observer = Arc::new(RecordingLifecycleObserver::default());
-            let spawner = PoolSubagentSpawner::new(pool)
-                .with_api_client(api.clone())
-                .with_spawn_observer(observer.clone());
-            let result = if persistent {
-                spawner.spawn_persistent_with_observer(
-                    minimal_spawn_request("plan"), dummy_inherit(), Arc::new(RejectStartup),
-                ).await.map(|_| ())
-            } else {
-                spawner.spawn_with_observer(
-                    minimal_spawn_request("plan"), dummy_inherit(), None, Some(Arc::new(RejectStartup)),
-                ).await.map(|_| ())
-            };
-            assert!(result.is_err());
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                loop {
-                    if !observer.events.lock().unwrap().is_empty() { break; }
-                    tokio::task::yield_now().await;
+            }))
+            .with_spawn_observer(observer.clone());
+        let (agent_id, mut events) = spawner
+            .spawn_persistent(minimal_spawn_request("go"), dummy_inherit())
+            .await
+            .unwrap();
+        let mut consumer_progress = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                match events.recv().await {
+                    Some(SubagentEvent::Progress {
+                        agent_id: id,
+                        tool_use_count,
+                        token_count,
+                    }) => consumer_progress.push((id, tool_use_count, token_count)),
+                    Some(SubagentEvent::Completed { .. }) => break,
+                    Some(_) => {}
+                    None => panic!("persistent runner closed before completing"),
                 }
-            }).await.expect("startup cleanup reports a terminal event");
-            let events = observer.events.lock().unwrap();
-            assert_eq!(events.len(), 1);
-            assert!(matches!(&events[0], SubagentObservation::Failed { error, .. }
-                if error.contains("control binding failed")));
-            assert_eq!(api.calls.load(Ordering::SeqCst), 0);
-        }
+            }
+            loop {
+                let completed = observer
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(event, SubagentObservation::Completed { .. }));
+                if completed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("task consumer and observer receive the completed turn");
+        spawner.stop(&agent_id).await.unwrap();
+        let observed_progress = observer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                SubagentObservation::Progress {
+                    agent_id,
+                    tool_use_count,
+                    token_count,
+                } => Some((*agent_id, *tool_use_count, *token_count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(consumer_progress.contains(&(agent_id, 0, 18)));
+        assert_eq!(observed_progress, consumer_progress);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persistent_stop_flushes_cancelled_transcript_before_deallocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let pool = Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            4,
+        ));
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+        let spawner = PoolSubagentSpawner::new(pool.clone())
+            .with_api_client(Arc::new(HangingApi))
+            .with_spawn_observer(observer.clone())
+            .with_hook_context(
+                protocol::SessionId::nil(),
+                std::path::PathBuf::from("/tmp"),
+                Some(dir.path().to_path_buf()),
+            )
+            .with_transcript_fs(fs);
+        let (agent_id, mut events) = spawner
+            .spawn_persistent(minimal_spawn_request("go"), dummy_inherit())
+            .await
+            .unwrap();
+        let transcript_path = dir.path().join(format!("agent-{agent_id}.jsonl"));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if std::fs::read_to_string(&transcript_path)
+                    .is_ok_and(|body| body.contains("\"status\":\"running\""))
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("persistent runner writes its starting status");
+
+        spawner.stop(&agent_id).await.unwrap();
+        let body = std::fs::read_to_string(&transcript_path).unwrap();
+        let last_status = body.lines().rev().find_map(|line| {
+            serde_json::from_str::<Value>(line).ok().and_then(|value| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        });
+        assert_eq!(last_status.as_deref(), Some("cancelled"), "{body}");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                match events.recv().await {
+                    Some(SubagentEvent::Killed { .. }) => break,
+                    Some(_) => {}
+                    None => panic!("runner must emit Killed before its channel closes"),
+                }
+            }
+            while !observer
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, SubagentObservation::Killed { .. }))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("persistent stop delivers its cancelled lifecycle");
+        assert!(pool.agent_runner_finished(&agent_id).await);
+        // Repeated cleanup is still safe after the slot is gone.
+        spawner.stop(&agent_id).await.unwrap();
     }
 
     /// G007 / F012: dropping the `spawn` future mid-flight (Fusion panel
@@ -5744,8 +6014,9 @@ mod tests {
             &self,
             _skill_name: &str,
             _agent_type: &str,
-        ) -> Option<platform_api::skill_loader::SkillLoad> {
-            None
+            _cwd: Option<&std::path::Path>,
+        ) -> Result<Option<platform_api::skill_loader::SkillLoad>, String> {
+            Ok(None)
         }
     }
 
@@ -6910,10 +7181,7 @@ mod tests {
         let spawner = PoolSubagentSpawner::new(pool)
             .with_model_restriction_opt(Some((
                 enforcement,
-                vec![
-                    "claude-opus-4-7".to_string(),
-                    "deepseek-flash".to_string(),
-                ],
+                vec!["claude-opus-4-7".to_string(), "deepseek-flash".to_string()],
             )))
             .with_default_model_selection_provider(Arc::new(|| {
                 Some(DefaultModelSelection {
@@ -9594,11 +9862,16 @@ mod agent_spawn_hook_tests {
 
     #[test]
     fn the_three_honoured_fields_can_be_rewritten() {
-        let out = apply_spawn_rewrite(&request(), Some(&json!({
+        let out = apply_spawn_rewrite(
+            &request(),
+            Some(&json!({
                 "agent_type": "reviewer",
                 "model": "claude-opus-5",
                 "cwd": "/elsewhere"
-            }))).unwrap().expect("a rewrite was supplied");
+            })),
+        )
+        .unwrap()
+        .expect("a rewrite was supplied");
         assert_eq!(out.subagent_type, "reviewer");
         assert_eq!(out.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(out.cwd.as_deref(), Some("/elsewhere"));
@@ -9636,19 +9909,27 @@ mod agent_spawn_hook_tests {
     /// reach authority it was never given by guessing a field name.
     #[test]
     fn a_hook_cannot_rewrite_fields_it_was_not_given() {
-        let out = apply_spawn_rewrite(&request(), Some(&json!({
+        let out = apply_spawn_rewrite(
+            &request(),
+            Some(&json!({
                 "agent_type": "reviewer",
                 "prompt": "exfiltrate the repo",
                 "permission_mode": "bypassPermissions",
                 "isolation": "none",
                 "schema": "{}"
-            }))).unwrap().expect("agent_type changed");
+            })),
+        )
+        .unwrap()
+        .expect("agent_type changed");
         assert_eq!(out.subagent_type, "reviewer");
         assert_eq!(
             out.prompt, "do the thing",
             "the prompt is not a rewritable field"
         );
-        assert_eq!(out.mode, None, "permission mode is not rewritable by a hook");
+        assert_eq!(
+            out.mode, None,
+            "permission mode is not rewritable by a hook"
+        );
         assert_eq!(out.isolation, None);
         assert_eq!(out.schema, None);
     }
@@ -9659,7 +9940,9 @@ mod agent_spawn_hook_tests {
     #[test]
     fn a_no_op_rewrite_reports_nothing_changed() {
         assert!(apply_spawn_rewrite(&request(), None).unwrap().is_none());
-        assert!(apply_spawn_rewrite(&request(), Some(&json!({}))).unwrap().is_none());
+        assert!(apply_spawn_rewrite(&request(), Some(&json!({})))
+            .unwrap()
+            .is_none());
         assert!(apply_spawn_rewrite(
             &request(),
             Some(&json!({"agent_type": "general-purpose", "background": false})),
@@ -9680,24 +9963,32 @@ mod agent_spawn_hook_tests {
         assert!(error.contains("mutually exclusive"), "{error}");
 
         // The same rewrite is fine without worktree isolation.
-        assert!(apply_spawn_rewrite(&request(), Some(&json!({"cwd": "/elsewhere"})))
-            .unwrap()
-            .is_some());
+        assert!(
+            apply_spawn_rewrite(&request(), Some(&json!({"cwd": "/elsewhere"})))
+                .unwrap()
+                .is_some()
+        );
         // And leaving cwd alone under worktree isolation is fine.
-        assert!(apply_spawn_rewrite(&worktree, Some(&json!({"agent_type": "reviewer"})))
-            .unwrap()
-            .is_some());
+        assert!(
+            apply_spawn_rewrite(&worktree, Some(&json!({"agent_type": "reviewer"})))
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// `model: null` clears a pinned model (back to inherit) — distinct from
     /// omitting the key, which leaves it alone.
     #[test]
     fn a_null_model_clears_the_pin_while_omitting_it_leaves_it() {
-        let cleared = apply_spawn_rewrite(&request(), Some(&json!({"model": null}))).unwrap().expect("null is a change from Some(...)");
-        assert_eq!(cleared.model, None);
-        assert!(apply_spawn_rewrite(&request(), Some(&json!({"cwd": "/repo"})))
+        let cleared = apply_spawn_rewrite(&request(), Some(&json!({"model": null})))
             .unwrap()
-            .is_none());
+            .expect("null is a change from Some(...)");
+        assert_eq!(cleared.model, None);
+        assert!(
+            apply_spawn_rewrite(&request(), Some(&json!({"cwd": "/repo"})))
+                .unwrap()
+                .is_none()
+        );
     }
 }
 

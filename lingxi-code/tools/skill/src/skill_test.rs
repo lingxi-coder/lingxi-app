@@ -418,6 +418,45 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn dynamic_body_checked_error_is_not_injected_as_instructions() {
+        struct Checked;
+        impl command_api::BundledPromptFn for Checked {
+            fn build(&self, _: &str) -> String {
+                panic!("unchecked expansion");
+            }
+            fn try_build_at(
+                &self,
+                _: &str,
+                root: &std::path::Path,
+                cwd: &std::path::Path,
+                preload: bool,
+            ) -> std::io::Result<String> {
+                assert_eq!(root, std::path::Path::new("/project"));
+                assert_eq!(cwd, std::path::Path::new("/project/subdir"));
+                assert!(!preload);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "loop.md denied",
+                ))
+            }
+        }
+        let desc = SkillDescriptor {
+            dynamic_body: Some(Arc::new(Checked)),
+            ..prompt_desc("loop")
+        };
+        let mut builtin = shell_test_ctx(dummy_out());
+        builtin.session_cwd = tool_api::SessionCwd::new("/project".into(), Vec::new());
+        let tool = SkillTool::with_loader(builtin, Arc::new(FixedLoader(Some(desc))));
+        let mut call = fresh_ctx();
+        call.cwd = Some("/project/subdir".into());
+        let error = tool
+            .call(json!({"skill":"loop"}), call, fresh_tx())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("loop.md denied"));
+    }
+
     /// SKILLEXEC.3 (bundled): when a descriptor carries `dynamic_body`, the Skill
     /// tool calls the builder with the raw args INSTEAD of static templating, so
     /// the bundled-skill two-branch behavior (empty→usage, else→buildPrompt) is
@@ -2006,4 +2045,3 @@ fn the_requested_name_is_not_offered_back() {
         None
     );
 }
-

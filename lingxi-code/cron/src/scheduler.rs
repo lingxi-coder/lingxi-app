@@ -1,20 +1,70 @@
 //! Cron scheduler tick loop wired to [`tasks::TaskRegistry`].
 //!
 //! The scheduler ticks once per second, finds jobs whose deterministic
-//! jittered fire time has arrived, acquires a per-job cross-process lock (A9),
-//! and spawns a `Dream` task via the registry.
+//! jittered fire time has arrived, applies project-leader / creator ownership,
+//! and delivers raw scheduled prompts through the host conversation queue.
 
-use crate::lock::{try_acquire_lock, CronLockError};
 use crate::schedule::{parse_cron, CronExpression};
 use platform_api::task_registry::TaskRegistryHandle;
 use platform_api::{Clock, FileSystem, FsError, RuntimeSpawner};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::{Duration, SystemTime};
 use tasks::registry::TaskRegistry;
-use tasks::{TaskSpawnInput, TaskType};
+use tasks::TaskSpawnInput;
+#[cfg(test)]
+use tasks::TaskType;
 use tokio::sync::{Mutex, RwLock};
+
+/// A raw cron fire routed to the owning conversation, not a new agent.
+#[derive(Clone, Debug)]
+pub struct SessionCronFire {
+    /// Stable scheduled job ID.
+    pub id: String,
+    /// Original cron expression.
+    pub cron: String,
+    /// Unresolved prompt, including loop sentinel values.
+    pub prompt: String,
+    /// Teammate owner, when the session task was created by one.
+    pub owner: Option<String>,
+}
+
+/// Host integration for Claude-compatible Later/meta scheduled input.
+#[async_trait::async_trait]
+pub trait SessionCronDelivery: Send + Sync {
+    /// A busy conversation leaves due jobs pending without claiming them.
+    async fn is_loading(&self) -> bool;
+    /// Enqueue the raw fire into the owning conversation.
+    async fn enqueue(&self, fire: SessionCronFire) -> Result<(), String>;
+    /// Discard unconsumed fixed fires before switching conversation identity.
+    async fn clear_queued(&self) {}
+}
+
+#[cfg(test)]
+struct RegistryTestDelivery(Arc<TaskRegistry>);
+#[cfg(test)]
+#[async_trait::async_trait]
+impl SessionCronDelivery for RegistryTestDelivery {
+    async fn is_loading(&self) -> bool {
+        false
+    }
+    async fn enqueue(&self, fire: SessionCronFire) -> Result<(), String> {
+        self.0
+            .spawn(
+                TaskType::Dream,
+                TaskSpawnInput::Dream {
+                    prompt: fire.prompt,
+                    max_iterations: None,
+                },
+                format!("cron: {}", fire.id),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
 
 /// The session-scoped portion of a cron job. These records never touch the
 /// project tasks file; they live for exactly as long as the scheduler attached
@@ -184,7 +234,7 @@ enum TasksFileSnapshot {
 pub fn missed_one_shots_prompt(missed: &[crate::tasks_file::CronTask]) -> String {
     let plural = missed.len() > 1;
     let head = format!(
-        "The following one-shot scheduled task{} missed while Claude was not running. {} already been removed from .lingxi/scheduled_tasks.json.\n\nDo NOT execute {} yet. First use the AskUserQuestion tool to ask whether to run {} now. Only execute if the user confirms.",
+        "The following one-shot scheduled task{} missed while Claude was not running. {} already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute {} yet. First use the AskUserQuestion tool to ask whether to run {} now. Only execute if the user confirms.",
         if plural { "s were" } else { " was" },
         if plural { "They have" } else { "It has" },
         if plural { "these prompts" } else { "this prompt" },
@@ -204,8 +254,8 @@ pub fn missed_one_shots_prompt(missed: &[crate::tasks_file::CronTask]) -> String
     format!("{head}\n\n{}", entries.join("\n\n"))
 }
 
-/// Optional seven-day compatibility preset for explicit host overrides.
-/// Production schedulers have no global age limit; tasks may set `expiresAt`.
+/// Claude Code 2.1.270 default lifespan for recurring cron jobs.
+/// Task-center v2 automations use their separate explicit expiration policy.
 pub const DEFAULT_RECURRING_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Claude Code's recurring jitter is at most half of the schedule interval.
@@ -290,7 +340,8 @@ pub(crate) fn is_recurring_task_aged(
     let Some(max_age) = max_age else {
         return false;
     };
-    recurring
+    !max_age.is_zero()
+        && recurring
         && now
             .duration_since(created_at)
             .is_ok_and(|age| age >= max_age)
@@ -480,6 +531,12 @@ fn is_job_due_with<F: Fn(u64) -> i64>(task: &CronTaskDef, now: SystemTime, offse
 /// Owner of the cron tick loop. Constructed with platform trait objects and
 /// the shared [`TaskRegistry`].
 pub struct CronScheduler {
+    session_id: StdMutex<Option<String>>,
+    session_cron_enabled: bool,
+    pending_missed: Mutex<Vec<crate::tasks_file::CronTask>>,
+    session_delivery: RwLock<Option<Arc<dyn SessionCronDelivery>>>,
+    fallback_identity: String,
+    project_leader: AtomicBool,
     tasks: Arc<RwLock<HashMap<String, CronTaskDef>>>,
     session_tasks: Arc<RwLock<HashMap<String, SessionCronTask>>>,
     /// Durable identities must never fall back to session execution after disk deletion.
@@ -490,6 +547,8 @@ pub struct CronScheduler {
     /// The tasks-file generation currently mirrored into `tasks`; `None` before
     /// the first reload. Gates the locked re-read (PARITY the file watcher).
     applied_snapshot: Mutex<Option<TasksFileSnapshot>>,
+    automation_firer: RwLock<Option<Arc<dyn crate::CronJobFirer>>>,
+    automation_runs: Mutex<HashMap<String, AutomationFlight>>,
     task_registry: Arc<TaskRegistry>,
     fs: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
@@ -498,14 +557,66 @@ pub struct CronScheduler {
     /// (`<project_root>/.lingxi/scheduled_tasks.json`) the scheduler loads from
     /// and writes `lastFiredAt` back to. 1:1 with claude-code `cronTasks.ts`.
     tasks_file: PathBuf,
-    /// Directory holding per-job lock files (the tasks file's parent, i.e.
-    /// `<project_root>/.claude`). LingXi's A9 cross-process locks live beside the
-    /// single tasks file.
-    lock_dir: PathBuf,
     /// Auto-expiry age for RECURRING jobs; `None` disables expiry (unlimited).
-    /// Defaults to no age limit.
+    /// Defaults to seven days for Claude-compatible recurring jobs.
     recurring_max_age: Option<Duration>,
     tick_handle: Mutex<Option<TickHandle>>,
+}
+
+struct AutomationFlight {
+    request: crate::AutomationRunRequest,
+    handle: Option<TickHandle>,
+    commit: Arc<StdMutex<AutomationCommit>>,
+    firer: Arc<dyn crate::CronJobFirer>,
+}
+
+#[derive(Clone)]
+enum AutomationCommit {
+    AwaitingOutcome,
+    Pending {
+        result: Result<crate::AutomationRunResult, String>,
+        finished_at: u64,
+    },
+    Settled,
+}
+
+impl AutomationFlight {
+    fn is_running(&mut self) -> bool {
+        self.handle.as_mut().is_some_and(|handle| {
+            matches!(
+                handle.completed.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        })
+    }
+}
+
+async fn persist_automation_outcome(
+    fs: &dyn FileSystem,
+    root: &Path,
+    request: &crate::AutomationRunRequest,
+    commit: &StdMutex<AutomationCommit>,
+) -> Result<(), String> {
+    let outcome = commit
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match outcome {
+        AutomationCommit::Settled => return Ok(()),
+        AutomationCommit::AwaitingOutcome => {
+            return Err("Execution has not released its outcome".into())
+        }
+        AutomationCommit::Pending {
+            result,
+            finished_at,
+        } => {
+            crate::finish_automation_run_checked(fs, root, request, &result, finished_at).await?;
+        }
+    }
+    *commit
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = AutomationCommit::Settled;
+    Ok(())
 }
 
 struct TickHandle {
@@ -585,23 +696,165 @@ impl CronScheduler {
         runtime: Arc<dyn RuntimeSpawner>,
         tasks_file: PathBuf,
     ) -> Self {
-        let lock_dir = tasks_file
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let fallback_identity = format!(
+            "cron-{}-{}",
+            std::process::id(),
+            task_registry_identity(&task_registry)
+        );
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             session_tasks: Arc::new(RwLock::new(HashMap::new())),
             durable_ids: RwLock::new(HashSet::new()),
             next_fire: RwLock::new(HashMap::new()),
             applied_snapshot: Mutex::new(None),
+            automation_firer: RwLock::new(None),
+            automation_runs: Mutex::new(HashMap::new()),
             task_registry,
             fs,
             clock,
             runtime,
             tasks_file,
-            lock_dir,
-            recurring_max_age: None,
+            fallback_identity,
+            project_leader: AtomicBool::new(false),
+            session_id: StdMutex::new(None),
+            session_cron_enabled: true,
+            pending_missed: Mutex::new(Vec::new()),
+            session_delivery: RwLock::new(None),
+            recurring_max_age: Some(DEFAULT_RECURRING_MAX_AGE),
             tick_handle: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_registry_delivery(mut self) -> Self {
+        self.session_delivery = RwLock::new(Some(Arc::new(RegistryTestDelivery(
+            self.task_registry.clone(),
+        ))));
+        self
+    }
+
+    /// Disable session cron in the independent task-center controller.
+    #[must_use]
+    pub fn with_session_cron(mut self, enabled: bool) -> Self {
+        self.session_cron_enabled = enabled;
+        self
+    }
+
+    /// Bind the conversation queue before session cron fires are claimed.
+    pub async fn set_session_delivery(&self, delivery: Arc<dyn SessionCronDelivery>) {
+        *self.session_delivery.write().await = Some(delivery);
+        self.load_persisted().await;
+    }
+
+    /// Bind creator-owned durable cron jobs to their conversation session.
+    #[must_use]
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = StdMutex::new(Some(session_id));
+        self
+    }
+
+    /// Install the host session executor before starting the scheduler.
+    pub async fn set_automation_firer(&self, firer: Arc<dyn crate::CronJobFirer>) {
+        *self.automation_firer.write().await = Some(firer);
+    }
+
+    fn current_session_id(&self) -> Option<String> {
+        self.session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Switch sessions after joining the old tick and releasing its lease.
+    pub async fn set_session_id(
+        self: &Arc<Self>,
+        id: String,
+    ) -> Result<(), platform_api::RuntimeError> {
+        if self.current_session_id().as_deref() == Some(id.as_str()) {
+            return Ok(());
+        }
+        self.stop().await?;
+        if let Some(delivery) = self.session_delivery.read().await.clone() {
+            delivery.clear_queued().await;
+        }
+        *self
+            .session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id);
+        self.load_persisted().await;
+        self.clone().start().await
+    }
+
+    fn lease_identity(&self) -> String {
+        self.current_session_id()
+            .unwrap_or_else(|| self.fallback_identity.clone())
+    }
+
+    async fn refresh_project_leader(&self) {
+        let Some(root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file) else {
+            return;
+        };
+        let leader = crate::lock::acquire_scheduler_lease(
+            self.fs.as_ref(),
+            root,
+            &self.lease_identity(),
+            unix_epoch_ms(self.clock.now()),
+        )
+        .await
+        .unwrap_or(false);
+        self.project_leader.store(leader, Ordering::SeqCst);
+    }
+
+    fn owns_durable_task(&self, creator: &crate::tasks_file::CronTaskCreator) -> bool {
+        if creator
+            .created_by_session_id
+            .as_deref()
+            .is_some_and(|id| Some(id) == self.current_session_id().as_deref())
+        {
+            return true;
+        }
+        self.project_leader.load(Ordering::SeqCst)
+            && creator.can_run_for(self.current_session_id().as_deref())
+    }
+
+    async fn refresh_creator_process(&self) {
+        let Some(session_id) = self.current_session_id() else {
+            return;
+        };
+        let Some(root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file) else {
+            return;
+        };
+        let _process_guard = crate::lock_cron_file().await;
+        let Ok(_file_guard) = crate::tasks_file::lock_scheduled_tasks(self.fs.as_ref(), root).await
+        else {
+            return;
+        };
+        let Ok(body) = crate::tasks_file::read_tasks_body(self.fs.as_ref(), root).await else {
+            return;
+        };
+        let Ok(mut doc) = crate::tasks_file::parse_tasks_strict(&body) else {
+            return;
+        };
+        let pid = std::process::id();
+        let mut changed = false;
+        for task in &mut doc.tasks {
+            if task.automation.is_none()
+                && task.creator.created_by_session_id.as_deref() == Some(session_id.as_str())
+                && task.creator.created_by_pid != Some(pid)
+            {
+                task.creator.created_by_pid = Some(pid);
+                task.creator.created_by_proc_start =
+                    platform_api::live_sessions::process_start_identity(pid);
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = crate::tasks_file::write_tasks_body(
+                self.fs.as_ref(),
+                root,
+                &crate::tasks_file::serialize_tasks(&doc),
+            )
+            .await;
         }
     }
 
@@ -612,6 +865,11 @@ impl CronScheduler {
     /// skipped with a warning. Call once after construction, before
     /// [`Self::start`].
     pub async fn load_persisted(&self) {
+        if !self.session_cron_enabled {
+            return;
+        }
+        self.refresh_creator_process().await;
+        self.refresh_project_leader().await;
         let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
         else {
             tracing::error!(path = %self.tasks_file.display(), "cron: invalid tasks-file path");
@@ -637,8 +895,14 @@ impl CronScheduler {
         let now = self.clock.now();
         let mut missed: Vec<crate::tasks_file::CronTask> = Vec::new();
         for t in doc.tasks {
+            if t.automation.is_some() || !self.owns_durable_task(&t.creator) {
+                continue;
+            }
             // Anchor expiry/catch-up off the persisted ms timestamps. A
-            // missing/zero `createdAt` falls back to "now" (a fresh window).
+            // missing/zero `createdAt` falls back to "now" (a fresh window):
+            // the parser preserves an explicit `0`, and anchoring that at the
+            // epoch makes every one-shot "missed" and ages every recurring job
+            // out of `recurring_max_age` on its first load.
             let created_at = if t.created_at > 0 {
                 SystemTime::UNIX_EPOCH + Duration::from_millis(t.created_at)
             } else {
@@ -650,11 +914,12 @@ impl CronScheduler {
             // fired: it is removed from the file and surfaced to the user for
             // confirmation (`onMissed` / the `be()` prompt).
             //
-            // A one-shot that ALREADY FIRED is not a miss. `lastFiredAt` is
-            // persisted before the launch, and the delete that follows it can
-            // lose the race (a crash, a failed write, a peer holding the lock),
-            // so a stale record can survive a run. Offering it as "missed" would
-            // ask the user to authorise work that already happened.
+            // Upstream Amr scores missed one-shots from createdAt. A one-shot
+            // that ALREADY FIRED is still not a miss: `lastFiredAt` is persisted
+            // before the launch and the delete that follows it can lose the race
+            // (crash, failed write, a peer holding the lock), so the record can
+            // outlive its own run. Offering it as "missed" would ask the user to
+            // authorise work that already happened.
             if !recurring && t.last_fired_at.is_none_or(|ms| ms == 0) {
                 let passed = parse_cron(&t.cron)
                     .ok()
@@ -666,7 +931,6 @@ impl CronScheduler {
             }
             let last_run = t
                 .last_fired_at
-                .filter(|ms| *ms > 0)
                 .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms));
             if let Err(e) = self
                 .register_with_meta(
@@ -680,7 +944,9 @@ impl CronScheduler {
             }
         }
         if !missed.is_empty() {
-            self.surface_missed_one_shots(project_root, missed).await;
+            // Lifecycle setters may hold the host transition mutex. Publish
+            // catch-up only from the background tick after those setters return.
+            *self.pending_missed.lock().await = missed;
         }
     }
 
@@ -693,6 +959,12 @@ impl CronScheduler {
         project_root: &Path,
         missed: Vec<crate::tasks_file::CronTask>,
     ) {
+        let delivery = self.session_delivery.read().await.clone();
+        if delivery.is_none() || delivery.as_ref().unwrap().is_loading().await {
+            *self.pending_missed.lock().await = missed;
+            return;
+        }
+        let delivery = delivery.unwrap();
         let ids: Vec<String> = missed.iter().map(|t| t.id.clone()).collect();
         tracing::info!(
             event = "tengu_scheduled_task_missed",
@@ -708,6 +980,15 @@ impl CronScheduler {
         if !removed {
             // Say nothing rather than assert a removal that did not happen; the
             // tasks stay on disk and are re-surfaced by the next startup.
+            //
+            // Park them back in `pending_missed` first. `tick` reached here via
+            // `std::mem::take`, so dropping them empties the set that
+            // `process_due_ids` uses to suppress a normal fire — and the still-
+            // on-disk task is re-registered by the very next
+            // `refresh_durable_tasks` and fired with its RAW prompt, which is
+            // exactly the unconfirmed run this branch exists to prevent. The
+            // loading-delivery early return above parks them for the same reason.
+            *self.pending_missed.lock().await = missed;
             tracing::error!(
                 "[ScheduledTasks] could not remove {} missed one-shot task(s); \
                  not surfacing them this run",
@@ -716,16 +997,13 @@ impl CronScheduler {
             return;
         }
         let prompt = missed_one_shots_prompt(&missed);
-        if let Err(e) = self
-            .task_registry
-            .spawn(
-                TaskType::Dream,
-                TaskSpawnInput::Dream {
-                    prompt,
-                    max_iterations: None,
-                },
-                "cron: missed one-shot tasks".to_string(),
-            )
+        if let Err(e) = delivery
+            .enqueue(SessionCronFire {
+                id: ids.join(","),
+                cron: String::new(),
+                prompt,
+                owner: None,
+            })
             .await
         {
             // The binary removes the missed tasks unconditionally (`SK(ids)`
@@ -769,7 +1047,7 @@ impl CronScheduler {
     }
 
     /// Override the recurring auto-expiry age (`None` = unlimited / never
-    /// expire). Defaults to no age limit.
+    /// expire). Defaults to seven days.
     #[must_use]
     pub fn with_recurring_max_age(mut self, age: Option<Duration>) -> Self {
         self.recurring_max_age = age;
@@ -975,60 +1253,95 @@ impl CronScheduler {
     }
 
     async fn process_due_ids(&self, now: SystemTime, due_ids: Vec<String>) {
+        if !self.session_cron_enabled {
+            return;
+        }
+        let Some(delivery) = self.session_delivery.read().await.clone() else {
+            return;
+        };
+        if delivery.is_loading().await {
+            return;
+        }
+        self.refresh_project_leader().await;
         for id in due_ids {
-            if self.session_tasks.read().await.contains_key(&id) {
-                if let Some(claimed_job) = self.claim_in_memory_due_job(&id, now).await {
-                    Self::log_fire(&id, claimed_job.recurring, claimed_job.prompt());
-                    let (task_input, rollback) = claimed_job.into_parts();
-                    if let Err(e) = self
-                        .task_registry
-                        .spawn(TaskType::Dream, task_input, format!("cron: {id}"))
-                        .await
-                    {
-                        tracing::error!("cron task {id} spawn failed: {e}");
-                        self.rollback_claim(id.as_str(), rollback).await;
-                    }
-                }
+            if self
+                .pending_missed
+                .lock()
+                .await
+                .iter()
+                .any(|task| task.id == id)
+            {
                 continue;
             }
-            // Per-job lock with PID liveness check.
-            let lock_path = self.lock_dir.join(format!("{id}.lock"));
-            let our_pid = std::process::id();
-            let acquired =
-                try_acquire_lock(self.fs.clone(), &lock_path, our_pid, &id, pid_alive_check).await;
-            match acquired {
-                Ok(()) => {}
-                Err(CronLockError::HeldByLivePid { pid }) => {
-                    tracing::debug!("cron job {id} held by live PID {pid}; skipping");
-                    continue;
-                }
-                Err(error) => {
-                    // Fail closed: running without the intended ownership lock
-                    // turns a transient filesystem/parse failure into duplicate
-                    // task execution across scheduler processes.
-                    tracing::warn!("cron job {id} lock acquisition failed: {error}; skipping");
-                    continue;
-                }
+            if delivery.is_loading().await {
+                break;
             }
-
-            // Re-read the authoritative state after lock acquisition and
-            // claim the run BEFORE launch so a peer that already persisted
-            // `lastFiredAt`/deletion suppresses this stale due snapshot.
-            if let Some(claimed_job) = self.claim_due_job_if_still_due(&id, now).await {
-                Self::log_fire(&id, claimed_job.recurring, claimed_job.prompt());
-                let (task_input, rollback) = claimed_job.into_parts();
-                if let Err(e) = self
+            let Some(cron) = self
+                .tasks
+                .read()
+                .await
+                .get(&id)
+                .map(|task| task.schedule.raw.clone())
+            else {
+                continue;
+            };
+            let owner = self
+                .session_tasks
+                .read()
+                .await
+                .get(&id)
+                .and_then(|task| task.owner.clone());
+            if let Some(owner) = owner.as_deref() {
+                if self
                     .task_registry
-                    .spawn(TaskType::Dream, task_input, format!("cron: {id}"))
+                    .get(owner)
                     .await
+                    .is_some_and(|task| task.is_terminated())
                 {
-                    tracing::error!("cron task {id} spawn failed: {e}");
-                    self.rollback_claim(id.as_str(), rollback).await;
+                    self.unregister_job(&id, None).await;
+                    continue;
                 }
             }
-
-            // Release the lock so other peers see "stale" if we crash mid-task.
-            let _ = crate::lock::release_lock(self.fs.clone(), &lock_path).await;
+            let claimed = if self.session_tasks.read().await.contains_key(&id) {
+                self.claim_in_memory_due_job(&id, now).await
+            } else {
+                self.claim_due_job_if_still_due(&id, now).await
+            };
+            if let Some(claimed_job) = claimed {
+                Self::log_fire(&id, claimed_job.recurring, claimed_job.prompt());
+                let fire = SessionCronFire {
+                    id: id.clone(),
+                    cron,
+                    prompt: claimed_job.prompt().to_owned(),
+                    owner,
+                };
+                let (_, rollback) = claimed_job.into_parts();
+                let result = if let Some(owner) = fire.owner.as_deref() {
+                    match platform_api::team_spawn::TeamSpawnSeam::send_message(
+                        self.task_registry.as_ref(),
+                        owner,
+                        fire.prompt,
+                    )
+                    .await
+                    {
+                        Ok(()) => Ok(()),
+                        Err(
+                            platform_api::team_spawn::TeamSpawnError::Terminated
+                            | platform_api::team_spawn::TeamSpawnError::StoppedByUser(_),
+                        ) => {
+                            self.unregister_job(&id, None).await;
+                            continue;
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    delivery.enqueue(fire).await
+                };
+                if let Err(error) = result {
+                    tracing::error!("cron task {id} enqueue failed: {error}");
+                    self.rollback_claim(&id, rollback).await;
+                }
+            }
         }
     }
 
@@ -1095,6 +1408,9 @@ impl CronScheduler {
         let mut current = HashSet::new();
         let mut tasks = self.tasks.write().await;
         for task in doc.tasks {
+            if task.automation.is_some() {
+                continue;
+            }
             if session_ids.contains(&task.id)
                 || (tasks.contains_key(&task.id) && !previous.contains(&task.id))
             {
@@ -1104,6 +1420,9 @@ impl CronScheduler {
                 continue;
             };
             let local = tasks.get(&task.id);
+            // Same epoch-zero guard as `load_persisted`: an explicit `createdAt:
+            // 0` survives the parser, and anchoring it at 1970 ages the task out
+            // of `recurring_max_age` the first time it is refreshed.
             let created_at = if task.created_at > 0 {
                 SystemTime::UNIX_EPOCH + Duration::from_millis(task.created_at)
             } else {
@@ -1116,7 +1435,6 @@ impl CronScheduler {
                 agent_type: local.and_then(|local| local.agent_type.clone()),
                 last_run: task
                     .last_fired_at
-                    .filter(|ms| *ms > 0)
                     .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
                 enabled: local.is_none_or(|local| local.enabled),
                 created_at,
@@ -1200,8 +1518,189 @@ impl CronScheduler {
         }
     }
 
+    async fn settle_automation_flight(
+        &self,
+        root: &Path,
+        flight: &AutomationFlight,
+    ) -> Result<(), String> {
+        let needs_shutdown = matches!(
+            *flight
+                .commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            AutomationCommit::AwaitingOutcome
+        );
+        if needs_shutdown {
+            // A dropped/panicked producer may have a supervised native runtime.
+            // Confirm it has released writers before committing Interrupted.
+            flight.firer.cancel_run(&flight.request.run_id).await?;
+            *flight
+                .commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = AutomationCommit::Pending {
+                result: Err(format!(
+                    "{}Execution ended before its result was confirmed",
+                    crate::AUTOMATION_INTERRUPTED_PREFIX
+                )),
+                finished_at: unix_epoch_ms(self.clock.now()),
+            };
+        }
+        persist_automation_outcome(self.fs.as_ref(), root, &flight.request, &flight.commit).await
+    }
+
+    async fn dispatch_automations(&self) {
+        let Some(firer) = self.automation_firer.read().await.clone() else {
+            return;
+        };
+        let Some(root) = crate::project_root_from_tasks_path(&self.tasks_file) else {
+            return;
+        };
+        // Stop takes this lock before cancelling the tick, so every successful
+        // spawn has a tracked destruction barrier before shutdown can begin.
+        let mut flights = self.automation_runs.lock().await;
+        let mut settled = Vec::new();
+        for (id, flight) in flights.iter_mut() {
+            if !flight.is_running() {
+                match self.settle_automation_flight(root, flight).await {
+                    Ok(()) => settled.push(id.clone()),
+                    Err(error) => {
+                        tracing::warn!(run_id = %id, %error, "Retaining scheduled outcome for persistence retry")
+                    }
+                }
+            }
+        }
+        for id in settled {
+            flights.remove(&id);
+        }
+        let Ok(body) = crate::tasks_file::read_automation_tasks_body(self.fs.as_ref(), root).await
+        else {
+            return;
+        };
+        for task in crate::parse_tasks(&body).tasks {
+            if task.automation.is_none() {
+                continue;
+            }
+            let Some(request) = crate::claim_automation_run(
+                self.fs.as_ref(),
+                root,
+                &task.id,
+                self.clock.now(),
+                None,
+            )
+            .await
+            else {
+                continue;
+            };
+            let fs = self.fs.clone();
+            let clock = self.clock.clone();
+            let root_owned = root.to_path_buf();
+            let executor = firer.clone();
+            let claimed = request.clone();
+            let (completed_tx, completed) = tokio::sync::oneshot::channel();
+            let commit = Arc::new(StdMutex::new(AutomationCommit::AwaitingOutcome));
+            let produced_commit = commit.clone();
+            let future = TickFuture {
+                future: Box::pin(async move {
+                    let result = executor.fire_automation(&claimed).await;
+                    *produced_commit
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        AutomationCommit::Pending {
+                            result,
+                            finished_at: unix_epoch_ms(clock.now()),
+                        };
+                    if let Err(error) = persist_automation_outcome(
+                        fs.as_ref(),
+                        &root_owned,
+                        &claimed,
+                        &produced_commit,
+                    )
+                    .await
+                    {
+                        tracing::warn!(run_id = %claimed.run_id, %error, "Scheduled result needs persistence retry");
+                    }
+                }),
+                _completed: completed_tx,
+            };
+            match self
+                .runtime
+                .spawn("cron-automation", Box::pin(future))
+                .await
+            {
+                Ok(runtime_handle) => {
+                    flights.insert(
+                        request.run_id.clone(),
+                        AutomationFlight {
+                            request,
+                            handle: Some(TickHandle {
+                                runtime_handle,
+                                completed,
+                            }),
+                            commit,
+                            firer: firer.clone(),
+                        },
+                    );
+                }
+                Err(error) => {
+                    *commit
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        AutomationCommit::Pending {
+                            result: Err(format!(
+                                "{}Could not start execution: {error}",
+                                crate::AUTOMATION_INTERRUPTED_PREFIX
+                            )),
+                            finished_at: unix_epoch_ms(self.clock.now()),
+                        };
+                    let flight = AutomationFlight {
+                        request,
+                        handle: None,
+                        commit,
+                        firer: firer.clone(),
+                    };
+                    if self.settle_automation_flight(root, &flight).await.is_err() {
+                        flights.insert(flight.request.run_id.clone(), flight);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn prune_orphan_session_jobs(&self) {
+        let Some(delivery) = self.session_delivery.read().await.clone() else {
+            return;
+        };
+        if delivery.is_loading().await {
+            return;
+        }
+        let jobs = self.session_jobs().await;
+        for job in jobs {
+            if let Some(owner) = job.owner.as_deref() {
+                if self
+                    .task_registry
+                    .get(owner)
+                    .await
+                    .is_none_or(|task| task.is_terminated())
+                {
+                    self.unregister_job(&job.id, None).await;
+                }
+            }
+        }
+    }
+
     async fn tick(&self) {
+        self.dispatch_automations().await;
+        if !self.session_cron_enabled {
+            return;
+        }
+        let pending = std::mem::take(&mut *self.pending_missed.lock().await);
+        if !pending.is_empty() {
+            if let Some(root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file) {
+                self.surface_missed_one_shots(root, pending).await;
+            }
+        }
         self.refresh_durable_tasks().await;
+        self.prune_orphan_session_jobs().await;
         let now = self.clock.now();
         let due_ids = self.due_ids(now).await;
         if due_ids.is_empty() {
@@ -1216,6 +1715,14 @@ impl CronScheduler {
     /// fails; concurrent start/stop calls cannot bypass it.
     pub async fn stop(&self) -> Result<(), platform_api::RuntimeError> {
         let mut tick_handle = self.tick_handle.lock().await;
+        let mut flights =
+            tokio::time::timeout(TICK_DESTRUCTION_BUDGET, self.automation_runs.lock())
+                .await
+                .map_err(|_| {
+                    platform_api::RuntimeError::Internal(
+                        "scheduled dispatch did not finish within the shutdown budget".into(),
+                    )
+                })?;
         if let Some(tick) = tick_handle.as_mut() {
             self.runtime.cancel(&tick.runtime_handle).await?;
             // Channel closure, not a sent value, proves TickFuture and all its
@@ -1235,12 +1742,52 @@ impl CronScheduler {
                 ));
             }
         }
+        for flight in flights.values_mut() {
+            if let Some(handle) = flight.handle.as_mut() {
+                if matches!(
+                    handle.completed.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ) {
+                    if let Err(error) = self.runtime.cancel(&handle.runtime_handle).await {
+                        if matches!(
+                            handle.completed.try_recv(),
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                        ) {
+                            return Err(error);
+                        }
+                    }
+                    if tokio::time::timeout(TICK_DESTRUCTION_BUDGET, &mut handle.completed)
+                        .await
+                        .is_err()
+                    {
+                        return Err(platform_api::RuntimeError::Internal(
+                            "scheduled execution did not release its owners within the shutdown budget".into()));
+                    }
+                }
+            }
+            if let Some(root) = crate::project_root_from_tasks_path(&self.tasks_file) {
+                self.settle_automation_flight(root, flight)
+                    .await
+                    .map_err(|error| {
+                        platform_api::RuntimeError::Internal(format!(
+                            "Scheduled result was not safely persisted: {error}"
+                        ))
+                    })?;
+            }
+        }
+        flights.clear();
         *tick_handle = None;
         let key = task_registry_identity(&self.task_registry);
         LIVE_SCHEDULERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
+        if let Some(root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file) {
+            crate::lock::release_scheduler_lease(self.fs.as_ref(), root, &self.lease_identity())
+                .await;
+        }
+        self.project_leader.store(false, Ordering::SeqCst);
+        self.pending_missed.lock().await.clear();
         self.session_tasks.write().await.clear();
         self.durable_ids.write().await.clear();
         self.tasks.write().await.clear();
@@ -1301,6 +1848,9 @@ impl CronScheduler {
             return self.claim_missing_disk_job(id, now).await;
         };
 
+        if on_disk.automation.is_some() || !self.owns_durable_task(&on_disk.creator) {
+            return None;
+        }
         if on_disk
             .expires_at
             .is_some_and(|expiry| expiry <= unix_epoch_ms(now))
@@ -1324,14 +1874,9 @@ impl CronScheduler {
                 agent_type: local.agent_type,
                 last_run: on_disk
                     .last_fired_at
-                    .filter(|ms| *ms > 0)
                     .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
                 enabled: local.enabled,
-                created_at: if on_disk.created_at > 0 {
-                    SystemTime::UNIX_EPOCH + Duration::from_millis(on_disk.created_at)
-                } else {
-                    local.created_at
-                },
+                created_at: SystemTime::UNIX_EPOCH + Duration::from_millis(on_disk.created_at),
                 recurring: on_disk.recurring.unwrap_or(false),
             },
             Err(e) => {
@@ -1348,12 +1893,13 @@ impl CronScheduler {
         // Claude Code checks recurringMaxAge only after a due job has entered
         // the fire path. An aged job therefore gets one final fire; an aged job
         // whose next run has not arrived remains registered.
-        let expires_after_fire = is_recurring_task_aged(
-            now,
-            authoritative.created_at,
-            authoritative.recurring,
-            self.recurring_max_age,
-        );
+        let expires_after_fire = on_disk.permanent != Some(true)
+            && is_recurring_task_aged(
+                now,
+                authoritative.created_at,
+                authoritative.recurring,
+                self.recurring_max_age,
+            );
 
         let updated = if authoritative.recurring && !expires_after_fire {
             tasks_file_with_last_fired(&body, id, unix_epoch_ms(now))
@@ -1631,10 +2177,16 @@ fn unix_epoch_ms(at: SystemTime) -> u64 {
 #[allow(unsafe_code)]
 #[must_use]
 pub fn pid_alive_check(pid: u32) -> bool {
+    // `kill(0, 0)` addresses the caller's whole process group, not a process, so
+    // a recorded pid of 0 is never a live owner. PID 1 IS a real process — the
+    // engine is PID 1 in a container — so it must not be lumped in here, or the
+    // scheduler lease and creator ownership both read a live leader as dead.
+    if pid == 0 {
+        return false;
+    }
     // SAFETY: kill(pid, 0) tests existence without delivering a signal.
     // The libc function takes only POD args; there are no aliasing concerns,
-    // and a non-zero return is interpreted as "process does not exist or
-    // permission denied", which we conservatively treat as "not alive".
+    // and any failure is treated as not alive (upstream gi catches all errors).
     #[allow(clippy::cast_possible_wrap)]
     unsafe {
         libc::kill(pid as libc::pid_t, 0) == 0
@@ -1713,6 +2265,16 @@ mod expiry_tests {
     #[test]
     fn none_max_age_disables_expiry() {
         assert!(!is_recurring_task_aged(at(10_000), at(0), true, None));
+    }
+
+    #[test]
+    fn zero_max_age_disables_expiry_like_2_1_270() {
+        assert!(!is_recurring_task_aged(
+            at(10_000),
+            at(0),
+            true,
+            Some(std::time::Duration::ZERO)
+        ));
     }
 
     #[test]
@@ -1994,14 +2556,18 @@ mod scheduler_tick_tests {
     use tasks::output_manager::TaskOutputManager;
     use tasks::registry::TaskRegistry;
     use tasks::task_trait::{Task, TaskContext, TaskError, TaskHandle};
-    use tasks::{TaskSpawnInput, TaskType};
+    use tasks::TaskSpawnInput;
+    #[cfg(test)]
+    use tasks::TaskType;
 
     const NOW: u64 = 1_700_000_000;
-    const TASKS_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
+    const TASKS_PATH: &str = "/proj/.claude/scheduled_tasks.json";
+    const AUTOMATION_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
     const OUTPUT_DIR: &str = "/proj/task-output";
 
     struct MemFs {
         files: tokio::sync::Mutex<HashMap<String, String>>,
+        fail_writes: AtomicUsize,
     }
 
     struct MemFlockGuard(String);
@@ -2018,6 +2584,7 @@ mod scheduler_tick_tests {
             files.insert(path.to_string(), body.to_string());
             Arc::new(Self {
                 files: tokio::sync::Mutex::new(files),
+                fail_writes: AtomicUsize::new(0),
             })
         }
 
@@ -2045,6 +2612,16 @@ mod scheduler_tick_tests {
         }
 
         async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError> {
+            if path == AUTOMATION_PATH
+                && self
+                    .fail_writes
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                return Err(FsError::Io("injected atomic write failure".into()));
+            }
             self.files
                 .lock()
                 .await
@@ -2166,13 +2743,16 @@ mod scheduler_tick_tests {
     async fn stop_waits_for_tick_future_drop_even_after_waiter_cancellation() {
         let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
         let runtime = Arc::new(DeferredCancelRuntime::default());
-        let scheduler = Arc::new(CronScheduler::new(
-            registry(fs.clone()),
-            fs,
-            FixedClock::at_secs(NOW),
-            runtime.clone(),
-            PathBuf::from(TASKS_PATH),
-        ));
+        let scheduler = Arc::new(
+            CronScheduler::new(
+                registry(fs.clone()),
+                fs,
+                FixedClock::at_secs(NOW),
+                runtime.clone(),
+                PathBuf::from(TASKS_PATH),
+            )
+            .with_test_registry_delivery(),
+        );
         scheduler.clone().start().await.unwrap();
         let first_scheduler = scheduler.clone();
         let mut first = tokio::spawn(async move { first_scheduler.stop().await });
@@ -2371,7 +2951,187 @@ mod scheduler_tick_tests {
             Arc::new(UnusedRuntime),
             PathBuf::from(TASKS_PATH),
         )
+        .with_test_registry_delivery()
         .with_recurring_max_age(Some(super::DEFAULT_RECURRING_MAX_AGE))
+    }
+
+    struct RecordingDelivery {
+        loading: std::sync::atomic::AtomicBool,
+        fires: tokio::sync::Mutex<Vec<super::SessionCronFire>>,
+    }
+    #[async_trait]
+    impl super::SessionCronDelivery for RecordingDelivery {
+        async fn is_loading(&self) -> bool {
+            self.loading.load(Ordering::SeqCst)
+        }
+        async fn enqueue(&self, fire: super::SessionCronFire) -> Result<(), String> {
+            self.fires.lock().await.push(fire);
+            Ok(())
+        }
+        async fn clear_queued(&self) {
+            self.fires.lock().await.clear();
+        }
+    }
+
+    #[tokio::test]
+    async fn session_cron_waits_for_binding_and_idle_then_delivers_raw_prompt() {
+        let fs = MemFs::with(TASKS_PATH, "{\"tasks\":[]}");
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = CronScheduler::new(
+            registry,
+            fs,
+            clock,
+            Arc::new(UnusedRuntime),
+            PathBuf::from(TASKS_PATH),
+        );
+        scheduler
+            .register_tool_job(
+                super::SessionCronTask {
+                    id: "00000000".into(),
+                    cron: "* * * * *".into(),
+                    prompt: "__loop_sentinel_raw__".into(),
+                    created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
+                    last_fired_at: None,
+                    recurring: true,
+                    owner: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        scheduler.tick().await;
+        assert_eq!(scheduler.session_jobs().await[0].last_fired_at, None);
+        let delivery = Arc::new(RecordingDelivery {
+            loading: std::sync::atomic::AtomicBool::new(true),
+            fires: tokio::sync::Mutex::new(Vec::new()),
+        });
+        scheduler.set_session_delivery(delivery.clone()).await;
+        scheduler.tick().await;
+        assert_eq!(scheduler.session_jobs().await[0].last_fired_at, None);
+        delivery.loading.store(false, Ordering::SeqCst);
+        scheduler.tick().await;
+        let fires = delivery.fires.lock().await;
+        assert_eq!(fires.len(), 1);
+        assert_eq!(
+            (&*fires[0].id, &*fires[0].cron, &*fires[0].prompt),
+            ("00000000", "* * * * *", "__loop_sentinel_raw__")
+        );
+        assert_eq!(
+            handler.spawn_count(),
+            0,
+            "production queue delivery never creates a Dream agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_switch_discards_memory_jobs_and_queued_fires() {
+        let fs = MemFs::with(TASKS_PATH, "{\"tasks\":[]}");
+        let scheduler = Arc::new(
+            CronScheduler::new(
+                registry(fs.clone()),
+                fs,
+                FixedClock::at_secs(NOW),
+                Arc::new(AutomationTestRuntime::default()),
+                PathBuf::from(TASKS_PATH),
+            )
+            .with_session_id("old".into()),
+        );
+        let delivery = Arc::new(RecordingDelivery {
+            loading: std::sync::atomic::AtomicBool::new(false),
+            fires: tokio::sync::Mutex::new(Vec::new()),
+        });
+        scheduler.set_session_delivery(delivery.clone()).await;
+        scheduler
+            .register_tool_job(
+                SessionCronTask {
+                    id: "old-job".into(),
+                    cron: "* * * * *".into(),
+                    prompt: "old".into(),
+                    created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
+                    last_fired_at: None,
+                    recurring: true,
+                    owner: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        scheduler.tick().await;
+        assert_eq!(delivery.fires.lock().await.len(), 1);
+        scheduler.set_session_id("new".into()).await.unwrap();
+        assert!(scheduler.session_jobs().await.is_empty());
+        assert!(delivery.fires.lock().await.is_empty());
+        assert_eq!(scheduler.current_session_id().as_deref(), Some("new"));
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn claude_session_store_and_task_center_have_independent_envelopes() {
+        let center = r#"{"tasks":[{"id":"same","cron":"* * * * *","prompt":"center","createdAt":1,"automation":{"version":2,"model":"model"}}]}"#;
+        let fs = MemFs::with(AUTOMATION_PATH, center);
+        let root = Path::new("/proj");
+        assert!(
+            crate::read_tasks_body(fs.as_ref(), root).await.is_err(),
+            "no legacy .lingxi fallback"
+        );
+        let session = r#"{"tasks":[{"id":"same","cron":"* * * * *","prompt":"session","createdAt":1,"recurring":true,"sessionId":"not-upstream","expiresAt":3}]}"#;
+        crate::write_tasks_body(fs.as_ref(), root, session)
+            .await
+            .unwrap();
+        let bytes = fs.get(TASKS_PATH).await.unwrap();
+        assert_eq!(bytes, "{\n  \"tasks\": [\n    {\n      \"id\": \"same\",\n      \"cron\": \"* * * * *\",\n      \"prompt\": \"session\",\n      \"createdAt\": 1,\n      \"recurring\": true\n    }\n  ]\n}\n");
+        assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), center);
+        crate::tasks_file::write_automation_tasks_body(fs.as_ref(), root, "{\"tasks\":[]}")
+            .await
+            .unwrap();
+        assert_eq!(fs.get(TASKS_PATH).await.unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn future_orphan_agent_cron_is_removed_without_waiting_until_due() {
+        let fs = MemFs::with(TASKS_PATH, "{\"tasks\":[]}");
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs, FixedClock::at_secs(NOW));
+        scheduler
+            .register_tool_job(
+                SessionCronTask {
+                    id: "orphan".into(),
+                    cron: "0 0 1 1 *".into(),
+                    prompt: "do not run in main".into(),
+                    created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
+                    last_fired_at: None,
+                    recurring: true,
+                    owner: Some("missing-agent".into()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        scheduler.tick().await;
+        assert!(scheduler.session_jobs().await.is_empty());
+        assert_eq!(handler.spawn_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn project_leader_lease_blocks_peer_and_releases_on_stop() {
+        let fs = MemFs::with(TASKS_PATH, "{\"tasks\":[]}");
+        let clock = FixedClock::at_secs(NOW);
+        let a = scheduler(registry(fs.clone()), fs.clone(), clock.clone())
+            .with_session_id("owner".into());
+        let b = scheduler(registry(fs.clone()), fs.clone(), clock).with_session_id("peer".into());
+        a.refresh_project_leader().await;
+        b.refresh_project_leader().await;
+        assert!(a.project_leader.load(Ordering::SeqCst));
+        assert!(!b.project_leader.load(Ordering::SeqCst));
+        let record = fs.get("/proj/.claude/scheduled_tasks.lock").await.unwrap();
+        let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(record["sessionId"], "owner");
+        assert_eq!(record["acquiredAt"], NOW * 1000);
+        assert!(record.get("job_id").is_none());
+        a.stop().await.unwrap();
+        b.refresh_project_leader().await;
+        assert!(b.project_leader.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -2421,10 +3181,7 @@ mod scheduler_tick_tests {
             .await
             .get("d11111111")
             .and_then(|task| task.last_run);
-        assert_eq!(
-            scheduler_b_last_run,
-            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(NOW))
-        );
+        assert_eq!(scheduler_b_last_run, None);
     }
 
     #[tokio::test]
@@ -2468,7 +3225,7 @@ mod scheduler_tick_tests {
                     created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
                     last_fired_at: None,
                     recurring: false,
-                    owner: Some("agent:one".into()),
+                    owner: None,
                 },
                 false,
             )
@@ -2499,7 +3256,7 @@ mod scheduler_tick_tests {
                     created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
                     last_fired_at: None,
                     recurring: true,
-                    owner: Some("agent:one".into()),
+                    owner: None,
                 },
                 false,
             )
@@ -2516,11 +3273,7 @@ mod scheduler_tick_tests {
         let jobs = scheduler.session_jobs().await;
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].last_fired_at, Some(clock.now()));
-        assert!(
-            scheduler
-                .unregister_job("dsession2", Some("agent:one"))
-                .await
-        );
+        assert!(scheduler.unregister_job("dsession2", None).await);
         assert!(scheduler.session_jobs().await.is_empty());
     }
 
@@ -2539,7 +3292,7 @@ mod scheduler_tick_tests {
                     created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
                     last_fired_at: None,
                     recurring: false,
-                    owner: Some("agent:one".into()),
+                    owner: None,
                 },
                 false,
             )
@@ -2581,7 +3334,7 @@ mod scheduler_tick_tests {
                     created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 240),
                     last_fired_at: Some(previous_fire),
                     recurring: true,
-                    owner: Some("agent:one".into()),
+                    owner: None,
                 },
                 false,
             )
@@ -2679,6 +3432,7 @@ mod scheduler_tick_tests {
         let (registry, handler) = registry_with_dream_handler(fs.clone());
         let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler.load_persisted().await;
+        scheduler.tick().await;
 
         assert_eq!(
             handler.spawn_count(),
@@ -2686,7 +3440,7 @@ mod scheduler_tick_tests {
             "one confirmation prompt, not a fire"
         );
         let prompt = handler.prompts().remove(0);
-        assert!(prompt.starts_with("The following one-shot scheduled task was missed while Claude was not running. It has already been removed from .lingxi/scheduled_tasks.json.\n\nDo NOT execute this prompt yet. First use the AskUserQuestion tool to ask whether to run it now. Only execute if the user confirms.\n\n[Every minute, created "), "{prompt}");
+        assert!(prompt.starts_with("The following one-shot scheduled task was missed while Claude was not running. It has already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute this prompt yet. First use the AskUserQuestion tool to ask whether to run it now. Only execute if the user confirms.\n\n[Every minute, created "), "{prompt}");
         assert!(prompt.ends_with("]\ndeploy it"), "{prompt}");
         assert!(!scheduler.tasks.read().await.contains_key("dmissed01"));
         assert!(scheduler.tasks.read().await.contains_key("dkeep0001"));
@@ -2713,6 +3467,7 @@ mod scheduler_tick_tests {
         let (registry, handler) = registry_with_failing_dream_handler(fs.clone());
         let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler.load_persisted().await;
+        scheduler.tick().await;
         assert_eq!(
             handler.attempt_count(),
             1,
@@ -2726,6 +3481,7 @@ mod scheduler_tick_tests {
         assert!(scheduler.tasks.read().await.is_empty());
         let text = super::missed_one_shots_prompt(&[
             crate::tasks_file::CronTask {
+                creator: Default::default(),
                 id: "a".into(),
                 cron: "* * * * *".into(),
                 prompt: "a".into(),
@@ -2735,8 +3491,10 @@ mod scheduler_tick_tests {
                 permanent: None,
                 expires_at: None,
                 session_id: None,
+                automation: None,
             },
             crate::tasks_file::CronTask {
+                creator: Default::default(),
                 id: "b".into(),
                 cron: "0 9 * * 1-5".into(),
                 prompt: "b".into(),
@@ -2746,9 +3504,10 @@ mod scheduler_tick_tests {
                 permanent: None,
                 expires_at: None,
                 session_id: None,
+                automation: None,
             },
         ]);
-        assert!(text.starts_with("The following one-shot scheduled tasks were missed while Claude was not running. They have already been removed from .lingxi/scheduled_tasks.json.\n\nDo NOT execute these prompts yet. First use the AskUserQuestion tool to ask whether to run each one now. Only execute if the user confirms.\n\n[Every minute, created "));
+        assert!(text.starts_with("The following one-shot scheduled tasks were missed while Claude was not running. They have already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute these prompts yet. First use the AskUserQuestion tool to ask whether to run each one now. Only execute if the user confirms.\n\n[Every minute, created "));
         assert!(text.contains("]\na\n\n[Weekdays at 9:00 AM, created "));
         assert!(text.ends_with("]\nb"));
     }
@@ -2770,7 +3529,10 @@ mod scheduler_tick_tests {
         scheduler.tick().await;
 
         assert_eq!(handler.attempt_count(), 1);
-        assert_eq!(fs.get(TASKS_PATH).await.unwrap(), body);
+        assert_eq!(
+            crate::parse_tasks(&fs.get(TASKS_PATH).await.unwrap()),
+            crate::parse_tasks(&body)
+        );
         assert_eq!(
             scheduler
                 .tasks
@@ -2958,8 +3720,42 @@ mod scheduler_tick_tests {
     }
 
     #[tokio::test]
-    async fn explicit_expiration_survives_reload_and_absent_expiration_is_indefinite() {
-        for expired in [false, true] {
+    async fn durable_creator_session_owns_live_process_and_resume_refreshes_pid() {
+        for is_owner in [false, true] {
+            let creator_pid = if is_owner { 1 } else { std::process::id() };
+            let body = serde_json::json!({"tasks":[{
+                "id":"00000000", "cron":"* * * * *", "prompt":"owned",
+                "createdAt":(NOW-120)*1000, "recurring":true,
+                "createdBySessionId":"creator", "createdByPid":creator_pid
+            }]})
+            .to_string();
+            let fs = MemFs::with(TASKS_PATH, &body);
+            let clock = FixedClock::at_secs(NOW);
+            let (registry, handler) = registry_with_dream_handler(fs.clone());
+            let scheduler = CronScheduler::new(
+                registry,
+                fs.clone(),
+                clock,
+                Arc::new(UnusedRuntime),
+                PathBuf::from(TASKS_PATH),
+            )
+            .with_test_registry_delivery()
+            .with_session_id(if is_owner { "creator" } else { "foreign" }.into());
+            scheduler.load_persisted().await;
+            scheduler.tick().await;
+            assert_eq!(handler.spawn_count(), usize::from(is_owner));
+            let doc = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
+            assert_eq!(doc.tasks.len(), 1);
+            assert_eq!(
+                doc.tasks[0].creator.created_by_pid,
+                Some(std::process::id())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_ignores_task_center_expiration_and_preserves_permanent() {
+        for (expired, permanent) in [(false, false), (true, false), (false, true)] {
             let created_ms = (NOW - 30 * 24 * 60 * 60) * 1000;
             let expiry = if expired {
                 format!(",\"expiresAt\":{}", (NOW - 1) * 1000)
@@ -2967,7 +3763,7 @@ mod scheduler_tick_tests {
                 String::new()
             };
             let body = format!(
-                r#"{{"tasks":[{{"id":"dexpiry01","cron":"* * * * *","prompt":"expiry test","createdAt":{created_ms},"recurring":true{expiry}}}]}}"#
+                r#"{{"tasks":[{{"id":"dexpiry01","cron":"* * * * *","prompt":"expiry test","createdAt":{created_ms},"recurring":true,"permanent":{permanent}{expiry}}}]}}"#
             );
             let fs = MemFs::with(TASKS_PATH, &body);
             let clock = FixedClock::at_secs(NOW);
@@ -2978,17 +3774,21 @@ mod scheduler_tick_tests {
                 clock,
                 Arc::new(UnusedRuntime),
                 PathBuf::from(TASKS_PATH),
+            )
+            .with_test_registry_delivery();
+            assert_eq!(
+                scheduler.recurring_max_age,
+                Some(super::DEFAULT_RECURRING_MAX_AGE)
             );
-            assert!(scheduler.recurring_max_age.is_none());
             scheduler.load_persisted().await;
             scheduler.tick().await;
-            assert_eq!(handler.spawn_count(), usize::from(!expired));
+            assert_eq!(handler.spawn_count(), 1);
             assert_eq!(
                 scheduler.tasks.read().await.contains_key("dexpiry01"),
-                !expired
+                permanent
             );
             let doc = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
-            assert_eq!(doc.tasks.len(), usize::from(!expired));
+            assert_eq!(doc.tasks.len(), usize::from(permanent));
         }
     }
 
@@ -3269,5 +4069,795 @@ mod scheduler_tick_tests {
         registering.await.unwrap();
         assert!(scheduler.durable_ids.read().await.contains("dregister"));
         assert!(scheduler.tasks.read().await.contains_key("dregister"));
+    }
+    #[derive(Default)]
+    struct AutomationTestRuntime {
+        sequence: AtomicUsize,
+        handles: std::sync::Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    }
+    #[async_trait]
+    impl RuntimeSpawner for AutomationTestRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: Pin<Box<dyn Future<Output = ()> + Send>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            let id = self.sequence.fetch_add(1, Ordering::SeqCst) as u64;
+            self.handles.lock().unwrap().insert(id, tokio::spawn(task));
+            Ok(BackgroundTaskHandle {
+                task_name: name.into(),
+                task_id: id,
+            })
+        }
+        async fn sleep(&self, duration: Duration) {
+            tokio::time::sleep(duration).await;
+        }
+        async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            let task = self.handles.lock().unwrap().remove(&handle.task_id);
+            if let Some(task) = task {
+                task.abort();
+                let _ = task.await;
+            }
+            Ok(())
+        }
+    }
+    struct AutomationClock(AtomicUsize);
+    impl Clock for AutomationClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(self.0.load(Ordering::SeqCst) as u64)
+        }
+    }
+    struct BlockedAutomationFirer {
+        started: tokio::sync::Notify,
+        fast_finished: tokio::sync::Notify,
+        dropped: Arc<AtomicUsize>,
+    }
+    struct DroppedAutomation(Arc<AtomicUsize>);
+    impl Drop for DroppedAutomation {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    #[async_trait]
+    impl crate::CronJobFirer for BlockedAutomationFirer {
+        async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+            panic!("v2 must not use legacy execution");
+        }
+        async fn fire_automation(
+            &self,
+            request: &crate::AutomationRunRequest,
+        ) -> Result<crate::AutomationRunResult, String> {
+            if request.task.id == "slow" {
+                let _drop = DroppedAutomation(self.dropped.clone());
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+            }
+            self.fast_finished.notify_one();
+            Ok(crate::AutomationRunResult {
+                session_id: "fast-session".into(),
+                summary: "done".into(),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn blocked_automation_does_not_block_other_tasks_ticks_or_pending_coalescing() {
+        let tasks: Vec<_> = ["slow", "fast"]
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "cron": "* * * * *",
+                    "prompt": "run",
+                    "createdAt": (NOW - 120) * 1000,
+                    "recurring": true,
+                    "automation": { "version": 2, "model": "provider/model" }
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "tasks": tasks }).to_string();
+        let fs = MemFs::with(AUTOMATION_PATH, &body);
+        let clock = Arc::new(AutomationClock(AtomicUsize::new(NOW as usize)));
+        let runtime = Arc::new(AutomationTestRuntime::default());
+        let executor = Arc::new(BlockedAutomationFirer {
+            started: tokio::sync::Notify::new(),
+            fast_finished: tokio::sync::Notify::new(),
+            dropped: Arc::new(AtomicUsize::new(0)),
+        });
+        let scheduler = CronScheduler::new(
+            registry(fs.clone()),
+            fs.clone(),
+            clock.clone(),
+            runtime,
+            PathBuf::from(AUTOMATION_PATH),
+        )
+        .with_test_registry_delivery();
+        scheduler.set_automation_firer(executor.clone()).await;
+        tokio::time::timeout(Duration::from_secs(1), scheduler.tick())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), executor.started.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), executor.fast_finished.notified())
+            .await
+            .unwrap();
+        clock.0.store((NOW + 180) as usize, Ordering::SeqCst);
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(1), scheduler.tick())
+                .await
+                .unwrap();
+        }
+        let doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let slow = doc
+            .tasks
+            .iter()
+            .find(|task| task.id == "slow")
+            .unwrap()
+            .automation
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            slow.runs
+                .iter()
+                .filter(|run| run.status == crate::AutomationRunStatus::Running)
+                .count(),
+            1
+        );
+        assert_eq!(
+            slow.runs
+                .iter()
+                .filter(|run| run.status == crate::AutomationRunStatus::Queued)
+                .count(),
+            1
+        );
+        tokio::time::timeout(Duration::from_secs(1), scheduler.stop())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(executor.dropped.load(Ordering::SeqCst), 1);
+        assert!(scheduler.automation_runs.lock().await.is_empty());
+        let doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let slow = doc
+            .tasks
+            .iter()
+            .find(|task| task.id == "slow")
+            .unwrap()
+            .automation
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            slow.runs
+                .iter()
+                .filter(|run| run.status == crate::AutomationRunStatus::Running)
+                .count(),
+            0
+        );
+        assert_eq!(
+            slow.runs
+                .iter()
+                .filter(|run| run.status == crate::AutomationRunStatus::Interrupted)
+                .count(),
+            1
+        );
+    }
+
+    fn review_automation_file() -> Arc<MemFs> {
+        MemFs::with(
+            AUTOMATION_PATH,
+            &serde_json::json!({"tasks":[{
+                "id":"review-task", "cron":"* * * * *", "prompt":"run", "createdAt":(NOW-120)*1000,
+                "recurring":true, "automation":{"version":2,"model":"provider/model"}
+            }]})
+            .to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn stale_automation_claim_cannot_bind_or_finish_queued_or_reclaimed_run() {
+        let fs = review_automation_file();
+        let root = Path::new("/proj");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW);
+        let first = crate::claim_automation_run(fs.as_ref(), root, "review-task", now, None)
+            .await
+            .unwrap();
+        assert!(
+            !crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &first,
+                &Err("busy:target".into()),
+                NOW * 1000
+            )
+            .await
+        );
+        assert!(
+            !crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &first,
+                &Err("interrupted:old host".into()),
+                NOW * 1000
+            )
+            .await
+        );
+        assert!(
+            crate::bind_automation_run_session(fs.as_ref(), root, &first, "stale-chat")
+                .await
+                .is_err()
+        );
+        let retry = crate::claim_automation_run(fs.as_ref(), root, "review-task", now, None)
+            .await
+            .unwrap();
+        assert_eq!(first.run_id, retry.run_id);
+        assert!(retry.claim_generation > first.claim_generation);
+        assert!(
+            !crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &first,
+                &Err("interrupted:old host".into()),
+                NOW * 1000
+            )
+            .await
+        );
+        assert!(
+            crate::bind_automation_run_session(fs.as_ref(), root, &first, "stale-chat")
+                .await
+                .is_err()
+        );
+        let mut doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        doc.tasks[0].automation.as_mut().unwrap().runs[0].owner_pid =
+            Some(std::process::id().wrapping_add(1));
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &retry,
+                &Err("interrupted:wrong process".into()),
+                NOW * 1000
+            )
+            .await
+        );
+        assert!(crate::bind_automation_run_session(
+            fs.as_ref(),
+            root,
+            &retry,
+            "wrong-process-chat"
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap()),
+            doc
+        );
+    }
+
+    struct BusyReviewFirer;
+    #[async_trait]
+    impl crate::CronJobFirer for BusyReviewFirer {
+        async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+            unreachable!()
+        }
+        async fn fire_automation(
+            &self,
+            _: &crate::AutomationRunRequest,
+        ) -> Result<crate::AutomationRunResult, String> {
+            Err("busy:target".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_preserves_busy_pending_work_and_peer_reclaimed_generation() {
+        for reclaim in [false, true] {
+            let fs = review_automation_file();
+            let scheduler = CronScheduler::new(
+                registry(fs.clone()),
+                fs.clone(),
+                Arc::new(AutomationClock(AtomicUsize::new(NOW as usize))),
+                Arc::new(AutomationTestRuntime::default()),
+                PathBuf::from(AUTOMATION_PATH),
+            )
+            .with_test_registry_delivery();
+            scheduler
+                .set_automation_firer(Arc::new(BusyReviewFirer))
+                .await;
+            scheduler.tick().await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let mut flights = scheduler.automation_runs.lock().await;
+                    if flights.values_mut().all(|flight| !flight.is_running()) {
+                        break;
+                    }
+                    drop(flights);
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            if reclaim {
+                crate::claim_automation_run(
+                    fs.as_ref(),
+                    Path::new("/proj"),
+                    "review-task",
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(NOW),
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            let before = fs.get(AUTOMATION_PATH).await.unwrap();
+            scheduler.stop().await.unwrap();
+            assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_rechecks_expiration_after_claim_and_completes_without_session() {
+        let fs = review_automation_file();
+        let root = Path::new("/proj");
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "review-task",
+            SystemTime::UNIX_EPOCH + Duration::from_secs(NOW),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        // Simulate preparation crossing the expiry boundary without another tick.
+        doc.tasks[0].expires_at = Some(1);
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        let error =
+            crate::bind_automation_run_session(fs.as_ref(), root, &request, "never-started")
+                .await
+                .unwrap_err();
+        assert!(error.starts_with(crate::AUTOMATION_CANCELLED_PREFIX));
+        let doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let config = doc.tasks[0].automation.as_ref().unwrap();
+        assert_eq!(config.status, crate::AutomationStatus::Completed);
+        assert_eq!(config.runs[0].status, crate::AutomationRunStatus::Cancelled);
+        assert!(config.runs[0].session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn repaired_configuration_is_not_paused_by_old_run_failure() {
+        for repaired in [false, true] {
+            let fs = review_automation_file();
+            let root = Path::new("/proj");
+            let request = crate::claim_automation_run(
+                fs.as_ref(),
+                root,
+                "review-task",
+                SystemTime::UNIX_EPOCH + Duration::from_secs(NOW),
+                None,
+            )
+            .await
+            .unwrap();
+            // Coalescing changes last_fired_at but is not a user repair.
+            assert!(crate::claim_automation_run(
+                fs.as_ref(),
+                root,
+                "review-task",
+                SystemTime::UNIX_EPOCH + Duration::from_secs(NOW + 180),
+                None
+            )
+            .await
+            .is_none());
+            if repaired {
+                let mut doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+                doc.tasks[0].automation.as_mut().unwrap().model = "provider/repaired".into();
+                crate::tasks_file::write_automation_tasks_body(
+                    fs.as_ref(),
+                    root,
+                    &crate::serialize_tasks(&doc),
+                )
+                .await
+                .unwrap();
+            }
+            assert!(
+                crate::finish_automation_run(
+                    fs.as_ref(),
+                    root,
+                    &request,
+                    &Err("paused:Old model unavailable".into()),
+                    (NOW + 180) * 1000
+                )
+                .await
+            );
+            let doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+            let config = doc.tasks[0].automation.as_ref().unwrap();
+            assert_eq!(
+                config.status,
+                if repaired {
+                    crate::AutomationStatus::Active
+                } else {
+                    crate::AutomationStatus::Paused
+                }
+            );
+            assert_eq!(config.runs[0].status, crate::AutomationRunStatus::Failed);
+            assert_eq!(
+                config
+                    .runs
+                    .iter()
+                    .filter(|run| run.status == crate::AutomationRunStatus::Queued)
+                    .count(),
+                usize::from(repaired)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stable_manual_occurrence_retries_once_and_rejects_terminal_redelivery() {
+        let fs = review_automation_file();
+        let root = Path::new("/proj");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW);
+        let first = crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, 123)
+            .await
+            .unwrap();
+        assert!(
+            crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, 123)
+                .await
+                .is_none()
+        );
+        assert!(
+            !crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &first,
+                &Err("busy:target".into()),
+                NOW * 1000
+            )
+            .await
+        );
+        let retry = crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, 123)
+            .await
+            .unwrap();
+        assert_eq!(retry.run_id, first.run_id);
+        assert_eq!(retry.claim_generation, first.claim_generation + 1);
+        assert!(
+            crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &retry,
+                &Ok(crate::AutomationRunResult {
+                    session_id: "chat".into(),
+                    summary: "done".into()
+                }),
+                NOW * 1000
+            )
+            .await
+        );
+        assert!(
+            crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, 123)
+                .await
+                .is_none()
+        );
+        assert!(
+            crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, 124)
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_manual_pending_is_adopted_once_without_changing_its_run_id() {
+        // Equal clocks need a durable adoption marker too: a later different
+        // token must not look like another first adoption of the legacy ID.
+        for host_at in [123, NOW * 1000] {
+            let fs = review_automation_file();
+            let root = Path::new("/proj");
+            let now = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW);
+            let legacy = crate::claim_automation_run_now(fs.as_ref(), root, "review-task", now)
+                .await
+                .unwrap();
+            assert!(
+                !crate::finish_automation_run(
+                    fs.as_ref(),
+                    root,
+                    &legacy,
+                    &Err("busy:target".into()),
+                    NOW * 1000
+                )
+                .await
+            );
+            let adopted =
+                crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, host_at)
+                    .await
+                    .unwrap();
+            assert_eq!(adopted.run_id, legacy.run_id);
+            let doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+            let run = &doc.tasks[0].automation.as_ref().unwrap().runs[0];
+            assert_eq!(run.scheduled_at, NOW * 1000);
+            assert_eq!(run.manual_occurrence_at, Some(host_at));
+            assert!(
+                !crate::finish_automation_run(
+                    fs.as_ref(),
+                    root,
+                    &adopted,
+                    &Err("busy:target".into()),
+                    NOW * 1000
+                )
+                .await
+            );
+            assert!(crate::claim_automation_run_now_at(
+                fs.as_ref(),
+                root,
+                "review-task",
+                now,
+                host_at + 1
+            )
+            .await
+            .is_none());
+            let retry =
+                crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, host_at)
+                    .await
+                    .unwrap();
+            assert_eq!(retry.run_id, legacy.run_id);
+            assert!(
+                crate::finish_automation_run(
+                    fs.as_ref(),
+                    root,
+                    &retry,
+                    &Ok(crate::AutomationRunResult {
+                        session_id: "chat".into(),
+                        summary: "done".into()
+                    }),
+                    NOW * 1000
+                )
+                .await
+            );
+            assert!(crate::claim_automation_run_now_at(
+                fs.as_ref(),
+                root,
+                "review-task",
+                now,
+                host_at
+            )
+            .await
+            .is_none());
+        }
+    }
+
+    struct CommitReviewFirer {
+        fs: Arc<MemFs>,
+        failures: usize,
+        calls: AtomicUsize,
+        panic: bool,
+    }
+    #[async_trait]
+    impl crate::CronJobFirer for CommitReviewFirer {
+        async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+            unreachable!()
+        }
+        async fn fire_automation(
+            &self,
+            _: &crate::AutomationRunRequest,
+        ) -> Result<crate::AutomationRunResult, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic, "injected executor panic");
+            self.fs.fail_writes.store(self.failures, Ordering::SeqCst);
+            Ok(crate::AutomationRunResult {
+                session_id: "completed-chat".into(),
+                summary: "actual result".into(),
+            })
+        }
+    }
+    async fn await_review_flights(scheduler: &CronScheduler) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut flights = scheduler.automation_runs.lock().await;
+                if !flights.is_empty() && flights.values_mut().all(|flight| !flight.is_running()) {
+                    return;
+                }
+                drop(flights);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    fn commit_review_scheduler(fs: Arc<MemFs>) -> CronScheduler {
+        CronScheduler::new(
+            registry(fs.clone()),
+            fs,
+            Arc::new(AutomationClock(AtomicUsize::new(NOW as usize))),
+            Arc::new(AutomationTestRuntime::default()),
+            PathBuf::from(TASKS_PATH),
+        )
+    }
+
+    #[tokio::test]
+    async fn review_commit_retry_retains_actual_result_without_replaying_model() {
+        let fs = review_automation_file();
+        let executor = Arc::new(CommitReviewFirer {
+            fs: fs.clone(),
+            failures: 2,
+            calls: AtomicUsize::new(0),
+            panic: false,
+        });
+        let scheduler = commit_review_scheduler(fs.clone());
+        scheduler.set_automation_firer(executor.clone()).await;
+        scheduler.tick().await;
+        await_review_flights(&scheduler).await;
+        scheduler.tick().await;
+        assert_eq!(
+            scheduler.automation_runs.lock().await.len(),
+            1,
+            "retain uncommitted outcome"
+        );
+        scheduler.tick().await;
+        let doc =
+            crate::tasks_file::parse_automation_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let run = &doc.tasks[0].automation.as_ref().unwrap().runs[0];
+        assert_eq!(run.status, crate::AutomationRunStatus::Succeeded);
+        assert_eq!(run.summary.as_deref(), Some("actual result"));
+        assert_eq!(run.session_id.as_deref(), Some("completed-chat"));
+        assert_eq!(run.finished_at, Some(NOW * 1000));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_commit_stop_retries_original_result_and_reports_persistence_failure() {
+        let fs = review_automation_file();
+        let executor = Arc::new(CommitReviewFirer {
+            fs: fs.clone(),
+            failures: 2,
+            calls: AtomicUsize::new(0),
+            panic: false,
+        });
+        let scheduler = commit_review_scheduler(fs.clone());
+        scheduler.set_automation_firer(executor.clone()).await;
+        scheduler.tick().await;
+        await_review_flights(&scheduler).await;
+        assert!(scheduler.stop().await.is_err());
+        assert_eq!(scheduler.automation_runs.lock().await.len(), 1);
+        scheduler.stop().await.unwrap();
+        let doc =
+            crate::tasks_file::parse_automation_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let run = &doc.tasks[0].automation.as_ref().unwrap().runs[0];
+        assert_eq!(run.status, crate::AutomationRunStatus::Succeeded);
+        assert_eq!(run.summary.as_deref(), Some("actual result"));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn review_commit_panicked_flight_is_reconciled_before_its_owner_is_removed() {
+        let fs = review_automation_file();
+        let scheduler = commit_review_scheduler(fs.clone());
+        scheduler
+            .set_automation_firer(Arc::new(CommitReviewFirer {
+                fs: fs.clone(),
+                failures: 0,
+                calls: AtomicUsize::new(0),
+                panic: true,
+            }))
+            .await;
+        scheduler.tick().await;
+        await_review_flights(&scheduler).await;
+        scheduler.tick().await;
+        let doc =
+            crate::tasks_file::parse_automation_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        assert_eq!(
+            doc.tasks[0].automation.as_ref().unwrap().runs[0].status,
+            crate::AutomationRunStatus::Interrupted
+        );
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn review_commit_old_completion_does_not_complete_new_future_one_shot() {
+        let fs = review_automation_file();
+        let root = Path::new("/proj");
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "review-task",
+            SystemTime::UNIX_EPOCH + Duration::from_secs(NOW),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut doc =
+            crate::tasks_file::parse_automation_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        doc.tasks[0].recurring = None;
+        doc.tasks[0].cron = "0 9 * * *".into();
+        doc.tasks[0].prompt = "new one-shot instructions".into();
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &request,
+                &Ok(crate::AutomationRunResult {
+                    session_id: "chat".into(),
+                    summary: "old recurring result".into()
+                }),
+                NOW * 1000
+            )
+            .await
+        );
+        let doc =
+            crate::tasks_file::parse_automation_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let config = doc.tasks[0].automation.as_ref().unwrap();
+        assert_eq!(config.status, crate::AutomationStatus::Active);
+        assert_eq!(config.runs[0].status, crate::AutomationRunStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn review_commit_waits_for_host_drain_before_marking_interrupted() {
+        struct DrainFirer {
+            started: tokio::sync::Notify,
+            cancels: AtomicUsize,
+        }
+        #[async_trait]
+        impl crate::CronJobFirer for DrainFirer {
+            async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+                unreachable!()
+            }
+            async fn fire_automation(
+                &self,
+                _: &crate::AutomationRunRequest,
+            ) -> Result<crate::AutomationRunResult, String> {
+                self.started.notify_one();
+                std::future::pending().await
+            }
+            async fn cancel_run(&self, _: &str) -> Result<(), String> {
+                if self.cancels.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err("native writer is still draining".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let fs = review_automation_file();
+        let scheduler = commit_review_scheduler(fs.clone());
+        let firer = Arc::new(DrainFirer {
+            started: tokio::sync::Notify::new(),
+            cancels: AtomicUsize::new(0),
+        });
+        scheduler.set_automation_firer(firer.clone()).await;
+        scheduler.tick().await;
+        firer.started.notified().await;
+        assert!(scheduler.stop().await.is_err());
+        let doc =
+            crate::tasks_file::parse_automation_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        assert_eq!(
+            doc.tasks[0].automation.as_ref().unwrap().runs[0].status,
+            crate::AutomationRunStatus::Running
+        );
+        // Rebinding the scheduler cannot substitute a new executor for an old
+        // flight's destruction barrier.
+        scheduler
+            .set_automation_firer(Arc::new(BusyReviewFirer))
+            .await;
+        scheduler.stop().await.unwrap();
+        assert_eq!(firer.cancels.load(Ordering::SeqCst), 2);
+        let doc =
+            crate::tasks_file::parse_automation_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        assert_eq!(
+            doc.tasks[0].automation.as_ref().unwrap().runs[0].status,
+            crate::AutomationRunStatus::Interrupted
+        );
     }
 }

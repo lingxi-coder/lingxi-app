@@ -15,12 +15,10 @@
 //!   - `<<loop.md>>`                 (`rKi`) — CronCreate loop.md-tasks loop
 //!   - `<<loop.md-dynamic>>`         (`lFt`) — ScheduleWakeup loop.md-tasks loop
 //!
-//! The first-vs-subsequent delivery state (`iFt` = preamble-delivered,
-//! `Gst` = last-delivered loop.md content / preamble-sentinel) is module-level
-//! mutable global in the binary, shared across every fire. The port mirrors that
-//! with a process-global [`Mutex`]; `resolve_wakeup_prompt` (called at fire time
-//! by the bridge `MsgQueueWakeupScheduler`) reads/updates it so the second fire
-//! drops the long preamble exactly like the binary.
+//! In 2.1.270, delivery state belongs to the session (`e` in
+//! `src_186131770.js`'s `se(e,t)`). [`LoopRuntime`] owns that state so each
+//! transcript gets its own initial instructions. Process-global compatibility
+//! wrappers remain for isolated callers.
 //!
 //! FEATURE FLAGS: every gate reads the binary's sync flag reader `nt(key,default)`
 //! — ported as [`telemetry::flag_bool`] (an empty cached snapshot by default →
@@ -31,8 +29,8 @@
 //!     sentinel resolvers are unconditional
 //!   - dynamic gate `isLoopDynamic` — REMOVED in 2.1.263 (`tengu_kairos_loop_dynamic`
 //!     no longer exists); the dynamic `/loop` mode is unconditional
-//!   - preamble variant `isLoopPersistentPreambleEnabled` = env `LINGXI_LOOP_PERSISTENT` || `nt("tengu_kairos_loop_persistent",false)`
-//!   - keepalive gate `isLoopKeepaliveEnabled` = env `LINGXI_LOOP_KEEPALIVE` || `nt("tengu_kairos_loop_keepalive",false)`
+//!   - preamble variant `isLoopPersistentPreambleEnabled` = env `CLAUDE_CODE_LOOP_PERSISTENT` || `nt("tengu_kairos_loop_persistent",false)`
+//!   - keepalive gate `isLoopKeepaliveEnabled` = env `CLAUDE_CODE_LOOP_KEEPALIVE` || `nt("tengu_kairos_loop_keepalive",false)`
 //!   - `PushNotification` addendum `Yke()` = `nt("tengu_kairos_push_notifications",false)` && `agentPushNotifEnabled` setting
 //! With no live GrowthBook fetcher wired (the prod default) every flag is at its
 //! shipped `false`, so the whole subsystem is inert and byte-identical to the
@@ -88,10 +86,10 @@ const PUSH_NOTIFICATION: &str = "PushNotification";
 // PROMPT/DYNAMIC are FLAG-ONLY (`fJr`/`q_e` have NO env layer in the binary).
 
 /// `YIn` / `isLoopPersistentPreambleEnabled` (cc_all.txt:504950):
-/// `rt(process.env.LINGXI_LOOP_PERSISTENT) || nt("tengu_kairos_loop_persistent",false)`.
+/// 2.1.270 `g`: a nonempty raw env string wins, otherwise read the flag.
 #[must_use]
 pub fn is_loop_persistent_preamble_enabled() -> bool {
-    env_truthy("LINGXI_LOOP_PERSISTENT")
+    std::env::var("CLAUDE_CODE_LOOP_PERSISTENT").is_ok_and(|value| !value.is_empty())
         || telemetry::flag_bool("tengu_kairos_loop_persistent", false)
 }
 
@@ -127,7 +125,7 @@ pub fn is_loop_dynamic_enabled() -> bool {
 }
 
 /// `iKi` / `isLoopKeepaliveEnabled` (cc_all.txt:504966):
-/// `rt(process.env.LINGXI_LOOP_KEEPALIVE) || nt("tengu_kairos_loop_keepalive",false)`.
+/// `rt(process.env.CLAUDE_CODE_LOOP_KEEPALIVE) || nt("tengu_kairos_loop_keepalive",false)`.
 /// Gates the keepalive fallback heartbeat (the `lKi`/`cKi` re-arm when a dynamic
 /// loop tick completes without the model rescheduling).
 // PARITY: the keepalive *gate* is ported here; the keepalive *scheduling*
@@ -141,7 +139,7 @@ pub fn is_loop_keepalive_enabled() -> bool {
     // return e; return H("tengu_kairos_loop_keepalive",!0)` — a DEFINED env var
     // is returned raw (any non-empty string is truthy in JS), and the flag
     // default is TRUE.
-    match std::env::var("LINGXI_LOOP_KEEPALIVE") {
+    match std::env::var("CLAUDE_CODE_LOOP_KEEPALIVE") {
         Ok(value) => !value.is_empty(),
         Err(_) => telemetry::flag_bool("tengu_kairos_loop_keepalive", true),
     }
@@ -163,15 +161,6 @@ pub fn is_push_notif_enabled() -> bool {
     // monitor-event renderer can gate on the same predicate without taking a
     // dependency on `cron`.
     telemetry::push_notifications_enabled()
-}
-
-fn env_truthy(key: &str) -> bool {
-    // PARITY: binary `rt(e)` (cc_all.txt) is an ALLOWLIST, not a denylist:
-    // `String(e).toLowerCase().trim()` must be exactly one of `1|true|yes|on`.
-    // The workspace-canonical `platform_api::env::is_env_truthy` implements precisely
-    // this (and is used by ~10 other gates), so delegate to it — an earlier
-    // denylist here wrongly treated `no`/`off`/`2`/`foo` as truthy.
-    platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 // ── Preambles (binary `aJr` / `VVi`) ─────────────────────────────────────────
@@ -289,34 +278,42 @@ fn tick_loopfile_absent_dynamic() -> String {
 
 // ── loop.md reader (binary `oKi` + truncation `z4d`) ──────────────────────────
 
-/// `z4d(e)` (cc_all.txt:504965) — truncate loop.md content to `zIn` bytes with a
-/// warning footer, preferring to cut at the last newline before the budget.
-// PARITY: binary z4d (cc_all.txt:504965).
-fn truncate_loop_file(content: &str) -> String {
-    if content.len() <= LOOP_FILE_MAX_BYTES {
-        return content.to_string();
-    }
-    // PARITY: `let t=e.lastIndexOf("\n",zIn)` — last newline at/before the budget.
-    // The binary's JS `e.slice` / `lastIndexOf` operate on UTF-16 code units and
-    // never panic at a code-unit boundary. Rust string slicing panics on a non-
-    // char-boundary index, so clamp the budget DOWN to the nearest char boundary
-    // (`<= LOOP_FILE_MAX_BYTES`) before slicing — a multibyte char straddling
-    // byte 25000 (CJK / emoji / accented text, common in a real loop.md) would
-    // otherwise panic at fire time. This is behavior-preserving vs the binary
-    // (the warning footer + budget value are unchanged).
-    let mut budget = LOOP_FILE_MAX_BYTES.min(content.len());
-    while budget > 0 && !content.is_char_boundary(budget) {
-        budget -= 1;
-    }
-    let cut = content[..budget]
-        .rfind('\n')
-        .filter(|&i| i > 0)
-        .unwrap_or(budget);
-    let head = &content[..cut];
-    format!(
-        "{head}\n\n> WARNING: loop.md was truncated to {LOOP_FILE_MAX_BYTES} bytes. Keep the task list concise."
+/// JavaScript trim/regexp whitespace (ECMAScript WhiteSpace + LineTerminator).
+/// U+FEFF is included; U+0085, unlike Rust's `char::is_whitespace`, is not.
+pub fn is_loop_js_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
     )
 }
+
+// The upstream warning says bytes, but 2.1.270 `P` uses JS UTF-16 length/slice.
+fn truncate_loop_file(content: &str) -> String {
+    let units: Vec<u16> = content.encode_utf16().collect();
+    if units.len() <= LOOP_FILE_MAX_BYTES {
+        return content.to_string();
+    }
+    let cut = units[..=LOOP_FILE_MAX_BYTES]
+        .iter()
+        .rposition(|u| *u == 10)
+        .filter(|i| *i > 0)
+        .unwrap_or(LOOP_FILE_MAX_BYTES);
+    // A JS slice can leave a lone surrogate; Node UTF-8 serialization replaces
+    // it with U+FFFD, matching from_utf16_lossy at the Rust string boundary.
+    let head = String::from_utf16_lossy(&units[..cut]);
+    format!("{head}\n\n> WARNING: loop.md was truncated to {LOOP_FILE_MAX_BYTES} bytes. Keep the task list concise.")
+}
+
+pub use tasks::handlers::monitor::{
+    bounded_monitor_timeout_ms, bounded_monitors_enabled, monitor_duration,
+};
 
 /// A located loop.md file: its path and (truncated) contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,37 +324,60 @@ pub struct LoopFile {
     pub content: String,
 }
 
-/// `oKi` / `readLoopFile` (cc_all.txt:504966): reads `<cwd>/.lingxi/loop.md` then
-/// `<cwd>/loop.md`, trims, skips empty, truncates to `zIn` bytes. Returns the
-/// first non-empty match (path + content) or `None`.
-// PARITY: binary oKi (cc_all.txt:504966). The binary uses `dc()` (project root)
-// for `.lingxi/loop.md` and `Zn()` (cwd) for `loop.md`; the port reads both
-// relative to the supplied `cwd` (the bridge passes the session cwd; in practice
-// `dc()==Zn()` for a single-project session).
+/// Legacy single-directory reader. Session callers use [`read_loop_file_at`]
+/// so project root, current directory, and filesystem errors remain explicit.
 #[must_use]
 pub fn read_loop_file(cwd: &Path) -> Option<LoopFile> {
+    read_loop_file_at(cwd, cwd).ok().flatten()
+}
+
+// `Dt` in src_164606951.js accepts this exact errno set; `c` adds EISDIR.
+fn skippable_loop_file_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    if let Some(code) = error.raw_os_error() {
+        return [
+            libc::ENOENT,
+            libc::EACCES,
+            libc::EPERM,
+            libc::ENOTDIR,
+            libc::ELOOP,
+            libc::ENAMETOOLONG,
+            libc::EROFS,
+            libc::EISDIR,
+        ]
+        .contains(&code);
+    }
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+    ) || cfg!(windows) && matches!(error.raw_os_error(), Some(19 | 206 | 267 | 1142 | 1921))
+}
+
+/// 2.1.270 `_( )`: project-root `.claude/loop.md`, then current-directory
+/// `loop.md`. Node's UTF-8 replacement decoding precedes ECMAScript trimming.
+/// Expected path/access failures (`Dt` plus EISDIR) are skipped; unexpected
+/// errors such as EIO propagate.
+pub fn read_loop_file_at(project_root: &Path, cwd: &Path) -> std::io::Result<Option<LoopFile>> {
     let candidates = [
-        cwd.join(branding::DOT_DIR).join("loop.md"),
+        project_root.join(".claude").join("loop.md"),
         cwd.join("loop.md"),
     ];
     for path in candidates {
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            // PARITY: binary `if(zo(o)||dn(o)==="EISDIR")continue;throw o` — skip
-            // not-found / is-a-directory; the port treats any read error as skip
-            // (no panic at fire time).
-            Err(_) => continue,
+        let raw = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if skippable_loop_file_error(&error) => continue,
+            Err(error) => return Err(error),
         };
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
+        let text = String::from_utf8_lossy(&raw);
+        let trimmed = text.trim_matches(is_loop_js_whitespace);
+        if !trimmed.is_empty() {
+            return Ok(Some(LoopFile {
+                path,
+                content: truncate_loop_file(trimmed),
+            }));
         }
-        return Some(LoopFile {
-            path,
-            content: truncate_loop_file(trimmed),
-        });
     }
-    None
+    Ok(None)
 }
 
 // ── Sentinel predicates (binary `hJr`/`gJr`/`Y4d`) ───────────────────────────
@@ -382,10 +402,8 @@ pub fn is_loop_default_sentinel(s: &str) -> bool {
 
 // ── First-vs-subsequent delivery state (binary `iFt` / `Gst`) ─────────────────
 
-/// Module-level delivery state, mirroring the binary's `iFt`/`Gst` globals
-/// (cc_all.txt:504966 `var …,iFt=!1,Gst=null,…`). `preamble_delivered` = `iFt`;
-/// `last_content` = `Gst` (the last loop.md content delivered, or the
-/// `PREAMBLE_SENTINEL` placeholder once the preamble shipped via the default path).
+/// 2.1.270 `e.autonomousPreambleDelivered` / `e.lastLoopFileDelivered`.
+/// Each session owns its own state; the global wrapper serves isolated callers.
 #[derive(Default)]
 struct DeliveryState {
     /// `iFt` — true once the full preamble has been delivered on a prior fire.
@@ -514,6 +532,8 @@ pub enum LoopFoldOutcome {
 
 #[derive(Default)]
 struct LoopRuntimeState {
+    /// Preamble and loop.md instructions delivered to this session transcript.
+    delivery: DeliveryState,
     /// `Nt.loopTickInFlightPrompt` — prompt of the loop tick being processed.
     tick_in_flight_prompt: Option<String>,
     /// `Nt.loopConsecutiveKeepalives` — consecutive keepalive count.
@@ -555,6 +575,42 @@ pub struct LoopRuntime {
 }
 
 impl LoopRuntime {
+    /// Resolve a scheduled prompt using only this session's delivered instructions.
+    /// Mirrors 2.1.270 `se(e, t)`; ordinary prompts pass through byte-for-byte.
+    #[must_use]
+    pub fn resolve_loop_default_fire(&self, sentinel: &str, cwd: &Path) -> String {
+        let mut st = self.state.lock().unwrap();
+        resolve_loop_default_fire_with_state(&mut st.delivery, sentinel, cwd)
+    }
+
+    /// Resolve with explicit session roots and propagate loop.md read errors.
+    pub fn try_resolve_loop_default_fire(
+        &self,
+        sentinel: &str,
+        project_root: &Path,
+        cwd: &Path,
+    ) -> std::io::Result<String> {
+        // Read before taking/mutating delivery state; a failed read must not
+        // consume the first-delivery marker.
+        let file = if is_loop_file_sentinel(sentinel) {
+            read_loop_file_at(project_root, cwd)?
+        } else {
+            None
+        };
+        let mut st = self.state.lock().unwrap();
+        Ok(
+            resolve_autonomous_loop_fire_with_state(&mut st.delivery, sentinel)
+                .or_else(|| resolve_loop_file_fire_with_file(&mut st.delivery, sentinel, file))
+                .unwrap_or_else(|| sentinel.to_string()),
+        )
+    }
+
+    /// After this session compacts away its instructions, re-deliver them on
+    /// its next tick without changing other loop or session state.
+    pub fn reset_autonomous_loop_delivered(&self) {
+        self.state.lock().unwrap().delivery = DeliveryState::default();
+    }
+
     /// Mark the start of a loop tick and clear the prior reschedule marker.
     pub fn begin_tick(&self, prompt: String) {
         self.begin_tick_at(prompt, SystemTime::now());
@@ -622,6 +678,14 @@ impl LoopRuntime {
             duration_secs,
             span,
         })
+    }
+
+    /// Break a settled quiet streak when new user work appears between fires.
+    /// Upstream inspects the entire fire-to-fire transcript, not only the tick.
+    pub fn invalidate_noop_streak(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.noop_streak = 0;
+        state.streak_started_at = None;
     }
 
     /// The current no-op streak and when it started — what a firing wakeup
@@ -840,6 +904,13 @@ pub static TEST_SERIAL: Mutex<()> = Mutex::new(());
 /// is off (passthrough handled by [`resolve_loop_default_fire`]).
 #[must_use]
 pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
+    resolve_autonomous_loop_fire_with_state(&mut DELIVERY.lock().unwrap(), sentinel)
+}
+
+fn resolve_autonomous_loop_fire_with_state(
+    st: &mut DeliveryState,
+    sentinel: &str,
+) -> Option<String> {
     if !is_autonomous_loop_sentinel(sentinel) {
         return None;
     }
@@ -851,7 +922,6 @@ pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
     } else {
         tick_autonomous_cron()
     };
-    let mut st = DELIVERY.lock().unwrap();
     // PARITY: `if(iFt||Gst!==null)return t;return iFt=!0,`${dJr()}\n${t}``.
     if st.preamble_delivered || st.last_content.is_some() {
         return Some(tick);
@@ -873,12 +943,29 @@ pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
 /// tick (subsequent). `cwd` locates loop.md (binary uses process cwd).
 #[must_use]
 pub fn resolve_loop_file_fire(sentinel: &str, cwd: &Path) -> Option<String> {
+    resolve_loop_file_fire_with_state(&mut DELIVERY.lock().unwrap(), sentinel, cwd)
+}
+
+fn resolve_loop_file_fire_with_state(
+    st: &mut DeliveryState,
+    sentinel: &str,
+    cwd: &Path,
+) -> Option<String> {
+    if !is_loop_file_sentinel(sentinel) {
+        return None;
+    }
+    resolve_loop_file_fire_with_file(st, sentinel, read_loop_file(cwd))
+}
+
+fn resolve_loop_file_fire_with_file(
+    st: &mut DeliveryState,
+    sentinel: &str,
+    file: Option<LoopFile>,
+) -> Option<String> {
     if !is_loop_file_sentinel(sentinel) {
         return None;
     }
     let dynamic = sentinel == LOOP_FILE_DYNAMIC_SENTINEL;
-    let file = read_loop_file(cwd);
-    let mut st = DELIVERY.lock().unwrap();
     if let Some(file) = file {
         // PARITY: `let o=t?V4d():G4d();if(Gst===n.content)return o;Gst=n.content,…`
         let tick = if dynamic {
@@ -923,8 +1010,16 @@ pub fn resolve_loop_file_fire(sentinel: &str, cwd: &Path) -> Option<String> {
 /// `nKi(e) ?? sKi(e) ?? e` — try autonomous, then loop.md, else passthrough.
 #[must_use]
 pub fn resolve_loop_default_fire(sentinel: &str, cwd: &Path) -> String {
-    resolve_autonomous_loop_fire(sentinel)
-        .or_else(|| resolve_loop_file_fire(sentinel, cwd))
+    resolve_loop_default_fire_with_state(&mut DELIVERY.lock().unwrap(), sentinel, cwd)
+}
+
+fn resolve_loop_default_fire_with_state(
+    st: &mut DeliveryState,
+    sentinel: &str,
+    cwd: &Path,
+) -> String {
+    resolve_autonomous_loop_fire_with_state(st, sentinel)
+        .or_else(|| resolve_loop_file_fire_with_state(st, sentinel, cwd))
         .unwrap_or_else(|| sentinel.to_string())
 }
 
@@ -1085,10 +1180,10 @@ mod tests {
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         let g = super::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_autonomous_loop_delivered();
-        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
+        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         platform_api::session_flags::set_agent_push_notif_enabled(false);
-        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         g
     }
@@ -1145,12 +1240,33 @@ mod tests {
     fn preamble_persistent_selected_by_env() {
         let _g = guard();
         assert_eq!(get_autonomous_loop_preamble(), PREAMBLE_DEFAULT);
-        std::env::set_var("LINGXI_LOOP_PERSISTENT", "1");
+        std::env::set_var("CLAUDE_CODE_LOOP_PERSISTENT", "1");
         assert!(is_loop_persistent_preamble_enabled());
         assert_eq!(get_autonomous_loop_preamble(), PREAMBLE_PERSISTENT);
         assert!(PREAMBLE_PERSISTENT.contains("the *spirit* of the task"));
         assert!(PREAMBLE_PERSISTENT.contains("Persistence is the point of autonomous mode."));
-        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
+        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+    }
+
+    #[test]
+    fn persistent_preamble_env_uses_javascript_string_truthiness() {
+        let _g = guard();
+        for value in ["0", "false", "off", " ", "1"] {
+            std::env::set_var("CLAUDE_CODE_LOOP_PERSISTENT", value);
+            assert!(
+                is_loop_persistent_preamble_enabled(),
+                "{value:?} is nonempty"
+            );
+        }
+        std::env::set_var("CLAUDE_CODE_LOOP_PERSISTENT", "");
+        assert!(!is_loop_persistent_preamble_enabled());
+        telemetry::test_set_flag("tengu_kairos_loop_persistent", true);
+        assert!(
+            is_loop_persistent_preamble_enabled(),
+            "empty env falls through to flag"
+        );
+        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        telemetry::test_clear_flag("tengu_kairos_loop_persistent");
     }
 
     #[test]
@@ -1159,8 +1275,8 @@ mod tests {
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
-        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
-        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
         // PARITY 2.1.263: `tengu_kairos_loop_prompt` / `tengu_kairos_loop_dynamic`
         // no longer exist — the sentinel resolvers and the dynamic /loop mode are
         // unconditional.
@@ -1173,20 +1289,20 @@ mod tests {
         assert!(!is_loop_keepalive_enabled(), "flag off disables");
         // … and a DEFINED env var wins raw: any non-empty string is truthy, an
         // empty string is falsy (binary `if(e!==void 0)return e`).
-        std::env::set_var("LINGXI_LOOP_KEEPALIVE", "1");
+        std::env::set_var("CLAUDE_CODE_LOOP_KEEPALIVE", "1");
         assert!(is_loop_keepalive_enabled(), "env arm");
-        std::env::set_var("LINGXI_LOOP_KEEPALIVE", "");
+        std::env::set_var("CLAUDE_CODE_LOOP_KEEPALIVE", "");
         assert!(!is_loop_keepalive_enabled(), "empty env is falsy");
-        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
 
         // PERSISTENT: env || flag.
         telemetry::test_set_flag("tengu_kairos_loop_persistent", true);
         assert!(is_loop_persistent_preamble_enabled(), "flag arm");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
-        std::env::set_var("LINGXI_LOOP_PERSISTENT", "1");
+        std::env::set_var("CLAUDE_CODE_LOOP_PERSISTENT", "1");
         assert!(is_loop_persistent_preamble_enabled(), "env arm");
-        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
+        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
 
         // Push: flag alone is not enough.
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
@@ -1315,34 +1431,57 @@ mod tests {
         assert_eq!(truncate_loop_file("- task\n"), "- task\n");
     }
 
-    /// Regression: a multibyte UTF-8 char straddling byte 25000 must NOT panic
-    /// (Rust string slicing panics on a non-char-boundary index; the binary's
-    /// `z4d` JS `.slice`/`lastIndexOf` operate on UTF-16 code units and never
-    /// panic). The fix clamps the budget DOWN to the nearest char boundary.
     #[test]
-    fn loop_file_truncation_multibyte_boundary_no_panic() {
+    fn loop_file_truncation_matches_javascript_utf16_slice() {
         let _g = guard();
-        // `€` is 3 bytes (E2 82 AC). 8334 * 3 = 25002 bytes > 25000, with a char
-        // boundary at 24999 and the next at 25002 — so byte 25000 lands INSIDE a
-        // char. There are no newlines, so the rfind fallback hits the clamped
-        // budget. This panicked before the fix.
-        let big = "\u{20ac}".repeat(8334);
-        assert!(big.len() > LOOP_FILE_MAX_BYTES);
-        let out = truncate_loop_file(&big);
-        // The head is valid UTF-8 (never split a char) and the footer is appended.
-        assert!(out.ends_with(
-            "> WARNING: loop.md was truncated to 25000 bytes. Keep the task list concise."
-        ));
-        // Every retained head char is the full `€` (no replacement/mojibake).
-        let head = out
-            .strip_suffix(
-                "\n\n> WARNING: loop.md was truncated to 25000 bytes. Keep the task list concise.",
-            )
-            .expect("footer present");
-        assert!(head.chars().all(|c| c == '\u{20ac}'));
-        // Boundary-clamped: head is the largest whole-char prefix <= 25000 bytes.
-        assert!(head.len() <= LOOP_FILE_MAX_BYTES);
-        assert!(head.len() >= LOOP_FILE_MAX_BYTES - 3);
+        let short = "€".repeat(8334);
+        assert_eq!(truncate_loop_file(&short), short);
+        let footer =
+            "\n\n> WARNING: loop.md was truncated to 25000 bytes. Keep the task list concise.";
+        assert_eq!(
+            truncate_loop_file(&"€".repeat(25001)),
+            format!("{}{footer}", "€".repeat(25000))
+        );
+        assert_eq!(
+            truncate_loop_file(&format!("{}😀x", "a".repeat(24999))),
+            format!("{}�{footer}", "a".repeat(24999))
+        );
+        // lastIndexOf includes a newline exactly at the 25000-unit boundary.
+        assert_eq!(
+            truncate_loop_file(&format!("{}\nx", "a".repeat(25000))),
+            format!("{}{footer}", "a".repeat(25000))
+        );
+    }
+
+    #[test]
+    fn latest_2_1_270_tick_oracle_all_variants() {
+        let _g = guard();
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("bundled/loop_ticks_2_1_270.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let persistent = case["persistent"].as_bool().unwrap();
+            let push = case["push"].as_bool().unwrap();
+            telemetry::test_set_flag("tengu_kairos_loop_persistent", persistent);
+            telemetry::test_set_flag("tengu_kairos_push_notifications", push);
+            platform_api::session_flags::set_agent_push_notif_enabled(push);
+            let name = case["name"].as_str().unwrap();
+            let actual = match name {
+                "auto_cron" => tick_autonomous_cron(),
+                "auto_dynamic" => tick_autonomous_dynamic(),
+                "file_cron" => tick_loopfile_cron(),
+                "file_dynamic" => tick_loopfile_dynamic(),
+                "absent_dynamic" => tick_loopfile_absent_dynamic(),
+                _ => panic!("unknown oracle case"),
+            };
+            assert_eq!(
+                actual.as_bytes(),
+                case["text"].as_str().unwrap().as_bytes(),
+                "{name}, persistent={persistent}, push={push}"
+            );
+        }
+        telemetry::test_clear_flag("tengu_kairos_loop_persistent");
+        telemetry::test_clear_flag("tengu_kairos_push_notifications");
+        platform_api::session_flags::set_agent_push_notif_enabled(false);
     }
 
     #[test]
@@ -1369,5 +1508,145 @@ mod tests {
         // Next fire re-emits the preamble.
         let again = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
         assert!(again.starts_with("# Autonomous loop check\n"));
+    }
+    #[test]
+    fn session_delivery_is_isolated_and_reset_redelivers() {
+        let _g = guard();
+        let first = LoopRuntime::default();
+        let second = LoopRuntime::default();
+        let cwd = tempfile::tempdir().unwrap();
+        let sentinel = AUTONOMOUS_LOOP_DYNAMIC_SENTINEL;
+        let initial = first.resolve_loop_default_fire(sentinel, cwd.path());
+        assert!(initial.starts_with(PREAMBLE_DEFAULT));
+        assert_eq!(
+            second.resolve_loop_default_fire(sentinel, cwd.path()),
+            initial
+        );
+        let tick = tick_autonomous_dynamic();
+        assert_eq!(first.resolve_loop_default_fire(sentinel, cwd.path()), tick);
+        first.reset_autonomous_loop_delivered();
+        assert_eq!(
+            first.resolve_loop_default_fire(sentinel, cwd.path()),
+            initial
+        );
+        assert_eq!(second.resolve_loop_default_fire(sentinel, cwd.path()), tick);
+        first.reset();
+        assert_eq!(
+            first.resolve_loop_default_fire(sentinel, cwd.path()),
+            initial
+        );
+        assert_eq!(
+            first.resolve_loop_default_fire(" <<autonomous-loop-dynamic>> ", cwd.path()),
+            " <<autonomous-loop-dynamic>> "
+        );
+    }
+
+    #[test]
+    fn loop_file_delivery_is_isolated_between_sessions() {
+        let _g = guard();
+        let first = LoopRuntime::default();
+        let second = LoopRuntime::default();
+        let cwd = tempfile::tempdir().unwrap();
+        let file = cwd.path().join("loop.md");
+        std::fs::write(&file, "- isolated task").unwrap();
+        let sentinel = LOOP_FILE_DYNAMIC_SENTINEL;
+        let initial = first.resolve_loop_default_fire(sentinel, cwd.path());
+        assert!(initial.contains("- isolated task"));
+        assert_eq!(
+            second.resolve_loop_default_fire(sentinel, cwd.path()),
+            initial
+        );
+        assert_eq!(
+            first.resolve_loop_default_fire(sentinel, cwd.path()),
+            tick_loopfile_dynamic()
+        );
+        std::fs::write(&file, "- edited task").unwrap();
+        let changed = first.resolve_loop_default_fire(sentinel, cwd.path());
+        assert!(changed.contains("- edited task"));
+        assert_eq!(
+            second.resolve_loop_default_fire(sentinel, cwd.path()),
+            changed
+        );
+        first.reset();
+        assert_eq!(
+            first.resolve_loop_default_fire(sentinel, cwd.path()),
+            changed
+        );
+        assert_eq!(
+            second.resolve_loop_default_fire(sentinel, cwd.path()),
+            tick_loopfile_dynamic()
+        );
+    }
+    #[test]
+    fn loop_file_reader_uses_project_root_then_live_cwd_and_node_utf8() {
+        let _g = guard();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("nested");
+        std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(root.path().join(".lingxi")).unwrap();
+        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+        std::fs::write(root.path().join(".lingxi/loop.md"), "wrong legacy file").unwrap();
+        std::fs::write(cwd.join(".claude/loop.md"), "wrong cwd root").unwrap();
+        std::fs::write(cwd.join("loop.md"), "cwd tasks").unwrap();
+        let project_file = root.path().join(".claude/loop.md");
+        std::fs::write(&project_file, b"\xef\xbb\xbfroot \xff task\n").unwrap();
+        let found = read_loop_file_at(root.path(), &cwd).unwrap().unwrap();
+        assert_eq!(found.path, project_file);
+        assert_eq!(found.content, "root � task");
+        std::fs::write(&project_file, "\u{feff} \n").unwrap();
+        assert_eq!(
+            read_loop_file_at(root.path(), &cwd).unwrap().unwrap().path,
+            cwd.join("loop.md")
+        );
+        std::fs::remove_file(&project_file).unwrap();
+        std::fs::remove_file(cwd.join("loop.md")).unwrap();
+        assert!(
+            read_loop_file_at(root.path(), &cwd).unwrap().is_none(),
+            "legacy and cwd .claude are not extra fallbacks"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loop_file_reader_skips_exact_upstream_errno_set() {
+        for code in [
+            libc::ENOENT,
+            libc::EACCES,
+            libc::EPERM,
+            libc::ENOTDIR,
+            libc::ELOOP,
+            libc::ENAMETOOLONG,
+            libc::EROFS,
+            libc::EISDIR,
+        ] {
+            assert!(skippable_loop_file_error(
+                &std::io::Error::from_raw_os_error(code)
+            ));
+        }
+        for code in [libc::EIO, libc::EMFILE, libc::ENFILE] {
+            assert!(!skippable_loop_file_error(
+                &std::io::Error::from_raw_os_error(code)
+            ));
+        }
+    }
+
+    #[test]
+    fn checked_session_resolution_uses_explicit_project_root() {
+        let _g = guard();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("nested");
+        std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(root.path().join(".claude/loop.md"), "root tasks").unwrap();
+        let rt = LoopRuntime::default();
+        let first = rt
+            .try_resolve_loop_default_fire(LOOP_FILE_DYNAMIC_SENTINEL, root.path(), &cwd)
+            .unwrap();
+        assert!(first.contains("root tasks"));
+        assert_eq!(
+            rt.try_resolve_loop_default_fire(LOOP_FILE_DYNAMIC_SENTINEL, root.path(), &cwd)
+                .unwrap(),
+            tick_loopfile_dynamic()
+        );
     }
 }

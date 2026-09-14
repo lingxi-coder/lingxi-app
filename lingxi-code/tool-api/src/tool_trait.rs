@@ -73,6 +73,34 @@ pub trait Tool: Send + Sync {
         Vec::new()
     }
 
+    /// Use the shared native schema gate on nested invocations as well as the
+    /// main turn. Opt-in tools use the default flat schema parser or override
+    /// `parse_native_input` for native refinements and normalization.
+    fn native_input_validation(&self) -> bool {
+        false
+    }
+
+    /// Parse native schema defaults, stripping, and diagnostics at either dispatch boundary.
+    /// Tools with refinements may override this while retaining the shared issue formatter.
+    fn parse_native_input(
+        &self,
+        input: &Value,
+    ) -> Option<Result<Value, crate::native_schema::NativeSchemaError>> {
+        if !self.native_input_validation() {
+            return None;
+        }
+        crate::native_schema::validate_flat_input(
+            self.name(),
+            self.input_validation_schema(),
+            input,
+        )
+        .map(|result| {
+            result.map(|()| {
+                crate::native_schema::normalize_flat_input(input).unwrap_or_else(|| input.clone())
+            })
+        })
+    }
+
     /// Optional JSON Schema for the tool's output.
     fn output_schema(&self) -> Option<&Value> {
         None

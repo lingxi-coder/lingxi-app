@@ -42,6 +42,10 @@ pub struct Runtime {
     pub coordinator: Arc<engine_desktop::TeamRegistry>,
     /// The fully-constructed orchestrator.
     pub orchestrator: Arc<ConversationOrchestrator>,
+    /// Dynamic loop timer seam retained for the mounted terminal host.
+    pub wakeup_scheduler_cell: engine_desktop::loop_tools::WakeupSchedulerCell,
+    /// Host runtime used to arm cancellable loop timers.
+    pub runtime_spawner: Arc<dyn platform_api::RuntimeSpawner>,
     /// Durable session coordinator retained across CLI runtime projection and
     /// remounts. Every host has one; the no-transcript mode gets a disposable
     /// ledger under a temporary home rather than no ledger.
@@ -858,6 +862,8 @@ pub(crate) fn resolve_desktop_config_at(
     let _ = argv.no_stream;
 
     DesktopConfig {
+        enable_automation_scheduler: true,
+        host_workspace_trusted: None,
         // Real CLI session: the machine's keychain and env ARE legitimate
         // credential sources here.
         isolated_credential_storage: false,
@@ -1321,6 +1327,8 @@ pub async fn build_runtime_from_config(
     Ok(Runtime {
         #[cfg(test)]
         test_home,
+        wakeup_scheduler_cell: rt.wakeup_scheduler_cell,
+        runtime_spawner: rt.runtime_spawner,
         coordinator: rt.coordinator,
         orchestrator: rt.orchestrator,
         session_state: rt.session_state,
@@ -1407,7 +1415,28 @@ pub async fn build_runtime_for_tui_inner(
 }
 
 /// Resume/fork-aware variant that also supplies Anthropic request ancestry.
+/// Heap-allocate this boot future instead of building it in the caller's frame.
+///
+/// The state machine below holds every local that lives across an `.await`, and
+/// the boot path keeps growing: measured at 41,376 bytes before the cron/loop
+/// subsystem and 57,472 after. The 2 MB test-thread stack runs out first, and it
+/// does so as a `fatal runtime error: stack overflow` that ABORTS the binary —
+/// every remaining test in it then neither runs nor reports, which is how a
+/// suite loses 1,704 tests while still printing a failure count.
 pub async fn build_runtime_for_tui_inner_with_parent(
+    argv: &Argv,
+    resume_session_id: Option<uuid::Uuid>,
+    parent_session_id: Option<String>,
+) -> Result<TuiBuild, InitError> {
+    Box::pin(build_runtime_for_tui_inner_with_parent_impl(
+        argv,
+        resume_session_id,
+        parent_session_id,
+    ))
+    .await
+}
+
+async fn build_runtime_for_tui_inner_with_parent_impl(
     argv: &Argv,
     resume_session_id: Option<uuid::Uuid>,
     parent_session_id: Option<String>,

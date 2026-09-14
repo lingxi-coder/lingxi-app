@@ -66,6 +66,12 @@ pub struct QueuedCommand {
     /// routed through the queue (twin of `isMeta`).
     #[serde(default)]
     pub is_meta: bool,
+    /// Exact scheduled-job identity, separate from the queue command UUID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task_id: Option<String>,
+    /// Exact scheduled-fire UUID, supplied by its producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_fire_id: Option<String>,
 }
 
 impl QueuedCommand {
@@ -231,6 +237,7 @@ pub enum QueueSource {
 }
 
 /// The runtime queue itself. Cheap to clone (`Arc` inside).
+#[derive(Clone)]
 pub struct MessageQueueManager {
     queue: Arc<RwLock<VecDeque<QueuedCommand>>>,
     notify: Arc<Notify>,
@@ -250,6 +257,21 @@ pub struct MessageQueueManager {
 }
 
 impl MessageQueueManager {
+    /// Enqueue a passive goal retry through the ordinary host turn lifecycle.
+    pub async fn enqueue_goal_retry(&self, uuid: String, body: String, cancel: CancellationToken) {
+        self.enqueue(QueuedCommand {
+            uuid: uuid.clone(), content: QueuedCommandContent::UserInput { text: body },
+            priority: QueuePriority::Later, queued_at: SystemTime::now(), source: QueueSource::Hook,
+            agent_id: None, skip_slash_commands: true, is_meta: true,
+            scheduled_task_id: None, scheduled_fire_id: None,
+        }).await;
+        let queue = self.clone();
+        tokio::spawn(async move {
+            cancel.cancelled().await;
+            queue.remove(&[uuid], "goal retry invalidated").await;
+        });
+    }
+
     /// Construct an empty queue with no operation recorder and no active turn.
     #[must_use]
     pub fn new() -> Self {
@@ -307,6 +329,12 @@ impl MessageQueueManager {
     /// has nothing to abort — it simply waits to be drained.
     pub async fn clear_active_turn(&self) {
         *self.active_turn.write().await = None;
+    }
+
+    /// Whether a turn still owns the queue. Scheduled work waits for this owner
+    /// to finish before announcing a wakeup or resolving its task file.
+    pub async fn has_active_turn(&self) -> bool {
+        self.active_turn.read().await.is_some()
     }
 
     /// Consume the next batch of human prompts that belongs inside the running
@@ -589,6 +617,8 @@ mod tests {
 
     fn mk(priority: QueuePriority, text: &str) -> QueuedCommand {
         QueuedCommand {
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
             uuid: text.into(),
             content: QueuedCommandContent::UserInput { text: text.into() },
             priority,
@@ -607,6 +637,8 @@ mod tests {
         // `orphanedPermission.{permissionResult, …}` riding on the
         // `mode:'orphaned-permission'` command (print.ts:5291-5298).
         let cmd = QueuedCommand {
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
             uuid: "u1".into(),
             content: QueuedCommandContent::OrphanedPermission {
                 tool_use_id: ToolUseId::from("toolu_abc"),
@@ -668,6 +700,21 @@ mod tests {
             }
             other => panic!("expected OrphanedPermission, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn goal_retry_uses_host_queue_and_cancellation_removes_it() {
+        let queue = MessageQueueManager::new();
+        let cancel = CancellationToken::new();
+        queue.enqueue_goal_retry("goal-retry-test".into(), "continue".into(), cancel.clone()).await;
+        let queued = queue.snapshot().await;
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].is_meta);
+        assert_eq!(queued[0].priority, QueuePriority::Later);
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !queue.snapshot().await.is_empty() { tokio::task::yield_now().await; }
+        }).await.unwrap();
     }
 
     #[tokio::test]
@@ -755,6 +802,8 @@ mod tests {
         let q = MessageQueueManager::new();
         let agent = AgentId::new();
         let sub = QueuedCommand {
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
             uuid: "sub".into(),
             content: QueuedCommandContent::TaskNotification {
                 value: "done".into(),

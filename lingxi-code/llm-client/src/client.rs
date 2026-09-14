@@ -1131,6 +1131,17 @@ impl DefaultLlmClient {
                         message: String::new(),
                     });
                 };
+                // Codex subscription requests use the Responses backend's
+                // restricted shape (OpenCode's Codex plugin also omits its
+                // maxOutputTokens parameter). Keep API-key profiles unchanged.
+                if let Some(body) = request.body_json.as_object_mut() {
+                    body.remove("max_output_tokens");
+                    body.remove("temperature");
+                    body.remove("top_p");
+                    body.insert("store".into(), serde_json::Value::Bool(false));
+                    body.entry("instructions")
+                        .or_insert_with(|| serde_json::Value::String(String::new()));
+                }
                 let authenticator = ChatGptAuthenticator::new(access_token, account_id, fedramp);
                 request = authenticator.apply(request)?;
             }

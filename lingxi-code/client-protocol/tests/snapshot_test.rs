@@ -174,6 +174,11 @@ where
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
+        ("event/cron_run_bound.json", ClientEvent::CronRunBound {run_id: "run-1".into(), error: None}),
+        ("event/scheduled_run_finished.json", ClientEvent::ScheduledRunFinished {run_id: "run-1".into(), summary: Some("Completed".into()), error: None}),
+        ("event/cron_run_requested.json", ClientEvent::CronRunRequested {run_id: "run-1".into(), task: client_protocol::events::CronJobDto {
+            next_run_at: None, automation: None, id: "task-1".into(), cron: "0 9 * * *".into(), prompt: "Daily brief".into(), recurring: true, durable: true, permanent: false, created_at: 0, last_fired_at: None, expires_at: None, session_id: None,
+        }}),
         (
             "event/message_identity.json",
             ClientEvent::MessageIdentity {
@@ -213,6 +218,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::TaskLifecycle {
                 event_json: r#"{"type":"system","subtype":"task_started","task_id":"b12345678","description":"background job","task_type":"local_bash"}"#.to_string(),
             },
+        ),
+        (
+            "event/scheduled_task_fire.json",
+            ClientEvent::ScheduledTaskFire { message: "Scheduled task fired: check the deploy".into() },
         ),
         (
             "event/loop_wakeup.json",
@@ -429,6 +438,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 // `MessageDto` element exactly for the client mappers.
                 messages: vec![
                     MessageDto {
+                        loop_wakeup: None,
                         role: "user".to_string(),
                         blocks: vec![MessageBlockDto::Text {
                             text: "Resume me.".to_string(),
@@ -630,6 +640,18 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     "••••cdef".to_string(),
                 )]),
                 error: None,
+            },
+        ),
+        (
+            "event/openai_oauth_updated.json",
+            ClientEvent::OpenAiOAuthUpdated {
+                session: client_protocol::events::OpenAiOAuthSessionDto {
+                    access_token: "access-fixture".into(),
+                    refresh_token: Some("refresh-fixture".into()),
+                    expires_at: 2_000_000_000,
+                    account_id: Some("account-fixture".into()),
+                    fedramp: false,
+                },
             },
         ),
         (
@@ -1339,10 +1361,14 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        ("command/cron_run_started.json", ClientCommand::CronRunStarted {run_id: "run-1".into(), session_id: "session-1".into()}),
+        ("command/cron_run_completed.json", ClientCommand::CronRunCompleted {run_id: "run-1".into(), session_id: Some("session-1".into()), summary: Some("Completed".into()), error: None}),
+        ("command/scheduled_run_turn.json", ClientCommand::ScheduledRunTurn {run_id: "run-1".into(), prompt: "Daily brief".into(), model: "openai/model".into(), reasoning: ReasoningSelectionDto::Automatic}),
         ("command/task_message.json", ClientCommand::TaskMessage { task_id: "a12345678".into(), message: "Please continue the review.".into() }),
         ("command/cron_manage.json", ClientCommand::CronManage {
             request_id: "cron-1".into(),
             request: client_protocol::commands::CronRequestDto {
+            automation: None,
                 action: "list".into(), id: None, cron: None, prompt: None,
                 recurring: None, durable: None, expires_at: None, no_expiry: None,
             },
@@ -1963,18 +1989,24 @@ fn declared_wire_tags(source_file: &str, enum_name: &str) -> BTreeSet<String> {
 
     let mut tags = BTreeSet::new();
     let mut depth = 0_i32;
+    let mut renamed_tag = None;
     for line in src[start..].lines() {
         let trimmed = line.trim_start();
         // Doc comments legitimately contain unbalanced-looking braces; skip
         // them before counting, and never read a variant name out of one.
         if !trimmed.starts_with("//") {
             if depth == 1 {
-                assert!(
-                    !(trimmed.starts_with("#[") && trimmed.contains("rename")),
-                    "{enum_name} now carries a per-variant serde rename; \
-                     `declared_wire_tags` derives the tag from the variant NAME \
-                     and must be taught about it"
-                );
+                if let Some(tag) = trimmed
+                    .strip_prefix("#[serde(rename = \"")
+                    .and_then(|value| value.strip_suffix("\")]"))
+                {
+                    renamed_tag = Some(tag.to_string());
+                } else {
+                    assert!(
+                        !(trimmed.starts_with("#[") && trimmed.contains("rename")),
+                        "unsupported serde rename syntax in {enum_name}"
+                    );
+                }
                 if let Some(name) = line
                     .strip_prefix("    ")
                     .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
@@ -1983,7 +2015,7 @@ fn declared_wire_tags(source_file: &str, enum_name: &str) -> BTreeSet<String> {
                         .chars()
                         .take_while(char::is_ascii_alphanumeric)
                         .collect();
-                    tags.insert(to_snake_case(&name));
+                    tags.insert(renamed_tag.take().unwrap_or_else(|| to_snake_case(&name)));
                 }
             }
             depth += i32::try_from(line.matches('{').count()).expect("brace count fits i32");
@@ -2198,6 +2230,7 @@ fn canonical_cost() -> CostDto {
 /// CompactBoundary | ToolUse | ToolResult`.
 fn canonical_message() -> MessageDto {
     MessageDto {
+        loop_wakeup: None,
         role: "assistant".to_string(),
         blocks: vec![
             MessageBlockDto::Text {
@@ -2357,7 +2390,9 @@ fn canonical_doctor() -> DoctorReportDto {
 
 fn canonical_task_row() -> TaskRowDto {
     TaskRowDto {
-            unread: false, model: None, effort: None,
+        unread: false,
+        model: None,
+        effort: None,
         kind: None,
         awaiting_plan_approval: false,
         task_id: "b12345678".to_string(),

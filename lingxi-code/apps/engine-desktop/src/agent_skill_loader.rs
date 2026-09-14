@@ -28,6 +28,7 @@ pub struct AgentSkillLoader {
     /// Per-session id substituted for `${LINGXI_SESSION_ID}` in the skill body
     /// (claude `getSessionId()`); `None` leaves the token un-substituted.
     session_id: Option<String>,
+    prompt_cwd: Option<Arc<tool_api::SessionCwd>>,
     /// Shared shell-expansion provider. `None` keeps hermetic tests free of
     /// process execution; production always wires the live provider.
     shell_expansion: Option<Arc<dyn command_api::ShellExpansionProvider>>,
@@ -42,8 +43,15 @@ impl AgentSkillLoader {
         Self {
             registry,
             session_id,
+            prompt_cwd: None,
             shell_expansion: None,
         }
+    }
+
+    /// Supply the owning session's root and current directory.
+    pub fn with_prompt_cwd(mut self, cwd: Arc<tool_api::SessionCwd>) -> Self {
+        self.prompt_cwd = Some(cwd);
+        self
     }
 
     /// Use the same policy-gated shell expansion as the Skill tool.
@@ -87,7 +95,12 @@ impl AgentSkillLoader {
     /// `skill.type !== 'prompt'` skip). Applies empty-args `$ARGUMENTS`/`$N`
     /// substitution, skill/session token replacement, and policy-gated
     /// embedded shell expansion.
-    async fn to_skill_load(&self, cmd: &SlashCommand, display_name: &str) -> Option<SkillLoad> {
+    async fn to_skill_load(
+        &self,
+        cmd: &SlashCommand,
+        display_name: &str,
+        cwd_override: Option<&std::path::Path>,
+    ) -> Result<Option<SkillLoad>, String> {
         let (frontmatter, prompt_template, dynamic) = match &cmd.kind {
             SlashCommandKind::Markdown {
                 frontmatter,
@@ -101,19 +114,34 @@ impl AgentSkillLoader {
             } => (frontmatter, prompt_template.clone(), false),
             // Bundled programmatic skill (`/loop`): prompt-typed, but the body is
             // produced by the dynamic builder with empty args (claude
-            // `getPromptForCommand('')`). `${LINGXI_SESSION_ID}` still applies.
+            // `getPromptForCommand('', {isSkillPreload:true})`). Loading the
+            // instructions must not activate a stopped loop. Session tokens apply.
             SlashCommandKind::Bundled {
                 frontmatter,
                 prompt_fn: Some(builder),
             } => {
-                let body = builder.build("");
+                let cwd = cwd_override
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| {
+                        self.prompt_cwd.as_ref().map_or_else(
+                            || std::env::current_dir().unwrap_or_default(),
+                            |state| state.cwd(),
+                        )
+                    });
+                let root = self
+                    .prompt_cwd
+                    .as_ref()
+                    .map_or_else(|| cwd.clone(), |state| state.project_root());
+                let body = builder
+                    .try_build_at("", &root, &cwd, true)
+                    .map_err(|error| error.to_string())?;
                 (frontmatter, body, true)
             }
             // Builtin / MCP / inert-bundled commands are not prompt-based skills
             // (claude `skill.type !== 'prompt'`).
             SlashCommandKind::Builtin { .. }
             | SlashCommandKind::Mcp { .. }
-            | SlashCommandKind::Bundled { .. } => return None,
+            | SlashCommandKind::Bundled { .. } => return Ok(None),
         };
         // Empty-args argument substitution (claude `getPromptForCommand('', …)`;
         // matches the `Skill` tool's call: `Some(""), append=true`).
@@ -163,32 +191,41 @@ impl AgentSkillLoader {
                         %error,
                         "could not expand preloaded agent skill"
                     );
-                    return None;
+                    return Err(error.to_string());
                 }
             };
         }
-        Some(SkillLoad {
+        Ok(Some(SkillLoad {
             display_name: display_name.to_string(),
             // The descriptor's frontmatter `model` is unrelated to progressMessage;
             // the command model carries no progressMessage in the Rust port, so
             // claude's default ("loading") applies — represented as `None`.
             progress_message: None,
             content: vec![ContentBlock::Text { text: body }],
-        })
+        }))
     }
 }
 
 #[async_trait::async_trait]
 impl SkillLoader for AgentSkillLoader {
-    async fn resolve_and_load(&self, skill_name: &str, agent_type: &str) -> Option<SkillLoad> {
+    async fn resolve_and_load(
+        &self,
+        skill_name: &str,
+        agent_type: &str,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Option<SkillLoad>, String> {
         let reg = self.registry.read().await;
-        let resolved = Self::resolve_name(&reg, skill_name, agent_type)?;
-        let cmd = reg.resolve(&resolved)?.clone();
+        let Some(resolved) = Self::resolve_name(&reg, skill_name, agent_type) else {
+            return Ok(None);
+        };
+        let Some(cmd) = reg.resolve(&resolved).cloned() else {
+            return Ok(None);
+        };
         drop(reg);
         // claude passes the ORIGINAL `skillName` (the frontmatter entry) to
         // `formatSkillLoadingMetadata` (runAgent.ts:634), so the loading-metadata
         // block shows the name as authored, not the resolved/qualified name.
-        self.to_skill_load(&cmd, skill_name).await
+        self.to_skill_load(&cmd, skill_name, cwd).await
     }
 }
 
@@ -218,8 +255,9 @@ mod tests {
         reg.register_command(md("review", "REVIEW BODY"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("review", "general-purpose")
+            .resolve_and_load("review", "general-purpose", None)
             .await
+            .expect("checked skill preload")
             .expect("resolved");
         assert_eq!(load.display_name, "review");
         assert_eq!(load.content.len(), 1);
@@ -236,8 +274,9 @@ mod tests {
         reg.register_command(md("pm:feat", "FEATURE"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("feat", "pm:planner")
+            .resolve_and_load("feat", "pm:planner", None)
             .await
+            .expect("checked skill preload")
             .expect("resolved via plugin prefix");
         // display_name is the ORIGINAL frontmatter entry.
         assert_eq!(load.display_name, "feat");
@@ -249,8 +288,9 @@ mod tests {
         reg.register_command(md("some-plugin:deep", "DEEP"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("deep", "other-agent")
+            .resolve_and_load("deep", "other-agent", None)
             .await
+            .expect("checked skill preload")
             .expect("resolved via suffix");
         assert_eq!(load.display_name, "deep");
     }
@@ -259,7 +299,11 @@ mod tests {
     async fn unknown_skill_is_none() {
         let reg = CommandRegistry::new();
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
-        assert!(loader.resolve_and_load("nope", "a").await.is_none());
+        assert!(loader
+            .resolve_and_load("nope", "a", None)
+            .await
+            .expect("checked skill preload")
+            .is_none());
     }
 
     #[tokio::test]
@@ -275,7 +319,11 @@ mod tests {
             ..SlashCommand::default()
         });
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
-        assert!(loader.resolve_and_load("help", "a").await.is_none());
+        assert!(loader
+            .resolve_and_load("help", "a", None)
+            .await
+            .expect("checked skill preload")
+            .is_none());
     }
 
     #[tokio::test]
@@ -283,10 +331,92 @@ mod tests {
         let mut reg = CommandRegistry::new();
         reg.register_command(md("s", "id=${LINGXI_SESSION_ID}"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), Some("sess:42".to_string()));
-        let load = loader.resolve_and_load("s", "a").await.expect("resolved");
+        let load = loader
+            .resolve_and_load("s", "a", None)
+            .await
+            .expect("checked skill preload")
+            .expect("resolved");
         assert!(matches!(
             &load.content[0],
             ContentBlock::Text { text } if text == "id=sess:42"
         ));
+    }
+    #[tokio::test]
+    async fn bundled_preload_uses_the_non_invoking_builder_entry() {
+        struct PreloadOnly;
+        impl command_api::BundledPromptFn for PreloadOnly {
+            fn build(&self, _: &str) -> String {
+                panic!("agent preload must not invoke the command");
+            }
+            fn build_for_preload(&self, args: &str) -> String {
+                assert!(args.is_empty());
+                "preloaded instructions".into()
+            }
+        }
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "loop".into(),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: Some(Arc::new(PreloadOnly)),
+            },
+            ..SlashCommand::default()
+        });
+        let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
+        let load = loader
+            .resolve_and_load("loop", "a", None)
+            .await
+            .expect("checked skill preload")
+            .expect("resolved");
+        assert!(
+            matches!(&load.content[0], ContentBlock::Text { text } if text == "preloaded instructions")
+        );
+    }
+    #[tokio::test]
+    async fn checked_preload_propagates_error_with_root_and_live_cwd() {
+        struct Checked;
+        impl command_api::BundledPromptFn for Checked {
+            fn build(&self, _: &str) -> String {
+                panic!("unchecked preload");
+            }
+            fn try_build_at(
+                &self,
+                args: &str,
+                root: &std::path::Path,
+                cwd: &std::path::Path,
+                preload: bool,
+            ) -> std::io::Result<String> {
+                assert!(args.is_empty() && preload);
+                assert_eq!(root, std::path::Path::new("/project"));
+                assert_eq!(cwd, std::path::Path::new("/project/subdir"));
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "loop.md denied",
+                ))
+            }
+        }
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "loop".into(),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: Some(Arc::new(Checked)),
+            },
+            ..Default::default()
+        });
+        let cwd = tool_api::SessionCwd::new("/project".into(), Vec::new());
+        cwd.swap("/project/parent-dir".into(), Vec::new());
+        let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None).with_prompt_cwd(cwd);
+        assert_eq!(
+            loader
+                .resolve_and_load(
+                    "loop",
+                    "agent",
+                    Some(std::path::Path::new("/project/subdir"))
+                )
+                .await
+                .unwrap_err(),
+            "loop.md denied"
+        );
     }
 }

@@ -4,6 +4,25 @@ use super::*;
 use crate::streaming_loop::ExecutorPump;
 use protocol::ContentBlock;
 
+/// One queued prompt, retaining its own transcript identity and origin class.
+#[derive(Clone, Debug, Default)]
+pub struct QueuedPromptInput {
+    /// Opaque identity for admission of a cancellable goal retry.
+    pub goal_retry_id: Option<String>,
+    /// The already-expanded text to deliver to the model.
+    pub text: String,
+    /// Synthetic scheduled input stays meta even beside a human prompt.
+    pub is_meta: bool,
+    /// Queue-supplied identity; generated when absent.
+    pub message_id: Option<MessageId>,
+    /// Native queue priority retained only in the JSONL host envelope.
+    pub queue_priority: Option<String>,
+    /// Scheduled-job identity retained only in the JSONL host envelope.
+    pub scheduled_task_id: Option<String>,
+    /// Fire identity; written only when a scheduled task id is present.
+    pub scheduled_fire_id: Option<String>,
+}
+
 /// Drop runs on success, error, and cancellation of the driving future.
 struct MainLoopActivityGuard {
     provider: Option<Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>>,
@@ -96,6 +115,7 @@ struct StreamingTurnDriver<'a> {
     message_id: Option<MessageId>,
     transient_rewake: bool,
     in_human_turn: bool,
+    queued_inputs: Option<Vec<QueuedPromptInput>>,
 }
 
 struct PreparedStreamingIteration {
@@ -780,9 +800,10 @@ impl StreamingTurnDriver<'_> {
             .await;
         orch.persist_thinking_signature_strip_latch().await;
         let opened = match stream_result {
-            Ok(s) => OpenedModelStream::Stream(
-                super::output_accounting_impl::account_stream(s, output_observation),
-            ),
+            Ok(s) => OpenedModelStream::Stream(super::output_accounting_impl::account_stream(
+                s,
+                output_observation,
+            )),
             // #1 (main-loop parity): a connect-phase 413 / prompt-too-long
             // surfaces HERE as `LlmError::ContextOverflow` — the adapter's
             // `drive_stream` returns `Err` on connect status >= 400, so it
@@ -1264,8 +1285,12 @@ impl StreamingTurnDriver<'_> {
                         // The error must not discard known paid usage. This
                         // synchronous handoff survives dropping its waiter.
                         let _receipt = Self::begin_stream_cost_response(
-                            orch, cost_scope.as_ref(), &model, model_profile.as_deref(),
-                            retained, api_call_started.elapsed(),
+                            orch,
+                            cost_scope.as_ref(),
+                            &model,
+                            model_profile.as_deref(),
+                            retained,
+                            api_call_started.elapsed(),
                         );
                         return Err(error);
                     }
@@ -1333,7 +1358,10 @@ impl StreamingTurnDriver<'_> {
                             orch.persist_thinking_signature_strip_latch().await;
                             match retry_stream {
                                 Ok(s) => {
-                                    cur_stream = super::output_accounting_impl::account_stream(s, output_observation);
+                                    cur_stream = super::output_accounting_impl::account_stream(
+                                        s,
+                                        output_observation,
+                                    );
                                     continue;
                                 }
                                 // Re-open failed: surface as the terminal
@@ -1835,6 +1863,7 @@ impl StreamingTurnDriver<'_> {
             message_id,
             transient_rewake,
             in_human_turn,
+            queued_inputs,
         } = self;
 
         // Startup Responses WebSocket prewarm is strictly opportunistic. A real
@@ -1854,23 +1883,62 @@ impl StreamingTurnDriver<'_> {
         // 1. Append the user prompt (+ any pasted images) to session history.
         // `images` arrives already decoded (path-based callers ran `load_images`
         // first; the bridge converts inline `ImageRefDto`s straight to sources).
-        let user_msg = ConversationMessage::user_with_images(
-            message_id.unwrap_or_default(),
-            prompt.to_string(),
-            images,
-        );
+        let submissions: Vec<(QueuedPromptInput, ConversationMessage)> = match queued_inputs {
+            Some(inputs) => inputs
+                .into_iter()
+                .map(|input| {
+                    let mut message = ConversationMessage::user(
+                        input.message_id.unwrap_or_default(),
+                        input.text.clone(),
+                    );
+                    if let ConversationMessage::User { is_meta, .. } = &mut message {
+                        *is_meta = input.is_meta;
+                    }
+                    (input, message)
+                })
+                .collect(),
+            None => {
+                let mut message = ConversationMessage::user_with_images(
+                    message_id.unwrap_or_default(),
+                    prompt.to_string(),
+                    images,
+                );
+                if let ConversationMessage::User { is_meta, .. } = &mut message {
+                    *is_meta = !in_human_turn;
+                }
+                vec![(
+                    QueuedPromptInput {
+                    goal_retry_id: None,
+                        text: prompt.to_string(),
+                        is_meta: !in_human_turn,
+                        message_id,
+                        ..Default::default()
+                    },
+                    message,
+                )]
+            }
+        };
+        // A human entry owns turn-level UI/hook identity, but never rewrites a
+        // neighboring scheduled entry's per-message metadata.
+        let primary = submissions
+            .iter()
+            .position(|(input, _)| !input.is_meta)
+            .unwrap_or(0);
+        let user_msg = &submissions[primary].1;
         let prior_message_id = {
             let mut s = orch.session.lock().await;
             let prior = s.history.last().map(ConversationMessage::id);
             if !transient_rewake {
-                s.history.push(user_msg.clone());
+                s.history
+                    .extend(submissions.iter().map(|(_, message)| message.clone()));
             }
             prior
         };
         if !transient_rewake {
-            orch.persist_message_to_jsonl(&user_msg).await;
+            for (input, message) in &submissions {
+                orch.persist_queued_message_to_jsonl(message, input).await;
+            }
         }
-
         // (/rewind) Snapshot the pre-turn file state IN MEMORY, keyed by this
         // user message, so `track_edit` (fired by Edit/Write/NotebookEdit during
         // the turn) records each file's pre-edit backup into it. The POPULATED
@@ -1886,11 +1954,24 @@ impl StreamingTurnDriver<'_> {
 
         // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
         // first stream is opened. No-op when unregistered.
-        if !transient_rewake && orch.fire_user_prompt_submit(prompt, user_msg.id()).await {
-            return Ok(ConversationOutcome::StopHookPrevented {
-                turn_count: 0,
-                final_message_id: user_msg.id(),
-            });
+        if !transient_rewake {
+            for (input, message) in &submissions {
+                // Synthetic entries (cron fires, `/loop` wakeups) are not user
+                // prompts: firing the hook for them double-counts telemetry and
+                // re-runs `append_ultracode_attachments` per batch entry.
+                if input.is_meta {
+                    continue;
+                }
+                if orch
+                    .fire_user_prompt_submit(&input.text, message.id())
+                    .await
+                {
+                    return Ok(ConversationOutcome::StopHookPrevented {
+                        turn_count: 0,
+                        final_message_id: message.id(),
+                    });
+                }
+            }
         }
 
         orch.begin_output_turn(user_msg.id()).await?;
@@ -2233,6 +2314,7 @@ impl ConversationOrchestrator {
         for _ in 0..MAX_DRAIN_BATCHES {
             match source.take_mid_turn_input().await {
                 Some(text) => {
+                    self.reset_goal_interruption();
                     let wrapped = Self::wrap_mid_turn_user_message(&text);
                     self.inject_user_message(&wrapped).await;
                     injected = true;
@@ -2770,7 +2852,7 @@ impl ConversationOrchestrator {
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn("max_tokens", &cost).await;
                 Ok(TurnOutcome::MaxTurns)
-            },
+            }
             Err(error) => {
                 let error = self.enrich_api_error(error);
                 self.output
@@ -3430,6 +3512,29 @@ impl ConversationOrchestrator {
         transient_rewake: bool,
         in_human_turn: bool,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        self.try_run_turn_streaming_inputs(
+            prompt,
+            images,
+            user_cancel,
+            message_id,
+            transient_rewake,
+            in_human_turn,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn try_run_turn_streaming_inputs(
+        &self,
+        prompt: &str,
+        images: Vec<protocol::ImageSource>,
+        user_cancel: Option<CancellationToken>,
+        message_id: Option<MessageId>,
+        transient_rewake: bool,
+        in_human_turn: bool,
+        queued_inputs: Option<Vec<QueuedPromptInput>>,
+    ) -> Result<ConversationOutcome, OrchestratorError> {
         StreamingTurnDriver {
             orch: self,
             prompt,
@@ -3438,6 +3543,7 @@ impl ConversationOrchestrator {
             message_id,
             transient_rewake,
             in_human_turn,
+            queued_inputs,
         }
         .run()
         .await
@@ -3784,7 +3890,98 @@ impl ConversationOrchestrator {
         message_id: Option<MessageId>,
         in_human_turn: bool,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        let _turn_guard = self.turn_gate.lock().await;
+        if in_human_turn { self.reset_goal_interruption(); }
+        let turn_guard = self.turn_gate.lock().await;
+        self.run_turn_streaming_with_origin_locked(
+            &turn_guard,
+            prompt,
+            images,
+            cancel,
+            message_id,
+            in_human_turn,
+        )
+        .await
+    }
+
+    /// Deliver a queued batch as separate transcript messages in one model turn.
+    /// Per-entry metadata is owned by this call, never stored as a session override.
+    pub async fn run_queued_prompt_batch(
+        &self,
+        inputs: Vec<QueuedPromptInput>,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        if inputs.is_empty() {
+            return Ok(TurnOutcome::EndTurn);
+        }
+        if inputs.iter().any(|input| !input.is_meta) { self.reset_goal_interruption(); }
+        let turn_guard = self.turn_gate.lock().await;
+        let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
+        let prompt = inputs[primary].text.clone();
+        let message_id = inputs[primary].message_id;
+        let in_human_turn = inputs.iter().any(|input| !input.is_meta);
+        self.run_turn_streaming_inputs_locked(
+            &turn_guard,
+            &prompt,
+            Vec::new(),
+            cancel,
+            message_id,
+            in_human_turn,
+            Some(inputs),
+        )
+        .await
+    }
+
+    /// The caller retains the same turn gate through any target validation and binding.
+    pub(super) async fn run_turn_streaming_with_origin_locked(
+        &self,
+        _turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        prompt: &str,
+        images: Vec<protocol::ImageSource>,
+        cancel: CancellationToken,
+        message_id: Option<MessageId>,
+        in_human_turn: bool,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_turn_streaming_inputs_locked(
+            _turn_guard,
+            prompt,
+            images,
+            cancel,
+            message_id,
+            in_human_turn,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn_streaming_inputs_locked(
+        &self,
+        _turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        prompt: &str,
+        images: Vec<protocol::ImageSource>,
+        cancel: CancellationToken,
+        message_id: Option<MessageId>,
+        in_human_turn: bool,
+        queued_inputs: Option<Vec<QueuedPromptInput>>,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        if in_human_turn { self.reset_goal_interruption(); }
+        let mut queued_inputs = queued_inputs;
+        if let Some(inputs) = &mut queued_inputs {
+            let mut admitted = Vec::with_capacity(inputs.len());
+            for input in inputs.drain(..) {
+                if let Some(id) = input.goal_retry_id.as_deref() {
+                    if !self.admit_goal_retry(id).await { continue; }
+                }
+                admitted.push(input);
+            }
+            *inputs = admitted;
+            if inputs.is_empty() {
+                self.output.emit_end_turn("end_turn", &self.snapshot_cost_real().await).await;
+                return Ok(TurnOutcome::EndTurn);
+            }
+        }
+        let admitted_prompt = queued_inputs.as_ref().and_then(|inputs| inputs.iter().find(|i| !i.is_meta).or_else(|| inputs.first())).map(|i| i.text.clone());
+        let prompt = admitted_prompt.as_deref().unwrap_or(prompt);
         let _activity_guard = self.main_loop_activity(in_human_turn);
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
@@ -3819,19 +4016,23 @@ impl ConversationOrchestrator {
             async {
                 self.scope_api_session(
                     !self.prompt_is_interactive(),
-                    Box::pin(self.try_run_turn_streaming(
+                    Box::pin(self.try_run_turn_streaming_inputs(
                         prompt,
                         images,
                         Some(cancel.clone()),
                         message_id,
                         false,
                         in_human_turn,
+                        queued_inputs,
                     )),
                 )
                 .await
             },
         )
         .await;
+        if cancel.is_cancelled() {
+            self.reset_goal_interruption();
+        }
         match r {
             Ok(
                 ConversationOutcome::EndTurn { turn_count, .. }
@@ -3839,6 +4040,7 @@ impl ConversationOrchestrator {
             ) => {
                 tracing::info!(event = orch_events::TURN_STREAMING_COMPLETED, turn_count);
                 if cancel.is_cancelled() {
+                    self.reset_goal_interruption();
                     self.abort_startup_responses_websocket_prewarm();
                     if let Err(err) = self.api.close_responses_websocket_session().await {
                         tracing::warn!(

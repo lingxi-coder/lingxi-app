@@ -9,9 +9,7 @@
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
 use platform_api::permission_gate::PermissionGate;
-use platform_api::tool_invoker::{
-    SubagentInvocationContext, ToolInvoker, ToolInvokerError,
-};
+use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -230,11 +228,31 @@ impl ToolInvoker for RegistryToolInvoker {
         // timeout where the main loop honours it. `None` for every tool but
         // `Bash` ⇒ strict no-op.
         //
-        // (This surface still has no JSON-schema gate and no `validate_input`
-        // call — a pre-existing, separately-tracked divergence from the main
-        // loop; the coercion is correct with or without them.)
+        // Native-schema opt-in tools run their shared parse and validation
+        // gates below; other tools retain their existing dispatch contract.
         if let Some(coerced) = tool.coerce_input(&input) {
             input = coerced.input;
+        }
+
+        if tool.native_input_validation() {
+            match tool.parse_native_input(&input) {
+                Some(Ok(parsed)) => { input = parsed; }
+                Some(Err(error)) => {
+                    return Err(ToolInvokerError::Validation(format!(
+                        "InputValidationError: {}",
+                        error.display
+                    )))
+                }
+                // `None` means "schema vocabulary outside the flat collector",
+                // not "invalid input". The main turn treats it that way —
+                // `orchestrator::schema_validation::validate_tool_schema_detailed`
+                // falls through to the generic collector — so hard-failing here
+                // made nested/subagent dispatch the only surface that breaks
+                // when an opt-in tool's schema grows an `enum`, an array, or a
+                // nested object. Leave the input as-is and let the generic gate
+                // downstream judge it, exactly like the main loop.
+                None => {}
+            }
         }
 
         // Tool-owned checks (MCP clamps and Workflow's nested Read gate) run
@@ -272,6 +290,13 @@ impl ToolInvoker for RegistryToolInvoker {
             observer: ctx.observer.clone(),
             file_history: None,
         };
+        if tool.native_input_validation() {
+            if let Err(crate::ValidationError(message)) =
+                tool.validate_input(&input, &tool_use_ctx).await
+            {
+                return Err(ToolInvokerError::Validation(message));
+            }
+        }
         let tool_permission_result = tool.check_permissions(&input, &tool_use_ctx).await;
         let tool_ask_is_protected =
             tool_permission_ask_is_protected(tool.as_ref(), &tool_permission_result);
@@ -1535,11 +1560,7 @@ mod tests {
         let mut invocation_context = ctx_with_tool_use_id("toolu_abc123");
         invocation_context.permission_pause_observer = Some(pause.clone());
         invoker
-            .invoke(
-                "TestEcho",
-                json!({ "a": 1 }),
-                invocation_context,
-            )
+            .invoke("TestEcho", json!({ "a": 1 }), invocation_context)
             .await
             .expect("allow dispatches");
         let ctx = seen
@@ -1552,7 +1573,11 @@ mod tests {
             Some("toolu_abc123"),
             "the dispatching call's real tool_use_id reaches PermissionCheckContext.tool_use_id"
         );
-        assert_eq!(ctx.pause_observer, Some(pause), "real worker pause sink must reach the transport");
+        assert_eq!(
+            ctx.pause_observer,
+            Some(pause),
+            "real worker pause sink must reach the transport"
+        );
         assert!(!ctx.requires_user_interaction);
         let worker = ctx
             .worker

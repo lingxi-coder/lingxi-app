@@ -1367,3 +1367,23 @@ fn audio_error_kind_mapping_is_total_across_all_three_traits() {
         voice_error_kind(&VoiceError::PermissionDenied)
     );
 }
+#[test]
+fn cron_claim_generation_roundtrips_without_requiring_legacy_records_to_have_it() {
+    use client_protocol::commands::CronRunDto;
+    let legacy = serde_json::json!({
+        "id": "run", "taskId": "task", "scheduledAt": 1,
+        "startedAt": 2, "finishedAt": null, "status": "running",
+        "model": "provider/model", "reasoning": {"type": "automatic"},
+        "sessionId": null, "summary": null, "error": null
+    });
+    let mut run: CronRunDto = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(run.claim_generation, None);
+    assert_eq!(run.manual_occurrence_at, None);
+    assert_eq!(serde_json::to_value(&run).unwrap(), legacy);
+    run.claim_generation = Some(2);
+    run.manual_occurrence_at = Some(1);
+    let value = serde_json::to_value(&run).unwrap();
+    assert_eq!(value["claimGeneration"], 2);
+    assert_eq!(value["manualOccurrenceAt"], 1);
+    assert_eq!(serde_json::from_value::<CronRunDto>(value).unwrap(), run);
+}

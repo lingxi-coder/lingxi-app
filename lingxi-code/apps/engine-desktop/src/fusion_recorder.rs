@@ -109,7 +109,10 @@ async fn await_delivery_locks(locks: &DeliveryLocks, deadline: tokio::time::Inst
     };
     let snapshot = snapshot.values().cloned().collect::<Vec<_>>();
     for lock in snapshot {
-        if tokio::time::timeout_at(deadline, lock.lock()).await.is_err() {
+        if tokio::time::timeout_at(deadline, lock.lock())
+            .await
+            .is_err()
+        {
             tracing::warn!("Fusion delivery did not drain within the shutdown budget");
             return;
         }
@@ -1385,8 +1388,7 @@ mod tests {
         let wedged = recorder.lock_for_delivery(&outbox.delivery_id).await;
         let _held = wedged.lock_owned().await;
 
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let drain = tokio::spawn(async move {
             recorder.await_in_flight_deliveries(deadline).await;
         });
@@ -1424,10 +1426,7 @@ mod tests {
         let run_id = outcome.identity.run_id.to_string();
 
         let receipt = recorder
-            .record_terminal(
-                outcome,
-                Some(FusionSlashPublicationTarget { session_id }),
-            )
+            .record_terminal(outcome, Some(FusionSlashPublicationTarget { session_id }))
             .await;
 
         assert_eq!(

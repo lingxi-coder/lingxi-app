@@ -78,6 +78,7 @@ fn session_agent_events_round_trip() {
     assert_eq!(serde_json::from_value::<ClientEvent>(json).unwrap(), list);
 
     let message = MessageDto {
+        loop_wakeup: None,
         role: "assistant".into(),
         blocks: vec![MessageBlockDto::Text {
             text: "done".into(),
@@ -295,6 +296,7 @@ fn message_complete_round_trips() {
     let ev = ClientEvent::MessageComplete {
         stop_reason: Some("end_turn".to_string()),
         message: Some(MessageDto {
+            loop_wakeup: None,
             role: "assistant".to_string(),
             blocks: vec![
                 MessageBlockDto::Text {

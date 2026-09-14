@@ -257,6 +257,7 @@ pub struct MobileDiskSkillLoader {
     registry: Arc<RwLock<CommandRegistry>>,
     session_id: Option<String>,
     session_mode: SessionMode,
+    prompt_cwd: Option<Arc<tool_api::SessionCwd>>,
 }
 
 impl MobileDiskSkillLoader {
@@ -271,6 +272,7 @@ impl MobileDiskSkillLoader {
             registry,
             session_id: None,
             session_mode,
+            prompt_cwd: None,
         }
     }
 
@@ -292,6 +294,12 @@ impl MobileDiskSkillLoader {
         }
     }
 
+    /// Supply the owning session's root and current directory for bundled prompts.
+    pub fn with_prompt_cwd(mut self, cwd: Arc<tool_api::SessionCwd>) -> Self {
+        self.prompt_cwd = Some(cwd);
+        self
+    }
+
     /// Back-compat helper for tests that want a disk-populated live registry in
     /// one call.
     pub async fn load_from_disk(
@@ -310,6 +318,7 @@ impl MobileDiskSkillLoader {
             registry,
             session_id,
             session_mode,
+            prompt_cwd: Some(tool_api::SessionCwd::new(cwd.to_path_buf(), Vec::new())),
         }
     }
 }
@@ -375,29 +384,53 @@ impl MobileDiskSkillLoader {
 
 #[async_trait::async_trait]
 impl AgentSkillLoader for MobileDiskSkillLoader {
-    async fn resolve_and_load(&self, skill_name: &str, agent_type: &str) -> Option<SkillLoad> {
+    async fn resolve_and_load(
+        &self,
+        skill_name: &str,
+        agent_type: &str,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Option<SkillLoad>, String> {
         let registry = self.registry.read().await;
-        let resolved = Self::resolve_agent_skill_name(&registry, skill_name, agent_type)?;
-        let command = registry.resolve(&resolved)?.clone();
+        let Some(resolved) = Self::resolve_agent_skill_name(&registry, skill_name, agent_type)
+        else {
+            return Ok(None);
+        };
+        let Some(command) = registry.resolve(&resolved).cloned() else {
+            return Ok(None);
+        };
         drop(registry);
         if !command_visible_in_session_mode(&command, self.session_mode) {
-            return None;
+            return Ok(None);
         }
 
         let descriptor =
             to_descriptor_for_mode(&command, self.session_id.as_deref(), self.session_mode);
         if descriptor.command_type != SkillCommandType::Prompt {
-            return None;
+            return Ok(None);
         }
         let mut body = match descriptor.dynamic_body {
-            Some(builder) => builder.build(""),
+            Some(builder) => {
+                let cwd = cwd.map(std::path::Path::to_path_buf).unwrap_or_else(|| {
+                    self.prompt_cwd.as_ref().map_or_else(
+                        || std::env::current_dir().unwrap_or_default(),
+                        |state| state.cwd(),
+                    )
+                });
+                let root = self
+                    .prompt_cwd
+                    .as_ref()
+                    .map_or_else(|| cwd.clone(), |state| state.project_root());
+                builder
+                    .try_build_at("", &root, &cwd, true)
+                    .map_err(|error| error.to_string())?
+            }
             None => command_api::substitute_arguments_faithful(
                 &descriptor.body,
                 Some(""),
                 true,
                 &descriptor.argument_names,
             )
-            .ok()?,
+            .map_err(|error| error.to_string())?,
         };
         if let Some(root) = descriptor.skill_root {
             let root = root.to_string_lossy();
@@ -411,11 +444,11 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         if let Some(session_id) = descriptor.session_id {
             body = body.replace(&product_prompt_token("SESSION_ID"), &session_id);
         }
-        Some(SkillLoad {
+        Ok(Some(SkillLoad {
             display_name: skill_name.to_string(),
             progress_message: None,
             content: vec![ContentBlock::Text { text: body }],
-        })
+        }))
     }
 }
 
@@ -519,8 +552,10 @@ mod tests {
                 &loader,
                 &skill,
                 &format!("{LOCAL_APP_PLUGIN}:{agent}"),
+                None,
             )
             .await
+            .expect("checked skill preload")
             .unwrap_or_else(|| panic!("preloaded skill {skill} must resolve for {agent}"));
             bytes += loaded
                 .content
@@ -628,8 +663,10 @@ mod tests {
             &loader,
             "frontend-design",
             "lingxi-local-app:designer",
+            None,
         )
         .await
+        .expect("checked skill preload")
         .expect("namespaced Plugin skill must preload");
         assert!(matches!(
             preload.content.as_slice(),
@@ -742,5 +779,47 @@ mod tests {
                 "{denied} must not expose a forbidden Chat execution path"
             );
         }
+    }
+    #[tokio::test]
+    async fn mobile_bundled_preload_checks_paths_and_propagates_read_errors() {
+        struct Checked;
+        impl command_api::BundledPromptFn for Checked {
+            fn build(&self, _: &str) -> String {
+                panic!("unchecked preload");
+            }
+            fn try_build_at(
+                &self,
+                _: &str,
+                root: &Path,
+                cwd: &Path,
+                preload: bool,
+            ) -> std::io::Result<String> {
+                assert!(preload);
+                assert_eq!(root, Path::new("/project"));
+                assert_eq!(cwd, Path::new("/child"));
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "loop.md denied",
+                ))
+            }
+        }
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "loop".into(),
+            source: command_api::CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: Some(Arc::new(Checked)),
+            },
+            ..Default::default()
+        });
+        let loader = MobileDiskSkillLoader::new(Arc::new(RwLock::new(reg)))
+            .with_prompt_cwd(tool_api::SessionCwd::new("/project".into(), Vec::new()));
+        assert_eq!(
+            AgentSkillLoader::resolve_and_load(&loader, "loop", "agent", Some(Path::new("/child")))
+                .await
+                .unwrap_err(),
+            "loop.md denied"
+        );
     }
 }

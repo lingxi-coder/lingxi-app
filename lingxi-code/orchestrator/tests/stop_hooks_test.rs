@@ -554,11 +554,12 @@ async fn stop_goal_registers_named_prompt_hook_and_clears_when_met() {
     assert!(
         history
             .iter()
-            .any(|m| m.text_content() == "Stop hook feedback:\nnot yet"),
+            .any(|m| m.text_content() == "Stop hook feedback:\n[ship it]: not yet"),
         "an unmet goal should append blocking feedback from the /goal evaluator"
     );
     let seen = runner.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
+    assert!(seen[0].prompt.starts_with("Based on the conversation transcript above, has the following stopping condition been satisfied? Answer based on transcript evidence only.\n\nCondition: ship it\n\nARGUMENTS: "));
     assert!(
         seen[0].prompt.contains(r#""hook_event_name":"Stop""#),
         "goal Stop hook must evaluate the Stop payload"
@@ -600,7 +601,7 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
     orchestrator.set_active_goal("ship it").await;
     orchestrator.run_turn("hi").await.expect("turn ok");
 
-    let statuses = goal_status_rows(path);
+    let statuses = goal_status_rows(&path);
     assert_eq!(
         statuses,
         [
@@ -612,6 +613,15 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
         ],
         "a successful evaluation must not emit a redundant terminal set record"
     );
+    let terminal = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|line| {
+            line["attachment"]["type"] == "goal_status" && line["attachment"]["met"] == true
+        })
+        .expect("achievement attachment");
+    assert_eq!(terminal["attachment"]["reason"], "done");
 }
 
 #[tokio::test]
@@ -694,7 +704,7 @@ fn goal_status_rows(path: impl AsRef<std::path::Path>) -> Vec<(String, u64)> {
 }
 
 #[tokio::test]
-async fn stop_goal_is_not_capped_by_stop_hook_block_limit() {
+async fn stop_goal_shares_the_stop_hook_block_limit() {
     let _env = GOAL_CAP_ENV_LOCK.lock().unwrap();
     let prior_cap = std::env::var("LINGXI_STOP_HOOK_BLOCK_CAP").ok();
     std::env::set_var("LINGXI_STOP_HOOK_BLOCK_CAP", "1");
@@ -722,17 +732,17 @@ async fn stop_goal_is_not_capped_by_stop_hook_block_limit() {
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
     assert_eq!(
         api.captured_msgs().await.len(),
-        3,
-        "the /goal continuation must survive beyond the generic stop-hook cap and end only once the goal passes"
+        2,
+        "the second blocking evaluation must end this turn at cap=1"
     );
-    assert!(o.get_active_goal().await.is_none());
+    assert_eq!(o.get_active_goal().await.unwrap().iterations, 2);
     assert!(
-        !output
+        output
             .text_events()
             .await
             .iter()
             .any(|text| text.contains("overriding and ending turn")),
-        "goal continuations must not trip the generic stop-hook cap"
+        "goal continuations must share the generic stop-hook cap"
     );
     if let Some(prior_cap) = prior_cap {
         std::env::set_var("LINGXI_STOP_HOOK_BLOCK_CAP", prior_cap);
@@ -742,7 +752,7 @@ async fn stop_goal_is_not_capped_by_stop_hook_block_limit() {
 }
 
 #[tokio::test]
-async fn stop_goal_timeout_keeps_working_until_a_later_success() {
+async fn stop_goal_timeout_pauses_without_counting_a_verdict() {
     let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
     let runner = Arc::new(ScriptedPromptRunner {
         seen: StdMutex::new(Vec::new()),
@@ -758,19 +768,24 @@ async fn stop_goal_timeout_keeps_working_until_a_later_success() {
 
     let outcome = o.run_turn("hi").await.expect("turn ok");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
-    assert_eq!(api.captured_msgs().await.len(), 2);
-    let history = o.session().lock().await.history.clone();
-    assert!(
-        history
-            .iter()
-            .any(|m| { m.text_content().contains("timeout after 30000ms") }),
-        "timeout feedback must be injected into the next turn"
-    );
-    assert!(o.get_active_goal().await.is_none());
+    assert_eq!(api.captured_msgs().await.len(), 1);
+    let goal = o
+        .get_active_goal()
+        .await
+        .expect("timeout keeps the goal active");
+    assert_eq!(goal.iterations, 0);
+    assert_eq!(goal.last_reason, None);
+    assert!(!o
+        .session()
+        .lock()
+        .await
+        .history
+        .iter()
+        .any(|m| m.text_content().starts_with("Stop hook feedback:")));
 }
 
 #[tokio::test]
-async fn stop_goal_query_error_keeps_working_until_a_later_success() {
+async fn stop_goal_query_error_does_not_spin_or_count_a_verdict() {
     let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
     let runner = Arc::new(ScriptedPromptRunner {
         seen: StdMutex::new(Vec::new()),
@@ -786,14 +801,20 @@ async fn stop_goal_query_error_keeps_working_until_a_later_success() {
 
     let outcome = o.run_turn("hi").await.expect("turn ok");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
-    let history = o.session().lock().await.history.clone();
-    assert!(
-        history
-            .iter()
-            .any(|m| m.text_content().contains("provider 500")),
-        "query failures must also feed a reason into the next turn"
-    );
-    assert!(o.get_active_goal().await.is_none());
+    assert_eq!(api.captured_msgs().await.len(), 1);
+    let goal = o
+        .get_active_goal()
+        .await
+        .expect("error keeps the goal active");
+    assert_eq!(goal.iterations, 0);
+    assert_eq!(goal.last_reason, None);
+    assert!(!o
+        .session()
+        .lock()
+        .await
+        .history
+        .iter()
+        .any(|m| m.text_content().starts_with("Stop hook feedback:")));
 }
 
 #[tokio::test]
@@ -882,4 +903,81 @@ async fn stop_goal_hard_budget_escape_stops_before_second_goal_check() {
         "the second goal check must not run once the hard budget is exceeded"
     );
     assert!(o.get_active_goal().await.is_some());
+}
+
+struct RunningGoalBackgroundTask;
+#[async_trait]
+impl orchestrator::StopHookSnapshotProvider for RunningGoalBackgroundTask {
+    async fn background_tasks(&self) -> Vec<hooks::HookBackgroundTask> {
+        vec![hooks::HookBackgroundTask {
+            id: "background-build".into(),
+            r#type: "shell".into(),
+            status: "running".into(),
+            description: "build".into(),
+            is_idle: false,
+            command: None,
+            agent_type: None,
+            server: None,
+            tool: None,
+            name: None,
+        }]
+    }
+    async fn session_crons(&self) -> Vec<hooks::HookSessionCron> {
+        vec![]
+    }
+}
+
+#[tokio::test]
+async fn deferred_goal_never_calls_evaluator_or_leaks_blocking_feedback() {
+    let api = Arc::new(MockApiClient::new(vec![end_turn("waiting")]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(vec![]),
+        scripted: StdMutex::new(VecDeque::from([Ok(
+            r#"{"ok":false,"reason":"still running"}"#.into(),
+        )])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner.clone()).await;
+    let o = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks.clone(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_stop_hook_snapshot(Arc::new(RunningGoalBackgroundTask));
+    o.set_active_goal("ship it").await;
+    o.run_turn("hi").await.unwrap();
+    assert_eq!(api.captured_msgs().await.len(), 1);
+    assert!(
+        runner.seen.lock().unwrap().is_empty(),
+        "deferred goal must not send an evaluator request"
+    );
+    assert_eq!(o.get_active_goal().await.unwrap().iterations, 0);
+    assert!(hooks
+        .get_session_named_hook(o.current_session_id().await, "__session_goal_stop")
+        .await
+        .is_some());
+}
+
+#[tokio::test]
+async fn goal_reason_keeps_bracket_sequences_inside_the_condition_out_of_status() {
+    let api = Arc::new(MockApiClient::new(vec![end_turn("one"), end_turn("two")]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(vec![]),
+        scripted: StdMutex::new(VecDeque::from([
+            Ok(r#"{"ok":false,"reason":"tests pending"}"#.into()),
+            Err(PromptHookError::Timeout(Duration::from_secs(30))),
+        ])),
+        on_call: None,
+    });
+    let o = orch(api, exec_with_prompt_runner(runner).await);
+    o.set_active_goal("verify ]: details").await;
+    o.run_turn("hi").await.unwrap();
+    let goal = o.get_active_goal().await.unwrap();
+    assert_eq!(goal.last_reason.as_deref(), Some("tests pending"));
+    assert_eq!(goal.iterations, 1);
 }

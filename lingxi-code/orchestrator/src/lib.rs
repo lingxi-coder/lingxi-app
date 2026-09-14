@@ -37,6 +37,7 @@ pub use platform_api::refusal_cascade;
 pub mod turn_span;
 pub use platform_api::refusal_notice;
 pub mod resume;
+mod scheduled_turn;
 pub(crate) mod schema_validation;
 pub mod sse;
 pub mod stop_hook_snapshot;
@@ -77,6 +78,7 @@ pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient,
     SessionMemoryHandle, StreamingApiClient, TurnOutcome,
 };
+pub use conversation::{QueuedPromptInput, ScheduledLoopFire};
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;
 pub use file_changed_firer::OrchestratorFileChangedFirer;

@@ -7049,6 +7049,10 @@ mod goal_auto_clear_tests {
             Some(GoalClearBucket::Auth)
         );
         assert_eq!(
+            goal_clear_bucket(api(Some("verification_required"))),
+            Some(GoalClearBucket::VerificationRequired)
+        );
+        assert_eq!(
             goal_clear_bucket(api(Some("billing_error"))),
             Some(GoalClearBucket::Billing)
         );
@@ -7110,6 +7114,11 @@ mod goal_auto_clear_tests {
                 GoalClearBucket::Auth,
                 "authentication failed",
                 "cleared_auth",
+            ),
+            (
+                GoalClearBucket::VerificationRequired,
+                "organization verification required",
+                "cleared_verification_required",
             ),
             (
                 GoalClearBucket::Billing,

@@ -464,8 +464,12 @@ mod tests {
         };
         assert!(display.contains("Scheduled recurring job"));
 
-        let path = cron::tasks_file::scheduled_tasks_path(workspace.path());
-        let body = std::fs::read_to_string(path).expect("durable cron file");
+        let path = cron::tasks_file::session_scheduled_tasks_path(workspace.path());
+        let body = std::fs::read_to_string(path).expect("durable session cron file");
+        assert!(
+            !cron::tasks_file::scheduled_tasks_path(workspace.path()).exists(),
+            "/cron must not write the independent task-center store"
+        );
         let tasks = cron::tasks_file::parse_tasks(&body).tasks;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].cron, "0 9 * * *");

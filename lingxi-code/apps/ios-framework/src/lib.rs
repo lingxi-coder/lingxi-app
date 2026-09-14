@@ -667,12 +667,15 @@ fn ios_project_cwd(
         && components[0] == "apps"
         && local_apps::ids::is_valid_app_id(components[1])
         && components[2] == "workspace";
-    let valid = (is_managed_project || is_local_app_workspace) && workspace.is_dir();
+    let is_scheduled_workspace = components == ["scheduled", "workspace"];
+    let valid = (is_managed_project || is_local_app_workspace || is_scheduled_workspace)
+        && workspace.is_dir();
     if !valid {
         return Err(MobileEngineError::Internal(
             "iOS conversation workspace must match \
              appSandboxRoot/Projects/<lowercase UUID>/workspace or \
-             appSandboxRoot/apps/<app id>/workspace"
+             appSandboxRoot/apps/<app id>/workspace or \
+             appSandboxRoot/scheduled/workspace"
                 .to_string(),
         ));
     }
@@ -2717,6 +2720,16 @@ pub fn build_ios_cron_store(
 ) -> Result<Arc<MobileCronStoreHandle>, MobileEngineError> {
     use platform_posix_minimal::{PosixClock, PosixFileSystem};
 
+    let scheduled_cwd;
+    let project_cwd = match project_cwd {
+        Some(path) => Some(path),
+        None => {
+            scheduled_cwd = std::path::Path::new(&app_sandbox_root).join("scheduled/workspace");
+            std::fs::create_dir_all(&scheduled_cwd)
+                .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
+            Some(scheduled_cwd.to_string_lossy().into_owned())
+        }
+    };
     let cwd = ios_project_cwd(&app_sandbox_root, project_cwd.as_deref())?;
     let app_root = std::path::Path::new(&app_sandbox_root)
         .canonicalize()

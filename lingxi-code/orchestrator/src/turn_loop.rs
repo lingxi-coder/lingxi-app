@@ -2119,6 +2119,7 @@ pub(crate) enum GoalClearBucket {
     Auth,
     /// `billing` — "credit balance too low" / `cleared_billing`.
     Billing,
+    VerificationRequired,
     /// `context_limit` — "context limit reached" / `cleared_context_limit`.
     ContextLimit,
     /// `model_unavailable` — "model unavailable" / `cleared_model_unavailable`.
@@ -2131,6 +2132,7 @@ impl GoalClearBucket {
         match self {
             Self::Auth => "authentication failed",
             Self::Billing => "credit balance too low",
+            Self::VerificationRequired => "organization verification required",
             Self::ContextLimit => "context limit reached",
             Self::ModelUnavailable => "model unavailable",
         }
@@ -2141,6 +2143,7 @@ impl GoalClearBucket {
         match self {
             Self::Auth => "cleared_auth",
             Self::Billing => "cleared_billing",
+            Self::VerificationRequired => "cleared_verification_required",
             Self::ContextLimit => "cleared_context_limit",
             Self::ModelUnavailable => "cleared_model_unavailable",
         }
@@ -2184,6 +2187,7 @@ pub(crate) fn goal_clear_bucket(reason: GoalClearReason<'_>) -> Option<GoalClear
             }
             Some("account_on_hold") => Some(GoalClearBucket::Auth),
             Some("billing_error") => Some(GoalClearBucket::Billing),
+            Some("verification_required") => Some(GoalClearBucket::VerificationRequired),
             Some("model_not_found") => Some(GoalClearBucket::ModelUnavailable),
             // `overloaded | server_error | max_output_tokens | rate_limit |
             // invalid_request | unknown | void 0` and anything unrecognised.
@@ -2294,20 +2298,12 @@ pub(crate) fn goal_cleared_after_error_message(label: &str, condition: &str) -> 
 /// Reached only from the `else` arm of `goal_clear_bucket`, so the clear tier
 /// keeps its existing behaviour untouched.
 ///
-/// SCOPE (recorded, not an oversight): this announces the PAUSE tier. The retry
-/// tier additionally arms a delayed re-prompt (`X7n(..., delayMs)`), which needs
-/// a goal re-prompt timer this port does not have yet — the goal check-in timer
-/// (`sync_goal_checkin_idle_task`) is the shape to follow. Announcing "retrying
-/// in N min" without that timer would tell the user something untrue, so a
-/// retry-tier cause is currently left silent rather than mis-announced. The
-/// decision layer for it is complete and tested in
-/// [`crate::prompt::goal_interruption`].
 async fn announce_goal_interruption(
     orch: &ConversationOrchestrator,
     reason: GoalClearReason<'_>,
 ) {
     use crate::prompt::goal_interruption::{
-        classify_api_error_interruption, GoalInterruption,
+        classify_api_error_interruption,
     };
     let GoalClearReason::ApiError {
         error_kind,
@@ -2324,12 +2320,7 @@ async fn announce_goal_interruption(
     else {
         return;
     };
-    let GoalInterruption::Pause(cause) = interruption else {
-        return;
-    };
-    // Same surface as the clear tier: a SYSTEM notice, never an assistant
-    // message, so it does not enter the model-facing history.
-    orch.output.emit_system_notice(cause.text(), false).await;
+    orch.handle_goal_interruption(interruption).await;
 }
 
 pub(crate) async fn clear_goal_after_unrecoverable_error(
@@ -4105,6 +4096,8 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // the value for a future wiring.
         let coerced_input = tool_handle.coerce_input(input);
         let input: &serde_json::Value = coerced_input.as_ref().map_or(input, |c| &c.input);
+        let normalized_input = tool_handle.parse_native_input(input).and_then(Result::ok);
+        let input = normalized_input.as_ref().unwrap_or(input);
 
         // JSON-schema input gate (claude-code `toolExecution.ts:615`
         // `inputSchema.safeParse`): runs on the RAW `input` (pre-hook), AFTER the
@@ -4114,9 +4107,10 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // so the detail uses Claude's Zod `zue` grouping and JSON fallback. A
         // malformed tool schema is treated as PASS (logged) — see
         // [`crate::schema_validation::validate_tool_input_schema`].
-        if let Err(detail) =
-            crate::schema_validation::validate_tool_schema(tool_handle.as_ref(), input)
+        if let Err(schema_error) =
+            crate::schema_validation::validate_tool_schema_detailed(tool_handle.as_ref(), input)
         {
+            let detail = &schema_error.display;
             tool_handle
                 .on_input_schema_rejected(
                     input,
@@ -4133,16 +4127,11 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
             };
-            // O1: the schema-gate arm (2.1.220 BIN off 235405560) stamps
-            // `` toolUseResult: `InputValidationError: ${zodError.message}` `` —
-            // the unwrapped twin of the model text. claude uses the RAW zod
-            // message here while the model text carries its ENRICHED `ce`
-            // rendering; the port has one detail string, which it reuses, so
-            // these two bytes coincide (the detail bytes already diverge from
-            // Zod's by design — see the comment above).
+            // Native .270 persists raw ZodError.message, while only the model
+            // block uses the enriched grouped diagnostic (Yge).
             orch.record_tool_use_result(
                 tool_use_id,
-                serde_json::Value::String(format!("InputValidationError: {detail}")),
+                serde_json::Value::String(format!("InputValidationError: {}", schema_error.raw)),
             )
             .await;
             orch.emit_tool_result_frame(

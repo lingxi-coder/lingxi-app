@@ -71,6 +71,12 @@ struct TuiMsgQueueInput {
 
 #[async_trait::async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInput {
+    fn supports_goal_retries(&self) -> bool { true }
+    async fn has_queued_goal_work(&self) -> bool { self.queue.has_main_thread_commands().await }
+    async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
+        self.queue.enqueue_goal_retry(id, body, cancel).await;
+    }
+
     async fn take_mid_turn_input(&self) -> Option<String> {
         discard_cancelled_queued_prompts(&self.queue, &self.state).await;
         let candidates = self
@@ -107,6 +113,12 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                 .get(&command.uuid)
                 .is_some_and(|owner| owner.is_cancelled())
         });
+        if batch.iter().any(|c| c.source == msgqueue::QueueSource::PromptInput && !c.is_meta) {
+            if let Some(host) = self.state.loop_host.get() {
+                host.state.veto_tick(engine_desktop::loop_tools::LoopFoldVeto::ForeignUserInput);
+                host.state.invalidate_noop_streak();
+            }
+        }
         let joined = msgqueue::join_prompt_values(&batch).map(|(joined, _)| joined);
         self.queue
             .consume(&consumed, "drained mid-turn into running turn")
@@ -121,6 +133,8 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
 fn tui_prompt_command(text: String) -> msgqueue::QueuedCommand {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     msgqueue::QueuedCommand {
+        scheduled_task_id: None,
+        scheduled_fire_id: None,
         uuid: format!(
             "tui-prompt-{}",
             SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -197,6 +211,8 @@ struct HostSubmissionOrder {
 
 #[derive(Default)]
 struct HostPromptQueueState {
+    shutdown: CancellationToken,
+    loop_host: std::sync::OnceLock<Arc<crate::loop_wakeup::CliLoopHost>>,
     // Immutable ownership lasts for this host session, including canceled
     // tombstones: a consumer may hold a queue snapshot while cleanup retires
     // its ordering entry. Missing ownership still means a real unowned input.
@@ -378,6 +394,7 @@ async fn dequeue_after_slash_dispatch(
     state: &HostPromptQueueState,
 ) -> Option<(msgqueue::QueuedCommand, CancellationToken)> {
     loop {
+        if state.shutdown.is_cancelled() { return None; }
         wait_for_earlier_enqueues(state).await;
         let command = queue
             .dequeue_filtered(|command| {
@@ -388,7 +405,7 @@ async fn dequeue_after_slash_dispatch(
         state.pause_consumer().await;
         state.order.lock().unwrap().queued.remove(&command.uuid);
         let owner = state.owners.lock().unwrap().get(&command.uuid).cloned();
-        let cancel = owner.map_or_else(CancellationToken::new, |owner| owner.child_token());
+        let cancel = owner.map_or_else(|| state.shutdown.child_token(), |owner| owner.child_token());
         if cancel.is_cancelled() {
             continue;
         }
@@ -409,21 +426,41 @@ async fn drain_teammate_prompts(
         if cancel.is_cancelled() {
             continue;
         }
+        if let Some(host) = pending_slashes.loop_host.get() { host.refresh_session().await; }
+        let resolved = match pending_slashes.loop_host.get().map(|host| {
+            if command.source == msgqueue::QueueSource::Cron && !command.uuid.starts_with("loop-wakeup-") {
+                return host.resolve_scheduled(text).map(Some);
+            }
+            host.begin(
+            (command.source == msgqueue::QueueSource::Cron && command.uuid.starts_with("loop-wakeup-")).then_some(text),
+            command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
+        )}).transpose() {
+            Ok(resolved) => resolved.flatten(),
+            Err(error) => {
+                let _ = turn_tx.send(tui::TurnEvent::SystemNotice { body: error.to_string(), is_error: true });
+                continue;
+            }
+        };
+        let text = resolved.as_deref().unwrap_or(text);
         let _ = turn_tx.send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()));
         queue.register_active_turn(cancel.clone()).await;
-        if let Err(error) = orchestrator
-            .run_queued_turn_streaming(
-                text,
-                cancel,
-                command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
-            )
-            .await
+        let cancel_probe = cancel.clone();
+        let result = if let Some(host) = pending_slashes.loop_host.get()
+            .filter(|_| command.source == msgqueue::QueueSource::Cron || command.uuid.starts_with("goal-retry-")) {
+            host.run_scheduled(text, &command, cancel).await
+        } else {
+            orchestrator.run_queued_turn_streaming(
+                text, cancel, command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
+            ).await.map(|_| ()).map_err(|error| error.to_string())
+        };
+        if let Err(error) = result
         {
             let _ = turn_tx.send(tui::TurnEvent::TextDelta(error.to_string()));
             let _ = turn_tx.send(tui::TurnEvent::TurnEnded(
                 platform_api::TurnOutcome::EndTurn,
             ));
         }
+        if let Some(host) = pending_slashes.loop_host.get() { host.finish(&cancel_probe).await; }
         queue.clear_active_turn().await;
     }
 }
@@ -1431,6 +1468,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
     if initial_cost > 0.0 {
         let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
     }
+    let loop_host = crate::loop_wakeup::CliLoopHost::bind(
+        &tui_build.runtime, prompt_queue.clone(), web_turn_tx.clone(), queue_cancel_reason.clone(),
+    ).await;
+    let _ = pending_slashes.loop_host.set(loop_host.clone());
     let submit_pending_slashes = pending_slashes.clone();
     let submit_queue = prompt_queue.clone();
     let submit_turn_gate = teammate_turn_gate.clone();
@@ -1460,6 +1501,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     return;
                 };
                 cancel_reason.reset();
+                if let Some(host) = pending_slashes.loop_host.get() { host.refresh_session().await; let _ = host.begin(None, true); }
+                let cancel_probe = cancel.clone();
                 // Image-aware entry: with no images this is byte-identical to
                 // `run_turn_streaming_with_cancel`; with pasted/attached images
                 // they become `ContentBlock::Image` on the user message.
@@ -1480,6 +1523,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         platform_api::TurnOutcome::EndTurn,
                     ));
                 }
+                if let Some(host) = pending_slashes.loop_host.get() { host.finish(&cancel_probe).await; }
                 queue.clear_active_turn().await;
                 drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
             });
@@ -1948,6 +1992,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
                     return;
                 };
+                if let Some(host) = pending_slashes.loop_host.get() { host.refresh_session().await; }
                 let prompt = slash_model_prompt(result, &tx);
                 if prompt.is_none() {
                     drop(completion);
@@ -1976,6 +2021,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 };
                 let prompt = prompt.unwrap();
                 cancel_reason.reset();
+                if let Some(host) = pending_slashes.loop_host.get() { host.refresh_session().await; let _ = host.begin(None, true); }
+                let cancel_probe = token.clone();
                 if let Err(e) = orch
                     .run_turn_streaming_with_images(&prompt, &[], token)
                     .await
@@ -1985,6 +2032,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         platform_api::TurnOutcome::EndTurn,
                     ));
                 }
+                if let Some(host) = pending_slashes.loop_host.get() { host.finish(&cancel_probe).await; }
                 queue.clear_active_turn().await;
                 drop(completion);
                 drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
@@ -2284,9 +2332,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
             }
         }
     });
-    let pump_shutdown = CancellationToken::new();
+    let pump_shutdown = pending_slashes.shutdown.clone();
     let exit_turn_gate = teammate_turn_gate.clone();
     let notification_pump = {
+        let loop_host = loop_host.clone();
         let registry = tui_build.runtime.task_registry.clone();
         let orch = concrete_orchestrator.clone();
         let gate = teammate_turn_gate.clone();
@@ -2320,6 +2369,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 }
                 let cancel = shutdown.child_token();
                 cancel_reason.reset();
+                loop_host.refresh_session().await;
+                let _ = loop_host.begin(None, false);
                 queue.register_active_turn(cancel.clone()).await;
                 if tx
                     .send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()))
@@ -2328,7 +2379,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     break;
                 }
                 if let Err(error) = orch
-                    .run_task_notification_rewake(registry.as_ref(), cancel)
+                    .run_task_notification_rewake(registry.as_ref(), cancel.clone())
                     .await
                 {
                     let _ = tx.send(tui::TurnEvent::TextDelta(error.to_string()));
@@ -2336,7 +2387,22 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         platform_api::TurnOutcome::EndTurn,
                     ));
                 }
+                loop_host.finish(&cancel).await;
                 queue.clear_active_turn().await;
+            }
+        })
+    };
+    let loop_queue_pump = {
+        let queue = prompt_queue.clone();
+        let orch = concrete_orchestrator.clone();
+        let gate = teammate_turn_gate.clone();
+        let state = pending_slashes.clone();
+        let tx = teammate_turn_tx.clone();
+        let shutdown = pump_shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! { _ = shutdown.cancelled() => break, _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
+                if let Ok(_guard) = gate.try_lock() { drain_teammate_prompts(&queue, orch.as_ref(), &tx, &state).await; }
             }
         })
     };
@@ -2346,6 +2412,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
             loop {
                 let Some(message) = inbox.wait_for_message(std::time::Duration::from_millis(500)).await else { continue; };
                 incoming_queue.enqueue(msgqueue::QueuedCommand {
+                    scheduled_task_id: None,
+                    scheduled_fire_id: None,
                     uuid: message.message_id,
                     content: msgqueue::QueuedCommandContent::UserInput { text: tasks::handlers::in_process_teammate::teammate_message_envelope_with_summary(&message.from_name,&message.content,message.summary.as_deref()) },
                     priority: msgqueue::QueuePriority::Next,
@@ -2373,6 +2441,16 @@ pub(crate) async fn run_ratatui_with_initial_state(
         });
         (incoming, drain)
     });
+    let loop_interrupt = {
+        let host = loop_host.clone();
+        let runtime = tokio::runtime::Handle::current();
+        Arc::new(move || {
+            let host = host.clone();
+            runtime.spawn(async move {
+                engine_desktop::loop_tools::cancel_dynamic_loop_on_user_abort(&host.scheduler).await;
+            });
+        }) as Arc<dyn Fn() + Send + Sync>
+    };
     let run_result = tokio::task::spawn_blocking(move || {
         tui::app::run_app(
             initial,
@@ -2405,6 +2483,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             emoji_completion_enabled,
             startup_view_mode,
             Some(agents_snapshot_provider),
+            Some(loop_interrupt),
             on_submit,
             on_queue_prompt,
             on_switch_model,
@@ -2428,6 +2507,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
     })
     .await;
     pump_shutdown.cancel();
+    loop_host.shutdown().await;
+    let _ = loop_queue_pump.await;
     let drain_to_join = teammate_prompt_pumps.map(|(incoming, drain)| {
         incoming.abort();
         drain
@@ -4616,6 +4697,28 @@ async fn trust_gate() -> TrustGateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn loop_queue_is_meta_later_and_shutdown_cancels_its_turn_token() {
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let state = Arc::new(HostPromptQueueState::default());
+        queue.enqueue(msgqueue::QueuedCommand {
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
+            uuid: "loop-wakeup-test".into(),
+            content: msgqueue::QueuedCommandContent::UserInput { text: "<<loop-file-dynamic>>".into() },
+            priority: msgqueue::QueuePriority::Later, queued_at: std::time::SystemTime::now(),
+            source: msgqueue::QueueSource::Cron, agent_id: None, skip_slash_commands: true, is_meta: true,
+        }).await;
+        use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+        assert!(TuiMsgQueueInput { queue: queue.clone(), state: state.clone() }.take_mid_turn_input().await.is_none());
+        let (command, cancel) = dequeue_after_slash_dispatch(&queue, &state).await.unwrap();
+        assert_eq!(command.text(), Some("<<loop-file-dynamic>>"));
+        assert!(command.is_meta && command.skip_slash_commands);
+        state.shutdown.cancel();
+        assert!(cancel.is_cancelled());
+        assert!(dequeue_after_slash_dispatch(&queue, &state).await.is_none());
+    }
 
     #[derive(Default)]
     struct RecordingHostTurns(std::sync::Mutex<Vec<String>>);

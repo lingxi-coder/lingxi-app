@@ -44,8 +44,8 @@ use crate::definition::HookDefinition;
 use crate::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 
 /// Fixed system prompt the prompt hook evaluates against (`execPromptHook.ts`,
-/// v2.1.263). Oracle product name "Claude Code" is rebranded to "LingXi";
-/// blank lines and punctuation retain the evaluator prompt bytes.
+/// v2.1.263). The general hook retains LingXi branding; the Stop evaluator
+/// below preserves the 2.1.270 model-facing bytes, including its product name.
 pub(crate) const PROMPT_HOOK_SYSTEM_PROMPT: &str = r#"You are evaluating a hook condition in LingXi. Judge whether the user-provided condition is met.
 
 Your response must be a JSON object with one of these shapes:
@@ -55,7 +55,7 @@ Your response must be a JSON object with one of these shapes:
 Always include a "reason" field."#;
 
 /// Stop evaluators must judge transcript evidence, including impossible conditions.
-pub(crate) const STOP_PROMPT_HOOK_SYSTEM_PROMPT: &str = r#"You are evaluating a stop-condition hook in LingXi. Read the conversation transcript carefully, then judge whether the user-provided condition is satisfied.
+pub(crate) const STOP_PROMPT_HOOK_SYSTEM_PROMPT: &str = r#"You are evaluating a stop-condition hook in Claude Code. Read the conversation transcript carefully, then judge whether the user-provided condition is satisfied.
 
 Your response must be a JSON object with one of these shapes:
 - {"ok": true, "reason": "<quote evidence from the transcript that satisfies the condition>"}
@@ -412,6 +412,17 @@ pub(crate) fn add_arguments_to_prompt(prompt: &str, json_input: &str) -> String 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn goal_evaluator_system_prompt_matches_latest_oracle_bytes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/goal_oracle_2_1_270.json"))
+                .unwrap();
+        assert_eq!(
+            STOP_PROMPT_HOOK_SYSTEM_PROMPT.as_bytes(),
+            fixture["stop_system_prompt"].as_str().unwrap().as_bytes()
+        );
+    }
+
     use super::*;
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::HookEventType;

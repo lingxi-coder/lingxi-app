@@ -40,59 +40,91 @@ pub struct NearLimitCheckpointRequest {
     pub non_interactive: bool,
 }
 
-/// Ordered, bounded hand-off from the child event pump to host observers.
+/// Ordered, nonblocking hand-off from the child event pump to host observers.
 ///
-/// Observer implementations commonly bridge to a UI/main-thread executor. They
-/// must not be awaited by the model/tool event pump: a suspended UI would stop
-/// the child from draining its own bounded output channel. The dedicated worker
-/// preserves event order while `try_emit` keeps the producer non-blocking.
+/// Ordinary telemetry has bounded queue capacity. Lifecycle edges share the
+/// same FIFO but cannot be dropped: otherwise a busy observer can miss a wake
+/// or receive an older completion after a newer wake. No producer awaits UI
+/// callbacks or spawns a separate task to enqueue an event.
 #[derive(Clone)]
 pub(crate) struct ObserverEventSink {
-    sender: tokio::sync::mpsc::Sender<SubagentObservation>,
+    sender: tokio::sync::mpsc::UnboundedSender<QueuedObservation>,
+    telemetry_capacity: Arc<tokio::sync::Semaphore>,
+}
+
+struct QueuedObservation {
+    event: SubagentObservation,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ObserverEventSink {
     pub(crate) fn new(observers: Vec<Arc<dyn SubagentSpawnObserver>>) -> Self {
-        let (sender, mut receiver) =
-            tokio::sync::mpsc::channel::<SubagentObservation>(OBSERVER_EVENT_BUFFER);
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<QueuedObservation>();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Some(QueuedObservation { event, permit }) = receiver.recv().await {
+                // Capacity measures queued telemetry, not the callback in flight.
+                drop(permit);
                 for observer in &observers {
                     observer.on_event(event.clone()).await;
                 }
             }
         });
-        Self { sender }
+        Self {
+            sender,
+            telemetry_capacity: Arc::new(tokio::sync::Semaphore::new(OBSERVER_EVENT_BUFFER)),
+        }
     }
 
     pub(crate) fn try_emit(&self, event: SubagentObservation) {
-        match self.sender.try_send(event) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("subagent observer queue is full; dropping non-terminal event");
+        let reliable = match &event {
+            SubagentObservation::Allocated { .. }
+            | SubagentObservation::Completed { .. }
+            | SubagentObservation::Failed { .. }
+            | SubagentObservation::Killed { .. } => true,
+            SubagentObservation::Message {
+                message: protocol::ConversationMessage::User { content, .. },
+                ..
+            } => !content.iter().any(|block| {
+                matches!(
+                    block,
+                    protocol::ContentBlock::ToolResult { .. }
+                        | protocol::ContentBlock::AdvisorToolResult { .. }
+                )
+            }),
+            _ => false,
+        };
+        let permit = if reliable {
+            None
+        } else {
+            match self.telemetry_capacity.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    tracing::warn!("subagent observer queue is full; dropping telemetry event");
+                    return;
+                }
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!("subagent observer queue closed");
-            }
+        };
+        self.enqueue(event, permit);
+    }
+
+    fn enqueue(
+        &self,
+        event: SubagentObservation,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) {
+        if self
+            .sender
+            .send(QueuedObservation { event, permit })
+            .is_err()
+        {
+            tracing::debug!("subagent observer queue closed");
         }
     }
 
-    /// Deliver a terminal lifecycle event without holding up the completed
-    /// child pump. When the queue is saturated, one detached send waits for
-    /// bounded capacity so terminal state is not discarded.
+    /// Terminal lifecycle events join the same FIFO synchronously so a later
+    /// wake cannot overtake a completion while the observer is saturated.
     pub(crate) fn emit_terminal(&self, event: SubagentObservation) {
-        match self.sender.try_send(event) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
-                let sender = self.sender.clone();
-                tokio::spawn(async move {
-                    let _ = sender.send(event).await;
-                });
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!("subagent observer queue closed before terminal event");
-            }
-        }
+        self.enqueue(event, None);
     }
 }
 
@@ -528,6 +560,149 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn observer_saturation_preserves_lifecycle_fifo_without_blocking_producer() {
+        struct BlockingObserver {
+            events: std::sync::Mutex<Vec<SubagentObservation>>,
+            started: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            finished: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl SubagentSpawnObserver for BlockingObserver {
+            async fn on_event(&self, event: SubagentObservation) {
+                let first = self.events.lock().unwrap().is_empty();
+                if first {
+                    self.started.notify_one();
+                    self.release.notified().await;
+                }
+                let finished = matches!(event, SubagentObservation::Killed { .. });
+                self.events.lock().unwrap().push(event);
+                if finished {
+                    self.finished.notify_one();
+                }
+            }
+        }
+        let observer = Arc::new(BlockingObserver {
+            events: std::sync::Mutex::new(Vec::new()),
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            finished: tokio::sync::Notify::new(),
+        });
+        let sink = ObserverEventSink::new(vec![observer.clone()]);
+        let agent_id = AgentId::new();
+        let progress = || SubagentObservation::Progress {
+            agent_id,
+            tool_use_count: 0,
+            token_count: 1,
+        };
+        let completed = || SubagentObservation::Completed {
+            agent_id,
+            content: serde_json::Value::Null,
+            usage: Default::default(),
+            total_tool_use_count: 0,
+            total_duration_ms: 0,
+            assistant_message_count: 0,
+            last_request_id: None,
+        };
+        sink.try_emit(progress());
+        observer.started.notified().await;
+        for _ in 0..OBSERVER_EVENT_BUFFER + 10 {
+            sink.try_emit(progress());
+        }
+        let mut tool_result =
+            protocol::ConversationMessage::user(protocol::MessageId::new(), String::new());
+        if let protocol::ConversationMessage::User { content, .. } = &mut tool_result {
+            *content = vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: protocol::ToolUseId::new(),
+                content: "ordinary tool output".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }];
+        }
+        sink.try_emit(SubagentObservation::Message {
+            agent_id,
+            message: tool_result,
+        });
+        sink.try_emit(SubagentObservation::Allocated {
+            agent_id,
+            agent_type: "general-purpose".into(),
+            name: None,
+            model: "test".into(),
+            model_profile: None,
+            persistent: true,
+            initial_message_index: 0,
+            origin_session_id: None,
+        });
+        sink.emit_terminal(completed());
+        sink.try_emit(SubagentObservation::Message {
+            agent_id,
+            message: protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "resume".into(),
+            ),
+        });
+        sink.try_emit(SubagentObservation::Message {
+            agent_id,
+            message: protocol::ConversationMessage::user_meta(
+                protocol::MessageId::new(),
+                "wake".into(),
+            ),
+        });
+        sink.emit_terminal(completed());
+        sink.emit_terminal(SubagentObservation::Failed {
+            agent_id,
+            error: "failure".into(),
+        });
+        sink.emit_terminal(SubagentObservation::Killed { agent_id });
+        assert!(
+            observer.events.lock().unwrap().is_empty(),
+            "producer did not wait for blocked observer"
+        );
+        observer.release.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            observer.finished.notified(),
+        )
+        .await
+        .expect("all queued lifecycle events arrive");
+        let events = observer.events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, SubagentObservation::Progress { .. }))
+                .count(),
+            OBSERVER_EVENT_BUFFER + 1
+        );
+        let lifecycle = events
+            .iter()
+            .filter_map(|event| match event {
+                SubagentObservation::Allocated { .. } => Some("allocated"),
+                SubagentObservation::Completed { .. } => Some("completed"),
+                SubagentObservation::Message {
+                    message: protocol::ConversationMessage::User { is_meta, .. },
+                    ..
+                } => Some(if *is_meta { "wake" } else { "resume" }),
+                SubagentObservation::Failed { .. } => Some("failed"),
+                SubagentObservation::Killed { .. } => Some("killed"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lifecycle,
+            [
+                "allocated",
+                "completed",
+                "resume",
+                "wake",
+                "completed",
+                "failed",
+                "killed"
+            ]
+        );
+    }
 
     /// A mock that implements ONLY the required `messages_create`. It records
     /// the call so we can prove the DEFAULTED `messages_create_in` routes back

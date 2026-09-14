@@ -306,3 +306,6 @@ mod goal_evaluated_analytics_tests;
 #[cfg(test)]
 #[path = "conversation/tests/tool_search_usage_reminder_tests.rs"]
 mod tool_search_usage_reminder_tests;
+
+#[path = "conversation/tests/scheduled_turn_tests.rs"]
+mod scheduled_turn_tests;

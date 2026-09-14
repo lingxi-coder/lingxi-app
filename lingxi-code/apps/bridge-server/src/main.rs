@@ -31,6 +31,9 @@ use bridge_server::boot::{self, BridgeArgs};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--desktop-terminal") {
+        return bridge_server::desktop_terminal::run().await;
+    }
     #[cfg(any(unix, windows))]
     if engine_desktop::shell_supervisor::is_supervisor_invocation() {
         return engine_desktop::shell_supervisor::run_supervisor(
@@ -89,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
     //     channel before assembly. They are never placed in argv/env or logged.
     let mut cfg = boot::resolve_desktop_config(&args);
     let mut provider_keys = BTreeMap::new();
+    let mut openai_oauth = None;
     if args.credential_stdin {
         let envelope = boot::read_credential_envelope(&mut std::io::stdin().lock())
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -96,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.api_key = api_key;
         }
         provider_keys = envelope.provider_keys;
+        openai_oauth = envelope.openai_oauth;
         cfg.injected_plugin_secrets = envelope.plugin_secrets;
     }
     if args.api_key_stdin {
@@ -112,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         "bridge-server: resolved desktop config"
     );
 
-    let bound = boot::assemble_with_provider_keys(cfg, provider_keys)
+    let bound = boot::assemble_with_credentials(cfg, provider_keys, openai_oauth)
         .await
         .map_err(|e| anyhow::anyhow!("failed to assemble bridge runtime: {e}"))?;
 

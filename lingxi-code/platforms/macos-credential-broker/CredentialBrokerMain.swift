@@ -277,21 +277,13 @@ final class BrokerDelegate: NSObject, NSXPCListenerDelegate {
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
         guard newConnection.effectiveUserIdentifier == getuid() else { return false }
-        do {
-            try validateProcessIdentifier(
-                newConnection.processIdentifier,
-                expectedIdentifiers: [clientIdentifier],
-                teamId: teamId,
-                action: "authorize broker client"
-            )
-        } catch {
-            return false
-        }
         newConnection.exportedInterface = NSXPCInterface(with: LingXiCredentialBrokerXPC.self)
         newConnection.exportedObject = BrokerService(store: store)
-        // The system enforces this requirement using the XPC peer's audit
-        // token. The explicit PID check above supplies clear fail-closed
-        // behavior before the connection is resumed.
+        // Enforce the exact client identity against the XPC peer's audit token
+        // before accepting messages. A separate PID-based check repeats the
+        // expensive trust evaluation on the serial listener queue and can hold
+        // every client behind one cold verification. The connection requirement
+        // is authoritative and avoids relying on a reusable process identifier.
         newConnection.setCodeSigningRequirement(
             requirementString(teamId: teamId, identifier: clientIdentifier)
         )

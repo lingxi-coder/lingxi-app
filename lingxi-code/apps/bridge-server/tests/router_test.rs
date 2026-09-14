@@ -68,6 +68,9 @@ mod compact_shutdown;
 #[path = "router_test/compact_active_turn.rs"]
 mod compact_active_turn;
 
+#[path = "router_test/session_agent_liveness.rs"]
+mod session_agent_liveness;
+
 // ── Test sink ───────────────────────────────────────────────────────────────
 
 /// A [`ClientEventSink`] that captures every emitted event in emission order so
@@ -2204,6 +2207,42 @@ async fn session_agent_routes_list_nested_transcripts_and_load_real_messages() {
 }
 
 #[tokio::test]
+async fn session_agent_restart_does_not_resurrect_historical_running_transcripts() {
+    for nested in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        let session_id = handle.current_session_id().await;
+        let (agent_id, path) = seed_session_agent_transcript(root.path(), session_id, nested);
+        let original = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"idle\"", "\"running\"");
+        std::fs::write(&path, &original).unwrap();
+        let router = router_with_store(handle, root.path());
+        let sink = CapturingSink::arc();
+        router
+            .route(ClientCommand::ListSessionAgents, sink.clone())
+            .await;
+        let events = sink.events().await;
+        let [ClientEvent::SessionAgentList { agents, .. }] = events.as_slice() else {
+            panic!("expected agent roster: {events:?}");
+        };
+        let agent = agents
+            .iter()
+            .find(|agent| agent.agent_id == agent_id.to_string())
+            .unwrap();
+        assert_eq!(
+            agent.status, "cancelled",
+            "a historical transcript is not a live task"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            original,
+            "listing must preserve transcript bytes"
+        );
+    }
+}
+
+#[tokio::test]
 async fn session_agent_transcript_route_reports_absent_and_corrupt_files() {
     let root = tempfile::tempdir().unwrap();
     let handle = Arc::new(MockOrchestratorHandle::new());
@@ -2392,10 +2431,12 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
         block,
         client_protocol::message::MessageBlockDto::Text { text } if text == "pre-compaction question"
     ))));
-    assert!(messages.iter().any(|message| message.blocks.iter().any(|block| matches!(
+    assert!(messages.iter().any(|message| {
+        message.blocks.iter().any(|block| matches!(
         block,
         client_protocol::message::MessageBlockDto::Text { text } if text == "pre-compaction answer"
-    ))));
+    ))
+    }));
     // Assert the fold HAPPENED rather than the row simply being dropped —
     // a count alone cannot tell those two apart.
     assert!(

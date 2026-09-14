@@ -26,10 +26,15 @@ use tool_api::registry::ToolRegistry;
 
 /// Like [`orch`], but keeps the output stream so a test can read what the user
 /// was actually shown.
-fn orch_with_output(bus: Arc<telemetry::AnalyticsBus>) -> (ConversationOrchestrator, MockOutputStream) {
+fn orch_with_output(
+    bus: Arc<telemetry::AnalyticsBus>,
+) -> (ConversationOrchestrator, MockOutputStream) {
     let output = MockOutputStream::new();
     let orch = ConversationOrchestrator::new(
-        OrchestratorConfig::default(),
+        OrchestratorConfig {
+            interactive_session: true,
+            ..Default::default()
+        },
         Arc::new(MockApiClient::new(vec![])),
         Arc::new(ToolRegistry::new()),
         noop_hook_executor(),
@@ -256,7 +261,8 @@ async fn the_clear_tier_still_clears_and_says_so() {
     let notices = system_notices(&output).await;
     assert_eq!(notices.len(), 1);
     assert!(
-        notices[0].starts_with("Goal cleared after an unrecoverable error (credit balance too low)"),
+        notices[0]
+            .starts_with("Goal cleared after an unrecoverable error (credit balance too low)"),
         "got {:?}",
         notices[0]
     );

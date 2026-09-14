@@ -319,6 +319,8 @@ impl StdioControlPlane {
                     .cloned()
                     .unwrap_or_else(|| json!({}));
                 let cmd = msgqueue::QueuedCommand {
+                    scheduled_task_id: None,
+                    scheduled_fire_id: None,
                     uuid: Uuid::new_v4().to_string(),
                     content: msgqueue::QueuedCommandContent::OrphanedPermission {
                         tool_use_id: protocol::ToolUseId::from(tuid),

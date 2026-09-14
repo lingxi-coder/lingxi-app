@@ -437,19 +437,22 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                     .lock()
                     .await
                     .insert(agent_id.to_string(), initial_message_index);
-                self.emit_observed(ClientEvent::SessionAgentUpdated {
-                    session_id,
-                    agent: SessionAgentSummaryDto {
-                        agent_id: agent_id.to_string(),
-                        name,
-                        agent_type,
-                        model: Some(model),
-                        model_profile,
-                        status: "running".to_string(),
-                        latest_activity: None,
-                        updated_at_ms: Some(unix_time_ms()),
+                self.emit_observed(
+                    ClientEvent::SessionAgentUpdated {
+                        session_id,
+                        agent: SessionAgentSummaryDto {
+                            agent_id: agent_id.to_string(),
+                            name,
+                            agent_type,
+                            model: Some(model),
+                            model_profile,
+                            status: "running".to_string(),
+                            latest_activity: None,
+                            updated_at_ms: Some(unix_time_ms()),
+                        },
                     },
-                }, false)
+                    false,
+                )
                 .await;
             }
             SubagentObservation::Message { agent_id, message } => {
@@ -495,19 +498,22 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                         message: dto,
                     })
                     .await;
-                self.emit_observed(ClientEvent::SessionAgentUpdated {
-                    session_id: bound.session_id,
-                    agent: SessionAgentSummaryDto {
-                        agent_id: key,
-                        name: bound.name,
-                        agent_type: bound.agent_type,
-                        model: Some(bound.model),
-                        model_profile: bound.model_profile,
-                        status: "running".to_string(),
-                        latest_activity: activity(&message),
-                        updated_at_ms: Some(unix_time_ms()),
+                self.emit_observed(
+                    ClientEvent::SessionAgentUpdated {
+                        session_id: bound.session_id,
+                        agent: SessionAgentSummaryDto {
+                            agent_id: key,
+                            name: bound.name,
+                            agent_type: bound.agent_type,
+                            model: Some(bound.model),
+                            model_profile: bound.model_profile,
+                            status: "running".to_string(),
+                            latest_activity: activity(&message),
+                            updated_at_ms: Some(unix_time_ms()),
+                        },
                     },
-                }, false)
+                    false,
+                )
                 .await;
             }
             SubagentObservation::Completed { agent_id, .. } => {
@@ -620,19 +626,22 @@ impl DesktopSessionAgentObserver {
             }
             return;
         };
-        self.emit_observed(ClientEvent::SessionAgentUpdated {
-            session_id: bound.session_id,
-            agent: SessionAgentSummaryDto {
-                agent_id: key.clone(),
-                name: bound.name,
-                agent_type: bound.agent_type,
-                model: Some(bound.model),
-                model_profile: bound.model_profile,
-                status: status.to_string(),
-                latest_activity,
-                updated_at_ms: Some(unix_time_ms()),
+        self.emit_observed(
+            ClientEvent::SessionAgentUpdated {
+                session_id: bound.session_id,
+                agent: SessionAgentSummaryDto {
+                    agent_id: key.clone(),
+                    name: bound.name,
+                    agent_type: bound.agent_type,
+                    model: Some(bound.model),
+                    model_profile: bound.model_profile,
+                    status: status.to_string(),
+                    latest_activity,
+                    updated_at_ms: Some(unix_time_ms()),
+                },
             },
-        }, clear_state)
+            clear_state,
+        )
         .await;
         if clear_state {
             // Terminal rows remain in the client roster, but one-shot/failed/

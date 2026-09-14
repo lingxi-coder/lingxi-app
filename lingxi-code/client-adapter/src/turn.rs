@@ -197,6 +197,7 @@ pub fn lower_content_block_with(
 #[must_use]
 pub fn synthesize_message(turn: &PumpedTurn) -> MessageDto {
     MessageDto {
+        loop_wakeup: None,
         role: ASSISTANT_ROLE.to_string(),
         blocks: turn
             .assistant_blocks

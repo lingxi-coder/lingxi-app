@@ -152,7 +152,7 @@ pub fn retry_delay_ms(attempt: u32, rand01: f64) -> i64 {
 /// `Goal still active \u{b7} {cause} \u{b7} retrying in {n} min ({k}/{max}) \u{b7} send a message to retry now`
 ///
 /// `attempt` is 1-based here (upstream interpolates `M+1`). The minutes are
-/// `Math.round(me / 60000)` of the JITTERED delay.
+/// `Math.round(me / 60000)` of the BASE backoff rung; jitter affects only the timer.
 #[must_use]
 pub fn retry_announcement(cause: RetryCause, delay_ms: i64, attempt: u32) -> String {
     #[allow(clippy::cast_precision_loss)]
@@ -451,4 +451,10 @@ mod tests {
             );
         }
     }
+}
+
+/// X7n/eps model-facing retry prompt.
+pub fn retry_body(condition: &str, cause: RetryCause) -> String {
+    let goal = super::sanitize::escape_reminder_html(condition);
+    format!("Goal check-in: «{goal}» is still active. The last turn ended before the goal could be evaluated: {}. Continue toward the goal.", cause.text())
 }

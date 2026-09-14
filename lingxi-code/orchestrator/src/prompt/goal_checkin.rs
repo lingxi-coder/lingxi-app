@@ -45,17 +45,50 @@
 //!
 //! # Divergence (reason)
 //!
-//! * `bzf(e)` (@292041909 `gsa(pjo(e))`) homoglyph/invisible-character
-//!   sanitizes the goal condition and each task label before `Ma`-escaping. The
-//!   port has no confusables table, so only the `Ma` half
-//!   ([`super::sanitize::escape_reminder_html`]) is applied. The escape that
-//!   matters for envelope integrity is present; the anti-spoofing pass is not.
-//! * `Tzf`'s new-run detection keys on `Math.min(...tasks.map(t=>t.startTime)) >
-//!   lastDeferralPassAt`. The port's Stop-hook `background_tasks` projection
-//!   drops `startTime`, so [`GoalDeferralState::advance`] uses the equivalent
-//!   predicate over task IDENTITY: every currently-deferring task is one that
-//!   was not deferring at the previous pass. Same meaning ("this is a brand-new
-//!   batch of background work"), computed from what the port carries.
+//! * Check-in text sanitation follows 2.1.270 `Z7n = Vue(SU(text))`:
+//!   strip invisible/private/unassigned characters, collapse whitespace, map
+//!   bracket/slash lookalikes, then HTML-escape. See `sanitize_checkin_text`.
+//! * `Tzf`'s new-run detection keys on the minimum task startTime being
+//!   strictly after lastDeferralPassAt. The internal snapshot carries this
+//!   metadata separately from serialized Stop-hook payloads.
+
+/// Claude Code 2.1.270 `Z7n` (`Vue(SU(text))`), before HTML escaping.
+/// `SU` removes Unicode Cf/Co/Cn/default-ignorable characters, then `Nr`
+/// strips controls and collapses ECMAScript whitespace; `Vue` maps only
+/// bracket/slash lookalikes. It does not normalize or fold ordinary letters.
+fn sanitize_checkin_text(text: &str) -> String {
+    static INVISIBLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let invisible = INVISIBLE.get_or_init(|| {
+        regex::Regex::new(
+            r"[\p{Cf}\p{Co}\p{Cn}\p{Default_Ignorable_Code_Point}\x00-\x08\x0E-\x1F\x7F-\x9F]",
+        )
+        .expect("valid oracle Unicode sanitation pattern")
+    });
+    let stripped = invisible.replace_all(text, "");
+    let mut out = String::new();
+    let mut pending_space = false;
+    for ch in stripped.chars() {
+        if (ch.is_whitespace() && ch != '\u{85}') || ch == '\u{feff}' {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(match ch {
+            '\u{ff1c}' | '\u{fe64}' | '\u{2329}' | '\u{27e8}' | '\u{3008}' | '\u{2039}'
+            | '\u{02c2}' | '\u{1438}' | '\u{276c}' | '\u{276e}' | '\u{2770}' | '\u{29fc}'
+            | '\u{226e}' | '\u{227a}' | '\u{22d6}' => '<',
+            '\u{ff1e}' | '\u{fe65}' | '\u{232a}' | '\u{27e9}' | '\u{3009}' | '\u{203a}'
+            | '\u{02c3}' | '\u{1433}' | '\u{276d}' | '\u{276f}' | '\u{2771}' | '\u{29fd}'
+            | '\u{226f}' | '\u{227b}' | '\u{22d7}' => '>',
+            '\u{ff0f}' | '\u{2215}' | '\u{2044}' => '/',
+            other => other,
+        });
+    }
+    out
+}
 
 /// `cUv = 30` @292041909 — the default check-in interval, in minutes.
 pub const DEFAULT_CHECKIN_MINUTES: i64 = 30;
@@ -123,6 +156,8 @@ pub fn truncate_with_char_count(s: &str, cap: usize) -> String {
 pub struct DeferringTask {
     /// `s.id`.
     pub id: String,
+    /// Task start time in Unix epoch milliseconds, separate from hook JSON.
+    pub start_time_ms: Option<u64>,
     /// `efr[s.type]` — the already-mapped type label.
     pub label: String,
     /// `s.type==="local_bash"&&!isMonitor ? s.command : s.description`.
@@ -148,7 +183,7 @@ pub fn build_checkin_body(condition: &str, deferred_ms: i64, tasks: &[DeferringT
     // (JS rounds `.5` toward +Infinity), with no float cast.
     let minutes = deferred_ms.max(0).saturating_add(30_000) / 60_000;
     let minutes = minutes.max(1);
-    let goal = super::sanitize::escape_reminder_html(condition);
+    let goal = super::sanitize::escape_reminder_html(&sanitize_checkin_text(condition));
     if tasks.is_empty() {
         return format!(
             "Goal check-in: \u{ab}{goal}\u{bb} is still active. Its evaluation was deferred for \
@@ -160,7 +195,12 @@ stopped without reporting back). Continue toward the goal."
         .iter()
         .map(|task| {
             super::sanitize::escape_reminder_html(&truncate_with_char_count(
-                &format!("- {} \u{b7} {} \u{b7} {}", task.id, task.label, task.detail),
+                &format!(
+                    "- {} \u{b7} {} \u{b7} {}",
+                    task.id,
+                    task.label,
+                    sanitize_checkin_text(&task.detail)
+                ),
                 TASK_LINE_CHAR_CAP,
             ))
         })
@@ -289,8 +329,7 @@ pub struct GoalDeferralState {
     pub checkin_count: u32,
     /// `lastDeferralPassAt` — when the last deferral pass ran (epoch ms).
     pub last_deferral_pass_at: Option<i64>,
-    /// The task ids that were deferring at the last pass — the port's stand-in
-    /// for `Math.min(...startTimes)` (see the module divergence note).
+    /// Task IDs observed at the last pass; new-batch detection uses start times.
     pub last_deferring_ids: Vec<String>,
     /// `idleCheckinCount` (2.1.266) — how many check-ins the IDLE TIMER has
     /// delivered since the user last spoke. Counted separately from
@@ -336,11 +375,15 @@ impl GoalDeferralState {
                 now_ms
             }
             Some(since) => {
-                let all_tasks_are_new = tasks
-                    .iter()
-                    .all(|t| !self.last_deferring_ids.contains(&t.id));
                 let is_new_run = self.last_deferral_pass_at.is_some_and(|last| {
-                    all_tasks_are_new && now_ms.saturating_sub(last) > interval_ms
+                    // Math.min(empty) is Infinity; missing startTime makes NaN.
+                    // Neither is finite, so both prevent a new-batch reset.
+                    !tasks.is_empty()
+                        && tasks.iter().all(|task| {
+                            task.start_time_ms
+                                .is_some_and(|start| i128::from(start) > i128::from(last))
+                        })
+                        && now_ms.saturating_sub(last) > interval_ms
                 });
                 if is_new_run {
                     self.deferred_since = Some(now_ms);
@@ -388,6 +431,7 @@ mod tests {
     fn task(id: &str, label: &str, detail: &str) -> DeferringTask {
         DeferringTask {
             id: id.into(),
+            start_time_ms: Some(0),
             label: label.into(),
             detail: detail.into(),
         }
@@ -414,6 +458,20 @@ mod tests {
     }
 
     /// `Math.max(1, Math.round(t/60000))`.
+    #[test]
+    fn latest_checkin_sanitizes_conditions_and_task_details_before_escaping() {
+        let body = build_checkin_body(
+            "  ＜ship／it＞\u{200b}\u{e000} &\n now  ",
+            0,
+            &[task("b1", "shell", "  echo\n\t〈ok〉\u{fe0f}  ")],
+        );
+        assert!(body.starts_with("Goal check-in: «&lt;ship/it&gt; &amp; now»"));
+        assert!(body.contains("\n- b1 · shell · echo &lt;ok&gt;\n"));
+        assert_eq!(sanitize_checkin_text("e\u{301} α А"), "e\u{301} α А");
+        assert_eq!(sanitize_checkin_text("a\u{0085}b\u{0007}c"), "abc");
+        assert_eq!(sanitize_checkin_text("a\u{115f}b\u{0378}c"), "abc");
+    }
+
     #[test]
     fn a_sub_minute_deferral_still_reads_one_min() {
         assert!(build_checkin_body("g", 1_000, &[]).contains("deferred for 1 min while"));
@@ -525,7 +583,8 @@ mod tests {
         assert!(state.advance("g", &first, 0, interval).is_none());
 
         // Long gap, and every deferring task is new ⇒ new run.
-        let second = vec![task("b2", "shell", "two")];
+        let mut second = vec![task("b2", "shell", "two")];
+        second[0].start_time_ms = Some((interval + 1) as u64);
         assert!(
             state
                 .advance("g", &second, 3 * interval, interval)
@@ -547,7 +606,8 @@ mod tests {
 
         // 45 minutes after the last pass is greater than the base interval,
         // but less than the old batch's 60-minute backed-off interval.
-        let second = vec![task("b2", "shell", "two")];
+        let mut second = vec![task("b2", "shell", "two")];
+        second[0].start_time_ms = Some((interval + 1) as u64);
         let restart = interval + interval * 3 / 2;
         assert!(state.advance("g", &second, restart, interval).is_none());
         assert_eq!(state.deferred_since, Some(restart));
@@ -573,6 +633,37 @@ mod tests {
             text.is_some(),
             "the long-running task must trigger a check-in"
         );
+    }
+
+    #[test]
+    fn newly_deferring_old_task_does_not_reset_the_checkin_clock() {
+        let interval = 30 * 60_000;
+        let mut state = GoalDeferralState::default();
+        state.advance("g", &[task("old", "shell", "one")], 0, interval);
+        assert!(state
+            .advance(
+                "g",
+                &[task("new-id", "shell", "two")],
+                2 * interval,
+                interval
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn empty_or_unknown_start_times_do_not_reset_the_checkin_clock() {
+        let interval = 30 * 60_000;
+        for tasks in [
+            vec![],
+            vec![DeferringTask {
+                start_time_ms: None,
+                ..task("new", "shell", "two")
+            }],
+        ] {
+            let mut state = GoalDeferralState::default();
+            state.advance("g", &[task("old", "shell", "one")], 0, interval);
+            assert!(state.advance("g", &tasks, 2 * interval, interval).is_some());
+        }
     }
 
     #[test]

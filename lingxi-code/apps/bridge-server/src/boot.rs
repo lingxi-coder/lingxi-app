@@ -36,7 +36,7 @@ use serde::Deserialize;
 
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
-use engine_desktop::{build, DesktopAudio, DesktopConfig, DesktopRuntime};
+use engine_desktop::{DesktopAudio, DesktopConfig, DesktopRuntime};
 use platform_api::{
     CredentialStoragePolicy, OrchestratorHandle, OutputStream, SlashCommandDispatcher,
 };
@@ -78,6 +78,8 @@ pub struct BridgeArgs {
     pub credential_stdin: bool,
     /// Allow workspace-controlled configuration and customization sources.
     pub trusted_workspace: bool,
+    /// Own versioned scheduled tasks for this scope independently of chat runtimes.
+    pub scheduled_controller: bool,
     /// Enforce the packaged desktop credential boundary: trusted workspace
     /// customizations still load, but credential-bearing settings must not.
     pub packaged_credential_stdin_only: bool,
@@ -133,6 +135,7 @@ impl BridgeArgs {
                 "--api-key-stdin" => out.api_key_stdin = true,
                 "--credential-stdin" => out.credential_stdin = true,
                 "--trusted-workspace" => out.trusted_workspace = true,
+                "--scheduled-controller" => out.scheduled_controller = true,
                 "--packaged-credential-stdin-only" => {
                     out.packaged_credential_stdin_only = true;
                 }
@@ -175,6 +178,8 @@ pub fn usage() -> String {
                               Read a provider credential envelope from stdin\n    \
              --trusted-workspace\n    \
                               Enable workspace settings, hooks, MCP, agents, plugins, and memory\n    \
+             --scheduled-controller\n    \
+                              Own versioned scheduled tasks for this workspace\n    \
              --packaged-credential-stdin-only\n    \
                               In trusted packaged desktop mode, accept credentials only from stdin\n    \
              --bridge-dir <DIR>\n    \
@@ -231,11 +236,66 @@ pub struct CredentialEnvelope {
     /// Provider id to API key/bearer token mappings.
     #[serde(default)]
     pub provider_keys: BTreeMap<String, String>,
+    /// Host-owned Codex session, accepted only for the selected OAuth route.
+    #[serde(default)]
+    pub openai_oauth: Option<client_protocol::events::OpenAiOAuthSessionDto>,
     /// Sensitive plugin configuration, keyed by plugin identity then manifest
     /// field name. Values are injected into the runtime's process-local
     /// credential cache before plugin discovery.
     #[serde(default)]
     pub plugin_secrets: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+struct OpenAiOAuthHostObserver {
+    sink: Arc<dyn client_adapter::ClientEventSink>,
+}
+
+#[async_trait::async_trait]
+impl secret::credential::OpenAiOAuthObserver for OpenAiOAuthHostObserver {
+    async fn updated(&self, tokens: secret::credential::OpenAiOAuthTokens) {
+        self.sink
+            .emit(client_protocol::events::ClientEvent::OpenAiOAuthUpdated {
+                session: client_protocol::events::OpenAiOAuthSessionDto {
+                    access_token: tokens.access_token.expose_secret().clone(),
+                    refresh_token: tokens
+                        .refresh_token
+                        .map(|value| value.expose_secret().clone()),
+                    expires_at: tokens
+                        .expires_at
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    account_id: tokens.account_id,
+                    fedramp: tokens.fedramp,
+                },
+            })
+            .await;
+    }
+}
+
+fn validate_openai_oauth_session(
+    session: &client_protocol::events::OpenAiOAuthSessionDto,
+) -> Result<(), String> {
+    let valid_token = |token: &str| {
+        !token.is_empty() && token.len() <= 16 * 1024 && !token.chars().any(char::is_control)
+    };
+    if !valid_token(&session.access_token)
+        || session
+            .refresh_token
+            .as_deref()
+            .is_some_and(|token| !valid_token(token))
+        || session
+            .account_id
+            .as_deref()
+            .is_some_and(|id| id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control))
+        || session.expires_at == 0
+        || std::time::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(session.expires_at))
+            .is_none()
+    {
+        return Err("invalid Codex OAuth session in credential envelope".into());
+    }
+    Ok(())
 }
 
 /// Read and validate the one-line JSON envelope used by the packaged desktop.
@@ -255,6 +315,9 @@ pub fn read_credential_envelope<R: BufRead>(reader: &mut R) -> Result<Credential
     }
     let envelope: CredentialEnvelope =
         serde_json::from_slice(line).map_err(|_| "invalid credential envelope".to_string())?;
+    if let Some(session) = &envelope.openai_oauth {
+        validate_openai_oauth_session(session)?;
+    }
     if let Some(key) = envelope.api_key.as_ref() {
         if key.is_empty() || key.len() > MAX_STDIN_API_KEY_BYTES || key.contains('\0') {
             return Err("invalid API key in credential envelope".to_string());
@@ -512,6 +575,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let trusted = args.trusted_workspace;
 
     DesktopConfig {
+        host_workspace_trusted: Some(trusted),
+        enable_automation_scheduler: args.scheduled_controller,
         initial_teammate_team_name: None,
         api_base: resolve_api_base(),
         // Credentials are supplied explicitly by the parent over stdin and
@@ -845,10 +910,7 @@ impl Drop for LiveSessionGuard {
         // `<session>.inbox`. Remove only this PID's matching presence metadata;
         // the inbox is durable work, and writer-claim ownership belongs to the
         // coordinator/last scoped owner rather than this registration guard.
-        if let Err(error) = self
-            .dir
-            .unregister_record_if_session(self.pid, &current)
-        {
+        if let Err(error) = self.dir.unregister_record_if_session(self.pid, &current) {
             tracing::warn!(%error, "bridge live-session metadata cleanup failed");
         }
     }
@@ -873,15 +935,13 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
     // Only live records/PIDs participate in writer ownership. The persisted
     // `<session-id>.jsonl` transcript is intentionally ignored here because a
     // historical resume must reuse that same UUID.
-    let writer_claim =
-        dir.claim_session_id(&session_id, pid)
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::AlreadyExists => {
-                    "bridge session id is already active".to_string()
-                }
-                _ => "bridge live-session registry is unavailable".to_string(),
-            })?
-            .into_shared();
+    let writer_claim = dir
+        .claim_session_id(&session_id, pid)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => "bridge session id is already active".to_string(),
+            _ => "bridge live-session registry is unavailable".to_string(),
+        })?
+        .into_shared();
     // Consume this construction-only claim into the desktop config. The
     // coordinator, Fusion recorder, and ordinary transcript writer all clone
     // this exact lease; build must not reacquire a second OS lock.
@@ -1146,20 +1206,34 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
 /// Electron host owns persistent Keychain storage, so packaged startup does
 /// not write the same key into the Rust Keychain on every launch.
 pub async fn assemble_with_provider_keys(
-    mut cfg: DesktopConfig,
+    cfg: DesktopConfig,
     provider_keys: BTreeMap<String, String>,
 ) -> Result<BoundServer, String> {
+    assemble_with_credentials(cfg, provider_keys, None).await
+}
+
+/// Assemble a host-owned OAuth session without storing secrets in configuration.
+pub async fn assemble_with_credentials(
+    mut cfg: DesktopConfig,
+    provider_keys: BTreeMap<String, String>,
+    openai_oauth: Option<client_protocol::events::OpenAiOAuthSessionDto>,
+) -> Result<BoundServer, String> {
+    if openai_oauth.is_some() && !cfg.default_model.starts_with("openai-chatgpt/") {
+        return Err("Codex OAuth credentials require the selected openai-chatgpt route".into());
+    }
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
         platform_api::CredentialStoragePolicy::NativeOrMemory
     );
+    let enable_automation_scheduler = cfg.enable_automation_scheduler;
     let mut live_session = initialize_live_session(&mut cfg)?;
     let connection = BridgeConnection::new();
 
     // Preserve only the non-secret parent-source fact before `cfg` moves. The
     // authoritative decision is completed after `build`, when the runtime has
     // checked the same Rust secure store used by CLI and TUI.
-    let parent_credential_supplied = !has_no_credential_source(&cfg) || !provider_keys.is_empty();
+    let parent_credential_supplied =
+        !has_no_credential_source(&cfg) || !provider_keys.is_empty() || openai_oauth.is_some();
 
     // Capture the persisted-session inputs before `cfg` moves into the desktop
     // composition root. The router uses the same cwd/config-home pair as the
@@ -1226,16 +1300,18 @@ pub async fn assemble_with_provider_keys(
     // The orchestrator's output stream + the gate's request sink BOTH ride the
     // same connection-scoped outbound channel (the F2-06 contract).
     let event_sink = connection.event_sink();
+    let cron_firer = Arc::new(crate::cron_host::HostCronFirer::new(event_sink.clone(), cfg.cwd.clone()));
     // Subagent lifecycle/message events use the same authenticated sink as the
     // main turn. `initialize_live_session` canonicalizes this id before this
     // function is entered, so the observer and engine transcript share one
     // session fence even when the host did not provide an id explicitly.
-    cfg.session_agent_observer = Some(Arc::new(
+    let session_agent_observer = Arc::new(
         engine_desktop::session_agents::DesktopSessionAgentObserver::new(
             event_sink.clone(),
             cfg.session_id_override.clone().unwrap_or_default(),
         ),
-    ));
+    );
+    cfg.session_agent_observer = Some(session_agent_observer.clone());
     let message_output = client_adapter::AdapterOutputStream::new(event_sink.clone());
     let output: Arc<dyn OutputStream> = Arc::new(message_output.clone());
     let permission_sink = connection.permission_sink();
@@ -1289,7 +1365,34 @@ pub async fn assemble_with_provider_keys(
     ));
     let provider_model_catalog_listings = desktop_provider_catalog_listings(&cfg);
 
-    let runtime = build(cfg, output, permission_sink)
+    let shared = engine_desktop::build_shared_credential_stack_with_policy(
+        &cfg.lingxi_home,
+        cfg.isolated_credential_storage,
+        cfg.credential_storage_policy,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if let Some(session) = openai_oauth {
+        validate_openai_oauth_session(&session)?;
+        shared
+            .credentials
+            .store_openai_oauth_tokens(
+                &session.access_token,
+                session.refresh_token.as_deref(),
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at),
+                vec![],
+                session.account_id.as_deref(),
+                session.fedramp,
+            )
+            .await
+            .map_err(|_| "failed to seed Codex OAuth session".to_string())?;
+        shared
+            .credentials
+            .set_openai_oauth_observer(Arc::new(OpenAiOAuthHostObserver {
+                sink: event_sink.clone(),
+            }));
+    }
+    let runtime = engine_desktop::build_with_host_automation(cfg, output, permission_sink, shared)
         .await
         .map_err(|e| e.to_string())?;
     // The runtime cloned the exact construction-only lease into its hydrated
@@ -1356,6 +1459,8 @@ pub async fn assemble_with_provider_keys(
                 };
                 queue
                     .enqueue(msgqueue::QueuedCommand {
+                        scheduled_task_id: None,
+                        scheduled_fire_id: None,
                         uuid: message.message_id,
                         content: msgqueue::QueuedCommandContent::UserInput {
                             text: engine_desktop::teammate_message_envelope_with_summary(
@@ -1401,11 +1506,11 @@ pub async fn assemble_with_provider_keys(
     // set-once wakeup cell now that the per-connection `queue` + a `RuntimeSpawner`
     // both exist. `MsgQueueWakeupScheduler` sleeps for the (clamped) delay, resolves
     // the `<<autonomous-loop-dynamic>>` sentinel, then enqueues the `/loop` input at
-    // `Next` so the between-turn drain folds it back into the session. The cell was
+    // `Later` so it waits for the active turn and never enters the mid-turn drain. The cell was
     // threaded out of `engine_desktop::build` on `DesktopRuntime` precisely because
     // the tool is constructed before this seam. Setting it more than once is a no-op
     // (`OnceLock`); a fresh per-connection `assemble` builds a fresh runtime + cell.
-    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> = Arc::new(
+    let wakeup_scheduler = Arc::new(
         crate::driver::MsgQueueWakeupScheduler::with_loop_runtime(
             queue.clone(),
             runtime.runtime_spawner.clone(),
@@ -1416,10 +1521,14 @@ pub async fn assemble_with_provider_keys(
         // ticks. Unscoped because a wakeup fires between turns: the
         // turn-ownership filter on the regular sink drops a `SystemNotice` that
         // no active turn owns, which is every wakeup announcement.
+        .with_orchestrator(runtime.orchestrator.clone())
         .with_event_sink(connection.loop_wakeup_event_sink()),
     );
     // The driver re-uses the SAME scheduler at its turn-completion edge to arm the
     // `/loop` keepalive fallback (binary `lKi`); clone before the cell consumes it.
+    if let Some(cron) = &runtime.session_lifecycle.cron_scheduler {
+        cron.set_session_delivery(wakeup_scheduler.clone()).await;
+    }
     let driver_wakeup_scheduler = wakeup_scheduler.clone();
     if runtime.wakeup_scheduler_cell.set(wakeup_scheduler).is_err() {
         // Already filled — should not happen for a fresh runtime, but never panic
@@ -1441,6 +1550,12 @@ pub async fn assemble_with_provider_keys(
         )
     };
 
+    if enable_automation_scheduler {
+        if let Some(scheduler) = &runtime.session_lifecycle.cron_scheduler {
+            scheduler.set_automation_firer(cron_firer.clone()).await;
+        }
+    }
+
     // The full command-routing seam over the real engine handles.
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();
     let dispatcher: Arc<dyn SlashCommandDispatcher> =
@@ -1454,11 +1569,14 @@ pub async fn assemble_with_provider_keys(
             Some(dispatcher),
             Some(runtime.shared_command_registry.clone()),
         )
+        .with_cron_firer(cron_firer)
+        .with_session_cron(runtime.session_lifecycle.cron_scheduler.clone())
         .with_credentials(runtime.credentials.clone())
         .with_provider_model_catalog_listings(provider_model_catalog_listings)
         .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
         .with_http(runtime.http.clone())
         .with_session_store(session_store)
+        .with_session_agent_observer(session_agent_observer)
         .with_settings_context(settings_context)
         .with_mcp_paths(mcp_paths)
         .with_mcp_registry(runtime.mcp_registry.clone())
@@ -1896,8 +2014,8 @@ mod tests {
         let guard_c = initialize_live_session(&mut cfg_c).expect("start generation C");
         let dir = guard_c.dir.clone();
         let a_inbox_path = dir.root().join(format!("{session_a}.inbox.jsonl"));
-        let a_inbox_before = std::fs::read(&a_inbox_path)
-            .expect("starting C spills accepted A work");
+        let a_inbox_before =
+            std::fs::read(&a_inbox_path).expect("starting C spills accepted A work");
 
         drop(guard_a);
 
@@ -1964,6 +2082,17 @@ mod tests {
         assert!(BridgeArgs::parse(["--cwd"]).is_err());
         assert!(BridgeArgs::parse(["--model"]).is_err());
         assert!(BridgeArgs::parse(["--bridge-dir"]).is_err());
+    }
+
+    #[test]
+    fn only_explicit_scope_controller_enables_automation_dispatch() {
+        let ordinary = BridgeArgs::parse(["--trusted-workspace"]).unwrap();
+        assert!(!ordinary.scheduled_controller);
+        assert!(!resolve_desktop_config(&ordinary).enable_automation_scheduler);
+        let controller = BridgeArgs::parse(["--trusted-workspace", "--scheduled-controller"]).unwrap();
+        assert!(controller.scheduled_controller);
+        assert!(resolve_desktop_config(&controller).enable_automation_scheduler);
+        assert!(usage().contains("--scheduled-controller"));
     }
 
     #[test]
@@ -2053,6 +2182,20 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_envelope_is_validated_and_debug_redacted() {
+        let mut input = std::io::Cursor::new(br#"{"openai_oauth":{"access_token":"access-private","refresh_token":"refresh-private","expires_at":2000000000,"account_id":"acct","fedramp":false}}"#);
+        let envelope = read_credential_envelope(&mut input).unwrap();
+        let session = envelope.openai_oauth.as_ref().unwrap();
+        assert_eq!(session.account_id.as_deref(), Some("acct"));
+        assert!(!format!("{envelope:?}").contains("private"));
+        for invalid in ["", "bad\nheader"] {
+            let mut session = session.clone();
+            session.access_token = invalid.into();
+            assert!(validate_openai_oauth_session(&session).is_err());
+        }
+    }
+
+    #[test]
     fn credential_envelope_rejects_javascript_camel_case_fields() {
         let mut input = std::io::Cursor::new(
             br#"{"apiKey":null,"providerKeys":{"deepseek":"ds-secret"}}"#.to_vec(),
@@ -2076,6 +2219,7 @@ mod tests {
     #[test]
     fn workspace_is_untrusted_by_default() {
         let cfg = resolve_desktop_config(&BridgeArgs::default());
+        assert_eq!(cfg.host_workspace_trusted, Some(false));
         assert!(cfg.api_key.is_empty(), "credentials must not come from env");
         assert!(cfg.api_key_helper.is_none());
         assert!(cfg.provider_profiles.is_none());
@@ -2094,6 +2238,7 @@ mod tests {
             trusted_workspace: true,
             ..BridgeArgs::default()
         });
+        assert_eq!(cfg.host_workspace_trusted, Some(true));
         assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
         assert!(!cfg.permission_mode_cli_explicit);
         assert_eq!(cfg.setting_source_scope, (true, true));
@@ -2200,6 +2345,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            enable_automation_scheduler: false,
+            host_workspace_trusted: Some(true),
             initial_teammate_team_name: None,
             // This unit test must not require the signed macOS Credential
             // Broker or inherit a developer login keychain.
@@ -2277,6 +2424,7 @@ mod tests {
             audio: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
+        assert!(bound.runtime.orchestrator.workspace_trusted().await);
         // The gate handle is reachable only when bind() ran with a real gate.
         let gate = bound.connection.gate_handle();
         assert_eq!(

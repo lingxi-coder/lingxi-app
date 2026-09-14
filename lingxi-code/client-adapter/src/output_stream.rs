@@ -204,6 +204,7 @@ impl AdapterOutputStream {
             .emit(ClientEvent::MessageComplete {
                 stop_reason: stop_reason.map(str::to_string),
                 message: Some(MessageDto {
+                    loop_wakeup: None,
                     role: "assistant".to_string(),
                     blocks,
                     images: Vec::new(),

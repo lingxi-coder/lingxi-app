@@ -150,6 +150,8 @@ mod tests {
 
     fn user_cmd(uuid: &str, priority: QueuePriority) -> QueuedCommand {
         QueuedCommand {
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
             uuid: uuid.to_string(),
             content: QueuedCommandContent::UserInput {
                 text: uuid.to_string(),

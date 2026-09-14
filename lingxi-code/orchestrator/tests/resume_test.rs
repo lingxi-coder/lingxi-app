@@ -1662,3 +1662,79 @@ mod deferred_tool_resume_tests {
         );
     }
 }
+
+#[tokio::test]
+async fn scheduled_actual_settings_do_not_replace_persisted_human_defaults() {
+    for with_human_turn in [true, false] {
+        let temp = TempDir::new().unwrap();
+        let cwd_path = temp.path().join("project");
+        tokio::fs::create_dir(&cwd_path).await.unwrap();
+        let cwd = cwd_path.to_string_lossy().into_owned();
+        let home = temp.path().join("home");
+        let subdir = home.join("projects").join(project_dir_name(&cwd));
+        tokio::fs::create_dir_all(&subdir).await.unwrap();
+        let sid = Uuid::new_v4();
+        let mut parent = None;
+        let mut rows = Vec::new();
+        let turns = if with_human_turn {
+            vec![
+                (false, "claude-sonnet-4-6", "low"),
+                (true, "claude-opus-4-6", "high"),
+            ]
+        } else {
+            vec![(true, "claude-opus-4-6", "high")]
+        };
+        for (scheduled, model, level) in turns {
+            for role in ["user", "assistant"] {
+                let id = Uuid::new_v4().to_string();
+                let mut row = json!({"type":role,"uuid":id,"parentUuid":parent,"sessionId":sid.to_string(),"cwd":cwd,"timestamp":"2026-09-12T12:00:00.000Z","version":"0.6.0","isSidechain":false,"userType":"external","message":{"role":role,"content":"retained text"}});
+                if role == "assistant" {
+                    row["message"]["model"] = json!(model);
+                    row["modelProfile"] = json!("anthropic");
+                    row["effort"] = json!(level);
+                    row["reasoningSelection"] = json!({"type":"level","id":level});
+                    if scheduled {
+                        row["perTurnSettings"] = json!(true);
+                    }
+                }
+                rows.push(row.to_string());
+                parent = Some(id);
+            }
+        }
+        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), rows.join("\n"))
+            .await
+            .unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
+        let replayed = replay_session_state(&home, &cwd, sid, fs).await.unwrap();
+        let snapshot = replayed.handle_runtime_snapshot();
+        if with_human_turn {
+            assert_eq!(snapshot.model, "claude-sonnet-4-6");
+            assert_eq!(snapshot.model_profile.as_deref(), Some("anthropic"));
+            assert_eq!(snapshot.effort.as_deref(), Some("low"));
+            assert_eq!(
+                snapshot.reasoning_selection,
+                Some(platform_api::ReasoningSelection::Level { id: "low".into() })
+            );
+        } else {
+            assert!(
+                snapshot.model.is_empty(),
+                "scheduled-only history must preserve the boot default"
+            );
+            assert!(snapshot.reasoning_selection.is_none());
+            assert!(snapshot.effort.is_none());
+        }
+        let actual = replayed
+            .messages
+            .iter()
+            .rev()
+            .find(|row| row.message_type == "assistant")
+            .unwrap();
+        assert_eq!(actual.message["model"], "claude-opus-4-6");
+        assert_eq!(actual.extra["effort"], "high");
+        assert_eq!(actual.extra["perTurnSettings"], true);
+        assert_eq!(
+            replayed.state.history.len(),
+            if with_human_turn { 4 } else { 2 }
+        );
+    }
+}

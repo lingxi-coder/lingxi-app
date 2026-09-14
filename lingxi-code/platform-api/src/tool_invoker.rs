@@ -174,6 +174,9 @@ pub enum ToolInvokerError {
     /// The tool surfaced an invalid input.
     #[error("ToolInvoker: invalid input: {0}")]
     InvalidInput(String),
+    /// A schema or tool precondition rejected input before execution.
+    #[error("ToolInvoker: input validation failed: {0}")]
+    Validation(String),
     /// Permission policy terminated the owning prompt-avoiding agent.
     ///
     /// Unlike an ordinary denial, callers must not convert this into a
@@ -197,7 +200,17 @@ impl ToolInvokerError {
     pub fn model_facing_message(&self) -> String {
         match self {
             Self::NotFound(name) => format!("tool '{name}' not found"),
-            Self::InvalidInput(s) | Self::Abort(s) | Self::Internal(s) => s.clone(),
+            Self::InvalidInput(s) | Self::Validation(s) | Self::Abort(s) | Self::Internal(s) => {
+                s.clone()
+            }
+        }
+    }
+    /// Native result wrappers differ for pre-execution validation and thrown errors.
+    #[must_use]
+    pub fn model_tool_result_content(&self) -> String {
+        match self {
+            Self::Validation(message) => format!("<tool_use_error>{message}</tool_use_error>"),
+            _ => format!("Error: {}", self.model_facing_message()),
         }
     }
 }

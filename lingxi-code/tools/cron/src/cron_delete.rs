@@ -42,6 +42,7 @@ const CRON_DELETE_DESCRIPTION: &str = "Cancel a scheduled cron job by ID";
 
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -115,7 +116,13 @@ async fn locate_accessible_job(
             }
         }
     }
-    if job_exists(tool_ctx.fs.as_ref(), &tool_ctx.cwd(), id).await {
+    if job_exists(
+        tool_ctx.fs.as_ref(),
+        &tool_ctx.session_cwd.project_root(),
+        id,
+    )
+    .await
+    {
         Some(if owner.is_none() {
             JobLocation::Durable
         } else {
@@ -148,6 +155,9 @@ impl Tool for CronDeleteTool {
     fn search_hint(&self) -> Option<&str> {
         Some("cancel a scheduled cron job")
     }
+    fn native_input_validation(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }
@@ -163,7 +173,9 @@ impl Tool for CronDeleteTool {
         true
     }
     fn get_path(&self, _: &Value) -> Option<std::path::PathBuf> {
-        Some(cron::scheduled_tasks_path(&self.ctx.cwd()))
+        Some(cron::tasks_file::session_scheduled_tasks_path(
+            &self.ctx.session_cwd.project_root(),
+        ))
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -186,7 +198,7 @@ impl Tool for CronDeleteTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronDelete removes a cron job from .lingxi/scheduled_tasks.json".into(),
+                reason: "CronDelete removes a cron job from .claude/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -199,8 +211,11 @@ impl Tool for CronDeleteTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        // PARITY 2.1.263 `mbn(true)`; `.claude/` → `.lingxi/`.
-        "Cancel a cron job previously scheduled with CronCreate. Removes it from .lingxi/scheduled_tasks.json (durable jobs) or the in-memory session store (session-only jobs).".into()
+        if !crate::schedule_cron::durable_enabled() {
+            return "Cancel a cron job previously scheduled with CronCreate. Removes it from the in-memory session store.".into();
+        }
+        // PARITY 2.1.263 `mbn(true)`.
+        "Cancel a cron job previously scheduled with CronCreate. Removes it from .claude/scheduled_tasks.json (durable jobs) or the in-memory session store (session-only jobs).".into()
     }
 
     async fn validate_input(
@@ -289,31 +304,37 @@ impl Tool for CronDeleteTool {
         // Read-modify-write the single `{ "tasks": [...] }` file: drop the task
         // with the matching id and write the rest back. A missing file / missing
         // id surfaces the byte-exact "No scheduled job with id '<id>'" error.
-        let path = cron_file_path(&self.ctx.cwd());
+        let path = cron_file_path(&self.ctx.session_cwd.project_root());
         let _process_guard = cron::lock_cron_file().await;
-        let _file_guard =
-            match cron::tasks_file::lock_scheduled_tasks(self.ctx.fs.as_ref(), &self.ctx.cwd())
-                .await
-            {
-                Ok(guard) => guard,
-                Err(e) => {
-                    emit_failed(&bus, "io_lock", started.elapsed().as_millis() as u64).await;
-                    return Err(ToolError::Io(format!(
-                        "CronDelete: io error at {}: {e}",
-                        path.display()
-                    )));
-                }
-            };
-        let body =
-            match cron::tasks_file::read_tasks_body(self.ctx.fs.as_ref(), &self.ctx.cwd()).await {
-                Ok(b) => b,
-                Err(_) => {
-                    emit_failed(&bus, "not_found", started.elapsed().as_millis() as u64).await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "No scheduled job with id '{id}'"
-                    )));
-                }
-            };
+        let _file_guard = match cron::tasks_file::lock_scheduled_tasks(
+            self.ctx.fs.as_ref(),
+            &self.ctx.session_cwd.project_root(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(e) => {
+                emit_failed(&bus, "io_lock", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::Io(format!(
+                    "CronDelete: io error at {}: {e}",
+                    path.display()
+                )));
+            }
+        };
+        let body = match cron::tasks_file::read_tasks_body(
+            self.ctx.fs.as_ref(),
+            &self.ctx.session_cwd.project_root(),
+        )
+        .await
+        {
+            Ok(b) => b,
+            Err(_) => {
+                emit_failed(&bus, "not_found", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::InvalidInput(format!(
+                    "No scheduled job with id '{id}'"
+                )));
+            }
+        };
         let mut doc = cron::tasks_file::parse_tasks(&body);
         let before = doc.tasks.len();
         doc.tasks.retain(|t| t.id != id);
@@ -325,9 +346,12 @@ impl Tool for CronDeleteTool {
         }
 
         let updated = cron::tasks_file::serialize_tasks(&doc);
-        if let Err(e) =
-            cron::tasks_file::write_tasks_body(self.ctx.fs.as_ref(), &self.ctx.cwd(), &updated)
-                .await
+        if let Err(e) = cron::tasks_file::write_tasks_body(
+            self.ctx.fs.as_ref(),
+            &self.ctx.session_cwd.project_root(),
+            &updated,
+        )
+        .await
         {
             emit_failed(&bus, "io_remove", started.elapsed().as_millis() as u64).await;
             return Err(ToolError::Io(format!(
@@ -380,7 +404,7 @@ mod tests {
         }
     }
 
-    /// Seed `<root>/.lingxi/scheduled_tasks.json` with the given task ids.
+    /// Seed `<root>/.claude/scheduled_tasks.json` with the given task ids.
     async fn seed_ids(root: &Path, ids: &[&str]) {
         let path = cron_file_path(root);
         tokio::fs::create_dir_all(path.parent().unwrap())
@@ -390,6 +414,8 @@ mod tests {
             tasks: ids
                 .iter()
                 .map(|id| cron::tasks_file::CronTask {
+                    creator: Default::default(),
+                    automation: None,
                     id: (*id).into(),
                     cron: "*/5 * * * *".into(),
                     prompt: "echo hi".into(),

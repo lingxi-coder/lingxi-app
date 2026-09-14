@@ -172,6 +172,13 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            return self.service.messages_create_side_query_with_thinking(
+                &settings.model, Some(&settings.provider), system, msgs, tools,
+                None, None, Vec::new(), Some(settings.thinking), settings.effort,
+                None, Some("scheduled_task"),
+            ).await;
+        }
         self.service
             .messages_create(model, profile, system, msgs, tools)
             .await
@@ -229,6 +236,15 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
         context_hint: Option<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            let mut request = self.service.build_side_query_request_with_thinking(
+                &settings.model, Some(&settings.provider), system, msgs, tools,
+                None, None, Vec::new(), Some(settings.thinking), settings.effort,
+                None, Some("scheduled_task"),
+            )?;
+            request.context_hint = context_hint;
+            return self.service.execute_side_query_request(request).await;
+        }
         self.service
             .messages_create_with_context_hint(model, profile, system, msgs, tools, context_hint)
             .await
@@ -243,6 +259,15 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
         max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            let request = self.service.build_side_query_request_with_thinking(
+                &settings.model, Some(&settings.provider), system, msgs, tools,
+                Some(max_tokens), None, Vec::new(), Some(settings.thinking), settings.effort,
+                None, Some("scheduled_task"),
+            )?;
+
+            return self.service.execute_side_query_request(request).await;
+        }
         self.service
             .messages_create_with_opts(model, profile, system, msgs, tools, max_tokens)
             .await
@@ -259,6 +284,15 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         is_subscriber: bool,
         is_enterprise: bool,
     ) -> Result<LlmResponse, LlmError> {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            let request = self.service.build_side_query_request_with_thinking(
+                &settings.model, Some(&settings.provider), system, msgs, tools,
+                None, None, Vec::new(), Some(settings.thinking), settings.effort,
+                None, Some("scheduled_task"),
+            )?;
+
+            return self.service.execute_side_query_request(request).await;
+        }
         self.service
             .messages_create_with_fallback(
                 model,
@@ -282,6 +316,15 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
         initial_consecutive_overloaded: u8,
     ) -> Result<LlmResponse, LlmError> {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            let request = self.service.build_side_query_request_with_thinking(
+                &settings.model, Some(&settings.provider), system, msgs, tools,
+                None, None, Vec::new(), Some(settings.thinking), settings.effort,
+                None, Some("scheduled_task"),
+            )?;
+
+            return self.service.execute_side_query_request(request).await;
+        }
         self.service
             .messages_create_seeded(
                 model,
@@ -569,6 +612,7 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
         let description =
             description.or_else(|| model_description(&request_model).map(str::to_string));
         platform_api::orchestrator::ModelListing {
+            connection: Default::default(),
             display_model,
             request_model,
             provider_label: label,
@@ -587,7 +631,6 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
             // picker shows nothing here rather than offering a pick that only
             // fails once every panel has spent.
             fusion_analyst_capable: false,
-            connection: Default::default(),
         }
     };
 
@@ -956,6 +999,14 @@ impl StreamingApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            let request = self.service.build_side_query_request_with_thinking(
+                &settings.model, Some(&settings.provider), system, messages, tools,
+                None, None, Vec::new(), Some(settings.thinking), settings.effort,
+                None, Some("scheduled_task"),
+            )?;
+            return self.service.stream_request(request).await;
+        }
         // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
         // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
         // the pre-M4 body byte-identical.
@@ -1135,6 +1186,24 @@ mod tests {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 5, "output_tokens": 2}
         })
+    }
+
+    #[tokio::test]
+    async fn scheduled_settings_reach_wire_without_changing_adapter_defaults() {
+        let transport = FakeTransport::always(ProviderResponse {status: 200, headers: BTreeMap::new(), body_json: ok_response_json(), request_id: None});
+        let adapter = make_adapter(transport.clone()).with_initial_effort(Some(serde_json::json!("low")));
+        let settings = crate::scheduled_turn::ScheduledSettings {
+            model: "claude-sonnet-4-20250514".into(), provider: "anthropic".into(),
+            reasoning: platform_api::ReasoningSelection::Disabled,
+            thinking: llm_client::model::thinking::ThinkingConfig::Disabled,
+            effort: None,
+        };
+        let _ = crate::scheduled_turn::SETTINGS.scope(settings, StreamingApiClient::stream(&adapter, "ignored/default", None, None, Vec::new(), Vec::new())).await;
+        let request = transport.seen.lock().unwrap()[0].body_json.clone();
+        assert_eq!(request["model"], "claude-sonnet-4-20250514");
+        assert!(request["output_config"]["effort"].is_null());
+        assert!(crate::scheduled_turn::current().is_none());
+        assert_eq!(adapter.current_effort(), Some(serde_json::json!("low")));
     }
 
     /// Build the thin `ProviderApiAdapter` over an `ApiService` constructed exactly

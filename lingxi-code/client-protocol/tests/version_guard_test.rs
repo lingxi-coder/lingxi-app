@@ -253,6 +253,8 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::MessageIdentity.message_id", "String");
     put("ClientEvent::MessageRetracted", "message_retracted");
     put("ClientEvent::MessageRetracted.message_id", "String");
+    put("ClientEvent::ScheduledTaskFire", "scheduled_task_fire");
+    put("ClientEvent::ScheduledTaskFire.message", "String");
     put("ClientEvent::SystemNotice", "system_notice");
     put("ClientEvent::SystemNotice.message", "String");
     put("ClientEvent::SystemNotice.is_error", "bool");
@@ -431,6 +433,16 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::ProviderConnectionTested",
         "provider_connection_tested",
     );
+    put("ClientEvent::OpenAiOAuthUpdated", "openai_oauth_updated");
+    put(
+        "ClientEvent::OpenAiOAuthUpdated.session",
+        "OpenAiOAuthSessionDto",
+    );
+    put("OpenAiOAuthSessionDto.access_token", "String");
+    put("OpenAiOAuthSessionDto.refresh_token", "Option<String>");
+    put("OpenAiOAuthSessionDto.expires_at", "u64");
+    put("OpenAiOAuthSessionDto.account_id", "Option<String>");
+    put("OpenAiOAuthSessionDto.fedramp", "bool");
     put("ClientEvent::ProviderConnectionTested.operation_id", "u64");
     put(
         "ClientEvent::ProviderConnectionTested.provider_id",
@@ -1104,6 +1116,11 @@ fn current_contract_index() -> ContractIndex {
 
     // ── MessageDto / MessageBlockDto (message.rs) ─────────────────────────
     put("MessageDto.role", "String");
+    put("MessageDto.loop_wakeup", "Option<LoopWakeupDto>");
+    put("LoopWakeupDto.message", "String");
+    put("LoopWakeupDto.companion", "Option<String>");
+    put("LoopWakeupDto.streak", "u32");
+    put("LoopWakeupDto.since_ms", "u64");
     put("MessageDto.blocks", "Vec<MessageBlockDto>");
 
     put("MessageBlockDto::Text", "text");
@@ -3042,6 +3059,7 @@ fn contract_index_covers_every_dto() {
         message: String::new(),
     };
     let _msg = MessageDto {
+        loop_wakeup: None,
         role: String::new(),
         blocks: vec![MessageBlockDto::Text {
             text: String::new(),
@@ -3174,8 +3192,10 @@ fn contract_index_covers_every_dto() {
             },
         },
         TaskRowDto {
-            unread: false, model: None, effort: None,
-        kind: None,
+            unread: false,
+            model: None,
+            effort: None,
+            kind: None,
             awaiting_plan_approval: false,
             task_id: String::new(),
             task_type: String::new(),

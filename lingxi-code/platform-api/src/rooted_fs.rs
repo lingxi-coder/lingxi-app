@@ -1998,13 +1998,13 @@ mod imp {
         })
     }
 
-    #[cfg(any(test, target_os = "ios"))]
+    #[cfg(any(test, target_os = "ios", target_os = "android"))]
     pub(super) fn open_direct_root_checked(
         root: &Path,
         expected: Option<&RootIdentity>,
     ) -> Result<OwnedFd, FsError> {
-        // An iOS app may open its own container directly, but its sandbox
-        // rejects opening protected ancestors such as `/private/var/mobile`.
+        // Mobile apps may open their own container directly, but their sandbox
+        // rejects listing protected ancestors (including `/` on Android).
         // Reject every symlink in the supplied path before and after the open,
         // then prove the opened handle still names the resolved directory.
         let canonical_before = std::fs::canonicalize(root).map_err(|error| map_io(root, error))?;
@@ -2079,11 +2079,11 @@ mod imp {
         #[cfg(not(any(target_os = "ios", target_os = "macos")))]
         let root_alias_free = root.to_path_buf();
 
-        // iOS grants access to the app container itself without granting
-        // directory traversal over its system-owned ancestors. Directly pin
+        // iOS and Android grant access to the app container itself without
+        // granting directory reads over system-owned ancestors. Directly pin
         // an absolute, alias-free root after the checks above instead of
         // starting the walk at `/`, which the sandbox rejects with EACCES.
-        #[cfg(target_os = "ios")]
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         if root_alias_free.is_absolute() {
             return open_direct_root_checked(&root_alias_free, expected);
         }
@@ -3340,6 +3340,16 @@ mod tests {
         let real = tempfile::tempdir().unwrap();
         let canonical_real = std::fs::canonicalize(real.path()).unwrap();
         drop(imp::open_direct_root_checked(&canonical_real, None).unwrap());
+        let identity = root_identity(&canonical_real).unwrap();
+        drop(imp::open_direct_root_checked(&canonical_real, Some(&identity)).unwrap());
+        let wrong_identity = RootIdentity {
+            volume: identity.volume,
+            file: identity.file ^ 1,
+        };
+        assert!(matches!(
+            imp::open_direct_root_checked(&canonical_real, Some(&wrong_identity)),
+            Err(FsError::OutsideWorkspace(_))
+        ));
 
         let parent = tempfile::tempdir().unwrap();
         let victim = tempfile::tempdir().unwrap();

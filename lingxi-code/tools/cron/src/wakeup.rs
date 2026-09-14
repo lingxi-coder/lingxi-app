@@ -1,10 +1,11 @@
 //! `ScheduleWakeup` tool — `/loop` dynamic (self-pace) mode.
 //!
-//! PARITY: Claude Code 2.1.263 — tool definition `gWn` (schema `Uqo`, output
-//! `Hqo`, prompt `iZn`, description `aZn`) and the runtime module exporting
-//! `JXn` (schedule), `QXn` (keepalive), `ZXn` (stop), `t3t` (user abort). In
-//! 2.1.263 the dynamic mode has NO feature gate: the model's call always
-//! schedules (or ages out), and `stop: true` ends the loop.
+//! PARITY: Claude Code 2.1.270 — definition `ryr`, schemas `qvs` / `Vvs`,
+//! prompt `bgr`, description `wgr`; runtime `hpr` (schedule), `ypr`
+//! (keepalive), `_pr` (stop), `tXt` (user abort). The executable oracle
+//! in `tests/oracle` locks the native artifact hash and observable outputs.
+//! Dynamic mode has no feature gate: model calls schedule (or age out),
+//! and `stop: true` ends the loop.
 //!
 //! Runtime layering: this tool lives in a LOW crate (`tool-cron`) and cannot
 //! reach the per-connection message queue (owned at the bridge composition
@@ -32,8 +33,8 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    CoercedInput, DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult,
+    ToolError, ToolStaticContext, ValidationError,
 };
 
 use crate::autonomous_loop::{self as al, DynamicLoopRecord};
@@ -647,10 +648,17 @@ fn local_hhmmss(epoch_ms: i64) -> String {
 /// verbatim (binary `resolveLoopDefaultFire`).
 #[must_use]
 pub fn resolve_wakeup_prompt(prompt: &str) -> String {
-    let trimmed = prompt.trim();
-    if al::is_loop_default_sentinel(trimmed) {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        return al::resolve_loop_default_fire(trimmed, &cwd);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    resolve_wakeup_prompt_at(prompt, &cwd)
+}
+
+/// Resolve a wakeup against its owning session's working directory.
+#[must_use]
+pub fn resolve_wakeup_prompt_at(prompt: &str, cwd: &std::path::Path) -> String {
+    // Upstream sentinel predicates compare exact strings; padded sentinel-like
+    // prompts are ordinary user text and must not activate the autonomous loop.
+    if al::is_loop_default_sentinel(prompt) {
+        return al::resolve_loop_default_fire(prompt, cwd);
     }
     prompt.to_string()
 }
@@ -746,6 +754,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
     // boolean.optional(), noop: boolean.optional()})`. Nothing is required at
     // the schema level; `call` enforces the "required unless stop" rule.
     json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -777,6 +786,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
 static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
+        "required": ["scheduledFor", "clampedDelaySeconds", "wasClamped"],
         "properties": {
             "scheduledFor": {
                 "type": "number",
@@ -936,15 +946,55 @@ fn stopped_result(cancelled: usize) -> ToolCallResult {
     }))
 }
 
+/// Render with an explicit clock so the full model-visible result is byte-tested.
+fn scheduled_wakeup_text(scheduled: ScheduledWakeup, now_ms: i64) -> String {
+    let hhmmss = local_hhmmss(scheduled.scheduled_for_ms);
+    let secs = ((scheduled.scheduled_for_ms - now_ms) as f64 / 1000.0)
+        .round()
+        .max(0.0) as i64;
+    let clamped_suffix = if scheduled.was_clamped {
+        format!(
+            " (clamped to {}s from your requested value)",
+            scheduled.clamped_delay_seconds
+        )
+    } else {
+        String::new()
+    };
+    format!(
+            "Next wakeup scheduled for {hhmmss} (in {secs}s){clamped_suffix}. Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
+        )
+}
+
 /// Binary `DM(number)` — accept a JSON number or a numeric string.
 fn coerce_delay(value: Option<&Value>) -> Result<Option<f64>, ValidationError> {
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(n)) => Ok(n.as_f64()),
         Some(Value::String(s)) => {
-            s.trim().parse::<f64>().map(Some).map_err(|_| {
-                ValidationError("ScheduleWakeup: `delaySeconds` must be a number".into())
-            })
+            // Upstream TH only coerces signed decimal strings and finite values.
+            // Rust's float parser also accepts exponents, infinities and `.5`.
+            let trimmed = s.trim_matches(|c: char| {
+                // ECMAScript trim includes BOM but excludes U+0085.
+                matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}'
+                    | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}'
+                    | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
+            });
+            let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
+            let mut parts = unsigned.split('.');
+            let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+            let decimal = parts.next().is_some_and(digits)
+                && parts.next().is_none_or(digits)
+                && parts.next().is_none();
+            if decimal {
+                if let Ok(value) = trimmed.parse::<f64>() {
+                    if value.is_finite() {
+                        return Ok(Some(value));
+                    }
+                }
+            }
+            Err(ValidationError(
+                "ScheduleWakeup: `delaySeconds` must be a number".into(),
+            ))
         }
         Some(_) => Err(ValidationError(
             "ScheduleWakeup: `delaySeconds` must be a number".into(),
@@ -993,11 +1043,28 @@ impl Tool for ScheduleWakeupTool {
     fn name(&self) -> &str {
         SCHEDULE_WAKEUP_TOOL_NAME
     }
+    fn native_input_validation(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }
     fn output_schema(&self) -> Option<&Value> {
         Some(&OUTPUT_SCHEMA)
+    }
+    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
+        // Zod's TH preprocessing runs before type validation upstream. Move the
+        // same accepted string rewrite ahead of our exported JSON-schema gate.
+        if !input.get("delaySeconds")?.is_string() {
+            return None;
+        }
+        let delay = coerce_delay(input.get("delaySeconds")).ok()??;
+        let mut normalized = input.clone();
+        normalized["delaySeconds"] = json!(delay);
+        Some(CoercedInput {
+            input: normalized,
+            shape_class: "delaySeconds".into(),
+        })
     }
     fn search_hint(&self) -> Option<&str> {
         Some(SEARCH_HINT)
@@ -1029,20 +1096,16 @@ impl Tool for ScheduleWakeupTool {
         InterruptBehavior::Block
     }
 
-    /// PARITY 2.1.263 `create({permissions})`:
-    /// `if(mode==="auto") return {behavior:"passthrough", message:"Scheduling a
-    /// /loop wakeup requires classifier review."}; return {behavior:"allow", updatedInput}`.
-    ///
-    /// The port has no `passthrough` variant and needs none. In the binary a
-    /// tool-local `allow` SHORT-CIRCUITS the permission pipeline, so auto mode
-    /// has to decline explicitly or the classifier never sees the call. Here the
-    /// tool-local result is not a bypass: `ToolInvoker` reads it only to honour a
-    /// `Deny` and to route a protected `Ask`, then runs the outer permission gate
-    /// regardless (`tool_invoker_impl.rs`, the only dispatch path). An auto-mode
-    /// branch would therefore change nothing — and there is no classifier to hand
-    /// off to either (`tools/agent/src/classifier_handoff.rs` documents that
-    /// subsystem as absent). Revisit this if a tool-local `Allow` ever becomes
-    /// authoritative.
+    /// Upstream `.270` returns tool-local `passthrough` in auto mode so the
+    /// outer classifier can review the request; otherwise it returns `allow`.
+    /// Our Allow already has passthrough semantics: both turn_loop.rs and
+    /// tool_invoker_impl.rs preserve the outer policy result for tool-local
+    /// Allow. Returning Ask here would incorrectly force another user prompt.
+    /// PermissionPolicy carries this tool's non-Auto allow baseline after
+    /// explicit rules. In Auto, PolicyPermissionGate invokes the existing
+    /// classifier, which returns Pass and falls back to the prompt transport.
+    /// Matching Anthropic's LLM classification requires that shared classifier,
+    /// not a tool-local bypass or fabricated deterministic approval.
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -1071,7 +1134,10 @@ impl Tool for ScheduleWakeupTool {
         input: &Value,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        validate_wakeup_input(input)
+        // Required-unless-stop checks are thrown from call upstream, producing
+        // Error: ..., rather than the validateInput <tool_use_error> wrapper.
+        let _ = input;
+        Ok(())
     }
 
     async fn call(
@@ -1146,21 +1212,7 @@ impl Tool for ScheduleWakeupTool {
         // PARITY: `mapToolResultToToolResultBlockParam` — local HH:MM:SS,
         // `Math.max(0, Math.round((e - Date.now())/1000))`, clamp suffix.
         let now_ms = now_epoch_ms();
-        let hhmmss = local_hhmmss(scheduled.scheduled_for_ms);
-        let secs = ((scheduled.scheduled_for_ms - now_ms) as f64 / 1000.0)
-            .round()
-            .max(0.0) as i64;
-        let clamped_suffix = if scheduled.was_clamped {
-            format!(
-                " (clamped to {}s from your requested value)",
-                scheduled.clamped_delay_seconds
-            )
-        } else {
-            String::new()
-        };
-        let model_content = format!(
-            "Next wakeup scheduled for {hhmmss} (in {secs}s){clamped_suffix}. Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
-        );
+        let model_content = scheduled_wakeup_text(scheduled, now_ms);
 
         Ok(result(json!({
             "scheduledFor": scheduled.scheduled_for_ms,
@@ -1251,7 +1303,7 @@ mod tests {
         let g = al::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         al::reset_loop_runtime_state();
         al::reset_autonomous_loop_delivered();
-        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         g
     }
@@ -1404,6 +1456,291 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actual_cron_tools_and_nested_dispatch_match_native_zod_corpus() {
+        use platform_api::tool_invoker::{
+            SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker,
+        };
+        fn invocation_context() -> SubagentInvocationContext {
+            SubagentInvocationContext {
+                permission_pause_observer: None,
+                parent_agent_id: None,
+                origin_session_id: None,
+                tool_execution_policy: ToolExecutionPolicy::Ordinary,
+                agent_name: None,
+                team_name: None,
+                is_async: false,
+                is_non_interactive_session: true,
+                can_show_permission_prompts: false,
+                cwd: None,
+                tool_use_id: None,
+                assistant_message_id: None,
+                depth: 0,
+                observer: None,
+                parent_model: None,
+                parent_model_profile: None,
+                mode_override: None,
+                request_source: None,
+                frozen_command_denies: Vec::new(),
+            }
+        }
+        fn schema_shape(mut value: Value) -> Value {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("description");
+                if object.get("required").is_some_and(|v| v == &json!([])) {
+                    object.remove("required");
+                }
+                for child in object.values_mut() {
+                    *child = schema_shape(child.take());
+                }
+            }
+            value
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf());
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(ScheduleWakeupTool::new(ctx.clone())),
+            Arc::new(crate::CronCreateTool::new(ctx.clone())),
+            Arc::new(crate::CronDeleteTool::new(ctx.clone())),
+            Arc::new(crate::CronListTool::new(ctx)),
+        ];
+        let mut registry = tool_api::ToolRegistry::new();
+        for tool in &tools {
+            registry.register_builtin(tool.clone());
+        }
+        let invoker = tool_api::RegistryToolInvoker::new(Arc::new(registry));
+        let oracle: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/malformed_input_2_1_270.json"
+        ))
+        .unwrap();
+        for tool in &tools {
+            assert!(tool.native_input_validation());
+            assert_eq!(
+                schema_shape(tool.input_schema().clone()),
+                schema_shape(oracle["schemas"][tool.name()].clone()),
+                "schema {}",
+                tool.name()
+            );
+        }
+        for (index, case) in oracle["cases"].as_array().unwrap().iter().enumerate() {
+            let name = case["tool"].as_str().unwrap();
+            let tool = tools.iter().find(|tool| tool.name() == name).unwrap();
+            let actual = tool
+                .coerce_input(&case["input"])
+                .map_or_else(|| case["input"].clone(), |c| c.input);
+            assert_eq!(
+                tool_api::native_schema::js_json(&actual, false),
+                tool_api::native_schema::js_json(&case["coerced"], false),
+                "coercion {index}"
+            );
+            if case["success"] == true {
+                let normalized = tool_api::native_schema::normalize_flat_input(&actual)
+                    .unwrap_or_else(|| actual.clone());
+                let expected = case["normalized"].as_object().unwrap();
+                assert_eq!(
+                    normalized.as_object().unwrap().len(),
+                    expected.len(),
+                    "parsed keys {index}"
+                );
+                for (key, value) in expected {
+                    assert_eq!(
+                        tool_api::native_schema::js_json(&normalized[key], false),
+                        tool_api::native_schema::js_json(value, false),
+                        "parsed {index} {key}"
+                    );
+                }
+            }
+            if case["success"] == false {
+                let error = invoker
+                    .invoke(name, case["input"].clone(), invocation_context())
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.model_tool_result_content(),
+                    format!(
+                        "<tool_use_error>InputValidationError: {}</tool_use_error>",
+                        case["display"].as_str().unwrap()
+                    ),
+                    "nested case {index}"
+                );
+            } else if let Some(message) = case["callError"].as_str() {
+                assert!(
+                    tool.validate_input(&actual, &fresh_ctx()).await.is_ok(),
+                    "native missing-field checks run in call"
+                );
+                let error = invoker
+                    .invoke(name, case["input"].clone(), invocation_context())
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.model_tool_result_content(),
+                    format!("Error: {message}"),
+                    "call case {index}"
+                );
+            }
+        }
+        let error = invoker
+            .invoke("CronDelete", json!({"id":"missing"}), invocation_context())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.model_tool_result_content(),
+            "<tool_use_error>No scheduled job with id 'missing'</tool_use_error>"
+        );
+        let error = invoker
+            .invoke(
+                "CronCreate",
+                json!({"cron":"invalid","prompt":"p"}),
+                invocation_context(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.model_tool_result_content(), "<tool_use_error>Invalid cron expression 'invalid'. Expected 5 fields: M H DoM Mon DoW.</tool_use_error>");
+    }
+
+    #[test]
+    fn latest_executable_oracle_schema_prompt_timing_and_coercion() {
+        let oracle: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/schedule_wakeup_2_1_270.json"
+        ))
+        .unwrap();
+        assert_eq!(*SCHEMA, oracle["inputSchema"]);
+        assert_eq!(*OUTPUT_SCHEMA, oracle["outputSchema"]);
+        for (name, ttl) in [
+            ("oneHour", PromptCacheTtl::OneHour),
+            ("fiveMinutes", PromptCacheTtl::FiveMinutes),
+            ("unknown", PromptCacheTtl::Unknown),
+        ] {
+            assert_eq!(
+                build_prompt(ttl).as_bytes(),
+                oracle["prompts"][name].as_str().unwrap().as_bytes()
+            );
+        }
+        for case in oracle["timing"].as_array().unwrap() {
+            let raw = case["raw"].as_str().unwrap().parse::<f64>().unwrap();
+            let actual = wakeup_target(raw, case["nowMs"].as_i64().unwrap());
+            assert_eq!(
+                actual.clamped_delay_seconds,
+                case["clamped"].as_i64().unwrap(),
+                "{case}"
+            );
+            assert_eq!(
+                actual.was_clamped,
+                case["wasClamped"].as_bool().unwrap(),
+                "{case}"
+            );
+            assert_eq!(
+                actual.target_ms,
+                case["targetMs"].as_i64().unwrap(),
+                "{case}"
+            );
+        }
+        for case in oracle["coercion"].as_array().unwrap() {
+            let actual = coerce_delay(Some(&case["input"]));
+            assert_eq!(
+                actual.is_ok(),
+                case["accepted"].as_bool().unwrap(),
+                "{case}"
+            );
+            if let Ok(Some(value)) = actual {
+                assert_eq!(value, case["value"].as_f64().unwrap());
+            }
+        }
+        for case in oracle["errors"].as_array().unwrap() {
+            assert_eq!(
+                validate_wakeup_input(&case["input"]).unwrap_err().0,
+                case["message"].as_str().unwrap()
+            );
+        }
+        for case in oracle["results"].as_array().unwrap().iter().take(3) {
+            let result = if case["input"]["stopped"] == true {
+                stopped_result(case["input"]["cancelledWakeups"].as_u64().unwrap() as usize)
+            } else {
+                zero_triple_result("")
+            };
+            assert_eq!(result.data["model_content"], case["content"]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn latest_local_schedule_result_bytes() {
+        let oracle: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/schedule_wakeup_2_1_270.json"
+        ))
+        .unwrap();
+        if let Ok(zone) = std::env::var("LINGXI_WAKEUP_ORACLE_TZ") {
+            for case in oracle["localResults"][&zone].as_array().unwrap() {
+                let scheduled = ScheduledWakeup {
+                    scheduled_for_ms: case["input"]["scheduledFor"].as_i64().unwrap(),
+                    clamped_delay_seconds: case["input"]["clampedDelaySeconds"].as_i64().unwrap(),
+                    was_clamped: case["input"]["wasClamped"].as_bool().unwrap(),
+                };
+                assert_eq!(
+                    scheduled_wakeup_text(scheduled, case["nowMs"].as_i64().unwrap()),
+                    case["content"].as_str().unwrap(),
+                    "zone {zone} {case}"
+                );
+            }
+            return;
+        }
+        // Each timezone runs in its own process: no mutation races with other tests.
+        for zone in oracle["localResults"].as_object().unwrap().keys() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "wakeup::tests::latest_local_schedule_result_bytes",
+                    "--nocapture",
+                ])
+                .env("LINGXI_WAKEUP_ORACLE_TZ", zone)
+                .env("TZ", zone)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{zone}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_string_coercion_runs_before_schema_validation() {
+        let tool = tool_with(Rec::new());
+        let oracle: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/schedule_wakeup_2_1_270.json"
+        ))
+        .unwrap();
+        for case in oracle["coercion"].as_array().unwrap() {
+            let original =
+                json!({"delaySeconds": case["input"], "reason":"r", "prompt":"p", "noop":false});
+            let normalized = tool.coerce_input(&original);
+            assert_eq!(
+                normalized.is_some(),
+                case["accepted"].as_bool().unwrap(),
+                "{case}"
+            );
+            if let Some(normalized) = normalized {
+                assert_eq!(
+                    normalized.input["delaySeconds"].as_f64(),
+                    case["value"].as_f64()
+                );
+                assert_eq!(normalized.input["reason"], original["reason"]);
+                assert_eq!(normalized.input["prompt"], original["prompt"]);
+                assert_eq!(normalized.input["noop"], original["noop"]);
+                assert_eq!(normalized.shape_class, "delaySeconds");
+                assert!(normalized.input["delaySeconds"].is_number());
+            }
+            assert!(
+                original["delaySeconds"].is_string(),
+                "input remains unchanged"
+            );
+        }
+        assert!(tool.coerce_input(&json!({"delaySeconds":120})).is_none());
+        assert!(tool.coerce_input(&json!({"stop":true})).is_none());
+    }
+
+    #[tokio::test]
     async fn description_search_hint_and_prompt_surface() {
         let tool = tool_with(Rec::new());
         assert_eq!(
@@ -1440,8 +1777,8 @@ mod tests {
         let tool = tool_with(Rec::new());
         let tool = &tool;
         let err = |v: Value| async move {
-            let ctx = fresh_ctx();
-            tool.validate_input(&v, &ctx).await.err().map(|e| e.0)
+            let _ = tool;
+            validate_wakeup_input(&v).err().map(|e| e.0)
         };
         assert_eq!(
             err(json!({"reason": "r", "prompt": "p", "noop": true}))
@@ -1794,9 +2131,9 @@ mod tests {
         assert_eq!(maybe_arm_keepalive(&sched).await, None);
         // Gate off via the env var → no keepalive.
         al::begin_loop_tick("5m /x".into());
-        std::env::set_var("LINGXI_LOOP_KEEPALIVE", "");
+        std::env::set_var("CLAUDE_CODE_LOOP_KEEPALIVE", "");
         assert_eq!(maybe_arm_keepalive(&sched).await, None);
-        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
         assert_eq!(rec.calls.lock().unwrap().len(), 1);
     }
 
@@ -1825,6 +2162,17 @@ mod tests {
         assert!(resolved.starts_with("# Autonomous loop check\n\n"));
         assert!(resolved.contains("\n\n---\n\n# Autonomous loop tick (dynamic pacing)\n\n"));
         assert_eq!(resolve_wakeup_prompt("5m /babysit-prs"), "5m /babysit-prs");
+        for text in [
+            " <<autonomous-loop-dynamic>> ",
+            "\u{feff}<<loop.md-dynamic>>",
+            "<<loop.md-dynamic>>\n",
+        ] {
+            assert_eq!(
+                resolve_wakeup_prompt(text),
+                text,
+                "sentinel matching is exact, not trimmed"
+            );
+        }
         assert_eq!(
             resolve_wakeup_prompt("  5m /x  "),
             "  5m /x  ",

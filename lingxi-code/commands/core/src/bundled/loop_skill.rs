@@ -1,38 +1,11 @@
-//! Bundled `/loop` skill — 1:1 port of the 2.1.191 binary's `/loop`
-//! `getPromptForCommand` builder.
+//! Bundled `/loop` prompt builders, audited against Claude Code 2.1.270.
 //!
-//! The binary registers `/loop` via `_Zm()` (cc_all.txt:521920) with a
-//! `getPromptForCommand(e,t)`. Through 2.1.2xx that dispatch was gated on two
-//! feature flags (`tengu_kairos_loop_dynamic`, `tengu_kairos_loop_prompt`); in
-//! **2.1.263 neither flag exists in the binary** and the gated branches are the
-//! only reachable ones.
-//!
-//! The dispatch matrix (see [`LoopPromptFn::build`]):
-//!   1. no-prompt (empty / interval-only) → the autonomous-default builder
-//!      `a(loopFile, dynamic)` (binary inline `a=(c,u)`); `dynamic` only when the
-//!      input is fully empty
-//!   2. otherwise → `gZm(n)`, the combined fixed-interval + dynamic prompt
-//!   3. the pre-2.1.263 cron-only variants (`dZm` usage / `fZm(n)`) are retained
-//!      for provenance but are no longer reachable
-//!
-//! The two `tengu_kairos_loop_*` flags are read through the sync flag reader
-//! [`telemetry::flag_bool`] (the port's `nt`); with no live GrowthBook fetcher
-//! wired they sit at the binary's shipped `false`, so only branch 3 is reachable
-//! — byte-identical to the shipped binary. (Unlike PERSISTENT/KEEPALIVE, the
-//! PROMPT/DYNAMIC gates are FLAG-ONLY — the binary `fJr`/`q_e` have no env layer,
-//! so there is no `LINGXI_LOOP_PROMPT`/`_DYNAMIC` env; tests flip the flags
-//! via `telemetry::test_set_flag`.) The flag-on builders live in
-//! [`cron`]'s `autonomous_loop` module (loop.md detection, the preamble, the
-//! sentinels, `logAutonomousLoopActivation`), imported here exactly as the binary
-//! loop command imports `QVe = io(T3e)`. The cloud-offer / push-notification
-//! splices (`zpc`/`Ypc`/`Kpc`) are gated on `tengu_surreal_dali` /
-//! `allow_remote_sessions` / push-notif (all default off, no port subsystem) and
-//! render "" — matching the default-disabled binary path.
-//!
-//! Literal interpolations resolve to constants here: `${VSt}` = `10m`,
-//! `${xw}` = `CronCreate`, `${t9}` = `CronDelete`,
-//! `${Kh}` = `ScheduleWakeup`, `${IA}` = `Monitor`,
-//! `${AI}` = `TaskList`, `${eP}` = `TaskStop`.
+//! Empty input starts a self-paced autonomous loop; interval-only input starts
+//! its cron variant; other input gets the combined cron/self-paced prompt.
+//! Oracle fixtures execute the extracted official JavaScript with deterministic
+//! feature gates. See tests/fixtures/loop_2_1_270/generate.mjs and provenance.json.
+//! Cloud offers are unavailable in this runtime and use the upstream disabled
+//! branch. Monitor and push-notification prompt variants follow their tool gates.
 
 use command_api::BundledPromptFn;
 
@@ -126,7 +99,7 @@ Supported suffixes: `s` (seconds, rounded up to nearest minute, min 1), `m` (min
    - `cron`: the expression from the table above
    - `prompt`: the parsed prompt from above, verbatim (slash commands are passed through unchanged)
    - `recurring`: `true`
-2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks run until cancelled, and that they can cancel with CronDelete (include the job ID).
+2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 7 days, and that they can cancel sooner with CronDelete (include the job ID).
 3. **Then immediately execute the parsed prompt now** — don't wait for the first cron fire. If it's a slash command, invoke it via the Skill tool; otherwise act on it directly.",
         default = DEFAULT_INTERVAL,
     )
@@ -153,9 +126,8 @@ use std::sync::OnceLock;
 
 use cron::{
     get_autonomous_loop_preamble, is_loop_default_prompt_enabled, is_loop_dynamic_enabled,
-    log_autonomous_loop_activation, note_loop_invoked, read_loop_file, LoopFile,
-    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
-    LOOP_FILE_SENTINEL,
+    log_autonomous_loop_activation, note_loop_invoked, LoopFile, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+    AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
 };
 use regex::Regex;
 
@@ -170,7 +142,7 @@ const CRON_DELETE: &str = "CronDelete"; // t9
 /// Binary `lZm` (cc_all.txt:521947) — interval-only matcher `^\d+[smhd]$`.
 fn interval_only_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\d+[smhd]$").unwrap())
+    RE.get_or_init(|| Regex::new(r"^[0-9]+[smhd]$").unwrap())
 }
 
 /// Binary `cZm` (cc_all.txt:521947) — trailing "every <N> <unit>" matcher.
@@ -178,7 +150,7 @@ fn every_clause_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)^every\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s*$",
+            r"(?i-u:^every)[\t\n\x0B\x0C\r \u{00A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}]+([0-9]+)[\t\n\x0B\x0C\r \u{00A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}]*(?i-u:(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days))[\t\n\x0B\x0C\r \u{00A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}]*$",
         )
         .unwrap()
     })
@@ -239,18 +211,41 @@ const CRON_TABLE: &str = "| Interval pattern      | Cron expression     | Notes 
 
 **If the interval doesn't cleanly divide its unit** (e.g. `7m` → `*/7 * * * *` gives uneven gaps at :56→:00; `90m` → 1.5h which cron can't express), pick the nearest clean interval and tell the user what you rounded to before scheduling.";
 
+/// 2.1.270 `g` / `w`: bounded monitors must be re-armed after expiry.
+fn monitor_arm(timeout: Option<u64>) -> String {
+    match timeout {
+        Some(ms) => format!("arm one now with `timeout_ms: {ms}`"),
+        None => "arm one now with `persistent: true`".to_string(),
+    }
+}
+
+fn monitor_rearm(timeout: Option<u64>, unit: &str) -> String {
+    match timeout {
+        Some(ms) => format!("A monitor expires after at most {} minutes and tells you; on later {unit} call TaskList first and re-arm only if no monitor for it is still running.", ms / 60000),
+        None if unit == "iterations" => "Arm once; on later iterations call TaskList first and skip this step if a monitor is already running.".to_string(),
+        None => "Arm once; on later ticks call TaskList first and skip if a monitor is already running.".to_string(),
+    }
+}
+
+fn monitor_timeout() -> Option<u64> {
+    cron::bounded_monitors_enabled().then(cron::bounded_monitor_timeout_ms)
+}
+
 /// 2.1.263 `A(e)` — the `/loop <input>` prompt builder: parsing rules, the
 /// fixed-interval (cron) mode and the dynamic (ScheduleWakeup) mode. `${T()}`
 /// (cloud offer) and `${I()}` (session-only line) are claude.ai-only and
 /// render "" here; `${y()}` is the push-notification outcome line.
-/// The "recurring tasks auto-expire after 7 days" confirm text is replaced by
-/// LingXi's accepted no-expiry wording.
+/// Seven-day expiry wording is preserved verbatim.
 fn build_dynamic_prompt(args: &str) -> String {
+    build_dynamic_prompt_with_monitor(args, monitor_timeout())
+}
+
+fn build_dynamic_prompt_with_monitor(args: &str, timeout: Option<u64>) -> String {
     let dynamic = format!(
         "The user wants you to self-pace. Decide what makes the next iteration worth running — a passage of time, or an observable event.
 
 1. **Run the parsed prompt now.** If it's a slash command, invoke it via the Skill tool; otherwise act on it directly.
-2. **If the next run is gated on an event** (CI finishing, a log line matching, a file changing, a PR comment) and no Monitor is already running for it: arm one now with `persistent: true`. Its events arrive as `<task-notification>` messages and wake this loop immediately — you do not wait for the ScheduleWakeup deadline. Arm once; on later iterations call TaskList first and skip this step if a monitor is already running.
+2. **If the next run is gated on an event** (CI finishing, a log line matching, a file changing, a PR comment) and no Monitor is already running for it: {arm}. Its events arrive as `<task-notification>` messages and wake this loop immediately — you do not wait for the ScheduleWakeup deadline. {rearm}
 3. **Briefly confirm**: that you're self-pacing, whether a Monitor is the primary wake signal, that you ran the task now, and what fallback delay you're about to pick. Write this as text *before* calling ScheduleWakeup — the turn ends as soon as that tool returns.
 4. **Then, as the last action of this turn, decide whether the loop continues.** If the task needs another iteration, call ScheduleWakeup with:
    - `delaySeconds`: with a Monitor armed this is the **fallback heartbeat** — how long to wait if no event fires (lean 1200–1800s; idle ticks more frequent than the task needs are pure overhead). Without a Monitor this is the cadence — pick based on what you observed. Read the tool's own description for cache-aware delay guidance.
@@ -261,6 +256,8 @@ fn build_dynamic_prompt(args: &str) -> String {
 5. **If you were woken by a `<task-notification>`** rather than this prompt: handle the event in the context of the loop task, then make the same decision. If the loop should continue, call ScheduleWakeup again with the same `prompt` and the same 1200–1800s `delaySeconds` from step 4 (the Monitor remains the wake signal; the new wakeup is only the fallback heartbeat). If the event means the work is finished, stop (step 6).
 6. **To stop the loop** — the task is complete, further iterations can't make progress, or the user asked you to stop — call ScheduleWakeup with `stop: true` (no other fields) and TaskStop any Monitor you armed (use TaskList to find the task ID if it is no longer in context). Stopping is the loop's normal ending — the user can restart it anytime with /loop.{kpc}",
         kpc = push_outcome_line(),
+        arm = monitor_arm(timeout),
+        rearm = monitor_rearm(timeout, "iterations"),
     );
     format!(
         "# /loop — schedule a recurring or self-paced prompt
@@ -291,7 +288,7 @@ Convert the interval to a cron expression:
 
 Then:
 1. Call {CRON_CREATE} with: `cron` (the expression above), `prompt` (the parsed prompt verbatim), `recurring: true`.
-2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks run until cancelled, and that the user can cancel with {CRON_DELETE} (include the job ID).{ypc}
+2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 7 days, and that the user can cancel sooner with {CRON_DELETE} (include the job ID).{ypc}
 3. **Then immediately execute the parsed prompt now** — don't wait for the first cron fire. If it's a slash command, invoke it via the Skill tool; otherwise act on it directly.
 
 ## Dynamic mode (rule 3 — no interval)
@@ -313,6 +310,15 @@ Then:
 /// builder. With a loop.md the file contents are inlined; otherwise the
 /// activation is logged and the autonomous preamble is inlined.
 fn build_autonomous(loop_file: Option<&LoopFile>, dynamic: bool, interval: &str) -> String {
+    build_autonomous_with_monitor(loop_file, dynamic, interval, monitor_timeout())
+}
+
+fn build_autonomous_with_monitor(
+    loop_file: Option<&LoopFile>,
+    dynamic: bool,
+    interval: &str,
+    timeout: Option<u64>,
+) -> String {
     let path = loop_file
         .map(|f| f.path.display().to_string())
         .unwrap_or_default();
@@ -360,7 +366,7 @@ The user invoked `/loop` with no prompt and no interval. Run the autonomous chec
         };
         let action = format!(
             "1. **Run {what} now**, following the instructions inlined below.
-2. **If the next tick is gated on an event** (CI finishing, a PR comment, a log line) and no {MONITOR} is already running for it: arm one now with `persistent: true`. Its events wake this loop immediately — you do not wait for the {SCHEDULE_WAKEUP} deadline. Arm once; on later ticks call {TASK_LIST} first and skip if a monitor is already running.
+2. **If the next tick is gated on an event** (CI finishing, a PR comment, a log line) and no {MONITOR} is already running for it: {arm}. Its events wake this loop immediately — you do not wait for the {SCHEDULE_WAKEUP} deadline. {rearm}
 3. **Briefly confirm**: {confirm}, whether a {MONITOR} is the primary wake signal, and what fallback delay you're about to pick. Write this as text *before* calling {SCHEDULE_WAKEUP} — the turn ends as soon as that tool returns.
 4. **Then, as the last action of this turn, decide whether the loop continues.** If the next check is worth running, call {SCHEDULE_WAKEUP} with:
    - `delaySeconds`: with a {MONITOR} armed this is the fallback heartbeat (lean 1200–1800s). Without one, pick based on what you observed this turn — quiet branch? wait longer. Lots in flight? wait shorter. Read the tool's own description for cache-aware delay guidance.
@@ -371,6 +377,8 @@ The user invoked `/loop` with no prompt and no interval. Run the autonomous chec
 5. **If woken by a `<task-notification>`** rather than this prompt: handle the event, then make the same decision. If the loop should continue, call {SCHEDULE_WAKEUP} again with `{sentinel}` and the same 1200–1800s `delaySeconds` (the {MONITOR} remains the wake signal; the new wakeup is only the fallback heartbeat). If the event means the work is finished, stop (step 6).
 6. **To stop the loop** — the task is complete, further iterations can't make progress, or the user asked you to stop — call {SCHEDULE_WAKEUP} with `stop: true` (no other fields) and {TASK_STOP} any {MONITOR} you armed (use {TASK_LIST} to find the task ID if it is no longer in context). Stopping is the loop's normal ending — the user can restart it anytime with /loop.{kpc}",
             kpc = push_outcome_line(),
+            arm = monitor_arm(timeout),
+            rearm = monitor_rearm(timeout, "ticks"),
         );
         return format!(
             "{heading}
@@ -405,9 +413,9 @@ The user invoked `/loop` with no prompt (input was empty or just the interval `{
         "it expands at fire time to the full autonomous-loop instructions on first delivery, and to a short reminder on subsequent fires (the long instructions stay in the cached message-prefix)."
     };
     let confirm = if loop_file.is_some() {
-        format!("what's scheduled, the cron expression, the human-readable cadence, that it's running tasks from `{path}`, that recurring tasks run until cancelled, and that the user can cancel with {CRON_DELETE} (include the job ID).")
+        format!("what's scheduled, the cron expression, the human-readable cadence, that it's running tasks from `{path}`, that recurring tasks auto-expire after 7 days, and that the user can cancel sooner with {CRON_DELETE} (include the job ID).")
     } else {
-        format!("what's scheduled, the cron expression, the human-readable cadence, that recurring tasks run until cancelled, and that they can cancel with {CRON_DELETE} (include the job ID). Mention this is the autonomous default and that the autonomous-loop instructions are baked in.")
+        format!("what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 7 days, and that they can cancel sooner with {CRON_DELETE} (include the job ID). Mention this is the autonomous default and that the autonomous-loop instructions are baked in.")
     };
     format!("{heading}
 
@@ -441,8 +449,40 @@ pub struct LoopPromptFn;
 
 impl BundledPromptFn for LoopPromptFn {
     fn build(&self, args: &str) -> String {
+        self.build_input(args, true)
+    }
+
+    fn build_for_preload(&self, args: &str) -> String {
+        self.build_input(args, false)
+    }
+
+    fn try_build_at(
+        &self,
+        args: &str,
+        project_root: &std::path::Path,
+        cwd: &std::path::Path,
+        is_preload: bool,
+    ) -> std::io::Result<String> {
+        self.build_input_at(args, !is_preload, project_root, cwd)
+    }
+}
+
+impl LoopPromptFn {
+    fn build_input(&self, args: &str, is_invocation: bool) -> String {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        self.build_input_at(args, is_invocation, &cwd, &cwd)
+            .unwrap_or_else(|error| format!("Could not read loop.md: {error}"))
+    }
+
+    fn build_input_at(
+        &self,
+        args: &str,
+        is_invocation: bool,
+        project_root: &std::path::Path,
+        cwd: &std::path::Path,
+    ) -> std::io::Result<String> {
         // Binary `let n=e.trim()` (cc_all.txt:521921).
-        let n = args.trim();
+        let n = args.trim_matches(cron::is_loop_js_whitespace);
         let every = every_clause_re().captures(n);
         let empty = n.is_empty();
         // `s` = lZm.test(n) || r!==null — input is just an interval.
@@ -460,19 +500,16 @@ impl BundledPromptFn for LoopPromptFn {
             } else {
                 n.to_string()
             };
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let loop_file = read_loop_file(&cwd);
+            let loop_file = cron::autonomous_loop::read_loop_file_at(project_root, cwd)?;
             // `if(o&&q_e())return a(l,!0);return a(l,!1)` — dynamic only when empty.
             let dynamic = empty && is_loop_dynamic_enabled();
-            if dynamic {
+            if dynamic && is_invocation {
                 // PARITY `K_n()`: the binary clears the loop-ended marker on the
-                // EMPTY-args arm only, so a `/loop` after a `stop: true` is a live
-                // loop again. (Its `!isSkillPreload && !modelScheduledOrigin`
-                // guard has no port-side equivalent — `BundledPromptFn::build`
-                // carries neither flag and is reached only from a user dispatch.)
+                // empty-input arm, so a `/loop` after a `stop: true` is a live
+                // loop again. Agent skill preloading must not clear it.
                 note_loop_invoked();
             }
-            return build_autonomous(loop_file.as_ref(), dynamic, &interval);
+            return Ok(build_autonomous(loop_file.as_ref(), dynamic, &interval));
         }
 
         // Branch 2: the combined fixed-interval + dynamic prompt. `q_e()` is a
@@ -481,18 +518,21 @@ impl BundledPromptFn for LoopPromptFn {
         if is_loop_dynamic_enabled() {
             if empty {
                 // PARITY: `hZm()`.
-                return USAGE_MESSAGE_DYNAMIC.to_string();
+                return Ok(USAGE_MESSAGE_DYNAMIC.to_string());
             }
-            // PARITY: `gZm(n)`.
-            return build_dynamic_prompt(n);
+            // 2.1.270 `IHn()` also clears the stop marker on explicit prompts.
+            if is_invocation {
+                note_loop_invoked();
+            }
+            return Ok(build_dynamic_prompt(n));
         }
 
         // Branch 3: shipped default — `!n ? dZm : fZm(n)`.
-        if empty {
+        Ok(if empty {
             USAGE_MESSAGE.to_string()
         } else {
             build_prompt(n)
-        }
+        })
     }
 }
 
@@ -521,7 +561,7 @@ mod tests {
         // PARITY: binary fZm head (cc_all.txt:521800-521846) — single newlines
         // except the blank line before `## Interval` from the empty `${zpc()}` on
         // its own line; ${default}=10m, tool names baked in, zpc()/Ypc() empty.
-        let expected = "# /loop — schedule a recurring prompt\nParse the input below into `[interval] <prompt…>` and schedule it with CronCreate.\n## Parsing (in priority order)\n1. **Leading token**: if the first whitespace-delimited token matches `^\\d+[smhd]$` (e.g. `5m`, `2h`), that's the interval; the rest is the prompt.\n2. **Trailing \"every\" clause**: otherwise, if the input ends with `every <N><unit>` or `every <N> <unit-word>` (e.g. `every 20m`, `every 5 minutes`, `every 2 hours`), extract that as the interval and strip it from the prompt. Only match when what follows \"every\" is a time expression — `check every PR` has no interval.\n3. **Default**: otherwise, interval is `10m` and the entire input is the prompt.\nIf the resulting prompt is empty, show usage `/loop [interval] <prompt>` and stop — do not call CronCreate.\nExamples:\n- `5m /babysit-prs` → interval `5m`, prompt `/babysit-prs` (rule 1)\n- `check the deploy every 20m` → interval `20m`, prompt `check the deploy` (rule 2)\n- `run tests every 5 minutes` → interval `5m`, prompt `run tests` (rule 2)\n- `check the deploy` → interval `10m`, prompt `check the deploy` (rule 3)\n- `check every PR` → interval `10m`, prompt `check every PR` (rule 3 — \"every\" not followed by time)\n- `5m` → empty prompt → show usage\n\n## Interval → cron\nSupported suffixes: `s` (seconds, rounded up to nearest minute, min 1), `m` (minutes), `h` (hours), `d` (days). Convert:\n| Interval pattern      | Cron expression     | Notes                                    |\n|-----------------------|---------------------|------------------------------------------|\n| `Nm` where N ≤ 59   | `*/N * * * *`     | every N minutes                          |\n| `Nm` where N ≥ 60   | `0 */H * * *`     | round to hours (H = N/60, must divide 24)|\n| `Nh` where N ≤ 23   | `0 */N * * *`     | every N hours                            |\n| `Nd`                | `0 0 */N * *`     | every N days at midnight local           |\n| `Ns`                | treat as `ceil(N/60)m` | cron minimum granularity is 1 minute  |\n**If the interval doesn't cleanly divide its unit** (e.g. `7m` → `*/7 * * * *` gives uneven gaps at :56→:00; `90m` → 1.5h which cron can't express), pick the nearest clean interval and tell the user what you rounded to before scheduling.\n## Action\n1. Call CronCreate with:\n   - `cron`: the expression from the table above\n   - `prompt`: the parsed prompt from above, verbatim (slash commands are passed through unchanged)\n   - `recurring`: `true`\n2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks run until cancelled, and that they can cancel with CronDelete (include the job ID).\n3. **Then immediately execute the parsed prompt now** — don't wait for the first cron fire. If it's a slash command, invoke it via the Skill tool; otherwise act on it directly.";
+        let expected = "# /loop — schedule a recurring prompt\nParse the input below into `[interval] <prompt…>` and schedule it with CronCreate.\n## Parsing (in priority order)\n1. **Leading token**: if the first whitespace-delimited token matches `^\\d+[smhd]$` (e.g. `5m`, `2h`), that's the interval; the rest is the prompt.\n2. **Trailing \"every\" clause**: otherwise, if the input ends with `every <N><unit>` or `every <N> <unit-word>` (e.g. `every 20m`, `every 5 minutes`, `every 2 hours`), extract that as the interval and strip it from the prompt. Only match when what follows \"every\" is a time expression — `check every PR` has no interval.\n3. **Default**: otherwise, interval is `10m` and the entire input is the prompt.\nIf the resulting prompt is empty, show usage `/loop [interval] <prompt>` and stop — do not call CronCreate.\nExamples:\n- `5m /babysit-prs` → interval `5m`, prompt `/babysit-prs` (rule 1)\n- `check the deploy every 20m` → interval `20m`, prompt `check the deploy` (rule 2)\n- `run tests every 5 minutes` → interval `5m`, prompt `run tests` (rule 2)\n- `check the deploy` → interval `10m`, prompt `check the deploy` (rule 3)\n- `check every PR` → interval `10m`, prompt `check every PR` (rule 3 — \"every\" not followed by time)\n- `5m` → empty prompt → show usage\n\n## Interval → cron\nSupported suffixes: `s` (seconds, rounded up to nearest minute, min 1), `m` (minutes), `h` (hours), `d` (days). Convert:\n| Interval pattern      | Cron expression     | Notes                                    |\n|-----------------------|---------------------|------------------------------------------|\n| `Nm` where N ≤ 59   | `*/N * * * *`     | every N minutes                          |\n| `Nm` where N ≥ 60   | `0 */H * * *`     | round to hours (H = N/60, must divide 24)|\n| `Nh` where N ≤ 23   | `0 */N * * *`     | every N hours                            |\n| `Nd`                | `0 0 */N * *`     | every N days at midnight local           |\n| `Ns`                | treat as `ceil(N/60)m` | cron minimum granularity is 1 minute  |\n**If the interval doesn't cleanly divide its unit** (e.g. `7m` → `*/7 * * * *` gives uneven gaps at :56→:00; `90m` → 1.5h which cron can't express), pick the nearest clean interval and tell the user what you rounded to before scheduling.\n## Action\n1. Call CronCreate with:\n   - `cron`: the expression from the table above\n   - `prompt`: the parsed prompt from above, verbatim (slash commands are passed through unchanged)\n   - `recurring`: `true`\n2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 7 days, and that they can cancel sooner with CronDelete (include the job ID).\n3. **Then immediately execute the parsed prompt now** — don't wait for the first cron fire. If it's a slash command, invoke it via the Skill tool; otherwise act on it directly.";
         assert_eq!(cron_prompt_head(), expected);
     }
 
@@ -575,8 +615,11 @@ mod tests {
         // Establish the shipped-binary default: persistent off (preamble = aJr),
         // and the prompt/dynamic flags cleared. Gates now read the flag override
         // layer (binary `nt`), so reset it rather than env vars.
-        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
+        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
+        telemetry::test_clear_flag("tengu_breezy_crescent");
+        telemetry::test_clear_flag("tengu_kairos_push_notifications");
+        platform_api::session_flags::set_agent_push_notif_enabled(false);
         g
     }
 
@@ -656,6 +699,7 @@ mod tests {
 
     #[test]
     fn dynamic_prompt_builder_byte_exact() {
+        let _g = no_persistent_guard();
         // gZm("check the deploy") — the dynamic-flag prompt builder.
         assert_eq!(build_dynamic_prompt("check the deploy"), fixture("gZm"));
     }
@@ -696,5 +740,97 @@ mod tests {
         // The cron-mode usage / prompt builders are unreachable from dispatch.
         assert_ne!(LoopPromptFn.build(""), USAGE_MESSAGE);
         assert_ne!(LoopPromptFn.build(""), USAGE_MESSAGE_DYNAMIC);
+    }
+    #[test]
+    fn latest_2_1_270_command_oracle_all_variants() {
+        let _g = no_persistent_guard();
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/loop_2_1_270/commands.json"
+        ))
+        .unwrap();
+        let file = LoopFile {
+            path: "/tmp/proj/loop.md".into(),
+            content: "- task A\n- task B".into(),
+        };
+        for case in cases.as_array().unwrap() {
+            let persistent = case["persistent"].as_bool().unwrap();
+            let push = case["push"].as_bool().unwrap();
+            telemetry::test_set_flag("tengu_kairos_loop_persistent", persistent);
+            telemetry::test_set_flag("tengu_kairos_push_notifications", push);
+            platform_api::session_flags::set_agent_push_notif_enabled(push);
+            let timeout = case["timeout"].as_u64().filter(|n| *n != 0);
+            let name = case["name"].as_str().unwrap();
+            let actual = match name {
+                "prompt" => build_dynamic_prompt_with_monitor("check the deploy", timeout),
+                "auto_dynamic" => build_autonomous_with_monitor(None, true, "10m", timeout),
+                "auto_cron" => build_autonomous_with_monitor(None, false, "10m", timeout),
+                "file_dynamic" => build_autonomous_with_monitor(Some(&file), true, "5m", timeout),
+                "file_cron" => build_autonomous_with_monitor(Some(&file), false, "5m", timeout),
+                _ => panic!("unknown oracle case"),
+            };
+            assert_eq!(
+                actual.as_bytes(),
+                case["text"].as_str().unwrap().as_bytes(),
+                "{name}, persistent={persistent}, push={push}, timeout={timeout:?}"
+            );
+        }
+        telemetry::test_clear_flag("tengu_kairos_loop_persistent");
+        telemetry::test_clear_flag("tengu_kairos_push_notifications");
+        platform_api::session_flags::set_agent_push_notif_enabled(false);
+    }
+
+    #[test]
+    fn interval_parser_uses_ecmascript_characters() {
+        let _g = no_persistent_guard();
+        assert!(!interval_only_re().is_match("５m"));
+        assert!(!every_clause_re().is_match("every ５ minutes"));
+        assert!(every_clause_re().is_match("every\u{feff}5 minutes"));
+        assert!(!every_clause_re().is_match("every\u{85}5 minutes"));
+        assert_eq!(
+            LoopPromptFn.build("\u{feff}check the deploy\u{feff}"),
+            build_dynamic_prompt("check the deploy")
+        );
+        assert!(LoopPromptFn.build("\u{85}check").ends_with("\u{85}check"));
+    }
+    #[test]
+    fn preloading_loop_does_not_restart_a_stopped_loop() {
+        let _g = no_persistent_guard();
+        for args in ["", "check the deploy", "5m"] {
+            cron::autonomous_loop::set_loop_ended(true);
+            let preloaded = LoopPromptFn.build_for_preload(args);
+            assert!(
+                cron::autonomous_loop::loop_ended(),
+                "preload {args:?} restarted loop"
+            );
+            let invoked = LoopPromptFn.build(args);
+            assert_eq!(preloaded, invoked, "preload preserves prompt bytes");
+            assert_eq!(cron::autonomous_loop::loop_ended(), args == "5m");
+        }
+        cron::autonomous_loop::set_loop_ended(false);
+    }
+    #[test]
+    fn checked_builder_reads_session_project_root_without_preload_activation() {
+        let _g = no_persistent_guard();
+        let root = std::env::temp_dir().join(format!(
+            "lingxi-loop-reader-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = root.as_path().join("nested");
+        std::fs::create_dir_all(root.as_path().join(".claude")).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(root.as_path().join(".claude/loop.md"), "project tasks").unwrap();
+        cron::autonomous_loop::set_loop_ended(true);
+        let text = LoopPromptFn
+            .try_build_at("", root.as_path(), &cwd, true)
+            .unwrap();
+        assert!(text.contains("project tasks"));
+        assert!(text.starts_with("# /loop — loop.md tasks with dynamic pacing"));
+        assert!(cron::autonomous_loop::loop_ended());
+        cron::autonomous_loop::set_loop_ended(false);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -2,7 +2,138 @@
 
 use super::*;
 
+/// Metadata of the exact task whose scheduled fire is being recorded.
+pub struct ScheduledLoopFire {
+    pub fire_id: protocol::MessageId,
+    /// Identity assigned when the task was scheduled.
+    pub task_id: String,
+    /// Exact cron expression of the fired task.
+    pub cron: String,
+    /// Display prompt, with default loop sentinels already resolved.
+    pub prompt: String,
+    /// Whether the task has the upstream `kind: "loop"` discriminator.
+    pub task_kind_loop: bool,
+}
+
 impl ConversationOrchestrator {
+    /// Persist Claude's fire envelope and separate meta user companion while
+    /// holding the same ordering gate as foreground transcript writes.
+    pub async fn append_scheduled_loop_wakeup(
+        &self,
+        message: String,
+        companion: Option<String>,
+        streak: u32,
+        since_ms: u64,
+        fire: ScheduledLoopFire,
+    ) -> Result<(), platform_api::HandleError> {
+        let _turn = self.turn_gate.lock().await;
+        let session_id = self.session.lock().await.session_id;
+        let mut payload = serde_json::json!({"message": message, "companion": companion,
+            "streak": streak, "since_ms": since_ms, "taskId": fire.task_id,
+            "cron": fire.cron, "prompt": scheduled_fire_prompt(&fire.prompt),
+            "taskKindLoop": fire.task_kind_loop});
+        if streak > 0 {
+            let mut uuids = Vec::<String>::new();
+            if let Some(writer) = &self.transcript.jsonl_writer {
+                if let Ok(file) = writer
+                    .filesystem_handle()
+                    .read_file(&writer.active_path().to_string_lossy(), None, None)
+                    .await
+                {
+                    let rows: Vec<serde_json::Value> = file
+                        .content
+                        .lines()
+                        .filter_map(|line| serde_json::from_str(line).ok())
+                        .collect();
+                    if let Some(start) = rows.iter().rposition(|row| {
+                        row["type"] == "system" && row["subtype"] == "scheduled_task_fire"
+                    }) {
+                        uuids = rows[start..]
+                            .iter()
+                            .filter_map(|row| row["uuid"].as_str().map(str::to_owned))
+                            .collect();
+                    }
+                }
+            }
+            payload["foldedUuids"] = serde_json::json!(uuids);
+        }
+        let record = ConversationMessage::System {
+            id: fire.fire_id,
+            content: payload.to_string(),
+            subtype: Some("scheduled_task_fire".into()),
+            compact_metadata: None,
+            refusal_fallback: None,
+        };
+        let result = self
+            .persist_scheduled_record(&record, session_id, false)
+            .await;
+        {
+            let mut session = self.session.lock().await;
+            session.model_context_excluded_messages.insert(record.id());
+            session.history.push(record);
+        }
+        if let Some(text) = companion {
+            let row = ConversationMessage::user_meta(protocol::MessageId::new(), text);
+            let companion_result = if result.is_ok() {
+                self.persist_scheduled_record(&row, session_id, true).await
+            } else {
+                Ok(())
+            };
+            self.session.lock().await.history.push(row);
+            result?;
+            companion_result?;
+        } else {
+            result?;
+        }
+        Ok(())
+    }
+
+    async fn persist_scheduled_record(
+        &self,
+        record: &ConversationMessage,
+        session_id: protocol::SessionId,
+        companion: bool,
+    ) -> Result<(), platform_api::HandleError> {
+        let Some(writer) = &self.transcript.jsonl_writer else {
+            return Ok(());
+        };
+        let mut row = self.to_jsonl_message_with_inner_id(
+            record,
+            &session_id.as_uuid().to_string(),
+            self.transcript.last_jsonl_uuid.lock().await.clone(),
+            self.resolve_git_branch().await,
+            Some(entrypoint_value()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        if companion {
+            row.extra
+                .insert("turnCompanion".into(), serde_json::json!(true));
+            if let ConversationMessage::User { content, .. } = record {
+                let text = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                row.message = serde_json::json!({"role":"user", "content":text});
+            }
+        }
+        writer.append(&row).await.map_err(|error| {
+            platform_api::HandleError::ActionFailed(format!(
+                "could not persist scheduled fire: {error}"
+            ))
+        })?;
+        *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid);
+        Ok(())
+    }
+
     /// Build a deterministic assistant-block `uuid` for write-side per-block
     /// persistence.
     ///
@@ -768,6 +899,21 @@ impl ConversationOrchestrator {
                 }
             }
         }
+        if kind == "assistant" && assistant_model.is_some() {
+            if let Some(settings) = crate::scheduled_turn::current() {
+                // Actual response settings belong to this turn, not the next
+                // human turn's persisted defaults. Replay retains the message
+                // and its real attribution while ignoring these defaults.
+                extra.insert("perTurnSettings".into(), serde_json::Value::Bool(true));
+                extra.remove("effort");
+                if let Some(effort) = settings.effort {
+                    extra.insert("effort".into(), effort);
+                }
+                if let Ok(selection) = serde_json::to_value(settings.reasoning) {
+                    extra.insert("reasoningSelection".into(), selection);
+                }
+            }
+        }
         // Top-level api-error envelope (`createAssistantAPIErrorMessage`/`fje`):
         // `error` (omitted when the builder took no `error:` arg), the always-on
         // `isApiErrorMessage: true`, and `apiErrorStatus` (set only for an
@@ -801,6 +947,48 @@ impl ConversationOrchestrator {
                     "apiErrorStatus".to_string(),
                     serde_json::Value::Number(status.into()),
                 );
+            }
+        }
+        if let ConversationMessage::System {
+            content, subtype, ..
+        } = msg
+        {
+            if subtype.as_deref() == Some("scheduled_task_fire") {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(content) {
+                    extra.insert("subtype".into(), serde_json::json!("scheduled_task_fire"));
+                    extra.insert("content".into(), payload["message"].clone());
+                    extra.insert("isMeta".into(), serde_json::json!(false));
+                    for key in ["taskId", "cron", "prompt"] {
+                        extra.insert(key.into(), payload[key].clone());
+                    }
+                    if payload["taskKindLoop"] == true {
+                        extra.insert("taskKind".into(), serde_json::json!("loop"));
+                    }
+                    if payload["taskKindLoop"] == true {
+                        extra.insert("cronKind".into(), serde_json::json!("loop"));
+                    }
+                    if payload["streak"].as_u64().unwrap_or(0) > 0 {
+                        extra.insert("noOpStreak".into(), payload["streak"].clone());
+                        let since = payload["since_ms"].as_i64().unwrap_or(0);
+                        if let Some(time) =
+                            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(since)
+                        {
+                            extra.insert(
+                                "streakStartedAt".into(),
+                                serde_json::json!(
+                                    time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                                ),
+                            );
+                        }
+                        if payload["foldedUuids"]
+                            .as_array()
+                            .is_some_and(|ids| !ids.is_empty())
+                        {
+                            extra.insert("foldedUuids".into(), payload["foldedUuids"].clone());
+                        }
+                    }
+                    inner_message = serde_json::Value::Null;
+                }
             }
         }
         session::JsonlMessage {
@@ -954,6 +1142,24 @@ impl ConversationOrchestrator {
         let sanitized = redact_ephemeral_tool_result_images(msg);
         self.persist_message_to_jsonl_inner(&sanitized, parent_override, None, false)
             .await;
+    }
+
+    /// Persist one queued user message's host-only envelope metadata. Keeping
+    /// queue metadata out of ConversationMessage keeps it out of model input.
+    pub(super) async fn persist_queued_message_to_jsonl(
+        &self,
+        msg: &ConversationMessage,
+        input: &QueuedPromptInput,
+    ) {
+        let sanitized = redact_ephemeral_tool_result_images(msg);
+        self.persist_message_to_jsonl_inner_with_queue_metadata(
+            &sanitized,
+            None,
+            None,
+            false,
+            Some(input),
+        )
+        .await;
     }
 
     /// Persist a synthetic api-error assistant line, stamping the top-level
@@ -1269,6 +1475,24 @@ impl ConversationOrchestrator {
         api_error: Option<ApiErrorEnvelope>,
         compact_summary: bool,
     ) {
+        self.persist_message_to_jsonl_inner_with_queue_metadata(
+            msg,
+            parent_override,
+            api_error,
+            compact_summary,
+            None,
+        )
+        .await;
+    }
+
+    async fn persist_message_to_jsonl_inner_with_queue_metadata(
+        &self,
+        msg: &ConversationMessage,
+        parent_override: Option<String>,
+        api_error: Option<ApiErrorEnvelope>,
+        compact_summary: bool,
+        queued_input: Option<&QueuedPromptInput>,
+    ) {
         self.note_assistant_commit(msg).await;
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             // These side tables live only until the corresponding tool-result
@@ -1314,6 +1538,26 @@ impl ConversationOrchestrator {
             api_error.as_ref(),
         );
         if matches!(msg, ConversationMessage::User { .. }) {
+            if let Some(input) = queued_input {
+                if let Some(priority) = &input.queue_priority {
+                    jmsg.extra.insert(
+                        "queuePriority".into(),
+                        serde_json::Value::String(priority.clone()),
+                    );
+                }
+                if let Some(task_id) = &input.scheduled_task_id {
+                    jmsg.extra.insert(
+                        "scheduledTaskId".into(),
+                        serde_json::Value::String(task_id.clone()),
+                    );
+                    if let Some(fire_id) = &input.scheduled_fire_id {
+                        jmsg.extra.insert(
+                            "scheduledFireId".into(),
+                            serde_json::Value::String(fire_id.clone()),
+                        );
+                    }
+                }
+            }
             let permission_mode = if plan_mode {
                 "plan".to_string()
             } else {
@@ -1411,31 +1655,35 @@ impl ConversationOrchestrator {
             })?
         } else {
             match self.config_home.as_ref() {
-            Some(home) => {
-                match session::jsonl::resolve_session_path_across_worktrees(home, &cwd, target_uuid)
+                Some(home) => {
+                    match session::jsonl::resolve_session_path_across_worktrees(
+                        home,
+                        &cwd,
+                        target_uuid,
+                    )
                     .await
-                {
-                    Ok(path) => path,
-                    Err(
-                        session::jsonl::LoaderError::SessionNotFound { .. }
-                        | session::jsonl::LoaderError::EmptyDirectory,
-                    ) => session::jsonl::session_path(home, &cwd, &target_bare),
-                    Err(error) => {
-                        return Err(platform_api::HandleError::ActionFailed(format!(
-                            "could not resolve target session transcript: {error}"
-                        )))
+                    {
+                        Ok(path) => path,
+                        Err(
+                            session::jsonl::LoaderError::SessionNotFound { .. }
+                            | session::jsonl::LoaderError::EmptyDirectory,
+                        ) => session::jsonl::session_path(home, &cwd, &target_bare),
+                        Err(error) => {
+                            return Err(platform_api::HandleError::ActionFailed(format!(
+                                "could not resolve target session transcript: {error}"
+                            )))
+                        }
                     }
                 }
-            }
-            None => {
-                let current = self.session.lock().await.session_id;
-                if current != target_session {
-                    return Err(platform_api::HandleError::ActionFailed(
-                        "target-session persistence requires a configured session store".into(),
-                    ));
+                None => {
+                    let current = self.session.lock().await.session_id;
+                    if current != target_session {
+                        return Err(platform_api::HandleError::ActionFailed(
+                            "target-session persistence requires a configured session store".into(),
+                        ));
+                    }
+                    writer.active_path()
                 }
-                writer.active_path()
-            }
             }
         };
 
@@ -1447,23 +1695,23 @@ impl ConversationOrchestrator {
         } else {
             let fs = writer.filesystem_handle();
             match self.config_home.as_ref() {
-            Some(home) => {
-                match session::jsonl::load_session_across_worktrees(home, &cwd, target_uuid, fs)
-                    .await
-                {
-                    Ok(messages) => messages.last().map(|message| message.uuid.clone()),
-                    Err(
-                        session::jsonl::LoaderError::SessionNotFound { .. }
-                        | session::jsonl::LoaderError::EmptyDirectory,
-                    ) => None,
-                    Err(error) => {
-                        return Err(platform_api::HandleError::ActionFailed(format!(
-                            "could not read target session transcript: {error}"
-                        )))
+                Some(home) => {
+                    match session::jsonl::load_session_across_worktrees(home, &cwd, target_uuid, fs)
+                        .await
+                    {
+                        Ok(messages) => messages.last().map(|message| message.uuid.clone()),
+                        Err(
+                            session::jsonl::LoaderError::SessionNotFound { .. }
+                            | session::jsonl::LoaderError::EmptyDirectory,
+                        ) => None,
+                        Err(error) => {
+                            return Err(platform_api::HandleError::ActionFailed(format!(
+                                "could not read target session transcript: {error}"
+                            )))
+                        }
                     }
                 }
-            }
-            None => self.transcript.last_jsonl_uuid.lock().await.clone(),
+                None => self.transcript.last_jsonl_uuid.lock().await.clone(),
             }
         };
 
@@ -1576,7 +1824,7 @@ impl ConversationOrchestrator {
         // Shared inner Anthropic `message.id` for every block of this turn.
         let inner_id = turn_id.as_uuid().to_string();
 
-        let (session_id_str, model, model_profile) = {
+        let (session_id_str, mut model, mut model_profile) = {
             let s = self.session.lock().await;
             (
                 s.session_id.to_string(),
@@ -1584,6 +1832,10 @@ impl ConversationOrchestrator {
                 s.model_profile.clone(),
             )
         };
+        if let Some(settings) = crate::scheduled_turn::current() {
+            model = settings.model;
+            model_profile = Some(settings.provider);
+        }
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
 
@@ -1687,7 +1939,7 @@ impl ConversationOrchestrator {
             return;
         };
         let inner_id = turn_id.as_uuid().to_string();
-        let (session_id_str, model, model_profile) = {
+        let (session_id_str, mut model, mut model_profile) = {
             let s = self.session.lock().await;
             (
                 s.session_id.to_string(),
@@ -1695,6 +1947,10 @@ impl ConversationOrchestrator {
                 s.model_profile.clone(),
             )
         };
+        if let Some(settings) = crate::scheduled_turn::current() {
+            model = settings.model;
+            model_profile = Some(settings.provider);
+        }
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
         let parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
@@ -1750,55 +2006,59 @@ impl ConversationOrchestrator {
         }
     }
 
-    pub(super) async fn persist_idle_goal_checkin_message(
-        writer: Option<Arc<JsonlWriter>>,
-        last_jsonl_uuid: Arc<Mutex<Option<String>>>,
-        current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
-        fallback_cwd: std::path::PathBuf,
-        session: &Arc<Mutex<SessionState>>,
-        msg: &ConversationMessage,
-    ) {
-        let Some(writer) = writer else {
-            return;
-        };
-        let (session_id, content) = {
-            let locked = session.lock().await;
-            let content = match msg {
-                ConversationMessage::User { content, .. } => content.clone(),
-                _ => Vec::new(),
-            };
-            (locked.session_id.to_string(), content)
-        };
-        let cwd = current_cwd
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_else(|_| fallback_cwd.clone());
-        let parent_uuid = last_jsonl_uuid.lock().await.clone();
-        let mut extra = serde_json::Map::new();
-        extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
-        let jmsg = session::JsonlMessage {
-            message_type: "user".to_string(),
-            uuid: msg.id().as_uuid().to_string(),
-            parent_uuid,
-            session_id,
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string(),
-            cwd: cwd.to_string_lossy().into_owned(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            message: serde_json::json!({ "role": "user", "content": content }),
-            is_sidechain: false,
-            user_type: Some("external".to_string()),
-            git_branch: git_branch_for_cwd(&cwd),
-            entrypoint: Some(entrypoint_value()),
-            slug: None,
-            prompt_id: None,
-            logical_parent_uuid: None,
-            extra,
-        };
-        let line_uuid = jmsg.uuid.clone();
-        if writer.append(&jmsg).await.is_ok() {
-            *last_jsonl_uuid.lock().await = Some(line_uuid);
-        }
+
+}
+
+/// Claude 2.1.270 `npe`: strip ANSI, normalize whitespace, remove invisible
+/// controls, then truncate without splitting a UTF-16 surrogate pair.
+fn scheduled_fire_prompt(prompt: &str) -> String {
+    use std::sync::LazyLock;
+    static ANSI: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+        r"[\x{001B}\x{009B}][\[\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z0-9/#&.:=?%@~_]+)*|[a-zA-Z0-9]+(?:;[-a-zA-Z0-9/#&.:=?%@~_]*)*)?(?:\x{0007}|\x{001B}\x{005C}|\x{009C}))|(?:(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-PR-TZcf-nq-uy=><~]))"
+    ).expect("oracle ANSI pattern")
+    });
+    static CONTROLS: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"[\p{Cc}\p{Cf}\x{2028}\x{2029}]").expect("control pattern")
+    });
+    let stripped = ANSI.replace_all(prompt, "");
+    let stripped: String = stripped
+        .chars()
+        .filter(|c| {
+            !matches!(*c as u32,
+        0..=8 | 14..=31 | 127..=159)
+        })
+        .collect();
+    static SPACE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+        r"[ \t\n\v\f\r\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]+"
+    ).expect("ECMAScript whitespace")
+    });
+    let normalized = SPACE.replace_all(&stripped, " ");
+    let ansi_clean = ANSI.replace_all(&normalized, "");
+    let clean = CONTROLS.replace_all(&ansi_clean, "");
+    let mut units = 0;
+    clean
+        .trim()
+        .chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= 200
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn scheduled_fire_prompt_matches_oracle_sanitization_and_utf16_limit() {
+    let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../session/tests/fixtures/loop-2.1.270/prompt.json"
+    ))
+    .unwrap();
+    for case in cases {
+        assert_eq!(
+            scheduled_fire_prompt(case["input"].as_str().unwrap()),
+            case["expected"].as_str().unwrap()
+        );
     }
 }

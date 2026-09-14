@@ -37,6 +37,7 @@ const CRON_LIST_DESCRIPTION: &str = "List scheduled cron jobs";
 /// Empty `strictObject({})` schema — CronList takes no input.
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": false,
         "properties": {},
@@ -86,7 +87,7 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
     truncate_to_width(s, max_width)
 }
 
-/// Read the single `<root>/.lingxi/scheduled_tasks.json` file into the `jobs`
+/// Read the single `<root>/.claude/scheduled_tasks.json` file into the `jobs`
 /// shape, in FILE order (the oracle `bFe` does not sort). A missing /
 /// unparseable file yields no jobs. Every persisted task is durable by
 /// definition, so the `durable:false`
@@ -133,7 +134,7 @@ async fn read_all_jobs(
 ) -> Vec<Value> {
     let owner = teammate_owner(call_ctx);
     let mut jobs = if owner.is_none() {
-        read_durable_jobs(tool_ctx.fs.as_ref(), &tool_ctx.cwd()).await
+        read_durable_jobs(tool_ctx.fs.as_ref(), &tool_ctx.session_cwd.project_root()).await
     } else {
         Vec::new()
     };
@@ -227,6 +228,9 @@ impl Tool for CronListTool {
     fn search_hint(&self) -> Option<&str> {
         Some("list active cron jobs")
     }
+    fn native_input_validation(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }
@@ -260,7 +264,7 @@ impl Tool for CronListTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronList reads .lingxi/scheduled_tasks.json".into(),
+                reason: "CronList reads .claude/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -273,8 +277,11 @@ impl Tool for CronListTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        // PARITY 2.1.263 `hbn(true)`; `.claude/` → `.lingxi/`.
-        "List all cron jobs scheduled via CronCreate, both durable (.lingxi/scheduled_tasks.json) and session-only.".into()
+        if !crate::schedule_cron::durable_enabled() {
+            return "List all cron jobs scheduled via CronCreate in this session.".into();
+        }
+        // PARITY 2.1.263 `hbn(true)`.
+        "List all cron jobs scheduled via CronCreate, both durable (.claude/scheduled_tasks.json) and session-only.".into()
     }
 
     async fn validate_input(
@@ -336,11 +343,11 @@ mod tests {
         }
     }
 
-    /// Seed the single `<root>/.lingxi/scheduled_tasks.json` file with the given
+    /// Seed the single `<root>/.claude/scheduled_tasks.json` file with the given
     /// tasks (everything on disk is durable by definition — there is no on-disk
     /// `durable` field).
     async fn seed_tasks(root: &Path, tasks: Vec<cron::tasks_file::CronTask>) {
-        let path = cron::tasks_file::scheduled_tasks_path(root);
+        let path = cron::tasks_file::session_scheduled_tasks_path(root);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
@@ -356,6 +363,8 @@ mod tests {
     /// Build one recurring `CronTask` for seeding.
     fn task(id: &str, cron: &str, prompt: &str, recurring: bool) -> cron::tasks_file::CronTask {
         cron::tasks_file::CronTask {
+            creator: Default::default(),
+            automation: None,
             id: id.into(),
             cron: cron.into(),
             prompt: prompt.into(),

@@ -8,8 +8,8 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use command_core::{fusion_request_from_slash, parse_fusion_slash};
 use platform_api::{
-    FusionCompletionSink, FusionExecutor, FusionPublicationReceipt, FusionResult, FusionStatus,
-    FusionRunId, OrchestratorHandle,
+    FusionCompletionSink, FusionExecutor, FusionPublicationReceipt, FusionResult, FusionRunId,
+    FusionStatus, OrchestratorHandle,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -364,7 +364,11 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         let retry_run_id = match publication_retry_run_id(args) {
             Ok(retry) => retry,
-            Err(message) => return CommandResult::Done { display: Some(message) },
+            Err(message) => {
+                return CommandResult::Done {
+                    display: Some(message),
+                }
+            }
         };
         if let Some(run_id) = retry_run_id {
             if !self.durable_publication_available {
@@ -383,9 +387,7 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
                 };
             };
             let session_id = self.handle.current_session_id().await;
-            let receipt = retrier
-                .retry_publication(session_id, run_id.as_str())
-                .await;
+            let receipt = retrier.retry_publication(session_id, run_id.as_str()).await;
             let display = match receipt.status {
                 platform_api::FusionPublicationStatus::Published => {
                     format!("Fusion publication {} is published.", run_id.as_str())
@@ -423,7 +425,9 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
         // contract.
         if !self.durable_publication_available {
             return CommandResult::Done {
-                display: Some(format!("fusion failed to start: {FUSION_PERSISTENCE_REQUIRED}")),
+                display: Some(format!(
+                    "fusion failed to start: {FUSION_PERSISTENCE_REQUIRED}"
+                )),
             };
         }
         let snapshot = self.handle.get_status_snapshot().await;
@@ -567,8 +571,8 @@ mod tests {
     #[test]
     fn publication_retry_is_strictly_local_and_mutex_with_run_arguments() {
         let run_id = "fu_0123456789abcdef0123456789abcdef";
-        let retry = parse_slash_command(&format!("/fusion --retry-publication {run_id}"))
-            .expect("slash");
+        let retry =
+            parse_slash_command(&format!("/fusion --retry-publication {run_id}")).expect("slash");
         assert_eq!(
             publication_retry_run_id(&retry)
                 .expect("valid retry")

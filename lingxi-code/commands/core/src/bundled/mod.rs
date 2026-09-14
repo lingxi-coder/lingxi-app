@@ -30,7 +30,7 @@ pub mod debug_skill;
 /// `bundledSkills.ts`).
 ///
 /// `cron_enabled` is the host's `isKairosCronEnabled` equivalent
-/// (`cron_scheduler_enabled(LINGXI_DISABLE_CRON)` on desktop). When `false`
+/// (`cron_scheduler_enabled(CLAUDE_CODE_DISABLE_CRON)` on desktop). When `false`
 /// neither `/loop` nor `LingXi`'s `/cron` management command is registered. The
 /// `/loop` half mirrors the reference `isEnabled: isKairosCronEnabled` gate
 /// (loop.ts:83); `/cron` shares it so it cannot advertise a stopped scheduler.

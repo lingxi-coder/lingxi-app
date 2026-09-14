@@ -170,6 +170,7 @@ pub struct RegistrySlashDispatcher {
     /// enable this because they have no TUI loop to consume injected prompts;
     /// the default stays display-only for existing embedded/mobile callers.
     injected_messages_as_turns: bool,
+    prompt_paths: Option<Arc<dyn Fn() -> (PathBuf, PathBuf) + Send + Sync>>,
     /// Permission gate that receives each input's frontmatter
     /// `disallowed-tools` (claude-code `Tbt(setToolPermissionContext, …)`).
     /// `None` — every existing caller — leaves the field inert, so a host that
@@ -223,8 +224,19 @@ impl RegistrySlashDispatcher {
             mcp_prompt_resolver: None,
             skill_invocation_observer: None,
             injected_messages_as_turns: false,
+            prompt_paths: None,
             permission_gate: None,
         }
+    }
+
+    /// Supply the session project root and live cwd for checked bundled expansion.
+    #[must_use]
+    pub fn with_prompt_paths(
+        mut self,
+        paths: Arc<dyn Fn() -> (PathBuf, PathBuf) + Send + Sync>,
+    ) -> Self {
+        self.prompt_paths = Some(paths);
+        self
     }
 
     /// Make builtin prompt-injection commands run through the host turn driver.
@@ -379,6 +391,7 @@ impl RegistrySlashDispatcher {
             mcp_prompt_resolver: self.mcp_prompt_resolver.clone(),
             skill_invocation_observer: self.skill_invocation_observer.clone(),
             injected_messages_as_turns: self.injected_messages_as_turns,
+            prompt_paths: self.prompt_paths.clone(),
             // The gate must travel too: a shared dispatcher that did not clear
             // the command denies would leave the previous skill's restrictions
             // standing for every input routed through the clone.
@@ -509,7 +522,23 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             drop(reg);
             return match builder {
                 Some(pf) => {
-                    let content = pf.build(&parsed.raw_args);
+                    let (project_root, cwd) = self.prompt_paths.as_ref().map_or_else(
+                        || {
+                            let cwd =
+                                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                            (cwd.clone(), cwd)
+                        },
+                        |paths| paths(),
+                    );
+                    let content =
+                        match pf.try_build_at(&parsed.raw_args, &project_root, &cwd, false) {
+                            Ok(content) => content,
+                            Err(error) => {
+                                return SlashDispatchResult::Handled {
+                                    display: format!("{} expansion failed: {error}", command.name),
+                                }
+                            }
+                        };
                     self.observe_skill_invocation(&command.name).await;
                     self.fire_user_prompt_expansion(
                         &command.name,
@@ -1939,7 +1968,48 @@ mod tests {
             "the real provider must never be built for an MCP-sourced command"
         );
     }
-
+    #[tokio::test]
+    async fn bundled_checked_expansion_receives_paths_and_surfaces_read_errors() {
+        struct Checked;
+        impl crate::BundledPromptFn for Checked {
+            fn build(&self, _: &str) -> String {
+                panic!("unchecked expansion");
+            }
+            fn try_build_at(
+                &self,
+                args: &str,
+                root: &std::path::Path,
+                cwd: &std::path::Path,
+                preload: bool,
+            ) -> std::io::Result<String> {
+                assert_eq!(args, "task");
+                assert_eq!(root, std::path::Path::new("/project"));
+                assert_eq!(cwd, std::path::Path::new("/project/subdir"));
+                assert!(!preload);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "loop.md denied",
+                ))
+            }
+        }
+        let mut reg = CommandRegistry::new();
+        reg.register_command(crate::SlashCommand {
+            name: "checked-loop".into(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: Some(Arc::new(Checked)),
+            },
+            user_invocable: Some(true),
+            ..Default::default()
+        });
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+            .with_prompt_paths(Arc::new(|| {
+                (PathBuf::from("/project"), PathBuf::from("/project/subdir"))
+            }));
+        assert!(matches!(dispatcher.dispatch("/checked-loop task").await,
+            SlashDispatchResult::Handled { display } if display == "checked-loop expansion failed: loop.md denied"));
+    }
     // ---- MP-1: `disallowed-tools` reaches the permission gate --------------
 
     /// Records every `set_command_input_denies` call the dispatcher makes.

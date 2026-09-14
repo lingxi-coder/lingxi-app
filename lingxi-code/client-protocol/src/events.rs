@@ -33,6 +33,33 @@ use crate::permission::PermissionResolutionDto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Host-private Codex session. Never forward this payload to a renderer.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(deny_unknown_fields)]
+pub struct OpenAiOAuthSessionDto {
+    /// OAuth bearer token.
+    pub access_token: String,
+    /// Rotating refresh token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// Expiration in Unix seconds.
+    pub expires_at: u64,
+    /// `ChatGPT` account identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// Government account routing flag.
+    #[serde(default)]
+    pub fedramp: bool,
+}
+
+impl std::fmt::Debug for OpenAiOAuthSessionDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiOAuthSessionDto")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Outbound events the engine streams to a client.
 //
 // Each live-turn variant notes its engine source (from the area maps).
@@ -601,18 +628,19 @@ pub enum ClientEvent {
         message_id: String,
     },
 
-    /// A `/loop` wakeup fired. `message` is the resume line, already rendered
-    /// host-side so its wording lives in one place.
-    ///
-    /// `streak` is how many consecutive QUIET ticks preceded it: `0` for an
-    /// ordinary wakeup, `N > 0` when the client should collapse the previous
-    /// `N` loop-wakeup groups behind this row and show `companion` with it.
-    /// Every wakeup carries this event — including `streak: 0` — so a client
-    /// can mark the group boundary without matching on the copy.
-    ///
-    /// Appended LAST: per §0.10 an additive event that moves no existing
-    /// native ordinal keeps `CLIENT_PROTOCOL_VERSION` and updates the contract
-    /// index only.
+    // A `/loop` wakeup fired. `message` is the resume line, already rendered
+    // host-side so its wording lives in one place.
+    //
+    // `streak` is how many consecutive QUIET ticks preceded it: `0` for an
+    // ordinary wakeup, `N > 0` when the client folds the latest available
+    // wakeup-to-tail slice, unions prior folded IDs, and shows `companion`.
+    // `N` is the cumulative display count, not required local history depth.
+    // Every wakeup carries this event — including `streak: 0` — so a client
+    // can mark the group boundary without matching on the copy.
+    //
+    // Appended LAST: per §0.10 an additive event that moves no existing
+    // native ordinal keeps `CLIENT_PROTOCOL_VERSION` and updates the contract
+    // index only.
     LoopWakeup {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -625,6 +653,31 @@ pub enum ClientEvent {
     // frozen prefix so existing UniFFI variant ordinals remain unchanged.
     TaskLifecycle {
         event_json: String,
+    },
+    #[serde(rename = "openai_oauth_updated")]
+    OpenAiOAuthUpdated {
+        session: OpenAiOAuthSessionDto,
+    },
+    CronRunBound {
+        run_id: String,
+        error: Option<String>,
+    },
+    ScheduledRunFinished {
+        run_id: String,
+        summary: Option<String>,
+        error: Option<String>,
+    },
+    // Execute a claimed scheduled run in a host-managed session.
+    CronRunRequested {
+        run_id: String,
+        task: CronJobDto,
+    },
+
+    // Session-level fixed-schedule fire notice, emitted before TurnStarted.
+    // Unlike LoopWakeup this carries no dynamic-loop fold boundary.
+    // Appended to preserve every existing native enum ordinal.
+    ScheduledTaskFire {
+        message: String,
     },
 }
 
@@ -813,6 +866,10 @@ pub enum AudioOpDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CronJobDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<crate::commands::CronAutomationDto>,
     pub id: String,
     pub cron: String,
     pub prompt: String,

@@ -30,6 +30,8 @@ pub enum StepOutcome {
 /// Host adapter for completion delivery while the prompt is idle.
 #[async_trait::async_trait]
 pub trait TaskNotificationWake: Send + Sync {
+    /// Cancel pending session wakeups when the user interrupts an idle prompt.
+    async fn user_interrupt(&self) {}
     /// Only called after a real stdin line selects `/tasks message`.
     async fn send_human_task_message(&self, _task_id: &str, _message: &str) -> Result<(), String> {
         Err("task messaging is unavailable".into())
@@ -148,6 +150,7 @@ where
             InputEvent::Read(Ok(_)) => break,
             InputEvent::Read(Err(_)) => return StepOutcome::Continue,
             InputEvent::Signal => {
+                if let Some(wake) = notifications { wake.user_interrupt().await; }
                 if sigint.take_idle_armed() {
                     return StepOutcome::DoubleSigintExit;
                 }

@@ -138,6 +138,13 @@ impl Default for CancelReasonFlag {
 /// surface the task-notification reminder uses.
 #[async_trait]
 pub trait MidTurnInputSource: Send + Sync {
+    /// Whether this host can admit cancellable goal wake-ups.
+    fn supports_goal_retries(&self) -> bool { false }
+    /// Whether queued main-session work should run before a goal wake-up.
+    async fn has_queued_goal_work(&self) -> bool { false }
+    /// Enqueue a synthetic goal wake-up under host-owned execution and cancellation.
+    async fn enqueue_goal_retry(&self, _id: String, _body: String, _cancel: tokio_util::sync::CancellationToken) {}
+
     /// Drain + return the joined text of the queued main-thread, non-slash
     /// prompts at or above `Next` priority, or `None` when there is nothing to
     /// inject. CONSUME-ONCE: drained commands are `consume`d from the queue so

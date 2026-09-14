@@ -1082,7 +1082,26 @@ present this turn, the skill is loaded — follow it directly rather than callin
             // (`loop.ts:84`). The builder does its own arg handling
             // (empty→usage, else→buildPrompt(trimmed)), so `$ARGUMENTS`/`$N`
             // substitution is bypassed entirely.
-            builder.build(args_for_expansion)
+            let cwd = ctx.cwd.clone().unwrap_or_else(|| self.ctx.cwd());
+            match builder.try_build_at(
+                args_for_expansion,
+                &self.ctx.session_cwd.project_root(),
+                &cwd,
+                false,
+            ) {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    emit_failed(
+                        &bus,
+                        "expansion_error",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::Internal(format!(
+                        "Skill {command_name} expansion failed: {error}"
+                    )));
+                }
+            }
         } else {
             match command_api::substitute_arguments_faithful(
                 &desc.body,

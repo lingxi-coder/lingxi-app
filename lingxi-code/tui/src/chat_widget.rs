@@ -370,6 +370,7 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
 /// The chat surface: owns the conversation state and the interactive footer,
 /// leaving only loop plumbing (terminal, channels, callbacks) to the app.
 pub struct ChatWidget {
+    loop_interrupt: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// Conversation history: committed cells + the active streaming cell +
     /// the native-scrollback commit cursor + verbose/render mode.
     transcript: Transcript,
@@ -667,6 +668,7 @@ impl ChatWidget {
     pub fn new(messages: Vec<RenderedMessage>, session: SessionInfo) -> Self {
         let theme = Theme::dark();
         Self {
+            loop_interrupt: None,
             transcript: Transcript::from_messages(messages),
             bottom_pane: BottomPane::new(theme),
             session,
@@ -970,12 +972,33 @@ impl ChatWidget {
         self.theme_name
     }
 
+    /// Bind cancellation of session timers at the terminal interrupt boundary.
+    pub fn set_loop_interrupt(&mut self, callback: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.loop_interrupt = Some(callback);
+    }
+
     /// Route one key press: feed the pane the current turn status (Ctrl-C
     /// routing depends on it), route through the pane's layered input
     /// handling (active view, completion, vim, composer), execute the
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
+        // Only an Esc/Ctrl-C the pane will NOT consume locally is a session
+        // abort. `has_active_view()` reads the view stack alone, so without the
+        // extra conjuncts an Esc that merely clears the composer, closes the
+        // completion popup, or leaves vim INSERT would silently kill an armed
+        // `/loop` with no user-visible notice.
+        if key.kind == crossterm::event::KeyEventKind::Press
+            && !self.bottom_pane.has_active_view()
+            && !self.bottom_pane.completion_is_open()
+            && self.bottom_pane.composer_is_empty()
+            && !(key.code == crossterm::event::KeyCode::Esc
+                && self.bottom_pane.vim_insert_mode())
+            && (key.code == crossterm::event::KeyCode::Esc
+                || (key.modifiers == crossterm::event::KeyModifiers::CONTROL
+                    && matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C')))) {
+            if let Some(cancel) = &self.loop_interrupt { cancel(); }
+        }
         if key.kind == crossterm::event::KeyEventKind::Press {
             if let Some(registry) = &self.task_registry {
                 registry.update_shell_session_activity(true, self.current_turn.is_some(), true);
@@ -6325,6 +6348,18 @@ mod tests {
         let mut w = widget();
         assert!(!w.background_all_tasks());
         let _ = w.handle_key(ctrl(KeyCode::Char('b')));
+    }
+
+    #[test]
+    fn idle_escape_notifies_loop_owner_without_an_active_turn() {
+        let mut widget = widget();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = called.clone();
+        widget.set_loop_interrupt(std::sync::Arc::new(move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        widget.handle_key(KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE));
+        assert_eq!(called.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     fn widget() -> ChatWidget {

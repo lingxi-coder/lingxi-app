@@ -167,6 +167,21 @@ pub trait StopHookSnapshotProvider: Send + Sync {
     /// only if the source is unavailable.
     async fn background_tasks(&self) -> Vec<HookBackgroundTask>;
 
+    /// Internal goal timing metadata captured with the background task snapshot.
+    /// Timestamp values are Unix epoch milliseconds; they never enter hook JSON.
+    /// Providers without timing data preserve their existing snapshot behavior.
+    async fn background_tasks_with_start_times(
+        &self,
+    ) -> (
+        Vec<HookBackgroundTask>,
+        std::collections::HashMap<String, u64>,
+    ) {
+        (
+            self.background_tasks().await,
+            std::collections::HashMap::new(),
+        )
+    }
+
     /// The current `session_crons` array (claude `Mic()`), in source order.
     async fn session_crons(&self) -> Vec<HookSessionCron>;
 }

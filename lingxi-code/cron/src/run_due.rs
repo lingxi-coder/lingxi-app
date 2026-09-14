@@ -24,7 +24,7 @@
 //! so the same core serves desktop (a Dream subagent) and mobile (a fresh
 //! orchestrator turn).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -65,6 +65,23 @@ pub trait CronJobFirer: Send + Sync {
     /// Fire `prompt` for job `id`. `Ok(result_text)` on success; `Err(message)`
     /// on failure (surfaced as [`FireStatus::Failed`]).
     async fn fire(&self, id: &str, prompt: &str) -> Result<String, String>;
+
+    /// Cancel and join host-owned execution resources after the outer firing
+    /// future is dropped. Errors retain scheduler ownership for a later retry.
+    async fn cancel_run(&self, _run_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Hosts must explicitly implement session-aware execution for v2 tasks.
+    async fn fire_automation(
+        &self,
+        _request: &crate::AutomationRunRequest,
+    ) -> Result<crate::AutomationRunResult, String> {
+        Err(format!(
+            "{}This host does not support scheduled session execution",
+            crate::AUTOMATION_PAUSED_PREFIX
+        ))
+    }
 }
 
 /// Terminal status of one fired job.
@@ -108,18 +125,24 @@ pub async fn run_due_jobs(
     firer: &dyn CronJobFirer,
     recurring_max_age: Option<Duration>,
 ) -> Vec<FiredJob> {
+    let mut automation_fired =
+        crate::automation::run_due_automations(tasks_file, fs.clone(), clock.clone(), firer).await;
     let now = clock.now();
     let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(tasks_file) else {
-        return Vec::new();
+        return automation_fired;
     };
 
     // Load the persisted (durable) jobs into a transient in-memory map, mirroring
     // `CronScheduler::load_persisted` (epoch-ms timestamps; invalid cron skipped).
     let Ok(body) = crate::tasks_file::read_tasks_body(fs.as_ref(), project_root).await else {
-        return Vec::new(); // file absent → nothing to fire
+        return automation_fired; // file absent → no session cron to fire
     };
     let mut tasks: HashMap<String, CronTaskDef> = HashMap::new();
+    let mut permanent_ids = HashSet::new();
     for t in parse_tasks(&body).tasks {
+        if t.automation.is_some() {
+            continue;
+        }
         if t.expires_at
             .is_some_and(|expiry| expiry <= system_time_to_epoch_ms(now))
         {
@@ -139,15 +162,13 @@ pub async fn run_due_jobs(
                 continue;
             }
         };
-        let created_at = if t.created_at > 0 {
-            SystemTime::UNIX_EPOCH + Duration::from_millis(t.created_at)
-        } else {
-            now
-        };
+        let created_at = SystemTime::UNIX_EPOCH + Duration::from_millis(t.created_at);
         let last_run = t
             .last_fired_at
-            .filter(|ms| *ms > 0)
             .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms));
+        if t.permanent == Some(true) {
+            permanent_ids.insert(t.id.clone());
+        }
         tasks.insert(
             t.id.clone(),
             CronTaskDef {
@@ -184,7 +205,8 @@ pub async fn run_due_jobs(
         };
 
         let expires_after_fire = tasks.get(&id).is_some_and(|task| {
-            is_recurring_task_aged(now, task.created_at, task.recurring, recurring_max_age)
+            !permanent_ids.contains(&id)
+                && is_recurring_task_aged(now, task.created_at, task.recurring, recurring_max_age)
         });
         let remove_after_fire = finalize_fired_job(&mut tasks, &id, now) || expires_after_fire;
         if expires_after_fire {
@@ -212,7 +234,8 @@ pub async fn run_due_jobs(
             status,
         });
     }
-    fired
+    automation_fired.extend(fired);
+    automation_fired
 }
 
 /// The earliest next fire across all persisted ENABLED jobs, as epoch
@@ -229,23 +252,50 @@ pub async fn next_fire_epoch_ms(
 ) -> Option<u64> {
     let now = clock.now();
     let project_root = crate::tasks_file::project_root_from_tasks_path(tasks_file)?;
-    let body = crate::tasks_file::read_tasks_body(fs.as_ref(), project_root)
-        .await
-        .ok()?;
+    // Which of the two stores this path names — session cron under `.claude/`,
+    // or the v2 task centre under `branding::DOT_DIR`. Decided once; the body
+    // and the parser must come from the SAME store or they disagree about what
+    // is scheduled.
+    let session_store = tasks_file.parent()?.file_name()? == std::ffi::OsStr::new(".claude");
+    let body = if session_store {
+        crate::tasks_file::read_tasks_body(fs.as_ref(), project_root).await
+    } else {
+        crate::tasks_file::read_automation_tasks_body(fs.as_ref(), project_root).await
+    }
+    .ok()?;
 
     // The earliest jittered next-fire across all tasks. Each task is scored by
     // the SAME per-task helper the management-UI display uses, so the armed alarm
     // (this value) and the displayed per-task next fire cannot drift apart.
     let mut earliest: Option<u64> = None;
-    for t in parse_tasks(&body).tasks {
-        if let Some(next) = next_fire_epoch_ms_for_task(
-            &t.id,
-            &t.cron,
-            t.created_at,
-            t.last_fired_at,
-            t.recurring.unwrap_or(false),
-            now,
-        ) {
+    let document = if session_store {
+        parse_tasks(&body)
+    } else {
+        crate::tasks_file::parse_automation_tasks(&body)
+    };
+    for t in document.tasks {
+        if t.automation
+            .as_ref()
+            .is_some_and(|a| a.status != crate::AutomationStatus::Active)
+        {
+            continue;
+        }
+        if let Some(queued) = t.automation.as_ref().and_then(|a| {
+            a.runs
+                .iter()
+                .filter(|r| r.status == crate::AutomationRunStatus::Queued)
+                .map(|r| r.scheduled_at)
+                .min()
+        }) {
+            if t.expires_at
+                .is_none_or(|expiry| expiry > system_time_to_epoch_ms(now))
+            {
+                earliest = Some(earliest.map_or(queued, |e| e.min(queued)));
+                continue;
+            }
+        }
+
+        if let Some(next) = next_fire_epoch_ms_for_persisted_task(&t, now) {
             if t.expires_at
                 .is_none_or(|expiry| expiry > system_time_to_epoch_ms(now) && next < expiry)
             {
@@ -254,6 +304,43 @@ pub async fn next_fire_epoch_ms(
         }
     }
     earliest
+}
+
+/// Compute the next occurrence using versioned task semantics. V2 reactivation
+/// records its future-only schedule anchor in `last_fired_at`; creation time and
+/// historical run IDs remain unchanged. Legacy one-shots retain their original
+/// creation-based catch-up behavior.
+#[must_use]
+pub fn next_fire_epoch_ms_for_persisted_task(
+    task: &crate::CronTask,
+    now: SystemTime,
+) -> Option<u64> {
+    let recurring = task.recurring.unwrap_or(false);
+    let resumed_one_shot = task.automation.is_some() && !recurring;
+    let anchor = if resumed_one_shot {
+        task.last_fired_at
+            .unwrap_or(task.created_at)
+            .max(task.created_at)
+    } else {
+        task.created_at
+    };
+    let next = next_fire_epoch_ms_for_task(
+        &task.id,
+        &task.cron,
+        anchor,
+        task.last_fired_at,
+        recurring,
+        now,
+    )?;
+    // One-shot cache lead may clamp to the anchor. Reactivation must still
+    // schedule a future occurrence, so use the nominal match in that case.
+    if resumed_one_shot && task.last_fired_at.is_some() && next <= anchor {
+        return parse_cron(&task.cron)
+            .ok()?
+            .next_match_after(SystemTime::UNIX_EPOCH + Duration::from_millis(anchor))
+            .map(system_time_to_epoch_ms);
+    }
+    Some(next)
 }
 
 /// The jittered next-fire time of ONE task, epoch **milliseconds** — the same
@@ -358,10 +445,10 @@ async fn set_last_fired_in_file(
     }
 }
 
-/// Production hosts impose no global recurring age limit; tasks can set `expiresAt`.
+/// Default for Claude-compatible cron jobs; task-center v2 automations bypass it.
 #[must_use]
 pub const fn default_recurring_max_age() -> Option<Duration> {
-    None
+    Some(crate::scheduler::DEFAULT_RECURRING_MAX_AGE)
 }
 
 #[cfg(test)]
@@ -525,7 +612,8 @@ mod tests {
     }
 
     const NOW: u64 = 1_700_000_000; // not on a minute boundary (…020 seconds)
-    const PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
+    const PATH: &str = "/proj/.claude/scheduled_tasks.json";
+    const AUTOMATION_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
 
     fn file_with(tasks_json: &str) -> Arc<MemFs> {
         MemFs::with(PATH, tasks_json)
@@ -717,7 +805,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn per_task_expiration_blocks_mobile_fire_and_absent_expiration_has_no_age_limit() {
+    async fn legacy_mobile_cron_ignores_task_center_expiration() {
         for expired in [false, true] {
             let created_ms = (NOW - 30 * 24 * 60 * 60) * 1000;
             let expiry = if expired {
@@ -738,7 +826,533 @@ mod tests {
                 default_recurring_max_age(),
             )
             .await;
-            assert_eq!(fired.len(), usize::from(!expired));
+            assert_eq!(fired.len(), 1);
         }
+    }
+    fn v2_file(status: &str, recurring: bool) -> Arc<MemFs> {
+        MemFs::with(AUTOMATION_PATH, &serde_json::json!({"tasks":[{"id":"dv2", "cron":"* * * * *", "prompt":"v2 prompt", "createdAt":(NOW-120)*1000, "recurring":recurring, "automation":{"version":2,"name":"Test task","status":status,"model":"provider/model","reasoning":{"kind":"level","id":"high"},"runMode":"task_session","notificationPolicy":"all"}}]}).to_string())
+    }
+    #[tokio::test]
+    async fn v2_lifecycle_and_model_snapshot_survive_claim_and_completion() {
+        let fs = v2_file("active", false);
+        let root = Path::new("/proj");
+        let now = FixedClock::at_secs(NOW).now();
+        let request = crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+            .await
+            .unwrap();
+        let config = request.task.automation.as_ref().unwrap();
+        assert_eq!(config.model, "provider/model");
+        assert_eq!(config.reasoning["id"], "high");
+        assert_eq!(config.name.as_deref(), Some("Test task"));
+        assert!(
+            crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+                .await
+                .is_none()
+        );
+        crate::bind_automation_run_session(fs.as_ref(), root, &request, "owned-chat")
+            .await
+            .unwrap();
+        let bound = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0)
+            .automation
+            .unwrap();
+        assert_eq!(bound.owned_session_id.as_deref(), Some("owned-chat"));
+        assert_eq!(bound.runs[0].session_id.as_deref(), Some("owned-chat"));
+        let result = Ok(crate::AutomationRunResult {
+            session_id: "owned-chat".into(),
+            summary: "result".into(),
+        });
+        assert!(
+            crate::finish_automation_run(fs.as_ref(), root, &request, &result, NOW * 1000).await
+        );
+        assert!(
+            !crate::finish_automation_run(fs.as_ref(), root, &request, &result, NOW * 1000).await
+        );
+        let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0);
+        let config = task.automation.unwrap();
+        assert_eq!(config.status, crate::AutomationStatus::Completed);
+        assert_eq!(config.owned_session_id.as_deref(), Some("owned-chat"));
+        assert_eq!(config.runs[0].summary.as_deref(), Some("result"));
+    }
+    #[tokio::test]
+    async fn v2_inactive_and_future_version_never_fall_back_to_legacy() {
+        for status in ["paused", "completed"] {
+            let fs = v2_file(status, true);
+            let firer = RecordingFirer::new("legacy");
+            assert!(run_due_jobs(
+                Path::new(AUTOMATION_PATH),
+                fs.clone(),
+                FixedClock::at_secs(NOW),
+                &firer,
+                None
+            )
+            .await
+            .is_empty());
+            assert!(
+                next_fire_epoch_ms(Path::new(AUTOMATION_PATH), fs, FixedClock::at_secs(NOW))
+                    .await
+                    .is_none()
+            );
+            assert!(firer.calls().is_empty());
+        }
+        let fs = v2_file("active", true);
+        let body = fs
+            .get(AUTOMATION_PATH)
+            .await
+            .unwrap()
+            .replace("\"version\":2", "\"version\":3");
+        let doc = parse_tasks(&body);
+        assert!(doc.tasks.is_empty());
+        assert_eq!(doc.unmodeled.len(), 1);
+        assert!(crate::serialize_tasks(&doc).contains("\"version\": 3"));
+    }
+    #[tokio::test]
+    async fn v2_busy_coalesces_and_invalid_configuration_pauses() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let now = FixedClock::at_secs(NOW).now();
+        let request = crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+            .await
+            .unwrap();
+        crate::bind_automation_run_session(fs.as_ref(), root, &request, "busy-session")
+            .await
+            .unwrap();
+        assert!(
+            !crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &request,
+                &Err("busy:target".into()),
+                NOW * 1000
+            )
+            .await
+        );
+        let pending = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0)
+            .automation
+            .unwrap();
+        assert_eq!(pending.runs[0].session_id, None);
+        assert_eq!(pending.runs[0].owner_pid, None);
+        assert_eq!(pending.owned_session_id.as_deref(), Some("busy-session"));
+        let next = crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+            .await
+            .unwrap();
+        assert_eq!(request.run_id, next.run_id);
+        assert!(
+            crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &next,
+                &Err("paused:Missing target".into()),
+                NOW * 1000
+            )
+            .await
+        );
+        let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0);
+        let config = task.automation.unwrap();
+        assert_eq!(config.status, crate::AutomationStatus::Paused);
+        assert_eq!(config.status_reason.as_deref(), Some("Missing target"));
+        assert_eq!(config.runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v2_concurrent_claims_coalesce_one_pending_occurrence() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let now = FixedClock::at_secs(NOW).now();
+        let (a, b) = tokio::join!(
+            crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None),
+            crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+        );
+        assert_eq!(usize::from(a.is_some()) + usize::from(b.is_some()), 1);
+        let later = now + Duration::from_secs(180);
+        for _ in 0..3 {
+            assert!(
+                crate::claim_automation_run(fs.as_ref(), root, "dv2", later, None)
+                    .await
+                    .is_none()
+            );
+        }
+        let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0);
+        let config = task.automation.unwrap();
+        assert_eq!(
+            config
+                .runs
+                .iter()
+                .filter(|r| r.status == crate::AutomationRunStatus::Running)
+                .count(),
+            1
+        );
+        assert_eq!(
+            config
+                .runs
+                .iter()
+                .filter(|r| r.status == crate::AutomationRunStatus::Queued)
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn v2_busy_merges_a_later_pending_occurrence_into_the_retry() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let now = FixedClock::at_secs(NOW).now();
+        let first = crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+            .await
+            .unwrap();
+        let later = now + Duration::from_secs(180);
+        assert!(
+            crate::claim_automation_run(fs.as_ref(), root, "dv2", later, None)
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap()).tasks[0]
+                .automation
+                .as_ref()
+                .unwrap()
+                .runs
+                .len(),
+            2
+        );
+        assert!(
+            !crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &first,
+                &Err("busy:target".into()),
+                (NOW + 180) * 1000
+            )
+            .await
+        );
+        let config = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0)
+            .automation
+            .unwrap();
+        assert_eq!(config.runs.len(), 1);
+        assert_eq!(config.runs[0].id, first.run_id);
+        assert_eq!(config.runs[0].status, crate::AutomationRunStatus::Queued);
+        let retry = crate::claim_automation_run(fs.as_ref(), root, "dv2", later, None)
+            .await
+            .unwrap();
+        assert_eq!(retry.run_id, first.run_id);
+        assert!(
+            crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &retry,
+                &Ok(crate::AutomationRunResult {
+                    session_id: "chat".into(),
+                    summary: "done".into()
+                }),
+                (NOW + 180) * 1000
+            )
+            .await
+        );
+        assert!(
+            crate::claim_automation_run(fs.as_ref(), root, "dv2", later, None)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_one_shot_reactivation_uses_future_anchor_and_preserves_history() {
+        for previously_executed in [false, true] {
+            let fs = v2_file("active", false);
+            let root = Path::new("/proj");
+            let now = FixedClock::at_secs(NOW).now();
+            if previously_executed {
+                let old = crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+                    .await
+                    .unwrap();
+                assert!(
+                    crate::finish_automation_run(
+                        fs.as_ref(),
+                        root,
+                        &old,
+                        &Err("failed".into()),
+                        NOW * 1000
+                    )
+                    .await
+                );
+            }
+            let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+            let created = doc.tasks[0].created_at;
+            let history = doc.tasks[0].automation.as_ref().unwrap().runs.clone();
+            // The management API writes this anchor when resuming or saving
+            // valid Active settings for a completed task.
+            doc.tasks[0].last_fired_at = Some(NOW * 1000);
+            doc.tasks[0].automation.as_mut().unwrap().status = crate::AutomationStatus::Active;
+            crate::tasks_file::write_automation_tasks_body(
+                fs.as_ref(),
+                root,
+                &crate::serialize_tasks(&doc),
+            )
+            .await
+            .unwrap();
+            let next = crate::next_fire_epoch_ms_for_persisted_task(&doc.tasks[0], now).unwrap();
+            assert!(next > NOW * 1000);
+            assert_eq!(
+                next_fire_epoch_ms(
+                    Path::new(AUTOMATION_PATH),
+                    fs.clone(),
+                    FixedClock::at_secs(NOW)
+                )
+                .await,
+                Some(next)
+            );
+            assert!(
+                crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+                    .await
+                    .is_none()
+            );
+            let claim = crate::claim_automation_run(
+                fs.as_ref(),
+                root,
+                "dv2",
+                SystemTime::UNIX_EPOCH + Duration::from_millis(next),
+                Some(next),
+            )
+            .await
+            .unwrap();
+            assert!(!history.iter().any(|old| old.id == claim.run_id));
+            let saved = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+                .tasks
+                .remove(0);
+            assert_eq!(saved.created_at, created);
+            assert_eq!(
+                &saved.automation.unwrap().runs[..history.len()],
+                history.as_slice()
+            );
+
+            let mut legacy = doc.tasks.remove(0);
+            legacy.automation = None;
+            assert_eq!(
+                crate::next_fire_epoch_ms_for_persisted_task(&legacy, now),
+                next_fire_epoch_ms_for_task(&legacy.id, &legacy.cron, created, None, false, now)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_expiry_retains_task_and_recovery_does_not_replay() {
+        let fs = v2_file("active", false);
+        let root = Path::new("/proj");
+        let now = FixedClock::at_secs(NOW).now();
+        crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+            .await
+            .unwrap();
+        crate::interrupt_orphaned_automation_runs(fs.as_ref(), root, NOW * 1000)
+            .await
+            .unwrap();
+        let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0);
+        let config = task.automation.unwrap();
+        assert_eq!(config.status, crate::AutomationStatus::Completed);
+        assert_eq!(
+            config.runs[0].status,
+            crate::AutomationRunStatus::Interrupted
+        );
+        assert!(
+            crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+                .await
+                .is_none()
+        );
+        let fs = v2_file("active", true);
+        let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        doc.tasks[0].expires_at = Some(NOW * 1000 - 1);
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+                .await
+                .is_none()
+        );
+        let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0);
+        assert_eq!(
+            task.automation.unwrap().status,
+            crate::AutomationStatus::Completed
+        );
+    }
+    #[tokio::test]
+    async fn v2_paused_before_binding_cancels_unstarted_run_without_overriding_task() {
+        for status in [
+            crate::AutomationStatus::Paused,
+            crate::AutomationStatus::Completed,
+        ] {
+            let fs = v2_file("active", true);
+            let root = Path::new("/proj");
+            let request = crate::claim_automation_run(
+                fs.as_ref(),
+                root,
+                "dv2",
+                FixedClock::at_secs(NOW).now(),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+            doc.tasks[0].automation.as_mut().unwrap().status = status;
+            crate::tasks_file::write_automation_tasks_body(
+                fs.as_ref(),
+                root,
+                &crate::serialize_tasks(&doc),
+            )
+            .await
+            .unwrap();
+            let error = crate::bind_automation_run_session(fs.as_ref(), root, &request, "chat")
+                .await
+                .unwrap_err();
+            assert!(error.starts_with(crate::AUTOMATION_CANCELLED_PREFIX));
+            assert!(
+                !crate::finish_automation_run(fs.as_ref(), root, &request, &Err(error), NOW * 1000)
+                    .await
+            );
+            let a = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+                .tasks
+                .remove(0)
+                .automation
+                .unwrap();
+            assert_eq!(a.status, status);
+            assert_eq!(a.runs[0].status, crate::AutomationRunStatus::Cancelled);
+            assert_eq!(a.runs[0].session_id, None);
+            assert_eq!(a.owned_session_id, None);
+        }
+    }
+    #[tokio::test]
+    async fn v2_bound_run_can_finish_after_pause_and_resume_rejects_old_occurrence() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::bind_automation_run_session(fs.as_ref(), root, &request, "chat")
+            .await
+            .unwrap();
+        let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        doc.tasks[0].automation.as_mut().unwrap().status = crate::AutomationStatus::Paused;
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &request,
+                &Ok(crate::AutomationRunResult {
+                    session_id: "chat".into(),
+                    summary: "finished".into()
+                }),
+                NOW * 1000
+            )
+            .await
+        );
+        let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let a = doc.tasks[0].automation.as_mut().unwrap();
+        assert_eq!(a.status, crate::AutomationStatus::Paused);
+        assert_eq!(a.runs[0].status, crate::AutomationRunStatus::Succeeded);
+        let old_scheduled_at = a.runs[0].scheduled_at;
+        a.status = crate::AutomationStatus::Active;
+        a.runs
+            .retain(|run| run.status != crate::AutomationRunStatus::Queued);
+        doc.tasks[0].last_fired_at = Some((NOW + 600) * 1000);
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        assert!(crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "dv2",
+            FixedClock::at_secs(NOW + 600).now(),
+            Some(old_scheduled_at)
+        )
+        .await
+        .is_none());
+    }
+    #[tokio::test]
+    async fn v2_manual_run_preserves_schedule_anchor_and_records_cancellation() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let now = FixedClock::at_secs(NOW).now();
+        let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        doc.tasks[0].created_at = NOW * 1000;
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
+                .await
+                .is_none()
+        );
+        let request = crate::claim_automation_run_now(fs.as_ref(), root, "dv2", now)
+            .await
+            .unwrap();
+        assert!(request.run_id.contains("manual"));
+        assert!(
+            crate::claim_automation_run_now(fs.as_ref(), root, "dv2", now)
+                .await
+                .is_none()
+        );
+        let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0);
+        assert_eq!(task.last_fired_at, None);
+        assert_eq!(
+            task.automation.unwrap().runs[0].owner_pid,
+            Some(std::process::id())
+        );
+        assert!(
+            crate::finish_automation_run(
+                fs.as_ref(),
+                root,
+                &request,
+                &Err("cancelled:User cancelled".into()),
+                NOW * 1000
+            )
+            .await
+        );
+        let a = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0)
+            .automation
+            .unwrap();
+        assert_eq!(a.status, crate::AutomationStatus::Active);
+        assert_eq!(a.runs[0].status, crate::AutomationRunStatus::Cancelled);
     }
 }

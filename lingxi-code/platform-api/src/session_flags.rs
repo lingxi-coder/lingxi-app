@@ -775,3 +775,17 @@ mod tests {
         assert!(second.managed());
     }
 }
+
+/// Whether print input is a single prompt rather than a streaming SDK session.
+static SINGLE_SHOT_PRINT_SESSION: AtomicBool = AtomicBool::new(false);
+
+/// Publish the CLI launch mode used by bounded Monitor deadlines.
+pub fn set_single_shot_print_session(value: bool) {
+    SINGLE_SHOT_PRINT_SESSION.store(value, Ordering::Relaxed);
+}
+
+/// Claude Code 2.1.270 `HEe()`; interactive and streaming SDK sessions are false.
+#[must_use]
+pub fn is_single_shot_print_session() -> bool {
+    SINGLE_SHOT_PRINT_SESSION.load(Ordering::Relaxed)
+}

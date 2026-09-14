@@ -546,12 +546,14 @@ pub fn lower_conversation_message_with(
                 |text| vec![MessageBlockDto::Text { text }],
             );
             MessageDto {
+                loop_wakeup: None,
                 role: "user".to_string(),
                 blocks,
                 images: content.iter().filter_map(lower_message_image).collect(),
             }
         }
         ConversationMessage::Assistant { content, .. } => MessageDto {
+            loop_wakeup: None,
             role: "assistant".to_string(),
             blocks: content
                 .iter()
@@ -559,11 +561,23 @@ pub fn lower_conversation_message_with(
                 .collect(),
             images: Vec::new(),
         },
+        ConversationMessage::System { content, subtype, .. }
+            if subtype.as_deref() == Some("scheduled_task_fire") => {
+                let payload: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
+                if payload.get("taskKindLoop") == Some(&serde_json::json!(false)) {
+                    MessageDto { role: "system".into(), images: Vec::new(), loop_wakeup: None,
+                        blocks: vec![MessageBlockDto::Text { text: payload["message"].as_str().unwrap_or_default().into() }] }
+                } else {
+                    MessageDto { role: "system".into(), blocks: Vec::new(), images: Vec::new(),
+                        loop_wakeup: serde_json::from_value(payload).ok() }
+                }
+            },
         ConversationMessage::System {
             subtype,
             compact_metadata,
             ..
         } if subtype.as_deref() == Some("compact_boundary") => MessageDto {
+            loop_wakeup: None,
             role: "system".to_string(),
             blocks: vec![MessageBlockDto::CompactBoundary {
                 messages_before: compact_metadata
@@ -576,6 +590,7 @@ pub fn lower_conversation_message_with(
             images: Vec::new(),
         },
         ConversationMessage::System { content, .. } => MessageDto {
+            loop_wakeup: None,
             role: "system".to_string(),
             blocks: vec![MessageBlockDto::Text {
                 text: content.clone(),
@@ -643,7 +658,22 @@ pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
     // ONE index for the WHOLE transcript: a `ToolUse` in assistant message N
     // pairs with its `ToolResult` in user message N+1.
     let mut tool_uses = crate::turn::ToolUseIndex::default();
+    let mut pending_loop_companion: Option<String> = None;
     for message in history {
+        if let Some(expected) = pending_loop_companion.take() {
+            if let ConversationMessage::User { content, is_meta: true, .. } = message {
+                let text = content.iter().filter_map(|block| match block {
+                    protocol::ContentBlock::Text { text } => Some(text.as_str()), _ => None,
+                }).collect::<Vec<_>>().join("");
+                if text == expected { continue; }
+            }
+        }
+        if let ConversationMessage::System { content, subtype, .. } = message {
+            if subtype.as_deref() == Some("scheduled_task_fire") {
+                pending_loop_companion = serde_json::from_str::<serde_json::Value>(content).ok()
+                    .and_then(|value| value["companion"].as_str().map(str::to_owned));
+            }
+        }
         match message {
             ConversationMessage::User {
                 content,
@@ -679,6 +709,23 @@ pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 is_visible_in_transcript_only: true,
                 ..
             } => {}
+            ConversationMessage::User { content, is_meta: true, .. } => {
+                // Scheduled inputs and other internal meta text are model context,
+                // not user-authored scrollback. Tool results still belong to their
+                // visible calls and must retain the shared transcript index.
+                let blocks: Vec<_> = content.iter()
+                    .filter(|block| matches!(block, protocol::ContentBlock::ToolResult { .. }))
+                    .filter_map(|block| crate::turn::lower_content_block_with(block, &mut tool_uses))
+                    .collect();
+                if !blocks.is_empty() {
+                    transcript.push(MessageDto {
+                        role: "user".to_string(),
+                        blocks,
+                        images: Vec::new(),
+                        loop_wakeup: None,
+                    });
+                }
+            }
             _ => transcript.push(lower_conversation_message_with(message, &mut tool_uses)),
         }
     }
@@ -1375,6 +1422,41 @@ mod tests {
     }
 
     #[test]
+    fn lower_transcript_hides_internal_meta_body_but_preserves_tool_results() {
+        use protocol::{ContentBlock, MessageId, ToolUseId};
+        let tick = "Internal scheduled tick".to_string();
+        let tool_id = ToolUseId::new();
+        let meta = |content| ConversationMessage::User {
+            id: MessageId::new(), content, is_meta: true,
+            is_compact_summary: false, is_visible_in_transcript_only: false,
+        };
+        let history = vec![
+            meta(vec![ContentBlock::Text { text: tick.clone() }]),
+            ConversationMessage::user(MessageId::new(), tick.clone()),
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: tool_id.clone(), name: "Bash".to_string(),
+                    input: serde_json::json!({"command": "pwd"}), provider_id: None,
+                }],
+                stop_reason: Some("tool_use".to_string()),
+            },
+            meta(vec![
+                ContentBlock::Text { text: "Internal result context".to_string() },
+                ContentBlock::ToolResult {
+                    tool_use_id: tool_id, content: "/tmp".to_string(), is_error: false,
+                    provider_tool_use_id: None, content_blocks: None,
+                },
+            ]),
+        ];
+        let transcript = lower_transcript(&history);
+        assert_eq!(transcript.len(), 3);
+        assert_eq!(transcript[0].blocks, vec![MessageBlockDto::Text { text: tick }]);
+        assert_eq!(transcript[2].blocks.len(), 1);
+        assert!(matches!(&transcript[2].blocks[0], MessageBlockDto::ToolResult { tool, .. } if tool == "Bash"));
+    }
+
+    #[test]
     fn lower_transcript_empty_history_is_empty() {
         assert!(lower_transcript(&[]).is_empty());
     }
@@ -1465,4 +1547,23 @@ mod tests {
             }]
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
+    let message = ConversationMessage::System {
+        id: protocol::MessageId::new(),
+        content: serde_json::json!({"message":"任意文案", "companion":"healthy", "streak":2, "since_ms":123}).to_string(),
+        subtype: Some("scheduled_task_fire".into()), compact_metadata: None, refusal_fallback: None,
+    };
+    let dto = lower_conversation_message(&message);
+    assert!(dto.blocks.is_empty());
+    let fire = dto.loop_wakeup.unwrap();
+    assert_eq!(fire.message, "任意文案");
+    assert_eq!(fire.streak, 2);
+    assert_eq!(fire.since_ms, 123);
+    let companion = ConversationMessage::user_meta(protocol::MessageId::new(), "healthy".to_string());
+    assert_eq!(lower_transcript(&[message, companion]).len(), 1,
+        "the model companion is rendered once through fire metadata");
 }

@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 // `Uvi` map, normally null), then — if GrowthBook is enabled (`$4()`) — reads
 // `Dt().cachedGrowthBookFeatures?.[key]`, returning the passed `default` whenever
 // the flag is absent or GrowthBook is disabled. There is NO env layer inside `nt`
-// itself; env overrides (e.g. `LINGXI_LOOP_PERSISTENT`) are applied by the
+// itself; env overrides (e.g. `CLAUDE_CODE_LOOP_PERSISTENT`) are applied by the
 // CALLER (`YIn`/`iKi`), not here.
 //
 // The port mirrors this with two process-global maps:

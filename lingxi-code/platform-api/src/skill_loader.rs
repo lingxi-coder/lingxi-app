@@ -49,11 +49,18 @@ pub trait SkillLoader: Send + Sync {
     /// Resolve `skill_name` (claude `resolveSkillName`: exact match, then the
     /// agent's plugin prefix `pluginName:skill`, then a `:skill` suffix match —
     /// the concrete impl owns this strategy), load its prompt content, and return
-    /// a [`SkillLoad`]. Returns `None` when the skill cannot be resolved OR is not
+    /// a [`SkillLoad`]. Returns `Ok(None)` when the skill cannot be resolved OR is not
     /// a prompt-based skill (claude logs a warning and `continue`s in both cases);
     /// the runner emits claude's exact warn string and skips it.
     ///
     /// `agent_type` is the child's `agentType` — its first `:`-segment is the
     /// plugin prefix the impl tries for the plugin-qualified resolution strategy.
-    async fn resolve_and_load(&self, skill_name: &str, agent_type: &str) -> Option<SkillLoad>;
+    /// `cwd` overrides the parent session cwd for isolated/worktree children.
+    /// Read/expansion failures return `Err`; they must not look like missing skills.
+    async fn resolve_and_load(
+        &self,
+        skill_name: &str,
+        agent_type: &str,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Option<SkillLoad>, String>;
 }

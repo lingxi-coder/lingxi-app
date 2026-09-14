@@ -827,7 +827,9 @@ fn format_skill_loading_metadata(skill_name: &str) -> String {
 /// A `None` `hook_executor` / `skill_loader` (tests / minimal builds) makes the
 /// respective step a strict no-op, so the child history stays byte-identical to
 /// legacy.
-async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::ConversationMessage> {
+async fn build_preload_messages(
+    ctx: &SubagentContext,
+) -> Result<Vec<protocol::ConversationMessage>, String> {
     use protocol::{ContentBlock, ConversationMessage, MessageId};
 
     let agent_type = ctx.agent_definition.agent_type.clone();
@@ -892,7 +894,10 @@ async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::Conversa
     // warn and is skipped.
     if let Some(loader) = &ctx.skill_loader {
         for skill_name in &ctx.agent_definition.skills {
-            match loader.resolve_and_load(skill_name, &agent_type).await {
+            match loader
+                .resolve_and_load(skill_name, &agent_type, ctx.cwd.as_deref())
+                .await?
+            {
                 None => {
                     // claude runAgent.ts:600 — exact warn string.
                     tracing::warn!(
@@ -923,7 +928,7 @@ async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::Conversa
         }
     }
 
-    out
+    Ok(out)
 }
 
 /// Translate llm-client content blocks into protocol content blocks.
@@ -1361,7 +1366,19 @@ async fn run_subagent_loop(
         // `SubagentContext::rendered_system_prompt`, and the resumed tool list
         // is pinned by the same SHA-256 definition snapshot AG-5 turns on.
         // Re-open this only with a measured prefix diff across two turns.
-        history.extend(build_preload_messages(&ctx).await);
+        match build_preload_messages(&ctx).await {
+            Ok(messages) => history.extend(messages),
+            Err(error) => {
+                let _ = out_tx
+                    .send(SubagentEvent::Failed {
+                        agent_id,
+                        error: format!("Could not preload agent skills: {error}"),
+                        cumulative_usage: llm_client::Usage::default(),
+                    })
+                    .await;
+                return;
+            }
+        }
     }
 
     // Per-agent transcript. Appended by WATERMARK — everything in
@@ -1599,8 +1616,7 @@ async fn run_subagent_loop(
             };
             let response = loop {
                 // (M9) A wake message injected below rides into the next
-                // round-trip as a user turn (mirrors the persist-park path,
-                // which appends without emitting a Message event).
+                // round-trip as a user turn. The runner is already active here.
                 if let Some(content) = wake_message.take() {
                     history.push(ConversationMessage::user(MessageId::new(), content));
                 }
@@ -2259,7 +2275,7 @@ async fn run_subagent_loop(
                                 // model-facing message, NOT the `Display` form which
                                 // would leak the LingXi-internal `ToolInvoker: …`
                                 // prefix into the child's tool_result wire bytes.
-                                content: format!("Error: {}", e.model_facing_message()),
+                                content: e.model_tool_result_content(),
                                 is_error: true,
                                 provider_tool_use_id: provider_id.clone(),
                                 content_blocks: None,
@@ -2627,7 +2643,11 @@ async fn run_subagent_loop(
                 }
                 None => true,
             };
+            let before_notifications = history.len();
             if handler_rested && fold_task_notifications(&ctx, history).await {
+                for message in &history[before_notifications..] {
+                    emit_message(&out_tx, agent_id, message).await;
+                }
                 break;
             }
             let event = tokio::select! {
@@ -2651,7 +2671,11 @@ async fn run_subagent_loop(
                     // MessageId, consistent with the assistant-id minting above —
                     // the event's message_id / request_id are the host's bookkeeping)
                     // and resume the inner turn loop with a fresh `max_turns` budget.
-                    history.push(ConversationMessage::user(MessageId::new(), content));
+                    let message = ConversationMessage::user(MessageId::new(), content);
+                    history.push(message.clone());
+                    // Publish the wake before the next provider call, which may
+                    // stall: observers use this user message to leave idle.
+                    emit_message(&out_tx, agent_id, &message).await;
                     break;
                 }
                 Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
@@ -2744,7 +2768,9 @@ async fn fold_task_notifications(
     for reminder in reminders {
         history.push(ConversationMessage::user_meta(MessageId::new(), reminder));
     }
-    for message in human { history.push(ConversationMessage::user_meta(MessageId::new(), message)); }
+    for message in human {
+        history.push(ConversationMessage::user_meta(MessageId::new(), message));
+    }
     any
 }
 

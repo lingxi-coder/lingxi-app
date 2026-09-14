@@ -2975,6 +2975,14 @@ impl TaskRegistry {
                 TaskState::LocalAgent(a) => {
                     a.is_parked = false;
                     a.base.status = status;
+                    if status.is_terminal() {
+                        // `bind_background_killer` inserts a cleanup for
+                        // foreground agents too, and only the LocalBash arm
+                        // above used to withdraw it — so every completed agent
+                        // left a permanent entry that `shutdown_background_tasks`
+                        // later walked and `kill`ed one by one.
+                        self.cleanups.lock().await.remove(&task_id);
+                    }
                     if !status.is_terminal() {
                         a.base.end_time = None;
                         a.base.evict_after = None;
@@ -5807,6 +5815,58 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
+    async fn foreground_agent_killer_binding_reaches_real_registry_and_stops_runner() {
+        struct Killer(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl platform_api::task_registry::TaskKiller for Killer {
+            async fn kill(&self) {
+                self.0.notify_one();
+            }
+        }
+        let (_dir, _fs, registry) = make_registry();
+        let agent_id = protocol::AgentId::new();
+        let registration = platform_api::task_registry::ForegroundAgentRegistration {
+            agent_id,
+            agent_type: "Plan".into(),
+            description: "plan the change".into(),
+            prompt: "design".into(),
+            tool_use_id: None,
+            creator_agent_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+        };
+        let state = registry.register_foreground_agent(registration.clone()).await.unwrap();
+        let id = state.base().id.clone();
+        let killed = Arc::new(tokio::sync::Notify::new());
+        // Exercise the public adapter used by Agent's before_start observer,
+        // including alias resolution; a mock registry hid the shell-only bug.
+        platform_api::task_registry::TaskRegistryHandle::bind_background_killer(
+            &registry, &agent_id.to_string(), Arc::new(Killer(killed.clone())),
+        ).await.unwrap();
+        registry.kill(&id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), killed.notified()).await.unwrap();
+        assert_eq!(registry.get(&id).await.unwrap().base().status, TaskStatus::Killed);
+
+        // The binding must not install stale cleanup after terminal publication.
+        let terminal = registry.register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
+            agent_id: protocol::AgentId::new(),
+            ..registration
+        }).await.unwrap();
+        let terminal_id = terminal.base().id.clone();
+        registry.set_status(&terminal_id, TaskStatus::Completed).await.unwrap();
+        platform_api::task_registry::TaskRegistryHandle::bind_background_killer(
+            &registry, &terminal_id, Arc::new(Killer(killed)),
+        ).await.unwrap();
+        assert!(!registry.cleanups.lock().await.contains_key(&terminal_id));
+
+        // PID binding still rejects agents: OS identity remains shell-specific.
+        let result = registry.bind_background_bash_process(
+            &terminal_id, Some(123), Arc::new(Killer(Arc::new(tokio::sync::Notify::new()))),
+        ).await;
+        assert!(matches!(result, Err(TaskError::Unsupported)));
+    }
+
+    #[tokio::test]
     async fn foreground_agent_controls_register_background_and_preserve_completed_row() {
         struct BackgroundSignal(std::sync::atomic::AtomicUsize);
         #[async_trait::async_trait]
@@ -5868,58 +5928,6 @@ mod adopted_workflow_scope_test {
             .unregister_foreground_agent(&temporary.base().id)
             .await;
         assert!(registry.get(&temporary.base().id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn foreground_agent_killer_binding_reaches_real_registry_and_stops_runner() {
-        struct Killer(Arc<tokio::sync::Notify>);
-        #[async_trait::async_trait]
-        impl platform_api::task_registry::TaskKiller for Killer {
-            async fn kill(&self) {
-                self.0.notify_one();
-            }
-        }
-        let (_dir, _fs, registry) = make_registry();
-        let agent_id = protocol::AgentId::new();
-        let registration = platform_api::task_registry::ForegroundAgentRegistration {
-            agent_id,
-            agent_type: "Plan".into(),
-            description: "plan the change".into(),
-            prompt: "design".into(),
-            tool_use_id: None,
-            creator_agent_id: None,
-            creator_teammate_name: None,
-            creator_team_name: None,
-        };
-        let state = registry.register_foreground_agent(registration.clone()).await.unwrap();
-        let id = state.base().id.clone();
-        let killed = Arc::new(tokio::sync::Notify::new());
-        // Exercise the public adapter used by Agent's before_start observer,
-        // including alias resolution; a mock registry hid the shell-only bug.
-        platform_api::task_registry::TaskRegistryHandle::bind_background_killer(
-            &registry, &agent_id.to_string(), Arc::new(Killer(killed.clone())),
-        ).await.unwrap();
-        registry.kill(&id).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), killed.notified()).await.unwrap();
-        assert_eq!(registry.get(&id).await.unwrap().base().status, TaskStatus::Killed);
-
-        // The binding must not install stale cleanup after terminal publication.
-        let terminal = registry.register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
-            agent_id: protocol::AgentId::new(),
-            ..registration
-        }).await.unwrap();
-        let terminal_id = terminal.base().id.clone();
-        registry.set_status(&terminal_id, TaskStatus::Completed).await.unwrap();
-        platform_api::task_registry::TaskRegistryHandle::bind_background_killer(
-            &registry, &terminal_id, Arc::new(Killer(killed)),
-        ).await.unwrap();
-        assert!(!registry.cleanups.lock().await.contains_key(&terminal_id));
-
-        // PID binding still rejects agents: OS identity remains shell-specific.
-        let result = registry.bind_background_bash_process(
-            &terminal_id, Some(123), Arc::new(Killer(Arc::new(tokio::sync::Notify::new()))),
-        ).await;
-        assert!(matches!(result, Err(TaskError::Unsupported)));
     }
 
     #[tokio::test]

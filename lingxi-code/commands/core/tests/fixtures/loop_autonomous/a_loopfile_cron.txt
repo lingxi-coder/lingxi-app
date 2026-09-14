@@ -9,7 +9,7 @@ The user invoked `/loop` with no prompt (input was empty or just the interval `5
    - `cron`: the expression from step 1
    - `prompt`: the literal string `<<loop.md>>` — it expands at fire time to the full loop.md contents on first delivery (and whenever loop.md has been edited since last fire), and to a short reminder on subsequent unchanged fires. The long instructions stay in the cached message-prefix.
    - `recurring`: `true`
-3. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that it's running tasks from `/tmp/proj/loop.md`, that recurring tasks run until cancelled, and that the user can cancel with CronDelete (include the job ID).
+3. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that it's running tasks from `/tmp/proj/loop.md`, that recurring tasks auto-expire after 7 days, and that the user can cancel sooner with CronDelete (include the job ID).
 4. **Then immediately run the loop.md tasks now**, following the instructions inlined below. Don't wait for the first cron fire.
 
 ## Loop tasks (from /tmp/proj/loop.md)

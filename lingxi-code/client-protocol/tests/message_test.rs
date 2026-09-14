@@ -17,6 +17,7 @@ use client_protocol::message::{MessageBlockDto, MessageDto};
 #[test]
 fn message_dto_round_trips() {
     let msg = MessageDto {
+        loop_wakeup: None,
         role: "assistant".to_string(),
         blocks: vec![
             MessageBlockDto::Text {
@@ -156,4 +157,19 @@ fn tool_result_diff_fields_skip_when_none() {
     assert_eq!(json["is_error"], false);
     let back: MessageBlockDto = serde_json::from_value(json).expect("deserialize ToolResult");
     assert_eq!(back, block);
+}
+
+#[test]
+fn loop_wakeup_metadata_is_additive_and_round_trips() {
+    let old: MessageDto = serde_json::from_str(r#"{"role":"assistant","blocks":[]}"#).unwrap();
+    assert!(old.loop_wakeup.is_none());
+    let dto = MessageDto { role: "system".into(), blocks: vec![], images: vec![],
+        loop_wakeup: Some(client_protocol::message::LoopWakeupDto {
+            message: "fire".into(), companion: Some("healthy".into()), streak: 1, since_ms: 42,
+        }),
+    };
+    let bytes = serde_json::to_string(&dto).unwrap();
+    assert_eq!(serde_json::from_str::<MessageDto>(&bytes).unwrap(), dto);
+    let golden = include_str!("../snapshots/message_loop_wakeup.json").trim();
+    assert_eq!(serde_json::to_string_pretty(&dto).unwrap(), golden);
 }

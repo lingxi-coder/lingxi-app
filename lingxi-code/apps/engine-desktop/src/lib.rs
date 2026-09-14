@@ -39,10 +39,15 @@ mod background_agent;
 mod connect;
 mod cron_command;
 pub mod cron_management;
+mod cron_native;
 pub mod file_changed_watch;
 pub mod fork_resume;
-mod fusion_command;
+#[cfg(test)]
+mod fusion_attempt_composition_test;
 mod fusion_attempts;
+mod fusion_command;
+#[cfg(test)]
+mod fusion_pool_admission_test;
 pub mod fusion_recorder;
 pub mod ide;
 mod pane_teammate;
@@ -52,16 +57,11 @@ pub mod settings_watch;
 mod skill_loader;
 #[cfg(test)]
 mod watcher_test_support;
-#[cfg(test)]
-mod fusion_pool_admission_test;
-#[cfg(test)]
-mod fusion_attempt_composition_test;
 
 use crate::ide::DesktopIdeHandle;
 use async_trait::async_trait;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
-use cost::CostHydrator;
 use command_api::{
     parse_slash_command, CommandRegistry, CommandResult, ParsedSlashCommand,
     RegistrySlashDispatcher,
@@ -70,6 +70,7 @@ use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
+use cost::CostHydrator;
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_client::oauth::anthropic::handle::OAuthHandle;
@@ -104,6 +105,7 @@ use tokio::sync::RwLock;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
+pub use tool_cron as loop_tools;
 
 #[cfg(unix)]
 use platform_posix::PosixMcpTransport;
@@ -1460,10 +1462,13 @@ async fn load_boot_permission_tiers_with_flag(
     if allow_managed_permission_rules_only {
         rules.retain(|r| r.source == permission::PermissionRuleSource::PolicySettings);
     }
-    let mode_preference_allowed = !managed_tiers.iter().any(|raw| {
-        permission::default_mode_from_settings_json(raw).is_some()
-    }) && flag_settings.and_then(|settings| serde_json::to_string(settings).ok())
-        .and_then(|raw| permission::default_mode_from_settings_json(&raw)).is_none();
+    let mode_preference_allowed = !managed_tiers
+        .iter()
+        .any(|raw| permission::default_mode_from_settings_json(raw).is_some())
+        && flag_settings
+            .and_then(|settings| serde_json::to_string(settings).ok())
+            .and_then(|raw| permission::default_mode_from_settings_json(&raw))
+            .is_none();
     raw_tiers.extend(managed_tiers);
     BootPermissionTiers {
         rules,
@@ -1868,13 +1873,13 @@ mod managed_otel_env_tests {
 
 /// Whether the live cron scheduler should run. Faithful to claude-code's
 /// `isKairosCronEnabled` LOCAL kill-switch (`ScheduleCronTool/prompt.ts:34/38`):
-/// the `LINGXI_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
+/// the `CLAUDE_CODE_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
 /// the GrowthBook fleet flag. That flag defaults to `true`, so this wired-on
 /// scheduler already matches the default-enabled fleet state — only the local
 /// disable override was missing. (The remote GB gate itself is not portable —
 /// LingXi has no GrowthBook substrate — but its default-true state is.)
 fn cron_scheduler_enabled(disable_cron_env: Option<&str>) -> bool {
-    !platform_api::env::is_env_truthy(disable_cron_env)
+    disable_cron_env.is_none_or(str::is_empty)
 }
 
 /// Expand a raw additional-working-dir entry (settings `additionalDirectories`
@@ -3140,13 +3145,32 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
         orchestrator::build_background_tasks(&records)
     }
 
+    async fn background_tasks_with_start_times(
+        &self,
+    ) -> (
+        Vec<hooks::HookBackgroundTask>,
+        std::collections::HashMap<String, u64>,
+    ) {
+        let records = self
+            .registry
+            .list(platform_api::task_registry::TaskListFilter::default())
+            .await
+            .unwrap_or_default();
+        let start_times = records
+            .iter()
+            .filter_map(|record| record.started_at_ms.map(|ms| (record.task_id.clone(), ms)))
+            .collect();
+        (orchestrator::build_background_tasks(&records), start_times)
+    }
+
     async fn session_crons(&self) -> Vec<hooks::HookSessionCron> {
         // claude `Cv()` is the in-memory session cron list; the port persists the
-        // durable cron jobs to `<project_root>/.lingxi/scheduled_tasks.json`. Read
-        // + parse it (a missing/garbage file ⇒ no crons, matching claude's
-        // unreadable-file-as-empty contract) and map each task into the builder's
-        // neutral input.
-        let path = cron::tasks_file::scheduled_tasks_path(&self.project_root);
+        // durable cron jobs to `<project_root>/.claude/scheduled_tasks.json` —
+        // the SESSION store `CronCreate`/`write_tasks_body` write, not the v2
+        // task-center store beside it. Read + parse it (a missing/garbage file ⇒
+        // no crons, matching claude's unreadable-file-as-empty contract) and map
+        // each task into the builder's neutral input.
+        let path = cron::tasks_file::session_scheduled_tasks_path(&self.project_root);
         let body = std::fs::read_to_string(&path).unwrap_or_default();
         let doc = cron::tasks_file::parse_tasks(&body);
         let mut inputs: Vec<orchestrator::CronSnapshotInput> = doc
@@ -5300,9 +5324,7 @@ mod desktop_fusion_executor_boot_test {
         let outputs = budget.workflow_output_scopes();
         desktop_fusion_attempts(
             Arc::new(llm_client::ApiService::new(
-                Arc::new(
-                    llm_client::DefaultLlmClient::from_config(Default::default()).unwrap(),
-                ),
+                Arc::new(llm_client::DefaultLlmClient::from_config(Default::default()).unwrap()),
                 Arc::new(UnreachableTransport),
                 Default::default(),
                 Default::default(),
@@ -5762,6 +5784,8 @@ impl std::fmt::Debug for DesktopAudio {
 /// use std::path::PathBuf;
 ///
 /// let cfg = DesktopConfig {
+///     enable_automation_scheduler: true,
+///     host_workspace_trusted: None,
 ///     api_base: "https://api.anthropic.com".to_string(),
 ///     api_key: "sk-test".to_string(),
 ///     isolated_credential_storage: false,
@@ -5850,6 +5874,12 @@ impl std::fmt::Debug for DesktopAudio {
 /// ```
 #[derive(Clone)]
 pub struct DesktopConfig {
+    /// Whether this runtime owns versioned automation dispatch. CLI defaults to
+    /// true; desktop hosts enable it only for their persistent scope controller.
+    pub enable_automation_scheduler: bool,
+    /// Explicit trust decision from the host for this workspace. `None` keeps
+    /// CLI trust resolution; `Some(false)` must override any persisted grant.
+    pub host_workspace_trusted: Option<bool>,
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
@@ -6434,6 +6464,11 @@ impl std::fmt::Debug for DesktopConfig {
         // diagnostics. Trait objects use the same presence-only convention.
         f.debug_struct("DesktopConfig")
             .field(
+                "enable_automation_scheduler",
+                &self.enable_automation_scheduler,
+            )
+            .field("host_workspace_trusted", &self.host_workspace_trusted)
+            .field(
                 "api_base",
                 &if self.api_base.is_empty() {
                     "<empty>"
@@ -6579,6 +6614,8 @@ impl std::fmt::Debug for DesktopConfig {
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
+            enable_automation_scheduler: true,
+            host_workspace_trusted: None,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             // Production reads the real keychain; only isolated hosts opt out.
@@ -6804,10 +6841,11 @@ pub async fn desktop_command_registry(
     register_all_builtin_commands(&mut reg);
     // Bundled programmatic skills (`/loop`), port of `registerBundledSkills`.
     // Gated on the same cron kill-switch the scheduler uses
-    // (`isKairosCronEnabled` ↔ `cron_scheduler_enabled(LINGXI_DISABLE_CRON)`,
+    // (`isKairosCronEnabled` ↔ `cron_scheduler_enabled(CLAUDE_CODE_DISABLE_CRON)`,
     // loop.ts:83). Registered AFTER builtins; `/loop` is not a builtin name so no
     // shadow conflict.
-    let cron_enabled = cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
+    let cron_enabled =
+        cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref());
     command_core::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth.clone());
@@ -7276,7 +7314,9 @@ pub async fn refresh_process_session_presence(
         platform_api::live_sessions::process_permission_class().as_deref(),
     ) {
         let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
-        return Err(format!("live-session identity could not be updated: {error}"));
+        return Err(format!(
+            "live-session identity could not be updated: {error}"
+        ));
     }
     if socket.is_none() {
         dir.clear_messaging_socket_if_session(pid, &current_text)
@@ -7288,7 +7328,7 @@ pub async fn refresh_process_session_presence(
 pub struct DesktopSessionLifecycle {
     settings_watcher: settings_watch::SettingsWatcherHandle,
     file_changed_watcher: file_changed_watch::FileChangedWatcherHandle,
-    cron_scheduler: Option<Arc<cron::CronScheduler>>,
+    pub cron_scheduler: Option<Arc<cron::CronScheduler>>,
     orchestrator: Arc<ConversationOrchestrator>,
     mcp_reconnect_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     mcp_catalog_refresh_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -7333,20 +7373,16 @@ impl DesktopSessionLifecycle {
         // Per-stage allowance, further clipped by the overall deadline. A
         // stage that overruns is abandoned, not aborted: its detached owner
         // still holds its own guard and settles on its own.
-        let stage = |budget: std::time::Duration| {
-            deadline.min(tokio::time::Instant::now() + budget)
-        };
+        let stage =
+            |budget: std::time::Duration| deadline.min(tokio::time::Instant::now() + budget);
         // Both watcher families can fire hooks that retain the orchestrator or
         // create children. Join their actual jobs before draining consumers.
-        if tokio::time::timeout_at(
-            stage(std::time::Duration::from_millis(500)),
-            async {
-                tokio::join!(
-                    self.settings_watcher.shutdown_and_drain(),
-                    self.file_changed_watcher.shutdown_and_drain(),
-                );
-            },
-        )
+        if tokio::time::timeout_at(stage(std::time::Duration::from_millis(500)), async {
+            tokio::join!(
+                self.settings_watcher.shutdown_and_drain(),
+                self.file_changed_watcher.shutdown_and_drain(),
+            );
+        })
         .await
         .is_err()
         {
@@ -7416,16 +7452,14 @@ impl DesktopSessionLifecycle {
             // and this lifecycle can be retried. Already-observed charges may
             // still be settled safely; no queue or writer claim is closed here.
             if let Err(error) = self.cost_tracker.drain_owned_settlements().await {
-                report.errors.push(format!("cost settlement failed: {error}"));
+                report
+                    .errors
+                    .push(format!("cost settlement failed: {error}"));
             }
             return report;
         }
-        let retired_command_handlers = {
-            self.command_registry
-                .write()
-                .await
-                .take_builtin_handlers()
-        };
+        let retired_command_handlers =
+            { self.command_registry.write().await.take_builtin_handlers() };
         // Handler destructors can release the orchestrator, whose skill-listing
         // provider owns this same registry. Run that graph teardown only after
         // the write guard above has been released.
@@ -7438,7 +7472,9 @@ impl DesktopSessionLifecycle {
         // producer.
         self.subagent_spawner.release_runtime_links();
         if let Err(error) = self.cost_tracker.drain_owned_settlements().await {
-            report.errors.push(format!("cost settlement failed: {error}"));
+            report
+                .errors
+                .push(format!("cost settlement failed: {error}"));
         }
         if let Err(error) = self.session_state_manager.flush_all().await {
             report
@@ -7666,9 +7702,9 @@ pub struct DesktopRuntime {
     /// `/loop` dynamic-mode (Phase 2): the set-once cell for the registered
     /// `ScheduleWakeup` tool. Empty at build time (the per-connection queue +
     /// spawner don't exist yet); the bridge composition root fills it at
-    /// `boot::assemble` with a `MsgQueueWakeupScheduler`. Hosts without a
-    /// per-connection queue (CLI / offline) leave it empty → the tool is an
-    /// honest no-op.
+    /// `boot::assemble` with a `MsgQueueWakeupScheduler`. Interactive CLI hosts
+    /// retain and bind the same seam when mounting their local queue. One-shot
+    /// hosts without a queue leave the cell empty.
     pub wakeup_scheduler_cell: tool_cron::WakeupSchedulerCell,
     /// A `RuntimeSpawner` for host-side background wiring that needs one after
     /// `build` (today: the bridge's `MsgQueueWakeupScheduler`, which sleeps then
@@ -9591,7 +9627,8 @@ fn registry_skill_listing_provider(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .keys();
-                let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
                     .into_iter()
                     // TS `cmd.type === 'prompt'` — markdown/plugin commands,
@@ -10144,6 +10181,14 @@ fn current_credential_user() -> String {
 /// environment and the network (the availability probe), but creates no
 /// session, no transcript and no hooks.
 pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildError> {
+    let shared = build_shared_credential_stack_for_config(cfg).await?;
+    resolve_llm_stack_with_credentials(cfg, shared).await
+}
+
+async fn resolve_llm_stack_with_credentials(
+    cfg: &DesktopConfig,
+    shared: SharedCredentialStack,
+) -> Result<LlmStack, BuildError> {
     // Resolve the winning model setting from the canonical tier stack before
     // assembling provider profiles. Managed `settings.model` is the only
     // administrator-owned default; explicit CLI/env pins remain user-owned.
@@ -10161,7 +10206,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         clock,
         storage: mcp_oauth_storage,
         credentials,
-    } = build_shared_credential_stack_for_config(&cfg).await?;
+    } = shared;
 
     // The packaged Electron parent owns durable plugin-secret persistence in
     // a dedicated Keychain service. Seed the shared runtime manager before
@@ -11286,9 +11331,13 @@ fn capture_legacy_opening_balance(
     let config_path = config_path?;
     let project_key = migrations::global_config::project_path_for_config(cwd);
     let project = migrations::global_config::get_project_config(&config_path, &project_key).ok()?;
-    let session = project.get("lastSessionId").and_then(serde_json::Value::as_str)?;
+    let session = project
+        .get("lastSessionId")
+        .and_then(serde_json::Value::as_str)?;
     let session_id = protocol::SessionId::parse_prefixed(session)?;
-    let dollars = project.get("lastCost").and_then(serde_json::Value::as_f64)?;
+    let dollars = project
+        .get("lastCost")
+        .and_then(serde_json::Value::as_f64)?;
     if !dollars.is_finite() || dollars <= 0.0 {
         return None;
     }
@@ -11318,7 +11367,10 @@ mod legacy_opening_balance_test {
         .unwrap();
     }
 
-    fn entries(session: &str, cost: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    fn entries(
+        session: &str,
+        cost: serde_json::Value,
+    ) -> serde_json::Map<String, serde_json::Value> {
         let mut map = serde_json::Map::new();
         map.insert("lastSessionId".into(), serde_json::json!(session));
         map.insert("lastCost".into(), cost);
@@ -11332,7 +11384,11 @@ mod legacy_opening_balance_test {
         let cwd = Path::new("/proj/alpha");
         let session = protocol::SessionId::new();
         // Exactly what `save_session_cost` writes: `session_id.to_string()`.
-        write(&config, cwd, entries(&session.to_string(), serde_json::json!(0.0175)));
+        write(
+            &config,
+            cwd,
+            entries(&session.to_string(), serde_json::json!(0.0175)),
+        );
 
         assert_eq!(
             capture_legacy_opening_balance(Some(&config), cwd),
@@ -11346,7 +11402,11 @@ mod legacy_opening_balance_test {
         let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
         let session = protocol::SessionId::new();
-        write(&config, cwd, entries(&session.to_string(), serde_json::json!(0.0175)));
+        write(
+            &config,
+            cwd,
+            entries(&session.to_string(), serde_json::json!(0.0175)),
+        );
 
         // A different project key must not inherit alpha's balance.
         assert_eq!(
@@ -11388,7 +11448,11 @@ mod legacy_opening_balance_test {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
-        write(&config, cwd, entries("not-a-uuid", serde_json::json!(0.0175)));
+        write(
+            &config,
+            cwd,
+            entries("not-a-uuid", serde_json::json!(0.0175)),
+        );
 
         assert_eq!(capture_legacy_opening_balance(Some(&config), cwd), None);
     }
@@ -11417,10 +11481,42 @@ mod legacy_opening_balance_test {
 }
 
 pub async fn build(
-    mut cfg: DesktopConfig,
+    cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
+    let shared = build_shared_credential_stack_for_config(&cfg).await?;
+    build_with_credential_stack(cfg, output, permission_sink, shared).await
+}
+
+/// Build a bridge runtime whose host owns versioned automation execution.
+/// No native CLI firer is attached during construction, even before host binding.
+pub async fn build_with_host_automation(
+    cfg: DesktopConfig,
+    output: Arc<dyn OutputStream>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+    shared: SharedCredentialStack,
+) -> Result<DesktopRuntime, BuildError> {
+    cron_native::HOST_AUTOMATION
+        .scope(
+            true,
+            build_with_credential_stack(cfg, output, permission_sink, shared),
+        )
+        .await
+}
+
+/// Build using a host-seeded credential stack; secrets never enter configuration.
+pub async fn build_with_credential_stack(
+    mut cfg: DesktopConfig,
+    output: Arc<dyn OutputStream>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+    shared: SharedCredentialStack,
+) -> Result<DesktopRuntime, BuildError> {
+    let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
+        let mut seed = cfg.clone();
+        seed.session_writer_lease = None;
+        (seed, permission_sink.clone())
+    });
     // Consume the construction-only writer claim before any config-derived
     // stack is cloned. Long-lived settings/catalog clones must not retain an
     // obsolete session authority across a hot clear/resume.
@@ -11542,7 +11638,7 @@ pub async fn build(
         credential_origin,
         has_oauth_token,
         ..
-    } = resolve_llm_stack(&cfg).await?;
+    } = resolve_llm_stack_with_credentials(&cfg, shared).await?;
 
     // Phase 2a CHAINS BRIDGE: translate the assembled `ChainConfig` into main's
     // richer adapter's `fallback_overrides` shape. `assemble` keys each chain by
@@ -11929,10 +12025,8 @@ pub async fn build(
     } else {
         None
     };
-    let legacy_opening_balance = capture_legacy_opening_balance(
-        legacy_config_path.as_deref(),
-        &cfg.cwd,
-    );
+    let legacy_opening_balance =
+        capture_legacy_opening_balance(legacy_config_path.as_deref(), &cfg.cwd);
     // `--no-session-persistence` means "leave no transcript behind", not
     // "spend without accounting". Fusion charges several models per run, so it
     // needs a ledger; giving the ephemeral host a disposable one is what lets
@@ -11949,9 +12043,7 @@ pub async fn build(
     let session_state_manager = {
         let legacy_shadow = legacy_opening_balance.map(|(legacy_session_id, amount)| {
             Arc::new(move |session_id| (session_id == legacy_session_id).then_some(amount))
-                as Arc<
-                    dyn Fn(protocol::SessionId) -> Option<u64> + Send + Sync + 'static,
-                >
+                as Arc<dyn Fn(protocol::SessionId) -> Option<u64> + Send + Sync + 'static>
         });
         session_state::SessionStateManager::new_with_legacy_shadow(
             ledger_home.clone(),
@@ -11962,12 +12054,10 @@ pub async fn build(
         let lease = if let Some(lease) = construction_writer_lease {
             lease
         } else {
-            platform_api::live_sessions::LiveSessionDir::at_live(
-                ledger_home.join("sessions"),
-            )
-            .claim_session_id(&main_session_id.to_string(), std::process::id())
-            .map_err(|error| BuildError::DurableSession(error.to_string()))?
-            .into_shared()
+            platform_api::live_sessions::LiveSessionDir::at_live(ledger_home.join("sessions"))
+                .claim_session_id(&main_session_id.to_string(), std::process::id())
+                .map_err(|error| BuildError::DurableSession(error.to_string()))?
+                .into_shared()
         };
         let coordinator = session_state::SessionStateCoordinator::open(
             &ledger_home,
@@ -12032,16 +12122,14 @@ pub async fn build(
         Arc::new(main_jsonl_writer)
     };
     session_state_manager.set_transcript_writer(main_jsonl_writer.clone());
-    let fusion_transcript_target = fusion_recorder::FusionTranscriptTarget::new(
-        main_jsonl_writer.clone(),
-    )
-    .for_session(main_session_id);
-    let fusion_recorder_factory_impl = Arc::new(
-        fusion_recorder::DesktopFusionRecorderFactory::new(
+    let fusion_transcript_target =
+        fusion_recorder::FusionTranscriptTarget::new(main_jsonl_writer.clone())
+            .for_session(main_session_id);
+    let fusion_recorder_factory_impl =
+        Arc::new(fusion_recorder::DesktopFusionRecorderFactory::new(
             session_state_manager.clone(),
             fusion_transcript_target.clone(),
-        ),
-    );
+        ));
     // Resolve the boot recorder through the same factory retained for hot
     // sessions and shutdown recovery. This both shares its per-delivery lock
     // and ensures a boot outbox is included in `retry_pending_all()`.
@@ -12050,8 +12138,8 @@ pub async fn build(
         .expect("boot durable session is registered before recorder wiring");
     let fusion_recorder =
         fusion_recovery_recorder.clone() as Arc<dyn platform_api::FusionRunRecorder>;
-    let fusion_recorder_factory = fusion_recorder_factory_impl.clone()
-        as Arc<dyn platform_api::FusionRunRecorderFactory>;
+    let fusion_recorder_factory =
+        fusion_recorder_factory_impl.clone() as Arc<dyn platform_api::FusionRunRecorderFactory>;
 
     // One CostTracker per process. The ephemeral path retains compatibility
     // with hosts that explicitly disabled session persistence; production
@@ -12292,7 +12380,11 @@ pub async fn build(
     let workflow_output_scopes = shared_budget_enforcer.workflow_output_scopes();
     {
         if let Err(error) = workflow_output_scopes
-            .ensure_current(main_session_id, protocol::MessageId::new(), orch_cfg.token_budget)
+            .ensure_current(
+                main_session_id,
+                protocol::MessageId::new(),
+                orch_cfg.token_budget,
+            )
             .await
         {
             let cleanup = session_state.close_and_drain().await.err();
@@ -13877,9 +13969,7 @@ pub async fn build(
     .with_fusion(fusion_executor.clone())
     .with_terminal_recorder_opt(Some(fusion_recorder.clone()))
     .with_terminal_recorder_factory(fusion_recorder_factory.clone())
-    .with_status_sink(
-        local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
-    )
+    .with_status_sink(local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>)
     .with_workflow_progress_sink(local_workflow_event_sink.clone()
         as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
     // Nested workflow names resolve against the same plugin registry.
@@ -13943,20 +14033,69 @@ pub async fn build(
     //        posix RuntimeSpawner (D17). The tick task holds a self-clone; the
     //        session lifecycle therefore retains the scheduler and explicitly
     //        stops it before draining task producers on shutdown/remount.
-    //        Gated by the `LINGXI_DISABLE_CRON` local kill-switch
+    //        Gated by the `CLAUDE_CODE_DISABLE_CRON` local kill-switch
     //        (claude-code `prompt.ts:34/38` — the env override that wins over the
     //        GrowthBook fleet flag, which itself defaults on).
-    let cron_scheduler = if cron_scheduler_enabled(
-        std::env::var("LINGXI_DISABLE_CRON").ok().as_deref(),
-    ) {
+    let cron_scheduler = if !cron_native::is_child_runtime()
+        && cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref())
+    {
+        if cfg.enable_automation_scheduler && cfg.host_workspace_trusted == Some(true) {
+            let migration_model = provider_adapter_handle
+                .list_model_listings()
+                .into_iter()
+                .find(|listing| {
+                    listing.request_model == default_model_id
+                        && default_model_profile
+                            .as_ref()
+                            .is_none_or(|profile| &listing.provider_id == profile)
+                })
+                .map(|listing| {
+                    platform_api::qualified_model_ref(
+                        &listing.request_model,
+                        Some(&listing.provider_id),
+                    )
+                });
+            let migration_reasoning = cfg.initial_effort.as_ref().map_or_else(
+                || serde_json::json!({"type":"automatic"}),
+                |id| serde_json::json!({"type":"level", "id":id}),
+            );
+            cron_management::migrate_legacy(
+                &PosixFileSystem::new(cwd.clone()),
+                &cwd,
+                migration_model,
+                migration_reasoning,
+            )
+            .await
+            .map_err(|error| {
+                BuildError::DurableSession(format!("Scheduled task migration failed: {error}"))
+            })?;
+            if cron::scheduled_tasks_path(&cwd).exists() {
+                cron::automation::recover_orphaned_automation_runs(
+                    &PosixFileSystem::new(cwd.clone()),
+                    &cwd,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                )
+                .await
+                .map_err(BuildError::DurableSession)?;
+            }
+        }
         let tasks_file = cron::tasks_file::scheduled_tasks_path(&cwd);
-        let scheduler = Arc::new(cron::CronScheduler::new(
-            task_registry.clone(),
-            Arc::new(PosixFileSystem::new(cwd.clone())),
-            clock.clone(),
-            Arc::new(PosixRuntime::new()),
-            tasks_file,
-        ));
+        let scheduler = Arc::new(
+            cron::CronScheduler::new(
+                task_registry.clone(),
+                Arc::new(PosixFileSystem::new(cwd.clone())),
+                clock.clone(),
+                Arc::new(PosixRuntime::new()),
+                tasks_file,
+            )
+            .with_session_id(main_session_uuid.clone())
+            .with_session_cron(
+                !(cfg.enable_automation_scheduler && cfg.host_workspace_trusted.is_some()),
+            ),
+        );
         // Load every durable job from the single tasks file (a recurring job
         // created days ago is aged correctly on load; its restored `lastFiredAt`
         // prevents a missed-run catch-up from re-firing an already-fired run).
@@ -14437,9 +14576,7 @@ pub async fn build(
                     )
                     // `zj`'s `!Ae()`; this fallback path has no settings read,
                     // so it takes the launch kind straight from the config.
-                    .with_interactive_session(
-                        cfg.session_composition().is_interactive_session(),
-                    )
+                    .with_interactive_session(cfg.session_composition().is_interactive_session())
                     .with_roots(permission::FsRoots {
                         cwd: cwd.clone(),
                         home: dirs::home_dir(),
@@ -14648,6 +14785,7 @@ pub async fn build(
             shared_command_registry.clone(),
             Some(skill_session_id),
         )
+        .with_prompt_cwd(tool_ctx.session_cwd.clone())
         .with_shell_expansion(tool_skill::build_prompt_shell_provider(&tool_ctx)),
     );
     let _ = subagent_skill_loader_cell.set(skill_loader_arc.clone());
@@ -14736,8 +14874,7 @@ pub async fn build(
         Arc::new(tool_computer_use::TuiBridgeResolver::new(tx))
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
-    let (wakeup_scheduler_cell, loop_wakeup_armed) =
-        register_desktop_tools_with_fusion_recorder(
+    let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools_with_fusion_recorder(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
@@ -15232,18 +15369,13 @@ pub async fn build(
     // restoration. Same shared-`Arc` file target, so the record lands in the SAME
     // `<uuid>.jsonl` the orchestrator appends messages to.
     let main_agent_setting_writer = main_jsonl_writer.clone();
-    // (review #12) Resolve the `/goal` accept-gate values BEFORE `cwd` is moved
-    // into the orchestrator. These feed the previously-unwired
-    // `with_workspace_trusted` / `with_hooks_restricted` builders so `/goal`
-    // honors claude's `Xys()` gate — rejected in an untrusted workspace or when
-    // hooks are restricted. Both resolve FAIL-SAFE: a missing global config or a
-    // load failure yields `untrusted` / `not-restricted`, so `/goal` is BLOCKED
-    // rather than falsely granted. A session that accepted the trust dialog has a
-    // recorded disk grant (`record_trust_accept`), so normal sessions stay
-    // trusted; homedir sessions short-circuit via session-trust.
-    let goal_workspace_trusted = migrations::global_config::global_config_path()
-        .map(|cfg| migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd))
-        .unwrap_or(false);
+    // Desktop hosts own their trust decision; CLI callers retain disk/session
+    // trust resolution. This shared value gates cron, task messages, and /goal.
+    let workspace_trusted = resolve_workspace_trust(
+        cfg.host_workspace_trusted,
+        &cwd,
+        migrations::global_config::global_config_path().as_deref(),
+    );
     let goal_hooks_restricted = if cfg.restricted {
         effective_settings
             .as_ref()
@@ -15315,7 +15447,7 @@ pub async fn build(
         // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
         // above) into the orchestrator, replacing the hardcoded trusted=true /
         // restricted=false defaults.
-        .with_workspace_trusted(goal_workspace_trusted)
+        .with_workspace_trusted(workspace_trusted)
         .with_hooks_restricted(goal_hooks_restricted)
         .with_analytics_bus(analytics_bus.clone())
         .with_mcp_registry(mcp_registry.clone())
@@ -15496,6 +15628,7 @@ pub async fn build(
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
     let orch = Arc::new(orch_builder);
+    orch.enable_goal_retries();
     orch.attach_owned_session_switches();
     async_hook_response_buffer.attach_rewake_target(&orch);
 
@@ -15626,7 +15759,12 @@ pub async fn build(
     // `Nle`) instead of silently accepted. Non-blocking read (`try_lock`); a
     // contended read returns `None` and the model check is skipped (fail-open).
     if let Some(cell) = loop_classifier_cell {
-        let _ = cell.set(Arc::new(orchestrator::loop_permission_classifier::SessionLoopClassifier::new(&orch, api_service.clone())));
+        let _ = cell.set(Arc::new(
+            orchestrator::loop_permission_classifier::SessionLoopClassifier::new(
+                &orch,
+                api_service.clone(),
+            ),
+        ));
     }
     if let Some(cell) = live_model_provider_cell.as_ref() {
         let session = orch.session();
@@ -15741,7 +15879,7 @@ pub async fn build(
         task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     )));
     reg.register_builtin_handler(worktree_command_handler);
-    if cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref()) {
+    if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
         // `/cron` is an explicit management action. Keep it out of the model
         // permission loop and invoke the same validated cron tools directly.
         reg.register_builtin_handler(cron_command_handler);
@@ -16245,7 +16383,14 @@ pub async fn build(
     let expansion_ctx_orch = orch.clone();
     let background_command_orch = orch.clone();
     let mcp_prompt_registry = mcp_registry.clone();
+    let prompt_paths_orch = orch.clone();
     let mut dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+        .with_prompt_paths(Arc::new(move || {
+            (
+                prompt_paths_orch.project_root(),
+                prompt_paths_orch.current_cwd(),
+            )
+        }))
         .with_skill_invocation_observer(skill_invocation_observer)
         .with_skill_usage_home(cfg.lingxi_home.clone())
         .with_mcp_prompt_resolver(Arc::new(move |connection_id, prompt_name, arguments| {
@@ -16450,6 +16595,29 @@ pub async fn build(
         .entry("anthropic".to_string())
         .or_insert_with(|| "api_key".to_string());
 
+    if let (Some(scheduler), Some((config, permissions))) = (&cron_scheduler, native_cron_seed) {
+        if orch.workspace_trusted().await {
+            if cron::scheduled_tasks_path(&config.cwd).exists() {
+                cron::automation::recover_orphaned_automation_runs(
+                    &PosixFileSystem::new(config.cwd.clone()),
+                    &config.cwd,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                )
+                .await
+                .map_err(BuildError::DurableSession)?;
+            }
+        }
+        scheduler
+            .set_automation_firer(Arc::new(cron_native::NativeCronFirer::new(
+                config,
+                permissions,
+                Arc::downgrade(&orch),
+            )))
+            .await;
+    }
     let session_lifecycle = Arc::new(DesktopSessionLifecycle {
         ephemeral_home: ephemeral_home.clone(),
         settings_watcher: settings_watcher.clone(),
@@ -16522,13 +16690,25 @@ pub async fn build(
     })
 }
 
+fn resolve_workspace_trust(
+    host_trusted: Option<bool>,
+    cwd: &std::path::Path,
+    global_config_path: Option<&std::path::Path>,
+) -> bool {
+    host_trusted.unwrap_or_else(|| {
+        global_config_path
+            .map(|path| migrations::global_config::check_has_trust_dialog_accepted(path, cwd))
+            .unwrap_or(false)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build, build_shared_credential_stack_for_config, desktop_fusion_runtime_config,
-        ephemeral_session_home,
-        desktop_tool_registry, filter_fusion_catalog, fusion_route_flag, model_deprecation_warning,
-        parse_worktree_slash_action, refresh_fusion_catalog_after_credential_delete,
+        desktop_tool_registry, ephemeral_session_home, filter_fusion_catalog, fusion_route_flag,
+        model_deprecation_warning, parse_worktree_slash_action,
+        refresh_fusion_catalog_after_credential_delete,
         refresh_fusion_catalog_after_credential_write, register_fusion_catalog_refresher,
         resolve_memory_feature_gates, resolve_workflow_session_enabled,
         resolve_workflow_size_guideline, sandbox_network_ask_callback, CoordinatorWiring,
@@ -16539,6 +16719,26 @@ mod tests {
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn host_workspace_trust_overrides_cli_records_and_preserves_cli_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let config = tmp.path().join("global.json");
+        let resolve = |host| super::resolve_workspace_trust(host, &cwd, Some(&config));
+        assert_eq!(DesktopConfig::default().host_workspace_trusted, None);
+        assert!(!resolve(None));
+        assert!(resolve(Some(true)));
+        assert!(!config.exists(), "host trust must not persist a CLI grant");
+        migrations::global_config::mark_trust_dialog_accepted(&config, &cwd).unwrap();
+        assert!(resolve(None));
+        assert!(!resolve(Some(false)));
+        assert!(!super::resolve_workspace_trust(None, &cwd, None));
+        std::fs::write(&config, "invalid json").unwrap();
+        assert!(!resolve(None));
+        assert!(resolve(Some(true)));
+    }
 
     /// `--no-session-persistence` still needs a spend ledger: Fusion charges
     /// several models per run, and one billing path is better than two. The
@@ -16587,7 +16787,6 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
         assert!(!home.exists());
     }
-
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
@@ -16802,6 +17001,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn memory_feature_gates_keep_prefetch_and_session_memory_in_sync() {
+        assert_eq!(resolve_memory_feature_gates(false, false), (false, false));
+        assert_eq!(resolve_memory_feature_gates(true, false), (true, false));
+        assert_eq!(resolve_memory_feature_gates(false, true), (true, true));
+        assert_eq!(resolve_memory_feature_gates(true, true), (true, true));
+    }
+
     /// MEM-1 — a clean install must get auto-memory. claude-code's `dLt()` ends
     /// `return!0`; the port had it OFF for everyone behind
     /// `LINGXI_MEMDIR_PREFETCH`, citing `tengu_moth_copse` — a flag that
@@ -16811,7 +17018,10 @@ mod tests {
         let env = memory::AutoMemoryEnv::default();
         let (prefetch_on, _) =
             resolve_memory_feature_gates(memory::auto_memory_enabled(&env, None), false);
-        assert!(prefetch_on, "auto-memory must be ON with nothing configured");
+        assert!(
+            prefetch_on,
+            "auto-memory must be ON with nothing configured"
+        );
 
         let (off, _) =
             resolve_memory_feature_gates(memory::auto_memory_enabled(&env, Some(false)), false);
@@ -16842,20 +17052,11 @@ mod tests {
         );
         // The precise thing that must be gone is the env READ, not the name —
         // the comment above the call site still explains what it replaced.
-        let old_gate =
-            "is_env_truthy(\"LINGXI_MEMDIR_PREFETC".to_string() + "H\")";
+        let old_gate = "is_env_truthy(\"LINGXI_MEMDIR_PREFETC".to_string() + "H\")";
         assert!(
             !build_src.contains(&old_gate),
             "the old env-only gate must no longer decide this — it kept memory off by default"
         );
-    }
-
-    #[test]
-    fn memory_feature_gates_keep_prefetch_and_session_memory_in_sync() {
-        assert_eq!(resolve_memory_feature_gates(false, false), (false, false));
-        assert_eq!(resolve_memory_feature_gates(true, false), (true, false));
-        assert_eq!(resolve_memory_feature_gates(false, true), (true, true));
-        assert_eq!(resolve_memory_feature_gates(true, true), (true, true));
     }
 
     #[test]
@@ -19828,6 +20029,8 @@ still flip to available"
         let cwd = tmp.path().to_path_buf();
         let lingxi_home = cwd.join(".lingxi");
         let cfg = DesktopConfig {
+            enable_automation_scheduler: true,
+            host_workspace_trusted: None,
             isolated_credential_storage: false,
             credential_storage_policy: platform_api::CredentialStoragePolicy::NativeOrMemory,
             injected_plugin_secrets: std::collections::BTreeMap::new(),
@@ -20475,16 +20678,28 @@ still flip to available"
         struct FailingDrain(std::sync::atomic::AtomicBool);
         #[async_trait::async_trait]
         impl Task for FailingDrain {
-            fn name(&self) -> &str { "failing-drain" }
-            fn task_type(&self) -> tasks::id::TaskType { tasks::id::TaskType::LocalBash }
-            async fn spawn(&self, _: TaskSpawnInput, _: TaskContext) -> Result<TaskHandle, TaskError> {
+            fn name(&self) -> &str {
+                "failing-drain"
+            }
+            fn task_type(&self) -> tasks::id::TaskType {
+                tasks::id::TaskType::LocalBash
+            }
+            async fn spawn(
+                &self,
+                _: TaskSpawnInput,
+                _: TaskContext,
+            ) -> Result<TaskHandle, TaskError> {
                 Err(TaskError::Unsupported)
             }
-            async fn kill(&self, _: &str, _: TaskContext) -> Result<(), TaskError> { Ok(()) }
+            async fn kill(&self, _: &str, _: TaskContext) -> Result<(), TaskError> {
+                Ok(())
+            }
             async fn drain_shutdown(&self) -> Result<(), TaskError> {
                 if self.0.load(std::sync::atomic::Ordering::SeqCst) {
                     Err(TaskError::Internal("worker has not exited".into()))
-                } else { Ok(()) }
+                } else {
+                    Ok(())
+                }
             }
         }
         let (tmp, cfg) = test_config(true);
@@ -20492,34 +20707,62 @@ still flip to available"
             cfg,
             Arc::new(orchestrator::test_support::MockOutputStream::new()),
             Arc::new(RecordingPermissionSink::default()),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let fs = Arc::new(PosixFileSystem::new(tmp.path().to_path_buf()));
         let mut registry = tasks::registry::TaskRegistry::new(
-            Arc::new(PosixRuntime::new()), fs.clone(),
-            Arc::new(tasks::output_manager::TaskOutputManager::new(tmp.path().join("drain-test"), fs)),
+            Arc::new(PosixRuntime::new()),
+            fs.clone(),
+            Arc::new(tasks::output_manager::TaskOutputManager::new(
+                tmp.path().join("drain-test"),
+                fs,
+            )),
         );
         let handler = Arc::new(FailingDrain(std::sync::atomic::AtomicBool::new(true)));
         registry.register_handler(tasks::id::TaskType::LocalBash, handler.clone());
         let hooks = Arc::new(crate::fusion_attempt_composition_test::RetirementProbe);
         let retained_hooks = Arc::downgrade(&hooks);
-        rt.session_lifecycle.fusion_api_service.set_model_attempt_hooks(hooks);
+        rt.session_lifecycle
+            .fusion_api_service
+            .set_model_attempt_hooks(hooks);
         // Keep the real registry to drain its production graph on the retry.
         let lifecycle = Arc::get_mut(&mut rt.session_lifecycle).expect("single lifecycle owner");
         let original = std::mem::replace(&mut lifecycle.task_registry, Arc::new(registry));
         let report = lifecycle.shutdown_and_drain().await;
         assert!(!report.complete);
         assert!(!report.errors.is_empty());
-        assert!(retained_hooks.upgrade().is_some(), "failed producer drain must retain attempt hooks");
-        assert!(lifecycle.subagent_spawner.tool_registry_handle().get().is_some(),
-            "a failed task drain must not retire dependencies used by live workers");
+        assert!(
+            retained_hooks.upgrade().is_some(),
+            "failed producer drain must retain attempt hooks"
+        );
+        assert!(
+            lifecycle
+                .subagent_spawner
+                .tool_registry_handle()
+                .get()
+                .is_some(),
+            "a failed task drain must not retire dependencies used by live workers"
+        );
         handler.0.store(false, std::sync::atomic::Ordering::SeqCst);
-        lifecycle.task_registry.shutdown_background_tasks().await.unwrap();
+        lifecycle
+            .task_registry
+            .shutdown_background_tasks()
+            .await
+            .unwrap();
         lifecycle.task_registry = original;
         let report = lifecycle.shutdown_and_drain().await;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(report.complete);
-        assert!(retained_hooks.upgrade().is_none(), "successful retry must retire attempt hooks");
-        assert!(lifecycle.subagent_spawner.tool_registry_handle().get().is_none());
+        assert!(
+            retained_hooks.upgrade().is_none(),
+            "successful retry must retire attempt hooks"
+        );
+        assert!(lifecycle
+            .subagent_spawner
+            .tool_registry_handle()
+            .get()
+            .is_none());
     }
 
     #[tokio::test]
@@ -20557,7 +20800,11 @@ still flip to available"
         drop(lease);
 
         let report = rt.session_lifecycle.shutdown_and_drain().await;
-        assert!(report.errors.is_empty(), "shutdown errors: {:?}", report.errors);
+        assert!(
+            report.errors.is_empty(),
+            "shutdown errors: {:?}",
+            report.errors
+        );
         drop(rt);
 
         let immediate_registry_zero = registry.strong_count() == 0;
@@ -20610,9 +20857,7 @@ still flip to available"
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
-        let coordinator = rt
-            .session_state
-            .clone();
+        let coordinator = rt.session_state.clone();
         let writer_lease = coordinator.writer_lease();
         let weak_lease = Arc::downgrade(&writer_lease);
         drop(writer_lease);
@@ -20680,7 +20925,11 @@ still flip to available"
         let report = tokio::time::timeout(std::time::Duration::from_secs(2), &mut shutdown)
             .await
             .expect("shutdown completes after the WAL lock is released");
-        assert!(report.errors.is_empty(), "shutdown errors: {:?}", report.errors);
+        assert!(
+            report.errors.is_empty(),
+            "shutdown errors: {:?}",
+            report.errors
+        );
         let hydration = coordinator.hydrate_blocking().expect("replay durable cost");
         assert_eq!(hydration.state.cost_revision, expected_revision);
         assert_eq!(hydration.state.last_usage, Some(usage));
@@ -24140,13 +24389,13 @@ must be filtered out: got {after:?}"
         use super::cron_scheduler_enabled;
         // Unset ⇒ enabled (matches the GrowthBook fleet flag's `true` default).
         assert!(cron_scheduler_enabled(None));
-        // Truthy LINGXI_DISABLE_CRON ⇒ disabled (the local kill-switch).
+        // Truthy CLAUDE_CODE_DISABLE_CRON ⇒ disabled (the local kill-switch).
         assert!(!cron_scheduler_enabled(Some("1")));
         assert!(!cron_scheduler_enabled(Some("true")));
         assert!(!cron_scheduler_enabled(Some("on")));
-        // Falsy / empty / other ⇒ still enabled (isEnvTruthy semantics).
-        assert!(cron_scheduler_enabled(Some("0")));
-        assert!(cron_scheduler_enabled(Some("false")));
+        // JavaScript string truthiness: nonempty "0"/"false" still disable.
+        assert!(!cron_scheduler_enabled(Some("0")));
+        assert!(!cron_scheduler_enabled(Some("false")));
         assert!(cron_scheduler_enabled(Some("")));
     }
 
@@ -27992,30 +28241,4 @@ pub fn supervisor_exit_sink(
         manager,
         path.to_path_buf(),
     ))
-}
-
-#[cfg(test)]
-mod read_auto_allow_wiring_tests {
-    /// Oracle `kq` is read by leaf file tools through a process-global probe, so
-    /// a root that never publishes one silently loses the whole stale-recovery
-    /// path — `read_auto_allowed` just answers `false` forever. The composition
-    /// needs a live policy and a built registry, neither unit-constructible
-    /// here, so pin it against this file's own source. The needle is assembled
-    /// at runtime so it cannot match the comment that explains it.
-    #[test]
-    fn this_root_publishes_the_read_auto_allow_probe() {
-        const SRC: &str = include_str!("lib.rs");
-        let publish = "set_read_auto_allow_prob".to_string() + "e(";
-        assert!(
-            SRC.contains(&publish),
-            "this root must publish the kq probe, or Edit can never recover a \
-             stale-but-clean edit"
-        );
-        let inputs = "PolicyReadAutoAllow::ne".to_string() + "w(policy, tools.all_names())";
-        assert!(
-            SRC.contains(&inputs),
-            "the probe must be built from the boot policy AND the final tool \
-             list — an unknown tool list answers false for everything"
-        );
-    }
 }

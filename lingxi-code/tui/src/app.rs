@@ -799,6 +799,7 @@ pub fn run_app(
     agents_snapshot_provider: Option<
         std::sync::Arc<dyn Fn() -> crate::bottom_pane::view::AgentsSnapshot + Send + Sync>,
     >,
+    loop_interrupt: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_queue_prompt: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
@@ -875,6 +876,7 @@ pub fn run_app(
             on_rewake_peer: Box::new(on_rewake_peer),
         },
     );
+    if let Some(callback) = loop_interrupt { app.chat_widget.set_loop_interrupt(callback); }
     if let Some(provider) = hyperlink_cwd_provider {
         app.chat_widget.set_hyperlink_cwd_provider(provider);
     }

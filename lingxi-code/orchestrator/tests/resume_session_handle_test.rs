@@ -136,3 +136,25 @@ async fn resume_session_default_runtime_keeps_live_model_for_legacy_callers() {
         "legacy/default runtime snapshots keep the pre-resume model until callers provide one"
     );
 }
+
+#[tokio::test]
+async fn resume_without_persisted_human_defaults_preserves_application_reasoning() {
+    let orch = make_orch();
+    let model = orch.session().lock().await.model.clone();
+    let selection = platform_api::ReasoningSelection::Level { id: "high".into() };
+    assert_eq!(
+        orch.initialize_reasoning_selection_for_model(&model, None, selection.clone()),
+        selection
+    );
+    orch.resume_session(
+        SessionId::new(),
+        Vec::new(),
+        None,
+        None,
+        platform_api::ResumeRuntimeSnapshot::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(orch.current_reasoning_selection(), selection);
+    assert_eq!(orch.session().lock().await.model, model);
+}

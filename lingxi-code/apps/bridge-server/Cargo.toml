@@ -46,6 +46,7 @@ session = { path = "../../session" }
 protocol = { path = "../../protocol" }
 secret = { path = "../../secret" }
 platform-posix = { path = "../../platforms/posix" }
+platform-pty = { path = "../../platforms/pty" }
 uuid = "1.10"
 # `AudioResultDto` carries recorded/synthesized audio as base64 (the same
 # convention as `ImageRefDto`); `audio_bridge` decodes it back to the `Vec<u8>`
@@ -59,6 +60,7 @@ msgqueue = { path = "../../msgqueue" }
 # Phase-2 /loop: the composition-root `WakeupScheduler` impl (one-shot delayed
 # self-wakeup → enqueue) implements the `tool_cron::WakeupScheduler` seam.
 tool-cron = { path = "../../tools/cron" }
+cron = { path = "../../cron" }
 # S2: the real binary resolves a DesktopConfig from env/argv and assembles the
 # production runtime through the desktop composition root. app→app is permitted
 # by the dependency gate (apps are leaves; the rule only forbids non-leaf→leaf).
@@ -82,7 +84,7 @@ llm-client = { path = "../../llm-client" }
 # S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
 # F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
 dirs = "5"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "io-util", "io-std"] }
 # `CancellationToken` (the per-turn cancel seam) is available in the default
 # surface of tokio-util 0.7 — no extra feature needed.
 tokio-util = { workspace = true }

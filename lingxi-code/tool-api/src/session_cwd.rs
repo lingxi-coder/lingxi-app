@@ -33,6 +33,7 @@ struct CwdState {
 /// Always held behind an `Arc` (see [`SessionCwd::new`]) so every tool
 /// invocation can clone a handle and observe the latest swap.
 pub struct SessionCwd {
+    project_root: PathBuf,
     state: ArcSwap<CwdState>,
     on_swap: Mutex<Option<OnSwapCallback>>,
     /// Shared live-cwd cells (the file/shell/LSP tools' `LiveCwdCell`) kept in
@@ -49,6 +50,7 @@ impl SessionCwd {
     #[must_use]
     pub fn new(boot_cwd: PathBuf, trusted: Vec<PathBuf>) -> Arc<Self> {
         Arc::new(Self {
+            project_root: boot_cwd.clone(),
             state: ArcSwap::from_pointee(CwdState {
                 cwd: boot_cwd,
                 trusted_dirs: trusted,
@@ -56,6 +58,12 @@ impl SessionCwd {
             on_swap: Mutex::new(None),
             mirror_cells: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Session project root captured at composition, distinct from a later shell cwd.
+    #[must_use]
+    pub fn project_root(&self) -> PathBuf {
+        self.project_root.clone()
     }
 
     /// Current cwd (cloned out of the cell).

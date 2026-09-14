@@ -66,10 +66,19 @@ async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {
     .expect("client")
     .with_credential_provider(Arc::new(ChatGptStore));
 
-    let prepared = client
-        .prepare(&LlmRequest::new("p-model"))
-        .await
-        .expect("prepare");
+    let mut request = LlmRequest::new("p-model");
+    request.max_tokens = Some(1024);
+    request.temperature = Some(0.5);
+    request.top_p = Some(0.9);
+    request.openai_responses.store = Some(true);
+    let prepared = client.prepare(&request).await.expect("prepare");
+
+    let body = &prepared.provider_request.body_json;
+    assert!(body.get("max_output_tokens").is_none());
+    assert!(body.get("temperature").is_none());
+    assert!(body.get("top_p").is_none());
+    assert_eq!(body["store"], false);
+    assert_eq!(body["instructions"], "");
 
     assert_eq!(
         prepared

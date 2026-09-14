@@ -769,6 +769,8 @@ impl CompactionRuntime {
 
 /// State owned by lifecycle hooks, goal checks, and main-thread agents.
 pub(crate) struct LifecycleRuntime {
+    pub(crate) goal_retry: std::sync::Mutex<super::goal_retry_impl::GoalRetryState>,
+    pub(crate) goal_retry_owner: std::sync::OnceLock<std::sync::Weak<ConversationOrchestrator>>,
     /// Hook registry (M5-06). `None` when not wired — `list_hooks` then
     /// returns `vec![]`. The CLI binary populates from settings + plugin
     /// sources at startup.
@@ -845,6 +847,8 @@ impl LifecycleRuntime {
             agent_catalog: None,
             main_thread_agent: tokio::sync::RwLock::new(None),
             main_thread_agent_hook_id: Mutex::new(None),
+            goal_retry: std::sync::Mutex::new(super::goal_retry_impl::GoalRetryState::default()),
+            goal_retry_owner: std::sync::OnceLock::new(),
             goal_checkin: Arc::new(std::sync::Mutex::new(
                 crate::prompt::goal_checkin::GoalDeferralState::default(),
             )),

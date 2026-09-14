@@ -23,6 +23,7 @@ pub mod content_replacement;
 pub mod context;
 pub mod defer;
 pub mod model_prompt_gate;
+pub mod native_schema;
 pub mod progress;
 pub mod read_file_state;
 pub mod registry;

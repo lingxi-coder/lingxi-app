@@ -117,4 +117,7 @@
 /// grows two fields and mobile binding layouts are positional — the same reason
 /// 9.0.0 and 12.0.0 were real majors for otherwise wire-additive additions
 /// (12.0.0 was this very record). Mobile bindings version-lock with the host.
-pub const CLIENT_PROTOCOL_VERSION: &str = "14.0.0";
+/// 15.0.0 adds versioned cron configuration and history records to native DTOs.
+/// (Renumbered from 14.0.0: multi-connection providers landed on 14.0.0 first.
+/// The owning session should replace this line with its own wording.)
+pub const CLIENT_PROTOCOL_VERSION: &str = "15.0.0";

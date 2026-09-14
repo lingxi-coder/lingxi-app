@@ -118,7 +118,12 @@ impl BackgroundAgentSpawner {
             })
     }
 
-    async fn connect_agent_route(&self, agent_id: AgentId, task_id: &str, name: Option<&str>) -> Result<(), SubagentSpawnError> {
+    async fn connect_agent_route(
+        &self,
+        agent_id: AgentId,
+        task_id: &str,
+        name: Option<&str>,
+    ) -> Result<(), SubagentSpawnError> {
         let mailbox = Arc::new(TeammateMailbox::new(agent_id));
         self.mailbox_router
             .register(agent_id, mailbox.clone())
@@ -185,13 +190,21 @@ impl BackgroundAgentSpawner {
                     inheritance: Some(inherit),
                 },
                 description,
-                &restored_task_id.map(str::to_string).into_iter().collect::<Vec<_>>(),
+                &restored_task_id
+                    .map(str::to_string)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
             )
             .await
             .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
 
-        self.connect_agent_route(agent_id, &task_id, request.name.as_deref()).await?;
-        if let Some(old_task_id) = restored_task_id { self.mailbox_router.register_alias(old_task_id, agent_id).await; }
+        self.connect_agent_route(agent_id, &task_id, request.name.as_deref())
+            .await?;
+        if let Some(old_task_id) = restored_task_id {
+            self.mailbox_router
+                .register_alias(old_task_id, agent_id)
+                .await;
+        }
 
         let output_file = self
             .registry
@@ -209,10 +222,19 @@ impl BackgroundAgentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for BackgroundAgentSpawner {
-    async fn resume_foreground(&self, agent_id: &AgentId, message: String) -> Result<(), SubagentSpawnError> {
+    async fn resume_foreground(
+        &self,
+        agent_id: &AgentId,
+        message: String,
+    ) -> Result<(), SubagentSpawnError> {
         self.inner.resume_foreground(agent_id, message).await
     }
-    async fn connect_foreground_route(&self, agent_id: AgentId, task_id: &str, name: Option<&str>) -> Result<(), SubagentSpawnError> {
+    async fn connect_foreground_route(
+        &self,
+        agent_id: AgentId,
+        task_id: &str,
+        name: Option<&str>,
+    ) -> Result<(), SubagentSpawnError> {
         self.connect_agent_route(agent_id, task_id, name).await
     }
 
@@ -329,15 +351,24 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
-        self.spawn_async_with_id(agent_id, request, inherit, None).await
+        self.spawn_async_with_id(agent_id, request, inherit, None)
+            .await
     }
 
     async fn restore_async_task(
-        &self, task_id: &str, agent_id: AgentId, request: SubagentSpawnRequest,
+        &self,
+        task_id: &str,
+        agent_id: AgentId,
+        request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
-        if request.resumed_history.is_none() { return Err(SubagentSpawnError::Runtime("stable restore requires recovered history".into())); }
-        self.spawn_async_with_id(agent_id, request, inherit, Some(task_id)).await
+        if request.resumed_history.is_none() {
+            return Err(SubagentSpawnError::Runtime(
+                "stable restore requires recovered history".into(),
+            ));
+        }
+        self.spawn_async_with_id(agent_id, request, inherit, Some(task_id))
+            .await
     }
 
     async fn concurrent_subagent_count(&self) -> usize {

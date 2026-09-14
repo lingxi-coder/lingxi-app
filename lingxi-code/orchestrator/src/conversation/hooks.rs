@@ -33,11 +33,7 @@ impl GoalEvalOutcome {
         }
     }
 
-    /// 🚨 Only a REAL verdict advances the count upstream. This port's
-    /// [`ConversationOrchestrator::record_goal_evaluation`] bumps the STORED
-    /// count on every path, so the telemetry value must be built from the
-    /// count read BEFORE the evaluation plus this, never from the mutated
-    /// one.
+    /// Only a real verdict advances the stored and reported count.
     pub(super) fn counts_as_iteration(self) -> bool {
         matches!(self, Self::Met | Self::NotMet | Self::Impossible)
     }
@@ -55,7 +51,7 @@ impl ConversationOrchestrator {
             events: vec![hooks::HookEventType::Stop],
             if_condition: None,
             executor: hooks::HookExecutor::Prompt {
-                prompt: goal_stop_hook_prompt(condition),
+                prompt: condition.to_string(),
                 model: None,
                 continue_on_block: true,
             },
@@ -123,6 +119,7 @@ impl ConversationOrchestrator {
         status: platform_api::GoalStatusKind,
         cleared_reason: Option<platform_api::GoalClearedReason>,
     ) -> Option<platform_api::ActiveGoalSnapshot> {
+        self.reset_goal_interruption();
         let (session_id, goal, cleared) = {
             let mut s = self.session.lock().await;
             let goal = s.active_goal.take();
@@ -271,11 +268,17 @@ impl ConversationOrchestrator {
     /// when `s` is present); when no provider is wired both stay `None` and the
     /// executor omits the keys (claude `m = undefined`), keeping no-registry
     /// builds byte-identical.
-    pub(crate) async fn populate_stop_hook_snapshot(&self, ctx: &mut HookContext) {
+    pub(crate) async fn populate_stop_hook_snapshot(
+        &self,
+        ctx: &mut HookContext,
+    ) -> std::collections::HashMap<String, u64> {
         if let Some(provider) = self.lifecycle_runtime.stop_hook_snapshot.as_ref() {
-            ctx.background_tasks = Some(provider.background_tasks().await);
+            let (tasks, start_times) = provider.background_tasks_with_start_times().await;
+            ctx.background_tasks = Some(tasks);
             ctx.session_crons = Some(provider.session_crons().await);
+            return start_times;
         }
+        std::collections::HashMap::new()
     }
 
     /// Public lifecycle [`HookContext`] for collaborators that fire engine
@@ -488,6 +491,7 @@ impl ConversationOrchestrator {
         stop_hook_active: bool,
         parent_aborted: bool,
     ) -> StopHookDisposition {
+        let evaluation_started = std::time::Instant::now();
         tracing::debug!(event = "hook_stop_started", reason, stop_hook_active);
         let mut ctx = self.lifecycle_hook_ctx(stop_hook_active).await;
         let goal_hook_id = self
@@ -499,44 +503,55 @@ impl ConversationOrchestrator {
         // payload whenever the tool-use context is present (`...m`). The
         // orchestrator's main-loop Stop firing always runs inside a tool-use
         // context, so populate the snapshot here (and ONLY here / SubagentStop).
-        self.populate_stop_hook_snapshot(&mut ctx).await;
-        // REM-09 (goal check-in): the oracle decides deferral BEFORE the Stop
-        // hooks run — `if(U.length>0){…i.sessionHooksRegistry.remove(zt(),"Stop",y)…}`
-        // @292174788 removes the goal's Stop hook for this turn so the goal is
-        // NOT evaluated while background work is in flight, and emits the
-        // interstitial once the deferral has run past the check-in interval.
-        // The port cannot un-register the hook mid-dispatch, so it suppresses
-        // the goal DISPOSITION instead — the observable effect is identical
-        // (no `GoalContinue`, no `iterations` bump, no `goal_status` record).
-        // Upstream emits `tengu_goal_evaluated` from the evaluator's `finally`,
-        // so the goal it reports is the one that was active BEFORE the
-        // evaluation. Its `durationMs` is NOT measured from here: the oracle's
-        // base is `D`, stamped at the top of the query generator.
+        let start_times = self.populate_stop_hook_snapshot(&mut ctx).await;
+        // 2.1.270 $Qn removes the goal hook while background work runs.
+        // Exclude it before dispatch so neither an evaluator API call nor its
+        // blocking result can leak through the generic Stop aggregate.
         let goal_before = { self.session.lock().await.active_goal.clone() };
-        let deferring_tasks = Self::build_deferring_goal_checkin_tasks(
+        let mut deferring_tasks = Self::build_deferring_goal_checkin_tasks(
             ctx.background_tasks.as_deref().unwrap_or(&[]),
         );
-        let goal_deferred = self
-            .goal_checkin_pass(ctx.background_tasks.as_deref().unwrap_or(&[]))
-            .await;
+        for task in &mut deferring_tasks {
+            task.start_time_ms = start_times.get(&task.id).copied();
+        }
+        let (goal_deferred, checkin_emitted) = self.goal_checkin_pass_tasks(&deferring_tasks).await;
         let agg = self
             .hooks
-            .execute(
+            .execute_excluding_hook(
                 HookEvent::Stop {
                     reason: reason.to_string(),
                 },
                 ctx,
+                goal_hook_id.filter(|_| goal_deferred),
             )
             .await;
         let (goal_disposition, goal_outcome) = if goal_deferred {
-            (None, GoalEvalOutcome::Deferred)
+            (
+                checkin_emitted.then(|| StopHookDisposition::Continue(String::new())),
+                GoalEvalOutcome::Deferred,
+            )
         } else {
             self.goal_stop_hook_disposition(goal_hook_id, &agg, parent_aborted)
                 .await
         };
+        if matches!(
+            goal_outcome,
+            GoalEvalOutcome::Met
+                | GoalEvalOutcome::NotMet
+                | GoalEvalOutcome::Impossible
+                | GoalEvalOutcome::Deferred
+        ) {
+            self.reset_goal_interruption();
+        }
         if let Some(goal) = goal_before.as_ref() {
-            self.fire_goal_evaluated(goal, goal_outcome, parent_aborted, &deferring_tasks)
-                .await;
+            self.fire_goal_evaluated(
+                goal,
+                goal_outcome,
+                parent_aborted,
+                &deferring_tasks,
+                evaluation_started.elapsed(),
+            )
+            .await;
         }
         let disposition = if agg.prevent_continuation {
             // FIX C: carry the hook's `stopReason` (parsed into `agg.reason`,
@@ -618,6 +633,7 @@ impl ConversationOrchestrator {
             })
             .map(|t| crate::prompt::goal_checkin::DeferringTask {
                 id: t.id.clone(),
+                start_time_ms: None,
                 label: t.r#type.clone(),
                 detail: t
                     .command
@@ -628,10 +644,19 @@ impl ConversationOrchestrator {
             .collect()
     }
 
+    #[cfg(test)]
     pub(super) async fn goal_checkin_pass(
         &self,
         background_tasks: &[hooks::HookBackgroundTask],
     ) -> bool {
+        let deferring = Self::build_deferring_goal_checkin_tasks(background_tasks);
+        self.goal_checkin_pass_tasks(&deferring).await.0
+    }
+
+    async fn goal_checkin_pass_tasks(
+        &self,
+        deferring: &[crate::prompt::goal_checkin::DeferringTask],
+    ) -> (bool, bool) {
         let Some(goal) = ({
             let session = self.session.lock().await;
             session.active_goal.clone()
@@ -642,10 +667,8 @@ impl ConversationOrchestrator {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clear();
             self.sync_goal_checkin_idle_task().await;
-            return false;
+            return (false, false);
         };
-
-        let deferring = Self::build_deferring_goal_checkin_tasks(background_tasks);
 
         if deferring.is_empty() {
             self.lifecycle_runtime
@@ -654,7 +677,7 @@ impl ConversationOrchestrator {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clear();
             self.sync_goal_checkin_idle_task().await;
-            return false;
+            return (false, false);
         }
 
         // Captured BEFORE `advance`, which resets `deferred_since` to now when
@@ -668,10 +691,11 @@ impl ConversationOrchestrator {
         let checkin = Self::advance_goal_checkin_state(
             &self.lifecycle_runtime.goal_checkin,
             &goal.condition,
-            &deferring,
+            deferring,
             crate::prompt::goal_checkin::checkin_interval_ms(),
         );
         self.sync_goal_checkin_idle_task().await;
+        let emitted = checkin.is_some();
         if let Some(body) = checkin {
             let (checkin_count, idle_checkin_count) = {
                 let state = self
@@ -686,7 +710,7 @@ impl ConversationOrchestrator {
                 self.model_runtime.analytics_bus.as_ref(),
                 "turn_end",
                 deferred_since_before.map_or(0, |since| now_ms.saturating_sub(since)),
-                &deferring,
+                deferring,
                 checkin_count,
                 idle_checkin_count,
             )
@@ -698,7 +722,7 @@ impl ConversationOrchestrator {
             }
             self.persist_message_to_jsonl(&msg).await;
         }
-        true
+        (true, emitted)
     }
 
     /// The terminal `tengu_goal_*` analytics events (2.1.266):
@@ -759,7 +783,7 @@ impl ConversationOrchestrator {
         } else {
             metadata.insert(
                 "promptLength".into(),
-                telemetry::AnalyticsValue::Int(goal.condition.len() as i64),
+                telemetry::AnalyticsValue::Int(goal.condition.encode_utf16().count() as i64),
             );
             let tokens = self
                 .snapshot_cost_real()
@@ -774,7 +798,10 @@ impl ConversationOrchestrator {
                 metadata.insert(
                     "reasonLength".into(),
                     telemetry::AnalyticsValue::Int(
-                        goal.last_reason.as_ref().map_or(0, String::len) as i64,
+                        goal.last_reason
+                            .as_ref()
+                            .map_or(0, |reason| reason.encode_utf16().count())
+                            as i64,
                     ),
                 );
             }
@@ -811,11 +838,8 @@ impl ConversationOrchestrator {
     /// [`Self::fire_goal_checkin_injected`] already makes off
     /// [`crate::prompt::goal_checkin::DeferringTask::label`].
     ///
-    /// `durationMs` is `Date.now() - D`, and `D` is stamped at the TOP of the
-    /// query generator — not where the goal evaluation begins. It is therefore
-    /// the elapsed time of the whole query up to this stop-hook firing; the port
-    /// reads the same clock through
-    /// [`crate::conversation::runtime::CompactionRuntime::query_started_at`].
+    /// 2.1.270 `$Qn` starts `D` at Stop-handler entry. Model-query latency
+    /// is excluded from this duration.
     ///
     /// Upstream captures the goal as `Fe = p.agentId ? void 0 : activeGoal`, so
     /// a subagent never emits this event. That gate is vacuous here: this
@@ -830,6 +854,7 @@ impl ConversationOrchestrator {
         outcome: GoalEvalOutcome,
         parent_aborted: bool,
         deferring_tasks: &[crate::prompt::goal_checkin::DeferringTask],
+        duration: Duration,
     ) {
         let Some(bus) = self.model_runtime.analytics_bus.as_ref() else {
             return;
@@ -841,15 +866,7 @@ impl ConversationOrchestrator {
         );
         metadata.insert(
             "durationMs".into(),
-            telemetry::AnalyticsValue::Int(
-                self.compaction_runtime
-                    .query_started_at
-                    .lock()
-                    .unwrap()
-                    .elapsed()
-                    .as_millis()
-                    .min(i64::MAX as u128) as i64,
-            ),
+            telemetry::AnalyticsValue::Int(duration.as_millis().min(i64::MAX as u128) as i64),
         );
         metadata.insert(
             "iterations".into(),
@@ -959,13 +976,10 @@ impl ConversationOrchestrator {
 
     pub(super) async fn run_goal_checkin_idle_loop(
         provider: Arc<dyn crate::stop_hook_snapshot::StopHookSnapshotProvider>,
-        writer: Option<Arc<JsonlWriter>>,
+        owner: Option<std::sync::Weak<ConversationOrchestrator>>,
         session: Arc<Mutex<SessionState>>,
         turn_gate: Arc<Mutex<()>>,
         goal_checkin: Arc<std::sync::Mutex<crate::prompt::goal_checkin::GoalDeferralState>>,
-        last_jsonl_uuid: Arc<Mutex<Option<String>>>,
-        current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
-        fallback_cwd: std::path::PathBuf,
         running: Arc<std::sync::atomic::AtomicBool>,
         generation_counter: Arc<std::sync::atomic::AtomicU64>,
         generation: u64,
@@ -1045,7 +1059,9 @@ impl ConversationOrchestrator {
             // the history order deterministic, this prevents the background
             // append and a foreground append from reading the same JSONL parent
             // and creating a split chain.
-            let _turn_guard = turn_gate.lock().await;
+            let Ok(_turn_guard) = turn_gate.try_lock() else {
+                continue;
+            };
 
             let Some(goal) = ({
                 let locked = session.lock().await;
@@ -1057,28 +1073,52 @@ impl ConversationOrchestrator {
                     .clear();
                 return;
             };
-            let deferring =
-                Self::build_deferring_goal_checkin_tasks(&provider.background_tasks().await);
-            if deferring.is_empty() {
-                goal_checkin
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clear();
-                return;
+            let (tasks, start_times) = provider.background_tasks_with_start_times().await;
+            let mut deferring = Self::build_deferring_goal_checkin_tasks(&tasks);
+            for task in &mut deferring {
+                task.start_time_ms = start_times.get(&task.id).copied();
             }
-
+            let Some(orch) = owner.as_ref().and_then(std::sync::Weak::upgrade) else {
+                if deferring.is_empty() {
+                    goal_checkin
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clear();
+                }
+                return;
+            };
+            // If admission is busy, retry without spending an idle check-in.
+            let state_before = goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             // Captured before `advance` resets the stretch — see the
             // turn-end twin.
             let deferred_since_before = goal_checkin
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .deferred_since;
-            let body = Self::advance_goal_checkin_state(
-                &goal_checkin,
-                &goal.condition,
-                &deferring,
-                base_interval_ms,
-            );
+            let body = if deferring.is_empty() {
+                {
+                    let mut state = goal_checkin
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.checkin_count = state.checkin_count.saturating_add(1);
+                }
+                Some(crate::prompt::goal_checkin::build_checkin_body(
+                    &goal.condition,
+                    tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now())
+                        .saturating_sub(deferred_since_before.unwrap_or(0)),
+                    &deferring,
+                ))
+            } else {
+                Self::advance_goal_checkin_state(
+                    &goal_checkin,
+                    &goal.condition,
+                    &deferring,
+                    base_interval_ms,
+                )
+            };
             if let Some(body) = body {
                 // `p(RUe(V)?Mns(re):re)` — `V` is the goal AFTER the increment,
                 // so the delivery that REACHES the cap is the one that carries
@@ -1101,6 +1141,18 @@ impl ConversationOrchestrator {
                     .checkin_count;
                 let now_ms =
                     tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+                if !orch.queue_goal_checkin(body, &goal).await {
+                    let current = session.lock().await;
+                    if !current.active_goal.as_ref().is_some_and(|active| {
+                        active.set_at == goal.set_at && active.condition == goal.condition
+                    }) {
+                        return;
+                    }
+                    *goal_checkin
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = state_before;
+                    continue;
+                }
                 Self::fire_goal_checkin_injected(
                     analytics_bus.as_ref(),
                     "idle_timer",
@@ -1110,19 +1162,13 @@ impl ConversationOrchestrator {
                     idle_checkin_count,
                 )
                 .await;
-                let msg = ConversationMessage::user_meta(MessageId::new(), body);
-                {
-                    session.lock().await.history.push(msg.clone());
+                if deferring.is_empty() {
+                    goal_checkin
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clear();
+                    return;
                 }
-                Self::persist_idle_goal_checkin_message(
-                    writer.clone(),
-                    Arc::clone(&last_jsonl_uuid),
-                    Arc::clone(&current_cwd),
-                    fallback_cwd.clone(),
-                    &session,
-                    &msg,
-                )
-                .await;
             }
         }
     }
@@ -1144,18 +1190,35 @@ impl ConversationOrchestrator {
                 },
             );
         };
+        let (session_id, goal) = {
+            let session = self.session.lock().await;
+            (session.session_id, session.active_goal.clone())
+        };
+        let Some(goal) = goal else {
+            return (None, GoalEvalOutcome::Absent);
+        };
+        // A user may clear or replace a goal while its evaluator is running.
+        // Never apply the old hook's verdict to the replacement condition.
+        if self
+            .hooks
+            .get_session_named_hook(session_id, GOAL_STOP_HOOK_NAME)
+            .await
+            .is_none_or(|hook| hook.id != goal_hook_id)
+        {
+            return (None, GoalEvalOutcome::Absent);
+        }
         let Some((_, result)) = agg
             .all_results
             .iter()
             .find(|(hook_id, _)| *hook_id == goal_hook_id)
         else {
-            self.record_goal_evaluation(Some("Goal completion hook did not run".to_string()), true)
-                .await;
             return (
-                Some(StopHookDisposition::GoalContinue(
-                    "Goal completion hook did not run".to_string(),
-                )),
-                GoalEvalOutcome::Error,
+                None,
+                if parent_aborted {
+                    GoalEvalOutcome::Cancelled
+                } else {
+                    GoalEvalOutcome::Absent
+                },
             );
         };
 
@@ -1166,13 +1229,20 @@ impl ConversationOrchestrator {
                         let reason = response
                             .reason
                             .as_deref()
-                            .map(strip_goal_prompt_block_reason)
+                            .map(|reason| {
+                                reason
+                                    .strip_prefix(&format!("[{}]: ", goal.condition))
+                                    .unwrap_or(reason)
+                                    .to_string()
+                            })
                             .filter(|reason| !reason.is_empty())
                             .unwrap_or_else(|| "Goal not met yet".to_string());
                         self.record_goal_evaluation(Some(reason.clone()), true)
                             .await;
                         return (
-                            Some(StopHookDisposition::GoalContinue(reason)),
+                            Some(StopHookDisposition::GoalContinue(
+                                response.reason.clone().unwrap_or(reason),
+                            )),
                             GoalEvalOutcome::NotMet,
                         );
                     }
@@ -1193,28 +1263,43 @@ impl ConversationOrchestrator {
                 // The terminal `achieved` attachment below carries the updated
                 // iteration count; avoid writing a redundant intermediate
                 // `set` attachment for the same successful evaluation.
-                self.record_goal_evaluation(None, false).await;
+                // Successful prompt hooks do not contribute a generic hook
+                // decision/reason. Keep the evaluator's evidence on the goal only.
+                let reason = serde_json::from_str::<serde_json::Value>(&result.stdout)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("reason")
+                            .and_then(|r| r.as_str())
+                            .map(str::to_string)
+                    });
+                self.record_goal_evaluation(reason, false).await;
                 let _ = self
                     .finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Achieved, None)
                     .await;
                 (None, GoalEvalOutcome::Met)
             }
-            hooks::HookOutcome::Timeout
-            | hooks::HookOutcome::Error
-            | hooks::HookOutcome::Cancelled => {
-                let reason = if !result.stderr.is_empty() {
-                    result.stderr.clone()
-                } else if !result.stdout.is_empty() {
-                    result.stdout.clone()
-                } else {
-                    "Goal completion check failed".to_string()
-                };
-                self.record_goal_evaluation(Some(reason.clone()), true)
+            hooks::HookOutcome::Timeout | hooks::HookOutcome::Cancelled => {
+                if !parent_aborted {
+                    self.handle_goal_interruption(
+                        crate::prompt::goal_interruption::GoalInterruption::Pause(
+                            crate::prompt::goal_interruption::PauseCause::GoalCheckTimeout,
+                        ),
+                    )
                     .await;
-                (
-                    Some(StopHookDisposition::GoalContinue(reason)),
-                    GoalEvalOutcome::Error,
-                )
+                }
+                (None, GoalEvalOutcome::Cancelled)
+            }
+            hooks::HookOutcome::Error => {
+                if !parent_aborted {
+                    self.handle_goal_interruption(
+                        crate::prompt::goal_interruption::GoalInterruption::Retry(
+                            crate::prompt::goal_interruption::RetryCause::GoalCheck,
+                        ),
+                    )
+                    .await;
+                }
+                (None, GoalEvalOutcome::Error)
             }
         }
     }
@@ -1305,11 +1390,20 @@ impl ConversationOrchestrator {
             self.fire_stop_failure("invalid_request").await;
             return StopHookFlow::FallThrough;
         }
-        match self
+        let disposition = self
             .fire_stop_hooks(stop_reason, *stop_hook_active, parent_aborted)
-            .await
-        {
+            .await;
+        let goal_blocked = matches!(&disposition, StopHookDisposition::GoalContinue(_));
+        match disposition {
             StopHookDisposition::Prevent(reason) => {
+                if !parent_aborted {
+                    self.handle_goal_interruption(
+                        crate::prompt::goal_interruption::GoalInterruption::Pause(
+                            crate::prompt::goal_interruption::PauseCause::HookStopped,
+                        ),
+                    )
+                    .await;
+                }
                 // FIX C (Stop hook_stopped_continuation): persist the stop-reason
                 // meta message (claude `query/stopHooks.ts:269-280`, an isMeta
                 // `hook_stopped_continuation` attachment) BEFORE terminating so the
@@ -1322,7 +1416,7 @@ impl ConversationOrchestrator {
                     final_message_id,
                 })
             }
-            StopHookDisposition::Continue(reason) => {
+            StopHookDisposition::Continue(reason) | StopHookDisposition::GoalContinue(reason) => {
                 // #2/#4 consecutive-block cap (binary `let ar=Z+1; if(bo>0&&ar>bo)
                 // …return {reason:"completed"}`). `Z` is the carried
                 // `stopHookBlockingCount`; `ar` the would-be next count.
@@ -1369,17 +1463,22 @@ impl ConversationOrchestrator {
                         "A hook blocked the turn from ending {next_count} consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set LINGXI_STOP_HOOK_BLOCK_CAP to raise this limit."
                     );
                     self.output.emit_text(&warning).await;
+                    if goal_blocked {
+                        self.handle_goal_interruption(
+                            crate::prompt::goal_interruption::GoalInterruption::Pause(
+                                crate::prompt::goal_interruption::PauseCause::GoalCheckCapped,
+                            ),
+                        )
+                        .await;
+                    }
                     return StopHookFlow::FallThrough;
                 }
-                self.append_stop_hook_feedback(&reason).await;
+                // Empty feedback means the goal check-in was already appended.
+                if !reason.is_empty() {
+                    self.append_stop_hook_feedback(&reason).await;
+                }
                 *stop_hook_active = true;
                 *stop_hook_blocking_count = next_count;
-                StopHookFlow::LoopAgain
-            }
-            StopHookDisposition::GoalContinue(reason) => {
-                *stop_hook_active = false;
-                *stop_hook_blocking_count = 0;
-                self.append_stop_hook_feedback(&reason).await;
                 StopHookFlow::LoopAgain
             }
             StopHookDisposition::Pass => {

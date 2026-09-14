@@ -623,9 +623,7 @@ impl crate::api::SubagentApiClient for CacheTtlProbeClient {
 ///
 /// One run per test: three in a single `#[tokio::test]` overflowed the stack —
 /// `run_subagent`'s future is large, and they compose.
-async fn cache_ttl_seen_at_request_site(
-    ttl: Option<crate::definition::AgentCacheTtl>,
-) -> bool {
+async fn cache_ttl_seen_at_request_site(ttl: Option<crate::definition::AgentCacheTtl>) -> bool {
     let probe = Arc::new(CacheTtlProbeClient {
         seen: Mutex::new(None),
     });
@@ -3307,6 +3305,88 @@ async fn loop_user_interrupt_mid_flight_surfaces_killed() {
 // ---- Persist-mode tests (ctx.persistent = true) ----------------------
 
 #[tokio::test]
+async fn persistent_resume_emits_user_message_before_stalled_provider_once() {
+    struct ResumeApi {
+        calls: AtomicUsize,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl crate::api::SubagentApiClient for ResumeApi {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _system: Option<&str>,
+            _messages: Vec<ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(text_response("answer", Some("end_turn")))
+        }
+    }
+    let api = Arc::new(ResumeApi {
+        calls: AtomicUsize::new(0),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.persistent = true;
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+    })
+    .await
+    .expect("first turn completes");
+    event_tx
+        .send(lingxi_core::Event::UserMessage {
+            message_id: MessageId::new(),
+            request_id: RequestId::new(),
+            content: "second question".into(),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), api.started.notified())
+        .await
+        .expect("resumed provider starts");
+    let is_resumed_user = |event: &SubagentEvent| {
+        matches!(event, SubagentEvent::Message { message, .. }
+            if message["role"] == "user" && message.to_string().contains("second question"))
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(250), async {
+        loop {
+            let event = out_rx.recv().await.expect("resumed runner remains live");
+            if is_resumed_user(&event) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("resumed user is visible while provider response is still blocked");
+    api.release.notify_one();
+    let duplicates = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut duplicates = 0;
+        loop {
+            let event = out_rx.recv().await.expect("resumed turn completes");
+            duplicates += usize::from(is_resumed_user(&event));
+            if matches!(event, SubagentEvent::Completed { .. }) {
+                return duplicates;
+            }
+        }
+    })
+    .await
+    .expect("resumed turn completes after provider release");
+    event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
+    handle.await.unwrap();
+    assert_eq!(duplicates, 0, "resumed user must be emitted exactly once");
+    assert_eq!(api.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn persist_mode_processes_second_message_after_idling() {
     // Turn-set 1: a single end_turn turn completes, then the runner parks
     // (it does NOT return because persistent = true). We then inject a
@@ -4270,8 +4350,9 @@ impl platform_api::skill_loader::SkillLoader for MockSkillLoader {
         &self,
         skill_name: &str,
         _agent_type: &str,
-    ) -> Option<platform_api::skill_loader::SkillLoad> {
-        if skill_name == self.known {
+        _cwd: Option<&std::path::Path>,
+    ) -> Result<Option<platform_api::skill_loader::SkillLoad>, String> {
+        Ok(if skill_name == self.known {
             Some(platform_api::skill_loader::SkillLoad {
                 display_name: skill_name.to_string(),
                 progress_message: None,
@@ -4281,7 +4362,7 @@ impl platform_api::skill_loader::SkillLoader for MockSkillLoader {
             })
         } else {
             None
-        }
+        })
     }
 }
 
@@ -5745,7 +5826,32 @@ async fn owner_notification_wakes_parked_runner_without_user_message() {
         while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
         registry.parked_fold.notified().await;
         registry.publish();
-        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+        let wake = out_rx
+            .recv()
+            .await
+            .expect("notification wakes the idle observer");
+        let SubagentEvent::Message { message, .. } = wake else {
+            panic!("wake message must precede resumed provider progress");
+        };
+        let wake: ConversationMessage = serde_json::from_value(message).unwrap();
+        assert!(matches!(
+            wake,
+            ConversationMessage::User { is_meta: true, .. }
+        ));
+        assert!(serde_json::to_string(&wake)
+            .unwrap()
+            .contains("<task-id>achild</task-id>"));
+        while let Some(event) = out_rx.recv().await {
+            if let SubagentEvent::Message { message, .. } = &event {
+                assert!(
+                    message["role"] != "user",
+                    "notification wake is emitted exactly once"
+                );
+            }
+            if matches!(event, SubagentEvent::Completed { .. }) {
+                break;
+            }
+        }
     })
     .await
     .unwrap();
@@ -5824,13 +5930,20 @@ async fn owner_notification_folds_after_inflight_request_without_cancelling_it()
 
 #[tokio::test]
 async fn owner_notification_waits_for_handler_rest_acknowledgement() {
-    let api = MockSubagentApiClient::new(vec![Ok(text_response("first", Some("end_turn"))), Ok(text_response("second", Some("end_turn")))]);
+    let api = MockSubagentApiClient::new(vec![
+        Ok(text_response("first", Some("end_turn"))),
+        Ok(text_response("second", Some("end_turn"))),
+    ]);
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.persistent = true;
     let registry = Arc::new(OwnerNotificationRegistry {
-        rest_acknowledged: AtomicBool::new(false), wake_checked: tokio::sync::Notify::new(),
-        drains: AtomicUsize::new(0), parked_fold: tokio::sync::Notify::new(), owner: ctx.agent_id,
-        pending: Mutex::new(vec![]), revision: tokio::sync::watch::channel(0).0,
+        rest_acknowledged: AtomicBool::new(false),
+        wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0),
+        parked_fold: tokio::sync::Notify::new(),
+        owner: ctx.agent_id,
+        pending: Mutex::new(vec![]),
+        revision: tokio::sync::watch::channel(0).0,
     });
     ctx.task_registry = Some(registry.clone());
     let (event_tx, event_rx) = mpsc::channel(8);
@@ -5841,11 +5954,17 @@ async fn owner_notification_waits_for_handler_rest_acknowledgement() {
         registry.wake_checked.notified().await;
         registry.publish();
         registry.wake_checked.notified().await;
-        assert_eq!(api.call_count(), 1, "pending notification cannot outrun handler rest acknowledgement");
+        assert_eq!(
+            api.call_count(),
+            1,
+            "pending notification cannot outrun handler rest acknowledgement"
+        );
         registry.rest_acknowledged.store(true, Ordering::SeqCst);
         registry.revision.send_modify(|revision| *revision += 1);
         while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     assert_eq!(api.call_count(), 2);
     drop(event_tx);
     runner.await.unwrap();
@@ -6112,4 +6231,31 @@ fn a_notice_for_another_model_is_not_picked() {
     let history = vec![notice];
     assert!(super::local_refusal_notice(&history, "hop-two").is_none());
     assert!(super::local_refusal_notice(&history, "hop-one").is_some());
+}
+
+#[tokio::test]
+async fn skill_preload_read_error_fails_before_model_request() {
+    struct FailingLoader;
+    #[async_trait]
+    impl platform_api::skill_loader::SkillLoader for FailingLoader {
+        async fn resolve_and_load(
+            &self,
+            _: &str,
+            _: &str,
+            _cwd: Option<&std::path::Path>,
+        ) -> Result<Option<platform_api::skill_loader::SkillLoad>, String> {
+            Err("loop.md denied".into())
+        }
+    }
+    let api = CapturingApiClient::new();
+    let mut ctx = loop_ctx(api.clone(), None, 2);
+    ctx.agent_definition.skills = vec!["loop".into()];
+    ctx.skill_loader = Some(Arc::new(FailingLoader));
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    drop(event_tx);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert!(api.captured().is_empty());
+    assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. } if error.contains("loop.md denied"))));
 }

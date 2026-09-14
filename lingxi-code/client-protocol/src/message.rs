@@ -26,6 +26,24 @@ pub struct MessageDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "uniffi", uniffi(default = []))]
     pub images: Vec<MessageImageDto>,
+    /// Structured scheduled-fire presentation; absent on ordinary messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub loop_wakeup: Option<LoopWakeupDto>,
+}
+
+/// Durable `/loop` fire metadata, rendered without matching user-facing text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LoopWakeupDto {
+    /// Host-rendered fire announcement.
+    pub message: String,
+    /// Optional no-op companion text.
+    pub companion: Option<String>,
+    /// Cumulative quiet tick count.
+    pub streak: u32,
+    /// Start of the quiet streak in Unix milliseconds.
+    pub since_ms: u64,
 }
 
 /// A persisted image projected for transcript renderers.

@@ -698,6 +698,40 @@ Worth recording, because each one produced a confident wrong number first:
 The rule-body absence survived all three, and then survived a fourth check
 against the raw executable with no extraction step at all.
 
+---
+
+## 10. Not this subsystem: the cron UI's hardcoded strings
+
+A `/code-review max` pass over this work also flagged ~75 hardcoded English
+strings in the iOS/Android cron UI. They are recorded here only so the finding
+is not lost, because they are **not on main and not this session's files**:
+
+```
+git show HEAD:clients/android/.../cron/CronScreen.kt | grep -c 'Text(\s*"\|text = "'   →  1
+the working copy of the same file                                                    → 15
+```
+
+Thirty cron files are dirty. The review counted against the working tree, so the
+strings are inside another session's in-flight rewrite. On main those files were
+last touched by `cdf462b27` ("Collapse a quiet /loop streak, and delete the cron
+exports nobody calls") and `e0530991e`, which points at the /loop + cron cluster;
+`fix-lingxi-gaps-2.1.270` independently checked all of its commits and has zero
+hits on `clients/` or any cron file.
+
+Four hazards for whoever does it, each confirmed from two independent records:
+
+1. `clients/translations/*.json` is the SOURCE. The iOS `.xcstrings` and Android
+   `strings.xml` catalogs are GENERATED — editing a catalog directly is
+   overwritten.
+2. iOS keeps placeholders in the KEY and Android in the VALUE, so one visible
+   string with an interpolation commonly needs TWO keys.
+3. The generated artifacts can drift AHEAD of the source. A previous pass ran
+   the generator and it DELETED five strings that were in use; diff the
+   generated output before committing it.
+4. The Android tests that pin those strings are INSTRUMENTED. `./gradlew test`
+   never runs them, so a green JVM run says nothing about whether the catalog
+   still resolves.
+
 ## Test state
 
 `cargo test -p permission --all-features`: **1640 unit + 22 auto-mode-scope + 10

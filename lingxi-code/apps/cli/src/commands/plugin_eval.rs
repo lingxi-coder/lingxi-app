@@ -923,10 +923,13 @@ pub async fn run(cli: &Cli, plugins_dir: &Path, home: &Path, cwd: &Path) -> i32 
             return RUNTIME_ERROR;
         }
     }
-    if !plugin_eval_enabled_from_env(std::env::var("CLAUDE_CODE_WALNUT_SPIRE").ok().as_deref()) {
-        eprintln!("`plugin eval` is currently in early access");
-        return RUNTIME_ERROR;
-    }
+    // `plugin eval` GRADUATED out of early access. 2.1.220 gated it on
+    // `CLAUDE_CODE_WALNUT_SPIRE` (still pinned by that release's fixture); in
+    // 2.1.270 neither the env name nor the "currently in early access" refusal
+    // appears anywhere in the binary, while the command itself is fully
+    // documented with help text and examples. Keeping the gate made the whole
+    // subcommand unreachable unless the user happened to set a variable that
+    // upstream no longer reads.
     if let Some(EvalSub::Init(args)) = &cli.command {
         return run_init(args, cli.eval_dir.as_deref(), cwd).await;
     }
@@ -988,10 +991,6 @@ fn no_eval_cases_message(root: &Path, eval_dir: &str, flag: Option<&str>) -> Str
         root.display(),
         root.display()
     )
-}
-
-fn plugin_eval_enabled_from_env(value: Option<&str>) -> bool {
-    migrations::context::is_env_truthy(value)
 }
 
 fn is_default_judge_model(model: &String) -> bool {
@@ -4443,13 +4442,33 @@ mod tests {
     }
 
     #[test]
-    fn mocks_default_and_early_access_env_match_the_oracle() {
+    fn mocks_default_matches_the_oracle() {
         let eval = parse_eval(["lingxi-cli", "plugin", "eval", "."]);
         assert_eq!(eval.mocks, "record");
-        assert!(plugin_eval_enabled_from_env(Some("1")));
-        assert!(plugin_eval_enabled_from_env(Some(" TRUE ")));
-        assert!(!plugin_eval_enabled_from_env(None));
-        assert!(!plugin_eval_enabled_from_env(Some("0")));
+    }
+
+    /// `plugin eval` must not be gated behind an env var 2.1.270 no longer
+    /// reads. `run` is not unit-drivable (it needs a plugins dir, a home and a
+    /// cwd), so pin its source instead — and assert a POSITIVE landmark from the
+    /// same function first, so a renamed or emptied file fails loudly rather
+    /// than passing this as a vacuous absence.
+    #[test]
+    fn plugin_eval_is_not_gated_behind_a_graduated_env_var() {
+        const SRC: &str = include_str!("plugin_eval.rs");
+        let landmark = "--json output path must end in ".to_string() + ".json";
+        assert!(
+            SRC.contains(&landmark),
+            "instrument check: run's argument validation should be in this file"
+        );
+        // Match the CODE construct, not the bare name: the note above this
+        // function names the variable in prose, and a bare-name needle matches
+        // that instead — which is how this assertion first went red.
+        let gate = "::var(\"CLAUDE_CODE_WALNUT".to_string();
+        assert!(
+            !SRC.contains(&gate),
+            "the early-access gate graduated upstream; re-adding it makes the \
+             whole subcommand unreachable"
+        );
     }
 
     #[tokio::test]

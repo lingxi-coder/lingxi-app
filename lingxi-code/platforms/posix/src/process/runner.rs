@@ -113,6 +113,29 @@ const HOOK_ENV_DENYLIST: &[&str] = &[
     "LINGXI_BG_ISOLATION",
     "LINGXI_BG_BACKEND",
     "LINGXI_SESSION_NAME",
+    // ⚠️ Scrub-list only — nothing in this port SETS or READS this, and the
+    // backlog entry that calls it "中断回合自动续跑 + 6h 上限" (auto-resume an
+    // interrupted turn, with a 6h cap) understates it by a lot. Upstream it
+    // gates a crash-RESPAWN recovery protocol, not a resume convenience:
+    //
+    // * The only writer is the background-PTY supervisor, which sets it when
+    //   re-launching a worker it already tried once (`attempt > 1` with the
+    //   same session), alongside `CLAUDE_CODE_RESUME_PROMPT` and
+    //   `..._MAX_AGE_MS`. A user never sets it and `--resume` never sets it.
+    // * Behind it sits the whole `turnInterruptionState` reconstruction:
+    //   replaying a trailing `interrupted_prompt`, resolving trailing
+    //   unresolved `tool_use` ids, superseded-tool bookkeeping, adopting a
+    //   parked permission request, re-notifying orphaned background tasks, and
+    //   resuming a `workflow_launch` — most of it on the SERVED/remote
+    //   transport, which is out of scope here.
+    // * The "6h cap" is `E6o()`: env override, else a statsig flag inside a
+    //   min/max band, else a compiled default — an age bound on how stale a
+    //   turn may be before the resume is suppressed, not the feature itself.
+    //
+    // So this is a subsystem to schedule against the background-session
+    // supervisor, not a gap to patch. Verified at the 2.1.270 oracle
+    // 2026-09-14; scrubbing it stays correct either way, since a hook child
+    // must not learn that its parent is a crash respawn.
     "LINGXI_RESUME_INTERRUPTED_TURN",
     "LINGXI_RESUME_PROMPT",
     "LINGXI_BG_SESSION_PERMISSION_RULES",

@@ -223,6 +223,73 @@ pub trait SkillLoader: Send + Sync {
     /// Notify the host that a validated prompt skill is about to run. Default
     /// loaders have no lifecycle side effects.
     async fn skill_invoked(&self, _name: &str) {}
+
+    /// Every registered skill name, used only to suggest a full name after a
+    /// lookup miss. Defaulted to EMPTY so no implementor breaks and, more
+    /// importantly, so a loader that cannot enumerate simply offers no
+    /// suggestion — the miss still reports `Unknown skill:` exactly as before.
+    async fn list_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// Oracle `Fee` — whether a skill name is safe to echo into a user-facing
+/// message: non-empty, at most 256 chars, and free of control characters,
+/// U+2028/U+2029 line separators, and `<`/`>`.
+///
+/// Skill names come from plugins and marketplaces, so they are third-party
+/// input. Upstream refuses to quote an unsafe one rather than sanitising it,
+/// and so does this: an unsuggestable name simply yields no suggestion.
+#[must_use]
+pub fn skill_name_is_displayable(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 256
+        && !name.chars().any(|c| {
+            matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}' | '<' | '>')
+        })
+}
+
+/// The suffix-match half of oracle `gqe` — what to append to `Unknown skill:`.
+///
+/// A bare `foo` can be the tail of a plugin-qualified `some-plugin:foo`. When
+/// exactly one registered name ends with `:{requested}` the miss names it;
+/// when several do, it lists them. Candidates whose name IS already the bare
+/// request are filtered out first (oracle `drt`) — they are not suggestions,
+/// they are the thing that just failed to load.
+///
+/// Returns `None` (plain `Unknown skill:`) when nothing matches, or when ANY
+/// name involved fails [`skill_name_is_displayable`].
+#[must_use]
+pub fn unknown_skill_suffix_hint(requested: &str, names: &[String]) -> Option<String> {
+    if requested.is_empty() {
+        return None;
+    }
+    let suffix = format!(":{requested}");
+    let mut matches: Vec<&String> = names
+        .iter()
+        .filter(|n| n.ends_with(&suffix) && n.as_str() != requested)
+        .collect();
+    matches.sort();
+    matches.dedup();
+    if matches.is_empty() {
+        return None;
+    }
+    if !matches.iter().all(|n| skill_name_is_displayable(n)) {
+        return None;
+    }
+    if let [only] = matches.as_slice() {
+        return Some(format!(
+            " Did you mean {only}? Invoke it by that full name."
+        ));
+    }
+    let listed = matches
+        .iter()
+        .map(|n| n.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        " Several skills match that name: {listed} \u{2014} invoke one by its full name."
+    ))
 }
 
 /// Default hermetic loader — always reports "not found" (→ `Unknown skill:`).
@@ -838,7 +905,16 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 }
                 Ok(())
             }
-            Ok(None) => Err(ValidationError(format!("Unknown skill: {normalized}"))),
+            Ok(None) => {
+                // A bare name can be the tail of a plugin-qualified one, so the
+                // miss says which full name to use rather than just refusing.
+                let hint = unknown_skill_suffix_hint(
+                    &normalized,
+                    &self.loader.list_names().await,
+                )
+                .unwrap_or_default();
+                Err(ValidationError(format!("Unknown skill: {normalized}{hint}")))
+            }
             // Loader I/O failure — surface verbatim; not one of the locked
             // contract strings.
             Err(e) => {
@@ -916,9 +992,13 @@ present this turn, the skill is loaded — follow it directly rather than callin
             Some(d) => d,
             None => {
                 emit_failed(&bus, "unknown_skill", started.elapsed().as_millis() as u64).await;
-                // Locked string (TS `:406`).
+                // Locked string (TS `:406`), plus the suffix hint when a
+                // plugin-qualified name ends with the bare one.
+                let hint =
+                    unknown_skill_suffix_hint(&command_name, &self.loader.list_names().await)
+                        .unwrap_or_default();
                 return Err(ToolError::InvalidInput(format!(
-                    "Unknown skill: {command_name}"
+                    "Unknown skill: {command_name}{hint}"
                 )));
             }
         };

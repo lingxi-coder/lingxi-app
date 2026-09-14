@@ -186,6 +186,15 @@ impl SkillLoader for CommandRegistrySkillLoader {
             observer(name.to_string()).await;
         }
     }
+
+    /// Every registered command name, so a lookup miss on a bare `foo` can
+    /// point at a plugin-qualified `some-plugin:foo`. Only names are exposed —
+    /// the suggestion never needs a descriptor, and building them all would
+    /// touch disk for a path that is already an error.
+    async fn list_names(&self) -> Vec<String> {
+        let reg = self.registry.read().await;
+        reg.list_all().iter().map(|cmd| cmd.name.clone()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -408,5 +417,20 @@ mod tests {
             .expect("present");
         assert!(desc.disable_model_invocation);
         assert_eq!(desc.command_type, SkillCommandType::Prompt);
+    }
+
+    /// The suggestion in `Unknown skill:` can only name a plugin-qualified
+    /// command if the loader can enumerate one. The trait's default returns an
+    /// empty list — correct for hermetic loaders, but silently disabling the
+    /// hint here — so pin that THIS loader overrides it.
+    #[tokio::test]
+    async fn list_names_reports_the_registered_commands() {
+        let mut reg = CommandRegistry::new();
+        reg.register_command(markdown_cmd("some-plugin:deploy", "body"));
+        reg.register_command(markdown_cmd("other", "body"));
+        let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
+        let mut names = loader.list_names().await;
+        names.sort();
+        assert_eq!(names, vec!["other", "some-plugin:deploy"]);
     }
 }

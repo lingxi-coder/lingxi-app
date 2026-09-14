@@ -1871,3 +1871,80 @@ fn declared_effort_matches_the_oracle_union() {
         Some(Effort::Level("high".to_string()))
     );
 }
+
+/// A bare name that is the tail of exactly one plugin-qualified name gets that
+/// full name back: `foo` alone does not resolve, but `some-plugin:foo` does,
+/// and the miss should say so.
+#[test]
+fn a_single_suffix_match_is_named() {
+    let names = vec![
+        "some-plugin:deploy".to_string(),
+        "other:unrelated".to_string(),
+    ];
+    assert_eq!(
+        super::unknown_skill_suffix_hint("deploy", &names).as_deref(),
+        Some(" Did you mean some-plugin:deploy? Invoke it by that full name.")
+    );
+}
+
+/// Several matches are listed instead, with the oracle's em-dash.
+#[test]
+fn several_suffix_matches_are_listed() {
+    let names = vec![
+        "b-plugin:deploy".to_string(),
+        "a-plugin:deploy".to_string(),
+    ];
+    assert_eq!(
+        super::unknown_skill_suffix_hint("deploy", &names).as_deref(),
+        Some(" Several skills match that name: a-plugin:deploy, b-plugin:deploy \u{2014} invoke one by its full name.")
+    );
+}
+
+/// Only a `:`-qualified SUFFIX counts. A name that merely contains the request
+/// is not a match, or `redeploy` would be offered for `deploy`.
+#[test]
+fn only_a_colon_qualified_suffix_counts() {
+    let names = vec![
+        "redeploy".to_string(),
+        "plugin:redeploy".to_string(),
+        "deployment".to_string(),
+    ];
+    assert_eq!(super::unknown_skill_suffix_hint("deploy", &names), None);
+    assert_eq!(super::unknown_skill_suffix_hint("deploy", &[]), None);
+}
+
+/// Oracle `Fee`. Skill names come from plugins and marketplaces, so they are
+/// third-party input; an unsafe one is never quoted back. Upstream refuses
+/// rather than sanitising, and ONE bad candidate suppresses the whole hint
+/// rather than being quietly dropped from the list.
+#[test]
+fn an_undisplayable_name_is_never_quoted_back() {
+    // The unsafe characters must sit in the PLUGIN part, so each of these is a
+    // genuine `:deploy` suffix match that the guard then has to reject. (Put
+    // them after the colon and they are not matches at all, and the test passes
+    // without exercising the guard.)
+    for bad in [
+        "ev\u{1b}[2Jil:deploy",
+        "<script>:deploy",
+        "a\u{2028}b:deploy",
+        "a\u{0}b:deploy",
+    ] {
+        assert_eq!(
+            super::unknown_skill_suffix_hint("deploy", &[bad.to_string()]),
+            None,
+            "{bad:?} must not be echoed into a user-facing message"
+        );
+    }
+    let mixed = vec!["good:deploy".to_string(), "<x>:deploy".to_string()];
+    assert_eq!(super::unknown_skill_suffix_hint("deploy", &mixed), None);
+}
+
+/// The failed request itself is not a suggestion.
+#[test]
+fn the_requested_name_is_not_offered_back() {
+    assert_eq!(
+        super::unknown_skill_suffix_hint("deploy", &["deploy".to_string()]),
+        None
+    );
+}
+

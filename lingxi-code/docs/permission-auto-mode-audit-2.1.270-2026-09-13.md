@@ -343,6 +343,24 @@ downgrade) and threaded to the bottom pane.
    restore the `Ask` was the FAITHFUL path all along. The divergence was on the
    other path, which skipped the classifier entirely — see §7.2.
 
+6. **The sandbox-network action reaches the classifier under a name its own
+   rule does not use.** Upstream's third `bke` consumer is `mUe`, which
+   synthesises a tool call named `XV = "SandboxNetworkAccess"` carrying
+   `{host, port}` and classifies it (`severitySite: {key:"sandboxNetwork"}`),
+   failing closed on `unavailable`. The port reaches the same decision through
+   `sandbox_network_ask_callback`, which calls
+   `permission_gate.check("Sandbox Network Callback", …)` — and
+   `transcript_blocks` renders that name straight into the classifier prompt.
+   The bundled policy's rule is LABELLED `Sandbox Network Callback` but its body
+   says "A `SandboxNetworkAccess` action", so the classifier is told to look for
+   a name the port never sends. The mode mapping itself is equivalent
+   (`cVe`: auto→classify, bypass→allow, dontAsk→deny, else ask — which is what
+   the port's gate does per mode), and upstream additionally MEMOISES the
+   verdict per `(host, port, transcript-key)` via `getOrClassify`, which the port
+   does not: every outbound connection pays a fresh round-trip. Both fixes live
+   in `apps/engine-desktop/src/lib.rs` (two sites, one a test), which is carrying
+   another session's uncommitted work.
+
 ---
 
 ## 7. Second pass, 2026-09-13 — three more defects in the auto path

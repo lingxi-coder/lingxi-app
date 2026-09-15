@@ -243,6 +243,76 @@ test('plan approval state overrides running label and clears after either decisi
   assert.ok(render(React.createElement(RuntimeCenterOverview, { bridge })).includes('1 awaiting approval'));
 });
 
+function renderAgentActivity(status: string, activity?: string, withTranscript = true): string {
+  const bridge = runtimeBridge();
+  const active = { kind: 'agent', id: 'reviewer-progress' } as const;
+  bridge.runtimeCenter = {
+    ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active],
+    agents: {
+      [active.id]: { agent_id: active.id, name: 'reviewer', agent_type: 'general-purpose', status, latest_activity: activity },
+    },
+    transcripts: withTranscript ? {
+      [active.id]: {
+        messages: [{ role: 'user', blocks: [{ type: 'text', text: 'Review these changes.' }], images: [] }],
+        revision: 1, nextMessageIndex: 1, messageIndexes: {},
+      },
+    } : {},
+  };
+  return render(React.createElement(RuntimeCenterInspector, { bridge }));
+}
+
+test('subagent progress and retry activity replace generic thinking without ending the run', () => {
+  for (const activity of ['3 tool uses · 1200 tokens', 'Retrying (attempt 2): model response stalled']) {
+    const html = renderAgentActivity('running', activity);
+    assert.ok(html.includes(activity));
+    assert.ok(html.includes('>running</span>'));
+    assert.ok(html.includes('Review these changes.'));
+    assert.ok(!html.includes('Thinking'));
+    assert.ok(html.includes('role="status"'));
+  }
+});
+
+test('subagent with no meaningful activity retains the generic thinking fallback', () => {
+  for (const activity of [undefined, '', '   ']) {
+    assert.ok(renderAgentActivity('running', activity).includes('Thinking'));
+  }
+});
+
+test('retry before the first transcript message does not display welcome or waiting copy', () => {
+  const html = renderAgentActivity('running', 'Retrying (attempt 2): first response timeout', false);
+  assert.ok(html.includes('Retrying (attempt 2): first response timeout'));
+  assert.ok(!html.includes('Thinking'));
+  assert.ok(!html.includes('Waiting for the agent'));
+  assert.ok(!html.includes('Turn intent into working code'));
+});
+
+test('interrupted subagent shows its failure reason without an active thinking indicator', () => {
+  const html = renderAgentActivity('failed', 'Interrupted when the engine stopped.');
+  assert.ok(html.includes('>failed</span>'));
+  assert.ok(html.includes('Interrupted when the engine stopped.'));
+  assert.ok(!html.includes('Thinking'));
+});
+
+import { Stage } from '../src/renderer/components/Stage';
+
+test('explicit agent activity suppresses only synthetic thinking, retaining live reasoning and tools', () => {
+  const thinking = render(React.createElement(Stage, {
+    running: true,
+    pendingActivity: '3 tool uses · 1200 tokens',
+    liveItems: [{ type: 'thinking', id: 'reasoning-1', text: 'private reasoning', streamed: true }],
+  }));
+  assert.ok(thinking.includes('Thinking'));
+  assert.ok(!thinking.includes('private reasoning'));
+  const tool = render(React.createElement(Stage, {
+    running: true,
+    pendingActivity: '3 tool uses · 1200 tokens',
+    liveItems: [{ type: 'tool', id: 'tool-1', tool: 'Read', status: 'running', view: { verb: 'read', label: 'Read', primary: 'src/main.ts', title: 'Read(src/main.ts)' } }],
+  }));
+  assert.ok(tool.includes('src/main.ts'));
+  assert.ok(tool.includes('running-sweep'));
+  assert.ok(!tool.includes('Thinking'));
+});
+
 /**
  * Finished work reads as claude-code writes it.
  *

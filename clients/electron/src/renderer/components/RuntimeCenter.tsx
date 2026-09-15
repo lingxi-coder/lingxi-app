@@ -403,17 +403,21 @@ export function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bri
 function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefined; bridge: UseBridge }) {
   const t = useT();
   const center = bridge.runtimeCenter;
+  const messages = agent ? center.transcripts[agent.agent_id]?.messages : undefined;
+  // `Stage` compares `liveItems` by reference to decide whether to recompute its
+  // agent anchors, and that anchor map is a dependency of its transcript `rows`
+  // memo — so rebuilding the conversation inline on every render defeated both.
+  const conversation = useMemo(() => conversationFromMessages(messages ?? []), [messages]);
   if (!agent) return <EmptyRow>Agent is no longer available.</EmptyRow>;
-  const transcript = center.transcripts[agent.agent_id];
-  const conversation = conversationFromMessages(transcript?.messages ?? []);
+  const latestActivity = agent.latest_activity?.trim();
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ padding: '10px 13px', borderBottom: `0.5px solid ${t.border}`, color: t.text3, fontSize: 10.5 }}>
         <span style={{ color: statusColor(t, agent.status), fontWeight: 650 }}>{statusLabel(agent.status, 'agent')}</span>
         {agent.model && <span> · {agent.model}</span>}
-        {agent.latest_activity && <span style={{ display: 'block', marginTop: 4, color: t.dark ? t.text2 : t.text3 }}>{shorten(agent.latest_activity, 150)}</span>}
+        {latestActivity && <span role="status" style={{ display: 'block', marginTop: 4, color: t.dark ? t.text2 : t.text3 }}>{shorten(latestActivity, 150)}</span>}
       </div>
-      <Stage liveItems={conversation.items} running={agent.status === 'running'} sessionKey={`agent:${agent.agent_id}`} emptyMessage="Waiting for the agent to emit its first message." />
+      <Stage liveItems={conversation.items} running={agent.status === 'running'} pendingActivity={latestActivity} sessionKey={`agent:${agent.agent_id}`} emptyMessage="Waiting for the agent to emit its first message." />
     </div>
   );
 }

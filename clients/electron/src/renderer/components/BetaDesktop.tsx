@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { GitTopBar } from './GitReview';
 import { ShellIcon } from './TerminalPanel';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type {
   ImageRefDto,
   ModelDetailsDto,
@@ -12,6 +12,7 @@ import { type UseBridge } from '../bridge/useBridge';
 import type { ContextSummarySnapshot } from '../bridge/conversation';
 import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
+import { runningSubagentIds } from '../bridge/runtimeCenterState';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
 import { settingsLabel } from '../settingsLabel';
@@ -235,7 +236,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
   const asideRef = useRef<HTMLElement>(null);
   const resizingPointerRef = useRef<number | null>(null);
   const settings = bridge.bootstrap?.settings;
-  const projects = settings?.projects ?? [];
+  const scheduledWorkspace = bridge.bootstrap?.scheduledWorkspace;
+  const projects = (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace);
+  const generalCatalog = scheduledWorkspace ? bridge.bootstrap?.projectCatalogs?.[scheduledWorkspace] : undefined;
   const pinnedSessions = settings?.pinnedSessions ?? [];
   const selectedProject = bridge.activeSession?.projectPath ?? settings?.activeProject ?? bridge.bootstrap?.workspace.path;
   const visibleSession = bridge.activeSession ?? bridge.bootstrap?.activeSession ?? settings?.activeSession;
@@ -315,6 +318,10 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       if (!bridge.bootstrap?.projectCatalogs?.[projectPath]) void bridge.listProjectSessions(projectPath).catch(() => undefined);
     }
   }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, expandedProjects]);
+
+  useEffect(() => {
+    if (scheduledWorkspace && !generalCatalog) void bridge.listProjectSessions(scheduledWorkspace).catch(() => undefined);
+  }, [scheduledWorkspace, generalCatalog, bridge.listProjectSessions]);
 
   useEffect(() => {
     const pinnedProjects = new Set(pinnedSessions.map((session) => session.projectPath));
@@ -486,6 +493,23 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
             })}
           </section>
         ) : null}
+
+        {scheduledWorkspace && generalCatalog && generalCatalog.sessions.length > 0 && <section aria-labelledby="general-chats-heading">
+          <h2 id="general-chats-heading" style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>Chats</h2>
+          {(showAllSessions[scheduledWorkspace] ? generalCatalog.sessions : generalCatalog.sessions.slice(0, 5)).map((session) => {
+            const pinned = pinnedKeys.has(`${scheduledWorkspace}\0${session.uuid}`);
+            return <SessionRow key={session.uuid} session={session}
+              active={!scheduled && visibleSession?.projectPath === scheduledWorkspace && visibleSession?.sessionId === session.uuid}
+              pinned={pinned} opening={openingSessionKey === `${scheduledWorkspace}\0${session.uuid}`}
+              status={bridge.sessionRuntimeStatus(session.uuid)}
+              onClick={() => openSidebarSession(scheduledWorkspace, session.uuid)}
+              onArchive={() => void prepareArchive(scheduledWorkspace, session.uuid, session.title || 'Untitled chat')}
+              onPin={() => invoke(() => bridge.setSessionPinned(pinInput(scheduledWorkspace, session.uuid, session.title || 'Untitled session'), !pinned))} />;
+          })}
+          {generalCatalog.sessions.length > 5 && <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [scheduledWorkspace]: !current[scheduledWorkspace] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
+            {showAllSessions[scheduledWorkspace] ? 'Show less' : `Show more (${generalCatalog.sessions.length - 5})`}
+          </button>}
+        </section>}
 
         <section aria-labelledby="projects-heading">
           <div style={{ minHeight: 31, padding: '2px 4px 4px 8px', display: 'flex', alignItems: 'center' }}>
@@ -2247,14 +2271,15 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           ? 'LingXi is working — draft your next message…'
           : 'Do anything';
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
+  const canStop = bridge.running || runningSubagentIds(bridge.runtimeCenter).length > 0;
   const stopTurnButton = (
     <button
       type="button"
       className="composer-submit-button"
-      disabled={!bridge.running || hasPrompt || bridge.isCancelling}
-      tabIndex={bridge.running && !hasPrompt ? 0 : -1}
+      disabled={!canStop || hasPrompt || bridge.isCancelling}
+      tabIndex={canStop && !hasPrompt ? 0 : -1}
       onClick={() => invoke(() => bridge.cancel())}
-      aria-label={bridge.isCancelling ? 'Stopping current turn' : 'Stop current turn'}
+      aria-label={bridge.isCancelling ? (bridge.running ? 'Stopping current turn' : 'Stopping background agents') : (bridge.running ? 'Stop current turn' : 'Stop background agents')}
       title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
       style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
     ><Icon name="stop" size={15} color="#fff" /></button>
@@ -2380,7 +2405,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         {voiceState === 'listening' && !flowMode ? (
           <DictationRecorderBar
             audio={audio}
-            turnAction={bridge.running ? stopTurnButton : undefined}
+            turnAction={canStop ? stopTurnButton : undefined}
             owner={dictationOwner.current ?? audioOwner('dictation')}
             onCancel={() => { void cancelStandardListening(); }}
             onFinish={() => { void finishStandardListening(); }}
@@ -2718,7 +2743,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             )}
           </div>
           <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
-          {!bridge.running && !hasPrompt && <button
+          {!canStop && !hasPrompt && <button
             type="button"
             disabled={!ready}
             className="composer-icon-action"
@@ -2730,8 +2755,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           >
             <Icon name="waveform" size={18} color="currentColor" stroke={2.15} />
           </button>}
-          <div className="composer-submit-actions" style={!bridge.running && !hasPrompt ? { display: 'none' } : undefined}>
-            <span className="composer-stop-presence" data-visible={bridge.running && !hasPrompt} aria-hidden={!bridge.running || hasPrompt}>
+          <div className="composer-submit-actions" style={!canStop && !hasPrompt ? { display: 'none' } : undefined}>
+            <span className="composer-stop-presence" data-visible={canStop && !hasPrompt} aria-hidden={!canStop || hasPrompt}>
               {stopTurnButton}
             </span>
             <span className="composer-send-presence" data-visible={hasPrompt} aria-hidden={!hasPrompt}>

@@ -165,7 +165,7 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   // references the name, and the ClientEvent switch in `main/bridge.ts`
   // ends in `default: break;`, so an unhandled event is dropped rather
   // than relayed to the renderer.
-  task_lifecycle: 'not_applicable',
+  task_lifecycle: 'exposed',
   memory_entries: 'not_applicable',
   status_snapshot: 'exposed',
   settings_snapshot: 'exposed',

@@ -749,17 +749,19 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     )));
 
     let before = orch.session.lock().await.history.len();
-    let mut messages = orch.task_notification_reminder_messages().await;
-    assert_eq!(messages.len(), 1, "one terminal task ⇒ one message");
-    let message = messages.pop().expect("a terminal task produces a message");
-
-    // The drivers are what persist it, so mirror exactly what they do and then
-    // assert the message survives the turn instead of vanishing with it.
-    {
-        let mut session = orch.session.lock().await;
-        session.history.push(message.clone());
-    }
-    orch.persist_message_to_jsonl(&message).await;
+    let reminders = orch.collect_turn_reminders(true).await;
+    assert_eq!(
+        reminders.task_notifications.len(),
+        1,
+        "one terminal task ⇒ one durable message"
+    );
+    assert!(
+        reminders
+            .transient
+            .iter()
+            .all(|message| !message.text_content().contains("b87654321")),
+        "the durable notification must stay out of the retryable reminder list"
+    );
 
     let history = orch.session.lock().await.history.clone();
     assert_eq!(
@@ -776,7 +778,10 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     // Consume-once still holds: a second drain has nothing left, so the
     // completion cannot be appended twice.
     assert!(
-        orch.task_notification_reminder_messages().await.is_empty(),
+        orch.collect_turn_reminders(true)
+            .await
+            .task_notifications
+            .is_empty(),
         "a drained completion must not surface again",
     );
 }

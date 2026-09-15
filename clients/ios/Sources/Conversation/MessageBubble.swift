@@ -258,8 +258,7 @@ struct MessageBubble: View, Equatable {
                 onToggleToolBlock: onToggleToolBlock
             )
         } else {
-            AIText(markdown: message.text)
-                .equatable()
+            PlanAwareText(markdown: message.text)
         }
     }
 
@@ -272,7 +271,7 @@ struct MessageBubble: View, Equatable {
     }
 
     private var assistantIsCollapsible: Bool {
-        AssistantMessageCollapsePolicy.shouldCollapse(message.text)
+         !PlanDocument.segments(message.text).contains { if case .plan = $0 { return true }; return false } && AssistantMessageCollapsePolicy.shouldCollapse(message.text)
     }
 
     private var assistantIsCollapsed: Bool {
@@ -310,8 +309,7 @@ private struct StructuredAIBlocks: View {
             ForEach(Array(detail.blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case let .text(text):
-                    AIText(markdown: text)
-                        .equatable()
+                    PlanAwareText(markdown: text)
                 case .thinking, .redactedThinking:
                     // The timeline owns the ephemeral Thinking indicator.
                     // Restored reasoning remains in the model, never in a bubble.
@@ -321,6 +319,9 @@ private struct StructuredAIBlocks: View {
                 case let .toolUse(id, tool, inputSummary, inputJson, header):
                     // The engine's derived header, localized. `inputSummary` is
                     // the older-engine fallback, never a re-derivation.
+                    if let plan = PlanDocument.tool(tool, json: inputJson) {
+                        PlanDocumentCard(document: plan)
+                    } else {
                     StructuredToolBlock(
                         id: id,
                         title: header.map(ToolDisplayText.title)
@@ -336,6 +337,7 @@ private struct StructuredAIBlocks: View {
                         isExpanded: expandedToolBlocks.contains(id),
                         onToggle: { onToggleToolBlock(id) }
                     )
+                    }
                 case let .toolResult(id, tool, isError, summary, _, _, _, _, display):
                     StructuredToolBlock(
                         id: id,

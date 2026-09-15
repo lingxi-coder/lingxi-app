@@ -76,6 +76,10 @@ internal fun ToolCallView(
     /** Trailing metadata for the LIVE timeline (elapsed time). Null in the transcript. */
     trailing: String? = null,
 ) {
+    if (call.planMarkdown != null) {
+        PlanDocumentCard(call.planMarkdown, call.status == AgentToolStatus.Running)
+        return
+    }
     val t = LingXiTheme.palette
     val detailHost = LocalConversationDetail.current
     val openDetail = { if (detailHost != null) detailHost("tool:${call.id}") else onToggleExpanded() }

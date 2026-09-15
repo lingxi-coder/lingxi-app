@@ -146,7 +146,7 @@ internal fun previewToolInput(inputJson: String): String {
  * when the key is absent or its value isn't a JSON string. Best-effort and
  * never-throwing — not a general JSON parser, just enough for a preview line.
  */
-private fun extractJsonStringValue(json: String, key: String): String? {
+internal fun extractJsonStringValue(json: String, key: String): String? {
     val needle = "\"$key\""
     var i = json.indexOf(needle)
     if (i < 0) return null
@@ -165,6 +165,16 @@ private fun extractJsonStringValue(json: String, key: String): String? {
         when {
             c == '\\' && i + 1 < json.length -> {
                 when (val esc = json[i + 1]) {
+                    'u' -> {
+                        if (i + 6 > json.length) return null
+                        val hex = json.substring(i + 2, i + 6)
+                        if (hex.any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) return null
+                        // JSON escapes encode UTF-16 units. Appending both units
+                        // preserves surrogate pairs in Kotlin's UTF-16 String.
+                        sb.append(hex.toInt(16).toChar())
+                        i += 6
+                        continue
+                    }
                     'n' -> sb.append('\n')
                     't' -> sb.append('\t')
                     'r' -> sb.append('\r')

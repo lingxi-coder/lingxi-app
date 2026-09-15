@@ -183,7 +183,7 @@ private struct ConversationToolBatchRow: View {
                     ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
                                  onToggle: { onToggleTool(trace.id) })
                 }
-            } else {
+            } else if !ordinaryTools.isEmpty {
             Button(action: onToggleBatch) {
                 HStack(spacing: 8) {
                     LXIcon(name: batchIcon, size: 14, color: t.text3, stroke: 1.6)
@@ -222,7 +222,7 @@ private struct ConversationToolBatchRow: View {
             .accessibilityIdentifier("conversation.timeline.tool-batch.\(id)")
 
             if isExpanded {
-                ForEach(tools) { trace in
+                ForEach(ordinaryTools) { trace in
                     ToolCallView(
                         trace: trace,
                         isExpanded: expandedToolCalls.contains(trace.id),
@@ -234,13 +234,17 @@ private struct ConversationToolBatchRow: View {
                 .padding(.leading, 12)
             }
             }
+            ForEach(tools.filter { $0.planDocument != nil }) { trace in
+                if let document = trace.planDocument { PlanDocumentCard(document: document) }
+            }
         }
     }
 
-    private var activeTools: [ConversationToolTrace] { ConversationDesktopTimeline.activeTools(tools) }
+    private var ordinaryTools: [ConversationToolTrace] { tools.filter { $0.planDocument == nil } }
+    private var activeTools: [ConversationToolTrace] { ConversationDesktopTimeline.activeTools(ordinaryTools) }
 
     private var summary: String {
-        ConversationDesktopTimeline.summary(tools)
+        ConversationDesktopTimeline.summary(ordinaryTools)
     }
 
     private var terminalStatus: ConversationToolStatus? {

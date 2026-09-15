@@ -860,6 +860,7 @@ enum ConversationToolStatus: Equatable {
 }
 
 struct ConversationToolTrace: Identifiable, Equatable {
+    var planDocument: PlanDocument? = nil
     let id: String
     var tool: String
     var status: ConversationToolStatus

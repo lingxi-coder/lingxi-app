@@ -4802,6 +4802,7 @@ final class MockConversationSource: ConversationSource {
                         trace.tool = tool
                         trace.status = .running
                         trace.inputSummary = summary
+                        trace.planDocument = PlanDocument.tool(tool, json: inputJson)
                         trace.header = derivedHeader
                     }
                     model.statusLine = String(localized: "chat_tool_calling \(tool)")
@@ -6353,6 +6354,7 @@ final class MockConversationSource: ConversationSource {
                         appendActivity(.tool(id: id))
                         let lowered = header.map(toolHeader(from:))
                         let trace = ConversationToolTrace(
+                            planDocument: PlanDocument.tool(tool, json: inputJson),
                             id: id,
                             tool: tool,
                             // Temporarily running until the matching result is

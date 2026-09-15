@@ -57,6 +57,7 @@ data class AgentToolRunState(
     val header: ToolHeaderUi? = null,
     /** Engine-derived `⎿` block (`ToolUseResult.display`). Null until the call returns. */
     val display: ToolResultDisplayUi? = null,
+    val planMarkdown: String? = null,
 ) {
     /** This row as the shared [ToolCallUi] both render surfaces consume. */
     fun toToolCall(): ToolCallUi = ToolCallUi(
@@ -66,6 +67,7 @@ data class AgentToolRunState(
         display = display,
         status = status,
         fallbackSummary = summary,
+        planMarkdown = planMarkdown,
     )
 }
 
@@ -161,6 +163,7 @@ internal fun AgentRunState.reduceTool(event: ReplyEvent.ToolActivity): AgentRunS
         id = id,
         tool = tool,
         summary = event.inputSummary ?: existing?.summary,
+        planMarkdown = event.planMarkdown ?: existing?.planMarkdown,
         status = status,
         elapsedMs = event.elapsedMs ?: existing?.elapsedMs,
         // The header rides the CALL, the display rides the RESULT — two separate

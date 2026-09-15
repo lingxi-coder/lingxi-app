@@ -18,6 +18,7 @@ import com.lingxi.code.theme.LingXiTheme
 /** Presentation grouping never changes durable tool order or removes completed results. */
 internal sealed interface TranscriptBlock {
     data class Prose(val text: String) : TranscriptBlock
+    data class Plan(val markdown: String, val writing: Boolean, val id: String) : TranscriptBlock
     data class Tools(val calls: List<ToolCallUi>, val firstToolId: String = calls.first().id) : TranscriptBlock {
         val id get() = "tool-group:$firstToolId"
         val summary get() = calls.last()
@@ -33,7 +34,10 @@ internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBloc
     }
     blocks.forEach { block ->
         when (block) {
-            is MessageContent.Tool -> pending.add(block.call)
+            is MessageContent.Tool -> if (block.call.planMarkdown != null) {
+                flush()
+                add(TranscriptBlock.Plan(block.call.planMarkdown, block.call.status == AgentToolStatus.Running, block.call.id))
+            } else pending.add(block.call)
             is MessageContent.Text -> if (block.text.isNotBlank()) {
                 flush()
                 add(TranscriptBlock.Prose(block.text))

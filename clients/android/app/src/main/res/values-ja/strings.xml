@@ -133,6 +133,8 @@
     <string name="chat_open_side_drawer">サイドバーを開く</string>
     <string name="chat_output_truncated">出力が切り詰められました</string>
     <string name="chat_plan_collapse_hint">タスクリストを折りたたむ</string>
+    <string name="chat_plan_document_title">計画</string>
+    <string name="chat_plan_document_writing">計画を作成中</string>
     <string name="chat_plan_expand_hint">タスクリストを展開</string>
     <string name="chat_plan_overflow_completed_label">完了 %1$d 件</string>
     <string name="chat_plan_overflow_in_progress_label">進行中 %1$d 件</string>
@@ -1095,6 +1097,8 @@
     <string name="permission_deny">拒否</string>
     <string name="permission_exit_plan_mode">プランモードを終了して続行しますか？</string>
     <string name="permission_request_title">権限のリクエスト</string>
+    <string name="plan_document_copy">計画をコピー</string>
+    <string name="plan_document_open">計画を開く</string>
     <string name="project_conflict_defer_button">後で処理</string>
     <string name="project_conflict_dialog_body">競合したファイルはデフォルトでスキップされています。すべて端末内バージョンを保持するか、外部ディレクトリバージョンを保持するかを選択してください。</string>
     <string name="project_conflict_dialog_more_files_fmt">他に %1$d 件のファイル…</string>

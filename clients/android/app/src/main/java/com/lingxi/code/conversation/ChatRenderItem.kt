@@ -120,6 +120,12 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<Cha
             }
             transcriptBlocks(projectedBlocks).forEachIndexed { index, block ->
                 when (block) {
+                    is TranscriptBlock.Plan -> {
+                        canMergeTools = false
+                        add(ChatRenderItem.Message(message.copy(id = "plan:${block.id}", text = block.markdown,
+                            blocks = listOf(MessageContent.Tool(ToolCallUi(id = "plan:${block.id}", tool = "ExitPlanMode",
+                                planMarkdown = block.markdown, status = if (block.writing) AgentToolStatus.Running else AgentToolStatus.Unknown))))))
+                    }
                     is TranscriptBlock.Tools -> appendTools(block.calls)
                     is TranscriptBlock.Prose -> add(ChatRenderItem.Message(message.copy(
                         id = if (index == 0) message.id else "${message.id}:prose:$index",

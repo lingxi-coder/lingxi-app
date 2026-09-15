@@ -133,6 +133,8 @@
     <string name="chat_open_side_drawer">사이드 서랍 열기</string>
     <string name="chat_output_truncated">출력이 잘렸습니다</string>
     <string name="chat_plan_collapse_hint">할 일 목록 접기</string>
+    <string name="chat_plan_document_title">계획</string>
+    <string name="chat_plan_document_writing">계획 작성 중</string>
     <string name="chat_plan_expand_hint">할 일 목록 펼치기</string>
     <string name="chat_plan_overflow_completed_label">완료 %1$d개</string>
     <string name="chat_plan_overflow_in_progress_label">진행 중 %1$d개</string>
@@ -1095,6 +1097,8 @@
     <string name="permission_deny">거부</string>
     <string name="permission_exit_plan_mode">계획 모드를 종료하고 계속하시겠습니까?</string>
     <string name="permission_request_title">권한 요청</string>
+    <string name="plan_document_copy">계획 복사</string>
+    <string name="plan_document_open">계획 열기</string>
     <string name="project_conflict_defer_button">나중에 처리</string>
     <string name="project_conflict_dialog_body">기본적으로 충돌한 파일은 건너뜁니다. 기기 버전 또는 외부 디렉터리 버전 중 하나를 모두 유지하도록 선택해 주세요.</string>
     <string name="project_conflict_dialog_more_files_fmt">%1$d개 파일 더 있음…</string>

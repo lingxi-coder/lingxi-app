@@ -987,6 +987,7 @@ private class MessageBuild(
                         ToolCallUi(
                             id = block.id,
                             tool = block.tool,
+                            planMarkdown = toolPlanMarkdown(block.tool, block.inputJson),
                             header = block.header?.toUi(),
                             status = AgentToolStatus.Running,
                             // Older engine (no header): the legacy scrape is the floor.
@@ -1007,7 +1008,8 @@ private class MessageBuild(
                 if (ref != null) {
                     val existing = ref.build.blocks[ref.blockIndex] as MessageContent.Tool
                     ref.build.blocks[ref.blockIndex] = MessageContent.Tool(
-                        existing.call.copy(display = display, status = status),
+                        existing.call.copy(display = display, status = status,
+                            planMarkdown = existing.call.planMarkdown ?: toolPlanMarkdown(block.tool, block.resultJson)),
                     )
                 } else {
                     // ORPHAN result — a torn or compacted transcript window. It
@@ -1018,6 +1020,7 @@ private class MessageBuild(
                             ToolCallUi(
                                 id = block.id,
                                 tool = block.tool,
+                                planMarkdown = toolPlanMarkdown(block.tool, block.resultJson),
                                 display = display,
                                 status = status,
                             ),
@@ -1096,6 +1099,7 @@ sealed interface ReplyEvent {
         val status: AgentToolStatus? = null,
         /** LEGACY input scrape — the fallback when [header] is null (older engine). */
         val inputSummary: String? = null,
+        val planMarkdown: String? = null,
         val elapsedMs: Long? = null,
         /**
          * The engine's PRE-DERIVED call header, carried straight through from
@@ -1216,6 +1220,7 @@ fun clientEventToReply(
                 // The legacy scrape stays ONLY as the older-engine fallback; when
                 // `header` is present the renderer ignores it entirely.
                 inputSummary = summarizeToolInput(event.inputJson),
+                planMarkdown = toolPlanMarkdown(event.tool, event.inputJson),
                 header = event.header?.toUi(),
             )
         }
@@ -1251,6 +1256,7 @@ fun clientEventToReply(
                 tool = event.tool,
                 status = if (event.isError) AgentToolStatus.Failed else AgentToolStatus.Completed,
                 display = event.display?.toUi(),
+                planMarkdown = if (!event.isError) toolPlanMarkdown(event.tool, event.resultJson) else null,
             )
         }
     is ClientEvent.UsageUpdate -> ReplyEvent.Usage(

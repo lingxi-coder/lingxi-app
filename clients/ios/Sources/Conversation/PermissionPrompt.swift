@@ -350,7 +350,11 @@ import SwiftUI
                                 workerChip(worker)
                             }
                             if !copy.detail.isEmpty {
-                                detailBlock(copy.detail)
+                                if case .exitPlanMode = pending.kind {
+                                    PlanDocumentCard(document: PlanDocument(markdown: copy.detail, isWriting: false))
+                                } else {
+                                    detailBlock(copy.detail)
+                                }
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)

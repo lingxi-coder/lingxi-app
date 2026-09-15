@@ -138,6 +138,7 @@ struct RootView: View {
     @State private var sourceGeneration = UUID()
     @State private var workspaceWidth: CGFloat = 0
     @State private var sessionInspectorOpen = false
+    @State private var selectedPlanDocument: PlanDocument?
     @State private var providerCatalogBootstrapped = false
     /// The workspace the conversation currently runs in: global, a managed
     /// project, or a local app (v3 — each app is a conversation scope whose
@@ -387,19 +388,34 @@ struct RootView: View {
                 NavigationStack(path: $navigation.path) {
                     HStack(spacing: 0) {
                         detailSurface.frame(maxWidth: .infinity)
+                            .environment(\.openPlanDocument, { document, previous in
+                                guard workspaceWidth >= 840 else { return false }
+                                if let previous {
+                                    if selectedPlanDocument == previous { selectedPlanDocument = document }
+                                } else {
+                                    selectedPlanDocument = document
+                                    sessionInspectorOpen = true
+                                }
+                                return true
+                            })
+                            .onChange(of: session.id) { _, _ in selectedPlanDocument = nil }
                         if workspaceWidth >= 840 && sessionInspectorOpen {
                             Divider()
                             VStack(spacing: 0) {
                                 HStack {
-                                    Text("session_details_title").font(.headline)
+                                    Text(selectedPlanDocument == nil ? "session_details_title" : "chat_plan_document_title").font(.headline)
                                     Spacer()
                                     Button("common_close", systemImage: "xmark") { sessionInspectorOpen = false }
                                         .labelStyle(.iconOnly)
                                         .accessibilityIdentifier("session-inspector-close")
                                 }.padding()
+                                if let document = selectedPlanDocument {
+                                    PlanDocumentDetail(document: document)
+                                } else {
                                 SessionDetailsView(session: session, source: source,
                                     workspacePath: currentWorkspaceGuestPath,
                                     onOpenTerminal: openCurrentWorkspaceTerminal)
+                                }
                             }
                             .frame(width: min(360, workspaceWidth * 0.35))
                             .background(theme.windowBg)

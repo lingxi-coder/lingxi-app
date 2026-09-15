@@ -187,11 +187,12 @@ fun MessageBubble(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     if (message.blocks.isEmpty()) {
-                        AIText(markdown = message.text, onOpenLink = onOpenLink)
+                        PlanAwareText(markdown = message.text, onOpenLink = onOpenLink)
                     } else {
                         transcriptBlocks(message.blocks).forEach { block ->
                             when (block) {
-                                is TranscriptBlock.Prose -> AIText(block.text, onOpenLink = onOpenLink)
+                                is TranscriptBlock.Prose -> PlanAwareText(block.text, onOpenLink = onOpenLink)
+                                is TranscriptBlock.Plan -> PlanDocumentCard(block.markdown, block.writing, onOpenLink)
                                 is TranscriptBlock.Tools -> ToolGroupView(block, expandedToolCalls, onToggleToolCall)
                             }
                         }

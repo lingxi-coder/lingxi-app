@@ -67,11 +67,21 @@ struct SessionDetailsView: View {
         }
     }
 
-    private var planEntries: [String] {
-        runs.flatMap { run in
-            let reasoning = run.reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
-            let notices = run.notices.map(\.text).filter { !$0.isEmpty }
-            return (reasoning.isEmpty ? [] : [reasoning]) + notices
+    private var planEntries: [PlanDocument] {
+        runs.flatMap { $0.tools.compactMap(\.planDocument) } + convo.messages.flatMap { message -> [PlanDocument] in
+            guard message.role != .user else { return [] }
+            if let detail = convo.messageDetails[message.id], !detail.blocks.isEmpty {
+                return detail.blocks.flatMap { block -> [PlanDocument] in
+                    switch block {
+                    case let .text(text):
+                        return PlanDocument.segments(text).compactMap { if case let .plan(plan) = $0 { return plan }; return nil }
+                    case let .toolUse(_, tool, _, input, _):
+                        return PlanDocument.tool(tool, json: input).map { [$0] } ?? []
+                    default: return []
+                    }
+                }
+            }
+            return PlanDocument.segments(message.text).compactMap { if case let .plan(plan) = $0 { return plan }; return nil }
         }
     }
 
@@ -125,18 +135,7 @@ struct SessionDetailsView: View {
                         )
                     } else {
                         ForEach(Array(planEntries.enumerated()), id: \.offset) { index, entry in
-                            HStack(alignment: .top, spacing: 10) {
-                                Text("\(index + 1)")
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .foregroundStyle(t.accent)
-                                    .frame(width: 22, height: 22)
-                                    .background(t.accent.opacity(0.14), in: Circle())
-                                Text(entry)
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(t.text2)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .padding(.vertical, 3)
+                            PlanDocumentCard(document: entry)
                         }
                     }
                 }

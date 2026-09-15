@@ -105,7 +105,9 @@ fun PermissionPromptDialog(
                         )
                     }
                 }
-                if (state.detail.isNotEmpty()) {
+                if (state.isPlan && state.detail.isNotBlank()) {
+                    PlanDocumentCard(state.detail, writing = false)
+                } else if (state.detail.isNotEmpty()) {
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()

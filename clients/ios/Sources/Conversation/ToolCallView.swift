@@ -29,6 +29,14 @@ struct ToolCallView: View {
     var onToggle: () -> Void = {}
 
     var body: some View {
+        if let document = trace.planDocument {
+            PlanDocumentCard(document: document)
+        } else {
+            toolContent
+        }
+    }
+
+    private var toolContent: some View {
         VStack(alignment: .leading, spacing: 5) {
             if compact {
                 if isCollapsible {

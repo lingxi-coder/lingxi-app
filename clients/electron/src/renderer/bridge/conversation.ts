@@ -1,3 +1,4 @@
+import { resultAgentId } from '../components/transcriptAgentPlacement';
 /**
  * Live-conversation reducer (M10 A1 — C3).
  *
@@ -52,7 +53,6 @@ import type { ClientEvent, ImageRefDto, MessageDto, MessageImageDto, PlanTaskDto
 import { fallbackToolBody, fallbackToolHeader } from '@lingxi/bridge-client/toolview';
 import { isSupportedImageMediaType } from '../../shared/imageInput';
 
-import { resultAgentId } from '../components/transcriptAgentPlacement';
 import type { RunItem } from '../model/runItem';
 import { collectTurnFileChanges } from '../model/turnFileChanges';
 
@@ -665,36 +665,32 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       };
     }
 
+    case 'scheduled_task_fire':
+      return pushNotice(state, event.message);
+
     case 'system_notice':
       if (event.is_error) return pushError(state, event.message);
       return pushNotice(state, event.message);
 
-    // A `/loop` wakeup announces itself before the turn it starts. `streak > 0`
-    // means the ticks before it were quiet, so the rows back to (and including)
-    // the `streak`-th previous wakeup row collapse behind this one — the
-    // oracle's `foldedUuids`, resolved here because only the client knows which
-    // rows those turns produced.
+    // Oracle 2.1.270 folds the slice since the most recent fire and unions
+    // those UUIDs with earlier folds. Streak is a label, not a required count
+    // of boundaries in local history (which may start after a reconnect).
     case 'loop_wakeup': {
       const items = state.items.slice();
       closeThinking(items, state.openThinkingIndex);
       let foldedItemIds = state.foldedItemIds;
       if (event.streak > 0) {
-        const folded: string[] = [];
-        let boundaries = 0;
-        for (let i = items.length - 1; i >= 0 && boundaries < event.streak; i -= 1) {
-          const row = items[i];
-          folded.push(row.id);
-          if (row.type === 'narration' && row.loopWakeupStreak !== undefined) boundaries += 1;
+        let start = items.length - 1;
+        while (start >= 0) {
+          const row = items[start];
+          if (row.type === 'narration' && row.loopWakeupStreak !== undefined) break;
+          start -= 1;
         }
-        // Fold only a run that really is `streak` whole groups. A shorter
-        // history (a reconnect, a `/clear`) would otherwise swallow rows that
-        // belong to something else entirely.
-        //
-        // The streak is CUMULATIVE — tick 3 reports 3, not 1 — so this run
-        // subsumes what the previous wakeup folded. Deduplicate rather than
-        // append, or every row would be listed once per subsequent fold.
-        if (boundaries === event.streak) {
-          foldedItemIds = [...new Set([...state.foldedItemIds, ...folded])];
+        if (start >= 0) {
+          foldedItemIds = [...new Set([
+            ...state.foldedItemIds,
+            ...items.slice(start).map((row) => row.id),
+          ])];
         }
       }
       items.push({
@@ -805,12 +801,24 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
 export function conversationFromMessages(
   messages: readonly MessageDto[],
 ): ConversationState {
-  const items: RunItem[] = [];
+  let items: RunItem[] = [];
   const summaries: ContextSummarySnapshot[] = [];
   const toolIndex = new Map<string, number>();
   let nextId = 1;
+  let foldedItemIds: readonly string[] = [];
 
   for (const message of messages) {
+    if (message.loop_wakeup) {
+      const restored = reduceEvent({ ...emptyConversation(), items, nextId, foldedItemIds }, {
+        type: 'loop_wakeup', ...message.loop_wakeup,
+        companion: message.loop_wakeup.companion ?? undefined,
+      });
+      items = restored.items;
+      nextId = restored.nextId;
+      foldedItemIds = restored.foldedItemIds;
+      continue;
+    }
+
     const images = message.role === 'user'
       ? (message.images ?? []).filter(isRenderableMessageImage)
       : [];
@@ -928,6 +936,7 @@ export function conversationFromMessages(
     ...emptyConversation(),
     items,
     summaries,
+    foldedItemIds,
     toolIndex: Object.fromEntries(toolIndex),
     nextId,
   };

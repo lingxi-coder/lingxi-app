@@ -29,6 +29,7 @@ import {
 } from '../src/renderer/bridge/conversation';
 import type { ToolRunItem } from '../src/renderer/model/runItem';
 import { toolHasBody } from '../src/renderer/model/runItem';
+import { visibleRows } from '../src/renderer/components/loopFold';
 
 type Narration = Extract<ConversationState['items'][number], { type: 'narration' }>;
 type Tool = ToolRunItem;
@@ -326,6 +327,14 @@ test('system_notice remains non-terminal while surfacing its severity', () => {
   assert.equal((s.items.at(-1) as Narration).text, 'Recovered persisted state.');
 });
 
+test('a fixed schedule fire is visible before a turn and creates no dynamic fold marker', () => {
+  const s = reduceEvent(emptyConversation(), { type: 'scheduled_task_fire', message: 'Fixed task is ready' });
+  assert.equal(s.running, false);
+  assert.equal((s.items.at(-1) as Narration).text, 'Fixed task is ready');
+  assert.equal((s.items.at(-1) as Narration).loopWakeupStreak, undefined);
+  assert.deepEqual(s.foldedItemIds, []);
+});
+
 test('a /loop wakeup marks its row, and a streak folds the quiet groups behind it', () => {
   let s = emptyConversation();
   // First wakeup: nothing before it was quiet, so nothing folds.
@@ -342,7 +351,8 @@ test('a /loop wakeup marks its row, and a streak folds the quiet groups behind i
   // That tick produced one assistant line…
   s = reduceEvent(s, { type: 'text_delta', text: 'nothing to do' });
   s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
-  const quietLineId = s.items.at(-1)!.id;
+  const quietLineId = s.items.at(-2)!.id;
+  const quietMetaId = s.items.at(-1)!.id;
 
   // …and the next wakeup reports it as quiet, folding the group behind itself.
   s = reduceEvent(s, {
@@ -353,8 +363,8 @@ test('a /loop wakeup marks its row, and a streak folds the quiet groups behind i
     since_ms: 1_788_790_449_000,
   });
   assert.deepEqual(
-    s.foldedItemIds,
-    [firstWakeupId, quietLineId],
+    new Set(s.foldedItemIds),
+    new Set([firstWakeupId, quietLineId, quietMetaId]),
     'the folded run is the previous wakeup row and what its tick produced',
   );
   assert.equal(
@@ -367,10 +377,10 @@ test('a /loop wakeup marks its row, and a streak folds the quiet groups behind i
 });
 
 /**
- * A history too short for the streak (a reconnect mid-loop) must fold nothing:
- * folding "as much as there is" would hide rows belonging to something else.
+ * With no local fire boundary (a reconnect mid-loop), fold nothing rather
+ * than hiding unrelated transcript rows.
  */
-test('a /loop streak longer than the history folds nothing', () => {
+test('a /loop streak with no local fire boundary folds nothing', () => {
   let s = reduceEvent(emptyConversation(), { type: 'text_delta', text: 'unrelated' });
   s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
   s = reduceEvent(s, {
@@ -381,6 +391,65 @@ test('a /loop streak longer than the history folds nothing', () => {
     since_ms: 1_788_780_000_000,
   });
   assert.deepEqual(s.foldedItemIds, []);
+});
+
+test('a cumulative /loop streak folds the latest available fire after partial history recovery', () => {
+  let s = appendUserPrompt(emptyConversation(), 'unrelated history');
+  s = reduceEvent(s, { type: 'loop_wakeup', message: 'recovered fire', streak: 4, since_ms: 1 });
+  const recoveredId = s.items.at(-1)!.id;
+  s = reduceEvent(s, { type: 'loop_wakeup', message: 'next fire', streak: 5, since_ms: 1 });
+  assert.deepEqual(s.foldedItemIds, [recoveredId]);
+  assert.equal(visibleRows(s.items, s.foldedItemIds, () => false).length, 2);
+});
+
+test('cumulative /loop folds hide complete quiet turns and reveal their original order', () => {
+  let s = appendUserPrompt(emptyConversation(), 'start monitoring');
+  const promptId = s.items[0].id;
+  const wake = (streak: number) => {
+    s = reduceEvent(s, {
+      type: 'loop_wakeup', message: `wakeup ${streak}`, streak, since_ms: 1,
+      ...(streak > 0 ? { companion: `quiet ${streak}` } : {}),
+    });
+  };
+  const tick = () => {
+    s = reduceEvents(s, [
+      { type: 'thinking_delta', thinking: 'checking' },
+      { type: 'text_delta', text: 'nothing actionable' },
+      { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST },
+    ]);
+  };
+  wake(0);
+  tick();
+  wake(1);
+  tick();
+  const quietIds = s.items.slice(1).map((row) => row.id);
+  wake(2);
+  assert.deepEqual(new Set(s.foldedItemIds), new Set(quietIds));
+  assert.equal(s.foldedItemIds.length, quietIds.length, 'cumulative folds never duplicate ids');
+  const foldId = s.items.at(-2)!.id;
+  assert.deepEqual(visibleRows(s.items, s.foldedItemIds, () => false).map((row) => row.id),
+    [promptId, foldId, s.items.at(-1)!.id]);
+  assert.deepEqual(visibleRows(s.items, s.foldedItemIds, (id) => id === foldId), s.items);
+});
+
+test('an actionable /loop tick keeps separate quiet runs independently expandable', () => {
+  let s = emptyConversation();
+  const wake = (streak: number) => {
+    s = reduceEvent(s, { type: 'loop_wakeup', message: 'wakeup', streak, since_ms: 1 });
+    return s.items.at(-1)!.id;
+  };
+  const first = wake(0);
+  const firstFold = wake(1);
+  s = reduceEvent(s, { type: 'text_delta', text: 'actionable result' });
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  const second = wake(0);
+  const secondFold = wake(1);
+  assert.deepEqual(new Set(s.foldedItemIds), new Set([first, second]));
+  const visible = visibleRows(s.items, s.foldedItemIds, (id) => id === firstFold);
+  assert.ok(visible.some((row) => row.id === first));
+  assert.ok(!visible.some((row) => row.id === second));
+  assert.ok(visible.some((row) => row.id === secondFold));
+  assert.ok(visible.some((row) => row.type === 'narration' && row.text === 'actionable result'));
 });
 
 test('failing tool_use_result marks the card errored without a duplicate error line', () => {
@@ -947,4 +1016,42 @@ test('retry retraction removes only the identified completed assistant attempt',
   assert.ok(!serialized.includes('failed thought'));
   assert.ok(state.openAssistantIndex >= 0);
   assert.equal(reduceEvent(state, { type: 'message_retracted', message_id: 'failed' }), state);
+});
+
+test('success for one Edit does not complete a later Edit of the same file', () => {
+  let state = emptyConversation();
+  const start = (id: string) => ({ type: 'tool_use_started' as const, id, tool: 'Edit', input_json: '{"file_path":"ModelStoreScreen.kt"}' });
+  const result = (id: string) => ({ type: 'tool_use_result' as const, id, tool: 'Edit', result_json: '"updated successfully"', is_error: false });
+  state = reduceEvent(state, start('edit-imports'));
+  state = reduceEvent(state, result('edit-imports'));
+  state = reduceEvent(state, start('edit-layout'));
+  assert.deepEqual(state.items.filter((item) => item.type === 'tool').map((item) => [item.id, item.status]), [['edit-imports', 'done'], ['edit-layout', 'running']]);
+  state = reduceEvent(state, result('edit-layout'));
+  assert.deepEqual(state.items.filter((item) => item.type === 'tool').map((item) => item.status), ['done', 'done']);
+});
+
+test('resumed structured loop fires fold the same transcript as live events', () => {
+  const s = conversationFromMessages([
+    { role: 'user', blocks: [{ type: 'text', text: 'monitor' }] },
+    { role: 'system', blocks: [], loop_wakeup: { message: 'first', streak: 0, since_ms: 0 } },
+    { role: 'assistant', blocks: [{ type: 'text', text: 'quiet' }] },
+    { role: 'system', blocks: [], loop_wakeup: { message: 'second', companion: 'healthy', streak: 1, since_ms: 1 } },
+  ]);
+  assert.deepEqual(visibleRows(s.items, s.foldedItemIds, () => false)
+    .filter((row): row is Narration => row.type === 'narration').map((row) => row.text),
+  ['monitor', 'second', 'healthy']);
+});
+
+test('pending prompt stays distinct during streaming and settles at turn boundaries', () => {
+  let state = appendPendingUserPrompt(emptyConversation(), 'First prompt');
+  const delivery = () => state.items.filter((item) => item.type === 'narration' && item.role === 'user').map((item) => item.delivery);
+  assert.deepEqual(delivery(), ['pending']);
+  state = reduceEvent(state, { type: 'turn_started' });
+  assert.deepEqual(delivery(), [undefined]);
+  state = appendPendingUserPrompt(state, 'Follow up');
+  state = appendPendingUserPrompt(state, 'Another follow up');
+  state = reduceEvent(state, { type: 'text_delta', text: 'Still working' });
+  assert.deepEqual(delivery(), [undefined, 'pending', 'pending']);
+  state = reduceEvent(state, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  assert.deepEqual(delivery(), [undefined, undefined, undefined]);
 });

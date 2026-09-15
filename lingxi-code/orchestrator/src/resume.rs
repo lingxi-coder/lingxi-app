@@ -557,6 +557,29 @@ fn build_state_from_jsonl(
                         refusal_fallback: None,
                     });
                 }
+                if is_scheduled_task_fire(m) {
+                    // The live path (`transcript.rs`) pushes the fire into
+                    // history AND excludes it from model context; resume did
+                    // neither, so a `/loop` or fixed fire was written to the
+                    // transcript and then dropped on the way back in. The
+                    // companion `user_meta` row is NOT excluded — it is the
+                    // line the model is meant to read.
+                    state.history.push(ConversationMessage::System {
+                        id: MessageId::from_uuid(msg_uuid),
+                        content: m
+                            .extra
+                            .get("content")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        subtype: Some("scheduled_task_fire".to_string()),
+                        compact_metadata: None,
+                        refusal_fallback: None,
+                    });
+                    state
+                        .model_context_excluded_messages
+                        .insert(MessageId::from_uuid(msg_uuid));
+                }
                 if let Some(active_goal) = goal_state_from_message(m) {
                     state.active_goal = active_goal;
                 }
@@ -996,6 +1019,17 @@ fn restored(goal: Option<ActiveGoalState>) -> Option<ActiveGoalState> {
         origin: GoalOrigin::Restored,
         ..goal
     })
+}
+
+/// A scheduled-task fire row — `/loop` wakeups and fixed-schedule fires alike.
+/// Written by `conversation::transcript`, and until now read by nothing.
+fn is_scheduled_task_fire(message: &JsonlMessage) -> bool {
+    message.message_type == "system"
+        && message
+            .extra
+            .get("subtype")
+            .and_then(serde_json::Value::as_str)
+            == Some("scheduled_task_fire")
 }
 
 fn is_compact_boundary(message: &JsonlMessage) -> bool {

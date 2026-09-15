@@ -216,6 +216,8 @@ export interface UseBridge {
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  loginCodex(): Promise<ProviderCredentialUpdate>;
+  cancelCodexLogin(): Promise<void>;
   testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
   refreshProviderCredential(providerId: string): Promise<void>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
@@ -1947,6 +1949,21 @@ export function useBridge(): UseBridge {
     } catch (cause) { return capture(cause); }
   }, [capture, host]);
 
+  const loginCodex = useCallback(async () => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    const update = await host.loginCodex();
+    setBootstrap((previous) => previous ? {
+      ...previous, settings: update.settings,
+      providerCredentials: [...(previous.providerCredentials ?? []).filter((entry) => entry.providerId !== update.credential.providerId), update.credential],
+    } : previous);
+    return update;
+  }, [host]);
+
+  const cancelCodexLogin = useCallback(async () => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    await host.cancelCodexLogin();
+  }, [host]);
+
   const clearProviderCredential = useCallback(async (providerId: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
@@ -2503,6 +2520,8 @@ export function useBridge(): UseBridge {
     searchWorkspaceFiles,
     setProviderCredential,
     clearProviderCredential,
+    loginCodex,
+    cancelCodexLogin,
     testProviderConnection,
     refreshProviderCredential,
     pluginSecret,

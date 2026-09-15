@@ -9,7 +9,9 @@ import {
   resolveProviderCredential,
   resolveSessionLaunchCredentials,
   resolveSessionLaunchPluginSecrets,
+  resolveCodexOAuthSession,
 } from './credential-broker.js';
+import { CODEX_PROVIDER_ID, parseCodexSession } from './codex-auth.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { HostController } from './host.js';
 import { ScheduledTaskService } from './scheduled.js';
@@ -240,6 +242,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     onModelSelected: (model) => settings.setLastModel(model),
     getSavedModel: () => settings.getPublic().model,
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
+    resolveOpenAiOAuth: () => resolveCodexOAuthSession(credentialBroker),
+    onOpenAiOAuthUpdated: async (session) => {
+      if (!credentialBroker) throw new Error('Codex secure credential storage is unavailable');
+      await credentialBroker.set(CODEX_PROVIDER_ID, JSON.stringify(parseCodexSession(session)));
+    },
     onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
     sessionIdAvailable: async (ref) => {
       const catalog = await sessionCatalog.list(ref.projectPath);
@@ -280,12 +287,15 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         credentialBroker,
       });
       const pluginSecrets = await resolveSessionLaunchPluginSecrets(credentialBroker);
+      const openaiOAuth = model?.startsWith(`${CODEX_PROVIDER_ID}/`)
+        ? await resolveCodexOAuthSession(credentialBroker) : undefined;
       return {
         workspace,
         sessionId: ref.sessionId,
         trusted: settings.hasProject(workspace),
         ...credentials,
         pluginSecrets,
+        openaiOAuth,
         model,
         apiBaseUrl: configured.apiBaseUrl,
       };

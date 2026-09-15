@@ -47,6 +47,6 @@ test('the providers with no hosted transcription endpoint stay false', () => {
   const incapable = PROVIDERS.filter((p) => !p.transcriptionCapable).map((p) => p.id).sort();
   assert.deepEqual(
     incapable,
-    ['anthropic', 'deepseek', 'github-copilot', 'glm-coding', 'kimi', 'kimi-code'].sort(),
+    ['anthropic', 'deepseek', 'github-copilot', 'glm-coding', 'kimi', 'kimi-code', 'openai-chatgpt'].sort(),
   );
 });

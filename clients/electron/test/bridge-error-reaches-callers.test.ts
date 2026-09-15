@@ -137,3 +137,24 @@ test('a successful host updateSettings resolves for voice preferences too', asyn
 
   await bridge.setVoicePreferences(defaultVoicePreferences());
 });
+
+test('Codex OAuth login and cancellation use dedicated host methods', async () => {
+  const events: string[] = [];
+  const update = { credential: { providerId: 'openai-chatgpt', configured: true, encryptionAvailable: true }, settings: {} };
+  const bridge = bridgeWithHost({
+    loginCodex: async () => { events.push('login'); return update; },
+    cancelCodexLogin: async () => { events.push('cancel'); },
+  });
+  assert.equal(await bridge.loginCodex(), update);
+  await bridge.cancelCodexLogin();
+  assert.deepEqual(events, ['login', 'cancel']);
+});
+
+test('Codex OAuth login and cancellation failures reach the settings caller', async () => {
+  const bridge = bridgeWithHost({
+    loginCodex: async () => { throw new Error('OAuth callback timed out'); },
+    cancelCodexLogin: async () => { throw new Error('Cancellation failed'); },
+  });
+  await assert.rejects(bridge.loginCodex(), /OAuth callback timed out/);
+  await assert.rejects(bridge.cancelCodexLogin(), /Cancellation failed/);
+});

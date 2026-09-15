@@ -405,7 +405,8 @@ export class BridgeClient extends EventEmitter {
       case 'event':
         try {
           const event = validateClientEvent(frame.payload);
-          this.pushEvent(event);
+          // Refreshed credentials belong only to the host event handler, never the replay queue.
+          if (event.type !== 'openai_oauth_updated') this.pushEvent(event);
           this.emit('event', event);
         } catch (error) {
           this.emit('error', new Error(`bridge: invalid inbound client event (${error instanceof Error ? error.message : String(error)})`));

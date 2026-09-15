@@ -156,8 +156,15 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
     // capability.
     transcriptionCapable: false,
   },
-  // ChatGPT OAuth is intentionally omitted until the Electron credential
-  // bridge supports its sign-in flow; CLI/TUI and mobile keep the route.
+  {
+    id: 'openai-chatgpt', label: 'Codex Auth', description: '使用 ChatGPT 账号登录', popular: true,
+    authMethod: 'oauth', keyLabel: 'ChatGPT 账号', keyPlaceholder: '',
+    defaultApiBase: 'https://chatgpt.com/backend-api/codex',
+    credentialManagementUrl: 'https://chatgpt.com',
+    defaultModel: 'openai-chatgpt/gpt-5.6-sol', available: true,
+    // Codex subscription credentials do not grant access to the audio API.
+    transcriptionCapable: false,
+  },
 ] as const;
 
 export const PROVIDER_IDS = PROVIDERS.map(({ id }) => id);

@@ -104,6 +104,13 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const selectedProvider = providerById(selectedProviderId ?? '') ?? PROVIDERS[0];
   const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id);
   const statusKind = credentialStatusKind(selectedMetadata);
+  // Key the OAuth branches on the capability, not on one provider id: this is a
+  // multi-provider product, and `authMethod` is declared required on every
+  // PROVIDERS entry precisely so a new OAuth provider cannot land without
+  // answering. Keying on the id gave any future OAuth provider the API-key
+  // field and no sign-in button.
+  const isCodexAuth = selectedProvider.authMethod === 'oauth';
+  const oauthStorageUnavailable = Boolean(selectedMetadata?.storageError) || selectedMetadata?.encryptionAvailable === false;
   const providerModelCatalog = bridge.desktop.providerModelCatalog ?? [];
   const providerCatalogEntry = providerModelCatalog.find((entry) => entry.provider_id === selectedProvider.id);
   const visibility = snapshot?.settings.modelPickerVisibility?.[selectedProvider.id];
@@ -120,6 +127,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const credentialRef = useRef<HTMLInputElement>(null);
   const requestedPreviewProvidersRef = useRef(new Set<string>());
   const connectionTestGenerationRef = useRef(0);
+  const oauthActiveRef = useRef(false);
+  const cancelCodexRef = useRef(bridge.cancelCodexLogin);
+  cancelCodexRef.current = bridge.cancelCodexLogin;
   currentModelRef.current = bridge.desktop.currentModel;
 
   useEffect(() => {
@@ -130,6 +140,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       ++applyGenerationRef.current;
       ++connectionTestGenerationRef.current;
       applyAbortRef.current?.abort();
+      if (oauthActiveRef.current) void cancelCodexRef.current().catch(() => {});
     };
   }, []);
 
@@ -148,7 +159,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   // preview lazily after selection; masking happens inside the native broker,
   // so the renderer never receives the complete credential.
   useEffect(() => {
-    if (!shouldRequestCredentialPreview(
+    if (isCodexAuth || !shouldRequestCredentialPreview(
       selectedProviderId,
       selectedMetadata,
       requestedPreviewProvidersRef.current,
@@ -156,7 +167,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     )) return;
     requestedPreviewProvidersRef.current.add(selectedProviderId);
     void bridge.refreshProviderCredential(selectedProviderId);
-  }, [bridge, selectedMetadata, selectedProviderId, snapshot?.credentialBrokerAvailable]);
+  }, [bridge, isCodexAuth, selectedMetadata, selectedProviderId, snapshot?.credentialBrokerAvailable]);
 
   const applyPendingModel = async (
     allowWhileConnecting = false,
@@ -226,6 +237,36 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
         setConnecting(false);
       }
+    }
+  };
+
+  const loginCodex = async () => {
+    if (connecting || modelApplying || bridge.running || oauthStorageUnavailable || oauthActiveRef.current) return;
+    const generation = ++transactionGenerationRef.current;
+    oauthActiveRef.current = true;
+    setConnecting(true);
+    setSaveError(null);
+    setApplyError(null);
+    try {
+      await bridge.loginCodex();
+      if (isCurrentCredentialTransaction(mountedRef.current, generation, transactionGenerationRef.current)
+        && pendingModelReference) await applyPendingModel(true, generation);
+    } catch (cause) {
+      if (isCurrentCredentialTransaction(mountedRef.current, generation, transactionGenerationRef.current)) {
+        setSaveError(cause instanceof Error ? cause.message : 'ChatGPT 登录失败，请重试。');
+      }
+    } finally {
+      oauthActiveRef.current = false;
+      if (isCurrentCredentialTransaction(mountedRef.current, generation, transactionGenerationRef.current)) setConnecting(false);
+    }
+  };
+
+  const cancelCodexLogin = async () => {
+    if (!oauthActiveRef.current) return;
+    try {
+      await bridge.cancelCodexLogin();
+    } catch (cause) {
+      if (mountedRef.current) setSaveError(cause instanceof Error ? cause.message : '无法取消登录。');
     }
   };
 
@@ -323,7 +364,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     <>
       {selectedProviderId === null ? (
         <Card title="Provider">
-          <Row title="选择 Provider" desc="凭据与 Desktop、CLI、TUI 共享；选择一项查看或修改 API Key。" align="center">
+          <Row title="选择 Provider" desc="凭据与 Desktop、CLI、TUI 共享；选择一项登录账号或修改 API Key。" align="center">
             <span />
           </Row>
           {PROVIDERS.map((provider) => {
@@ -396,7 +437,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
 
           <Card title={selectedProvider.label}>
         {pendingModelReference && (
-          <Row title="待应用的模型" desc={`保存 ${selectedProvider.label} API Key 以使用 ${modelReference(pendingModelReference).label}。`} align="center">
+          <Row title="待应用的模型" desc={`${isCodexAuth ? '登录 ChatGPT 账号' : `保存 ${selectedProvider.label} API Key`}以使用 ${modelReference(pendingModelReference).label}。`} align="center">
             <Icon name="spark" size={15} color={t.accent} />
           </Row>
         )}
@@ -406,18 +447,40 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
         {statusKind === 'secure' && (
           <Row title="存储方式" desc="已安全保存在 macOS Data Protection Keychain 中，由签名凭据代理统一管理。" align="center"><span /></Row>
         )}
+        {isCodexAuth && oauthStorageUnavailable && !selectedMetadata?.storageError && (
+          <Row title="安全存储不可用" desc="ChatGPT 登录需要可用的安全凭据存储。请检查系统钥匙串或凭据代理后重试。" align="center">
+            <Icon name="shieldAlert" size={15} color={t.danger} />
+          </Row>
+        )}
         {statusKind === 'unavailable' && (
           <Row title="安全存储不可用" desc={selectedMetadata?.storageError} align="center">
             <Icon name="shieldAlert" size={15} color={t.danger} />
           </Row>
         )}
-        {statusKind === 'fallback-configured' && (
+        {!isCodexAuth && statusKind === 'fallback-configured' && (
           <Row title="存储方式" desc="当前凭据来自仅所有者可读的本地回退存储；引擎会在钥匙串可用时自动迁移。" align="center"><span /></Row>
         )}
-        {statusKind === 'fallback-unconfigured' && (
+        {!isCodexAuth && statusKind === 'fallback-unconfigured' && (
           <Row title="存储方式" desc="安全存储当前处于本地回退模式；保存时会优先尝试 macOS 登录钥匙串。" align="center"><span /></Row>
         )}
-        {selectedProvider.available ? (
+        {isCodexAuth ? (
+          <Row title="ChatGPT 账号" desc={connecting
+            ? '请在浏览器中完成 ChatGPT 登录。等待授权返回…'
+            : '通过浏览器登录 ChatGPT 账号，授权凭据由安全存储管理。'} align="center">
+            <div style={{ display: 'flex', gap: 7 }}>
+              <button type="button" data-testid="codex-login" disabled={credentialWriteDisabled || oauthStorageUnavailable}
+                onClick={() => void loginCodex()} style={ghostButtonStyle(t, credentialWriteDisabled || oauthStorageUnavailable)}>
+                {connecting ? '等待登录…' : modelApplying ? '应用模型中…' : selectedMetadata?.configured ? '重新登录' : '登录'}
+              </button>
+              {connecting && !modelApplying && (
+                <button type="button" data-testid="codex-login-cancel" onClick={() => void cancelCodexLogin()} style={ghostButtonStyle(t, false)}>取消登录</button>
+              )}
+              {selectedMetadata?.configured && !selectedMetadata.runtimeOnly && (
+                <button type="button" disabled={credentialWriteDisabled} onClick={() => void clearCredential()} style={ghostButtonStyle(t, credentialWriteDisabled, true)}>退出登录</button>
+              )}
+            </div>
+          </Row>
+        ) : selectedProvider.available ? (
           <Row title={selectedProvider.keyLabel} desc={selectedMetadata?.configured ? '输入新的 API Key 并保存，即可更新现有凭据。' : undefined} align="center">
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 7 }}>
               <input
@@ -450,7 +513,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
         ) : (
           <Row title={selectedProvider.keyLabel} desc={`${selectedProvider.label} 目前只能通过 CLI/TUI 配置凭据。`} align="center"><span /></Row>
         )}
-        {selectedProvider.available && (
+        {selectedProvider.available && !isCodexAuth && (
           <Row
             title="连接测试"
             desc={testMessage ? (
@@ -532,7 +595,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
             <Icon name="warning" size={15} color={t.warn} />
           </Row>
         )}
-        {selectedProvider.available && (
+        {selectedProvider.available && !isCodexAuth && (
           <Row
             title="凭据操作"
             desc={selectedMetadata?.configured

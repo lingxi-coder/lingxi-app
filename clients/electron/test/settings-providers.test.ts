@@ -612,3 +612,49 @@ test('the fixtures in this file are real SettingsSnapshots — rowState can read
     'an untyped fixture missing mergedKeys throws here rather than failing an assertion',
   );
 });
+
+function renderCodexCredentials(metadata: Record<string, unknown>) {
+  return renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(false) },
+    React.createElement(ProviderCredentials, {
+      bridge: {
+        bootstrap: { settings: {}, providerCredentials: [{ providerId: 'openai-chatgpt', ...metadata }] },
+        desktop: { currentModel: null }, connected: false, running: false,
+      } as any,
+      initialProviderId: 'openai-chatgpt',
+      pendingModelReference: 'openai-chatgpt/gpt-5.6-sol',
+      snapshot: null, editingLayer: 'user', theme: 'light',
+      onTheme: () => undefined, onNavigate: () => undefined,
+      onClose: () => undefined, onJumpToLayer: () => undefined,
+    }),
+  ));
+}
+
+test('Codex Auth offers browser login without exposing key input or generic API tests', () => {
+  const markup = renderCodexCredentials({ configured: false, encryptionAvailable: true });
+  assert.match(markup, /Codex Auth/);
+  assert.match(markup, /登录 ChatGPT 账号/);
+  assert.match(markup, /data-testid="codex-login"/);
+  assert.doesNotMatch(markup, /type="password"|provider-credential-preview|provider-connection-test|保存新的 API Key/);
+  assert.doesNotMatch(markup.match(/<button[^>]*data-testid="codex-login"[^>]*>/)?.[0] ?? '', /disabled/);
+});
+
+test('configured Codex Auth offers re-login and logout without rendering credential previews', () => {
+  const markup = renderCodexCredentials({ configured: true, encryptionAvailable: true, credentialPreview: 'never-render-this' });
+  assert.match(markup, /重新登录/);
+  assert.match(markup, /退出登录/);
+  assert.doesNotMatch(markup, /never-render-this|type="password"/);
+});
+
+test('Codex Auth blocks login and explains unavailable secure storage', () => {
+  for (const metadata of [
+    { configured: false, encryptionAvailable: false },
+    { configured: false, encryptionAvailable: true, storageError: 'Credential Broker unavailable' },
+  ]) {
+    const markup = renderCodexCredentials(metadata);
+    assert.match(markup, /安全存储不可用/);
+    assert.match(markup.match(/<button[^>]*data-testid="codex-login"[^>]*>/)?.[0] ?? '', /disabled/);
+    assert.doesNotMatch(markup, /本地回退模式/);
+  }
+});

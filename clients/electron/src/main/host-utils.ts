@@ -558,7 +558,16 @@ export function buildBridgeArguments(config: {
  * Keep this boundary explicitly snake_case: it is a Rust serde contract, not
  * an Electron/JavaScript object passed over IPC.
  */
+export interface OpenAiOAuthSession {
+  access_token: string;
+  refresh_token?: string;
+  expires_at: number;
+  account_id?: string;
+  fedramp: boolean;
+}
+
 export function buildCredentialEnvelope(config: {
+  openaiOAuth?: OpenAiOAuthSession;
   apiKey?: string;
   providerCredentials?: Record<string, string>;
   pluginSecrets?: Record<string, Record<string, string>>;
@@ -567,6 +576,7 @@ export function buildCredentialEnvelope(config: {
     api_key: config.apiKey ?? null,
     provider_keys: config.providerCredentials ?? {},
     plugin_secrets: config.pluginSecrets ?? {},
+    ...(config.openaiOAuth ? { openai_oauth: config.openaiOAuth } : {}),
   })}\n`;
 }
 

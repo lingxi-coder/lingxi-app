@@ -498,3 +498,12 @@ test('SettingsStore.update writes and reloads voice preferences, normalized', ()
     autoPlayReplies: false,
   }, 'the earlier localOnly/ZH-cn values must be replaced wholesale, not merged into');
 });
+
+test('Codex OAuth credentials use only the private stdin envelope', () => {
+  const session = { access_token: 'oauth-access-secret', refresh_token: 'oauth-refresh-secret', expires_at: 123, account_id: 'account', fedramp: false };
+  assert.deepEqual(JSON.parse(buildCredentialEnvelope({ openaiOAuth: session })).openai_oauth, session);
+  const args = buildBridgeArguments({ workspace: '/tmp', bridgeDir: '/tmp/bridge', hasApiKey: false, hasCredentialStdin: true, trusted: true });
+  assert.ok(args.includes('--credential-stdin'));
+  assert.ok(!JSON.stringify(args).includes('oauth-access-secret'));
+  assert.equal(buildBridgeEnvironment({ OPENAI_ACCESS_TOKEN: session.access_token }).OPENAI_ACCESS_TOKEN, undefined);
+});

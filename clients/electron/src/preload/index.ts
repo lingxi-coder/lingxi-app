@@ -186,6 +186,8 @@ export interface LingxiApi {
   providerCredentials(providerId?: string): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  loginCodex(): Promise<ProviderCredentialUpdate>;
+  cancelCodexLogin(): Promise<void>;
   testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
@@ -282,6 +284,8 @@ const api: LingxiApi = {
   setSessionPinned: (session, pinned) => ipcRenderer.invoke(CH_SESSION_PIN_SET, session, pinned) as Promise<PublicSettings>,
   searchWorkspaceFiles: (query) => ipcRenderer.invoke(CH_WORKSPACE_FILES_SEARCH, query) as Promise<WorkspaceFileSearchResult>,
   previewWorkspaceFile: (sessionId, path) => ipcRenderer.invoke(CH_WORKSPACE_FILE_PREVIEW, sessionId, path) as Promise<WorkspaceFilePreview>,
+  loginCodex: () => ipcRenderer.invoke('lingxi:codex:login') as Promise<ProviderCredentialUpdate>,
+  cancelCodexLogin: () => ipcRenderer.invoke('lingxi:codex:cancel') as Promise<void>,
   providerCredentials: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIALS_GET, providerId) as Promise<ProviderCredentialMetadata[]>,
   setProviderCredential: (providerId, credential) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_SET, providerId, credential) as Promise<ProviderCredentialUpdate>,
   clearProviderCredential: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_CLEAR, providerId) as Promise<ProviderCredentialMetadata>,

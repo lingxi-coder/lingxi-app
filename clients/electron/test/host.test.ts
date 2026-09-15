@@ -6,6 +6,8 @@ import { join } from 'node:path';
 
 import {
   CH_BRIDGE_RESTART,
+  CH_CODEX_LOGIN,
+  CH_CODEX_CANCEL,
   CH_PROVIDER_CREDENTIAL_CLEAR,
   CH_PROVIDER_CREDENTIAL_SET,
   CH_PROVIDER_CREDENTIALS_GET,
@@ -1167,4 +1169,48 @@ test('settings model, voice and Thought patches persist without restarting a liv
     host.dispose();
     rmSync(userData, { recursive: true, force: true });
   }
+});
+
+test('Codex login keeps tokens in broker and stops OAuth before logout', async () => {
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const operations: string[] = [];
+  let configured = false;
+  const host = new HostController(
+    { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
+    { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
+      get: () => ({ connectionState: { status: 'disconnected' } }),
+      restart: async () => { throw new Error('engine unavailable after credential persistence'); },
+      withCodexAuthMutation: async (mutation: () => Promise<unknown>) => { operations.push('stop-oauth'); return mutation(); },
+    } as any,
+    new DiagnosticBuffer(), undefined,
+    { handle: (channel: string, handler: any) => handlers.set(channel, handler), removeHandler: (channel: string) => handlers.delete(channel) } as any,
+    undefined,
+    { health: async () => { operations.push('health'); },
+      set: async (id: string, secret: string) => {
+        assert.equal(id, 'openai-chatgpt');
+        assert.equal(JSON.parse(secret).refresh_token, 'private-refresh');
+        operations.push('store'); configured = true;
+        return { providerId: id, configured: true, maskedValue: 'must-not-expose' };
+      },
+      delete: async () => { operations.push('delete'); configured = false; },
+      listStatus: async () => [{ providerId: 'openai-chatgpt', configured }],
+      preview: async () => { throw new Error('OAuth previews must never be requested'); },
+    } as any,
+    undefined,
+    async () => { operations.push('login'); return { access_token: 'private-access', refresh_token: 'private-refresh', expires_at: 9999, fedramp: false }; },
+  );
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {} };
+  const event = { sender, senderFrame: frame };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  const result = await handlers.get(CH_CODEX_LOGIN)!(event);
+  assert.deepEqual(operations, ['health', 'login', 'stop-oauth', 'store']);
+  assert.deepEqual(result.credential, { providerId: 'openai-chatgpt', configured: true, encryptionAvailable: true });
+  assert.equal(JSON.stringify(result).includes('private'), false);
+  await handlers.get(CH_PROVIDER_CREDENTIALS_GET)!(event, 'openai-chatgpt');
+  await assert.rejects(handlers.get(CH_PROVIDER_CREDENTIAL_SET)!(event, 'openai-chatgpt', 'api-key'), /账号登录/);
+  const cleared = await handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR)!(event, 'openai-chatgpt');
+  assert.equal(cleared.configured, false);
+  assert.deepEqual(operations.slice(-2), ['stop-oauth', 'delete']);
+  await handlers.get(CH_CODEX_CANCEL)!(event);
 });

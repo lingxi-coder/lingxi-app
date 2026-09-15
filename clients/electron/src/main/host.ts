@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
+import { CODEX_PROVIDER_ID, loginCodex } from './codex-auth.js';
 import type { ScheduledTaskService } from './scheduled.js';
 import { CH_SCHEDULED } from '../shared/scheduled.js';
 import type { TerminalManager } from './terminal.js';
@@ -68,6 +69,8 @@ export interface PluginSecretMetadata {
   restartRequired?: boolean;
 }
 
+export const CH_CODEX_LOGIN = 'lingxi:codex:login';
+export const CH_CODEX_CANCEL = 'lingxi:codex:cancel';
 export const CH_BOOTSTRAP = 'lingxi:bootstrap';
 export const CH_SETTINGS_GET = 'lingxi:settings:get';
 export const CH_SETTINGS_FILE_OPEN = 'lingxi:settings:file:open';
@@ -333,6 +336,7 @@ export class HostController {
   private git?: GitService;
   private offGit?: () => void;
   private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
+  private codexLoginAbort?: AbortController;
   private scheduled?: ScheduledTaskService;
   private terminals?: TerminalManager;
   private offTerminals?: () => void;
@@ -361,6 +365,7 @@ export class HostController {
     private readonly mediaAccess?: MediaAccessReader,
     private readonly credentialBroker?: ProviderCredentialBroker,
     private readonly nativeAudio?: NativeAudioManager,
+    private readonly codexLogin: typeof loginCodex = loginCodex,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
@@ -508,6 +513,39 @@ export class HostController {
         }
       }
       return result;
+    });
+    this.ipc.handle(CH_CODEX_LOGIN, async (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      this.assertNoActiveTurn();
+      if (!this.credentialBroker) throw new Error('Codex 登录需要可用的安全凭据存储。');
+      if (this.codexLoginAbort) throw new Error('Codex 登录正在进行。');
+      const abort = new AbortController();
+      this.codexLoginAbort = abort;
+      const cancel = () => abort.abort();
+      event.sender.once('destroyed', cancel);
+      try {
+        await this.credentialBroker.health();
+        const session = await this.codexLogin({ openExternal: (url) => shell.openExternal(url), signal: abort.signal });
+        this.assertNoActiveTurn();
+        const stored = await this.bridge.withCodexAuthMutation(async () => {
+          if (abort.signal.aborted) throw new Error('Codex 登录已取消。');
+          return this.credentialBroker!.set(CODEX_PROVIDER_ID, JSON.stringify(session))
+            .catch(() => { throw new Error('Codex 登录凭据无法保存到安全存储，请重试。'); });
+        });
+        if (!stored.configured) throw new Error('Codex 登录凭据未能保存。');
+        this.brokerConfiguredProviders.add(CODEX_PROVIDER_ID);
+        this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
+        this.brokerStorageError = undefined;
+        // Authentication is durable even if the unrelated engine launch fails.
+        // Keep metadata authoritative; the runtime exposes its own connection error.
+        await this.restartIfConfigured().catch(() => {
+          this.diagnostics.add('warn', 'host', 'Codex authentication saved; the session runtime could not restart.');
+        });
+        return { credential: this.providerCredentialMetadata(CODEX_PROVIDER_ID), settings: this.settings.getPublic() };
+      } finally {
+        event.sender.removeListener('destroyed', cancel);
+        if (this.codexLoginAbort === abort) this.codexLoginAbort = undefined;
+      }
     });
     this.ipc.handle(CH_SCHEDULED, async (event: IpcMainInvokeEvent, input: unknown) => {
       this.assertSender(event);
@@ -741,6 +779,7 @@ export class HostController {
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
       this.assertSender(event);
       const provider = await this.requireCredentialProvider(providerId);
+      if (provider.id === CODEX_PROVIDER_ID) throw new Error('请使用 Codex 账号登录。');
       if (typeof credential !== 'string') throw new Error('invalid credential');
       this.assertNoActiveTurn();
       const credentialMetadata = this.credentialBroker
@@ -748,10 +787,22 @@ export class HostController {
         : await this.setCredentialThroughRuntime(provider.id, credential);
       return { credential: credentialMetadata, settings: this.settings.getPublic() };
     });
+    this.ipc.handle(CH_CODEX_CANCEL, (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      this.codexLoginAbort?.abort();
+    });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
       const provider = await this.requireCredentialProvider(providerId);
       this.assertNoActiveTurn();
+      if (provider.id === CODEX_PROVIDER_ID) {
+        this.codexLoginAbort?.abort();
+        if (!this.credentialBroker) throw new Error('Codex 安全凭据存储不可用。');
+        await this.bridge.withCodexAuthMutation(() => this.credentialBroker!.delete(CODEX_PROVIDER_ID));
+        this.brokerConfiguredProviders.delete(CODEX_PROVIDER_ID);
+        this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
+        return this.providerCredentialMetadata(CODEX_PROVIDER_ID);
+      }
       if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
       else {
         this.requireWorkspace();
@@ -766,6 +817,7 @@ export class HostController {
     ): Promise<ProviderConnectionTestResult> => {
       this.assertSender(event);
       const provider = this.requireProvider(providerId);
+      if (provider.id === CODEX_PROVIDER_ID) throw new Error('Codex 登录使用 ChatGPT 认证，不支持 API Key 连接测试。');
       if (credentialOverride !== undefined && typeof credentialOverride !== 'string') {
         throw new Error('invalid credential');
       }
@@ -1078,6 +1130,10 @@ export class HostController {
       ? Object.fromEntries(this.brokerCredentialPreviews)
       : runtime?.providerCredentialPreviews ?? legacy.providerCredentialPreviews ?? {};
     return this.credentialProviderIds().map((providerId) => {
+      if (providerId === CODEX_PROVIDER_ID && !this.credentialBroker) {
+        return { providerId, configured: false, encryptionAvailable: false,
+          storageError: 'Codex 登录需要支持安全凭据代理的桌面构建。' };
+      }
       if (persistedProviders.has(providerId)) {
         return {
           providerId,
@@ -1126,7 +1182,7 @@ export class HostController {
     for (const providerId of this.credentialProviderIds()) {
       if (!nextConfigured.has(providerId)) this.brokerCredentialPreviews.delete(providerId);
     }
-    if (!previewProviderId) return;
+    if (!previewProviderId || previewProviderId === CODEX_PROVIDER_ID) return;
     const preview = await this.credentialBroker.preview(previewProviderId);
     if (!preview.configured) {
       this.brokerConfiguredProviders.delete(previewProviderId);
@@ -1441,6 +1497,7 @@ export class HostController {
   }
 
   dispose(): void {
+    this.codexLoginAbort?.abort();
     this.scheduled?.dispose();
     this.ipc.removeHandler(CH_SCHEDULED);
     this.offGit?.();
@@ -1450,7 +1507,7 @@ export class HostController {
     this.terminalDeliveries.clear();
     if (!this.registered) return;
     for (const channel of [
-      CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
+      CH_CODEX_LOGIN, CH_CODEX_CANCEL, CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_WORKSPACE_FILES_SEARCH,

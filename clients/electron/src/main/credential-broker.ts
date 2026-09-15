@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStd
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { CODEX_PROVIDER_ID, parseCodexSession, type CodexOAuthSession } from './codex-auth.js';
 
 const CREDENTIAL_BROKER_BIN = process.platform === 'win32'
   ? 'lingxi-credential-client.exe'
@@ -269,8 +270,17 @@ export async function resolveProviderCredential(
   } = {},
 ): Promise<string | undefined> {
   const id = validateProviderId(providerId);
+  // OAuth JSON is not an API key and must never enter the key injection path.
+  if (id === CODEX_PROVIDER_ID) return undefined;
   return readProviderEnvironmentCredential(id, options.environment)
     ?? await options.credentialBroker?.resolve(id);
+}
+
+export async function resolveCodexOAuthSession(broker?: ProviderCredentialResolver): Promise<CodexOAuthSession | undefined> {
+  const secret = await broker?.resolve(CODEX_PROVIDER_ID);
+  if (!secret) return undefined;
+  try { return parseCodexSession(JSON.parse(secret)); }
+  catch { throw new Error('Codex 登录凭据无效，请重新登录。'); }
 }
 
 export async function resolveSessionLaunchCredentials(

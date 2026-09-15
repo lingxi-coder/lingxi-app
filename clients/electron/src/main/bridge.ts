@@ -1,3 +1,4 @@
+import type { OpenAiOAuthSession } from './host-utils.js';
 import { GitActivityTracker } from './git-activity.js';
 import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
 import type { HostNotifier } from './notifications.js';
@@ -63,6 +64,7 @@ export type ConnectionState =
   | { status: 'error'; message: string };
 
 export interface BridgeLaunchConfig {
+  openaiOAuth?: OpenAiOAuthSession;
   workspace: string;
   /** Stable identity for the engine process and its persisted transcript. */
   sessionId?: string;
@@ -117,6 +119,9 @@ export interface BridgeManagerOptions {
    * a separate `Frame` arm handled by `client.on('permission')` below.
    */
   notifier?: HostNotifier;
+  resolveOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
+  onOpenAiOAuthUpdated?: (session: OpenAiOAuthSession) => Promise<void>;
+  beforeOpenAiOAuthLaunch?: () => Promise<void>;
   onCronRunRequested?: (runtime: SessionRuntime, event: Extract<ClientEvent, { type: 'cron_run_requested' }>) => Promise<{ sessionId: string; summary: string }>;
   /** Persist only an explicitly requested, engine-confirmed model selection. */
   onModelSelected?: (model: string) => void;
@@ -918,6 +923,11 @@ export class SessionRuntime {
     return this.sendCronCommand({ type: 'cron_manage', request_id: randomUUID(), request });
   }
 
+  private launchOAuthOverride: OpenAiOAuthSession | undefined;
+  private launchOAuthModel: string | undefined;
+  private openAiOAuthActive = false;
+  private preparingOpenAiOAuth = false;
+  private oauthPersistence: Promise<void> = Promise.resolve();
   private activeCronExecutions = 0;
   private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
   private readonly backgroundSessionLeases = new Map<string, number>();
@@ -1025,11 +1035,13 @@ export class SessionRuntime {
   }
 
   get turnActive(): boolean {
-    return this.activeTurn || this.pendingPromptHydrations.size > 0 || this.pendingModelSwitch !== undefined;
+    return this.preparingOpenAiOAuth || this.activeTurn || this.pendingPromptHydrations.size > 0 || this.pendingModelSwitch !== undefined;
   }
 
   private readonly gitActivity = new GitActivityTracker();
   get hasActiveAgents(): boolean { return this.gitActivity.active; }
+  get hasOpenAiOAuth(): boolean { return this.openAiOAuthActive; }
+  get isStarting(): boolean { return this.startPromise !== null; }
 
   get activeCredentialProviderIds(): readonly string[] {
     return [...this.activeCredentialProviders];
@@ -1391,6 +1403,14 @@ export class SessionRuntime {
         (this.opts.listProcessCommands ?? listProcessCommands)(),
       );
       if (reusable) {
+        const command = (this.opts.readProcessCommand ?? readProcessCommand)(reusable.pid)
+          ?? (this.opts.listProcessCommands ?? listProcessCommands)().find(process => process.pid === reusable.pid)?.command;
+        // An inherited Codex process has an unknown refresh owner. Never attach
+        // or spawn a competing process; the user must close its owning host.
+        if (this.launchOAuthOverride || (this.opts.resolveOpenAiOAuth
+          && (!command || /(?:^|\s)--model(?:=|\s+)openai-chatgpt\//.test(command)))) {
+          throw new Error('An existing Codex runtime is still running. Close its owning application before reopening this chat.');
+        }
         this.launchDir = reusable.launchDir;
         this.adoptedPid = reusable.pid;
         this.adoptedProcessOwned = reusable.ownedProcess;
@@ -1417,6 +1437,17 @@ export class SessionRuntime {
     }
 
     const launch = await this.opts.launchConfig();
+    if (this.launchOAuthOverride) launch.openaiOAuth = this.launchOAuthOverride;
+    if (this.launchOAuthModel) launch.model = this.launchOAuthModel;
+    if (launch.openaiOAuth) {
+      await this.opts.beforeOpenAiOAuthLaunch?.();
+      // The previous owner may have rotated credentials while it was stopping.
+      if (this.opts.resolveOpenAiOAuth) {
+        launch.openaiOAuth = await this.opts.resolveOpenAiOAuth();
+        if (!launch.openaiOAuth) throw new Error('Codex authentication is unavailable. Sign in again.');
+      }
+      this.openAiOAuthActive = true;
+    }
     if (this.disposed) throw new Error('SessionRuntime is disposed');
     this.selectedModelReference = launch.model;
     this.activeWorkspace = launch.workspace;
@@ -1447,6 +1478,8 @@ export class SessionRuntime {
     const pluginSecretValues = Object.values(launch.pluginSecrets ?? {}).flatMap((values) => Object.values(values));
     this.captureLogs(child, [
       launch.apiKey,
+      launch.openaiOAuth?.access_token,
+      launch.openaiOAuth?.refresh_token,
       ...Object.values(launch.providerCredentials ?? {}),
       ...pluginSecretValues,
     ].filter((value): value is string => Boolean(value)));
@@ -1530,7 +1563,7 @@ export class SessionRuntime {
       bridgeDir,
       model: launch.model,
       hasApiKey: Boolean(launch.apiKey),
-      hasCredentialStdin: Object.keys(launch.providerCredentials ?? {}).length > 0
+      hasCredentialStdin: Boolean(launch.openaiOAuth) || Object.keys(launch.providerCredentials ?? {}).length > 0
         || Object.keys(launch.pluginSecrets ?? {}).length > 0,
       trusted: launch.trusted,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
@@ -1544,7 +1577,7 @@ export class SessionRuntime {
       detached: process.platform !== 'win32',
     });
     const providerCredentials = launch.providerCredentials ?? {};
-    if (Object.keys(providerCredentials).length > 0 || Object.keys(launch.pluginSecrets ?? {}).length > 0) {
+    if (launch.openaiOAuth || Object.keys(providerCredentials).length > 0 || Object.keys(launch.pluginSecrets ?? {}).length > 0) {
       child.stdin?.end(buildCredentialEnvelope(launch));
     } else if (launch.apiKey) child.stdin?.end(`${launch.apiKey}\n`);
     else child.stdin?.end();
@@ -1733,6 +1766,20 @@ export class SessionRuntime {
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation) return;
       this.gitActivity.accept(event);
+      if (event.type === 'openai_oauth_updated') {
+        this.oauthPersistence = this.oauthPersistence.then(async () => {
+          if (!this.opts.onOpenAiOAuthUpdated) throw new Error('OAuth persistence unavailable');
+          await this.opts.onOpenAiOAuthUpdated(event.session);
+        }).catch(() => {
+          // Never include token-bearing event or arbitrary broker error text.
+          void this.stop().catch(() => {
+            this.diagnostics.add('error', 'host', 'Failed to stop Codex runtime after credential persistence failure.');
+          });
+          this.diagnostics.add('error', 'host', 'Failed to persist refreshed Codex authentication. Sign in again.');
+          this.broadcastClientEvent({ type: 'error', kind: { type: 'internal' }, message: 'Failed to persist refreshed Codex authentication. Sign in again.' });
+        });
+        return;
+      }
       if (event.type === 'cron_run_requested') {
         this.activeCronExecutions++;
         this.notifyActivityChanged();
@@ -2243,6 +2290,7 @@ export class SessionRuntime {
    */
   async dispatchCommand(command: unknown): Promise<void> {
     if (this.archiving) throw new Error('This chat is being archived.');
+    if (this.preparingOpenAiOAuth) throw new Error('Codex authentication is being prepared.');
     const validated = validateClientCommand(command, this.activeWorkspace);
     if (validated.type === 'cron_manage') {
       await this.sendCronCommand(validated);
@@ -2267,7 +2315,24 @@ export class SessionRuntime {
       // would race a real reply the engine has already accepted.
       this.outstandingResponderRequests.delete(validated.request_id);
     }
-    if (validated.type === 'set_model' && (this.opts.resolveProviderCredential || this.opts.onModelSelected)) {
+    if (validated.type === 'set_model' && (this.opts.resolveProviderCredential || this.opts.resolveOpenAiOAuth || this.opts.onModelSelected)) {
+      if (validated.model.startsWith('openai-chatgpt/') && !this.openAiOAuthActive && this.opts.resolveOpenAiOAuth) {
+        if (this.activeTurn) throw new Error('Cancel the active turn before activating Codex authentication; this requires restarting the session engine.');
+        this.preparingOpenAiOAuth = true;
+        try {
+          const session = await this.opts.resolveOpenAiOAuth();
+          if (session) {
+            this.launchOAuthOverride = session;
+            this.launchOAuthModel = validated.model;
+            await this.restart();
+            await this.restoreOwnedSessionIfNeeded();
+          }
+        } finally {
+          this.launchOAuthOverride = undefined;
+          this.launchOAuthModel = undefined;
+          this.preparingOpenAiOAuth = false;
+        }
+      }
       return this.switchModel(validated.model);
     }
     if (validated.type === 'set_permission_mode' && (this.opts.getSavedPermissionMode || this.opts.onPermissionModeSelected)) {
@@ -2498,6 +2563,8 @@ export class SessionRuntime {
     this.activeWorkspaceTrusted = false;
     this.runtimeCredentialProviders.clear();
     this.persistedCredentialProviders.clear();
+    await this.oauthPersistence;
+    this.openAiOAuthActive = false;
     this.activeCredentialProviders.clear();
     this.credentialStorageEncrypted = false;
     this.gitActivity.reset();
@@ -2685,6 +2752,40 @@ export class SessionRuntimeManager {
       else this.backgroundSessionLeases.delete(ref.sessionId);
       this.trimCache();
     };
+  }
+
+  private oauthOwner: string | undefined;
+  private oauthLifecycle: Promise<void> = Promise.resolve();
+
+  private async stopOtherCodexRuntimes(sessionId?: string): Promise<void> {
+    const owner = this.oauthOwner ? this.runtimes.get(this.oauthOwner) : undefined;
+    const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
+      && (runtime.hasOpenAiOAuth || runtime === owner));
+    if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.pendingInteractions > 0
+      || !['connected', 'idle', 'error', 'disconnected'].includes(runtime.connectionState.status))) {
+      throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
+    }
+    for (const runtime of candidates) await runtime.stop();
+    this.oauthOwner = sessionId;
+  }
+
+  private claimCodexRuntime(sessionId?: string): Promise<void> {
+    const operation = this.oauthLifecycle.catch(() => undefined).then(() => this.stopOtherCodexRuntimes(sessionId));
+    this.oauthLifecycle = operation;
+    return operation;
+  }
+
+  withCodexAuthMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    const operation = this.oauthLifecycle.catch(() => undefined).then(async () => {
+      await this.stopOtherCodexRuntimes();
+      return mutation();
+    });
+    this.oauthLifecycle = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async invalidateCodexRuntimes(): Promise<void> {
+    await this.withCodexAuthMutation(async () => undefined);
   }
 
   private trimCache(): void {
@@ -3045,6 +3146,7 @@ export class SessionRuntimeManager {
       envelopeEvents: true,
       registerIpc: false,
       launchConfig: () => launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
+      beforeOpenAiOAuthLaunch: () => this.claimCodexRuntime(ref.sessionId),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
       onModelChanged: (model: string) => {
         this.sessionModelHints.set(ref.sessionId, model);

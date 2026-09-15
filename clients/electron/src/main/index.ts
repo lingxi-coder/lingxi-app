@@ -234,7 +234,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         // Adding a Project is the Desktop trust decision. Repository edits must
         // not silently revoke a live session or reintroduce the removed setup
         // prompt; removal from the Project list revokes access instead.
-        return { workspace: ref.projectPath, trusted: settings.hasProject(ref.projectPath) };
+        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) };
       } catch {
         return { workspace: ref.projectPath, trusted: false };
       }
@@ -292,7 +292,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       return {
         workspace,
         sessionId: ref.sessionId,
-        trusted: settings.hasProject(workspace),
+        trusted: settings.isTrustedWorkspace(workspace),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         pluginSecrets,

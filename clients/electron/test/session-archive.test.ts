@@ -32,7 +32,7 @@ test('archive persists metadata and unpins without touching the transcript; rest
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('archive stops only associated schedules before persistence, and leaves chat accessible on failure', async () => {
+test('archive pauses only execution-dependent schedules before persistence, and leaves chat accessible on failure', async () => {
   for (const fail of [false, true]) {
     const dir = mkdtempSync(join(tmpdir(), 'lingxi-archive-host-'));
     const projectPath = realpathSync.native(dir);
@@ -44,11 +44,15 @@ test('archive stops only associated schedules before persistence, and leaves cha
       const runtime = {
         projectPath, connectionState: { status: 'connected' },
         beginArchive: () => { calls.push('lock'); return () => { calls.push('unlock'); }; },
-        manageCron: async (request: { action: string; id?: string }) => {
+        manageCron: async (request: { action: string; id?: string; automation?: { statusReason?: string } }) => {
+          if (request.action !== 'list') {
+            assert.equal(request.action, 'pause', 'lifecycle changes must not use partial updates');
+            assert.match(request.automation?.statusReason ?? '', /archived/);
+          }
           calls.push(request.action + (request.id ? ':' + request.id : ''));
           assert.equal(settings.isSessionArchived(ref), false, 'cleanup must precede archive');
           if (fail && request.id === 'second') throw new Error('fixture stop failure');
-          return [{ id: 'first', session_id: sessionId }, { id: 'second', session_id: `sess:${sessionId}` }, { id: 'unrelated', session_id: 'another-session' }, { id: 'prefixed-unrelated', session_id: 'sess:another-session' }, { id: 'double-prefixed', session_id: `sess:sess:${sessionId}` }];
+          return [{ id: 'first', automation: { status: 'active', runMode: 'selected_session', targetSessionId: sessionId } }, { id: 'second', automation: { status: 'active', runMode: 'task_session', ownedSessionId: sessionId } }, { id: 'creator-only', session_id: sessionId }, { id: 'unrelated', automation: { targetSessionId: 'another-session' } }];
         },
       };
       const bridge = {
@@ -69,10 +73,12 @@ test('archive stops only associated schedules before persistence, and leaves cha
         assert.equal(settings.isSessionArchived(ref), true);
         assert.equal((await (host as any).loadProjectSessions(projectPath)).sessions.length, 0);
       }
-      assert.ok(!calls.includes('delete:unrelated'));
+      assert.ok(!calls.some((call) => call.startsWith('delete:')));
+      assert.ok(!calls.includes('pause:creator-only'));
+      assert.ok(!calls.includes('pause:unrelated'));
       assert.ok(!calls.includes('delete:prefixed-unrelated'));
       assert.ok(!calls.includes('delete:double-prefixed'));
-      assert.deepEqual(calls.slice(0, 4), ['lock', 'list', 'delete:first', 'delete:second']);
+      assert.deepEqual(calls.slice(0, 4), ['lock', 'list', 'pause:first', 'pause:second']);
       assert.equal(calls.at(-1), 'unlock');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
@@ -132,5 +138,34 @@ test('failure to create the replacement keeps the durable archive and cleared ac
     await assert.rejects((host as any).archiveSessionInternal(ref), /Chat was archived.*fixture launch failure/);
     assert.equal(settings.getPublic().activeSession, undefined);
     assert.equal(new SettingsStore(dir).isSessionArchived(ref), true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('removing a project pauses active schedules with a reason before removing its scope', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-remove-scheduled-project-'));
+  const project = realpathSync.native(dir);
+  try {
+    const settings = new SettingsStore(dir);
+    settings.addProject(project);
+    const calls: string[] = [];
+    const bridge = {
+      hasActiveWork: () => false,
+      closeProject: async () => { calls.push('close'); assert.equal(settings.hasProject(project), true); },
+    };
+    const host = new HostController(settings, bridge as any, new DiagnosticBuffer());
+    (host as any).bootstrap = () => ({ settings: settings.getPublic() });
+    (host as any).scheduled = { manage: async (scope: string, request: { action: string; id?: string; automation?: { statusReason?: string } }) => {
+      assert.equal(scope, project);
+      assert.equal(settings.hasProject(project), true);
+      calls.push(request.action);
+      if (request.action === 'list') return [{ id: 'active', automation: { status: 'active' } }, { id: 'completed', automation: { status: 'completed' } }];
+      assert.equal(request.action, 'pause');
+      assert.equal(request.id, 'active');
+      assert.match(request.automation?.statusReason ?? '', /Project was removed/);
+      return [];
+    } };
+    await (host as any).removeProjectInternal(project);
+    assert.equal(settings.hasProject(project), false);
+    assert.deepEqual(calls, ['list', 'pause', 'close']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

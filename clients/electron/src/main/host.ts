@@ -9,7 +9,7 @@ import { TerminalDelivery } from './terminal-delivery.js';
 import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT, TERMINAL_DRAFT_SESSION, type TerminalScope } from '../shared/terminal.js';
 import type { HostNotifier } from './notifications.js';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
@@ -256,6 +256,7 @@ export interface BootstrapState {
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
   activeSession?: SessionRef;
+  scheduledWorkspace?: string;
   runtimes: SessionRuntimeSummary[];
   projectCatalogs: Record<string, ProjectSessionCatalogState>;
   providerCredentials?: ProviderCredentialMetadata[];
@@ -680,6 +681,7 @@ export class HostController {
         if (model !== undefined && typeof model !== 'string') throw new Error('invalid model');
         const ref = await this.bridge.newSession(project, model as string | undefined);
         this.settings.activateProject(project);
+        this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, ref);
         this.settings.setActiveSessionDraft(ref);
         return this.bootstrap();
       });
@@ -699,7 +701,7 @@ export class HostController {
       const row = await this.assertSessionBelongsToProject(ref);
       return this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
         const jobs = await runtime.manageCron({ action: 'list' });
-        return jobs.filter((job) => job.session_id === ref.sessionId || job.session_id === `sess:${ref.sessionId}`);
+        return jobs.filter((job) => job.automation?.targetSessionId === ref.sessionId || job.automation?.ownedSessionId === ref.sessionId);
       });
     });
     this.ipc.handle(CH_SESSION_ARCHIVE, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
@@ -709,7 +711,7 @@ export class HostController {
     this.ipc.handle(CH_SESSION_CLEAR, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
       if (!isSessionId(sessionId)) throw new Error('invalid session id');
-      await this.clearActiveSession(sessionId);
+      await this.enqueueNavigation(() => this.clearActiveSession(sessionId));
     });
     this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
       this.assertSender(event);
@@ -727,7 +729,7 @@ export class HostController {
       const projectPath = candidate['projectPath'];
       const sessionId = candidate['sessionId'];
       const title = candidate['title'];
-      if (typeof projectPath !== 'string' || !this.settings.hasProject(projectPath)) {
+      if (typeof projectPath !== 'string' || !this.settings.isTrustedWorkspace(projectPath)) {
         throw new Error('pinned session project is not in the project list');
       }
       if (typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) {
@@ -989,7 +991,7 @@ export class HostController {
     if (!workspace) return { trusted: false };
     try {
       const trust = this.settings.getTrust(workspace);
-      return { path: workspace, fingerprint: trust.fingerprint, trusted: this.settings.hasProject(workspace) };
+      return { path: workspace, fingerprint: trust.fingerprint, trusted: this.settings.isTrustedWorkspace(workspace) };
     } catch (error) {
       this.diagnostics.add('warn', 'host', error);
       return { path: workspace, trusted: false, recovery: workspaceRecovery(workspace, error) };
@@ -1024,6 +1026,7 @@ export class HostController {
       ?? (this.bridge as unknown as { runtimeVersions?: BridgeRuntimeVersions }).runtimeVersions;
     return {
       revision,
+      scheduledWorkspace: this.settings.scheduledWorkspace,
       settings: this.settings.getPublic(),
       workspace: this.workspace(),
       ...(activeSession ? { activeSession: { ...activeSession } } : {}),
@@ -1080,8 +1083,9 @@ export class HostController {
 
   private requireProject(value: unknown): string {
     if (typeof value !== 'string') throw new Error('invalid project path');
+    if (value === this.settings.scheduledWorkspace) mkdirSync(value, { recursive: true, mode: 0o700 });
     const project = canonicalWorkspace(value);
-    if (!this.settings.hasProject(project)) throw new Error('project is not in the project list');
+    if (!this.settings.isTrustedWorkspace(project)) throw new Error('project is not in the project list');
     return project;
   }
 
@@ -1298,7 +1302,7 @@ export class HostController {
     let fingerprint: string | undefined;
     try { fingerprint = this.settings.getTrust(workspace).fingerprint; }
     catch (error) { this.diagnostics.add('warn', 'host', error); }
-    return { path: workspace, trusted: this.settings.hasProject(workspace), ...(fingerprint ? { fingerprint } : {}) };
+    return { path: workspace, trusted: this.settings.isTrustedWorkspace(workspace), ...(fingerprint ? { fingerprint } : {}) };
   }
 
   private assertNoActiveTurn(): void {
@@ -1334,7 +1338,7 @@ export class HostController {
     try {
       const result = await this.sessionCatalog.list(projectPath);
       const state = {
-        sessions: result.sessions.filter((session) => !this.settings.isSessionArchived({ projectPath, sessionId: session.uuid })).map(({
+        sessions: result.sessions.filter((session) => !this.scheduled?.isControllerSession(projectPath, session.uuid) && !this.settings.isSessionArchived({ projectPath, sessionId: session.uuid })).map(({
           empty_session: _emptySession,
           resume_model: _resumeModel,
           ...session
@@ -1407,12 +1411,15 @@ export class HostController {
       const release = runtime.beginArchive();
       let removed = 0;
       try {
-        const jobs = (await runtime.manageCron({ action: 'list' })).filter((job) => job.session_id === ref.sessionId || job.session_id === `sess:${ref.sessionId}`);
-        if (jobs.some((job) => job.permanent)) throw new Error('This chat has a system task that cannot be removed.');
-        for (const job of jobs) { await runtime.manageCron({ action: 'delete', id: job.id }); removed++; }
+        const jobs = (await runtime.manageCron({ action: 'list' })).filter((job) => job.automation?.targetSessionId === ref.sessionId || job.automation?.ownedSessionId === ref.sessionId);
+        for (const job of jobs) {
+          if (job.automation && job.automation.status !== 'completed') await runtime.manageCron({ action: 'pause', id: job.id, automation: { ...job.automation, status: 'paused', statusReason: 'Target chat was archived. Select another chat to resume.' } });
+          removed++;
+        }
         const active = this.settings.getPublic().activeSession?.sessionId === ref.sessionId;
         const title = row?.title ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
         this.settings.setSessionArchived(ref, true, title);
+        await this.terminals?.closeScope(ref);
         await this.bridge.closeSession(ref);
         await this.loadProjectSessions(ref.projectPath);
         if (active) {
@@ -1421,7 +1428,7 @@ export class HostController {
         }
         return this.bootstrap();
       } catch (error) {
-        if (!this.settings.isSessionArchived(ref)) throw new Error(`Chat was not archived. ${removed ? `${removed} scheduled task(s) were already removed. ` : ''}${error instanceof Error ? error.message : String(error)}`);
+        if (!this.settings.isSessionArchived(ref)) throw new Error(`Chat was not archived. ${removed ? `${removed} scheduled task(s) were already paused. ` : ''}${error instanceof Error ? error.message : String(error)}`);
         throw new Error(`Chat was archived, but opening the next chat failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally { release(); }
     });
@@ -1433,10 +1440,22 @@ export class HostController {
     // Set the host-side guard before invoking the manager. The manager then
     // synchronously removes matching runtimes from its routable map before its
     // first await, so a racing prompt cannot enter a disposing runtime.
+    if (this.scheduled) {
+      const jobs = await this.scheduled.manage(project, { action: 'list' });
+      for (const job of jobs) if (job.automation?.status === 'active') {
+        await this.scheduled.manage(project, { action: 'pause', id: job.id, automation: { ...job.automation, status: 'paused', statusReason: 'Project was removed. Add the project again to resume.' } });
+      }
+    }
     this.closingProjects.add(project);
     try {
+      await this.terminals?.closeProject(project);
       await this.bridge.closeProject(project);
       this.settings.removeProject(project);
+      for (const watches of this.gitWatches.values()) {
+        const watch = watches.get(project);
+        watches.delete(project);
+        if (watch) void watch.then(stop => stop()).catch(() => undefined);
+      }
       this.workspaceFiles.invalidate();
       this.catalogs.delete(project);
       this.catalogRequestGenerations.set(project, (this.catalogRequestGenerations.get(project) ?? 0) + 1);
@@ -1458,7 +1477,7 @@ export class HostController {
       return activeSession;
     }
     const catalog = await this.sessionCatalog.list(project);
-    catalog.sessions = catalog.sessions.filter((session) => !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid }));
+    catalog.sessions = catalog.sessions.filter((session) => !this.scheduled?.isControllerSession(project, session.uuid) && !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid }));
     this.catalogs.set(project, {
       sessions: catalog.sessions.map(({
         empty_session: _emptySession,
@@ -1474,6 +1493,7 @@ export class HostController {
     this.settings.activateProject(project);
     if (first) this.settings.setActiveSession(ref);
     else this.settings.setActiveSessionDraft(ref);
+    this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, ref);
     return ref;
   }
 
@@ -1489,6 +1509,7 @@ export class HostController {
     if ((runtime?.pendingInteractions ?? 0) > 0 || (runtime?.pendingAskUserQuestions.length ?? 0) > 0) {
       throw new Error('resolve pending interactions before clearing the session');
     }
+    await this.terminals?.closeScope(active);
     await this.bridge.closeSession(active);
     const replacement = await this.bridge.newSession(active.projectPath);
     this.settings.activateProject(active.projectPath);

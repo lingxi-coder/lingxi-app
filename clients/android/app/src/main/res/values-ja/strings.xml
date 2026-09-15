@@ -1624,6 +1624,14 @@
     <string name="settings_provider_config_changed_retest">テスト中に設定が変更されました。再度テストしてください</string>
     <string name="settings_provider_conn_service_unavailable">Provider 接続サービスが利用できません</string>
     <string name="settings_provider_connecting">Provider に接続し、モデルを検証しています…</string>
+    <string name="settings_provider_connection_add">接続方法を追加</string>
+    <string name="settings_provider_connection_id">接続 ID</string>
+    <string name="settings_provider_connection_id_hint">例: cn、intl。「:」と「/」は使用できません。</string>
+    <string name="settings_provider_connection_models">利用できるモデル</string>
+    <string name="settings_provider_connection_models_hint">空欄にすると上のすべてのモデルを提供します。一部だけの場合はカンマ区切りで入力してください。</string>
+    <string name="settings_provider_connections">接続方法</string>
+    <string name="settings_provider_connections_hint">同じプロバイダに複数の接続方法を設定できます（国内用と海外用のアドレスなど）。リクエストはリストの順に使われ、失敗すると次の接続に切り替わります。プロトコルと保存済みの API キーは上の設定を共有します。</string>
+    <string name="settings_provider_connections_single">接続方法は 1 つだけです。上で入力したアドレスと認証を使用します。</string>
     <string name="settings_provider_credential_api_key_oauth">API キーと OAuth</string>
     <string name="settings_provider_credential_clear_scheduled">次回の適用時にセキュアストレージから削除されます。</string>
     <string name="settings_provider_credential_cleared">共有セキュアストレージ内の認証情報をクリアしました</string>
@@ -1646,6 +1654,9 @@
     <string name="settings_provider_edit_unavailable">このカテゴリーはまだ編集に対応していません。</string>
     <string name="settings_provider_edit_unavailable_detail">モックカードを排除するため、ここではプリセットの Provider 状態を読み込みません。対応する実際のバックエンドが接続され次第、編集が可能になります。</string>
     <string name="settings_provider_enable">有効化</string>
+    <string name="settings_provider_error_connection_duplicate_id_fmt">接続 ID「%1$s」が重複しています。別の名前にしてください。</string>
+    <string name="settings_provider_error_connection_invalid_url_fmt">接続「%1$s」のアドレスは http または https の URL である必要があります。</string>
+    <string name="settings_provider_error_connection_missing_id">接続 ID は空にできません。「:」と「/」も使用できません。</string>
     <string name="settings_provider_error_invalid_url">API アドレスは http または https の URL である必要があります。</string>
     <string name="settings_provider_error_missing_credential">先に有効な API Key を入力するか、既存のものを保持してください。</string>
     <string name="settings_provider_error_missing_model">デフォルトモデルは空にできません。</string>

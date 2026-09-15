@@ -269,6 +269,7 @@ struct ProviderEditorSheet: View {
                         FieldHint(String(localized: "settings_provider_custom_url_hint"))
                     }
                     credentialSection
+                    connectionsSection
                     modelSection
                     SettingsSection {
                         SettingsRow(label: String(localized: "settings_provider_enable"), chevron: false) { LXToggle(isOn: boolBinding(\.enabled)) }
@@ -441,6 +442,90 @@ struct ProviderEditorSheet: View {
                     .accessibilityIdentifier("provider.oauth.login")
             }
         }.padding(.top, 4)
+    }
+
+    private var connectionsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            FieldLabel(text: String(localized: "settings_provider_connections"))
+            FieldHint(String(localized: "settings_provider_connections_hint"))
+            if draft.profile.connections.isEmpty {
+                FieldHint(String(localized: "settings_provider_connections_single"))
+            } else {
+                // Identified by position: ids start empty and stay editable, so
+                // an id-keyed ForEach would collapse every new row onto one.
+                ForEach(draft.profile.connections.indices, id: \.self) { index in
+                    connectionRow(index: index)
+                }
+            }
+            Button(String(localized: "settings_provider_connection_add")) {
+                draft.profile.addConnection()
+            }
+            .font(.system(size: 12.5, weight: .medium))
+            .foregroundColor(t.accent)
+        }
+        .padding(.bottom, 14)
+    }
+
+    private func connectionRow(index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                FieldLabel(text: String(localized: "settings_provider_connection_id"))
+                Spacer()
+                Button(String(localized: "common_removed")) {
+                    draft.profile.removeConnection(at: index)
+                }
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundColor(t.danger)
+            }
+            SettingsField(text: connectionBinding(index: index, keyPath: \.id), placeholder: "cn")
+            FieldHint(String(localized: "settings_provider_connection_id_hint"))
+            FieldLabel(text: String(localized: "settings_api_url"))
+            SettingsField(
+                text: connectionBinding(index: index, keyPath: \.baseURL),
+                placeholder: repository.preset(for: draft.profile.presetID).defaultUrl
+            )
+            FieldLabel(text: String(localized: "settings_provider_connection_models"))
+            SettingsField(text: connectionModelsBinding(index: index), placeholder: draft.profile.modelID)
+            FieldHint(String(localized: "settings_provider_connection_models_hint"))
+        }
+        .padding(11)
+        .background(t.windowBg)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Removing a row shortens the array while SwiftUI still holds bindings for
+    /// the rows that were after it, so every accessor is bounds-checked rather
+    /// than subscripting straight into `connections`.
+    private func connectionBinding(
+        index: Int,
+        keyPath: WritableKeyPath<ProviderStoredConnection, String>
+    ) -> Binding<String> {
+        Binding(
+            get: { draft.profile.connections.indices.contains(index) ? draft.profile.connections[index][keyPath: keyPath] : "" },
+            set: { value in
+                guard draft.profile.connections.indices.contains(index) else { return }
+                draft.profile.connections[index][keyPath: keyPath] = value
+            }
+        )
+    }
+
+    /// A comma-separated list, because a connection that serves every model
+    /// leaves this empty and one that serves a few names only those.
+    private func connectionModelsBinding(index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                guard draft.profile.connections.indices.contains(index) else { return "" }
+                return (draft.profile.connections[index].modelIDs ?? []).joined(separator: ", ")
+            },
+            set: { value in
+                guard draft.profile.connections.indices.contains(index) else { return }
+                let ids = value
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                draft.profile.connections[index].modelIDs = ids.isEmpty ? nil : ids
+            }
+        )
     }
 
     private var modelSection: some View {

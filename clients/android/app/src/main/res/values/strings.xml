@@ -1624,6 +1624,14 @@
     <string name="settings_provider_config_changed_retest">配置已在测试期间变化，请重新测试</string>
     <string name="settings_provider_conn_service_unavailable">Provider 连接服务不可用</string>
     <string name="settings_provider_connecting">正在连接 Provider 并校验模型…</string>
+    <string name="settings_provider_connection_add">添加连接方式</string>
+    <string name="settings_provider_connection_id">连接 ID</string>
+    <string name="settings_provider_connection_id_hint">例如 cn 或 intl，不能包含「:」或「/」。</string>
+    <string name="settings_provider_connection_models">可用模型</string>
+    <string name="settings_provider_connection_models_hint">留空表示这个连接提供上方的全部模型；只提供一部分时用逗号分隔填写。</string>
+    <string name="settings_provider_connections">连接方式</string>
+    <string name="settings_provider_connections_hint">同一个服务商可以有多种连接方式，例如国内与国外地址。请求按列表顺序使用，前一个失败时自动切换到下一个。协议与已保存的 API Key 由上方设置共用。</string>
+    <string name="settings_provider_connections_single">当前只有一种连接方式，使用上方填写的地址与认证。</string>
     <string name="settings_provider_credential_api_key_oauth">API 密钥与 OAuth</string>
     <string name="settings_provider_credential_clear_scheduled">将在下次应用时从安全存储中清除。</string>
     <string name="settings_provider_credential_cleared">共享安全存储中的凭据已清除</string>
@@ -1646,6 +1654,9 @@
     <string name="settings_provider_edit_unavailable">此类别尚未开放编辑。</string>
     <string name="settings_provider_edit_unavailable_detail">为了移除模拟卡片，这里不再读取任何预置 Provider 状态。等待对应真实后端接入后再开放编辑。</string>
     <string name="settings_provider_enable">启用</string>
+    <string name="settings_provider_error_connection_duplicate_id_fmt">连接 ID「%1$s」重复，请改成不同的名称。</string>
+    <string name="settings_provider_error_connection_invalid_url_fmt">连接「%1$s」的地址必须是 http 或 https URL。</string>
+    <string name="settings_provider_error_connection_missing_id">连接 ID 不能为空，且不能包含「:」或「/」。</string>
     <string name="settings_provider_error_invalid_url">API 地址必须是 http 或 https URL。</string>
     <string name="settings_provider_error_missing_credential">请先填写或保留一个可用的 API Key。</string>
     <string name="settings_provider_error_missing_model">默认模型不能为空。</string>

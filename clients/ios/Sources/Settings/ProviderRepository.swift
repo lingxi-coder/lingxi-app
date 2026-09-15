@@ -38,6 +38,9 @@ enum ProviderProfileValidationError: LocalizedError, Equatable {
     case invalidBaseURL
     case missingModel
     case missingCredential
+    case connectionMissingID
+    case connectionDuplicateID(String)
+    case connectionInvalidBaseURL(String)
 
     var errorDescription: String? {
         switch self {
@@ -49,6 +52,12 @@ enum ProviderProfileValidationError: LocalizedError, Equatable {
             return String(localized: "settings_provider_error_missing_model")
         case .missingCredential:
             return String(localized: "settings_provider_error_missing_credential")
+        case .connectionMissingID:
+            return String(localized: "settings_provider_error_connection_missing_id")
+        case .connectionDuplicateID(let id):
+            return String(localized: "settings_provider_error_connection_duplicate_id \(id)")
+        case .connectionInvalidBaseURL(let id):
+            return String(localized: "settings_provider_error_connection_invalid_url \(id)")
         }
     }
 }
@@ -89,7 +98,13 @@ struct ProviderLaunchProfile: Equatable {
     let enabled: Bool
     let isDefault: Bool
     let apiKeyEnv: String
+    /// Empty for a provider reachable one way. When set, `id` names the GROUP
+    /// and the engine desugars one profile per connection beneath it.
+    let connections: [ProviderStoredConnection]
 
+    /// Still the group ref when connections exist: `resolve_in` matches a
+    /// profile name OR a group, so this keeps naming one stable thing as
+    /// connections are added and removed.
     var qualifiedModelID: String {
         "\(id)/\(modelID)"
     }
@@ -137,6 +152,49 @@ struct ProviderFallbackCandidate: Identifiable, Equatable {
     var id: String { profileID }
 }
 
+/// One way to reach a provider: its own endpoint, optionally serving fewer
+/// models than the provider as a whole.
+///
+/// Everything a connection does not restate — the wire protocol, the stored
+/// credential, the env var — is inherited from the provider entry. That
+/// inheritance is what lets ONE saved API key cover every connection, so the
+/// credential flow below needs no per-connection concept at all.
+struct ProviderStoredConnection: Codable, Equatable, Identifiable {
+    /// Stable within the provider; becomes the `group:connection` profile name
+    /// the engine routes on, so it is normalized before it is emitted.
+    var id: String
+    var baseURL: String
+    /// `nil` inherits the provider's model list. A connection that serves only
+    /// some of them (a regional endpoint) names the subset here.
+    var modelIDs: [String]?
+
+    init(id: String, baseURL: String, modelIDs: [String]? = nil) {
+        self.id = id
+        self.baseURL = baseURL
+        self.modelIDs = modelIDs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case baseURL
+        case modelIDs = "modelIds"
+    }
+}
+
+extension ProviderStoredConnection {
+    /// `:` would produce `group:a:b`, which the engine's connection-profile
+    /// parser splits at the wrong colon; `/` would break the `profile/model`
+    /// qualified reference. Both are rejected rather than rewritten, so the
+    /// id the user typed is the id they see.
+    static func isValidID(_ id: String) -> Bool {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && !trimmed.contains(":") && !trimmed.contains("/")
+    }
+
+    var trimmedID: String { id.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var trimmedBaseURL: String { baseURL.trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
 struct ProviderStoredProfile: Codable, Equatable, Identifiable {
     var id: String
     var presetID: String
@@ -147,6 +205,11 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
     var isDefault: Bool
     var showInModelPicker: Bool
     var visibleModelIDs: [String]?
+    /// Empty when the provider is reachable exactly one way, which is the shape
+    /// every profile written before envelope v3 has. The editor keeps it either
+    /// empty or >= 2 entries; a single connection would rename the engine
+    /// profile to `group:id` while describing the same one endpoint.
+    var connections: [ProviderStoredConnection]
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -158,6 +221,7 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
         case isDefault
         case showInModelPicker
         case visibleModelIDs = "visibleModelIds"
+        case connections
     }
 
     init(
@@ -169,7 +233,8 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
         enabled: Bool,
         isDefault: Bool,
         showInModelPicker: Bool = true,
-        visibleModelIDs: [String]? = nil
+        visibleModelIDs: [String]? = nil,
+        connections: [ProviderStoredConnection] = []
     ) {
         self.id = id
         self.presetID = presetID
@@ -180,6 +245,7 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
         self.isDefault = isDefault
         self.showInModelPicker = showInModelPicker
         self.visibleModelIDs = visibleModelIDs
+        self.connections = connections
     }
 
     init(from decoder: Decoder) throws {
@@ -193,6 +259,67 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
         isDefault = try container.decode(Bool.self, forKey: .isDefault)
         showInModelPicker = try container.decodeIfPresent(Bool.self, forKey: .showInModelPicker) ?? true
         visibleModelIDs = try container.decodeIfPresent([String].self, forKey: .visibleModelIDs)
+        connections = try container.decodeIfPresent([ProviderStoredConnection].self, forKey: .connections) ?? []
+    }
+}
+
+extension ProviderStoredProfile {
+    /// Add a connection.
+    ///
+    /// The FIRST add migrates the flat provider into TWO connections: the
+    /// endpoint already configured becomes `default` so nothing the user set is
+    /// lost, and the new one starts empty. Going straight from none to one
+    /// would rename the engine profile to `group:default` while still
+    /// describing a single endpoint.
+    mutating func addConnection() {
+        if connections.isEmpty {
+            connections = [
+                ProviderStoredConnection(id: "default", baseURL: baseURL),
+                ProviderStoredConnection(id: "", baseURL: ""),
+            ]
+        } else {
+            connections.append(ProviderStoredConnection(id: "", baseURL: ""))
+        }
+    }
+
+    /// Remove a connection, collapsing back to a flat provider when one is
+    /// left — a one-entry list would keep claiming several ways to reach this
+    /// provider, and would still cost the `group:id` rename. The survivor's
+    /// endpoint is lifted to provider level so the reachable URL is unchanged.
+    mutating func removeConnection(at index: Int) {
+        guard connections.indices.contains(index) else { return }
+        connections.remove(at: index)
+        guard connections.count <= 1 else { return }
+        if let survivor = connections.first, !survivor.trimmedBaseURL.isEmpty {
+            baseURL = survivor.baseURL
+        }
+        connections = []
+    }
+
+    /// Every rule the engine would otherwise discover as a parse error or, for
+    /// a duplicate id, as a silently dropped connection.
+    func validateConnections() throws {
+        guard !connections.isEmpty else { return }
+        var seen = Set<String>()
+        for connection in connections {
+            let id = connection.trimmedID
+            guard ProviderStoredConnection.isValidID(id) else {
+                throw ProviderProfileValidationError.connectionMissingID
+            }
+            guard seen.insert(id).inserted else {
+                throw ProviderProfileValidationError.connectionDuplicateID(id)
+            }
+            // Inheriting the provider URL here would point a connection the
+            // user just added at the endpoint they are trying to add one
+            // BESIDE, so an endpoint is required rather than inherited.
+            guard let url = URL(string: connection.trimmedBaseURL),
+                  let scheme = url.scheme?.lowercased(),
+                  ["http", "https"].contains(scheme),
+                  url.host != nil
+            else {
+                throw ProviderProfileValidationError.connectionInvalidBaseURL(id)
+            }
+        }
     }
 }
 
@@ -1865,7 +1992,8 @@ final class ProviderRepository {
             modelID: profile.modelID,
             enabled: profile.enabled,
             isDefault: profile.isDefault,
-            apiKeyEnv: metadata.envVar
+            apiKeyEnv: metadata.envVar,
+            connections: profile.connections
         )
     }
 
@@ -1953,6 +2081,7 @@ final class ProviderRepository {
         if profile.modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ProviderProfileValidationError.missingModel
         }
+        try profile.validateConnections()
         if !state.clearCredentialOnApply,
            profile.enabled || !allowDisabledWithoutCredential {
             if effectiveSecret(for: state) == nil, !state.hasStoredCredential {
@@ -2085,19 +2214,42 @@ final class ProviderRepository {
         let modelObjects: [[String: Any]] = models.map { modelID in
             ["id": modelID]
         }
-        return [
+        var settings: [String: Any] = [
             "type": profile.providerType,
             "baseUrl": profile.baseURL,
             "apiKeyEnv": profile.apiKeyEnv,
             "models": modelObjects,
         ]
+        // A single connection would rename the engine profile to `group:id`
+        // while describing the same one endpoint, so only a real branch is
+        // emitted. Each entry restates its own `baseUrl`; everything else —
+        // the wire protocol, the credential, the env var — is inherited from
+        // the keys above, which is what makes one stored key serve them all.
+        if profile.connections.count > 1 {
+            settings["connections"] = profile.connections.map { connection -> [String: Any] in
+                var entry: [String: Any] = [
+                    "id": connection.id,
+                    "baseUrl": connection.baseURL,
+                ]
+                if let restricted = connection.modelIDs, !restricted.isEmpty {
+                    entry["models"] = restricted.map { ["id": $0] }
+                }
+                return entry
+            }
+        }
+        return settings
     }
 
     /// Android and Rust both treat catalog-default endpoints as built-ins. Do
     /// not emit a second user profile with the same engine name: llm-client
     /// rejects duplicate profile names before a connection probe can run.
     private func usesBuiltInProfile(_ profile: ProviderLaunchProfile) -> Bool {
-        usesBuiltInProfile(presetID: profile.presetID, baseURL: profile.baseURL)
+        // Connections make this entry describe something the built-in catalog
+        // does not: several endpoints under one group. Treating it as a
+        // built-in would drop it from the emitted providers map, and the
+        // connections would vanish without an error on any surface.
+        guard profile.connections.isEmpty else { return false }
+        return usesBuiltInProfile(presetID: profile.presetID, baseURL: profile.baseURL)
     }
 
     private func engineProfileID(for profile: ProviderStoredProfile) -> String {
@@ -2264,7 +2416,7 @@ final class ProviderRepository {
             encoder.outputFormatting = [.withoutEscapingSlashes]
             let data = try encoder.encode(
                 ProviderPersistenceEnvelope(
-                    version: 2,
+                    version: 3,
                     profiles: profiles.map(\.profile),
                     routing: routingSettings,
                     visionDelegationEnabled: visionDelegationEnabled

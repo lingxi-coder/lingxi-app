@@ -68,6 +68,22 @@ data class LlmProviderCatalogEntry(
     val modelDetails: List<CatalogModelDetails>,
 )
 
+/**
+ * One way to reach a provider: its own endpoint, optionally serving fewer models
+ * than the provider as a whole.
+ *
+ * Everything a connection does not restate - the wire protocol, the stored
+ * credential, the env var - is inherited from the provider entry, which is what
+ * lets one saved API key cover every connection.
+ */
+data class ProviderConnection(
+    /** Becomes the `group:connection` profile name the engine routes on. */
+    val id: String,
+    val url: String,
+    /** `null` inherits the provider's model list. */
+    val modelIds: List<String>? = null,
+)
+
 data class GenericProvider(
     val id: String,
     val preset: String,
@@ -82,6 +98,13 @@ data class GenericProvider(
     val credentialConfigured: Boolean = false,
     val showInModelPicker: Boolean = true,
     val visibleModelIds: List<String>? = null,
+    /**
+     * Empty when the provider is reachable exactly one way, which is the shape
+     * every provider saved before this existed has. Kept either empty or >= 2:
+     * a single connection would rename the engine profile to `group:id` while
+     * describing the same one endpoint.
+     */
+    val connections: List<ProviderConnection> = emptyList(),
 )
 
 data class Skill(

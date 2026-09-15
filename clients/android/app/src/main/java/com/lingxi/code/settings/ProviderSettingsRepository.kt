@@ -10,6 +10,7 @@ import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
 import com.lingxi.code.model.LlmProviderCatalogEntry
+import com.lingxi.code.model.ProviderConnection
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.model.ProviderPreset
 import com.lingxi.code.secure.SecureKeyStore
@@ -535,6 +536,11 @@ class ProviderSettingsRepository(
         }
 
         private fun usesBuiltInProfile(provider: GenericProvider): Boolean {
+            // Connections make this entry describe something the built-in
+            // catalog does not: several endpoints under one group. Treating it
+            // as a built-in would drop it from the emitted providers map and
+            // the connections would vanish with no error on any surface.
+            if (provider.connections.isNotEmpty()) return false
             val preset = ProviderKind.Llm.presets.firstOrNull { it.id == provider.preset }
             val defaultUrl = preset?.defaultUrl ?: mapOf(
                 "openai-chatgpt" to "https://chatgpt.com/backend-api/codex",
@@ -581,6 +587,34 @@ class ProviderSettingsRepository(
                         models.forEach { model -> put(JSONObject().put("id", model)) }
                     },
                 )
+                // A single connection would rename the engine profile to
+                // `group:id` while describing the same one endpoint, so only a
+                // real branch is emitted. Each entry restates its own baseUrl;
+                // the protocol and credential are inherited from the keys above.
+                if (provider.connections.size > 1) {
+                    put(
+                        "connections",
+                        JSONArray().apply {
+                            provider.connections.forEach { connection ->
+                                put(
+                                    JSONObject().apply {
+                                        put("id", connection.id.trim())
+                                        put("baseUrl", connection.url.trim())
+                                        val restricted = connection.modelIds.orEmpty()
+                                        if (restricted.isNotEmpty()) {
+                                            put(
+                                                "models",
+                                                JSONArray().apply {
+                                                    restricted.forEach { put(JSONObject().put("id", it)) }
+                                                },
+                                            )
+                                        }
+                                    },
+                                )
+                            }
+                        },
+                    )
+                }
             }
         }
 
@@ -615,15 +649,37 @@ class ProviderSettingsRepository(
                 enabled = obj.optBoolean("enabled", true),
                 credentialConfigured = obj.optBoolean("credentialConfigured", false),
                 showInModelPicker = obj.optBoolean("showInModelPicker", true),
-                visibleModelIds = obj.optJSONArray("visibleModelIds")?.let { ids ->
-                    buildList {
-                        for (index in 0 until ids.length()) {
-                            val modelId = ids.optString(index).trim()
-                            if (modelId.isNotEmpty() && !contains(modelId)) add(modelId)
-                        }
-                    }
-                },
+                visibleModelIds = distinctModelIds(obj.optJSONArray("visibleModelIds")),
+                // Absent from every provider saved before connections existed.
+                connections = readConnections(obj.optJSONArray("connections")),
             )
+
+        /** `null` for an absent array, so "inherits everything" stays distinct from "serves nothing". */
+        private fun distinctModelIds(ids: JSONArray?): List<String>? {
+            if (ids == null) return null
+            val result = mutableListOf<String>()
+            for (index in 0 until ids.length()) {
+                val modelId = ids.optString(index).trim()
+                if (modelId.isNotEmpty() && modelId !in result) result.add(modelId)
+            }
+            return result
+        }
+
+        private fun readConnections(entries: JSONArray?): List<ProviderConnection> {
+            if (entries == null) return emptyList()
+            val result = mutableListOf<ProviderConnection>()
+            for (index in 0 until entries.length()) {
+                val entry = entries.optJSONObject(index) ?: continue
+                result.add(
+                    ProviderConnection(
+                        id = entry.optString("id"),
+                        url = entry.optString("url"),
+                        modelIds = distinctModelIds(entry.optJSONArray("modelIds")),
+                    ),
+                )
+            }
+            return result
+        }
 
         private fun providerToJson(provider: GenericProvider): JSONObject =
             JSONObject().apply {
@@ -642,6 +698,27 @@ class ProviderSettingsRepository(
                         "visibleModelIds",
                         JSONArray().apply {
                             provider.visibleModelIds.forEach(::put)
+                        },
+                    )
+                }
+                if (provider.connections.isNotEmpty()) {
+                    put(
+                        "connections",
+                        JSONArray().apply {
+                            provider.connections.forEach { connection ->
+                                put(
+                                    JSONObject().apply {
+                                        put("id", connection.id)
+                                        put("url", connection.url)
+                                        if (connection.modelIds != null) {
+                                            put(
+                                                "modelIds",
+                                                JSONArray().apply { connection.modelIds.forEach(::put) },
+                                            )
+                                        }
+                                    },
+                                )
+                            }
                         },
                     )
                 }

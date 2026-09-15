@@ -1624,6 +1624,14 @@
     <string name="settings_provider_config_changed_retest">The configuration changed during testing — please test again</string>
     <string name="settings_provider_conn_service_unavailable">Provider connection service unavailable</string>
     <string name="settings_provider_connecting">Connecting to provider and validating model…</string>
+    <string name="settings_provider_connection_add">Add a connection</string>
+    <string name="settings_provider_connection_id">Connection ID</string>
+    <string name="settings_provider_connection_id_hint">For example cn or intl. Cannot contain \":\" or \"/\".</string>
+    <string name="settings_provider_connection_models">Available models</string>
+    <string name="settings_provider_connection_models_hint">Leave empty to serve every model listed above. To serve only some of them, list those, separated by commas.</string>
+    <string name="settings_provider_connections">Connections</string>
+    <string name="settings_provider_connections_hint">One provider can be reached several ways — a domestic and an international host, for example. Requests use the list in order and move to the next one when a request fails. The protocol and the saved API key are shared from the settings above.</string>
+    <string name="settings_provider_connections_single">Reachable one way; the address and credentials above are used.</string>
     <string name="settings_provider_credential_api_key_oauth">API key and OAuth</string>
     <string name="settings_provider_credential_clear_scheduled">Will be cleared from secure storage the next time you apply.</string>
     <string name="settings_provider_credential_cleared">Credential cleared from shared secure storage</string>
@@ -1646,6 +1654,9 @@
     <string name="settings_provider_edit_unavailable">Editing isn\'t available for this category yet.</string>
     <string name="settings_provider_edit_unavailable_detail">To remove mock cards, this no longer reads any preset provider state. Editing will open up once the corresponding real backend is connected.</string>
     <string name="settings_provider_enable">Enable</string>
+    <string name="settings_provider_error_connection_duplicate_id_fmt">Connection ID \"%1$s\" is used twice; give each one a different name.</string>
+    <string name="settings_provider_error_connection_invalid_url_fmt">The address for connection \"%1$s\" must be an http or https URL.</string>
+    <string name="settings_provider_error_connection_missing_id">A connection ID cannot be empty and cannot contain \":\" or \"/\".</string>
     <string name="settings_provider_error_invalid_url">The API URL must be an http or https URL.</string>
     <string name="settings_provider_error_missing_credential">Please provide or keep a usable API key first.</string>
     <string name="settings_provider_error_missing_model">Default model can\'t be empty.</string>

@@ -58516,6 +58516,278 @@
         }
       }
     },
+    "settings_provider_connection_add": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加连接方式"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增連線方式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a connection"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続方法を追加"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 방식 추가"
+          }
+        }
+      }
+    },
+    "settings_provider_connection_id": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接 ID"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線 ID"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection ID"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続 ID"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 ID"
+          }
+        }
+      }
+    },
+    "settings_provider_connection_id_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "例如 cn 或 intl，不能包含「:」或「/」。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "例如 cn 或 intl，不能包含「:」或「/」。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "For example cn or intl. Cannot contain \":\" or \"/\"."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "例: cn、intl。「:」と「/」は使用できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "예: cn 또는 intl. \":\"와 \"/\"는 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "settings_provider_connection_models": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可用模型"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可用模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Available models"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "利用できるモデル"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용 가능한 모델"
+          }
+        }
+      }
+    },
+    "settings_provider_connection_models_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "留空表示这个连接提供上方的全部模型；只提供一部分时用逗号分隔填写。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "留空表示這個連線提供上方的全部模型；只提供一部分時請以逗號分隔填寫。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave empty to serve every model listed above. To serve only some of them, list those, separated by commas."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "空欄にすると上のすべてのモデルを提供します。一部だけの場合はカンマ区切りで入力してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "비워 두면 위의 모든 모델을 제공합니다. 일부만 제공하려면 쉼표로 구분해 입력하세요."
+          }
+        }
+      }
+    },
+    "settings_provider_connections": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接方式"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線方式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connections"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続方法"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 방식"
+          }
+        }
+      }
+    },
+    "settings_provider_connections_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同一个服务商可以有多种连接方式，例如国内与国外地址。请求按列表顺序使用，前一个失败时自动切换到下一个。协议与已保存的 API Key 由上方设置共用。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同一個服務商可以有多種連線方式，例如國內與國外位址。請求會依清單順序使用，前一個失敗時自動切換到下一個。通訊協定與已儲存的 API Key 由上方設定共用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One provider can be reached several ways — a domestic and an international host, for example. Requests use the list in order and move to the next one when a request fails. The protocol and the saved API key are shared from the settings above."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同じプロバイダに複数の接続方法を設定できます（国内用と海外用のアドレスなど）。リクエストはリストの順に使われ、失敗すると次の接続に切り替わります。プロトコルと保存済みの API キーは上の設定を共有します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "같은 제공자에 여러 연결 방식을 둘 수 있습니다(예: 국내용과 해외용 주소). 요청은 목록 순서대로 사용되며 실패하면 다음 연결로 전환됩니다. 프로토콜과 저장된 API 키는 위 설정을 함께 사용합니다."
+          }
+        }
+      }
+    },
+    "settings_provider_connections_single": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前只有一种连接方式，使用上方填写的地址与认证。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前只有一種連線方式，使用上方填寫的位址與驗證。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reachable one way; the address and credentials above are used."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続方法は 1 つだけです。上で入力したアドレスと認証を使用します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 방식이 하나뿐입니다. 위에 입력한 주소와 인증을 사용합니다."
+          }
+        }
+      }
+    },
     "settings_provider_credential_api_key_oauth": {
       "localizations": {
         "zh-Hans": {
@@ -59294,6 +59566,176 @@
           "stringUnit": {
             "state": "translated",
             "value": "활성화"
+          }
+        }
+      }
+    },
+    "settings_provider_error_connection_duplicate_id %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接 ID「%@」重复，请改成不同的名称。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線 ID「%@」重複，請改成不同的名稱。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection ID \"%@\" is used twice; give each one a different name."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続 ID「%@」が重複しています。別の名前にしてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 ID \"%@\"이(가) 중복됩니다. 다른 이름을 사용하세요."
+          }
+        }
+      }
+    },
+    "settings_provider_error_connection_duplicate_id_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接 ID「%1$s」重复，请改成不同的名称。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線 ID「%1$s」重複，請改成不同的名稱。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection ID \"%1$s\" is used twice; give each one a different name."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続 ID「%1$s」が重複しています。別の名前にしてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 ID \"%1$s\"이(가) 중복됩니다. 다른 이름을 사용하세요."
+          }
+        }
+      }
+    },
+    "settings_provider_error_connection_invalid_url %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接「%@」的地址必须是 http 或 https URL。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線「%@」的位址必須是 http 或 https URL。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The address for connection \"%@\" must be an http or https URL."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続「%@」のアドレスは http または https の URL である必要があります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 \"%@\"의 주소는 http 또는 https URL이어야 합니다."
+          }
+        }
+      }
+    },
+    "settings_provider_error_connection_invalid_url_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接「%1$s」的地址必须是 http 或 https URL。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線「%1$s」的位址必須是 http 或 https URL。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The address for connection \"%1$s\" must be an http or https URL."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続「%1$s」のアドレスは http または https の URL である必要があります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 \"%1$s\"의 주소는 http 또는 https URL이어야 합니다."
+          }
+        }
+      }
+    },
+    "settings_provider_error_connection_missing_id": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接 ID 不能为空，且不能包含「:」或「/」。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線 ID 不能為空，且不能包含「:」或「/」。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A connection ID cannot be empty and cannot contain \":\" or \"/\"."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続 ID は空にできません。「:」と「/」も使用できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결 ID는 비워 둘 수 없으며 \":\"와 \"/\"를 포함할 수 없습니다."
           }
         }
       }
@@ -60722,6 +61164,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "이 제공자는 OAuth를 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "settings_provider_official_url_hint %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用官方地址 %@，无需修改。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用官方位址 %@，無需修改。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uses the official address %@; no change needed."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "公式アドレス %@ を使用します。変更は不要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공식 주소 %@을(를) 사용하며 변경할 필요가 없습니다."
           }
         }
       }

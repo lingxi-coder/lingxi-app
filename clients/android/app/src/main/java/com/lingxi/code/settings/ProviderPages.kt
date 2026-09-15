@@ -533,6 +533,18 @@ fun ProviderEditPage(
         }
 
         if (kind == ProviderKind.Llm) {
+            ProviderConnectionsSection(
+                provider = editing,
+                presetDefaultUrl = preset.defaultUrl,
+                onChange = { next ->
+                    connectionMessage = null
+                    store.updateProvider(kind, providerId) { next }
+                    store.markProviderConnectionUnverified(kind, providerId)
+                },
+            )
+        }
+
+        if (kind == ProviderKind.Llm) {
             if (catalogModels.isNotEmpty()) {
                 ModelPicker(
                     models = catalogModels,
@@ -1031,6 +1043,112 @@ private fun StatusBanner(
                 .padding(horizontal = 10.dp, vertical = 6.dp),
         )
     }
+}
+
+/**
+ * The connection list for one provider.
+ *
+ * `onChange` receives the WHOLE provider rather than a patch: adding the first
+ * connection also moves the configured endpoint down onto `default`, and
+ * removing the last-but-one lifts the survivor's endpoint back up, so the edits
+ * are not expressible as a single-field update.
+ */
+@Composable
+private fun ProviderConnectionsSection(
+    provider: GenericProvider,
+    presetDefaultUrl: String,
+    onChange: (GenericProvider) -> Unit,
+) {
+    val t = LingXiTheme.palette
+    FieldLabel(stringResource(R.string.settings_provider_connections))
+    FieldHint(stringResource(R.string.settings_provider_connections_hint))
+    if (provider.connections.isEmpty()) {
+        FieldHint(stringResource(R.string.settings_provider_connections_single))
+    } else {
+        provider.connections.forEachIndexed { index, connection ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(t.windowBg)
+                    .padding(11.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FieldLabel(stringResource(R.string.settings_provider_connection_id))
+                    ProviderTextAction(
+                        label = stringResource(R.string.common_removed),
+                        enabled = true,
+                        onClick = { onChange(ProviderConnections.withRemovedConnection(provider, index)) },
+                    )
+                }
+                SettingsField(
+                    value = connection.id,
+                    onValueChange = { v ->
+                        onChange(
+                            ProviderConnections.withUpdatedConnection(provider, index) { it.copy(id = v) },
+                        )
+                    },
+                    placeholder = "cn",
+                )
+                FieldHint(stringResource(R.string.settings_provider_connection_id_hint))
+                FieldLabel(stringResource(R.string.settings_api_url))
+                SettingsField(
+                    value = connection.url,
+                    onValueChange = { v ->
+                        onChange(
+                            ProviderConnections.withUpdatedConnection(provider, index) { it.copy(url = v) },
+                        )
+                    },
+                    placeholder = presetDefaultUrl.ifEmpty { "https://api.example.com" },
+                )
+                FieldLabel(stringResource(R.string.settings_provider_connection_models))
+                SettingsField(
+                    value = connection.modelIds.orEmpty().joinToString(", "),
+                    onValueChange = { v ->
+                        val ids = v.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                        onChange(
+                            ProviderConnections.withUpdatedConnection(provider, index) {
+                                it.copy(modelIds = ids.ifEmpty { null })
+                            },
+                        )
+                    },
+                    placeholder = provider.model,
+                )
+                FieldHint(stringResource(R.string.settings_provider_connection_models_hint))
+            }
+        }
+    }
+    ProviderConnectionProblemHint(provider)
+    ProviderTextAction(
+        label = stringResource(R.string.settings_provider_connection_add),
+        enabled = true,
+        onClick = { onChange(ProviderConnections.withAddedConnection(provider)) },
+    )
+}
+
+/** Surfaces the rule the engine would otherwise enforce only at launch. */
+@Composable
+private fun ProviderConnectionProblemHint(provider: GenericProvider) {
+    val message = when (val problem = ProviderConnections.validate(provider)) {
+        null -> return
+        is ProviderConnectionProblem.MissingId ->
+            stringResource(R.string.settings_provider_error_connection_missing_id)
+        is ProviderConnectionProblem.DuplicateId ->
+            stringResource(R.string.settings_provider_error_connection_duplicate_id_fmt, problem.id)
+        is ProviderConnectionProblem.InvalidUrl ->
+            stringResource(R.string.settings_provider_error_connection_invalid_url_fmt, problem.id)
+    }
+    Text(
+        message,
+        color = LingXiTheme.palette.danger,
+        fontSize = 11.5.sp,
+        modifier = Modifier.padding(bottom = 8.dp),
+    )
 }
 
 @Composable

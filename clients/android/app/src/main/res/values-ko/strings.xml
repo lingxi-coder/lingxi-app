@@ -1624,6 +1624,14 @@
     <string name="settings_provider_config_changed_retest">테스트 중 설정이 변경되었습니다. 다시 테스트해 주세요</string>
     <string name="settings_provider_conn_service_unavailable">Provider 연결 서비스를 사용할 수 없습니다</string>
     <string name="settings_provider_connecting">Provider에 연결하고 모델을 확인하는 중…</string>
+    <string name="settings_provider_connection_add">연결 방식 추가</string>
+    <string name="settings_provider_connection_id">연결 ID</string>
+    <string name="settings_provider_connection_id_hint">예: cn 또는 intl. \":\"와 \"/\"는 사용할 수 없습니다.</string>
+    <string name="settings_provider_connection_models">사용 가능한 모델</string>
+    <string name="settings_provider_connection_models_hint">비워 두면 위의 모든 모델을 제공합니다. 일부만 제공하려면 쉼표로 구분해 입력하세요.</string>
+    <string name="settings_provider_connections">연결 방식</string>
+    <string name="settings_provider_connections_hint">같은 제공자에 여러 연결 방식을 둘 수 있습니다(예: 국내용과 해외용 주소). 요청은 목록 순서대로 사용되며 실패하면 다음 연결로 전환됩니다. 프로토콜과 저장된 API 키는 위 설정을 함께 사용합니다.</string>
+    <string name="settings_provider_connections_single">연결 방식이 하나뿐입니다. 위에 입력한 주소와 인증을 사용합니다.</string>
     <string name="settings_provider_credential_api_key_oauth">API 키 및 OAuth</string>
     <string name="settings_provider_credential_clear_scheduled">다음 적용 시 보안 저장소에서 삭제됩니다.</string>
     <string name="settings_provider_credential_cleared">공용 보안 저장소의 자격 증명이 지워졌습니다</string>
@@ -1646,6 +1654,9 @@
     <string name="settings_provider_edit_unavailable">이 카테고리는 아직 편집 기능이 열려 있지 않습니다.</string>
     <string name="settings_provider_edit_unavailable_detail">모의 카드를 제거하기 위해 여기서는 미리 구성된 Provider 상태를 더 이상 읽지 않습니다. 해당하는 실제 백엔드가 연결된 후 편집 기능이 열립니다.</string>
     <string name="settings_provider_enable">활성화</string>
+    <string name="settings_provider_error_connection_duplicate_id_fmt">연결 ID \"%1$s\"이(가) 중복됩니다. 다른 이름을 사용하세요.</string>
+    <string name="settings_provider_error_connection_invalid_url_fmt">연결 \"%1$s\"의 주소는 http 또는 https URL이어야 합니다.</string>
+    <string name="settings_provider_error_connection_missing_id">연결 ID는 비워 둘 수 없으며 \":\"와 \"/\"를 포함할 수 없습니다.</string>
     <string name="settings_provider_error_invalid_url">API 주소는 http 또는 https URL이어야 합니다.</string>
     <string name="settings_provider_error_missing_credential">먼저 사용 가능한 API Key를 입력하거나 유지해 주세요.</string>
     <string name="settings_provider_error_missing_model">기본 모델은 비워둘 수 없습니다.</string>

@@ -96,7 +96,7 @@ impl ReplayedSession {
         // keeps the live session model instead of adopting the `DEFAULT_MODEL`
         // seed that `build_state_from_jsonl` left behind.
         let model_recovered = self.messages.iter().any(|m| {
-            m.message_type == "assistant"
+            carries_human_turn_settings(m)
                 && m.message
                     .get("model")
                     .and_then(serde_json::Value::as_str)
@@ -456,6 +456,7 @@ fn build_state_from_jsonl(
                     .get("model")
                     .and_then(serde_json::Value::as_str)
                     .filter(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
+                    .filter(|_| carries_human_turn_settings(m))
                 {
                     state.model = model.to_string();
                 }
@@ -463,7 +464,11 @@ fn build_state_from_jsonl(
                 // the model. Presence is significant: JSON null intentionally
                 // clears a profile, while legacy rows omit the field and retain
                 // the most recently reconstructed value.
-                if let Some(profile) = m.extra.get("modelProfile") {
+                if let Some(profile) = m
+                    .extra
+                    .get("modelProfile")
+                    .filter(|_| carries_human_turn_settings(m))
+                {
                     state.model_profile = profile.as_str().map(str::to_owned);
                 }
                 // Per-block persistence (write-side) splits one assistant turn
@@ -1023,6 +1028,26 @@ fn restored(goal: Option<ActiveGoalState>) -> Option<ActiveGoalState> {
 
 /// A scheduled-task fire row — `/loop` wakeups and fixed-schedule fires alike.
 /// Written by `conversation::transcript`, and until now read by nothing.
+/// Whether this row's model / profile / effort / reasoning describe the
+/// session's HUMAN defaults.
+///
+/// An automatic (scheduled) turn persists the settings IT ran under and tags the
+/// row `perTurnSettings`. `docs/cron-task-center.md`: "Automatic assistant
+/// transcript rows carry `perTurnSettings` and retain their actual
+/// model/provider/reasoning. Session replay keeps these messages in history but
+/// excludes their settings when recovering human defaults." Every settings scan
+/// below goes through this, because each of them scanned independently and none
+/// of them excluded scheduled rows — so a nightly task's model, effort and
+/// reasoning became the session's own on the next resume.
+fn carries_human_turn_settings(message: &JsonlMessage) -> bool {
+    message.message_type == "assistant"
+        && !message
+            .extra
+            .get("perTurnSettings")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn is_scheduled_task_fire(message: &JsonlMessage) -> bool {
     message.message_type == "system"
         && message
@@ -1047,7 +1072,7 @@ fn is_compact_boundary(message: &JsonlMessage) -> bool {
 /// boundaries and after the latest boundary.
 fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
     let reasoning_selection = messages.iter().rev().find_map(|m| {
-        (m.message_type == "assistant"
+        (carries_human_turn_settings(m)
             && !m
                 .extra
                 .get("isApiErrorMessage")
@@ -1061,7 +1086,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         .flatten()
     });
     let effort = messages.iter().rev().find_map(|m| {
-        if m.message_type != "assistant"
+        if !carries_human_turn_settings(m)
             || m.extra
                 .get("isApiErrorMessage")
                 .and_then(serde_json::Value::as_bool)

@@ -1,4 +1,6 @@
 import { createRequire } from 'node:module';
+import type { GitService } from './git.js';
+import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
 import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT, TERMINAL_DRAFT_SESSION, type TerminalScope } from '../shared/terminal.js';
@@ -326,6 +328,9 @@ export class HostController {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly workspaceFiles = new WorkspaceFileSearch();
+  private git?: GitService;
+  private offGit?: () => void;
+  private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
   private terminals?: TerminalManager;
   private offTerminals?: () => void;
   private readonly terminalDeliveries = new Map<WebContents, TerminalDelivery>();
@@ -363,6 +368,20 @@ export class HostController {
    * pushed at it. `CH_SETTINGS_UPDATE` is the one writer.
    */
   attachNotifier(notifier: HostNotifier): void { this.notifier = notifier; }
+
+  attachGit(service: GitService): void {
+    this.git = service;
+    this.offGit?.();
+    this.offGit = service.onChanged((event) => {
+      for (const target of this.gitWatches.keys()) if (!target.isDestroyed()) target.send(CH_GIT_EVENT, event);
+    });
+  }
+
+  private detachGit(target: WebContents): void {
+    const watches = this.gitWatches.get(target);
+    this.gitWatches.delete(target);
+    for (const watch of watches?.values() ?? []) void watch.then(stop => stop()).catch(() => undefined);
+  }
 
   attachTerminals(manager: TerminalManager): void {
     this.offTerminals?.();
@@ -415,6 +434,7 @@ export class HostController {
     this.targets.set(webContents, origins);
     this.bridge.registerWindow(webContents, rendererUrl);
     const detachTerminals = () => {
+      this.detachGit(webContents);
       this.terminalDeliveries.get(webContents)?.dispose();
       this.terminalDeliveries.delete(webContents);
     };
@@ -447,6 +467,43 @@ export class HostController {
         }
       });
     }
+    this.ipc.handle(CH_GIT_REQUEST, async (event: IpcMainInvokeEvent, scopeValue: unknown, request: unknown) => {
+      this.assertSender(event);
+      if (!this.git) throw new Error('Git service is unavailable');
+      const scope = await this.validateSessionScope(scopeValue, true);
+      this.assertSender(event);
+      if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('invalid Git request');
+      if (this.isProjectClosing(scope.projectPath)) throw new Error('project is closing');
+      let watches = this.gitWatches.get(event.sender);
+      if (!watches) { watches = new Map(); this.gitWatches.set(event.sender, watches); }
+      if (!watches.has(scope.projectPath)) {
+        const watch = this.git.watch(scope);
+        watches.set(scope.projectPath, watch);
+        void watch.catch(() => watches!.delete(scope.projectPath));
+      }
+      const result = await this.git.request(scope, request as GitRequest);
+      // A non-repository watch is a no-op; retry after initialization (including
+      // initialization in an external terminal) rather than caching it forever.
+      if (result.status && (!result.status.repository || (request as GitRequest).kind === 'init')) {
+        const previous = watches.get(scope.projectPath);
+        watches.delete(scope.projectPath);
+        if (previous) void previous.then(stop => stop()).catch(() => undefined);
+        // Re-watch only into the map this window still owns: a renderer reload
+        // racing this request runs `detachGit`, which drops the whole map, and
+        // a watcher installed into the detached copy could never be stopped.
+        // The `.catch` mirrors the creation path above — without it a rejected
+        // watch is an unhandled rejection AND poisons the entry, so the
+        // `!watches.has(...)` guard above never re-creates the watcher and the
+        // Review panel silently stops refreshing for this project.
+        const live = this.gitWatches.get(event.sender);
+        if (result.status.repository && live === watches && this.targets.has(event.sender)) {
+          const watch = this.git.watch(scope);
+          watches.set(scope.projectPath, watch);
+          void watch.catch(() => watches.delete(scope.projectPath));
+        }
+      }
+      return result;
+    });
     this.ipc.handle(CH_TERMINAL_REQUEST, async (event: IpcMainInvokeEvent, value: unknown) => {
       this.assertSender(event);
       if (!this.terminals) throw new Error('terminal service is unavailable');
@@ -1360,12 +1417,14 @@ export class HostController {
   }
 
   dispose(): void {
+    this.offGit?.();
+    for (const target of this.gitWatches.keys()) this.detachGit(target);
     this.offTerminals?.();
     for (const delivery of this.terminalDeliveries.values()) delivery.dispose();
     this.terminalDeliveries.clear();
     if (!this.registered) return;
     for (const channel of [
-      CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
+      CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_WORKSPACE_FILES_SEARCH,

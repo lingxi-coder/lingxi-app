@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { GitReview, GitEnvironment } from './GitReview';
 import type { PlanTaskDto, SessionAgentSummaryDto, TaskRowDto } from '@lingxi/bridge-client';
 
 import { conversationFromMessages } from '../bridge/conversation';
@@ -26,6 +27,7 @@ const SECTION_LABELS: Record<RuntimeCenterSection, string> = {
   todos: 'Todos',
   resources: 'Resources',
   plan: 'Plan',
+  review: 'Review',
 };
 
 const statusRank: Record<string, number> = {
@@ -300,6 +302,7 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
     <div ref={ref} id="runtime-center-overview" className="runtime-summary" role="region" aria-label="Pinned summary"
       onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOverview(true); } }}
       style={{ '--runtime-border': t.border, '--runtime-muted': t.dark ? t.text2 : t.text3, background: t.surface, color: t.text } as CSSProperties}>
+      <GitEnvironment onNavigate={() => bridge.setRuntimeCenterOverviewOpen(false)} />
       <SummarySection section="agents">
         {agents.length === 0 && tasks.length === 0 ? <EmptyRow>No subagents or background tasks.</EmptyRow> : <>
           {agents.length > 0 && <OverviewRow icon="subagent" title={agentStatusSummary(agents.map((agent) => agent.status))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
@@ -534,7 +537,7 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
         <button type="button" aria-label="Hide right panel" className="runtime-panel-hide" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} style={runtimeCenterButtonStyle(t, true)}><Icon name="panel-right" size={18} /></button>
       </header>
       <div id="runtime-inspector-panel" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : 'Details'} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
-        {!active && <div className="runtime-inspector-landing">{(['agents', 'todos', 'resources', 'plan'] as const).map((section) => <OverviewRow key={section} icon={section === 'agents' ? 'subagent' : section === 'todos' ? 'check' : section === 'resources' ? 'resources' : 'file'} title={SECTION_LABELS[section]} onClick={() => bridge.openRuntimeItem({ kind: 'section', id: section })} />)}</div>}
+        {!active && <div className="runtime-inspector-landing">{(['review', 'agents', 'todos', 'resources', 'plan'] as const).map((section) => <OverviewRow key={section} icon={section === 'agents' ? 'subagent' : section === 'todos' ? 'check' : section === 'resources' ? 'resources' : 'file'} title={SECTION_LABELS[section]} onClick={() => bridge.openRuntimeItem({ kind: 'section', id: section })} />)}</div>}
         {active?.kind === 'section' && <SectionDetail section={active.id} bridge={bridge} />}
         {active?.kind === 'task' && <TaskDetail task={task} bridge={bridge} />}
         {active?.kind === 'agent' && <AgentDetail agent={agent} bridge={bridge} />}
@@ -555,6 +558,7 @@ function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bri
   const tasks = orderedTasks(bridge.desktop);
   const agents = Object.values(center.agents).filter((agent) => agent.agent_id !== 'main');
   const todos = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
+  if (section === 'review') return <GitReview />;
   if (section === 'plan') return <SubmittedPlanDetail plan={center.submittedPlan} />;
   return <div className="runtime-section-detail">
     <h2>{SECTION_LABELS[section]}</h2>

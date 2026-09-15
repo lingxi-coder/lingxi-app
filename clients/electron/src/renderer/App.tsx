@@ -1,4 +1,5 @@
 import { conversationPlans } from './bridge/planDocuments';
+import { selectedGitScope } from './bridge/gitScope';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { useBridge } from './bridge/useBridge';
@@ -18,6 +19,8 @@ import { Theme } from './theme/ThemeContext';
 import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
 import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/RuntimeCenter';
 import './components/RuntimeCenter.css';
+import './components/GitReview.css';
+import { GitWorkspaceProvider } from './components/GitReview';
 import './components/TranscriptAgents.css';
 import './components/TerminalPanel.css';
 import { TerminalPanel, useTerminalPanel } from './components/TerminalPanel';
@@ -38,6 +41,7 @@ export function App() {
   // the scope-bound panels on it empties the terminal tab strip and makes any
   // terminal opened in that window fail validation.
   const settledSession = bridge.activeSession?.sessionId?.startsWith('pending-new:') ? undefined : bridge.activeSession;
+  const gitScope = selectedGitScope(bridge.bootstrap?.settings.activeProject, settledSession, workspace?.path);
   const terminalProject = bridge.activeSession?.projectPath ?? workspace?.path;
   const terminal = useTerminalPanel(terminalProject ? { projectPath: terminalProject, sessionId: settledSession?.sessionId ?? '__draft__' } : null, page === 'chat' && settingsRoute === null);
   const stageAgents = useMemo(
@@ -82,6 +86,7 @@ export function App() {
 
   return (
     <Theme.Provider value={palette}>
+      <GitWorkspaceProvider scope={gitScope} onOpen={() => bridge.openRuntimeItem({ kind: 'section', id: 'review' })} onTerminal={() => { if (!terminal.open) terminal.toggle(); }}>
       <div
         className="desktop-shell"
         data-screen-label="LingXi Code Desktop Beta"
@@ -188,6 +193,7 @@ export function App() {
           />
         )}
       </div>
+    </GitWorkspaceProvider>
     </Theme.Provider>
   );
 }

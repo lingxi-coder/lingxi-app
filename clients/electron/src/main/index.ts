@@ -12,6 +12,7 @@ import {
 } from './credential-broker.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { HostController } from './host.js';
+import { GitService } from './git.js';
 import { TerminalManager } from './terminal.js';
 import { HostNotifier } from './notifications.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
@@ -29,6 +30,7 @@ const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
 let nativeAudio: NativeAudioManager | null = null;
+let git: GitService | null = null;
 let terminals: TerminalManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
@@ -299,6 +301,19 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   host.attachNotifier(notifier);
   terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
   host.attachTerminals(terminals);
+  git = new GitService({ isBusy: async (root) => {
+    for (const summary of bridge?.runtimeSummaries ?? []) {
+      if (!summary.turnActive && !summary.pendingInteractions && !bridge?.get(summary.sessionId)?.hasActiveAgents) continue;
+      // A session whose project directory was deleted or renamed makes
+      // `resolveRoot` throw, and this callback runs at the head of EVERY git
+      // request — an unrelated, healthy repository would stop working.
+      try {
+        if (await git?.resolveRoot(summary.projectPath) === root) return true;
+      } catch { /* A stale runtime cannot make a live repository busy. */ }
+    }
+    return false;
+  } });
+  host.attachGit(git);
   host.registerIpc();
   createWindow();
 
@@ -337,6 +352,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   host = null;
   notifier?.dispose();
   notifier = null;
+  const currentGit = git;
+  git = null;
   const currentTerminals = terminals;
   terminals = null;
   const currentAudio = nativeAudio;
@@ -344,6 +361,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const currentBridge = bridge;
   bridge = null;
   void Promise.all([
+    currentGit?.dispose() ?? Promise.resolve(),
     currentTerminals?.dispose() ?? Promise.resolve(),
     currentAudio?.dispose() ?? Promise.resolve(),
     currentBridge?.dispose() ?? Promise.resolve(),

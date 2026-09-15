@@ -11,10 +11,10 @@ import type {
 import { fileMentionsFromPrompt } from './fileMentions';
 import { emptySubmittedPlanState, latestSubmittedPlan, reduceSubmittedPlanEvent, reduceSubmittedPlanPermission, type SubmittedPlan, type SubmittedPlanState } from './submittedPlan';
 
-export type RuntimeCenterSection = 'tasks' | 'agents' | 'todos' | 'resources' | 'plan';
+export type RuntimeCenterSection = 'tasks' | 'agents' | 'todos' | 'resources' | 'plan' | 'review';
 
 export type RuntimeCenterItemRef =
-  | { kind: 'section'; id: 'agents' | 'todos' | 'resources' | 'plan' }
+  | { kind: 'section'; id: 'agents' | 'todos' | 'resources' | 'plan' | 'review' }
   | { kind: 'todo'; id: string }
   | { kind: 'plan-document'; id: string }
   | { kind: 'task'; id: string }
@@ -67,6 +67,7 @@ export const RUNTIME_CENTER_SECTIONS: readonly RuntimeCenterSection[] = [
   'todos',
   'resources',
   'plan',
+  'review',
 ];
 
 export function emptyRuntimeCenterState(): RuntimeCenterState {
@@ -78,7 +79,7 @@ export function emptyRuntimeCenterState(): RuntimeCenterState {
     plan: [],
     submittedPlan: null,
     submittedPlanState: emptySubmittedPlanState(),
-    sections: { tasks: true, agents: true, todos: true, resources: true, plan: true },
+    sections: { tasks: true, agents: true, todos: true, resources: true, plan: true, review: true },
     overviewOpen: false,
     tabs: [],
     activeItem: null,

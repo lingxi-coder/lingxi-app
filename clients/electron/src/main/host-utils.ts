@@ -515,7 +515,7 @@ export function setWorkspaceTrust(
   return { ...settings, trustedWorkspaces: records };
 }
 
-const ENV_ALLOWLIST = [
+export const ENV_ALLOWLIST = [
   'HOME', 'PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'USER', 'LOGNAME', 'SHELL',
   'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE',
   'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NIX_SSL_CERT_FILE',

@@ -1,5 +1,7 @@
 import type { CronJobDto } from '@lingxi/bridge-client';
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
+import { CH_GIT_REQUEST, CH_GIT_EVENT } from '../shared/git.js';
+import type { GitApi } from '../shared/git.js';
 import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT } from '../shared/terminal.js';
 import type { TerminalApi } from '../shared/terminal.js';
 import type {
@@ -156,6 +158,7 @@ export interface NativeAudioApi {
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
+  git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
@@ -245,6 +248,10 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  git: {
+    request: (scope, request) => ipcRenderer.invoke(CH_GIT_REQUEST, scope, request),
+    onChanged: (callback) => subscribe(CH_GIT_EVENT, callback),
+  },
   terminal: {
     list: (scope) => ipcRenderer.invoke(CH_TERMINAL_REQUEST, { kind: 'list', scope }),
     create: (scope) => ipcRenderer.invoke(CH_TERMINAL_REQUEST, { kind: 'create', scope }),

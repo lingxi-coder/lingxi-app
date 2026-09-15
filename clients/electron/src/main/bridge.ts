@@ -1,3 +1,4 @@
+import { GitActivityTracker } from './git-activity.js';
 import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
 import type { HostNotifier } from './notifications.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
@@ -957,6 +958,9 @@ export class SessionRuntime {
     return this.activeTurn || this.pendingPromptHydrations.size > 0 || this.pendingModelSwitch !== undefined;
   }
 
+  private readonly gitActivity = new GitActivityTracker();
+  get hasActiveAgents(): boolean { return this.gitActivity.active; }
+
   get activeCredentialProviderIds(): readonly string[] {
     return [...this.activeCredentialProviders];
   }
@@ -1658,6 +1662,7 @@ export class SessionRuntime {
   private wireClient(client: BridgeClient, generation: number): void {
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation) return;
+      this.gitActivity.accept(event);
       if (event.type === 'model_list') for (const waiter of this.modelCatalogWaiters) waiter(event);
       if (isTurnOwnedEvent(event) && !this.activeTurn) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
@@ -2397,6 +2402,7 @@ export class SessionRuntime {
     this.persistedCredentialProviders.clear();
     this.activeCredentialProviders.clear();
     this.credentialStorageEncrypted = false;
+    this.gitActivity.reset();
     this.activeTurn = false;
     this.activeTurnId = undefined;
     this.cancellingTurn = false;

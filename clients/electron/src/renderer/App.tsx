@@ -19,6 +19,8 @@ import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
 import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/RuntimeCenter';
 import './components/RuntimeCenter.css';
 import './components/TranscriptAgents.css';
+import './components/TerminalPanel.css';
+import { TerminalPanel, useTerminalPanel } from './components/TerminalPanel';
 
 export function App() {
   const [page, setPage] = useState<'chat' | 'scheduled'>('chat');
@@ -31,6 +33,13 @@ export function App() {
   // `Object.values(...)` (or a bare `[]` literal) would hand it a new identity on
   // every render, invalidating the anchor map and, through it, the transcript
   // `rows` memo — turning a memoized transcript into a full re-walk per render.
+  // `newSession` publishes a synthetic `pending-new:<opId>` id until the engine
+  // answers. It is not a session id the main process will ever accept, so keying
+  // the scope-bound panels on it empties the terminal tab strip and makes any
+  // terminal opened in that window fail validation.
+  const settledSession = bridge.activeSession?.sessionId?.startsWith('pending-new:') ? undefined : bridge.activeSession;
+  const terminalProject = bridge.activeSession?.projectPath ?? workspace?.path;
+  const terminal = useTerminalPanel(terminalProject ? { projectPath: terminalProject, sessionId: settledSession?.sessionId ?? '__draft__' } : null, page === 'chat' && settingsRoute === null);
   const stageAgents = useMemo(
     () => bridge.sessionLoading ? [] : Object.values(bridge.runtimeCenter.agents),
     [bridge.sessionLoading, bridge.runtimeCenter.agents],
@@ -87,6 +96,8 @@ export function App() {
             onOpenSettings={() => openSettings()}
           />
 
+          <div className="desktop-workspace">
+          <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
           <ScheduledTasks key={bridge.activeSession?.sessionId ?? workspace?.path ?? 'no-project'} bridge={bridge} visible={page === 'scheduled'} />
@@ -94,6 +105,9 @@ export function App() {
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <BetaTopBar
             bridge={bridge}
+            terminalOpen={terminal.open}
+            terminalAvailable={Boolean(terminalProject && window.lingxi?.terminal)}
+            onToggleTerminal={terminal.toggle}
             runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
             onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
           />
@@ -153,6 +167,9 @@ export function App() {
           />
           </main>
           {page === 'chat' && !bridge.sessionLoading && <RuntimeCenterInspector bridge={planBridge} />}
+          </div>
+          <TerminalPanel controller={terminal} />
+          </div>
         </SettingsBackground>
 
         {settingsRoute && (

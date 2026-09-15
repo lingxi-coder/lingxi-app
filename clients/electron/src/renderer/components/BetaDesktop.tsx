@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { ShellIcon } from './TerminalPanel';
 import type {
   ImageRefDto,
   ModelDetailsDto,
@@ -784,7 +785,10 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
   );
 }
 
-export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter }: {
+export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal }: {
+  terminalOpen?: boolean;
+  terminalAvailable?: boolean;
+  onToggleTerminal?(): void;
   bridge: UseBridge;
   runtimeCenterOpen: boolean;
   onToggleRuntimeCenter(): void;
@@ -881,6 +885,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter }:
         onClick={onToggleRuntimeCenter}
         style={topbarActionTokens}
       ><Icon name="summary-list" size={20} /></button>
+      <button type="button" className="no-drag desktop-topbar-action" aria-label="Toggle terminal" title="Toggle terminal (Ctrl+`)" aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><ShellIcon /></button>
       <button
         className="no-drag desktop-topbar-action desktop-inspector-trigger"
         type="button"

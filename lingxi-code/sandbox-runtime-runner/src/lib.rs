@@ -202,10 +202,13 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
         //
         // Prefixing the COMMAND (rather than the bwrap/seatbelt invocation) is
         // what makes this portable: both platform branches end in a shell, and
-        // `unset` there covers the command and everything it spawns. Names are
-        // validated as POSIX env names first — they come from a settings file,
-        // which on the project tier can be checked into a repository.
-        let unset = sandbox::credentials::unset_prefix(&cfg.credential_deny_env);
+        // dropping the variable there covers the command and everything it
+        // spawns. Names are validated as POSIX env names first — they come from
+        // a settings file, which on the project tier can be checked into a
+        // repository. The spelling follows `bin_shell`, because this seam is
+        // shared with the PowerShell tool, which has no `unset`.
+        let unset =
+            sandbox::credentials::unset_prefix_for_shell(&cfg.credential_deny_env, bin_shell);
         let command: std::borrow::Cow<'_, str> = if unset.is_empty() {
             std::borrow::Cow::Borrowed(command)
         } else {

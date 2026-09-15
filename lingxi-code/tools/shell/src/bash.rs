@@ -2844,7 +2844,23 @@ impl Tool for BashTool {
         };
 
         let inner_cmd = match decision {
-            SandboxDecision::NoSandbox => spawn_cmd.clone(),
+            // HP-6: `sandbox.credentials` must hold even when THIS command is
+            // not sandbox-wrapped. `excludedCommands` and
+            // `allowUnsandboxedCommands` mean "this command does not need the
+            // sandbox", not "this command may read my AWS keys" — and
+            // `dangerouslyDisableSandbox` disables the sandbox, not the
+            // credential protection the user configured separately. Without
+            // this arm the withholding would exist only on the wrapped path,
+            // which is a security boundary that silently depends on an
+            // unrelated decision.
+            SandboxDecision::NoSandbox => format!(
+                "{}{}",
+                sandbox::credentials::unset_prefix_for_shell(
+                    &sandbox_runtime.credential_deny_env,
+                    Some(shell.as_str()),
+                ),
+                spawn_cmd
+            ),
             SandboxDecision::Sandbox { policy: _ } => {
                 // Wrap through the injected async `SandboxRunner`. The default
                 // `LegacyWrapRunner` forwards straight to the sync
@@ -7519,6 +7535,79 @@ mod tests {
     /// which is the TUI / `PostToolUse` metadata object.
     fn rendered(res: &ToolCallResult) -> String {
         format!("{:?} {:?}", res.model_content, res.data)
+    }
+
+    /// 🚨 HP-6: `sandbox.credentials` must hold on the UNSANDBOXED path.
+    ///
+    /// The withholding used to live only in the sandbox wrap, so a command that
+    /// `should_use_sandbox` sent down the `NoSandbox` arm — an excluded command,
+    /// `allowUnsandboxedCommands`, or `dangerouslyDisableSandbox` — received the
+    /// real credential while the setting reported it protected. That is a
+    /// security boundary silently conditioned on an unrelated decision.
+    #[tokio::test]
+    async fn a_credential_env_var_is_dropped_even_when_the_command_is_not_sandboxed() {
+        let mut bctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        // No sandbox available ⇒ `should_use_sandbox` takes the NoSandbox arm.
+        bctx.sandbox_available = false;
+        bctx.sandbox_runtime.credential_deny_env = vec!["AWS_SECRET_ACCESS_KEY".to_string()];
+        let recorder = Arc::new(RecordingProcess::default());
+        bctx.process = recorder.clone();
+
+        let tool = BashTool::new(bctx);
+        let _ = tool
+            .call(json!({"command": "printenv AWS_SECRET_ACCESS_KEY"}), use_ctx(), fresh_tx())
+            .await;
+
+        let seen = recorder.commands.lock().unwrap().join("\n");
+        assert!(
+            seen.contains("unset AWS_SECRET_ACCESS_KEY"),
+            "the credential must be dropped on the unsandboxed path too, got: {seen}"
+        );
+    }
+
+    /// Records the command strings handed to the process runner.
+    #[derive(Default)]
+    struct RecordingProcess {
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl platform_api::process::ProcessRunner for RecordingProcess {
+        async fn run(
+            &self,
+            cmd: &platform_api::sandbox::SandboxedCommand,
+        ) -> Result<platform_api::process::ProcessOutput, platform_api::process::ProcessError> {
+            self.commands.lock().unwrap().push(format!("{cmd:?}"));
+            Ok(platform_api::process::ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+
+        async fn spawn_background(
+            &self,
+            _cmd: &platform_api::sandbox::SandboxedCommand,
+        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
+            Err(platform_api::process::ProcessError::Unsupported)
+        }
+
+        async fn kill(
+            &self,
+            _handle: &platform_api::process::ProcessHandle,
+        ) -> Result<(), platform_api::process::ProcessError> {
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
     }
 
     /// The end-to-end wiring: a command that changed a file reports the diff.

@@ -316,7 +316,17 @@ impl Tool for PowerShellTool {
             workspace.clone(),
         );
         let final_cmd = match decision {
-            SandboxDecision::NoSandbox => cmd_str.clone(),
+            // HP-6: `sandbox.credentials` holds on the unsandboxed path too —
+            // see the same arm in `bash.rs` for why `excludedCommands` and
+            // `allowUnsandboxedCommands` must not double as credential consent.
+            SandboxDecision::NoSandbox => format!(
+                "{}{}",
+                sandbox::credentials::unset_prefix_for_shell(
+                    &sandbox_runtime.credential_deny_env,
+                    Some(bin.display().to_string().as_str()),
+                ),
+                cmd_str
+            ),
             SandboxDecision::Sandbox { policy: _ } => {
                 // Wrap through the injected async `SandboxRunner`. The default
                 // `LegacyWrapRunner` forwards to the sync `wrap_with_sandbox`

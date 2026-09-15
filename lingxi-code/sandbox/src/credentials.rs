@@ -25,17 +25,42 @@
 //! so the composition root can say it out loud rather than let the user
 //! discover it from a broken command.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// `mode` — `"deny"` or `"mask"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CredentialMode {
     /// The sandboxed process never sees this credential.
+    #[default]
     Deny,
     /// Upstream: the process sees a sentinel and the proxy substitutes the real
     /// value on egress. Here: degraded to [`Self::Deny`].
     Mask,
+}
+
+/// `mode`, read leniently: absent, null, or an unrecognized spelling all become
+/// [`CredentialMode::Deny`].
+///
+/// 🚨 This is not tidiness, it is the difference between a typo costing the user
+/// one credential rule and a typo costing them the whole sandbox. `mode` is the
+/// only required field in this block, and the callers that parse a settings tier
+/// (`apps/engine-desktop`'s `let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw)
+/// else { continue; }`) DISCARD A TIER THAT FAILS TO PARSE, with no log line. So a
+/// missing `mode` — or `"Deny"` with the capital that JSON schema docs invite —
+/// would take `sandbox.enabled`, `excludedCommands` and the network allowlist down
+/// with it: a silent fail-OPEN caused by the very block that exists to protect a
+/// credential. Defaulting to `Deny` keeps the tier and fails in the recoverable
+/// direction, exactly like the `mask` degradation this module is built around.
+/// (`deserialize_enabled_platforms` in `runtime_config` makes the same trade.)
+fn deserialize_credential_mode<'de, D>(deserializer: D) -> Result<CredentialMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(raw
+        .and_then(|value| serde_json::from_value::<CredentialMode>(value).ok())
+        .unwrap_or(CredentialMode::Deny))
 }
 
 /// `onExtractNoMatch` — what to do when `extract` matches nothing.
@@ -65,7 +90,9 @@ pub enum CredentialDecode {
 pub struct CredentialFile {
     /// Path to the file or directory.
     pub path: String,
-    /// Access mode.
+    /// Access mode. Absent or unrecognized reads as `deny` — see
+    /// [`deserialize_credential_mode`] for why this must never abort the tier.
+    #[serde(default, deserialize_with = "deserialize_credential_mode")]
     pub mode: CredentialMode,
     /// Regex for structured masking; capture group 1 of each match is masked.
     /// Only meaningful with `mode: "mask"`.
@@ -86,7 +113,9 @@ pub struct CredentialFile {
 pub struct CredentialEnvVar {
     /// Environment variable name.
     pub name: String,
-    /// Access mode.
+    /// Access mode. Absent or unrecognized reads as `deny` — see
+    /// [`deserialize_credential_mode`] for why this must never abort the tier.
+    #[serde(default, deserialize_with = "deserialize_credential_mode")]
     pub mode: CredentialMode,
     /// Regex for structured masking; capture group 1 is masked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,14 +245,15 @@ pub fn resolve(credentials: &SandboxCredentials) -> CredentialResolution {
     }
 
     for var in credentials.env_vars.iter().flatten() {
-        if var.name.trim().is_empty() {
+        let Some(name) = accept_env_name(&var.name, &mut out.degraded) else {
             continue;
+        };
+        if !out.deny_env_vars.iter().any(|existing| existing == &name) {
+            out.deny_env_vars.push(name.clone());
         }
-        out.deny_env_vars.push(var.name.clone());
         if var.mode == CredentialMode::Mask {
             out.degraded.push(format!(
-                "[sandbox] credential env var '{}' is configured mask, which this build does not implement; it is UNSET inside the sandbox instead",
-                var.name
+                "[sandbox] credential env var '{name}' is configured mask, which this build does not implement; it is UNSET inside the sandbox instead"
             ));
         }
     }
@@ -240,7 +270,10 @@ pub fn resolve(credentials: &SandboxCredentials) -> CredentialResolution {
         .into_iter()
         .flatten()
         {
-            if !name.trim().is_empty() && !out.deny_env_vars.contains(name) {
+            let Some(name) = accept_env_name(name, &mut out.degraded) else {
+                continue;
+            };
+            if !out.deny_env_vars.iter().any(|existing| existing == &name) {
                 out.deny_env_vars.push(name.clone());
                 out.degraded.push(format!(
                     "[sandbox] AWS credential pair names '{name}', which is not in credentials.envVars; it is UNSET inside the sandbox"
@@ -251,6 +284,32 @@ pub fn resolve(credentials: &SandboxCredentials) -> CredentialResolution {
 
     out.deny_read_paths.dedup();
     out
+}
+
+/// Trim `raw` and accept it only if the enforcement point can actually withhold
+/// it; otherwise record WHY in `degraded` and return `None`.
+///
+/// 🚨 This exists because the guard used to live only in [`unset_prefix`], which
+/// drops a non-conforming name SILENTLY. `resolve()` would push
+/// `"AWS_SECRET_ACCESS_KEY "` (a trailing space is invisible in JSON) or
+/// `"MY-API-KEY"` into `deny_env_vars`, the composition root would report it as
+/// protected — for `mask`, with a notice literally saying "it is UNSET inside the
+/// sandbox instead" — and then the filter would discard it and the sandboxed
+/// command would get the real value. That is the exact "reduces to no protection
+/// without saying so" failure this whole module exists to prevent, so the
+/// rejection has to happen where there is a channel to report it.
+fn accept_env_name(raw: &str, degraded: &mut Vec<String>) -> Option<String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if !is_posix_env_name(name) {
+        degraded.push(format!(
+            "[sandbox] credential env var '{name}' is not a POSIX environment-variable name ([A-Za-z_][A-Za-z0-9_]*), so this build CANNOT withhold it from the sandboxed command; rename the variable or remove the entry"
+        ));
+        return None;
+    }
+    Some(name.to_string())
 }
 
 /// Is `name` a POSIX environment-variable name?
@@ -281,15 +340,61 @@ pub fn is_posix_env_name(name: &str) -> bool {
 /// sandboxed command plus everything it spawns inherits the result.
 #[must_use]
 pub fn unset_prefix(names: &[String]) -> String {
-    let safe: Vec<&str> = names
-        .iter()
-        .map(String::as_str)
-        .filter(|name| is_posix_env_name(name))
-        .collect();
+    let safe = safe_names(names);
     if safe.is_empty() {
         return String::new();
     }
     format!("unset {}\n", safe.join(" "))
+}
+
+/// The same prefix, spelled for the shell that will actually run it.
+///
+/// 🚨 `unset` is a POSIX-shell builtin, and PowerShell does not have it — it
+/// spells this `Remove-Item Env:NAME`. The wrap seam is shared: the PowerShell
+/// tool folds only Windows out of `sandbox_available`
+/// (`tools/shell/src/powershell.rs`), so on macOS and Linux it hands `pwsh` in as
+/// `bin_shell` and the wrapped command is evaluated BY pwsh. A POSIX `unset`
+/// there does not fail loudly enough to matter — it raises CommandNotFound and
+/// the credential simply stays in the environment, which is the one outcome this
+/// module must never produce quietly.
+#[must_use]
+pub fn unset_prefix_for_shell(names: &[String], bin_shell: Option<&str>) -> String {
+    if !is_powershell(bin_shell) {
+        return unset_prefix(names);
+    }
+    let safe = safe_names(names);
+    if safe.is_empty() {
+        return String::new();
+    }
+    // `-ErrorAction SilentlyContinue` so a variable that is simply absent does
+    // not write an error record into the tool output the model reads.
+    let statements: Vec<String> = safe
+        .iter()
+        .map(|name| format!("Remove-Item -Path Env:{name} -ErrorAction SilentlyContinue"))
+        .collect();
+    format!("{}\n", statements.join("; "))
+}
+
+/// The subset of `names` [`unset_prefix`] is willing to splice into a shell.
+fn safe_names(names: &[String]) -> Vec<&str> {
+    names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| is_posix_env_name(name))
+        .collect()
+}
+
+/// Does `bin_shell` name a PowerShell binary? Matched on the file name so a full
+/// path, a `.exe` suffix and a bare `pwsh` all resolve the same way.
+fn is_powershell(bin_shell: Option<&str>) -> bool {
+    let Some(shell) = bin_shell else { return false };
+    let file = shell
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    let stem = file.strip_suffix(".exe").unwrap_or(&file);
+    stem == "pwsh" || stem == "powershell"
 }
 
 // ===== RESIDUAL: the masking pipeline ======================================
@@ -500,6 +605,108 @@ mod tests {
         assert!(resolved.deny_read_paths.is_empty());
         assert!(resolved.deny_env_vars.is_empty());
         assert!(resolved.degraded.is_empty());
+    }
+
+    /// 🚨 The tier-survival property. `mode` is the only required field in this
+    /// block, and a tier that fails to deserialize is DISCARDED by every caller
+    /// without a log line — taking `sandbox.enabled` and the network allowlist
+    /// with it. So a missing or misspelled `mode` must cost the user that one
+    /// rule's precision, never their whole sandbox.
+    #[test]
+    fn a_missing_or_misspelled_mode_still_parses_and_reads_as_deny() {
+        for raw in [
+            r#"{"envVars": [{"name": "AWS_SECRET_ACCESS_KEY"}]}"#,
+            r#"{"envVars": [{"name": "AWS_SECRET_ACCESS_KEY", "mode": "Deny"}]}"#,
+            r#"{"envVars": [{"name": "AWS_SECRET_ACCESS_KEY", "mode": null}]}"#,
+            r#"{"envVars": [{"name": "AWS_SECRET_ACCESS_KEY", "mode": 7}]}"#,
+        ] {
+            let parsed: SandboxCredentials = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("{raw} must not abort the tier: {e}"));
+            assert_eq!(parsed.env_vars.as_ref().unwrap()[0].mode, CredentialMode::Deny);
+            assert_eq!(
+                resolve(&parsed).deny_env_vars,
+                vec!["AWS_SECRET_ACCESS_KEY"],
+                "…and the protection the user asked for is still enforced"
+            );
+        }
+        // The same for a file entry, whose `mode` is equally required.
+        let parsed: SandboxCredentials =
+            serde_json::from_str(r#"{"files": [{"path": "~/.aws/credentials"}]}"#)
+                .expect("a file entry without `mode` must not abort the tier");
+        assert_eq!(parsed.files.as_ref().unwrap()[0].mode, CredentialMode::Deny);
+    }
+
+    /// 🚨 A name the enforcement point cannot use must be REPORTED, not dropped.
+    /// Silently dropping it is how `mask` fell through to "no protection" while
+    /// the notice claimed the variable had been unset.
+    #[test]
+    fn a_name_the_wrap_seam_cannot_unset_is_reported_not_silently_dropped() {
+        for hostile in ["MY-API-KEY", "1BAD", "HAS SPACE"] {
+            let resolved = resolve(&SandboxCredentials {
+                env_vars: Some(vec![env(hostile, CredentialMode::Mask)]),
+                ..SandboxCredentials::default()
+            });
+            assert!(
+                resolved.deny_env_vars.is_empty(),
+                "{hostile:?} must not be reported as withheld when it cannot be"
+            );
+            assert_eq!(resolved.degraded.len(), 1, "…and the user must be told once");
+            assert!(
+                resolved.degraded[0].contains(hostile) && resolved.degraded[0].contains("CANNOT"),
+                "the notice must name the variable and say it is not enforced: {:?}",
+                resolved.degraded
+            );
+            assert!(
+                !resolved.degraded[0].contains("is UNSET inside the sandbox"),
+                "…and must NOT be the mask notice, which would be a lie: {:?}",
+                resolved.degraded
+            );
+        }
+    }
+
+    /// A trailing space is invisible in a JSON settings file, so it must not be
+    /// the difference between a protected credential and an unprotected one.
+    #[test]
+    fn a_padded_name_is_trimmed_rather_than_becoming_unenforceable() {
+        let resolved = resolve(&SandboxCredentials {
+            env_vars: Some(vec![env("  AWS_SECRET_ACCESS_KEY  ", CredentialMode::Deny)]),
+            ..SandboxCredentials::default()
+        });
+        assert_eq!(resolved.deny_env_vars, vec!["AWS_SECRET_ACCESS_KEY"]);
+        assert_eq!(
+            unset_prefix(&resolved.deny_env_vars),
+            "unset AWS_SECRET_ACCESS_KEY\n",
+            "…and it actually reaches the command"
+        );
+    }
+
+    /// 🚨 The wrap seam is shared with the PowerShell tool, which folds only
+    /// WINDOWS out of `sandbox_available` — so on macOS/Linux `pwsh` evaluates
+    /// this prefix. `unset` is not a PowerShell command; emitting it there leaves
+    /// the credential in place, which is the failure this module forbids.
+    #[test]
+    fn the_prefix_is_spelled_for_the_shell_that_runs_it() {
+        let names = vec!["AWS_SECRET_ACCESS_KEY".to_string(), "GH_TOKEN".to_string()];
+        assert_eq!(
+            unset_prefix_for_shell(&names, Some("/bin/bash")),
+            "unset AWS_SECRET_ACCESS_KEY GH_TOKEN\n"
+        );
+        assert_eq!(unset_prefix_for_shell(&names, None), unset_prefix(&names));
+        for pwsh in ["pwsh", "/opt/homebrew/bin/pwsh", "C:\\Program Files\\PowerShell\\pwsh.exe"] {
+            assert_eq!(
+                unset_prefix_for_shell(&names, Some(pwsh)),
+                "Remove-Item -Path Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue; \
+                 Remove-Item -Path Env:GH_TOKEN -ErrorAction SilentlyContinue\n",
+                "{pwsh} must get the PowerShell spelling"
+            );
+        }
+        // An empty list stays empty in both dialects — no stray statement.
+        assert_eq!(unset_prefix_for_shell(&[], Some("pwsh")), "");
+        assert_eq!(
+            unset_prefix_for_shell(&["bad; rm -rf /".into()], Some("pwsh")),
+            "",
+            "the injection guard applies in both dialects"
+        );
     }
 
     #[test]

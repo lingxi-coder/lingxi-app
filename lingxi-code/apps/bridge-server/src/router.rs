@@ -386,9 +386,16 @@ async fn read_session_agent_summary(
             .or(model_profile);
         if let Some(value) = value.get("status").and_then(serde_json::Value::as_str) {
             status = match value {
-                "completed" | "failed" | "killed" | "cancelled" | "idle" | "running" => {
-                    value.to_string()
-                }
+                // The TRANSCRIPT's own rest marker (`agent_idle`, written by
+                // `agent::transcript::record_terminal`) is an engine-internal
+                // word. Translate it here rather than letting it reach a
+                // client: on the wire a parked agent is `completed`, exactly
+                // like claude-code's row. `engine-mobile` already does this at
+                // its own read-back; the desktop path did not, so one agent
+                // reached the panel as `idle` here and `completed` from the
+                // live observer.
+                "idle" => "completed".to_string(),
+                "completed" | "failed" | "killed" | "cancelled" | "running" => value.to_string(),
                 _ => "unknown".to_string(),
             };
             break;
@@ -427,7 +434,9 @@ async fn read_session_agent_summary(
             model = model.or(row.request.model);
             model_profile = model_profile.or(row.request.model_profile);
             if status == "running" {
-                status = "idle".to_string();
+                // A row on disk means the agent is parked and resumable, which
+                // on the wire is `completed` — not the footer-group word.
+                status = "completed".to_string();
             }
         }
     }
@@ -2666,7 +2675,9 @@ impl EngineCommandRouter {
                 // Hosts without the observer still use the current registry,
                 // never historical transcript status, for live workers.
                 agent.status = if task.is_parked {
-                    "idle"
+                    // Parked is `completed` on the wire, same as the two
+                    // read-back paths above.
+                    "completed"
                 } else {
                     task.status.as_str()
                 }

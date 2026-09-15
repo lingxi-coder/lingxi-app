@@ -2180,7 +2180,7 @@ async fn session_agent_routes_list_nested_transcripts_and_load_real_messages() {
     assert!(agents.iter().any(|agent| {
         agent.agent_id == agent_id.to_string()
             && agent.name == "Runtime reviewer"
-            && agent.status == "idle"
+            && agent.status == "completed"
     }));
 
     let transcript_sink = CapturingSink::arc();

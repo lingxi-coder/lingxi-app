@@ -139,7 +139,7 @@ async fn session_agent_terminal_observation_wins_over_stale_disk_and_registry() 
 async fn session_agent_registry_overrides_saved_status_for_live_and_parked_workers() {
     for (status, parked, expected) in [
         ("running", false, "running"),
-        ("completed", true, "idle"),
+        ("completed", true, "completed"),
         ("failed", false, "failed"),
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -205,7 +205,7 @@ async fn session_agent_idle_and_resume_observations_win_over_lagging_task_snapsh
             .find(|agent| agent.agent_id == id.to_string())
             .unwrap()
             .status,
-        "idle"
+        "completed"
     );
     live.on_event(SubagentObservation::Message {
         agent_id: id,
@@ -232,5 +232,60 @@ async fn session_agent_idle_and_resume_observations_win_over_lagging_task_snapsh
             .unwrap()
             .status,
         "running"
+    );
+}
+
+/// A row on disk is what makes a finished agent RESUMABLE, and it is the only
+/// thing that says so — the transcript's last marker can still read `running`.
+/// The desktop read-back answered `idle` for that case while the live observer
+/// answered `completed` for the very same agent, which is how one agent showed
+/// up in the panel under two different words. `engine-mobile` states the
+/// contract at its own read-back: on the wire a parked agent is `completed`.
+#[tokio::test]
+async fn a_parked_row_reports_the_wire_word_rather_than_the_footer_group_word() {
+    let root = tempfile::tempdir().unwrap();
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let session_id = handle.current_session_id().await;
+    let (id, path) = seed_session_agent_transcript(root.path(), session_id, false);
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "message": protocol::ConversationMessage::user(
+                    protocol::MessageId::new(),
+                    "inspect the runtime".to_string(),
+                ),
+                "status": "running",
+                "agent_name": "Runtime reviewer",
+                "agent_type": "reviewer",
+                "model": "test-model",
+            })
+        ),
+    )
+    .unwrap();
+    session::agent_rows::write_row(
+        path.parent().unwrap(),
+        &session::agent_rows::ParkedAgentRow {
+            task_id: "parked-task".into(),
+            agent_id: id,
+            description: "Runtime reviewer".into(),
+            request: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    // Deliberately no registry row: the task-registry override cannot be what
+    // answers here, so this pins the on-disk read-back path on its own.
+    let tasks = Arc::new(MockTaskRegistry { rows: Vec::new() });
+    let router = router_with_store_and_tasks(handle, root.path(), tasks);
+    assert_eq!(
+        roster(&router)
+            .await
+            .iter()
+            .find(|agent| agent.agent_id == id.to_string())
+            .unwrap()
+            .status,
+        "completed"
     );
 }

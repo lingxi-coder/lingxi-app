@@ -120,14 +120,21 @@ under it a whole stage that could not run — `needs_credential_driver`'s
 rebuilt: claude-code has no such stage, and the message it carried named a
 bridge-server CLI flag a desktop user cannot act on.
 
-`boot::tests::stale_live_session_guard_cannot_stop_or_unregister_new_generation`
-fails in the full run and passes alone under `--test-threads=1`; it shares
-process globals with its neighbours.
+~~`boot::tests::stale_live_session_guard_cannot_stop_or_unregister_new_generation`~~
+— fixed in `8f6fea986`. It held the crate's serial lock and still failed one
+run in three, because a serial lock only excludes tests that also take it: its
+FIXTURE used the process-global accepted queue, which
+`take_accepted_peer_reminders` drains from `orchestrator`'s turn assembly —
+production code, another crate, no lock. The fixture now writes the inbox
+directly and the test touches that queue not at all. 6 consecutive parallel
+runs green, and three mutations each red on exactly this test.
 
 `clients/electron/test/git-workflows.test.ts` failed all 17 of its cases as a
 block once, with "Commit or explicitly stash your changes before switching
-branches", and passed on re-run with no change. It appears order- or
-environment-sensitive.
+branches". Not reproduced since: 4 runs of that file alone and every subsequent
+full-suite run are green. One observation is not a diagnosis, so it is recorded
+rather than explained — most likely the same load-sensitivity that makes these
+suites report spurious reds on a busy machine.
 
 ## How this was verified, and why it had to be done that way
 

@@ -89,7 +89,7 @@ fn build_orchestrator_with_writer(
 // ============================================================================
 
 #[tokio::test]
-async fn single_turn_produces_two_jsonl_lines() {
+async fn single_turn_produces_the_fixture_line_count() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
 
@@ -113,19 +113,34 @@ async fn single_turn_produces_two_jsonl_lines() {
     let reader = JsonlReader::new(path.clone(), Arc::clone(&fs));
     let lines = reader.read_all().await.expect("read_all must succeed");
 
+    let f = load();
     assert_eq!(
         lines.len(),
-        2,
-        "single turn must produce exactly 2 JSONL lines (user + assistant)"
+        f.meta.single_turn_sequence.len(),
+        "single turn must produce the fixture's line count, got {:?}",
+        lines.iter().map(|l| l.message_type.as_str()).collect::<Vec<_>>()
+    );
+    // The extra line over the original user+assistant pair is the static
+    // system-prompt snapshot, which upstream records unless CLAUDE_CODE_SIMPLE
+    // is set — see the fixture's `why`. Assert WHICH attachment it is, so a
+    // different attachment leaking into the transcript cannot pass by count.
+    assert_eq!(
+        lines[1]
+            .extra
+            .get("attachment")
+            .and_then(|a| a.get("type"))
+            .and_then(|t| t.as_str()),
+        Some("prompt_snapshot"),
+        "the middle line must be the prompt snapshot"
     );
 }
 
 // ============================================================================
-// T4 — line order: first = "user", second = "assistant"
+// T4 — line order and chaining follow the fixture sequence
 // ============================================================================
 
 #[tokio::test]
-async fn single_turn_line_types_are_user_then_assistant() {
+async fn single_turn_line_types_follow_the_fixture_order() {
     let f = load();
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
@@ -159,7 +174,19 @@ async fn single_turn_line_types_are_user_then_assistant() {
     let actual_types: Vec<&str> = lines.iter().map(|l| l.message_type.as_str()).collect();
     assert_eq!(
         actual_types, expected_types,
-        "line types must be user then assistant (fixture order)"
+        "line types must follow the fixture order"
+    );
+    // The snapshot sits INSIDE the chain rather than beside it: the assistant's
+    // parent is the attachment, not the user line it answers.
+    assert_eq!(
+        lines[1].parent_uuid.as_deref(),
+        Some(lines[0].uuid.as_str()),
+        "the snapshot must chain from the user line"
+    );
+    assert_eq!(
+        lines[2].parent_uuid.as_deref(),
+        Some(lines[1].uuid.as_str()),
+        "the assistant must chain from the snapshot, not around it"
     );
 }
 

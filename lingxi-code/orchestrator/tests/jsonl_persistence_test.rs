@@ -66,20 +66,32 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     let reader = JsonlReader::new(session_path, fs);
     let msgs = reader.read_all().await.expect("read_all");
 
-    // 2 user + 2 assistant = 4 entries (no tool_use turns in this script).
+    // 2 user + 2 assistant + ONE static system-prompt snapshot, recorded once
+    // for the session on the first turn. claude-code 2.1.270 records it unless
+    // `CLAUDE_CODE_SIMPLE` is set (`lje(e)` in `src_169588164.js`, with
+    // `function U2(){return a.CLAUDE_CODE_SIMPLE}`), so with the env unset this
+    // is the aligned shape — the old `4` predated the feature.
+    assert_eq!(
+        msgs.iter().map(|m| m.message_type.as_str()).collect::<Vec<_>>(),
+        vec!["user", "attachment", "assistant", "user", "assistant"],
+        "unexpected JSONL entry sequence"
+    );
+    assert_eq!(
+        msgs[1]
+            .extra
+            .get("attachment")
+            .and_then(|a| a.get("type"))
+            .and_then(|t| t.as_str()),
+        Some("prompt_snapshot"),
+        "the only non-message line must be the prompt snapshot"
+    );
     assert_eq!(
         msgs.len(),
-        4,
-        "expected 4 JSONL entries (2 user + 2 assistant), got {} — entries: {:?}",
+        5,
+        "expected 5 JSONL entries (2 user + 2 assistant + 1 snapshot), got {} — entries: {:?}",
         msgs.len(),
         msgs.iter().map(|m| &m.message_type).collect::<Vec<_>>(),
     );
-
-    // Order: user, assistant, user, assistant.
-    assert_eq!(msgs[0].message_type, "user", "entry 0 type");
-    assert_eq!(msgs[1].message_type, "assistant", "entry 1 type");
-    assert_eq!(msgs[2].message_type, "user", "entry 2 type");
-    assert_eq!(msgs[3].message_type, "assistant", "entry 3 type");
 
     // First entry's parent_uuid is None (start of chain).
     assert_eq!(msgs[0].parent_uuid, None, "first parent_uuid must be None");

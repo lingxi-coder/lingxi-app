@@ -293,6 +293,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         workspace,
         sessionId: ref.sessionId,
         trusted: settings.hasProject(workspace),
+        scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         pluginSecrets,
         openaiOAuth,

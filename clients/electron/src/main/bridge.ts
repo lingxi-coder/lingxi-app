@@ -72,6 +72,7 @@ export interface BridgeLaunchConfig {
   providerCredentials?: Record<string, string>;
   /** Broker-owned sensitive plugin options, passed only over child stdin. */
   pluginSecrets?: Record<string, Record<string, string>>;
+  scheduledController?: boolean;
   trusted: boolean;
   model?: string;
   apiBaseUrl?: string;
@@ -634,6 +635,7 @@ const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'message_retracted',
   'system_notice',
   'loop_wakeup',
+  'scheduled_task_fire',
   'session_ended',
 ]);
 
@@ -916,7 +918,7 @@ export class SessionRuntime {
   }
 
   get cronOperationPending(): boolean {
-    return this.archiving || this.pendingCron.size > 0;
+    return this.archiving || this.pendingCron.size > 0 || this.activeCronExecutions > 0;
   }
 
   manageCron(request: CronRequestDto): Promise<CronJobDto[]> {
@@ -1566,6 +1568,7 @@ export class SessionRuntime {
       hasCredentialStdin: Boolean(launch.openaiOAuth) || Object.keys(launch.providerCredentials ?? {}).length > 0
         || Object.keys(launch.pluginSecrets ?? {}).length > 0,
       trusted: launch.trusted,
+      scheduledController: launch.scheduledController,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
 
@@ -1778,6 +1781,25 @@ export class SessionRuntime {
           this.diagnostics.add('error', 'host', 'Failed to persist refreshed Codex authentication. Sign in again.');
           this.broadcastClientEvent({ type: 'error', kind: { type: 'internal' }, message: 'Failed to persist refreshed Codex authentication. Sign in again.' });
         });
+        return;
+      }
+      if (event.type === 'cron_run_bound') {
+        const pending = this.pendingRunBindings.get(event.run_id);
+        if (pending) {
+          clearTimeout(pending.timer); this.pendingRunBindings.delete(event.run_id);
+          if (event.error) pending.reject(new Error(event.error)); else pending.resolve();
+        }
+        return;
+      }
+      if (event.type === 'scheduled_run_finished') {
+        const pending = this.pendingScheduledTurns.get(event.run_id);
+        if (pending) {
+          this.pendingScheduledTurns.delete(event.run_id);
+          if (!event.error?.startsWith('busy:')) this.activeTurn = false;
+          if (event.error) pending.reject(new Error(event.error));
+          else pending.resolve(event.summary ?? '');
+          this.notifyActivityChanged();
+        }
         return;
       }
       if (event.type === 'cron_run_requested') {
@@ -2510,6 +2532,19 @@ export class SessionRuntime {
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+      // `runScheduledTurn` sets `activeTurn` by hand and only the
+      // `scheduled_run_finished` handler clears it — and that handler needs the
+      // pending entry this block is about to delete. Without this the latch
+      // stays true forever, which blocks credential writes, Codex login, engine
+      // restart and every rewriting git operation.
+      if (this.pendingScheduledTurns.size > 0) {
+        this.activeTurn = false;
+        this.activeTurnId = undefined;
+      }
+      for (const pending of this.pendingScheduledTurns.values()) pending.reject(new Error('interrupted: Scheduled connection closed.'));
+      this.pendingScheduledTurns.clear();
+      for (const pending of this.pendingRunBindings.values()) { clearTimeout(pending.timer); pending.reject(new Error('interrupted: Scheduled connection closed.')); }
+      this.pendingRunBindings.clear();
     }
     if (
       this.pendingSessionResume
@@ -2533,6 +2568,10 @@ export class SessionRuntime {
   private async stopBridge(): Promise<void> {
     for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
     this.pendingCron.clear();
+    for (const pending of this.pendingScheduledTurns.values()) pending.reject(new Error('Scheduled execution interrupted.'));
+    this.pendingScheduledTurns.clear();
+    for (const pending of this.pendingRunBindings.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled execution interrupted.')); }
+    this.pendingRunBindings.clear();
     ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
@@ -2731,6 +2770,7 @@ export class SessionRuntimeManager {
     const status = runtime.connectionState.status;
     return runtime.sessionId === this.activeSessionId
       || runtime.turnActive
+      || runtime.hasActiveAgents
       || runtime.pendingInteractions > 0
       || runtime.cronOperationPending
       || status === 'spawning'

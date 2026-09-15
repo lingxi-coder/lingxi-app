@@ -541,6 +541,7 @@ export function buildBridgeArguments(config: {
   hasCredentialStdin?: boolean;
   trusted: boolean;
   packagedCredentialBoundary?: boolean;
+  scheduledController?: boolean;
 }): string[] {
   if (config.listSessionsJson) return ['--cwd', config.workspace, '--list-sessions-json'];
   const args = ['--cwd', config.workspace, '--bridge-dir', config.bridgeDir];
@@ -549,6 +550,7 @@ export function buildBridgeArguments(config: {
   if (config.hasCredentialStdin) args.push('--credential-stdin');
   else if (config.hasApiKey) args.push('--api-key-stdin');
   if (config.trusted) args.push('--trusted-workspace');
+  if (config.scheduledController) args.push('--scheduled-controller');
   if (config.packagedCredentialBoundary) args.push('--packaged-credential-stdin-only');
   return args;
 }

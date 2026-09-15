@@ -507,3 +507,10 @@ test('Codex OAuth credentials use only the private stdin envelope', () => {
   assert.ok(!JSON.stringify(args).includes('oauth-access-secret'));
   assert.equal(buildBridgeEnvironment({ OPENAI_ACCESS_TOKEN: session.access_token }).OPENAI_ACCESS_TOKEN, undefined);
 });
+
+test('only a controller session asks the engine to run the automation scheduler', () => {
+  const base = { workspace: '/w', bridgeDir: '/w/bridge', hasApiKey: false, trusted: true };
+  assert.ok(!buildBridgeArguments(base).includes('--scheduled-controller'));
+  assert.ok(!buildBridgeArguments({ ...base, scheduledController: false }).includes('--scheduled-controller'));
+  assert.ok(buildBridgeArguments({ ...base, scheduledController: true }).includes('--scheduled-controller'));
+});

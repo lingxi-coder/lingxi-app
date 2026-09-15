@@ -181,3 +181,26 @@ test('new desktop sessions start in Auto and honor authoritative permission chan
     assert.equal(state.permissionMode, mode);
   }
 });
+
+const SESSION_COST = { total_usd: 1, input_tokens: 10_000, output_tokens: 2_000, api_calls: 3, session_duration_secs: 60, formatted: '$1.00' };
+
+test('session totals replace cumulative snapshots without double counting or per-call resets', () => {
+  let state = reduceDesktopEvent(emptyDesktopState(), { type: 'cost_update', ...SESSION_COST });
+  state = reduceDesktopEvent(state, { type: 'usage_update', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 });
+  assert.equal(state.lastCost?.input_tokens, 10_000);
+  state = reduceDesktopEvent(state, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: { ...SESSION_COST, input_tokens: 12_000, output_tokens: 3_000 } });
+  assert.equal(state.lastCost?.input_tokens, 12_000);
+  assert.equal(state.lastCost?.output_tokens, 3_000);
+  state = reduceDesktopEvent(state, { type: 'cost_update', ...state.lastCost! });
+  assert.equal(state.lastCost?.input_tokens, 12_000);
+});
+
+for (const type of ['session_started', 'session_resumed', 'session_ended'] as const) {
+  test(`${type} clears another session's cost and status`, () => {
+    const state = { ...emptyDesktopState(), lastCost: SESSION_COST, status: { session_id: 'old', input_tokens: 100, output_tokens: 20 } } as ReturnType<typeof emptyDesktopState>;
+    const event = type === 'session_ended' ? { type } : type === 'session_resumed' ? { type, session_id: 'new', messages: [] } : { type, session_id: 'new', mode: 'code' as const };
+    const next = reduceDesktopEvent(state, event as ClientEvent);
+    assert.equal(next.lastCost, null);
+    assert.equal(next.status, null);
+  });
+}

@@ -68,6 +68,7 @@ function Fixture() {
   const bridge = {
     activeSession: { projectPath: '/Users/tester/Projects/LingXi-Next', sessionId: sessionKey },
     bootstrap: { workspace: { path: '/Users/tester/Projects/LingXi-Next', trusted: true } },
+    cost: { input_tokens: 18_420, output_tokens: 3_184 },
     usage: { inputTokens: 18_420, outputTokens: 3_184, cacheReadTokens: 0, cacheCreationTokens: 0 },
     conversation: {
       ...emptyConversation(), activeCompactionId: compactCalls ? 'compact-active' : null, sessionKey, plan: empty ? [] : todos,

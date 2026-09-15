@@ -516,3 +516,17 @@ test('sidebar uses indeterminate progress for main turns and background agents',
     assert.doesNotMatch(markup, /aria-label="Running" title="Running"/);
   }
 });
+
+test('topbar shows session totals instead of the latest usage update and restores saved totals', () => {
+  const render = (cost: unknown, status: unknown = null, loading = false) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(BetaTopBar, {
+    bridge: { ...bridgeFixture(), sessionLoading: loading, cost, desktop: { ...bridgeFixture().desktop, status }, usage: { inputTokens: 10, outputTokens: 5 }, conversation: { sessionKey: 'session-a', summaries: [] }, runtimeCenter: { inspectorOpen: false } } as any,
+    runtimeCenterOpen: false, onToggleRuntimeCenter: () => undefined,
+  })));
+  const snapshot = { input_tokens: 10_000, output_tokens: 2_500 };
+  assert.match(render(snapshot), new RegExp(`${(12_500).toLocaleString()} tok`));
+  assert.doesNotMatch(render(snapshot), />15 tok/);
+  assert.match(render(null, snapshot), new RegExp(`${(12_500).toLocaleString()} tok`));
+  assert.doesNotMatch(render(null), /desktop-topbar-usage/);
+  assert.doesNotMatch(render(snapshot, null, true), /desktop-topbar-usage/);
+  assert.match(render(snapshot), /Session total: input \+ output tokens/);
+});

@@ -865,6 +865,11 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
 }) {
   const t = useT();
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
+  // Cost events include all completed calls; status seeds a resumed session
+  // before its next turn. usage_update only describes the latest API response.
+  const sessionCost = bridge.cost ?? bridge.desktop?.status;
+  const sessionTokens = !bridge.sessionLoading && sessionCost
+    ? sessionCost.input_tokens + sessionCost.output_tokens : null;
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
@@ -880,9 +885,9 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
         <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
       </div>
-      {bridge.usage && (
-        <span className="mono desktop-topbar-usage" style={{ color: t.text4, fontSize: 9.5 }} title="Input + output tokens">
-          {(bridge.usage.inputTokens + bridge.usage.outputTokens).toLocaleString()} tok
+      {sessionTokens !== null && (
+        <span className="mono desktop-topbar-usage" style={{ color: t.text4, fontSize: 9.5 }} title="Session total: input + output tokens">
+          {sessionTokens.toLocaleString()} tok
         </span>
       )}
       <button

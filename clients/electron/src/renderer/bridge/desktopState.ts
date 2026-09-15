@@ -111,11 +111,11 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'session_list':
       return { ...state, sessions: mergeSessionCatalog(state.sessions, event.sessions) };
     case 'session_started':
-      return startSession(state, event.session_id, event.mode);
+      return startSession({ ...state, lastCost: null, status: null }, event.session_id, event.mode);
     case 'session_resumed':
-      return { ...state, activeSessionId: event.session_id };
+      return { ...state, activeSessionId: event.session_id, lastCost: null, status: null };
     case 'session_ended':
-      return { ...state, activeSessionId: null };
+      return { ...state, activeSessionId: null, lastCost: null, status: null };
     case 'model_list':
       return { ...state, models: [...event.models], modelDetails: [...(event.details ?? [])], currentModel: event.current };
     case 'provider_model_catalog':
@@ -130,6 +130,9 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       return { ...state, fastMode: event.enabled };
     case 'permission_mode_changed':
       return { ...state, permissionMode: event.mode };
+    case 'turn_ended':
+      // Both events carry authoritative session totals, never per-turn deltas.
+      return { ...state, lastCost: event.cost };
     case 'cost_update':
       return {
         ...state,

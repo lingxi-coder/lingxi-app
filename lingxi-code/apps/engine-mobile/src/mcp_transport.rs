@@ -445,6 +445,20 @@ mod tests {
                         if stream.write_all(response.as_bytes()).await.is_err() {
                             return;
                         }
+                        // The MCP SSE transport learns its POST url from a named
+                        // `endpoint` event and completes the connect only once
+                        // that event arrives (`platform-common`'s
+                        // `SseEndpointMode::EndpointEvent`). This mock opened the
+                        // stream and never sent it, so every connect sat until
+                        // the 10s deadline — the client was doing exactly what
+                        // the protocol says.
+                        if stream
+                            .write_all(b"event: endpoint\ndata: /mcp\n\n")
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                         while let Ok(reply) = rx.recv().await {
                             let event = format!("data: {reply}\n\n");
                             if stream.write_all(event.as_bytes()).await.is_err() {

@@ -605,7 +605,7 @@ impl Tool for MonitorTool {
 
         if let Some(ws) = input.get("ws") {
             websocket_host(ws).map_err(|error| ToolError::InvalidInput(error.0))?;
-            if input.get("command").is_some() {
+            if native_schema::has_command(input.get("command")) {
                 return Err(ToolError::InvalidInput(
                     "exactly one of command or ws".into(),
                 ));

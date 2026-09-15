@@ -2,6 +2,29 @@
 use serde_json::{json, Map, Value};
 use tool_api::native_schema::{format_issues, js_json, js_keys, value_type, NativeSchemaError};
 
+/// Upstream's truthiness test for the command/ws pair, 2.1.270
+/// (`src_177711820.js`):
+///
+/// ```js
+/// function Y(...e){ return j(e, Boolean) === 1 }
+/// .refine((e) => Y(e.command, e.ws), "exactly one of command or ws")
+/// ```
+///
+/// The count of TRUTHY values must be exactly one, and `Boolean("")` is false —
+/// so an empty command reads as ABSENT, not as a command. `{command: ""}` is
+/// therefore rejected (corpus cases 32/91/161/220) and `{command: "", ws: {…}}`
+/// is a valid ws monitor.
+///
+/// Both the validator and `monitor.rs`'s runtime conflict check go through this
+/// one function. They each used to re-decide the rule, and they had drifted
+/// apart: the validator answered on PRESENCE, the runtime on presence too, and
+/// neither matched upstream.
+pub(super) fn has_command(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|command| !command.is_empty())
+}
+
 pub(super) fn hidden_control(text: &str) -> bool {
     text.chars()
         .any(|c| c != '\t' && c != '\n' && ((c as u32) < 32 || (127..=159).contains(&(c as u32))))
@@ -149,12 +172,9 @@ pub(super) fn parse(input: &Value, bounded: bool) -> Result<Value, NativeSchemaE
         )
     });
     if !aborted {
-        // PRESENCE, not emptiness — `monitor.rs`'s runtime check re-decides this
-        // same rule with `input.get("command").is_some()`. An emptiness test
-        // here accepts `{command: "", ws: {...}}`, which the runtime then
-        // rejects with a bare `InvalidInput` instead of the Zod-shaped issue
-        // this validator exists to produce.
-        let command = parsed.contains_key("command");
+        // An object is always truthy in JS and a non-object `ws` was already
+        // rejected by the type check above, so presence IS truthiness for `ws`.
+        let command = has_command(parsed.get("command"));
         if command == parsed.contains_key("ws") {
             issues.push(custom(vec![], "exactly one of command or ws"));
         }
@@ -172,4 +192,29 @@ pub(super) fn parse(input: &Value, bounded: bool) -> Result<Value, NativeSchemaE
         }
     }
     finish(Value::Object(parsed), issues)
+}
+
+#[cfg(test)]
+mod has_command_tests {
+    use super::has_command;
+    use serde_json::json;
+
+    /// `Boolean(x) === true` for the command half of upstream's
+    /// `Y(e.command, e.ws)`. The empty string is the case the port got wrong in
+    /// BOTH places that asked the question, and the `{command: "", ws}` row is
+    /// the one the oracle corpus does not cover — so it is pinned here rather
+    /// than left to the corpus test.
+    #[test]
+    fn only_a_non_empty_string_counts_as_a_command() {
+        assert!(has_command(Some(&json!("echo ready"))));
+        assert!(has_command(Some(&json!(" "))), "whitespace is truthy in JS");
+
+        assert!(!has_command(None), "absent");
+        assert!(!has_command(Some(&json!(""))), "empty string is falsy in JS");
+        // A non-string never reaches the refinement upstream — the type check
+        // rejects it first — and must not be mistaken for a command here.
+        assert!(!has_command(Some(&json!(null))));
+        assert!(!has_command(Some(&json!(0))));
+        assert!(!has_command(Some(&json!(false))));
+    }
 }

@@ -105,7 +105,7 @@ export function App() {
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
-          <ScheduledTasks key={bridge.activeSession?.sessionId ?? workspace?.path ?? 'no-project'} bridge={bridge} visible={page === 'scheduled'} />
+          <ScheduledTasks bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => setPage('chat')} />
           </div>
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <BetaTopBar

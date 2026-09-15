@@ -136,6 +136,7 @@ export interface DiagnosticEntry {
   message: string;
 }
 export interface BootstrapState {
+  scheduledWorkspace?: string;
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
   activeSession?: SessionRef;

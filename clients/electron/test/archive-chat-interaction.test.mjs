@@ -73,7 +73,7 @@ test('archive chat dialog guards pending work, confirms once, and restores keybo
     assert.equal(result.retryEnabled, true);
     assert.equal(result.sidebarCalls, 2);
     assert.match(result.content, /Weekly project summary/);
-    assert.match(result.content, /Archive and remove/);
+    assert.match(result.content, /Archive and pause/);
     assert.match(result.content, /chat history will be kept/);
     assert.equal(result.loadingDisabled, true);
     assert.equal(result.afterCancel.confirms, 0);

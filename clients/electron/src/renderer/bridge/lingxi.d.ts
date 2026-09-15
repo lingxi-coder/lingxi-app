@@ -1,6 +1,7 @@
 import type { ScheduledApi } from '../../shared/scheduled';
 import type { CronJobDto } from '@lingxi/bridge-client';
 import type { TerminalApi } from '../../shared/terminal.js';
+import type { GitApi } from '../../shared/git.js';
 import type {
   AskUserQuestionRequestDto,
   AudioOpDto,
@@ -89,6 +90,7 @@ export interface BootstrapState {
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
   activeSession?: SessionRef;
+  scheduledWorkspace?: string;
   runtimes: SessionRuntimeSummary[];
   projectCatalogs: Record<string, ProjectSessionCatalogState>;
   providerCredentials?: ProviderCredentialMetadata[];
@@ -113,6 +115,7 @@ export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microph
 
 export interface LingxiApi {
   scheduled?: ScheduledApi;
+  git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;

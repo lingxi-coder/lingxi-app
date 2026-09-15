@@ -404,15 +404,15 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       const request_id = string(input['request_id'], 'cron request id', 128);
       const request = object(input['request']);
       const action = string(request['action'], 'cron action', 16);
-      if (!['list', 'create', 'update', 'delete'].includes(action)) throw new Error('invalid cron action');
-      const keys = action === 'list' ? ['action'] : action === 'delete' ? ['action', 'id']
-        : action === 'create' ? ['action', 'cron', 'prompt', 'recurring', 'durable', 'expires_at', 'no_expiry']
-        : ['action', 'id', 'cron', 'prompt', 'recurring', 'durable', 'expires_at', 'no_expiry'];
+      if (!['list', 'create', 'update', 'delete', 'pause', 'resume', 'complete', 'history'].includes(action)) throw new Error('invalid cron action');
+      const keys = action === 'list' ? ['action'] : ['delete', 'pause', 'resume', 'complete', 'history'].includes(action) ? ['action', 'id']
+        : action === 'create' ? ['action', 'cron', 'prompt', 'recurring', 'durable', 'expires_at', 'no_expiry', 'automation']
+        : ['action', 'id', 'cron', 'prompt', 'recurring', 'durable', 'expires_at', 'no_expiry', 'automation'];
       exactKeys(request, keys);
       const result: Extract<ClientCommand, { type: 'cron_manage' }>['request'] = {
-        action: action as 'list' | 'create' | 'update' | 'delete',
+        action: action as Extract<ClientCommand, { type: 'cron_manage' }>['request']['action'],
       };
-      if (action === 'update' || action === 'delete') result.id = string(request['id'], 'cron task id', 128);
+      if (['update', 'delete', 'pause', 'resume', 'complete', 'history'].includes(action)) result.id = string(request['id'], 'cron task id', 128);
       for (const key of ['cron', 'prompt'] as const) {
         if (action === 'create' || request[key] !== undefined) {
           result[key] = string(request[key], `cron ${key}`, key === 'cron' ? 256 : 100_000);
@@ -426,6 +426,30 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       }
       if (request['expires_at'] !== undefined) result.expires_at = integer(request['expires_at'], 'cron expiry', 1, Number.MAX_SAFE_INTEGER);
       if (result.no_expiry === true && result.expires_at !== undefined) throw new Error('conflicting cron expiry');
+      if (request['automation'] !== undefined) {
+        const config = object(request['automation']);
+        exactKeys(config, ['version', 'name', 'status', 'statusReason', 'model', 'reasoning', 'runMode', 'targetSessionId', 'notificationPolicy']);
+        if (config['version'] !== 2) throw new Error('unsupported scheduled task version');
+        const status = string(config['status'], 'task status', 16);
+        const runMode = string(config['runMode'], 'run mode', 32);
+        const notificationPolicy = string(config['notificationPolicy'], 'notification policy', 16);
+        if (!['active', 'paused', 'completed'].includes(status)) throw new Error('invalid task status');
+        if (!['new_session', 'selected_session', 'task_session'].includes(runMode)) throw new Error('invalid run mode');
+        if (!['all', 'failed', 'none'].includes(notificationPolicy)) throw new Error('invalid notification policy');
+        const reasoning = validateClientCommand({ type: 'set_reasoning_selection', selection: config['reasoning'] });
+        if (reasoning.type !== 'set_reasoning_selection') throw new Error('invalid reasoning selection');
+        const targetSessionId = config['targetSessionId'] === undefined ? undefined : string(config['targetSessionId'], 'target session', 128);
+        if (runMode === 'selected_session' && !targetSessionId) throw new Error('select a target session');
+        result.automation = {
+          version: 2,
+          ...(config['name'] === undefined ? {} : { name: string(config['name'], 'task name', 256) }),
+          status: status as 'active' | 'paused' | 'completed', model: string(config['model'], 'task model', 256), reasoning: reasoning.selection,
+          ...(config['statusReason'] === undefined ? {} : { statusReason: string(config['statusReason'], 'task status reason', 256) }),
+          runMode: runMode as 'new_session' | 'selected_session' | 'task_session',
+          ...(targetSessionId ? { targetSessionId } : {}),
+          notificationPolicy: notificationPolicy as 'all' | 'failed' | 'none',
+        };
+      }
       if (result.durable === false) throw new Error('scheduled tasks must be durable');
       return { type, request_id, request: result };
     }

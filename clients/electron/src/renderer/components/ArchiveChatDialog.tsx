@@ -15,7 +15,7 @@ export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, 
     return () => opener?.focus();
   }, []);
   useEffect(() => { if (busy) dialog.current?.focus(); }, [busy]);
-  return <DesktopDialog ref={dialog} tabIndex={-1} title={jobs.length ? 'Archive chat and remove scheduled tasks?' : 'Archive chat?'}
+  return <DesktopDialog ref={dialog} tabIndex={-1} title={jobs.length ? 'Archive chat and pause scheduled tasks?' : 'Archive chat?'}
     ariaLabel="Archive chat" icon="archive" tone={jobs.length ? 'danger' : 'default'}
     onEscape={() => { if (!busy) onClose(); }} onKeyDown={(event) => {
       if (event.key !== 'Tab') return;
@@ -30,13 +30,13 @@ export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, 
       style={{ position: 'absolute', right: 16, top: 16, border: 0, background: 'transparent', color: 'var(--dialog-text-2)', cursor: 'pointer' }}><Icon name="x" size={18} /></button>
     {loading ? <p role="status">Checking scheduled tasks…</p> : jobs.length ? <p style={{ color: 'var(--dialog-text-2)', lineHeight: 1.7 }}>
       This chat has scheduled tasks: <strong>{jobs.map((job) => scheduledTaskFromJob(job).title).join(', ')}</strong>.
-      Archiving “{title}” will also remove these tasks and stop future runs. The chat history will be kept.
+      Archiving “{title}” will pause these tasks and stop future runs. Tasks and chat history will be kept.
     </p> : <p style={{ color: 'var(--dialog-text-2)', lineHeight: 1.7 }}>“{title}” will move to Archived chats. You can restore it later.</p>}
     {busy && <p role="status">Archiving chat and updating the sidebar…</p>}
     {error && <p role="alert" style={{ color: 'var(--dialog-danger)', lineHeight: 1.6 }}>{error}</p>}
     <DesktopDialogActions>
       <DesktopDialogButton variant="cancel" disabled={busy} onClick={onClose}>Cancel</DesktopDialogButton>
-      <DesktopDialogButton variant="primary" disabled={busy || loading || (!!error && !onRetry)} onClick={error ? onRetry : onConfirm}>{error && !busy ? 'Try again' : busy ? 'Archiving…' : jobs.length ? 'Archive and remove' : 'Archive chat'}</DesktopDialogButton>
+      <DesktopDialogButton variant="primary" disabled={busy || loading || (!!error && !onRetry)} onClick={error ? onRetry : onConfirm}>{error && !busy ? 'Try again' : busy ? 'Archiving…' : jobs.length ? 'Archive and pause' : 'Archive chat'}</DesktopDialogButton>
     </DesktopDialogActions>
   </DesktopDialog>;
 }

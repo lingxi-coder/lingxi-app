@@ -40,6 +40,18 @@ pub trait SessionCronDelivery: Send + Sync {
     async fn enqueue(&self, fire: SessionCronFire) -> Result<(), String>;
     /// Discard unconsumed fixed fires before switching conversation identity.
     async fn clear_queued(&self) {}
+    /// The loop state of the conversation this delivery writes into.
+    ///
+    /// PARITY 2.1.270 `U(o)` (`src_197155721.js`): the no-op fold's blocking
+    /// predicate is `subtype === "scheduled_task_fire" || subtype ===
+    /// "compact_boundary"` — it matches EVERY scheduled fire, not only the
+    /// loop's own. A fixed task firing into the same transcript is therefore a
+    /// disturbance, and upstream refuses to fold rather than collapsing that
+    /// notice out of sight. Hosts that cannot reach the state return `None` and
+    /// keep the previous behaviour.
+    fn loop_runtime(&self) -> Option<std::sync::Arc<crate::autonomous_loop::LoopRuntime>> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1335,6 +1347,22 @@ impl CronScheduler {
                         Err(error) => Err(error.to_string()),
                     }
                 } else {
+                    // PARITY `A()`'s two `U(e)` arms. A fire that lands INSIDE
+                    // the tick's span vetoes that tick's fold; one that lands
+                    // between fires breaks the settled streak, which is the
+                    // backward `blocking_system_before_anchor` scan. The loop's
+                    // own fire is `I(e)` and ends that scan, so it is excluded.
+                    if !crate::autonomous_loop::is_loop_default_sentinel(&fire.prompt) {
+                        if let Some(loop_runtime) = delivery.loop_runtime() {
+                            if loop_runtime.in_flight_prompt().is_some() {
+                                loop_runtime.veto_tick(
+                                    crate::autonomous_loop::LoopFoldVeto::BlockingSystemInSpan,
+                                );
+                            } else {
+                                loop_runtime.invalidate_noop_streak();
+                            }
+                        }
+                    }
                     delivery.enqueue(fire).await
                 };
                 if let Err(error) = result {
@@ -2959,6 +2987,24 @@ mod scheduler_tick_tests {
         loading: std::sync::atomic::AtomicBool,
         fires: tokio::sync::Mutex<Vec<super::SessionCronFire>>,
     }
+
+    struct LoopAwareDelivery {
+        fires: tokio::sync::Mutex<Vec<super::SessionCronFire>>,
+        loop_runtime: Arc<crate::autonomous_loop::LoopRuntime>,
+    }
+    #[async_trait]
+    impl super::SessionCronDelivery for LoopAwareDelivery {
+        async fn is_loading(&self) -> bool {
+            false
+        }
+        async fn enqueue(&self, fire: super::SessionCronFire) -> Result<(), String> {
+            self.fires.lock().await.push(fire);
+            Ok(())
+        }
+        fn loop_runtime(&self) -> Option<Arc<crate::autonomous_loop::LoopRuntime>> {
+            Some(self.loop_runtime.clone())
+        }
+    }
     #[async_trait]
     impl super::SessionCronDelivery for RecordingDelivery {
         async fn is_loading(&self) -> bool {
@@ -3021,6 +3067,96 @@ mod scheduler_tick_tests {
             handler.spawn_count(),
             0,
             "production queue delivery never creates a Dream agent"
+        );
+    }
+
+    /// PARITY 2.1.270 `A()` (`src_197155721.js`). Its blocking predicate is
+    /// `U(o) = subtype === "scheduled_task_fire" || subtype ===
+    /// "compact_boundary"`, and it matches EVERY scheduled fire — the forward
+    /// span starts after the LAST loop fire, so a `U` found there is always
+    /// some OTHER task firing into the same transcript. All three hosts only
+    /// counted compactions, so a fixed task could fire during a quiet tick and
+    /// the next wakeup would fold its notice out of sight.
+    #[tokio::test]
+    async fn a_fixed_task_firing_into_the_loop_span_vetoes_the_fold() {
+        async fn fire_once(prompt: &str, tick_in_flight: bool) -> crate::autonomous_loop::LoopFoldOutcome {
+            let fs = MemFs::with(TASKS_PATH, "{\"tasks\":[]}");
+            let clock = FixedClock::at_secs(NOW);
+            let scheduler = CronScheduler::new(
+                registry(fs.clone()),
+                fs,
+                clock,
+                Arc::new(UnusedRuntime),
+                PathBuf::from(TASKS_PATH),
+            );
+            let loop_runtime = Arc::new(crate::autonomous_loop::LoopRuntime::default());
+            scheduler
+                .register_tool_job(
+                    super::SessionCronTask {
+                        id: "00000000".into(),
+                        cron: "* * * * *".into(),
+                        prompt: prompt.into(),
+                        created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
+                        last_fired_at: None,
+                        recurring: true,
+                        owner: None,
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+            let delivery = Arc::new(LoopAwareDelivery {
+                fires: tokio::sync::Mutex::new(Vec::new()),
+                loop_runtime: loop_runtime.clone(),
+            });
+            scheduler.set_session_delivery(delivery.clone()).await;
+            if tick_in_flight {
+                loop_runtime.begin_tick("<<autonomous-loop>>".into());
+            }
+            scheduler.tick().await;
+            assert_eq!(
+                delivery.fires.lock().await.len(),
+                1,
+                "precondition: the fire must actually be delivered"
+            );
+            if !tick_in_flight {
+                loop_runtime.begin_tick("<<autonomous-loop>>".into());
+            }
+            loop_runtime.mark_noop_reported(true);
+            loop_runtime
+                .settle_tick(
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(NOW),
+                    crate::autonomous_loop::LoopSpanCounts::default(),
+                )
+                .expect("a tick was in flight")
+        }
+
+        // A fixed task firing INSIDE the span is `blocking_system_in_span`.
+        assert!(
+            matches!(
+                fire_once("do the thing", true).await,
+                crate::autonomous_loop::LoopFoldOutcome::Vetoed {
+                    reason: crate::autonomous_loop::LoopFoldVeto::BlockingSystemInSpan
+                }
+            ),
+            "a fixed fire inside the span must veto the fold"
+        );
+        // …and one BETWEEN fires breaks the settled streak, which is the
+        // backward `blocking_system_before_anchor` scan.
+        assert!(
+            matches!(
+                fire_once("do the thing", false).await,
+                crate::autonomous_loop::LoopFoldOutcome::Folded { streak: 1, .. }
+            ),
+            "a fire between ticks resets the streak rather than extending it"
+        );
+        // The loop's OWN fire is `I(e)`: it ends that scan, it is not a veto.
+        assert!(
+            matches!(
+                fire_once("<<autonomous-loop>>", true).await,
+                crate::autonomous_loop::LoopFoldOutcome::Folded { streak: 1, .. }
+            ),
+            "the loop's own fire must not veto its own tick"
         );
     }
 

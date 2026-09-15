@@ -446,6 +446,10 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
 
 #[async_trait]
 impl cron::scheduler::SessionCronDelivery for MsgQueueWakeupScheduler {
+    fn loop_runtime(&self) -> Option<Arc<tool_cron::LoopRuntime>> {
+        Some(self.loop_runtime.clone())
+    }
+
     async fn clear_queued(&self) {
         let ids: Vec<_> = self.queue.snapshot().await.into_iter()
             .filter(|command| command.source == msgqueue::QueueSource::Cron && command.uuid.starts_with("cron-fire-"))

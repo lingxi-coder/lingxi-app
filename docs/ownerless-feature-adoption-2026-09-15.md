@@ -108,11 +108,17 @@ Wiring and repair:
 
 ## Known red on main, not caused by this work
 
-`bridge-server`'s `real_boot_handshakes_and_surfaces_turn_error` fails on its
-own. It expects a typed `Error` frame carrying `CREDENTIAL_REQUIRED_MESSAGE`
-and receives a plain `TextDelta { "Failed to authenticate. API Error: No API
-key is configured for the selected provider" }` — a typed error flattened into
-prose somewhere upstream of the turn driver. Not investigated here.
+~~`bridge-server`'s `real_boot_handshakes_and_surfaces_turn_error`~~ — fixed in
+`2181eb752`, and my first reading of it above was wrong. It is not "a typed
+error flattened into prose": the `TextDelta` it receives is
+`orchestrator::api_error_copy`, this port's byte-for-byte mirror of upstream's
+auth copy, and it is the ALIGNED behaviour. The stale half was the test, and
+under it a whole stage that could not run — `needs_credential_driver`'s
+`late_credential_route` term is `provider_auth_methods["anthropic"] ==
+"api_key"`, a catalog constant, so the predicate had been constant-false and
+`CredentialRequiredTurnDriver` unbindable since 2026-09-05. Removed rather than
+rebuilt: claude-code has no such stage, and the message it carried named a
+bridge-server CLI flag a desktop user cannot act on.
 
 `boot::tests::stale_live_session_guard_cannot_stop_or_unregister_new_generation`
 fails in the full run and passes alone under `--test-threads=1`; it shares

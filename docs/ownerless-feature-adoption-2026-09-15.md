@@ -169,6 +169,60 @@ writes into a working tree other sessions are using.
 `desktop-git/verification.md` reports a signed packaged run of the same steps,
 which is second-hand evidence, not a measurement made here.
 
+## Checked against the oracle (2.1.270)
+
+Three claims in this cluster were reasoning, not measurement. All three were
+taken back to the binary (`~/.claude/oracle-chunks/2.1.270`).
+
+**The `/loop` fold rule — confirmed, and it found a real divergence.**
+`src_197155721.js` holds the whole producer:
+
+```js
+I(o) = o.type==="system" && o.subtype==="scheduled_task_fire" && o.cronKind==="loop"
+U(o) = o.type==="system" && (o.subtype==="scheduled_task_fire" || o.subtype==="compact_boundary")
+// A(): anchor = findLastIndex(I); veto on any U before it (back to the previous
+// I) or inside the span; veto unless the model ended with ScheduleWakeup({noop:true})
+// P(): streak = anchor.noOpStreak + 1;  foldedUuids = o.slice(anchor).map(uuid)
+```
+
+and `src_190098428.js` holds the consumer, which simply unions every
+`foldedUuids` it has seen and filters those rows out.
+
+So the fold set is *every row from the most recent loop fire, inclusive*, and
+the streak is a **label carried forward on the event** — never recounted from
+local history. That is exactly what `dd468e569` changed the client to do, and
+it is the opposite of the rule it replaced. The port derives the ids client-side
+instead of receiving them, which is equivalent because the engine computes the
+streak with the full veto set and sends `streak > 0` only when upstream would
+have folded.
+
+What it exposed: `U(o)` matches EVERY scheduled fire, not only the loop's own,
+and all three hosts marked that veto for compactions alone. A fixed cron task
+firing alongside a `/loop` would have its notice folded out of sight. Fixed in
+`6317452dd`.
+
+**The `idle` → `completed` agent status — already measured.** `c1198.js`'s task
+row renderer has `running/pending/completed/failed/killed` and no `idle`; `idle`
+there is the footer group a finished agent collapses into, and a teammate's own
+state. `d0f326a4a` closes the last read-back still emitting the port's word. The
+three "life-or-death by status string" gates that `completed` falls into were
+re-checked against the new emission site: gate 1 (`engine-desktop`'s allocation
+early-exit) is flag-based now and has a test pinning a resumed parked agent;
+gates 2 and 3 are iOS paths that run on `engine-mobile`, not on the desktop
+router this commit touched.
+
+**`task_lifecycle: 'exposed'` — confirmed.** It is emitted by
+`AdapterOutputStream::emit_task_lifecycle`, the shared adapter the desktop
+bridge runs on, it is not in `isTurnOwnedEvent`, and nothing filters it before
+`broadcastClientEvent`. It reaches the renderer exactly like its `task_row` /
+`task_output_chunk` / `task_status_changed` siblings, which are all `exposed`.
+
+A fourth item came out of the same sweep without needing the oracle:
+`runningSubagentIds` matched two statuses (`working`, `in_progress`) that its
+own comment's cited vocabulary does not contain and that nothing can store —
+and its test manufactured the one input that could reach them. Fixed and
+honestly re-pinned in `bf9ea9d0c`.
+
 ## Left alone, and why
 
 - The **`CommandResultPanel`** cluster in `clients/electron` appeared in the

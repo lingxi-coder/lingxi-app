@@ -1,11 +1,13 @@
 package com.lingxi.code.cron
 
+import android.util.Log
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.work.WorkManager
 import com.lingxi.code.R
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -62,6 +64,9 @@ class AndroidCronRepository private constructor(
         }
     }
 
+    /** Release watchers owned by a repository whose host lifecycle has ended. */
+    internal fun dispose() { repositoryScope.cancel() }
+
     fun refresh() {
         repositoryScope.launch { refreshNow() }
     }
@@ -87,21 +92,29 @@ class AndroidCronRepository private constructor(
         refreshMutex.withLock {
             _state.value = _state.value.copy(loading = true, errorMessage = null)
             val next = runCronCatching {
+                // Terminal results are self-contained. Recover their pending notifications
+                // even when the original project or its current task is unavailable.
+                postPendingNotifications()
                 val scopes = scopeScanner.scan()
                 val scopedTasks = loadScopedTasks(scopes)
+                historyStore.records().filterNot { it.status.isTerminal }.forEach { record ->
+                    scopedTasks.firstOrNull { it.scope.scopeId == record.scopeId && it.task.id == record.taskId }?.let {
+                        recoverNativeTerminal(record, it.task)
+                    }
+                }
                 val history = historyStore.records()
                 val exactAllowed = CronAlarmScheduler.canScheduleExact(appContext)
                 val activeByTask = history
                     .filterNot { it.status.isTerminal }
                     .associateBy { it.scopeId to it.taskId }
                 val supportedNext = scopedTasks
-                    .filter { it.task.mobileSupported }
+                    .filter { it.task.mobileSupported && it.task.isActive() }
                     .filterNot { activeByTask.containsKey(it.scope.scopeId to it.task.id) }
                     .mapNotNull { it.task.nextFireMs?.toLong() }
                     .minOrNull()
                 val latestByTask = history
                     .filter { it.status.isTerminal }
-                    .sortedByDescending(CronRunRecord::triggeredAtMs)
+                    .sortedBy(CronRunRecord::triggeredAtMs)
                     .associateBy { it.scopeId to it.taskId }
                 AndroidCronRepositoryState(
                     loading = false,
@@ -126,6 +139,7 @@ class AndroidCronRepository private constructor(
                             .thenBy { it.task.nextFireMs?.toLong() ?: Long.MAX_VALUE },
                     ),
                     history = history.sortedByDescending(CronRunRecord::triggeredAtMs),
+                    generatedSessions = historyStore.generatedSessions(),
                     exactAlarmAllowed = exactAllowed,
                     schedulingMode = if (exactAllowed) {
                         CronSchedulingMode.Exact
@@ -155,16 +169,52 @@ class AndroidCronRepository private constructor(
         }
     }
 
+    internal fun recoverNativeTerminal(record: CronRunRecord, task: com.lingxi.code.bindings.CronTaskDto): Boolean {
+        val automation = CronAutomation.from(task)
+        val terminal = automation.terminalFor(record) ?: return false
+        historyStore.attachExecution(record.runId, terminal.sessionId, terminal.model)
+        historyStore.markTerminal(record.runId, terminal.status, terminal.summary, terminal.error, terminal.finishedAtMs)
+        postPendingNotifications(record.runId)
+        return true
+    }
+
+    internal fun postPendingNotifications(runId: String? = null) {
+        historyStore.postPendingNotifications(runId, onFailure = { error ->
+            if (error is CancellationException) throw error
+            Log.w("AndroidCronRepository", "Pending cron notification could not be delivered", error)
+        }) { record ->
+            val delivered = CronNotifications.postResult(
+                context = appContext,
+                title = record.prompt.lineSequence().firstOrNull()?.take(40)?.ifBlank { null }
+                    ?: appContext.getString(R.string.cron_result_title_default),
+                body = record.resultText ?: record.errorMessage
+                    ?: appContext.getString(R.string.chat_status_completed),
+                tag = "cron-${record.runId}",
+                runId = record.runId,
+            )
+            // POST_NOTIFICATIONS can be denied (Android 13+), in which case
+            // nothing was shown. Give the durable claim back so the result is
+            // still recoverable once the user grants the permission.
+            if (!delivered) historyStore.releaseNotificationClaim(record.runId)
+        }
+    }
+
+    private fun defaultAutomation(): CronAutomation =
+        com.lingxi.code.settings.ProviderSettingsRepository(appContext).use {
+            CronAutomation.defaults(it.engineLaunchConfig().defaultModel)
+        }
+
     suspend fun create(
         scopeId: String,
         cron: String,
         prompt: String,
         recurring: Boolean,
+        automation: CronAutomation = defaultAutomation(),
     ): com.lingxi.code.bindings.CronTaskDto = mutateAndReconcile(
         reason = "create",
         scopeId = scopeId,
     ) { scope ->
-        gateway.create(scope, cron.trim(), prompt.trim(), recurring)
+        gateway.create(scope, cron.trim(), prompt.trim(), recurring, automation)
     }
 
     suspend fun update(
@@ -173,6 +223,7 @@ class AndroidCronRepository private constructor(
         cron: String,
         prompt: String,
         recurring: Boolean,
+        automation: CronAutomation,
     ): com.lingxi.code.bindings.CronTaskDto = mutateAndReconcile(
         reason = "update",
         scopeId = scopeId,
@@ -180,7 +231,29 @@ class AndroidCronRepository private constructor(
         require(gateway.list(scope).any { it.id == taskId }) {
             appContext.getString(R.string.cron_task_not_in_project)
         }
-        gateway.update(scope, taskId, cron.trim(), prompt.trim(), recurring)
+        gateway.update(scope, taskId, cron.trim(), prompt.trim(), recurring, automation).also {
+            if (!it.isActive()) historyStore.cancelQueued(scope.scopeId, taskId)
+        }
+    }
+
+    suspend fun pauseForArchivedSession(scopeId: String, sessionId: String) {
+        val scope = requireScope(scopeId)
+        gateway.list(scope).filter { task ->
+            val config = CronAutomation.from(task)
+            config.status == "active" && (
+                (config.runMode == "selected_session" && config.targetSessionId.removePrefix("sess:") == sessionId.removePrefix("sess:")) ||
+                    (config.runMode == "task_session" && org.json.JSONObject(config.json).optString("ownedSessionId").removePrefix("sess:") == sessionId.removePrefix("sess:")))
+        }.forEach { task ->
+            val automation = CronAutomation.from(task)
+            update(scopeId, task.id, task.cron, task.prompt, task.recurring,
+                automation.change("status", "paused").change("statusReason", "The associated chat was archived"))
+            if (automation.notificationPolicy != "none") {
+                CronNotifications.postResult(appContext,
+                    automation.name.ifBlank { "Scheduled task paused" },
+                    "The associated chat was archived. Select another chat to resume this task.",
+                    tag = "cron-paused-$scopeId-${task.id}")
+            }
+        }
     }
 
     suspend fun delete(scopeId: String, taskId: String): Boolean =
@@ -207,6 +280,7 @@ class AndroidCronRepository private constructor(
                     ?: throw IllegalArgumentException(
                         appContext.getString(R.string.cron_task_not_in_project),
                     )
+                require(task.isActive()) { "Resume this task before running it" }
                 val now = System.currentTimeMillis()
                 val record = historyStore.enqueue(
                     scope = scope,
@@ -261,7 +335,7 @@ class AndroidCronRepository private constructor(
                     .getOrDefault(emptyList())
                     .mapNotNull { (taskId, scheduledAtMs) ->
                         tasks[taskId]
-                            ?.takeIf { it.mobileSupported }
+                            ?.takeIf { it.mobileSupported && it.isActive() }
                             ?.let { ScopedCronOccurrence(scope, it, scheduledAtMs) }
                     }
             }

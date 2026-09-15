@@ -573,6 +573,23 @@ class ChatViewModel(
             return
         }
         when (event) {
+            is ClientEvent.ScheduledTaskFire -> _state.update { current ->
+                // Session notice arrives before TurnStarted and is not a loop-fold marker.
+                current.copy(messages = current.messages + Message(role = Role.Ai, text = event.message))
+            }
+            is ClientEvent.LoopWakeup -> _state.update { current ->
+                val rows = buildChatRenderItems(current)
+                val lastWakeup = current.messages.lastOrNull { it.loopWakeupStreak != null }
+                val start = rows.indexOfFirst { it.key == lastWakeup?.id }
+                val folded = if (event.streak > 0u && start >= 0)
+                    rows.drop(start).map { it.key }.filterNot { it in lastWakeup?.loopPreexistingItemIds.orEmpty() }.toSet()
+                else emptySet()
+                current.copy(messages = current.messages + Message(
+                    role = Role.Ai, text = event.message,
+                    loopWakeupStreak = event.streak, loopFoldedItemIds = folded,
+                    loopPreexistingItemIds = rows.map { it.key }.toSet(),
+                ) + listOfNotNull(event.companion?.let { Message(role = Role.Ai, text = it) }))
+            }
             is ClientEvent.AskUserQuestion -> {
                 var inserted = false
                 _state.update { s ->

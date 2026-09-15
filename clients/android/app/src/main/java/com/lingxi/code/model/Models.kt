@@ -182,6 +182,7 @@ data class ModelMetadata(
 data class CatalogReasoningOption(
     val label: String,
     val persistable: Boolean,
+    val selection: com.lingxi.code.bindings.ReasoningSelectionDto = com.lingxi.code.bindings.ReasoningSelectionDto.Automatic,
 )
 
 data class CatalogModelPricingTier(
@@ -278,7 +279,7 @@ data class CatalogModelDetails(
                 capabilities = buildCapabilities(dto),
                 reasoningOptions = dto.reasoning.options.mapNotNull { option ->
                     selectionLabel(option.selection)?.let { label ->
-                        CatalogReasoningOption(label = label, persistable = option.persistable)
+                        CatalogReasoningOption(label = label, persistable = option.persistable, selection = option.selection)
                     }
                 },
                 reasoningEditable = dto.reasoning.editable,
@@ -461,6 +462,10 @@ data class Message(
      * Only the assistant bubble renders these; a user bubble stays text-only.
      */
     val blocks: List<com.lingxi.code.conversation.MessageContent> = emptyList(),
+    /** Loop wakeup metadata is presentation-only and never sent as a user prompt. */
+    val loopWakeupStreak: UInt? = null,
+    val loopFoldedItemIds: Set<String> = emptySet(),
+    val loopPreexistingItemIds: Set<String> = emptySet(),
 )
 
 /** A unified "session" reference used by the conversation title bar. */

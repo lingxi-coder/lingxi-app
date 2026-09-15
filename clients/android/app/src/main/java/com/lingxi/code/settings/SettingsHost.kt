@@ -71,6 +71,7 @@ fun SettingsHost(
     store: SettingsStore? = null,
     initialRoute: String = SettingsRoutes.MAIN,
     onClose: () -> Unit = {},
+    onOpenScheduledSession: (com.lingxi.code.cron.CronRunRecord) -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
     onReconnectEngine: () -> Unit = {},
     onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
@@ -362,15 +363,17 @@ fun SettingsHost(
                 page(SettingsRoutes.MCP_EDIT) { McpConfigurationPage(engineBridge) }
                 page(SettingsRoutes.DREAM) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
                 page(SettingsRoutes.CRON) {
-                    com.lingxi.code.cron.CronScreen()
+                    com.lingxi.code.cron.CronScreen(engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession)
                 }
                 page(SettingsRoutes.CRON_TASK) { entry ->
                     com.lingxi.code.cron.CronScreen(
+                        engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession,
                         initialTaskKey = entry.arguments?.getString("task"),
                     )
                 }
                 page(SettingsRoutes.CRON_RUN) { entry ->
                     com.lingxi.code.cron.CronScreen(
+                        engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession,
                         initialRunId = entry.arguments?.getString("run"),
                     )
                 }

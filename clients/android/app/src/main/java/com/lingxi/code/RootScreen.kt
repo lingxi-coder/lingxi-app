@@ -452,13 +452,18 @@ fun RootScreen(
     }
 
     fun projectSnapshotForScope(scope: ConversationScope): ProjectSnapshot? = when (scope) {
-        ConversationScope.Global -> null
+        ConversationScope.Global, ConversationScope.Scheduled -> null
         is ConversationScope.Project -> projectState.projects.firstOrNull { it.record.id == scope.projectId }
         is ConversationScope.LocalApp -> null
     }
 
     fun workspaceForScope(scope: ConversationScope) = when (scope) {
         ConversationScope.Global -> null
+        ConversationScope.Scheduled -> com.lingxi.code.project.ProjectWorkspace(
+            projectId = "b51bca68-b85f-4caa-8881-07dd33eba24d",
+            hostPath = com.lingxi.code.cron.CronScope.global(appContext).workspacePath,
+            guestPath = "/workspace/global",
+        )
         is ConversationScope.Project -> projectSnapshotForScope(scope)?.workspace
         is ConversationScope.LocalApp -> localAppWorkspace(
             appFilesRoot = appContext.filesDir,
@@ -474,6 +479,9 @@ fun RootScreen(
         sessionId: String,
         mode: SessionMode,
     ): SessionRow? = when (scope) {
+        ConversationScope.Scheduled -> cronState.generatedSessions.firstOrNull { it.projectId == null && it.sessionId == sessionId }?.let {
+            SessionRow(uuid = sessionId, title = it.prompt.take(120), messageCount = 2, relativeTime = "", mode = mode)
+        }
         ConversationScope.Global -> projectState.globalSessions
             .firstOrNull { it.sessionId == sessionId && it.mode == mode }
             ?.let {
@@ -985,6 +993,7 @@ fun RootScreen(
                     context = appContext,
                     projectWorkspace = when (engineScope) {
                         ConversationScope.Global -> null
+                        ConversationScope.Scheduled -> workspaceForScope(engineScope)
                         is ConversationScope.Project -> project?.workspace
                         is ConversationScope.LocalApp -> workspaceForScope(engineScope)
                     },
@@ -1603,7 +1612,7 @@ fun RootScreen(
     ) {
         if (
             sessionState.phase == SessionCatalogPhase.Ready &&
-            sourceScope !is ConversationScope.LocalApp
+            sourceScope !is ConversationScope.LocalApp && sourceScope != ConversationScope.Scheduled
         ) {
             val provisionalSessionMayNotBeListed =
                 state.isNew &&
@@ -1634,7 +1643,7 @@ fun RootScreen(
             state.messages.any { it.role == com.lingxi.code.model.Role.User } &&
             state.session.id != "new" &&
             (if (sourceProjectId == null) projectState.globalSessions else projectState.projects.firstOrNull { it.record.id == sourceProjectId }?.sessions.orEmpty()).none { it.sessionId == state.session.id && it.messageCount > 0 } &&
-            sourceScope !is ConversationScope.LocalApp
+            sourceScope !is ConversationScope.LocalApp && sourceScope != ConversationScope.Scheduled
         ) {
             runCatching {
                 projectStore.recordStartedSession(
@@ -1697,20 +1706,27 @@ fun RootScreen(
             modifiedAtEpochSeconds = cached.updatedAtEpochMillis / 1000L,
         )
     }
-    val globalDrawerSessions = if (sourceScope == ConversationScope.Global) {
+    val scheduledSessionRows = cronState.generatedSessions.filter { it.projectId == null && it.sessionId != null }
+        .distinctBy { it.sessionId }.map { run ->
+            SessionRow(uuid = run.sessionId!!, title = run.prompt.take(120), messageCount = 2,
+                relativeTime = formatCronTime(run.finishedAtMs ?: run.triggeredAtMs),
+                modifiedAtEpochSeconds = (run.finishedAtMs ?: run.triggeredAtMs) / 1000L)
+        }
+    val globalDrawerSessions = (if (sourceScope == ConversationScope.Global) {
         sessionState.withCachedRows(cachedGlobalRows, projectState.globalSessions.filter { it.pendingCatalogConfirmation }.map { it.sessionId }.toSet()).let { catalog ->
             val archivedIds = projectState.globalSessions.filter { it.isArchived }.map { it.sessionId }.toSet()
             catalog.copy(rows = catalog.rows.filterNot { it.uuid in archivedIds })
         }
     } else {
         EngineSessionState.ready(cachedGlobalRows)
-    }
+    }).let { it.copy(rows = (it.rows + scheduledSessionRows).distinctBy(SessionRow::uuid)) }
     fun sessionRowLookup(
         scope: ConversationScope,
         sessionId: String,
         mode: SessionMode,
     ): SessionCatalogLookup<SessionRow> {
         val row = when (scope) {
+            ConversationScope.Scheduled -> scheduledSessionRows.firstOrNull { it.uuid == sessionId }
             ConversationScope.Global -> globalDrawerSessions.rows
                 .firstOrNull { it.uuid == sessionId && it.mode == mode }
             is ConversationScope.Project -> projectState.projects
@@ -1742,6 +1758,7 @@ fun RootScreen(
                 }
         }
         return when (scope) {
+            ConversationScope.Scheduled -> SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
             ConversationScope.Global -> if (row != null || globalDrawerSessions.phase != SessionCatalogPhase.Loading) {
                 SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
             } else {
@@ -1819,11 +1836,12 @@ fun RootScreen(
             )
         },
         crons = cronState.tasks.map { cron ->
+            val automation = com.lingxi.code.cron.CronAutomation.from(cron.task)
             val status = cron.activeRun?.status ?: cron.lastRun?.status
             Cron(
                 id = "${cron.scope.scopeId}:${cron.task.id}",
                 wsId = LocalProjectWorkspace.id,
-                title = cron.task.prompt.lineSequence().firstOrNull()
+                title = automation.name.ifBlank { cron.task.prompt.lineSequence().firstOrNull().orEmpty() }
                     ?.take(42)
                     ?.ifBlank { cron.task.id }
                     ?: cron.task.id,
@@ -1835,6 +1853,7 @@ fun RootScreen(
                     append(" · ")
                     append(
                         when {
+                            automation.status != "active" -> automation.status.replaceFirstChar { it.uppercase() }
                             cron.schedulingMode == CronSchedulingMode.Unsupported ->
                                 cron.unsupportedReason ?: resources.getString(R.string.cron_unsupported_period_fallback)
                             status != null -> cronStatusLabel(status, context)
@@ -1992,11 +2011,12 @@ fun RootScreen(
                         onResumeSession = { uuid ->
                             showingApps = false
                             globalDrawerSessions.rows.firstOrNull { it.uuid == uuid }?.let { row ->
+                                val targetScope = if (scheduledSessionRows.any { it.uuid == uuid }) ConversationScope.Scheduled else ConversationScope.Global
                                 // Resume directly only when the live engine IS
                                 // the global scope — a Project OR LocalApp
                                 // scope must rebind first, or the session would
                                 // resume against the wrong cwd.
-                                if (sourceMatches(ConversationScope.Global, row.mode)) {
+                                if (sourceMatches(targetScope, row.mode)) {
                                     drawerUi.selectSession(uuid)
                                     chatViewModel.resumeSession(row)
                                     closeDrawer()
@@ -2004,9 +2024,10 @@ fun RootScreen(
                                     scope.launch {
                                         if (
                                             switchEngineScope(
-                                                null,
-                                                SessionRef(row.uuid, row.title),
-                                                false,
+                                                project = null,
+                                                target = SessionRef(row.uuid, row.title),
+                                                newSession = false,
+                                                engineScope = targetScope,
                                                 resumeEmpty = row.messageCount == 0,
                                                 replacePendingTransition = true,
                                                 sessionModeOverride = row.mode,
@@ -2162,7 +2183,10 @@ fun RootScreen(
                         },
                         onContinueSession = { sessionScope, row, targetMode ->
                             showingApps = false
-                            scope.launch { continueSessionInMode(sessionScope, row, targetMode) }
+                            val targetScope = if (sessionScope == ConversationScope.Global && scheduledSessionRows.any { it.uuid == row.uuid }) {
+                                ConversationScope.Scheduled
+                            } else sessionScope
+                            scope.launch { continueSessionInMode(targetScope, row, targetMode) }
                         },
                         onOpenLocalAppDetails = { appId ->
                             showingApps = true
@@ -2706,6 +2730,7 @@ private fun cronStatusLabel(status: CronRunStatus, context: Context): String = w
     CronRunStatus.TimedOut -> context.getString(R.string.cron_status_recent_timed_out)
     CronRunStatus.Cancelled -> context.getString(R.string.chat_status_cancelled)
     CronRunStatus.Skipped -> context.getString(R.string.cron_status_skipped)
+    CronRunStatus.Interrupted -> "Interrupted"
 }
 
 internal fun appendVoiceTranscript(base: String, transcript: String): String = when {

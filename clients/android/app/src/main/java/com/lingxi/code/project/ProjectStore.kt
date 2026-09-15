@@ -133,6 +133,8 @@ class ProjectStore private constructor(
         withContext(Dispatchers.IO) {
             repositoryMutex.withLock {
                 publishRepositoryState(repository.setSessionArchived(projectId, sessionId, archived))
+                if (archived) com.lingxi.code.cron.AndroidCronRepository.get(appContext)
+                    .pauseForArchivedSession(projectId ?: com.lingxi.code.cron.GLOBAL_CRON_SCOPE_ID, sessionId)
             }
         }
     }

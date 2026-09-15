@@ -77,7 +77,7 @@ sealed interface ChatRenderItem {
  * assistant message. `AskUserQuestion` uses a modal sheet. Pure — unit-tested
  * on the JVM.
  */
-fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList {
+fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<ChatRenderItem> {
     val pinnedTurnId = agentRunForBottomPanel(state)?.turnId
     if (state.isNew && state.messages.isEmpty() && !state.streaming) {
         add(ChatRenderItem.Empty)
@@ -101,7 +101,10 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList {
         else { removeAt(lastIndex); add(ChatRenderItem.Tools(previous.calls + calls)) }
         canMergeTools = true
     }
+    val foldedMessageIds = state.messages.flatMap { it.loopFoldedItemIds }.toSet()
     state.messages.forEachIndexed { messageIndex, message ->
+        if (message.id in foldedMessageIds) return@forEachIndexed
+        if (message.loopWakeupStreak != null) canMergeTools = false
         if (message.role == com.lingxi.code.model.Role.Ai && message.blocks.isNotEmpty()) {
             val projectedBlocks = message.blocks.map { block ->
                 if (block !is MessageContent.Tool) block else {
@@ -144,6 +147,9 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList {
     if (state.streaming && state.agentRun == null) {
         add(ChatRenderItem.StreamingIndicator)
     }
+}.let { rows ->
+    val hidden = state.messages.flatMap { it.loopFoldedItemIds }.toSet()
+    if (hidden.isEmpty()) rows else rows.filterNot { it.key in hidden }
 }
 
 /** Live agent work belongs beside Tasks/Todos even if its parent turn ended. */

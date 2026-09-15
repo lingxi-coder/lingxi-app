@@ -304,6 +304,41 @@ class ChatViewModelReducerTest {
         }
     }
 
+    @Test fun fixedScheduleNoticeArrivesBeforeTurnWithoutLoopFoldMarker() {
+        val vm = newVm()
+        vm.reduceClientEvent(ClientEvent.ScheduledTaskFire("Fixed task is ready"))
+        val message = vm.state.value.messages.single()
+        assertEquals("Fixed task is ready", message.text)
+        assertEquals(null, message.loopWakeupStreak)
+        assertTrue(message.loopFoldedItemIds.isEmpty())
+        assertFalse(vm.state.value.streaming)
+        vm.reduceClientEvent(ClientEvent.SystemNotice("Scheduled task text is still turn-scoped", false))
+        assertEquals(listOf(message), vm.state.value.messages)
+    }
+
+    @Test fun loopFoldDoesNotHideAShellFromBeforeTheFire() {
+        val vm = newVm()
+        vm.reduce(ReplyEvent.ShellTool(ShellToolUpdate.Started("old", "pwd", null)))
+        vm.reduceClientEvent(ClientEvent.LoopWakeup("first", null, 0u, 0uL))
+        vm.reduceClientEvent(ClientEvent.LoopWakeup("second", null, 1u, 1uL))
+        assertTrue(buildChatRenderItems(vm.state.value).any { it.key == "shell-old" })
+    }
+
+    @Test fun loopWakeupFoldsQuietRowsOutsideTheTurnStream() {
+        val vm = newVm()
+        vm.reduceClientEvent(ClientEvent.LoopWakeup("first", null, 0u, 0uL))
+        assertEquals("first", vm.state.value.messages.last().text)
+        vm.reduceClientEvent(ClientEvent.LoopWakeup("second", "healthy", 1u, 1uL))
+        assertEquals(listOf("second", "healthy"), buildChatRenderItems(vm.state.value)
+            .filterIsInstance<ChatRenderItem.Message>().map { it.message.text })
+        vm.reduceClientEvent(ClientEvent.LoopWakeup("third", "still healthy", 2u, 1uL))
+        assertEquals(listOf("third", "still healthy"), buildChatRenderItems(vm.state.value)
+            .filterIsInstance<ChatRenderItem.Message>().map { it.message.text })
+        assertEquals(5, vm.state.value.messages.size)
+        vm.reduceClientEvent(ClientEvent.LoopWakeup("actionable", null, 0u, 0uL))
+        assertEquals(3, buildChatRenderItems(vm.state.value).filterIsInstance<ChatRenderItem.Message>().size)
+    }
+
     private fun newVm() = ChatViewModel(StubSource())
 
     @Test

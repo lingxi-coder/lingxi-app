@@ -215,7 +215,7 @@ private fun WorkspaceGroupCard(
                     .padding(top = 6.dp)
                     .clickable {
                         when (val scope = group.scope) {
-                            ConversationScope.Global -> onNewGlobalSession()
+                            ConversationScope.Global, ConversationScope.Scheduled -> onNewGlobalSession()
                             is ConversationScope.Project -> onNewProjectSession(scope.projectId)
                             is ConversationScope.LocalApp -> onNewLocalAppSession(scope.appId)
                         }
@@ -229,7 +229,7 @@ private fun WorkspaceGroupCard(
                     continueTargetMode = row.mode.forkTargetMode(),
                     onClick = {
                         when (val scope = group.scope) {
-                            ConversationScope.Global -> onSelectGlobalSession(row)
+                            ConversationScope.Global, ConversationScope.Scheduled -> onSelectGlobalSession(row)
                             is ConversationScope.Project ->
                                 onSelectProjectSession(scope.projectId, SessionRef(row.uuid, row.title))
                             is ConversationScope.LocalApp ->
@@ -247,7 +247,7 @@ private fun WorkspaceGroupCard(
                     .padding(top = 6.dp)
                     .clickable {
                         when (val scope = group.scope) {
-                            ConversationScope.Global -> onNewGlobalSession()
+                            ConversationScope.Global, ConversationScope.Scheduled -> onNewGlobalSession()
                             is ConversationScope.Project -> onNewProjectSession(scope.projectId)
                             is ConversationScope.LocalApp -> onNewLocalAppSession(scope.appId)
                         }

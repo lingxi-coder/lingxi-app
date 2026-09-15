@@ -11,6 +11,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.Operation
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -19,6 +20,7 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.CronFireStatusDto
 import com.lingxi.code.bindings.FiredCronJobDto
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
@@ -31,6 +33,8 @@ internal object CronWorkKeys {
     const val SCOPE_ID = "scope_id"
     const val TASK_ID = "task_id"
     const val REASON = "reason"
+    const val BUSY_ATTEMPT = "busy_attempt"
+    const val RECOVER_RUNNING = "recover_running"
 }
 
 internal object CronWorkNames {
@@ -38,6 +42,8 @@ internal object CronWorkNames {
     const val RECONCILE = "cron-reconcile"
     const val SERIAL_EXECUTION = "cron-global-serial-execution"
     const val TAG_EXECUTION = "cron-execution"
+
+    fun busyRetry(runId: String, attempt: Int): String = "cron-busy-$runId-$attempt"
 
     fun dispatch(scheduledAtMs: Long): String = "cron-dispatch-$scheduledAtMs"
     fun occurrence(scopeId: String, taskId: String, scheduledAtMs: Long): String =
@@ -97,8 +103,8 @@ internal object CronWorkScheduler {
         )
     }
 
-    fun enqueueExecutionChain(context: Context, records: List<CronRunRecord>) {
-        if (records.isEmpty()) return
+    fun enqueueExecutionChain(context: Context, records: List<CronRunRecord>): Operation? {
+        if (records.isEmpty()) return null
         val requests = records.map(::executionRequest)
         var continuation = WorkManager.getInstance(context.applicationContext).beginUniqueWork(
             CronWorkNames.SERIAL_EXECUTION,
@@ -108,7 +114,26 @@ internal object CronWorkScheduler {
         for (request in requests.drop(1)) {
             continuation = continuation.then(request)
         }
-        continuation.enqueue()
+        return continuation.enqueue()
+    }
+
+    suspend fun enqueueBusyRetry(context: Context, record: CronRunRecord, recoverRunning: Boolean = false) {
+        val request = OneTimeWorkRequestBuilder<CronBusyRetryWorker>()
+            .setInitialDelay(30, TimeUnit.SECONDS)
+            .setInputData(Data.Builder()
+                .putString(CronWorkKeys.RUN_ID, record.runId)
+                .putInt(CronWorkKeys.BUSY_ATTEMPT, record.attempt)
+                .putBoolean(CronWorkKeys.RECOVER_RUNNING, recoverRunning)
+                .build())
+            .build()
+        // This delayed wake is independent of SERIAL_EXECUTION: the busy task
+        // releases that chain now, and rejoins its tail only after the delay.
+        val operation = WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+            CronWorkNames.busyRetry(record.runId, record.attempt),
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
+        withContext(Dispatchers.IO) { operation.result.get() }
     }
 
     private fun executionRequest(record: CronRunRecord): OneTimeWorkRequest =
@@ -136,6 +161,44 @@ internal object CronWorkScheduler {
                 ),
             )
             .build()
+}
+
+/** Durable busy retry wakes never wait at the front of the execution chain. */
+class CronBusyRetryWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
+    override suspend fun doWork(): Result {
+        val runId = inputData.getString(CronWorkKeys.RUN_ID) ?: return Result.success()
+        val attempt = inputData.getInt(CronWorkKeys.BUSY_ATTEMPT, -1)
+        val repository = AndroidCronRepository.get(applicationContext)
+        val record = busyCronRetryRecord(repository.historyStore, runId, attempt, inputData.getBoolean(CronWorkKeys.RECOVER_RUNNING, false)) ?: return Result.success()
+        return try {
+            // Pause/delete cancel queued history; execution also revalidates
+            // current task state and Rust atomically validates the occurrence.
+            CronWorkScheduler.enqueueExecutionChain(applicationContext, listOf(record))?.let { operation ->
+                withContext(Dispatchers.IO) { operation.result.get() }
+            }
+            Result.success()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            Result.retry()
+        }
+    }
+}
+
+internal fun busyCronRetryRecord(history: CronRunHistoryStore, runId: String, attempt: Int, recoverRunning: Boolean = false): CronRunRecord? =
+    history.record(runId)?.takeIf {
+        it.status == (if (recoverRunning) CronRunStatus.Running else CronRunStatus.Queued) && it.attempt == attempt
+    }
+
+internal suspend fun parkBusyCronRun(
+    history: CronRunHistoryStore,
+    runId: String,
+    attempt: Int,
+    message: String,
+    enqueueWake: suspend (CronRunRecord) -> Unit,
+) {
+    val queued = history.markRetry(runId, attempt, message) ?: return
+    if (queued.status == CronRunStatus.Queued) enqueueWake(queued)
 }
 
 class CronDispatchWorker(
@@ -202,30 +265,97 @@ class CronReconcileWorker(
     }
 }
 
-class CronExecutionWorker(
+class CronExecutionWorker internal constructor(
     appContext: Context,
     params: WorkerParameters,
+    private val repository: AndroidCronRepository,
+    private val gateway: CronEngineGateway,
+    private val reconcileSchedules: suspend () -> Unit = {
+        CronCoordinator(appContext, repository).reconcile("execution-finished")
+    },
 ) : CoroutineWorker(appContext, params) {
-    private val repository = AndroidCronRepository.get(appContext)
+    constructor(appContext: Context, params: WorkerParameters) : this(
+        appContext, params, AndroidCronRepository.get(appContext), MobileCronEngineGateway(appContext),
+    )
+
     private val history = repository.historyStore
-    private val gateway: CronEngineGateway = MobileCronEngineGateway(appContext)
     private val runId = params.inputData.getString(CronWorkKeys.RUN_ID)
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = try {
+        executeOccurrence()
+    } catch (cancel: CancellationException) {
+        throw cancel
+    } catch (error: Throwable) {
+        // Includes history/scope reads before a task can be safely identified.
+        // An exception must never fail the entire WorkManager dependency chain.
+        Log.w(TAG, "cron occurrence preflight unavailable", error)
+        Result.retry()
+    }
+
+    private suspend fun executeOccurrence(): Result {
         val id = runId ?: return Result.success()
         val existing = history.record(id) ?: return Result.success()
-        if (existing.status.isTerminal) return Result.success()
+        if (existing.status.isTerminal) {
+            repository.postPendingNotifications(id)
+            return Result.success()
+        }
         val scope = repository.scope(existing.scopeId)
             ?: return terminalFailure(
                 existing,
                 applicationContext.getString(R.string.cron_workspace_unavailable),
             )
-        history.markRunning(id, runAttemptCount + 1)
+        try {
+            val task = gateway.list(scope).firstOrNull { it.id == existing.taskId }
+            if (task != null && repository.recoverNativeTerminal(existing, task)) return Result.success()
+            if (existing.status == CronRunStatus.Running) {
+                history.markTerminal(id, CronRunStatus.Interrupted, errorMessage = "Execution was interrupted; it will not be replayed")
+                postTerminal(history.record(id))
+                return Result.success()
+            }
+            if (task == null || !task.isActive()) {
+                history.markTerminal(id, CronRunStatus.Cancelled, errorMessage = "Task is no longer active")
+                return Result.success()
+            }
+            val automation = CronAutomation.from(task)
+            history.attachExecution(id, model = automation.model, notificationPolicy = automation.notificationPolicy)
+            history.markRunning(id, maxOf(existing.attempt, runAttemptCount) + 1)
+        } catch (cancel: CancellationException) {
+            // No model invocation has started: retain the queued occurrence.
+            throw cancel
+        } catch (error: Throwable) {
+            Log.w(TAG, "cron task preflight failed", error)
+            // A previous started execution needs native terminal reconciliation;
+            // never turn it back into runnable work merely because reads failed.
+            return try {
+                withContext(NonCancellable) {
+                    val attempt = maxOf(existing.attempt, runAttemptCount) + 1
+                    if (existing.status == CronRunStatus.Running) {
+                        // Advance only the wake generation, retaining started
+                        // state so successful recovery can never invoke it again.
+                        history.markRunning(id, attempt)?.takeIf { it.status == CronRunStatus.Running }?.let {
+                            CronWorkScheduler.enqueueBusyRetry(applicationContext, it, recoverRunning = true)
+                        }
+                    } else {
+                        parkBusyCronRun(history, id, attempt,
+                            "preflight: ${error.message ?: "Scheduled task is temporarily unavailable"}") {
+                            CronWorkScheduler.enqueueBusyRetry(applicationContext, it)
+                        }
+                    }
+                }
+                repository.refresh()
+                Result.success()
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (handoffError: Throwable) {
+                Log.w(TAG, "cron preflight retry handoff failed", handoffError)
+                Result.retry()
+            }
+        }
         repository.refresh()
         return try {
             val batch = withTimeout(AGENT_RUN_BUDGET_MS) {
                 if (existing.manual) {
-                    gateway.runTaskNow(scope, existing.taskId)
+                    gateway.runTaskNow(scope, existing.taskId, existing.scheduledAtMs)
                 } else {
                     gateway.runTaskIfDue(scope, existing.taskId, existing.scheduledAtMs)
                 }
@@ -238,11 +368,12 @@ class CronExecutionWorker(
                 status = CronRunStatus.TimedOut,
             )
         } catch (cancel: CancellationException) {
-            history.markRetry(
-                id,
-                runAttemptCount + 1,
-                applicationContext.getString(R.string.cron_execution_interrupted_retry_message),
-            )
+            // A busy handoff has no started model turn. Its independent wake
+            // survives this worker stopping, so keep that occurrence queued.
+            val parked = history.record(id)?.let {
+                it.status == CronRunStatus.Queued && it.errorMessage?.startsWith("busy:") == true
+            } == true
+            if (!parked) history.markTerminal(id, CronRunStatus.Interrupted, errorMessage = "Execution was interrupted; it will not be replayed")
             repository.refresh()
             throw cancel
         } catch (error: Throwable) {
@@ -271,8 +402,7 @@ class CronExecutionWorker(
             withContext(NonCancellable) {
                 try {
                     withTimeout(RECONCILE_BUDGET_MS) {
-                        CronCoordinator(applicationContext, repository)
-                            .reconcile("execution-finished")
+                        reconcileSchedules()
                     }
                 } catch (error: Throwable) {
                     // Do not replay a completed occurrence merely because the
@@ -291,7 +421,19 @@ class CronExecutionWorker(
     ): Result {
         var requestedResult: Result? = null
         for (fired in firedJobs) {
-            val queued = history.unfinished(scope.scopeId, fired.id) ?: continue
+            val queued = history.record(requested.runId)?.takeIf { it.taskId == fired.id && !it.status.isTerminal } ?: continue
+            val actualModel = runCatching {
+                gateway.list(scope).firstOrNull { it.id == fired.id }?.let { task ->
+                    val runs = org.json.JSONObject(CronAutomation.from(task).json).optJSONArray("runs")
+                    if (runs == null) null else (runs.length() - 1 downTo 0).firstNotNullOfOrNull { index ->
+                        val run = runs.getJSONObject(index)
+                        run.optString("model").takeIf {
+                            it.isNotBlank() && run.optString("sessionId") == fired.sessionId
+                        }
+                    }
+                }
+            }.getOrNull()
+            history.attachExecution(queued.runId, sessionId = fired.sessionId, model = actualModel)
             when (val status = fired.status) {
                 CronFireStatusDto.Ok -> {
                     history.markTerminal(
@@ -304,9 +446,23 @@ class CronExecutionWorker(
                     if (queued.runId == requested.runId) requestedResult = Result.success()
                 }
                 is CronFireStatusDto.Failed -> {
-                    if (fired.retryable &&
-                        runAttemptCount + 1 < MAX_EXECUTION_ATTEMPTS
-                    ) {
+                    if (status.message.startsWith("busy:")) {
+                        val result = try {
+                            withContext(NonCancellable) {
+                                parkBusyCronRun(history, queued.runId, maxOf(queued.attempt, runAttemptCount) + 1, status.message) {
+                                    CronWorkScheduler.enqueueBusyRetry(applicationContext, it)
+                                }
+                            }
+                            // Only release the chain after the independent wake
+                            // commits. A failed handoff retains this worker retry.
+                            Result.success()
+                        } catch (cancel: CancellationException) {
+                            throw cancel
+                        } catch (_: Exception) {
+                            Result.retry()
+                        }
+                        if (queued.runId == requested.runId) requestedResult = result
+                    } else if (fired.retryable && runAttemptCount + 1 < MAX_EXECUTION_ATTEMPTS) {
                         history.markRetry(queued.runId, runAttemptCount + 1, status.message)
                         if (queued.runId == requested.runId) requestedResult = Result.retry()
                     } else {
@@ -368,17 +524,7 @@ class CronExecutionWorker(
     }
 
     private fun postTerminal(record: CronRunRecord?) {
-        record ?: return
-        val body = record.resultText ?: record.errorMessage
-            ?: applicationContext.getString(R.string.chat_status_completed)
-        CronNotifications.postResult(
-            context = applicationContext,
-            title = record.prompt.lineSequence().firstOrNull()?.take(40)?.ifBlank { null }
-                ?: applicationContext.getString(R.string.cron_result_title_default),
-            body = body,
-            tag = "cron-${record.taskId}",
-            runId = record.runId,
-        )
+        record?.let { repository.postPendingNotifications(it.runId) }
     }
 
     companion object {

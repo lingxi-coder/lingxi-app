@@ -38,11 +38,12 @@ class CronManagementViewModel(app: Application) : AndroidViewModel(app) {
         cron: String,
         prompt: String,
         recurring: Boolean,
+        automation: CronAutomation,
         onResult: (String?) -> Unit,
     ) {
         viewModelScope.launch {
             val error = runCatching {
-                repository.create(scopeId, cron, prompt, recurring)
+                repository.create(scopeId, cron, prompt, recurring, automation)
             }.exceptionOrNull()?.message
             onResult(error)
         }
@@ -54,11 +55,12 @@ class CronManagementViewModel(app: Application) : AndroidViewModel(app) {
         cron: String,
         prompt: String,
         recurring: Boolean,
+        automation: CronAutomation,
         onResult: (String?) -> Unit,
     ) {
         viewModelScope.launch {
             val error = runCatching {
-                repository.update(scopeId, taskId, cron, prompt, recurring)
+                repository.update(scopeId, taskId, cron, prompt, recurring, automation)
             }.exceptionOrNull()?.message
             onResult(error)
         }

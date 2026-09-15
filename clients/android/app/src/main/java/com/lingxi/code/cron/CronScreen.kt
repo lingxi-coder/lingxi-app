@@ -6,12 +6,14 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -83,271 +85,221 @@ private fun schedulePresets(): List<SchedulePreset> = listOf(
 fun CronScreen(
     initialTaskKey: String? = null,
     initialRunId: String? = null,
+    engineSource: com.lingxi.code.conversation.ConversationSource? = null,
+    projectStore: com.lingxi.code.project.ProjectStore? = null,
+    onOpenSession: (CronRunRecord) -> Unit = {},
     vm: CronManagementViewModel = viewModel(),
 ) {
     val state by vm.state.collectAsState()
+    val modelState = engineSource?.modelState?.collectAsState()?.value
+    val projects = projectStore?.state?.collectAsState()?.value
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-
+    var query by rememberSaveable { mutableStateOf("") }
+    var filter by rememberSaveable { mutableStateOf("all") }
+    var detail by rememberSaveable(initialTaskKey) { mutableStateOf(initialTaskKey != null) }
     var prompt by rememberSaveable { mutableStateOf("") }
     var cronExpr by rememberSaveable { mutableStateOf("0 9 * * *") }
     var recurring by rememberSaveable { mutableStateOf(true) }
     var selectedScopeId by rememberSaveable { mutableStateOf(GLOBAL_CRON_SCOPE_ID) }
     var editingTaskId by rememberSaveable { mutableStateOf<String?>(null) }
+    var metadata by rememberSaveable { mutableStateOf(CronAutomation.defaults("").json) }
+    val automation = CronAutomation(metadata)
+    var dirty by rememberSaveable { mutableStateOf(false) }
+    var discardAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var selectedRunId by rememberSaveable(initialRunId) { mutableStateOf(initialRunId) }
     var formError by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
     var appliedInitialTask by rememberSaveable(initialTaskKey) { mutableStateOf(false) }
-
+    fun change(value: CronAutomation) { metadata = value.json; dirty = true }
+    fun navigate(action: () -> Unit) { if (dirty) discardAction = action else action() }
+    fun select(task: AndroidCronTask) {
+        editingTaskId = task.task.id
+        selectedScopeId = task.scope.scopeId
+        prompt = task.task.prompt
+        cronExpr = task.task.cron
+        recurring = task.task.recurring
+        metadata = CronAutomation.from(task.task).json
+        detail = true; dirty = false; formError = null
+    }
+    fun create() {
+        editingTaskId = null; selectedScopeId = GLOBAL_CRON_SCOPE_ID
+        prompt = ""; cronExpr = "0 9 * * *"; recurring = true
+        metadata = CronAutomation.defaults(modelState?.active.orEmpty()).json
+        detail = true; dirty = false; formError = null
+    }
     DisposableEffect(lifecycleOwner, vm) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                vm.refresh()
-                vm.reconcile("ui-resume")
-            }
+            if (event == Lifecycle.Event.ON_RESUME) { vm.refresh(); vm.reconcile("ui-resume") }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-
-    LaunchedEffect(state.activeScopeId, state.scopes) {
-        if (editingTaskId == null && state.scopes.any { it.scopeId == state.activeScopeId }) {
-            selectedScopeId = state.activeScopeId
-        }
-    }
     LaunchedEffect(initialTaskKey, state.tasks) {
-        if (!appliedInitialTask && !initialTaskKey.isNullOrBlank()) {
-            state.tasks.firstOrNull {
-                "${it.scope.scopeId}:${it.task.id}" == initialTaskKey
-            }?.let { selected ->
-                selectedScopeId = selected.scope.scopeId
-                editingTaskId = selected.task.id
-                prompt = selected.task.prompt
-                cronExpr = selected.task.cron
-                recurring = selected.task.recurring
-                appliedInitialTask = true
+        if (!appliedInitialTask && initialTaskKey != null) {
+            state.tasks.firstOrNull { "${it.scope.scopeId}:${it.task.id}" == initialTaskKey }?.let {
+                select(it); appliedInitialTask = true
             }
         }
     }
-
-    fun resetForm() {
-        editingTaskId = null
-        prompt = ""
-        cronExpr = "0 9 * * *"
-        recurring = true
-        formError = null
-        selectedScopeId = state.activeScopeId
+    discardAction?.let { action ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { discardAction = null },
+            title = { Text("Discard unsaved changes?") },
+            text = { Text("Your saved task will keep its current settings.") },
+            confirmButton = { Button(onClick = { discardAction = null; dirty = false; action() }) { Text("Discard") } },
+            dismissButton = { OutlinedButton(onClick = { discardAction = null }) { Text("Keep editing") } },
+        )
     }
-
-    Column(
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        val validationErrorMessage = stringResource(R.string.cron_form_validation_error)
-
-        SchedulingSummary(state)
-        initialRunId?.let { runId ->
-            state.history.firstOrNull { it.runId == runId }?.let { run ->
-                Text(
-                    stringResource(R.string.cron_notification_run_result_label),
-                    fontWeight = FontWeight.SemiBold,
-                )
-                RunHistoryCard(run = run, expanded = true, onClick = {})
-            }
-        }
-        if (!state.exactAlarmAllowed) {
-            ExactAlarmBanner()
-        }
-        state.errorMessage?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-        }
-
-        Text(
-            if (editingTaskId == null) {
-                stringResource(R.string.cron_new_task_button)
-            } else {
-                stringResource(R.string.cron_edit_task_button)
-            },
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            stringResource(R.string.cron_scope_hint),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 12.sp,
-        )
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        ) {
-            state.scopes.forEach { scope ->
-                FilterChip(
-                    selected = scope.scopeId == selectedScopeId,
-                    onClick = { if (editingTaskId == null) selectedScopeId = scope.scopeId },
-                    enabled = editingTaskId == null,
-                    label = { Text(scope.projectName) },
-                )
-            }
-        }
-        OutlinedTextField(
-            value = prompt,
-            onValueChange = { prompt = it },
-            label = { Text(stringResource(R.string.cron_prompt_field_label)) },
-            minLines = 2,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        ) {
-            schedulePresets().forEach { preset ->
-                AssistChip(
-                    onClick = {
-                        cronExpr = preset.cron
-                        recurring = true
-                    },
-                    label = { Text(preset.label) },
-                )
-            }
-            AssistChip(
-                onClick = {
-                    openOneShotDateTimePicker(context) { expression ->
-                        cronExpr = expression
-                        recurring = false
-                    }
-                },
-                label = { Text(stringResource(R.string.cron_one_time_datetime_button)) },
-            )
-        }
-        OutlinedTextField(
-            value = cronExpr,
-            onValueChange = { cronExpr = it },
-            label = { Text(stringResource(R.string.cron_advanced_expression_label)) },
-            placeholder = { Text("0 9 * * *") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Switch(checked = recurring, onCheckedChange = { recurring = it })
-            Text(
-                if (recurring) {
-                    stringResource(R.string.cron_recurring_interval_note)
-                } else {
-                    stringResource(R.string.cron_run_once_toggle)
-                },
-                modifier = Modifier.padding(start = 8.dp),
-            )
-        }
-        formError?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = {
-                    formError = null
-                    if (prompt.isBlank() || cronExpr.isBlank()) {
-                        formError = validationErrorMessage
-                        return@Button
-                    }
-                    submitting = true
-                    val completed: (String?) -> Unit = { error ->
-                        submitting = false
-                        formError = error
-                        if (error == null) {
-                            resetForm()
-                            if (!state.exactAlarmAllowed) {
-                                openExactAlarmSettings(context)
-                            }
+    // The settings host renders this page inside a scrolling Box, which
+    // STACKS its children — without an explicit Column the run history,
+    // divider, banners and notices draw on top of the task list.
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.fillMaxWidth()) {
+        androidx.activity.compose.BackHandler(enabled = detail) { navigate { detail = false } }
+        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val wide = maxWidth >= 760.dp
+            Row(horizontalArrangement = Arrangement.spacedBy(24.dp), modifier = Modifier.fillMaxWidth()) {
+                if (!detail || wide) Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                        listOf("all", "active", "paused", "completed").forEach { item ->
+                            FilterChip(selected = filter == item, onClick = { filter = item }, label = { Text(item.replaceFirstChar { it.uppercase() }) })
                         }
                     }
-                    val taskId = editingTaskId
-                    if (taskId == null) {
-                        vm.create(selectedScopeId, cronExpr, prompt, recurring, completed)
-                    } else {
-                        vm.update(selectedScopeId, taskId, cronExpr, prompt, recurring, completed)
+                    OutlinedTextField(query, { query = it }, label = { Text("Search scheduled tasks") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Button(onClick = { navigate { create() } }) { Text("Create") }
+                    if (state.loading) CircularProgressIndicator()
+                    state.tasks.filter { task ->
+                        (filter == "all" || CronAutomation.from(task.task).status == filter) &&
+                            (query.isBlank() || "${CronAutomation.from(task.task).name} ${task.task.prompt} ${task.scope.projectName}".contains(query, ignoreCase = true))
+                    }.forEach { task ->
+                        CronTaskCard(task,
+                            onEdit = { navigate { select(task) } },
+                            onRunNow = { vm.runNow(task.scope.scopeId, task.task.id) { formError = it } },
+                            onDelete = { vm.delete(task.scope.scopeId, task.task.id) { formError = it } },
+                        )
                     }
-                },
-                enabled = !submitting && state.scopes.any { it.scopeId == selectedScopeId },
-            ) {
-                Text(
-                    if (editingTaskId == null) {
-                        stringResource(R.string.cron_create_and_schedule_button)
-                    } else {
-                        stringResource(R.string.voice_save_button)
-                    },
-                )
-            }
-            if (editingTaskId != null) {
-                OutlinedButton(onClick = ::resetForm) {
-                    Text(stringResource(R.string.cron_cancel_edit_button))
+                    if (state.tasks.isEmpty() && !state.loading) Text(stringResource(R.string.cron_no_tasks_yet))
+                    SchedulingSummary(state)
+                }
+                if (detail) Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { navigate { detail = false } }) { Text("Back") }
+                        Text(if (editingTaskId == null) "New scheduled task" else "Task details", modifier = Modifier.padding(top = 12.dp), fontWeight = FontWeight.SemiBold)
+                    }
+                    CronChoice("Status", automation.status, listOf("active", "paused", "completed").map { it to it.replaceFirstChar(Char::uppercase) }) {
+                        change(automation.change("status", it).change("statusReason", null))
+                    }
+                    automation.statusReason?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    OutlinedTextField(automation.name, { change(automation.change("name", it)) }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(prompt, { prompt = it; dirty = true }, label = { Text(stringResource(R.string.cron_prompt_field_label)) }, minLines = 3, modifier = Modifier.fillMaxWidth())
+                    Text("Details", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    androidx.compose.material3.OutlinedCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    ) {
+                    CronChoice("Runs in", automation.runMode, listOf("new_session" to "New chat each run", "selected_session" to "Selected chat", "task_session" to "Task chat")) {
+                        change(automation.change("runMode", it).change("targetSessionId", null).change("ownedSessionId", null))
+                    }
+                    CronChoice("Project", selectedScopeId, state.scopes.map { it.scopeId to if (it.projectId == null) "None" else it.projectName }, enabled = editingTaskId == null && automation.runMode != "selected_session") {
+                        selectedScopeId = it; dirty = true
+                    }
+                    if (automation.runMode == "selected_session") {
+                        val sessions = buildList {
+                            state.generatedSessions.filter { it.projectId == null && it.sessionId != null }.distinctBy { it.sessionId }
+                                .forEach { add(Triple(GLOBAL_CRON_SCOPE_ID, it.sessionId!!, it.prompt.take(120))) }
+                            projects?.projects?.forEach { project -> project.sessions.filterNot { it.isArchived }.forEach { add(Triple(project.record.id, it.sessionId, "${project.record.name} / ${it.title}")) } }
+                        }.filter { editingTaskId == null || it.first == selectedScopeId }
+                        CronChoice("Chat", automation.targetSessionId, sessions.map { it.second to it.third }) { id ->
+                            sessions.firstOrNull { it.second == id }?.let { selectedScopeId = it.first }
+                            change(automation.change("targetSessionId", id))
+                        }
+                    }
+                    if (editingTaskId != null) OutlinedButton(onClick = {
+                        editingTaskId = null; metadata = automation.copied().json; dirty = true
+                    }) { Text("Copy to project…") }
+                    CronChoice("Model", automation.model, modelState?.available.orEmpty().map { it to (modelState?.details?.get(it)?.displayName ?: it) }) { model ->
+                        change(automation.change("model", model).withReasoning(com.lingxi.code.bindings.ReasoningSelectionDto.Automatic))
+                    }
+                    val reasoningOptions = modelState?.details?.get(automation.model)?.reasoningOptions.orEmpty().filter { it.persistable }
+                    val choices = listOf("{\"type\":\"automatic\"}" to "Automatic") + reasoningOptions.map { reasoningJson(it.selection).toString() to it.label }
+                    CronChoice("Reasoning", automation.reasoningJson, choices.distinctBy { it.first }, fallbackLabel = automation.reasoningLabel) { change(automation.change("reasoning", org.json.JSONObject(it))) }
+                    CronChoice("Notifications", automation.notificationPolicy, listOf("all" to "All runs", "failed" to "Failures only", "none" to "Off"), divider = false) { change(automation.change("notificationPolicy", it)) }
+                    }
+                    Text("Frequency", fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                        schedulePresets().forEach { preset -> AssistChip(onClick = { cronExpr = preset.cron; recurring = true; dirty = true }, label = { Text(preset.label) }) }
+                        AssistChip(onClick = { openOneShotDateTimePicker(context) { cronExpr = it; recurring = false; dirty = true } }, label = { Text(stringResource(R.string.cron_one_time_datetime_button)) })
+                    }
+                    OutlinedTextField(cronExpr, { cronExpr = it; dirty = true }, label = { Text(stringResource(R.string.cron_advanced_expression_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(recurring, { recurring = it; dirty = true })
+                        Text(if (recurring) "Repeat on schedule" else "Run once")
+                    }
+                    Text("Time zone: ${ZoneId.systemDefault().id}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val validation = stringResource(R.string.cron_form_validation_error)
+                    Button(enabled = !submitting, onClick = {
+                        if (prompt.isBlank() || cronExpr.isBlank() || automation.model.isBlank() || (automation.runMode == "selected_session" && automation.targetSessionId.isBlank())) {
+                            formError = validation; return@Button
+                        }
+                        submitting = true
+                        val result: (String?) -> Unit = { error ->
+                            submitting = false; formError = error
+                            if (error == null) { dirty = false; detail = false }
+                        }
+                        editingTaskId?.let { vm.update(selectedScopeId, it, cronExpr, prompt, recurring, automation, result) }
+                            ?: vm.create(selectedScopeId, cronExpr, prompt, recurring, automation, result)
+                    }) { Text(if (submitting) "Saving…" else "Save changes") }
                 }
             }
         }
-
-        HorizontalDivider()
-        Text(
-            stringResource(R.string.cron_task_count_header_fmt, state.tasks.size),
-            fontWeight = FontWeight.SemiBold,
-        )
-        if (state.loading) {
-            CircularProgressIndicator()
-        }
-        state.tasks.groupBy { it.scope }.forEach { (scope, tasks) ->
-            Text(
-                scope.projectName,
-                color = MaterialTheme.colorScheme.primary,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            tasks.forEach { task ->
-                CronTaskCard(
-                    task = task,
-                    onEdit = {
-                        selectedScopeId = task.scope.scopeId
-                        editingTaskId = task.task.id
-                        prompt = task.task.prompt
-                        cronExpr = task.task.cron
-                        recurring = task.task.recurring
-                        formError = null
-                    },
-                    onRunNow = { vm.runNow(task.scope.scopeId, task.task.id) { formError = it } },
-                    onDelete = {
-                        vm.delete(task.scope.scopeId, task.task.id) { formError = it }
-                        if (editingTaskId == task.task.id) resetForm()
-                    },
-                )
-            }
-        }
-        if (!state.loading && state.tasks.isEmpty()) {
-            Text(
-                stringResource(R.string.cron_no_tasks_yet),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 13.sp,
-            )
-        }
-
+        formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        if (!state.exactAlarmAllowed) ExactAlarmBanner()
         HorizontalDivider()
         Text(stringResource(R.string.cron_run_history_section), fontWeight = FontWeight.SemiBold)
-        state.history.take(50).forEach { run ->
-            RunHistoryCard(
-                run = run,
-                expanded = selectedRunId == run.runId,
-                onClick = {
-                    selectedRunId = if (selectedRunId == run.runId) null else run.runId
-                },
-            )
+        state.history.filter { !detail || editingTaskId == null || (it.scopeId == selectedScopeId && it.taskId == editingTaskId) }.take(50).forEach { run ->
+            RunHistoryCard(run, selectedRunId == run.runId, { selectedRunId = if (selectedRunId == run.runId) null else run.runId })
+            if (selectedRunId == run.runId && run.sessionId != null) {
+                OutlinedButton(onClick = { onOpenSession(run) }) { Text("Open chat") }
+            }
         }
-        if (!state.loading && state.history.isEmpty()) {
-            Text(
-                stringResource(R.string.cron_no_run_history_android),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 13.sp,
-            )
+        Text(stringResource(R.string.cron_force_stop_notice), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun CronChoice(
+    label: String,
+    value: String,
+    choices: List<Pair<String, String>>,
+    enabled: Boolean = true,
+    divider: Boolean = true,
+    fallbackLabel: String? = null,
+    onChange: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val interactive = enabled && choices.isNotEmpty()
+    androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth()) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 52.dp)
+                    .clickable(enabled = interactive, role = androidx.compose.ui.semantics.Role.Button) { expanded = true }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(label, modifier = Modifier.padding(end = 16.dp), fontSize = 14.sp)
+                Text(choices.firstOrNull { it.first == value }?.second ?: fallbackLabel ?: value.ifBlank { "Select…" },
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f), fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                if (interactive) Text("⌄", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 10.dp))
+            }
+            if (divider) HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
         }
-        Text(
-            stringResource(R.string.cron_force_stop_notice),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 11.sp,
-        )
+        androidx.compose.material3.DropdownMenu(expanded, { expanded = false }) {
+            choices.forEach { (id, title) -> androidx.compose.material3.DropdownMenuItem(text = { Text(title) }, onClick = { expanded = false; onChange(id) }) }
+        }
     }
 }
 
@@ -398,7 +350,7 @@ private fun CronTaskCard(
     onDelete: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onEdit),
         colors = CardDefaults.cardColors(),
     ) {
         Column(
@@ -407,15 +359,15 @@ private fun CronTaskCard(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = task.task.prompt.lineSequence().firstOrNull()
-                        ?.ifBlank { task.task.id } ?: task.task.id,
+                    text = CronAutomation.from(task.task).name.ifBlank { task.task.prompt.lineSequence().firstOrNull().orEmpty() }
+                        .ifBlank { task.task.id },
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 14.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                IconButton(onClick = onRunNow, enabled = task.activeRun == null) {
+                IconButton(onClick = onRunNow, enabled = task.activeRun == null && task.task.isActive()) {
                     Icon(
                         Icons.Default.PlayArrow,
                         contentDescription = stringResource(R.string.cron_run_now_button),
@@ -444,11 +396,19 @@ private fun CronTaskCard(
                 fontSize = 12.sp,
             )
             Text(
+                task.scope.projectName,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+            )
+            Text(
                 task.task.cron,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.primary,
             )
+            val automation = CronAutomation.from(task.task)
+            Text(automation.status.replaceFirstChar { it.uppercase() }, color = MaterialTheme.colorScheme.primary)
+            automation.statusReason?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             val stateText = when {
                 task.schedulingMode == CronSchedulingMode.Unsupported ->
                     task.unsupportedReason ?: stringResource(R.string.cron_task_unsupported_default)
@@ -515,6 +475,7 @@ private fun RunHistoryCard(
                     },
                     fontSize = 12.sp,
                 )
+                run.model?.let { Text("Model: $it", fontSize = 11.sp) }
                 Text(
                     "run id: ${run.runId}",
                     fontFamily = FontFamily.Monospace,
@@ -613,4 +574,5 @@ private fun runStatusLabel(status: CronRunStatus): String = when (status) {
     CronRunStatus.TimedOut -> stringResource(R.string.chat_status_timed_out)
     CronRunStatus.Cancelled -> stringResource(R.string.chat_status_cancelled)
     CronRunStatus.Skipped -> stringResource(R.string.cron_status_skipped)
+    CronRunStatus.Interrupted -> "Interrupted"
 }

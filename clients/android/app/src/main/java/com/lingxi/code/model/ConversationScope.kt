@@ -2,7 +2,8 @@ package com.lingxi.code.model
 
 /**
  * Which workspace the conversation engine is bound to. `Global` is the default
- * shell workspace, `Project` a user project's workspace, and `LocalApp` a
+ * shell workspace, `Scheduled` the managed no-project task workspace,
+ * `Project` a user project's workspace, and `LocalApp` a
  * local app's `apps/<id>/workspace` directory — protocol v3 made each app a
  * conversation scope with its own session catalog (`ListAppSessions`).
  *
@@ -11,6 +12,8 @@ package com.lingxi.code.model
  */
 sealed interface ConversationScope {
     data object Global : ConversationScope
+    /** Managed no-project scheduled sessions, displayed with general chats. */
+    data object Scheduled : ConversationScope
     data class Project(val projectId: String) : ConversationScope
     data class LocalApp(val appId: String) : ConversationScope
 }
@@ -35,10 +38,11 @@ enum class SessionMode(val wireValue: String) {
 
 /**
  * The durable key a scope's state (last-active session, composer draft) is
- * stored under — `global` / `project.<id>` / `app.<id>`.
+ * stored under — `global` / `scheduled` / `project.<id>` / `app.<id>`.
  */
 fun ConversationScope.persistenceKey(): String = when (this) {
     ConversationScope.Global -> "global"
+    ConversationScope.Scheduled -> "scheduled"
     is ConversationScope.Project -> "project.$projectId"
     is ConversationScope.LocalApp -> "app.$appId"
 }
@@ -50,6 +54,7 @@ fun ConversationScope.sessionStateKey(mode: SessionMode): String = "${persistenc
 fun conversationScopeFromKey(key: String?): ConversationScope? = when {
     key == null -> null
     key == "global" -> ConversationScope.Global
+    key == "scheduled" -> ConversationScope.Scheduled
     key.startsWith("project.") -> key.removePrefix("project.")
         .takeIf { it.isNotBlank() }?.let { ConversationScope.Project(it) }
     key.startsWith("app.") -> key.removePrefix("app.")

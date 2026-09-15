@@ -21,8 +21,8 @@ data class CronScope(
         fun global(context: Context): CronScope = CronScope(
             scopeId = GLOBAL_CRON_SCOPE_ID,
             projectId = null,
-            projectName = context.applicationContext.getString(R.string.common_global),
-            workspacePath = context.applicationContext.filesDir.canonicalPath,
+            projectName = context.applicationContext.getString(R.string.common_none),
+            workspacePath = java.io.File(context.applicationContext.filesDir, "scheduled/workspace").apply { mkdirs() }.canonicalPath,
             guestPath = "/workspace/global",
         )
     }
@@ -42,10 +42,11 @@ enum class CronRunStatus {
     TimedOut,
     Cancelled,
     Skipped,
+    Interrupted,
     ;
 
     val isTerminal: Boolean
-        get() = this in setOf(Succeeded, Failed, TimedOut, Cancelled, Skipped)
+        get() = this in setOf(Succeeded, Failed, TimedOut, Cancelled, Skipped, Interrupted)
 }
 
 data class CronRunRecord(
@@ -64,6 +65,10 @@ data class CronRunRecord(
     val resultText: String? = null,
     val errorMessage: String? = null,
     val manual: Boolean = false,
+    val sessionId: String? = null,
+    val model: String? = null,
+    val notificationPolicy: String = "all",
+    val notificationDelivered: Boolean = false,
 )
 
 data class AndroidCronTask(
@@ -81,6 +86,7 @@ data class AndroidCronRepositoryState(
     val scopes: List<CronScope> = emptyList(),
     val activeScopeId: String = GLOBAL_CRON_SCOPE_ID,
     val history: List<CronRunRecord> = emptyList(),
+    val generatedSessions: List<CronRunRecord> = emptyList(),
     val exactAlarmAllowed: Boolean = true,
     val schedulingMode: CronSchedulingMode = CronSchedulingMode.Exact,
     val nextScheduledAtMs: Long? = null,
@@ -105,3 +111,10 @@ internal data class ScopedCronOccurrence(
 internal data class CronTaskExecutionBatch(
     val firedJobs: List<com.lingxi.code.bindings.FiredCronJobDto>,
 )
+
+internal fun shouldNotifyCronRun(policy: String, status: CronRunStatus): Boolean =
+    status.isTerminal && when (policy) {
+        "all" -> true
+        "failed" -> status in setOf(CronRunStatus.Failed, CronRunStatus.TimedOut, CronRunStatus.Interrupted)
+        else -> false
+    }

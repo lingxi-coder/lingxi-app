@@ -1,6 +1,5 @@
 package com.lingxi.code.cron
 
-import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.util.UUID
 import org.junit.After
@@ -11,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-class CronRunHistoryStoreInstrumentedTest {
+class CronRunHistoryPersistenceTest {
     private lateinit var root: File
     private lateinit var store: CronRunHistoryStore
     private var clock = 1_000L
@@ -19,8 +18,7 @@ class CronRunHistoryStoreInstrumentedTest {
 
     @Before
     fun setUp() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        root = File(context.cacheDir, "cron-history-${UUID.randomUUID()}")
+        root = java.nio.file.Files.createTempDirectory("cron-history-").toFile()
         store = CronRunHistoryStore(
             historyRoot = root,
             now = { clock++ },
@@ -98,6 +96,76 @@ class CronRunHistoryStoreInstrumentedTest {
     }
 
     @Test
+    fun restartRecoversSavedTerminalNotificationsOnceUsingPersistedPolicy() {
+        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        fun terminal(task: String, policy: String, status: CronRunStatus): String {
+            val run = store.enqueue(scope, task, "saved prompt", 900L)!!
+            store.attachExecution(run.runId, notificationPolicy = policy)
+            store.markTerminal(run.runId, status, resultText = "saved result")
+            return run.runId
+        }
+        val success = terminal("all", "all", CronRunStatus.Succeeded)
+        val failure = terminal("failed", "failed", CronRunStatus.Failed)
+        terminal("off", "none", CronRunStatus.Failed)
+        terminal("success-filtered", "failed", CronRunStatus.Succeeded)
+        val queued = store.enqueue(scope, "queued", "prompt", 900L)!!
+        val running = store.enqueue(scope, "running", "prompt", 900L)!!
+        store.markRunning(running.runId, 1)
+
+        val posted = mutableListOf<CronRunRecord>()
+        // No task or Engine is required to deliver the already persisted results.
+        CronRunHistoryStore(root).postPendingNotifications(post = posted::add)
+        CronRunHistoryStore(root).postPendingNotifications(post = posted::add)
+
+        assertEquals(setOf(success, failure), posted.map { it.runId }.toSet())
+        assertEquals(2, posted.size)
+        assertTrue(posted.all { it.resultText == "saved result" })
+        assertEquals(CronRunStatus.Queued, store.record(queued.runId)?.status)
+        assertEquals(CronRunStatus.Running, store.record(running.runId)?.status)
+    }
+
+    @Test
+    fun failedNotificationClaimWriteRemainsRecoverable() {
+        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val run = store.enqueue(scope, "task", "prompt", 900L)!!
+        store.markTerminal(run.runId, CronRunStatus.Succeeded)
+        // Block the write the CLAIM depends on, which lives in index.json.
+        //
+        // Two ways of blocking it that look right do not work. Replacing
+        // sessions.json with a directory fails a write `writeLocked` swallows
+        // ON PURPOSE — the sidecar is derived, and its failure must not strand
+        // a run as Running forever — so the claim still lands and the
+        // notification still posts. Replacing index.json with a directory is
+        // undone by `readLocked`, which quarantines a primary it cannot read
+        // and then writes a fresh one. Making the history root unwritable is
+        // what actually fails the claim write while leaving index.json
+        // readable, so the record can still be inspected below.
+        var posts = 0
+        try {
+            assertTrue(root.setWritable(false, false))
+            assertTrue(runCatching { store.postPendingNotifications { posts++ } }.isFailure)
+            assertEquals(0, posts)
+            org.junit.Assert.assertFalse(store.record(run.runId)!!.notificationDelivered)
+        } finally {
+            assertTrue(root.setWritable(true, true))
+        }
+        CronRunHistoryStore(root).postPendingNotifications { posts++ }
+        CronRunHistoryStore(root).postPendingNotifications { posts++ }
+        assertEquals(1, posts)
+    }
+
+    @Test
+    fun workerTerminalRedeliveryAndRecoveryShareDurableClaim() {
+        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val run = store.enqueue(scope, "task", "prompt", 900L)!!
+        store.markTerminal(run.runId, CronRunStatus.Succeeded)
+        var posts = 0
+        store.postPendingNotifications(run.runId) { posts++ }
+        CronRunHistoryStore(root).postPendingNotifications { posts++ }
+        assertEquals(1, posts)
+    }
+
+    @Test
     fun pauseCancelsQueuedButPreservesRunning() {
         val scope = CronScope("global", null, "None", root.path, "/workspace/global")
         val queued = store.enqueue(scope, "queued-task", "prompt", 900L)!!
@@ -136,6 +204,20 @@ class CronRunHistoryStoreInstrumentedTest {
         store.markTerminal(run.runId, CronRunStatus.Interrupted, errorMessage = "process interrupted")
         assertNull(store.enqueue(scope, "task", "prompt", 900L))
         assertNotNull(store.enqueue(scope, "task", "prompt", 1_800L))
+    }
+
+    @Test
+    fun generatedSessionIndexOutlivesRunRetention() {
+        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        repeat(25) { index ->
+            val run = store.enqueue(scope, "task", "prompt", index.toLong())!!
+            store.attachExecution(run.runId, sessionId = "session-$index")
+            store.markTerminal(run.runId, CronRunStatus.Succeeded)
+        }
+        val reloaded = CronRunHistoryStore(root)
+        assertEquals(20, reloaded.records().size)
+        assertEquals(25, reloaded.generatedSessions().size)
+        assertTrue(reloaded.generatedSessions().any { it.sessionId == "session-0" })
     }
 
 }

@@ -357,6 +357,20 @@ class MainActivity : ComponentActivity() {
                     ) {
                         SettingsHost(
                             engineSource = activeConversationSource,
+                            onOpenScheduledSession = { run ->
+                                run.sessionId?.let { sessionId ->
+                                    pendingConversationLaunch.value = ConversationLaunchRequest(
+                                        sessionId = sessionId,
+                                        turnId = null,
+                                        workspaceKey = run.projectId?.let { "project.$it" } ?: "scheduled",
+                                        sessionMode = desktopProjectStore.state.value.projects
+                                            .firstOrNull { it.record.id == run.projectId }?.sessions
+                                            ?.firstOrNull { it.sessionId == sessionId.removePrefix("sess:") }?.mode
+                                            ?: com.lingxi.code.model.SessionMode.Code,
+                                    )
+                                    settingsOpen = false
+                                }
+                            },
                             projectStore = desktopProjectStore,
                             // 「在这里换项目」要真的把引擎换过去，而不是只挪一个记号：
                             // 项目层写进哪个目录由引擎进程的 cwd 决定。关掉设置页、把

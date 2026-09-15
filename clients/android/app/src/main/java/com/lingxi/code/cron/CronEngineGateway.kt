@@ -19,6 +19,7 @@ internal interface CronEngineGateway {
         cron: String,
         prompt: String,
         recurring: Boolean,
+        automation: CronAutomation,
     ): CronTaskDto
     suspend fun update(
         scope: CronScope,
@@ -26,6 +27,7 @@ internal interface CronEngineGateway {
         cron: String,
         prompt: String,
         recurring: Boolean,
+        automation: CronAutomation,
     ): CronTaskDto
     suspend fun delete(scope: CronScope, taskId: String): Boolean
     suspend fun runTaskIfDue(
@@ -33,7 +35,7 @@ internal interface CronEngineGateway {
         taskId: String,
         scheduledAtMs: Long,
     ): CronTaskExecutionBatch
-    suspend fun runTaskNow(scope: CronScope, taskId: String): CronTaskExecutionBatch
+    suspend fun runTaskNow(scope: CronScope, taskId: String, scheduledAtMs: Long): CronTaskExecutionBatch
     suspend fun acknowledgeOccurrence(
         scope: CronScope,
         taskId: String,
@@ -59,7 +61,8 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
         cron: String,
         prompt: String,
         recurring: Boolean,
-    ): CronTaskDto = withStore(scope) { it.create(cron, prompt, recurring) }
+        automation: CronAutomation,
+    ): CronTaskDto = withStore(scope) { it.createConfigured(cron, prompt, recurring, automation.json) }
 
     override suspend fun update(
         scope: CronScope,
@@ -67,8 +70,9 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
         cron: String,
         prompt: String,
         recurring: Boolean,
+        automation: CronAutomation,
     ): CronTaskDto = withStore(scope) {
-        it.update(taskId, cron, prompt, recurring)
+        it.updateConfigured(taskId, cron, prompt, recurring, automation.json)
     }
 
     override suspend fun delete(scope: CronScope, taskId: String): Boolean =
@@ -92,8 +96,9 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
     override suspend fun runTaskNow(
         scope: CronScope,
         taskId: String,
+        scheduledAtMs: Long,
     ): CronTaskExecutionBatch {
-        val fired = withEngine(scope) { it.runCronTaskNow(taskId) }
+        val fired = withEngine(scope) { it.runCronTaskNowAt(taskId, scheduledAtMs.toULong()) }
         return CronTaskExecutionBatch(listOfNotNull(fired))
     }
 
@@ -114,6 +119,10 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
             projectCwd = scope.projectId?.let { scope.workspacePath },
         )
         return try {
+            val defaults = com.lingxi.code.settings.ProviderSettingsRepository(appContext).use {
+                it.engineLaunchConfig().defaultModel
+            }
+            store.setMigrationDefaults(defaults, "{\"type\":\"automatic\"}")
             block(store)
         } finally {
             runCatching { store.destroy() }

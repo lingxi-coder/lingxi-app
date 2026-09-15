@@ -12,8 +12,8 @@ import com.lingxi.code.voice.buildVoiceEngine
 
 /**
  * Builds a NO-UI [MobileEngineHandle] for the cron background path — the same
- * engine the foreground app builds (same `filesDir` root ⇒ the same
- * `.lingxi/scheduled_tasks.json`, the same `SecureKeyStore` credentials), but
+ * engine the foreground app builds (shared `SecureKeyStore` credentials and
+ * a validated per-project or managed no-project execution workspace), but
  * with discarding event / permission sinks because a fired cron job runs
  * headless: its result comes back from the single-task cron FFI, not from
  * streamed events. Rust immediately denies any permission that was not already
@@ -51,9 +51,9 @@ object HeadlessEngineFactory {
             providerProfilesJson = providerLaunch.providerProfilesJson,
             routingJson = providerLaunch.routingJson,
             visionDelegationEnabled = providerLaunch.visionDelegationEnabled,
-            projectWorkspace = scope.projectId?.let {
+            projectWorkspace = run {
                 ProjectWorkspace(
-                    projectId = it,
+                    projectId = scope.projectId ?: "b51bca68-b85f-4caa-8881-07dd33eba24d",
                     hostPath = scope.workspacePath,
                     guestPath = scope.guestPath,
                 )

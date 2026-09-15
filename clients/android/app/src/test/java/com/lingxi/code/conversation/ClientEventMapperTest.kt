@@ -47,6 +47,17 @@ class ClientEventMapperTest {
 
     // --- text / thinking --------------------------------------------------
 
+    @Test fun restoredLoopWakeupsKeepMetadataAndFoldQuietMessages() {
+        val messages = transcriptFromDtos(listOf(
+            MessageDto(role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.LoopWakeupDto("first", null, 0u, 0uL)),
+            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("quiet"))),
+            MessageDto(role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.LoopWakeupDto("second", "healthy", 1u, 1uL)),
+        ))
+        assertEquals(listOf("first", "quiet", "second", "healthy"), messages.map { it.text })
+        assertEquals(messages.take(2).map { it.id }.toSet(), messages[2].loopFoldedItemIds)
+        assertEquals(1u, messages[2].loopWakeupStreak)
+    }
+
     @Test
     fun textDelta_mapsToDelta_preservingText() {
         val r = clientEventToReply(ClientEvent.TextDelta("hello"))
@@ -242,6 +253,10 @@ class ClientEventMapperTest {
             ReplyEvent.Usage(AgentRunUsage(1, 2, 0, 0)),
             r,
         )
+    }
+
+    @Test fun fixedScheduleNoticeDoesNotDuplicateThroughTheActiveReplyStream() {
+        assertNull(clientEventToReply(ClientEvent.ScheduledTaskFire("Fixed task is ready")))
     }
 
     @Test

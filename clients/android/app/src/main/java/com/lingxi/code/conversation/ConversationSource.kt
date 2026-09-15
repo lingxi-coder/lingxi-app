@@ -812,7 +812,7 @@ fun messageDtoToMessage(
     dto: MessageDto,
     strings: ConversationStrings = DefaultConversationStrings,
 ): Message {
-    val build = MessageBuild(dto.role, messageImages(dto.images))
+    val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup)
     val index = mutableMapOf<String, ToolBlockRef>()
     dto.blocks.forEach { block ->
         // One DTO in isolation has no preceding turn to hand an orphan result
@@ -843,13 +843,25 @@ fun transcriptFromDtos(
     val builds = mutableListOf<MessageBuild>()
     val index = mutableMapOf<String, ToolBlockRef>()
     dtos.forEach { dto ->
-        val build = MessageBuild(dto.role, messageImages(dto.images))
+        val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup)
         builds.add(build)
         dto.blocks.forEach { block ->
             build.fold(block, strings, index) { orphanHostFor(builds, build) }
         }
     }
-    return builds.filter { it.isRenderable() }.map { it.toMessage() }
+    val messages = mutableListOf<Message>()
+    builds.filter { it.isRenderable() }.forEach { build ->
+        var message = build.toMessage()
+        build.loopWakeup?.let { wakeup ->
+            val start = messages.indexOfLast { it.loopWakeupStreak != null }
+            if (wakeup.streak > 0u && start >= 0) {
+                message = message.copy(loopFoldedItemIds = messages.drop(start).map { it.id }.toSet())
+            }
+        }
+        messages.add(message)
+        build.loopWakeup?.companion?.let { messages.add(Message(role = Role.Ai, text = it)) }
+    }
+    return messages
 }
 
 /**
@@ -909,9 +921,10 @@ private class ToolBlockRef(val build: MessageBuild, val blockIndex: Int)
 private class MessageBuild(
     wireRole: String,
     val images: List<ImageRefDto> = emptyList(),
+    val loopWakeup: com.lingxi.code.bindings.LoopWakeupDto? = null,
 ) {
     val role: Role = if (wireRole.equals("user", ignoreCase = true)) Role.User else Role.Ai
-    val textParts = mutableListOf<String>()
+    val textParts = mutableListOf<String>().apply { loopWakeup?.let { add(it.message) } }
     val blocks = mutableListOf<MessageContent>()
 
     /**
@@ -936,6 +949,7 @@ private class MessageBuild(
         text = textParts.filter { it.isNotBlank() }.joinToString("\n\n"),
         images = images,
         blocks = blocks.toList(),
+        loopWakeupStreak = loopWakeup?.streak,
     )
 
     private fun addText(text: String) {
@@ -1187,6 +1201,8 @@ fun clientEventToReply(
     is ClientEvent.TurnStarted -> ReplyEvent.Thinking
     is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text)
     is ClientEvent.ThinkingDelta -> ReplyEvent.ReasoningDelta(event.thinking)
+    // Reduced on the session-level raw event stream, including before TurnStarted.
+    is ClientEvent.ScheduledTaskFire -> null
     is ClientEvent.SystemNotice -> ReplyEvent.Notice(event.message, event.isError)
     is ClientEvent.ToolUseStarted ->
         if (isShellTool(event.tool)) {

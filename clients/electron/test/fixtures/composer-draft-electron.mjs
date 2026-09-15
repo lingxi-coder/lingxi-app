@@ -126,6 +126,65 @@ async function main() {
     assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').disabled`), true);
     await setPrompt(webContents, '');
 
+    // A background review remains stoppable after the foreground turn completes.
+    const backgroundSession = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const otherSession = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const setBackgroundStatus = (status) => webContents.executeJavaScript(
+      `window.__composerDraftTest.setBackgroundStatus(${JSON.stringify(backgroundSession)}, ${JSON.stringify(status)})`,
+    );
+    for (const status of ['running', 'working', 'in_progress']) {
+      await setBackgroundStatus(status);
+      await waitFor(webContents, `document.querySelector('[aria-label="Stop background agents"]')?.disabled === false && getComputedStyle(document.querySelector('.composer-stop-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
+      const stopState = await webContents.executeJavaScript(`(() => {
+        const stop = document.querySelector('[aria-label="Stop background agents"]');
+        const rect = stop.getBoundingClientRect();
+        return { visible: getComputedStyle(stop.parentElement).visibility, width: rect.width, tabIndex: stop.tabIndex,
+          hitTarget: stop.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)) };
+      })()`);
+      assert.deepEqual(stopState, { visible: 'visible', width: 40, tabIndex: 0, hitTarget: true });
+      const cancellations = await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`);
+      await webContents.executeJavaScript(`document.querySelector('.composer-stop-presence button').click()`);
+      assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`), cancellations + 1);
+    }
+    if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
+      await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.background-stop.png', (await webContents.capturePage()).toPNG());
+    }
+    await webContents.executeJavaScript(`window.__composerDraftTest.setCancelling(${JSON.stringify(backgroundSession)}, true)`);
+    await waitFor(webContents, `document.querySelector('[aria-label="Stopping background agents"]')?.disabled === true`);
+    const cancellingCount = await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`);
+    await webContents.executeJavaScript(`document.querySelector('.composer-stop-presence button').click()`);
+    assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`), cancellingCount);
+    await webContents.executeJavaScript(`window.__composerDraftTest.setCancelling(${JSON.stringify(backgroundSession)}, false)`);
+
+    // A draft sends normally while only background work is running.
+    await setPrompt(webContents, 'follow-up while review runs');
+    await waitFor(webContents, `document.querySelector('[aria-label="Send prompt"]')?.disabled === false && document.querySelector('.composer-submit-actions').getBoundingClientRect().width === 40`);
+    assert.equal(await webContents.executeJavaScript(`Boolean(document.querySelector('[aria-label="Send pending message"]'))`), false);
+    assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop background agents"]')?.disabled`), true);
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').click()`);
+    await waitFor(webContents, `window.__composerDraftTest.sendPending()`);
+    assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.lastSentPrompt()`), 'follow-up while review runs');
+    await webContents.executeJavaScript(`window.__composerDraftTest.resolveSend()`);
+    await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === ''`);
+
+    await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(true)`);
+    await setPrompt(webContents, 'pending with background review');
+    await waitFor(webContents, `document.querySelector('[aria-label="Stop current turn"]')?.disabled === true && document.querySelector('[aria-label="Send pending message"]')?.disabled === false`);
+    assert.equal(await webContents.executeJavaScript(`Boolean(document.querySelector('[aria-label="Stop background agents"]'))`), false);
+    await setPrompt(webContents, '');
+    await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(false)`);
+    await switchSession(webContents, otherSession);
+    await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-stop-presence')).visibility === 'hidden' && getComputedStyle(document.querySelector('.composer-submit-actions')).display === 'none'`);
+    await switchSession(webContents, backgroundSession);
+    await waitFor(webContents, `document.querySelector('[aria-label="Stop background agents"]')?.disabled === false && getComputedStyle(document.querySelector('.composer-stop-presence')).visibility === 'visible'`);
+    for (const status of ['idle', 'completed', 'failed', 'cancelled']) {
+      await setBackgroundStatus('running');
+      await waitFor(webContents, `document.querySelector('[aria-label="Stop background agents"]')?.disabled === false`);
+      await setBackgroundStatus(status);
+      await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-stop-presence')).visibility === 'hidden' && getComputedStyle(document.querySelector('.composer-submit-actions')).display === 'none'`);
+    }
+    await setBackgroundStatus(undefined);
+
     await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-stop-presence')).visibility === 'hidden' && getComputedStyle(document.querySelector('.composer-submit-actions')).display === 'none'`);
     await webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
     const composerScreenshotPath = process.env.LINGXI_COMPOSER_SCREENSHOT;

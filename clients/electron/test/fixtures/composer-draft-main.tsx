@@ -5,6 +5,7 @@ import '../../src/renderer/global.css';
 import { BetaComposer } from '../../src/renderer/components/BetaDesktop';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { emptyRuntimeCenterState } from '../../src/renderer/bridge/runtimeCenterState';
 import {
   defaultNativeAudioSnapshot,
   type NativeAudioCommand,
@@ -65,7 +66,7 @@ if (!window.lingxi) (window as unknown as { lingxi: { audio: unknown } }).lingxi
   },
 };
 
-function bridgeFixture(sessionId: string, running: boolean) {
+function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: string | undefined, isCancelling: boolean) {
   return {
     activeSession: { projectPath, sessionId },
     bootstrap: {
@@ -114,7 +115,13 @@ function bridgeFixture(sessionId: string, running: boolean) {
       doctor: null,
     },
     running,
-    isCancelling: false,
+    isCancelling,
+    runtimeCenter: {
+      ...emptyRuntimeCenterState(),
+      agents: backgroundStatus ? {
+        reviewer: { agent_id: 'reviewer', name: 'code-review', agent_type: 'general-purpose', status: backgroundStatus },
+      } : {},
+    },
     searchWorkspaceFiles: async () => ({ files: [], truncated: false }),
     setModel: async () => undefined,
     setReasoningSelection: async () => undefined,
@@ -139,11 +146,15 @@ function bridgeFixture(sessionId: string, running: boolean) {
 function Fixture() {
   const [sessionId, setSessionId] = useState('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
   const [running, setRunning] = useState(false);
+  const [backgroundStatuses, setBackgroundStatuses] = useState<Record<string, string | undefined>>({});
+  const [cancellingSessions, setCancellingSessions] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     window.__composerDraftTest = {
       switchSession: setSessionId,
       setRunning,
+      setBackgroundStatus: (session, status) => setBackgroundStatuses((current) => ({ ...current, [session]: status })),
+      setCancelling: (session, cancelling) => setCancellingSessions((current) => ({ ...current, [session]: cancelling })),
       cancelCount: () => cancelCount,
       sendPending: () => sendPending,
       lastSentPrompt: () => lastSentPrompt,
@@ -157,7 +168,7 @@ function Fixture() {
   return (
     <Theme.Provider value={tokens('dark')}>
       <BetaComposer
-        bridge={bridgeFixture(sessionId, running) as never}
+        bridge={bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false) as never}
         ready
         onOpenSettings={() => undefined}
         onOpenSettingsPage={() => undefined}
@@ -173,6 +184,8 @@ declare global {
     __composerDraftTest?: {
       switchSession(sessionId: string): void;
       setRunning(running: boolean): void;
+      setBackgroundStatus(sessionId: string, status: string | undefined): void;
+      setCancelling(sessionId: string, cancelling: boolean): void;
       cancelCount(): number;
       sendPending(): boolean;
       lastSentPrompt(): string;

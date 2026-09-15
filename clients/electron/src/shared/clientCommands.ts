@@ -149,6 +149,12 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   agents: 'exposed',
   slash_command_catalog: 'exposed',
   slash_command_result: 'exposed',
+  // An additive SDK task-lifecycle receipt carrying opaque `event_json`.
+  // Desktop neither reads it nor forwards it: nothing outside this table
+  // references the name, and the ClientEvent switch in `main/bridge.ts`
+  // ends in `default: break;`, so an unhandled event is dropped rather
+  // than relayed to the renderer.
+  task_lifecycle: 'not_applicable',
   memory_entries: 'not_applicable',
   status_snapshot: 'exposed',
   settings_snapshot: 'exposed',

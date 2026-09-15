@@ -141,6 +141,22 @@ pub fn assemble(inputs: AssembleInputs) -> Assembled {
                 id.clone()
             }
         };
+        // A settings entry named like a built-in preset REPLACES it. Appending
+        // beside it instead produces two profiles with one name, and
+        // `DefaultLlmClient::from_config` rejects a repeated `profile_name` for
+        // the WHOLE config — so a single `"deepseek": {…}` in settings.json took
+        // every other provider down with it, not just that one.
+        let superseded = providers
+            .iter()
+            .position(|existing| existing.profile_name == profile.profile_name);
+        if superseded.is_some() {
+            warnings.push(format!(
+                "provider {:?}: overrides the built-in profile of the same name",
+                profile.profile_name
+            ));
+            // The replaced profile must not keep claiming a credential slot.
+            credential_sources.retain(|source| source.profile_name != profile.profile_name);
+        }
         credential_sources.push(CredentialSource {
             provider_id: profile.provider_id.clone(),
             profile_name: profile.profile_name.clone(),
@@ -148,7 +164,12 @@ pub fn assemble(inputs: AssembleInputs) -> Assembled {
             env_var: pu.env_var,
             kind: CredentialKind::ApiKey,
         });
-        providers.push(profile);
+        match superseded {
+            // Replaced in place: the provider order a picker shows is stable
+            // whether or not the user overrode a preset.
+            Some(pos) => providers[pos] = profile,
+            None => providers.push(profile),
+        }
     }
 
     // 4. Routing: aliases (fold) + fallback (validate).

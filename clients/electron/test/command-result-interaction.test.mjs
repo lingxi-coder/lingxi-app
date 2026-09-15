@@ -12,11 +12,11 @@ import { createServer } from 'vite';
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
-const electronDriver = join(fixtureRoot, 'topbar-summary-electron.mjs');
+const electronDriver = join(fixtureRoot, 'command-result-electron.mjs');
 
-test('real Electron workspace keeps summary pinned with independent details and restored context access', async () => {
-  const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-topbar-summary-vite-'));
-  const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-topbar-summary-electron-'));
+test('command result dialog preserves full usage details, fits narrow screens, and restores focus', async () => {
+  const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-command-result-vite-'));
+  const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-command-result-electron-'));
   const vite = await createServer({
     root: fixtureRoot,
     cacheDir: viteCacheDir,
@@ -35,7 +35,7 @@ test('real Electron workspace keeps summary pinned with independent details and 
     await vite.listen();
     const address = vite.httpServer?.address();
     assert.ok(address && typeof address === 'object' && address.port);
-    const fixtureUrl = `http://127.0.0.1:${address.port}/topbar-summary-fixture.html`;
+    const fixtureUrl = `http://127.0.0.1:${address.port}/command-result-fixture.html`;
     const output = [];
     const errors = [];
     child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
@@ -54,26 +54,34 @@ test('real Electron workspace keeps summary pinned with independent details and 
     const result = await new Promise((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        rejectResult(new Error(`Electron topbar fixture timed out\n${errors.join('')}`));
+        rejectResult(new Error(`Electron compaction fixture timed out\n${errors.join('')}`));
       }, 20_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
         const line = output.join('').trim().split('\n').at(-1);
         if (code !== 0 || !line) {
-          rejectResult(new Error(`Electron topbar fixture exited ${code ?? signal}\n${errors.join('')}`));
+          rejectResult(new Error(`Electron compaction fixture exited ${code ?? signal}\n${errors.join('')}`));
           return;
         }
         try { resolveResult(JSON.parse(line)); }
-        catch (error) { rejectResult(new Error(`Invalid Electron topbar fixture output: ${line}`, { cause: error })); }
+        catch (error) { rejectResult(new Error(`Invalid Electron compaction fixture output: ${line}`, { cause: error })); }
       });
     });
 
-    assert.equal(result.checks.length, 8);
-    assert.deepEqual(result.overview.sections, ['Context', 'Subagents', 'Todos', 'Resources', 'Plan']);
-    assert.equal(result.overview.width, 300);
-    assert.deepEqual(result.heights, { chat: 56, detail: 56, panel: 390 });
-
+    for (const viewport of [result.desktop, result.narrow]) {
+      assert.equal(viewport.open, true);
+      assert.equal(viewport.overflow, false);
+      assert.equal(viewport.truncated, false);
+      assert.equal(viewport.focus, 'Close command result');
+      assert.match(viewport.text, /947 lines added/);
+      assert.match(viewport.text, /284 lines removed/);
+      assert.match(viewport.text, /2.7m cache read/);
+      assert.match(viewport.text, /A future metric without a colon/);
+      assert.match(viewport.text, /very-long-provider-model-name-over-32-characters/);
+    }
+    assert.deepEqual(result.dismissed, { closed: true, focus: 'open' });
+    assert.equal(result.buttonClosed, true);
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

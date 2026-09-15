@@ -160,7 +160,7 @@ test('desktop topbar keeps command and engine controls out of the chrome', () =>
     }),
   ));
 
-  assert.match(markup, /aria-label="More chat actions"/);
+  assert.doesNotMatch(markup, /More chat actions|desktop-topbar-more|git-topbar/);
   assert.match(markup, /aria-label="Toggle pinned summary"/);
   assert.match(markup, /aria-label="Toggle right panel"/);
   assert.doesNotMatch(markup, /aria-label="Toggle theme"|aria-label="Open context summaries"/);

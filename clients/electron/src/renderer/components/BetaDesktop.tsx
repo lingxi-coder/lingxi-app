@@ -1,4 +1,4 @@
-import { GitTopBar } from './GitReview';
+import { createPortal } from 'react-dom';
 import { ShellIcon } from './TerminalPanel';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type {
@@ -810,6 +810,51 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
   );
 }
 
+/** Context utilities live with the pinned summary instead of the topbar. */
+export function SummaryContextActions({ bridge }: { bridge: UseBridge }) {
+  const t = useT();
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const summaries = bridge.conversation.summaries ?? [];
+  const compacting = bridge.conversation.activeCompactionId != null;
+  const close = () => { setSummaryOpen(false); triggerRef.current?.focus(); };
+
+  useEffect(() => {
+    setSummaryOpen(false);
+    setSelectedId(null);
+  }, [bridge.conversation.sessionKey]);
+
+  useEffect(() => {
+    if (!summaryOpen) return;
+    panelRef.current?.querySelector<HTMLButtonElement>('.context-summary-close')?.focus();
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !panelRef.current?.contains(event.target) && !triggerRef.current?.contains(event.target)) setSummaryOpen(false);
+    };
+    document.addEventListener('pointerdown', outside, true);
+    return () => document.removeEventListener('pointerdown', outside, true);
+  }, [summaryOpen]);
+
+  return <section className="runtime-summary-section runtime-context-actions" aria-label="Context"
+    style={{ '--context-action-hover': t.surfaceHover, '--context-action-ring': t.borderStrong } as CSSProperties}>
+    <h2>Context</h2>
+    <button ref={triggerRef} type="button" aria-label="Open context summaries" aria-expanded={summaryOpen} aria-controls="context-summary-panel"
+      onClick={() => { setSelectedId(summaries.at(-1)?.id ?? null); setSummaryOpen(true); }}>
+      <Icon name="summary" size={16} /><span>Context summaries</span>
+      <span className="runtime-context-count">{summaries.length}</span>
+    </button>
+    <button type="button" aria-label="Compact conversation" disabled={!bridge.activeSession || bridge.sessionLoading || compacting}
+      onClick={() => { invoke(() => bridge.forceCompact()); }}>
+      <Icon name="summary-list" size={16} /><span>{compacting ? 'Compacting…' : 'Compact'}</span>
+    </button>
+    {summaryOpen && createPortal(<div ref={panelRef} className="runtime-context-detail"
+      onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } }}>
+      <ContextSummaryPanel summaries={summaries} selectedId={selectedId} onSelect={setSelectedId} onClose={close} />
+    </div>, document.body)}
+  </section>;
+}
+
 export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal }: {
   terminalOpen?: boolean;
   terminalAvailable?: boolean;
@@ -819,52 +864,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
   onToggleRuntimeCenter(): void;
 }) {
   const t = useT();
-  const [moreOpen, setMoreOpen] = useState(false);
-  const [summaryOpen, setSummaryOpen] = useState(false);
-  const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
-  const moreTriggerRef = useRef<HTMLButtonElement>(null);
-  const moreMenuRef = useRef<HTMLDivElement>(null);
-  const summaryPanelRef = useRef<HTMLDivElement>(null);
-  const summaries = bridge.conversation.summaries;
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
-
-  useEffect(() => {
-    if (!moreOpen && !summaryOpen) return;
-    const closeOnPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (moreTriggerRef.current?.contains(target) || moreMenuRef.current?.contains(target) || summaryPanelRef.current?.contains(target)) return;
-      setMoreOpen(false);
-      setSummaryOpen(false);
-    };
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.stopPropagation();
-      setMoreOpen(false);
-      setSummaryOpen(false);
-      moreTriggerRef.current?.focus();
-    };
-    document.addEventListener('pointerdown', closeOnPointerDown, true);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('pointerdown', closeOnPointerDown, true);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [moreOpen, summaryOpen]);
-
-  useEffect(() => {
-    setMoreOpen(false);
-    setSummaryOpen(false);
-    setSelectedSummaryId(null);
-  }, [bridge.conversation.sessionKey]);
-
-  useEffect(() => {
-    if (moreOpen) moreMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
-  }, [moreOpen]);
-
-  useEffect(() => {
-    if (summaryOpen) summaryPanelRef.current?.querySelector<HTMLButtonElement>('.context-summary-close')?.focus();
-  }, [summaryOpen]);
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
@@ -880,24 +880,11 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
         <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
       </div>
-      <GitTopBar />
       {bridge.usage && (
         <span className="mono desktop-topbar-usage" style={{ color: t.text4, fontSize: 9.5 }} title="Input + output tokens">
           {(bridge.usage.inputTokens + bridge.usage.outputTokens).toLocaleString()} tok
         </span>
       )}
-      <button
-        ref={moreTriggerRef}
-        className="no-drag desktop-topbar-action"
-        type="button"
-        aria-label="More chat actions"
-        title="More chat actions"
-        aria-expanded={moreOpen}
-        aria-controls="desktop-topbar-more"
-        data-active={moreOpen || summaryOpen ? 'true' : undefined}
-        onClick={() => { setMoreOpen((open) => !open); setSummaryOpen(false); }}
-        style={topbarActionTokens}
-      ><Icon name="more" size={18} /></button>
       <button
         className="no-drag desktop-topbar-action"
         type="button"
@@ -932,25 +919,6 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         }}
         style={topbarActionTokens}
       ><Icon name={inspectorOpen ? 'panel-right' : 'panel-right-hidden'} size={20} /></button>
-      {moreOpen && (
-        <div ref={moreMenuRef} id="desktop-topbar-more" className="no-drag desktop-topbar-more" style={{ background: t.surface, color: t.text, borderColor: t.border }}>
-          <button type="button" aria-label="Open context summaries" onClick={() => {
-            setMoreOpen(false);
-            setSelectedSummaryId(summaries.at(-1)?.id ?? null);
-            setSummaryOpen(true);
-          }}><Icon name="summary" size={16} /><span>Context summaries</span></button>
-        </div>
-      )}
-      {summaryOpen && (
-        <div ref={summaryPanelRef} style={{ display: 'contents' }}>
-          <ContextSummaryPanel
-            summaries={summaries}
-            selectedId={selectedSummaryId}
-            onSelect={setSelectedSummaryId}
-            onClose={() => { setSummaryOpen(false); moreTriggerRef.current?.focus(); }}
-          />
-        </div>
-      )}
     </header>
   );
 }

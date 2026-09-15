@@ -89,7 +89,7 @@ test('closed overview and inspector do not render stale session content', () => 
   assert.equal(render(React.createElement(RuntimeCenterInspector, { bridge })), '');
 });
 
-test('pinned summary is a nonmodal region with four ordered empty categories', () => {
+test('pinned summary is a nonmodal region with context actions and four ordered empty categories', () => {
   const bridge = runtimeBridge();
   bridge.desktop = emptyDesktopState();
   const html = render(React.createElement(RuntimeCenterOverview, { bridge }));
@@ -97,7 +97,7 @@ test('pinned summary is a nonmodal region with four ordered empty categories', (
   assert.ok(html.includes('aria-label="Pinned summary"'));
   assert.ok(!html.includes('role="dialog"'));
   const headings = [...html.matchAll(/<h2>(.*?)<\/h2>/g)].map((match) => match[1]);
-  assert.deepEqual(headings, ['Subagents', 'Todos', 'Resources', 'Plan']);
+  assert.deepEqual(headings, ['Context', 'Subagents', 'Todos', 'Resources', 'Plan']);
   for (const empty of ['No subagents or background tasks.', 'No todos yet.', 'No input resources in this session.', 'No submitted plan yet.']) assert.ok(html.includes(empty));
 });
 
@@ -366,4 +366,12 @@ test('finished agents and tasks render claude-code labels, and the summary still
   }));
   assert.ok(overview.includes('2 done · 2 failed'), `background-task summary counts raw statuses: ${overview}`);
   assert.ok(overview.includes('1 done'), `subagent summary counts raw statuses: ${overview}`);
+});
+
+test('summary owns context browsing and compaction controls', () => {
+  const bridge = runtimeBridge();
+  const html = render(React.createElement(RuntimeCenterOverview, { bridge }));
+  assert.match(html, /aria-label="Open context summaries"/);
+  assert.match(html, /aria-label="Compact conversation"/);
+  assert.match(html, /Compact/);
 });

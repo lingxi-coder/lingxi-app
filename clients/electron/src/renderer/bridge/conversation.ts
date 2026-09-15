@@ -53,7 +53,7 @@ import type { ClientEvent, ImageRefDto, MessageDto, MessageImageDto, PlanTaskDto
 import { fallbackToolBody, fallbackToolHeader } from '@lingxi/bridge-client/toolview';
 import { isSupportedImageMediaType } from '../../shared/imageInput';
 
-import type { RunItem } from '../model/runItem';
+import type { CommandRunItem, RunItem } from '../model/runItem';
 import { collectTurnFileChanges } from '../model/turnFileChanges';
 
 /**
@@ -141,12 +141,17 @@ export interface ConversationState {
   /** Monotonic counter backing stable, never-reused item ids. */
   readonly nextId: number;
   /**
-   * The name of the slash command whose typed line was just echoed, awaiting
+   * The name of the submitted slash command, awaiting
    * its `slash_command_result`. `reduceEvent` is pure over `ClientEvent` and
    * cannot see the raw typed line, so `beginSlashCommand` stashes it here for
    * the result event to pick up. Cleared the moment a result consumes it.
    */
   readonly pendingSlashName: string | null;
+  /** Deferred until the engine confirms that this command starts task work. */
+  readonly pendingSlashPrompt: string | null;
+  readonly pendingSlashWasRunning: boolean;
+  /** Ephemeral utility output, never part of the task transcript. */
+  readonly commandResult: CommandRunItem | null;
   /** Stable id of the optimistic `/compact` status row awaiting a terminal event. */
   readonly activeCompactionId: string | null;
 }
@@ -167,6 +172,9 @@ export function emptyConversation(): ConversationState {
     sessionKey: '',
     nextId: 1,
     pendingSlashName: null,
+    pendingSlashPrompt: null,
+    pendingSlashWasRunning: false,
+    commandResult: null,
     activeCompactionId: null,
   };
 }
@@ -228,39 +236,33 @@ export function appendUserPrompt(state: ConversationState, text: string, images:
   };
 }
 
-/**
- * Record the user's slash line and remember which command it was, so the
- * result event that follows can label its own output. `reduceEvent` is pure
- * over `ClientEvent` and cannot see the raw line, so the pairing is carried
- * here.
- */
+/** Task controls remain in the timeline; utility commands belong to the panel. */
+function isTaskControl(name: string | null): boolean {
+  return name === '/compact' || name === '/goal';
+}
+
+/** Defer the echo until turn_started proves the command initiated task work. */
 export function beginSlashCommand(state: ConversationState, raw: string): ConversationState {
   const trimmed = raw.trim();
   if (!trimmed) return state;
-  const next = appendUserPrompt(state, trimmed);
-  const name = trimmed.split(/\s/, 1)[0] ?? '';
-  // Pre-claim the renderer turn state exactly as `appendPendingUserPrompt` does for an
-  // ordinary prompt: most slash commands are display-only and release this
-  // in `slash_command_result` below, but a command that expands into a real
-  // turn hands ownership of `running` to `turn_started` instead (which also
-  // clears `pendingSlashName` so the claim isn't double-released).
-  return { ...next, pendingSlashName: name, running: true };
+  const name = trimmed.split(/\s/, 1)[0]?.toLowerCase() ?? '';
+  const next = isTaskControl(name) ? appendUserPrompt(state, trimmed) : state;
+  return {
+    ...next, pendingSlashName: name, pendingSlashPrompt: isTaskControl(name) ? null : trimmed,
+    pendingSlashWasRunning: state.running, running: true, commandResult: null,
+  };
 }
 
-/**
- * Echo a slash command the DESKTOP is handling itself.
- *
- * Same as {@link beginSlashCommand} except it makes no `running` claim: a
- * local command runs synchronously and never starts a turn, so there is no
- * engine event coming to release the turn state. Claiming it here would leave
- * the session permanently marked as running after a bare `/model`.
- */
+/** Desktop utility actions never create task messages or claim a model turn. */
 export function beginLocalSlashCommand(state: ConversationState, raw: string): ConversationState {
   const trimmed = raw.trim();
   if (!trimmed) return state;
-  const next = appendUserPrompt(state, trimmed);
-  const name = trimmed.split(/\s/, 1)[0] ?? '';
-  return { ...next, pendingSlashName: name };
+  const name = trimmed.split(/\s/, 1)[0]?.toLowerCase() ?? '';
+  const next = isTaskControl(name) ? appendUserPrompt(state, trimmed) : state;
+  return {
+    ...next, pendingSlashName: name, pendingSlashPrompt: null,
+    pendingSlashWasRunning: state.running, commandResult: null,
+  };
 }
 
 /**
@@ -323,7 +325,7 @@ export function appendPendingUserPrompt(state: ConversationState, text: string, 
   // name and take the slash release path, clearing running state while this
   // prompt's turn is still starting.
   return next === state ? state : {
-    ...next, running: true, pendingSlashName: null,
+    ...next, running: true, pendingSlashName: null, pendingSlashPrompt: null, commandResult: null,
     items: next.items.map((item, index) => index === next.items.length - 1
       ? { ...item, delivery: 'pending' as const } : item),
   };
@@ -359,7 +361,10 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // slash pre-claim: the command expanded into a real turn, which now
       // owns `running` (released by the ordinary `turn_ended` below), and a
       // stale `pendingSlashName` must not label a later, unrelated result.
-      return { ...state, items: settlePendingPrompts(state.items), running: true, pendingSlashName: null, openAssistantIndex: -1, openThinkingIndex: -1, turnToolIds: [] };
+      {
+        const next = state.pendingSlashPrompt ? appendUserPrompt(state, state.pendingSlashPrompt) : state;
+        return { ...next, items: settlePendingPrompts(next.items), running: true, pendingSlashName: null, pendingSlashPrompt: null, openAssistantIndex: -1, openThinkingIndex: -1, turnToolIds: [] };
+      }
 
     case 'turn_ended': {
       const items = settlePendingPrompts(state.items);
@@ -728,6 +733,19 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         const failed = event.is_error === true || /^(?:Error|No messages|Not enough messages|Compaction (?:failed|blocked))/i.test(event.display);
         return finishCompaction(state, cancelled ? 'cancelled' : failed ? 'error' : 'complete', event.display, now);
       }
+      if (!isTaskControl(state.pendingSlashName)) {
+        return {
+          ...state,
+          commandResult: event.display.trim() ? {
+            type: 'command', id: itemId(state.nextId), name: state.pendingSlashName ?? '',
+            output: event.display, isError: event.is_error === true,
+          } : null,
+          ...(event.is_error === true ? { lastError: event.display } : {}),
+          ...(state.pendingSlashName !== null ? { running: state.pendingSlashWasRunning } : {}),
+          pendingSlashName: null, pendingSlashPrompt: null,
+          nextId: state.nextId + 1,
+        };
+      }
       const items = state.items.slice();
       closeThinking(items, state.openThinkingIndex);
       items.push({
@@ -775,6 +793,9 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // `pendingSlashName` still being set: `turn_started` already clears it
       // for a command that expanded into a real turn, so an ordinary turn's
         // error handling is unchanged.
+      if (state.pendingSlashName !== null && !isTaskControl(state.pendingSlashName)) {
+        return reduceEvent(state, { type: 'slash_command_result', display: event.message, is_error: true }, now);
+      }
       const releaseSlashClaim = state.pendingSlashName !== null;
       const next = pushError(state, event.message);
       // In-flight tool cards do settle here, because `turn_ended` is exactly

@@ -1,3 +1,4 @@
+import { SummaryContextActions } from './BetaDesktop';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { GitReview, GitEnvironment } from './GitReview';
 import type { PlanTaskDto, SessionAgentSummaryDto, TaskRowDto } from '@lingxi/bridge-client';
@@ -303,6 +304,7 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
       onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOverview(true); } }}
       style={{ '--runtime-border': t.border, '--runtime-muted': t.dark ? t.text2 : t.text3, background: t.surface, color: t.text } as CSSProperties}>
       <GitEnvironment onNavigate={() => bridge.setRuntimeCenterOverviewOpen(false)} />
+      <SummaryContextActions key={bridge.conversation.sessionKey} bridge={bridge} />
       <SummarySection section="agents">
         {agents.length === 0 && tasks.length === 0 ? <EmptyRow>No subagents or background tasks.</EmptyRow> : <>
           {agents.length > 0 && <OverviewRow icon="subagent" title={agentStatusSummary(agents.map((agent) => agent.status))} onClick={() => open({ kind: 'section', id: 'agents' })} />}

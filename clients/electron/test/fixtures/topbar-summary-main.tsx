@@ -41,6 +41,7 @@ function initialCenter(empty: boolean) {
 }
 
 function Fixture() {
+  const [compactCalls, setCompactCalls] = useState(0);
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [sessionKey, setSessionKey] = useState('session-a');
   const [empty, setEmpty] = useState(false);
@@ -69,7 +70,7 @@ function Fixture() {
     bootstrap: { workspace: { path: '/Users/tester/Projects/LingXi-Next', trusted: true } },
     usage: { inputTokens: 18_420, outputTokens: 3_184, cacheReadTokens: 0, cacheCreationTokens: 0 },
     conversation: {
-      ...emptyConversation(), sessionKey, plan: empty ? [] : todos,
+      ...emptyConversation(), activeCompactionId: compactCalls ? 'compact-active' : null, sessionKey, plan: empty ? [] : todos,
       summaries: [
         { id: 'summary-1', content: '## Provider routing\n\nPreserve the selected provider when the session resumes.', messagesBefore: 42, messagesAfter: 9, bytesSaved: 38912 },
         { id: 'summary-2', content: '## Desktop polish\n\nKeep the workspace quiet and focused.', messagesBefore: 31, messagesAfter: 7, bytesSaved: 24576 },
@@ -77,12 +78,13 @@ function Fixture() {
     },
     runtimeCenter: center, desktop,
     openRuntimeItem, closeRuntimeItem, setRuntimeCenterOverviewOpen: setOverview, setRuntimeInspectorOpen: setInspector,
+    forceCompact: async () => { setCompactCalls((count) => count + 1); },
     refreshTasks: idle, refreshSessionAgents: idle, loadSessionAgentTranscript: idle, taskOutput: idle,
     previewWorkspaceFile: async () => ({ content: 'Reference content', path: '/workspace/requirements.md', kind: 'text' }),
   };
   return (
     <Theme.Provider value={palette}>
-      <div className="desktop-shell" style={{ width: '100vw', height: '100vh', position: 'relative', display: 'flex', overflow: 'hidden', background: palette.stageBg, color: palette.text }}>
+      <div data-compact-calls={compactCalls} className="desktop-shell" style={{ width: '100vw', height: '100vh', position: 'relative', display: 'flex', overflow: 'hidden', background: palette.stageBg, color: palette.text }}>
         <main className="desktop-main" style={{ minWidth: 0, position: 'relative', flex: 1, display: 'flex', flexDirection: 'column' }}>
           <BetaTopBar bridge={bridge as never} runtimeCenterOpen={center.overviewOpen} onToggleRuntimeCenter={() => setOverview(!center.overviewOpen)} />
           <RuntimeCenterOverview bridge={bridge as never} />

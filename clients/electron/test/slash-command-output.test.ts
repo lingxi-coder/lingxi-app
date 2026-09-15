@@ -11,18 +11,17 @@ import {
   parseCommandMetrics,
 } from '../src/renderer/model/runItem';
 
-test('a slash command result becomes its own transcript row, not an assistant line', () => {
+test('a display command result stays outside the transcript', () => {
   const started = beginSlashCommand(emptyConversation(), '/status');
   const state = reduceEvent(started, { type: 'slash_command_result', display: 'Model: opus', is_error: false });
 
-  const last = state.items.at(-1);
+  const last = state.commandResult;
   assert.equal(last?.type, 'command');
   assert.equal(last.name, '/status');
   assert.equal(last.output, 'Model: opus');
   assert.equal(last.isError, false);
-  // The typed line is still shown above it, as the CLI prints.
-  assert.equal(state.items.at(-2)?.type, 'narration');
-  assert.equal(state.items.at(-2)?.role, 'user');
+  assert.deepEqual(started.items, []);
+  assert.deepEqual(state.items, []);
   // The pending name is consumed, so a second result cannot inherit it.
   assert.equal(state.pendingSlashName, null);
 });
@@ -31,16 +30,16 @@ test('an error result is marked, and keeps the error visible to the chrome', () 
   const started = beginSlashCommand(emptyConversation(), '/nope');
   const state = reduceEvent(started, { type: 'slash_command_result', display: 'Unknown command', is_error: true });
 
-  assert.equal(state.items.at(-1)?.isError, true);
+  assert.equal(state.commandResult?.isError, true);
   assert.equal(state.lastError, 'Unknown command');
 });
 
 test('a result with no pending command still renders its output', () => {
   const state = reduceEvent(emptyConversation(), { type: 'slash_command_result', display: 'orphan', is_error: false });
 
-  assert.equal(state.items.at(-1)?.type, 'command');
-  assert.equal(state.items.at(-1)?.name, '');
-  assert.equal(state.items.at(-1)?.output, 'orphan');
+  assert.equal(state.commandResult?.type, 'command');
+  assert.equal(state.commandResult?.name, '');
+  assert.equal(state.commandResult?.output, 'orphan');
 });
 
 const COST = {
@@ -135,7 +134,7 @@ test('a locally-handled command never claims running, unlike an engine-forwarded
   const afterSyntheticResult = reduceEvent(local, { type: 'slash_command_result', display: 'Unknown model: nope', is_error: true });
   assert.equal(afterSyntheticResult.running, false);
   assert.equal(afterSyntheticResult.pendingSlashName, null);
-  const row = afterSyntheticResult.items.at(-1);
+  const row = afterSyntheticResult.commandResult;
   assert.equal(row?.type, 'command');
   assert.equal(row.name, '/model');
   assert.equal(row.output, 'Unknown model: nope');
@@ -192,4 +191,35 @@ test('help and metric parsers preserve content without depending on exact widths
     { label: 'Model', value: 'opus' },
     { label: 'Tokens', value: '1,024' },
   ]);
+});
+
+for (const raw of ['/usage', '/help', '/doctor', '/status', '/config', '/cron list', '/custom-info']) {
+  test(`${raw} preserves an active transcript`, () => {
+    const streaming = reduceEvent(reduceEvent(emptyConversation(), { type: 'turn_started' }), { type: 'text_delta', text: 'Working' });
+    const pending = beginLocalSlashCommand(streaming, raw);
+    assert.equal(pending.items, streaming.items);
+    const done = reduceEvent(pending, { type: 'slash_command_result', display: 'Details', is_error: false });
+    assert.equal(done.items, streaming.items);
+    assert.equal(done.running, true);
+    assert.equal(done.openAssistantIndex, streaming.openAssistantIndex);
+    assert.equal(done.commandResult?.name, raw.split(' ')[0]);
+  });
+}
+
+test('task commands are echoed once only after a real turn starts', () => {
+  const pending = beginSlashCommand(emptyConversation(), '/review src/main.ts');
+  assert.deepEqual(pending.items, []);
+  const running = reduceEvent(pending, { type: 'turn_started' });
+  assert.equal(running.items.length, 1);
+  assert.equal(running.items[0]?.text, '/review src/main.ts');
+  assert.equal(reduceEvent(running, { type: 'turn_started' }).items.length, 1);
+});
+
+test('failed utility commands and session switches do not create messages', () => {
+  const failed = reduceEvent(beginSlashCommand(emptyConversation(), '/usage'), { type: 'error', message: 'offline' });
+  assert.deepEqual(failed.items, []);
+  assert.equal(failed.commandResult?.isError, true);
+  assert.equal(failed.running, false);
+  const resumed = reduceEvent(failed, { type: 'session_resumed', session_id: 'other', messages: [] });
+  assert.equal(resumed.commandResult, null);
 });

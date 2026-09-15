@@ -1682,7 +1682,7 @@ impl SlashCommandDispatcher for MutatingDispatcher {
 }
 
 #[tokio::test]
-async fn cron_display_result_is_persisted_for_session_resume() {
+async fn display_only_slash_results_are_not_persisted_in_task_history() {
     use command_api::registry::CommandRegistry;
     use tokio::sync::RwLock;
 
@@ -1698,17 +1698,20 @@ async fn cron_display_result_is_persisted_for_session_resume() {
         Some(shared),
     );
 
-    let outcome = router.dispatch_slash("/cron list").await.expect("dispatch");
-    assert_eq!(
-        outcome.result,
-        SlashDispatchResult::Handled {
-            display: "/cron list".to_string(),
-        },
-    );
-    assert_eq!(
-        handle.slash_command_transcript(),
-        vec![("/cron list".to_string(), "/cron list".to_string())],
-    );
+    for raw in ["/usage", "/status", "/help", "/cron list"] {
+        let outcome = router.dispatch_slash(raw).await.expect("dispatch");
+        assert_eq!(
+            outcome.result,
+            SlashDispatchResult::Handled {
+                display: raw.to_string(),
+            },
+            "{raw} must still return its display to the client",
+        );
+        assert!(
+            handle.slash_command_transcript().is_empty(),
+            "{raw} is interface feedback and must not enter the resumed task history",
+        );
+    }
 }
 
 #[tokio::test]

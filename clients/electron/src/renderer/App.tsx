@@ -15,6 +15,8 @@ import { PermissionPrompt } from './components/PermissionPrompt';
 import { SettingsScreen } from './components/settings/SettingsScreen';
 import { ScheduledTasks } from './components/ScheduledTasks';
 import { Stage } from './components/Stage';
+import { CommandResultPanel } from './components/CommandResultPanel';
+import './components/CommandResultPanel.css';
 import { Theme } from './theme/ThemeContext';
 import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
 import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/RuntimeCenter';
@@ -152,6 +154,13 @@ export function App() {
 
           </div>
 
+          {page === 'chat' && !settingsRoute && !bridge.sessionLoading && bridge.conversation.commandResult && (
+            <CommandResultPanel
+              key={`${bridge.conversation.sessionKey}:${bridge.conversation.commandResult.id}`}
+              item={bridge.conversation.commandResult}
+              onClose={bridge.dismissCommandResult}
+            />
+          )}
           <PermissionPrompt
             request={bridge.sessionLoading ? null : bridge.pendingPermission}
             onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}

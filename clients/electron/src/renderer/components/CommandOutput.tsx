@@ -32,14 +32,22 @@ function HelpBody({ item }: { item: CommandRunItem }) {
 }
 
 function MetricsBody({ item }: { item: CommandRunItem }) {
-  const entries = parseCommandMetrics(item.output);
-  if (entries.length < 2) return <PlainBody item={item} />;
+  const lines = item.output.replace(/\r\n?/g, '\n').split('\n').filter((line) => line.trim());
+  const entries = lines.flatMap((line) => {
+    const parsed = parseCommandMetrics(line)[0];
+    return parsed ? [{ ...parsed, raw: false }] : [{ label: '', value: line, raw: true }];
+  });
+  if (!entries.some((entry) => !entry.raw)) return <PlainBody item={item} />;
   return (
-    <dl className="command-metric-grid">
+    <dl className="command-usage-metrics">
       {entries.map((entry, index) => (
-        <div className="command-metric-entry" key={`${entry.label}-${index}`}>
-          <dt>{entry.label}</dt>
-          <dd className="mono">{entry.value}</dd>
+        <div className="command-usage-row" data-cost={/^total cost$/i.test(entry.label) || undefined} key={index}>
+          {entry.label && <dt>{entry.label}</dt>}
+          <dd className={entry.raw ? 'command-usage-note' : undefined}>
+            {entry.raw ? entry.value : entry.value.split(/,\s+(?=[\d$])/).map((part, partIndex) => (
+              <span className="command-usage-value" key={partIndex}>{part}</span>
+            ))}
+          </dd>
         </div>
       ))}
     </dl>
@@ -81,7 +89,7 @@ function ActionBody({ item }: { item: CommandRunItem }) {
   return <p className="command-action-copy">{item.output}</p>;
 }
 
-function CommandBody({ item }: { item: CommandRunItem }): ReactNode {
+export function CommandBody({ item }: { item: CommandRunItem }): ReactNode {
   switch (commandPresentation(item).kind) {
     case 'help': return <HelpBody item={item} />;
     case 'metrics': return <MetricsBody item={item} />;

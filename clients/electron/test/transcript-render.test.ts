@@ -178,9 +178,9 @@ test('slash command results render command-specific cards instead of one raw pre
     output: 'Model: opus\nTokens: 1,024',
   });
   assert.match(status, /data-command-kind="metrics"/);
-  assert.match(status, /class="command-metric-grid"/);
-  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
-  assert.match(css, /\.command-metric-entry dd\s*\{[^}]*font-variant-numeric:\s*tabular-nums;/s);
+  assert.match(status, /class="command-usage-metrics"/);
+  const css = readFileSync(new URL('../src/renderer/components/CommandResultPanel.css', import.meta.url), 'utf8');
+  assert.match(css, /\.command-usage-row dd\s*\{[^}]*font-variant-numeric:\s*tabular-nums;/s);
 
   const error = renderCommand({
     type: 'command', id: 'error-1', name: '/rewind', isError: true,

@@ -3182,22 +3182,8 @@ impl CommandRouter for EngineCommandRouter {
             Some(result) => result,
             None => self.dispatcher.as_ref()?.dispatch(raw).await,
         };
-        if parse_slash_command(raw).is_some_and(|parsed| parsed.name.eq_ignore_ascii_case("cron")) {
-            let display = match &result {
-                platform_api::SlashDispatchResult::Handled { display }
-                | platform_api::SlashDispatchResult::Unknown { display, .. } => Some(display),
-                _ => None,
-            };
-            if let Some(display) = display {
-                if let Err(error) = self
-                    .handle
-                    .append_slash_command_transcript(raw, display)
-                    .await
-                {
-                    tracing::warn!(error = %error, "could not persist /cron transcript display");
-                }
-            }
-        }
+        // Display-only feedback belongs to the client's command surface. Persist
+        // actual task turns and command effects through their existing paths.
         let after = self.capture_slash_authority().await;
         Some(SlashDispatchOutcome {
             result,

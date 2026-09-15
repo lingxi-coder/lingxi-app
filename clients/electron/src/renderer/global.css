@@ -120,33 +120,6 @@ body {
 }
 
 .desktop-topbar-usage { padding: 0 8px; white-space: nowrap; }
-.desktop-topbar-more {
-  position: absolute;
-  top: 50px;
-  right: 80px;
-  width: 210px;
-  padding: 5px;
-  border: .5px solid;
-  border-radius: 12px;
-  box-shadow: 0 6px 24px #00000014;
-}
-.desktop-topbar-more button {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  border: 0;
-  border-radius: 8px;
-  padding: 10px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-.desktop-topbar-more button:hover,
-.desktop-topbar-more button:focus-visible { background: color-mix(in oklab, currentColor 7%, transparent); }
-
 .context-summary-panel {
   position: absolute;
   top: 48px;

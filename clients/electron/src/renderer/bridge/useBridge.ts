@@ -185,6 +185,7 @@ export interface UseBridge {
   readonly error: string | null;
   readonly audioSnapshot: NativeAudioSnapshot;
   clearError(): void;
+  dismissCommandResult(): void;
   sendTrackedPrompt(
     text: string,
     images?: ImageRefDto[],
@@ -1720,6 +1721,14 @@ export function useBridge(): UseBridge {
     updateRuntime(sessionId, (state) => ({ ...state, conversation: beginLocalSlashCommand(state.conversation, raw) }));
   }, [updateRuntime]);
 
+  const dismissCommandResult = useCallback(() => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    updateRuntime(sessionId, (state) => ({
+      ...state, conversation: { ...state.conversation, commandResult: null },
+    }));
+  }, [updateRuntime]);
+
   const emitCommandOutput = useCallback((output: string, isError: boolean) => {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
@@ -2539,6 +2548,7 @@ export function useBridge(): UseBridge {
     runSlashCommand,
     beginLocalCommand,
     emitCommandOutput,
+    dismissCommandResult,
     cancel,
     approve,
     deny,

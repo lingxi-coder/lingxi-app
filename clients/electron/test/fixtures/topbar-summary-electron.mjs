@@ -41,22 +41,33 @@ async function main() {
     assert.equal(await js(`document.querySelector('[aria-label="Toggle theme"]') === null && document.querySelector('#runtime-center-overview') === null && document.querySelector('.runtime-inspector') === null`), true);
     checks.push('initial closed controls');
 
-    await click('[aria-label="More chat actions"]');
+    assert.equal(await js(`Boolean(document.querySelector('.desktop-topbar [aria-label="More chat actions"], .desktop-topbar .git-topbar'))`), false);
+    await click('[aria-label="Toggle pinned summary"]');
     await click('[aria-label="Open context summaries"]');
     await waitFor(wc, `Boolean(document.querySelector('#context-summary-panel'))`);
     await waitFor(wc, `document.activeElement?.getAttribute('aria-label') === 'Close context summaries'`);
     await js(`document.querySelectorAll('[role="option"]')[1].click()`);
     await waitFor(wc, `document.querySelector('.context-summary-markdown')?.textContent.includes('Provider routing')`);
     await click('[aria-label="Close context summaries"]');
-    await waitFor(wc, `document.activeElement?.getAttribute('aria-label') === 'More chat actions'`);
-    checks.push('context summaries in more menu');
+    await waitFor(wc, `document.activeElement?.getAttribute('aria-label') === 'Open context summaries'`);
+    await click('[aria-label="Open context summaries"]');
+    await waitFor(wc, `document.activeElement?.getAttribute('aria-label') === 'Close context summaries'`);
+    await capture('context-detail');
+    wc.sendInputEvent({type:'keyDown',keyCode:'Escape'});
+    wc.sendInputEvent({type:'keyUp',keyCode:'Escape'});
+    await waitFor(wc, `!document.querySelector('#context-summary-panel') && Boolean(document.querySelector('#runtime-center-overview'))`);
+    await click('[aria-label="Compact conversation"]');
+    await waitFor(wc, `document.querySelector('.desktop-shell').dataset.compactCalls === '1'`);
+    assert.equal(await js(`document.querySelector('[aria-label="Compact conversation"]').disabled`), true);
+    await click('[aria-label="Compact conversation"]');
+    assert.equal(await js(`document.querySelector('.desktop-shell').dataset.compactCalls`), '1');
+    checks.push('context browsing focus and guarded compaction in summary');
 
-    await click('[aria-label="Toggle pinned summary"]');
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
     const overview = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); return { width: panel.getBoundingClientRect().width, radius: getComputedStyle(panel).borderRadius, sections: [...panel.querySelectorAll('h2')].map(el=>el.textContent), fourthResource: panel.textContent.includes('acceptance.md') }; })()`);
     assert.equal(overview.width, 300);
     assert.equal(overview.radius, '24px');
-    assert.deepEqual(overview.sections, ['Subagents', 'Todos', 'Resources', 'Plan']);
+    assert.deepEqual(overview.sections, ['Context', 'Subagents', 'Todos', 'Resources', 'Plan']);
     assert.equal(overview.fourthResource, false);
     await js(`document.querySelector('[data-fixture-chat]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))`);
     assert.equal(await js(`Boolean(document.querySelector('#runtime-center-overview'))`), true);
@@ -127,7 +138,7 @@ async function main() {
     await waitFor(wc, `!document.querySelector('#runtime-center-overview') && !document.querySelector('.runtime-inspector')`);
     await click('[aria-label="Toggle pinned summary"]');
     await click('[aria-label="Toggle right panel"]');
-    assert.equal(await js(`document.querySelectorAll('#runtime-center-overview h2').length`), 4);
+    assert.equal(await js(`document.querySelectorAll('#runtime-center-overview h2').length`), 5);
     assert.equal(await js(`document.querySelector('#runtime-center-overview').textContent.includes('No submitted plan yet.')`), true);
     assert.equal(await js(`document.querySelector('#runtime-center-overview').textContent.includes('Desktop workspace')`), false);
     await capture('empty-light');

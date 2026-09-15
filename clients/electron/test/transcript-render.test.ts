@@ -236,7 +236,7 @@ test('user messages use a neutral rounded Codex-style bubble', () => {
   assert.match(html, /class="user-message-bubble"/);
   assert.match(html, /padding:10px 16px/);
   assert.match(html, /border-radius:18px/);
-  assert.match(html, /border:0/);
+  assert.match(html, /border:1px solid transparent/);
   assert.doesNotMatch(html, /accentBg/);
 });
 
@@ -797,8 +797,8 @@ test('pending and failed user messages have a visible status distinct from sent 
       ] })));
     assert.equal((html.match(/data-delivery="pending"/g) ?? []).length, 1);
     assert.match(html, /border:1px dashed/);
-    assert.match(html, />Pending<\/span>/);
-    assert.match(html, />Not sent<\/span>/);
+    assert.match(html, /title="Pending"/);
+    assert.match(html, /title="Not sent"/);
     assert.equal((html.match(/role="status"/g) ?? []).length, 2);
   }
 });

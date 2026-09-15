@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron';
+import { mkdir, writeFile } from 'node:fs/promises';
 const url = process.argv.find((argument) => argument.startsWith('http://'));
 if (!url || !process.env.LINGXI_TEST_USER_DATA) throw new Error('fixture URL and isolated user data required');
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
@@ -47,6 +48,23 @@ async function main() {
     await settle();
     result.shrinkGap = (await run(metrics)).gap;
     result.finalAncestorScroll = (await run(metrics)).ancestor;
+    await run(`(() => { const style = document.createElement('style'); style.textContent = '* { animation: none !important; transition: none !important; }'; document.head.append(style); })()`);
+    result.deliveryLayouts = [];
+    for (const long of [false, true]) {
+      for (const status of ['pending', undefined, 'failed', undefined]) {
+        await run(`window.stageScrollFixture.delivery(${JSON.stringify(status)}, ${long})`);
+        await settle();
+        result.deliveryLayouts.push(await run(`(() => {
+          const bubble = document.querySelector('.user-message-bubble');
+          const rect = bubble.getBoundingClientRect();
+          return { width: rect.width, height: rect.height, top: rect.top, nextTop: document.getElementById('narration-content-after-delivery').getBoundingClientRect().top, scrollHeight: document.querySelector('.desktop-stage').scrollHeight };
+        })()`));
+        if (!long && status === 'pending' && process.env.LINGXI_DELIVERY_SCREENSHOTS) {
+          await mkdir(process.env.LINGXI_DELIVERY_SCREENSHOTS, { recursive: true });
+          await writeFile(process.env.LINGXI_DELIVERY_SCREENSHOTS + '/pending.png', (await window.webContents.capturePage()).toPNG());
+        }
+      }
+    }
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { window.destroy(); app.quit(); }
 }

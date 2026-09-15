@@ -24,6 +24,7 @@ import {
   reduceEvent,
   reduceEvents,
   appendPendingUserPrompt,
+  acknowledgePromptDispatch,
   appendUserPrompt,
   type ConversationState,
 } from '../src/renderer/bridge/conversation';
@@ -1054,4 +1055,32 @@ test('pending prompt stays distinct during streaming and settles at turn boundar
   assert.deepEqual(delivery(), [undefined, 'pending', 'pending']);
   state = reduceEvent(state, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
   assert.deepEqual(delivery(), [undefined, undefined, undefined]);
+});
+
+test('successful dispatch clears only its prompt before turn lifecycle events arrive', () => {
+  let state = appendPendingUserPrompt(emptyConversation(), 'First prompt');
+  const first = state.items.at(-1);
+  state = appendPendingUserPrompt(state, 'Second prompt');
+  state = acknowledgePromptDispatch(state, first);
+  const prompts = state.items as Narration[];
+  assert.equal(prompts[0].delivery, undefined);
+  assert.equal(prompts[1].delivery, 'pending');
+  assert.equal(state.running, true, 'dispatch does not finish the model turn');
+});
+
+test('late dispatch acknowledgements preserve settled, failed, and replacement prompts', () => {
+  const submitted = appendPendingUserPrompt(emptyConversation(), 'Original prompt');
+  const original = submitted.items.at(-1);
+  const ended = reduceEvent(submitted, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  assert.equal(acknowledgePromptDispatch(ended, original), ended);
+
+  const failed: ConversationState = { ...submitted, items: submitted.items.map((item) =>
+    item.type === 'narration' ? { ...item, delivery: 'failed' as const } : item) };
+  assert.equal(acknowledgePromptDispatch(failed, original), failed);
+  assert.equal(acknowledgePromptDispatch(failed, failed.items[0]), failed);
+
+  const replacement = appendPendingUserPrompt(emptyConversation(), 'New transcript prompt');
+  assert.equal(replacement.items[0].id, original?.id, 'transcript ids are reused');
+  assert.equal(acknowledgePromptDispatch(replacement, original), replacement);
+  assert.equal(acknowledgePromptDispatch(replacement, undefined), replacement);
 });

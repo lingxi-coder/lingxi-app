@@ -331,7 +331,20 @@ export function appendPendingUserPrompt(state: ConversationState, text: string, 
   };
 }
 
-/** Mid-turn input has no per-message receipt; release its marker at the turn boundary. */
+/** Clear the send indicator once this exact prompt crossed the host boundary.
+ * This acknowledges dispatch, not model consumption. Object identity prevents a
+ * late acknowledgement from settling a new transcript row with a reused id.
+ */
+export function acknowledgePromptDispatch(state: ConversationState, prompt: RunItem | undefined): ConversationState {
+  if (prompt?.type !== 'narration' || prompt.role !== 'user' || prompt.delivery !== 'pending') return state;
+  const index = state.items.indexOf(prompt);
+  if (index < 0) return state;
+  const items = state.items.slice();
+  items[index] = { ...prompt, delivery: undefined };
+  return { ...state, items };
+}
+
+/** Lifecycle events also settle markers when they arrive before the host acknowledgement. */
 function settlePendingPrompts(items: readonly RunItem[]): RunItem[] {
   return items.map((item) => item.type === 'narration' && item.delivery === 'pending'
     ? { ...item, delivery: undefined } : item);

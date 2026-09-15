@@ -46,6 +46,7 @@ import type { NotificationPreferences } from '../../shared/notificationPreferenc
 import type { ModelPickerVisibilitySettings } from '../../shared/settings';
 import {
   appendPendingUserPrompt,
+  acknowledgePromptDispatch,
   beginCompaction,
   beginLocalSlashCommand,
   beginSlashCommand,
@@ -1606,10 +1607,10 @@ export function useBridge(): UseBridge {
         mode: saved?.mode ?? 'code', path: saved?.path ?? '',
       },
     } : undefined;
-    let promptItemId: string | undefined;
+    let promptItem: ConversationState['items'][number] | undefined;
     updateRuntime(sessionId, (state) => {
       const conversation = appendPendingUserPrompt(state.conversation, trimmed, images);
-      promptItemId = conversation.items.at(-1)?.id;
+      promptItem = conversation.items.at(-1);
       return {
         ...state,
         submittedSession: state.submittedSession ?? submittedSession,
@@ -1621,6 +1622,7 @@ export function useBridge(): UseBridge {
       if (removedRuntimeIds.current.has(sessionId)) return;
       updateRuntime(sessionId, (state) => ({
         ...state,
+        conversation: acknowledgePromptDispatch(state.conversation, promptItem),
         runtimeCenter: commitRuntimeResources(state.runtimeCenter, sendToken),
       }));
     }).catch((cause) => {
@@ -1632,7 +1634,7 @@ export function useBridge(): UseBridge {
           ...state,
           conversation: {
             ...reduceEvent({ ...state.conversation, items: state.conversation.items.map((item) =>
-              item.id === promptItemId && item.type === 'narration' ? { ...item, delivery: 'failed' as const } : item) }, wasTurnActive
+              item === promptItem && item.type === 'narration' ? { ...item, delivery: 'failed' as const } : item) }, wasTurnActive
               ? { type: 'system_notice', message: 'Failed to queue the pending message.', is_error: true }
               : { type: 'error', kind: { type: 'transport' }, message: 'Failed to send the prompt to the engine.' }),
             running: wasTurnActive,

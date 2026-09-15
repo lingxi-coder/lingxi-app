@@ -79,6 +79,10 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     assert.ok(result.shrinkGap <= 1, `async child shrink bottom gap: ${result.shrinkGap}`);
     assert.equal(result.finalAncestorScroll, 0);
 
+    for (const offset of [0, 4]) {
+      const baseline = result.deliveryLayouts[offset];
+      for (const layout of result.deliveryLayouts.slice(offset, offset + 4)) assert.deepEqual(layout, baseline, 'delivery changes must not resize or move transcript messages');
+    }
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

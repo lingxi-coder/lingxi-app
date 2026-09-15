@@ -42,18 +42,20 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
     <div className={user ? 'user-message-bubble' : undefined} data-delivery={delivery} style={{
       maxWidth: user ? images.length ? 'min(430px, 100%)' : 'min(700px, 90%)' : '100%',
       minWidth: 0,
+      position: user ? 'relative' : undefined,
       padding: user ? '10px 16px' : 0,
       borderRadius: user ? 18 : 0,
-      border: delivery ? `1px dashed ${t.text3}` : 0,
+      border: user ? `1px ${delivery ? 'dashed' : 'solid'} ${delivery ? t.text3 : 'transparent'}` : 0,
       background: delivery ? t.surface : user ? t.surfaceHover : 'transparent',
       fontSize: 14, lineHeight: 1.65, letterSpacing: 0,
       color, fontWeight: item.strong ? 600 : 400,
     }}>
       {delivery && (
-        <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4, color: t.text2, fontSize: 11, fontWeight: 500, lineHeight: 1.5 }}>
-          <Icon name="clock" size={13} />
-          <span>{delivery === 'pending' ? 'Pending' : 'Not sent'}</span>
-        </div>
+        <span className="message-delivery-status" role="status" title={delivery === 'pending' ? 'Pending' : 'Not sent'}
+          style={{ color: delivery === 'failed' ? t.danger : t.text3 }}>
+          <Icon name={delivery === 'pending' ? 'clock' : 'shieldAlert'} size={14} />
+          <span className="message-delivery-label">{delivery === 'pending' ? 'Pending' : 'Not sent'}</span>
+        </span>
       )}
       {images.length > 0 && (
         <div role="group" aria-label="Attached images" style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>

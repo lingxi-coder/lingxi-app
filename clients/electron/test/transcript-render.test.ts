@@ -786,3 +786,36 @@ test('a main-only roster does not suppress the empty conversation', () => {
   assert.match(html, /Ready for a new prompt/);
   assert.doesNotMatch(html, /data-agent-id="main"/);
 });
+
+test('pending and failed user messages have a visible status distinct from sent bubbles', () => {
+  for (const dark of [false, true]) {
+    const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(dark) },
+      React.createElement(Stage, { liveItems: [
+        { type: 'narration', id: 'sent', role: 'user', text: 'Sent message' },
+        { type: 'narration', id: 'waiting', role: 'user', text: 'Queued message', delivery: 'pending' },
+        { type: 'narration', id: 'failed', role: 'user', text: 'Failed message', delivery: 'failed' },
+      ] })));
+    assert.equal((html.match(/data-delivery="pending"/g) ?? []).length, 1);
+    assert.match(html, /border:1px dashed/);
+    assert.match(html, />Pending<\/span>/);
+    assert.match(html, />Not sent<\/span>/);
+    assert.equal((html.match(/role="status"/g) ?? []).length, 2);
+  }
+});
+
+test('background slash launch receipts yield to their matching agent card', () => {
+  const agent = { agent_id: 'agent-c8d2', name: 'fork-a107', agent_type: 'fork', status: 'running' };
+  const receipt: CommandRunItem = { type: 'command', id: 'launch-receipt', name: '/code-review max --fix',
+    output: '⍼ started code-review in background as fork-a107 (c8d2)', isError: false };
+  const stage = (item: CommandRunItem, agents = [agent]) => render(React.createElement(Stage, {
+    liveItems: [item], agents,
+  }));
+  assert.doesNotMatch(stage(receipt), /Command output|started code-review/);
+  assert.match(stage(receipt), /fork-a107/);
+  assert.doesNotMatch(stage({ ...receipt, name: '/security-review', output: '⍼ started security-review in background as fork-a107 (c8d2)' }), /Command output/);
+  assert.match(stage(receipt, []), /Command output/);
+  assert.match(stage(receipt, [{ ...agent, agent_id: 'different-1234' }]), /Command output/);
+  assert.match(stage({ ...receipt, isError: true }), /Command failed/);
+  assert.match(stage({ ...receipt, output: receipt.output + '\nImportant additional output' }), /Important additional output/);
+  assert.match(stage({ ...receipt, output: 'Could not start /code-review in the background: unavailable' }), /Could not start/);
+});

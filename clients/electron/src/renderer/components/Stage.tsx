@@ -14,6 +14,7 @@ import { CompactionStatus } from './CompactionStatus';
 import { Icon } from './Icon';
 import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
 import { TranscriptAgents } from './TranscriptAgents';
+import { anchorTranscriptAgents, placeTranscriptAgents, type AgentAnchors } from './transcriptAgentPlacement';
 import { transcriptRows } from './transcriptRows';
 import { ToolGroup } from './ToolGroup';
 import { TurnFileSummary } from './TurnFileSummary';
@@ -29,6 +30,7 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
 }) {
   const t = useT();
   const user = item.role === 'user';
+  const delivery = user ? item.delivery : undefined;
   const color = item.tone === 'muted' ? t.text3 : t.text;
   const images = item.images?.filter((image) => image.url.trim().length > 0) ?? [];
   const collapsible = narrationShouldCollapse(item);
@@ -37,16 +39,22 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   const slashCommand = user ? parseSlashCommandMessage(item.text) : null;
   const slashIcon = slashCommand ? commandPaletteIcon(slashCommand.name) : null;
   return (
-    <div className={user ? 'user-message-bubble' : undefined} style={{
+    <div className={user ? 'user-message-bubble' : undefined} data-delivery={delivery} style={{
       maxWidth: user ? images.length ? 'min(430px, 100%)' : 'min(700px, 90%)' : '100%',
       minWidth: 0,
       padding: user ? '10px 16px' : 0,
       borderRadius: user ? 18 : 0,
-      border: 0,
-      background: user ? t.surfaceHover : 'transparent',
+      border: delivery ? `1px dashed ${t.text3}` : 0,
+      background: delivery ? t.surface : user ? t.surfaceHover : 'transparent',
       fontSize: 14, lineHeight: 1.65, letterSpacing: 0,
       color, fontWeight: item.strong ? 600 : 400,
     }}>
+      {delivery && (
+        <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4, color: t.text2, fontSize: 11, fontWeight: 500, lineHeight: 1.5 }}>
+          <Icon name="clock" size={13} />
+          <span>{delivery === 'pending' ? 'Pending' : 'Not sent'}</span>
+        </div>
+      )}
       {images.length > 0 && (
         <div role="group" aria-label="Attached images" style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
           {images.map((image, index) => (
@@ -129,6 +137,8 @@ interface StageProps {
   collapseThoughtsByDefault?: boolean;
   /** True while a turn is streaming — allows its live thinking status. */
   running?: boolean;
+  /** Activity already displayed by the caller; suppresses only the generic waiting fallback. */
+  pendingActivity?: string;
   /** Truthful empty/onboarding copy supplied by the host state. */
   emptyMessage?: string;
   /**
@@ -145,7 +155,7 @@ interface StageProps {
   foldedItemIds?: readonly string[];
 }
 
-export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', agents, onOpenAgent, foldedItemIds = [] }: StageProps) {
+export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', agents, onOpenAgent, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -190,7 +200,17 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
     [liveItems, foldedItemIds, visible, sessionKey],
   );
 
-  const rows = useMemo(() => transcriptRows(items, running), [items, running]);
+  const [placement, setPlacement] = useState<{ sessionKey: string; source: typeof agents; items: typeof liveItems; anchors: AgentAnchors }>(() => ({
+    sessionKey, source: agents, items: liveItems, anchors: anchorTranscriptAgents(new Map(), liveItems, agents ?? []),
+  }));
+  let anchors = placement.anchors;
+  if (placement.sessionKey !== sessionKey || placement.source !== agents || placement.items !== liveItems) {
+    anchors = anchorTranscriptAgents(placement.sessionKey === sessionKey ? anchors : new Map(), liveItems, agents ?? []);
+    setPlacement({ sessionKey, source: agents, items: liveItems, anchors });
+  }
+  const rows = useMemo(() => placeTranscriptAgents(
+    transcriptRows(items, running, Boolean(pendingActivity?.trim())), liveItems, agents ?? [], anchors,
+  ), [items, liveItems, running, pendingActivity, agents, anchors]);
 
   // Synchronize the actual scroll extent before paint, including feed padding.
   // A tail element's scrollIntoView also moves ancestors and excludes that padding.
@@ -288,6 +308,7 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
         */}
         {rows.map((item) => {
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} id={item.id} files={item.files} open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />;
+          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} />;
           if (item.type === 'narration') {
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
@@ -344,8 +365,6 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
           }
           return null;
         })}
-
-        {agents && <TranscriptAgents key={sessionKey} agents={agents} onOpenAgent={onOpenAgent} />}
 
         {localPlan && <div role="dialog" aria-label="Plan" style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>Close plan</button><PlanDocument content={localPlan.content}/></div>}
 

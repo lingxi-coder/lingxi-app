@@ -52,6 +52,7 @@ import type { ClientEvent, ImageRefDto, MessageDto, MessageImageDto, PlanTaskDto
 import { fallbackToolBody, fallbackToolHeader } from '@lingxi/bridge-client/toolview';
 import { isSupportedImageMediaType } from '../../shared/imageInput';
 
+import { resultAgentId } from '../components/transcriptAgentPlacement';
 import type { RunItem } from '../model/runItem';
 import { collectTurnFileChanges } from '../model/turnFileChanges';
 
@@ -321,7 +322,17 @@ export function appendPendingUserPrompt(state: ConversationState, text: string, 
   // unrelated `error` arriving before `turn_started` would find a non-null
   // name and take the slash release path, clearing running state while this
   // prompt's turn is still starting.
-  return next === state ? state : { ...next, running: true, pendingSlashName: null };
+  return next === state ? state : {
+    ...next, running: true, pendingSlashName: null,
+    items: next.items.map((item, index) => index === next.items.length - 1
+      ? { ...item, delivery: 'pending' as const } : item),
+  };
+}
+
+/** Mid-turn input has no per-message receipt; release its marker at the turn boundary. */
+function settlePendingPrompts(items: readonly RunItem[]): RunItem[] {
+  return items.map((item) => item.type === 'narration' && item.delivery === 'pending'
+    ? { ...item, delivery: undefined } : item);
 }
 
 /**
@@ -348,10 +359,10 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // slash pre-claim: the command expanded into a real turn, which now
       // owns `running` (released by the ordinary `turn_ended` below), and a
       // stale `pendingSlashName` must not label a later, unrelated result.
-      return { ...state, running: true, pendingSlashName: null, openAssistantIndex: -1, openThinkingIndex: -1, turnToolIds: [] };
+      return { ...state, items: settlePendingPrompts(state.items), running: true, pendingSlashName: null, openAssistantIndex: -1, openThinkingIndex: -1, turnToolIds: [] };
 
     case 'turn_ended': {
-      const items = state.items.slice();
+      const items = settlePendingPrompts(state.items);
       // Seal any reasoning block still open when the turn closes.
       closeThinking(items, state.openThinkingIndex);
       // …and any tool card still running. A call that never reported a result
@@ -469,6 +480,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       const previous = idx === undefined ? undefined : state.items[idx];
       const settled = {
         status: event.is_error ? ('error' as const) : ('done' as const),
+        agentId: resultAgentId(event.result_json),
         ...(event.display
           ? { result: event.display }
           : { note: fallbackToolBody(event.result_json) }),
@@ -870,6 +882,7 @@ export function conversationFromMessages(
           const idx = toolIndex.get(block.id);
           const settled = {
             status: block.is_error ? ('error' as const) : ('done' as const),
+            agentId: resultAgentId(block.result_json),
             ...(block.display
               ? { result: block.display }
               : { note: fallbackToolBody(block.result_json) }),

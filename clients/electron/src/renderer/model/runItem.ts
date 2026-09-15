@@ -29,6 +29,8 @@ export interface ToolRunItem {
   readonly id: string;
   /** Raw tool name, kept for diagnostics and error copy. */
   readonly tool: string;
+  /** Agent identity returned by a creation tool, retained for timeline placement. */
+  readonly agentId?: string;
   readonly status: ToolRunStatus;
   /** Pre-derived header (engine `header`, or the shared degraded fallback). */
   readonly view: ToolHeaderDto;
@@ -55,6 +57,8 @@ export interface NarrationRunItem {
   readonly tone?: 'muted';
   readonly strong?: boolean;
   readonly role?: 'user' | 'assistant';
+  /** Local prompt awaiting a turn boundary; absent on restored history. */
+  readonly delivery?: 'pending' | 'failed';
   /**
    * True when this assistant message was streamed in the current renderer.
    * Stable across `message_complete`, so a reply does not collapse and move the

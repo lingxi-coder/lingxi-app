@@ -9,7 +9,7 @@ export interface TranscriptToolGroup {
 export type TranscriptRow = Exclude<RunItem, ToolRunItem> | TranscriptToolGroup;
 
 /** Presentation only: thinking never divides tools, other events retain boundaries. */
-export function transcriptRows(items: readonly RunItem[], running: boolean): TranscriptRow[] {
+export function transcriptRows(items: readonly RunItem[], running: boolean, hasPendingActivity = false): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
   let group: TranscriptToolGroup | undefined;
   // Only the latest unfinished reasoning block can be active.
@@ -38,7 +38,7 @@ export function transcriptRows(items: readonly RunItem[], running: boolean): Tra
   }
   // Some providers never emit reasoning deltas. The turn still owes the user
   // a waiting indicator until it finishes, unless another activity owns it.
-  if (running && !activeThinking && !items.some((item) =>
+  if (running && !hasPendingActivity && !activeThinking && !items.some((item) =>
     (item.type === 'tool' || item.type === 'compaction') && item.status === 'running')) {
     rows.push({ type: 'thinking', id: 'thinking:pending', text: '', streamed: true });
   }

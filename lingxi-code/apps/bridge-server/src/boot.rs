@@ -1888,6 +1888,18 @@ mod tests {
         );
     }
 
+    /// Registering a session whose transcript already exists is allowed, and the
+    /// guard's drop deregisters it.
+    ///
+    /// This used to also enqueue accepted and held work and assert both spilled
+    /// on shutdown. That fixture raced `take_accepted_peer_reminders`, which
+    /// drains the same queues from every turn's reminder assembly — another
+    /// crate, no test lock — so the assertion failed on an empty spill. The
+    /// spill is the global's own property and is pinned where the global lives,
+    /// by `uds_inbox`'s `shutdown_spills_both_accepted_and_held_work_to_the_\
+    /// bound_session`; that the bridge's drop is what triggers it is pinned by
+    /// this module's `stale_live_session_guard_…`, which asserts the live guard
+    /// stops the inbox.
     #[test]
     fn live_registration_allows_resume_of_existing_transcript_and_cleans_up() {
         // `LiveSessionDir` and the UDS inbox are process globals in tests just
@@ -1917,37 +1929,9 @@ mod tests {
             .unwrap()
             .iter()
             .any(|record| record.sid() == session_id));
-        let mut accepted = platform_api::live_sessions::outbound_peer_message(
-            "sender",
-            "source-session",
-            "survive bridge shutdown",
-            None,
-        );
-        accepted.msg_id = Some("bridge-shutdown-accepted".into());
-        platform_api::uds_inbox::enqueue_accepted(accepted);
-        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "hold");
-        let mut held = platform_api::live_sessions::outbound_peer_message(
-            "sender",
-            "source-session",
-            "held across bridge shutdown",
-            None,
-        );
-        held.msg_id = Some("bridge-shutdown-held".into());
-        platform_api::uds_inbox::enqueue_inbound(held);
-        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
         drop(guard);
         let dir = LiveSessionDir::at_live(home.path().join("sessions"));
         assert!(dir.list_live().unwrap().is_empty());
-        let spilled = dir.drain_inbox(session_id).expect("preserved inbox");
-        let mut spilled_ids = spilled
-            .iter()
-            .filter_map(|message| message.msg_id.as_deref())
-            .collect::<Vec<_>>();
-        spilled_ids.sort_unstable();
-        assert_eq!(
-            spilled_ids,
-            vec!["bridge-shutdown-accepted", "bridge-shutdown-held"]
-        );
     }
 
     /// A stale generation's guard must not stop the inbox, unregister the live

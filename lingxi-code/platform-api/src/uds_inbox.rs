@@ -1653,6 +1653,59 @@ mod tests {
         std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
     }
 
+    /// Shutdown must preserve BOTH queues, not just the accepted one.
+    ///
+    /// `spill_generation` walks `accepted` and then `held`, and the held half
+    /// had no coverage here — it was only asserted in `bridge-server`'s
+    /// `live_registration_allows_resume_of_existing_transcript_and_cleans_up`,
+    /// where the fixture races `take_accepted_peer_reminders` (every turn calls
+    /// it, from another crate, holding no test lock). This crate owns the
+    /// global and serialises its own tests, so the property belongs here.
+    #[test]
+    fn shutdown_spills_both_accepted_and_held_work_to_the_bound_session() {
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        crate::live_sessions::set_process_dir(dir.clone());
+        crate::live_sessions::set_process_session_id("session-a");
+        let socket = temp.path().join("inbox.sock");
+        start_process_inbox_for_session(&socket, "session-a").unwrap();
+
+        let mut accepted = crate::live_sessions::outbound_peer_message(
+            "sender",
+            "source-session",
+            "survive shutdown",
+            None,
+        );
+        accepted.msg_id = Some("shutdown-accepted".into());
+        enqueue_accepted(accepted);
+
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "hold");
+        let mut held = crate::live_sessions::outbound_peer_message(
+            "sender",
+            "source-session",
+            "held across shutdown",
+            None,
+        );
+        held.msg_id = Some("shutdown-held".into());
+        enqueue_inbound(held);
+        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+
+        stop_process_inbox_checked().expect("shutdown preserves both queues");
+
+        let mut spilled = dir
+            .drain_inbox("session-a")
+            .expect("bound session inbox")
+            .iter()
+            .filter_map(|message| message.msg_id.clone())
+            .collect::<Vec<_>>();
+        spilled.sort();
+        assert_eq!(spilled, vec!["shutdown-accepted", "shutdown-held"]);
+        clean_env();
+    }
+
     #[test]
     fn retarget_spills_old_generation_work_to_old_session() {
         let _g = test_guard();

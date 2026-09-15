@@ -123,11 +123,15 @@ bridge-server CLI flag a desktop user cannot act on.
 ~~`boot::tests::stale_live_session_guard_cannot_stop_or_unregister_new_generation`~~
 — fixed in `8f6fea986`. It held the crate's serial lock and still failed one
 run in three, because a serial lock only excludes tests that also take it: its
-FIXTURE used the process-global accepted queue, which
-`take_accepted_peer_reminders` drains from `orchestrator`'s turn assembly —
-production code, another crate, no lock. The fixture now writes the inbox
-directly and the test touches that queue not at all. 6 consecutive parallel
-runs green, and three mutations each red on exactly this test.
+fixture rested on state that `live_sessions::take_accepted_peer_reminders`
+drains from `orchestrator`'s turn assembly — production code, another crate, no
+lock. That one function empties two stores, the in-memory queue and the file
+inbox, so it took two passes: `8f6fea986` removed the queue dependency (and I
+called it fixed too early, on runs that did not cover the reproducing case),
+`12d2cc681` removed the file one by seeding it only after the process session id
+has moved on. Verified against `cargo test -p cron -p bridge-server`, the
+combination that actually reproduced it: 8 consecutive runs green, three
+mutations each red on exactly this test.
 
 `clients/electron/test/git-workflows.test.ts` failed all 17 of its cases as a
 block once, with "Commit or explicitly stash your changes before switching

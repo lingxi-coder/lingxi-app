@@ -1950,6 +1950,19 @@ mod tests {
         );
     }
 
+    /// A stale generation's guard must not stop the inbox, unregister the live
+    /// generation, or disturb the retired session's inbox.
+    ///
+    /// The inbox fixtures are written through `send_inbox` rather than through
+    /// the process-global accepted queue. That queue is drained by
+    /// `take_accepted_peer_reminders`, which every turn calls as it assembles
+    /// reminders — production code in another crate that takes no test lock, so
+    /// any concurrently running turn could empty it between the enqueue and the
+    /// generation switch. This test then failed inside its own FIXTURE, on a
+    /// missing file, roughly one run in three. The spill those steps exercised
+    /// is not this test's subject and is covered where the global lives, by
+    /// `uds_inbox`'s own `retarget_spills_old_generation_work_to_old_session`
+    /// and its shutdown siblings, under that crate's `test_guard`.
     #[test]
     fn stale_live_session_guard_cannot_stop_or_unregister_new_generation() {
         let _serial = crate::driver::LOOP_KA_TEST_SERIAL
@@ -1965,14 +1978,20 @@ mod tests {
         cfg_a.lingxi_home = home.path().to_path_buf();
         cfg_a.session_id_override = Some(session_a.to_string());
         let guard_a = initialize_live_session(&mut cfg_a).expect("start generation A");
-        let mut accepted_a = platform_api::live_sessions::outbound_peer_message(
+
+        // Stand in for work already spilled to the retired session's inbox.
+        let dir = guard_a.dir.clone();
+        let mut owned_by_a = platform_api::live_sessions::outbound_peer_message(
             "sender",
             "source-session",
             "owned by A",
             None,
         );
-        accepted_a.msg_id = Some("accepted-a".into());
-        platform_api::uds_inbox::enqueue_accepted(accepted_a);
+        owned_by_a.msg_id = Some("accepted-a".into());
+        dir.send_inbox(session_a, &owned_by_a)
+            .expect("seed the retired session inbox");
+        let a_inbox_path = dir.root().join(format!("{session_a}.inbox.jsonl"));
+        let a_inbox_before = std::fs::read(&a_inbox_path).expect("fixture inbox exists");
 
         let mut cfg_c = resolve_desktop_config(&BridgeArgs::default());
         cfg_c.cwd = cwd.path().to_path_buf();
@@ -1980,45 +1999,48 @@ mod tests {
         cfg_c.session_id_override = Some(session_c.to_string());
         let guard_c = initialize_live_session(&mut cfg_c).expect("start generation C");
         let dir = guard_c.dir.clone();
-        let a_inbox_path = dir.root().join(format!("{session_a}.inbox.jsonl"));
-        let a_inbox_before =
-            std::fs::read(&a_inbox_path).expect("starting C spills accepted A work");
 
         drop(guard_a);
 
         assert_eq!(
             platform_api::live_sessions::process_session_id().as_deref(),
-            Some(session_c)
+            Some(session_c),
+            "a stale guard must not take the process session id from C"
         );
-        assert!(platform_api::uds_inbox::process_socket_path().is_some());
-        assert!(dir
-            .list_live()
-            .unwrap()
-            .iter()
-            .any(|record| record.pid == std::process::id() && record.sid() == session_c));
+        assert!(
+            platform_api::uds_inbox::process_socket_path().is_some(),
+            "a stale guard must not stop C's inbox"
+        );
+        assert!(
+            dir.list_live()
+                .unwrap()
+                .iter()
+                .any(|record| record.pid == std::process::id() && record.sid() == session_c),
+            "a stale guard must not unregister C"
+        );
         assert_eq!(
             std::fs::read(&a_inbox_path).expect("stale guard preserves A inbox"),
-            a_inbox_before
+            a_inbox_before,
+            "a stale guard must not rewrite the retired session's inbox"
         );
 
-        let mut accepted_c = platform_api::live_sessions::outbound_peer_message(
-            "sender",
-            "source-session",
-            "owned by C",
-            None,
-        );
-        accepted_c.msg_id = Some("accepted-c".into());
-        platform_api::uds_inbox::enqueue_accepted(accepted_c);
+        // The LIVE guard still deregisters, and still leaves the retired inbox
+        // alone — so the check above is about staleness, not about drops being
+        // inert in general.
         drop(guard_c);
 
         assert!(dir.list_live().unwrap().is_empty());
+        assert!(
+            platform_api::uds_inbox::process_socket_path().is_none(),
+            "the live guard DOES stop the inbox — otherwise the stale-guard              assertion above would hold for a drop that never tears anything down"
+        );
+        assert_eq!(
+            std::fs::read(&a_inbox_path).expect("shutdown preserves A inbox"),
+            a_inbox_before
+        );
         assert_eq!(
             dir.drain_inbox(session_a).unwrap()[0].msg_id.as_deref(),
             Some("accepted-a")
-        );
-        assert_eq!(
-            dir.drain_inbox(session_c).unwrap()[0].msg_id.as_deref(),
-            Some("accepted-c")
         );
     }
 

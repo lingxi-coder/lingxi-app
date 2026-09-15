@@ -4,6 +4,11 @@ import Foundation
 
 actor FfiCronStoreProvider: CronStoreProviding {
     private var stores: [String: FfiCronStoreClient] = [:]
+    private let defaults: @MainActor @Sendable () -> (String?, CronReasoning)
+
+    init(defaults: @escaping @MainActor @Sendable () -> (String?, CronReasoning) = { (nil, CronReasoning()) }) {
+        self.defaults = defaults
+    }
 
     func store(for scope: CronScope, appSandboxRoot: String) async throws -> any CronStoreClient {
         if let cached = stores[scope.scopeID] { return cached }
@@ -11,6 +16,8 @@ actor FfiCronStoreProvider: CronStoreProviding {
             appSandboxRoot: appSandboxRoot,
             projectCwd: scope.projectCwd
         )
+        let (model, reasoning) = await defaults()
+        try await handle.setMigrationDefaults(model: model ?? "", reasoningJson: String(decoding: try JSONEncoder().encode(reasoning), as: UTF8.self))
         let client = FfiCronStoreClient(handle: handle)
         stores[scope.scopeID] = client
         return client
@@ -36,6 +43,23 @@ final class FfiCronStoreClient: CronStoreClient, @unchecked Sendable {
         Self.map(try await handle.update(id: taskID, cronExpr: cronExpr, prompt: prompt, recurring: recurring))
     }
 
+    func migrateLegacyTasks(defaultModel: String?, reasoning: CronReasoning) async throws {
+        try await handle.setMigrationDefaults(model: defaultModel ?? "", reasoningJson: String(decoding: try JSONEncoder().encode(reasoning), as: UTF8.self))
+    }
+
+    func saveConfigured(draft: CronTaskDraft) async throws -> CronTaskRecord {
+        let json = String(decoding: try JSONEncoder().encode(draft.automation), as: UTF8.self)
+        if let id = draft.taskID {
+            return Self.map(try await handle.updateConfigured(id: id, cronExpr: draft.cron, prompt: draft.prompt, recurring: draft.recurring, automationJson: json))
+        }
+        return Self.map(try await handle.createConfigured(cronExpr: draft.cron, prompt: draft.prompt, recurring: draft.recurring, automationJson: json))
+    }
+
+    func updateAutomation(taskID: String, automation: CronAutomation) async throws -> CronTaskRecord {
+        let json = String(decoding: try JSONEncoder().encode(automation), as: UTF8.self)
+        return Self.map(try await handle.updateAutomation(id: taskID, automationJson: json))
+    }
+
     func delete(taskID: String) async throws -> Bool {
         await handle.delete(id: taskID)
     }
@@ -54,6 +78,18 @@ final class FfiCronStoreClient: CronStoreClient, @unchecked Sendable {
         await handle.acknowledgeOccurrence(taskId: taskID, scheduledAtMs: scheduledAtMs)
     }
 
+    private static func decodeAutomation(_ json: String?) -> CronAutomation? {
+        guard let json else { return nil }
+        if let configuration = try? JSONDecoder().decode(CronAutomation.self, from: Data(json.utf8)), configuration.version == 2 {
+            return configuration
+        }
+        var unsupported = CronAutomation()
+        unsupported.version = 0
+        unsupported.status = .paused
+        unsupported.statusReason = "This task uses settings this app cannot read. Update the app before editing it."
+        return unsupported
+    }
+
     private static func map(_ dto: CronTaskDto) -> CronTaskRecord {
         CronTaskRecord(
             id: dto.id,
@@ -64,7 +100,8 @@ final class FfiCronStoreClient: CronStoreClient, @unchecked Sendable {
             recurring: dto.recurring,
             nextFireMs: dto.nextFireMs,
             human: dto.human,
-            unsupportedReason: dto.mobileSupported ? nil : (dto.unsupportedReason ?? String(localized: "cron_unsupported_generic"))
+            unsupportedReason: dto.mobileSupported ? nil : dto.unsupportedReason,
+            automation: decodeAutomation(dto.automationJson)
         )
     }
 }
@@ -109,7 +146,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
     }
 
     func runTaskNow(scope: CronScope, task: CronTaskRecord) async throws -> CronExecutionOutcome {
-        let handle = try await makeHandle(scope: scope)
+        let handle = try await makeHandle(scope: scope, task: task)
         guard let result = await handle.runCronTaskNow(taskId: task.id) else {
             return CronExecutionOutcome(
                 status: .failed,
@@ -121,12 +158,21 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         return Self.map(result)
     }
 
+    func runTaskNow(scope: CronScope, task: CronTaskRecord, scheduledAtMs: UInt64) async throws -> CronExecutionOutcome {
+        let handle = try await makeHandle(scope: scope, task: task)
+        guard let result = await handle.runCronTaskNowAt(taskId: task.id, scheduledAtMs: scheduledAtMs) else {
+            return CronExecutionOutcome(status: .failed, resultText: nil,
+                errorMessage: String(localized: "cron_task_unavailable"), errorKind: .validation)
+        }
+        return Self.map(result)
+    }
+
     func runTaskIfDue(
         scope: CronScope,
         task: CronTaskRecord,
         scheduledAtMs: UInt64
     ) async throws -> CronExecutionOutcome? {
-        let handle = try await makeHandle(scope: scope)
+        let handle = try await makeHandle(scope: scope, task: task)
         return await handle.runCronTaskIfDue(taskId: task.id, scheduledAtMs: scheduledAtMs).map(Self.map)
     }
 
@@ -163,9 +209,14 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         LocalAppBackgroundTaskBridge.shared.schedule(earliestAtMs: next)
     }
 
-    private func makeHandle(scope: CronScope) async throws -> MobileEngineHandle {
+    private func makeHandle(scope: CronScope, task: CronTaskRecord? = nil) async throws -> MobileEngineHandle {
         let (snapshot, runtime) = await MainActor.run {
             (launchSnapshot(), terminalConfig(scope))
+        }
+        var cronRuntime = runtime
+        if task != nil && scope.projectID == nil {
+            cronRuntime?.workspaceHostPath = URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("scheduled/workspace", isDirectory: true).path
+            cronRuntime?.stableWorkspaceId = "scheduled"
         }
         let listener = CronEngineListener()
         let permissionSink = CronPermissionSink()
@@ -176,13 +227,13 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         let config = IosEngineLaunchConfigFfi(
             apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com",
             apiKey: Keychain.get(.apiKey) ?? "",
-            model: snapshot.defaultModelID ?? Keychain.get(.model) ?? "",
+            model: task?.configuration.model ?? snapshot.defaultModelID ?? Keychain.get(.model) ?? "",
             sessionMode: .code,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             appSandboxRoot: appSandboxRoot,
-            projectCwd: scope.projectCwd,
+            projectCwd: scope.projectCwd ?? (task == nil ? nil : URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("scheduled/workspace", isDirectory: true).path),
             providerConfig: provider,
-            mobileLinux: runtime.map {
+            mobileLinux: cronRuntime.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)
             },
             localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
@@ -217,7 +268,8 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 status: .succeeded,
                 resultText: fired.resultText,
                 errorMessage: nil,
-                errorKind: nil
+                errorKind: nil,
+                sessionID: fired.sessionId
             )
         case .failed(let message):
             let classification = classifyFailure(message, retryable: fired.retryable)
@@ -225,7 +277,8 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 status: classification.status,
                 resultText: fired.resultText,
                 errorMessage: message,
-                errorKind: classification.kind
+                errorKind: classification.kind,
+                sessionID: fired.sessionId
             )
         }
     }
@@ -235,6 +288,8 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         retryable: Bool
     ) -> (status: CronRunStatus, kind: CronRunErrorKind) {
         let normalized = message.lowercased()
+        if normalized.hasPrefix("busy:") { return (.queued, .system) }
+        if normalized.hasPrefix("paused:") { return (.failed, .validation) }
         if normalized.contains("cancel") || normalized.contains("取消") {
             return (.cancelled, .cancelled)
         }

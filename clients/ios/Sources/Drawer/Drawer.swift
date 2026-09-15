@@ -124,7 +124,7 @@ enum WorkspaceGroupBuilder {
             title: String(localized: "common_global"),
             subtitle: nil,
             updatedAt: nil,
-            sessions: mergedSessionRows(live: activeScope == .global ? liveSessions : [], cached: globalSessions)
+            sessions: mergedSessionRows(live: (activeScope == .global || activeScope == .scheduled) ? liveSessions : [], cached: globalSessions)
         )
         let projectSeeds = projects.map { project in
             let scope = ConversationScope.project(project.id)
@@ -167,7 +167,7 @@ enum WorkspaceGroupBuilder {
         let scopes = [CronScope.global(appSandboxRoot: appSandboxRoot)]
             + projects.map {
                 CronScope(
-                    scopeID: "project.\($0.id)",
+                    scopeID: $0.id,
                     projectID: $0.id,
                     projectName: $0.record.name,
                     projectCwd: $0.workspace.hostURL.path,
@@ -347,6 +347,7 @@ struct Drawer: View {
     let openSettings: () -> Void
     let openTerminal: () -> Void
     let openApps: (String?) -> Void
+    let openCron: (String?, String?) -> Void
     let closeSidebar: () -> Void
     let createApp: () -> Void
     let onSelectProject: (String?) -> Void
@@ -388,6 +389,7 @@ struct Drawer: View {
         openSettings: @escaping () -> Void,
         openTerminal: @escaping () -> Void,
         openApps: @escaping (String?) -> Void,
+        openCron: @escaping (String?, String?) -> Void = { _, _ in },
         closeSidebar: @escaping () -> Void,
         createApp: @escaping () -> Void,
         onSelectProject: @escaping (String?) -> Void,
@@ -412,6 +414,7 @@ struct Drawer: View {
         self.openSettings = openSettings
         self.openTerminal = openTerminal
         self.openApps = openApps
+        self.openCron = openCron
         self.closeSidebar = closeSidebar
         self.createApp = createApp
         self.onSelectProject = onSelectProject
@@ -441,7 +444,7 @@ struct Drawer: View {
             query: query,
             activeScope: activeScope,
             liveSessions: convo.engineSessions,
-            globalSessions: projectStore.globalSessions,
+            globalSessions: globalSessionsIncludingScheduled,
             projects: projectStore.projects,
             localApps: localAppsStore.apps,
             localAppSessionPages: localAppsStore.sessionPages,
@@ -589,6 +592,7 @@ struct Drawer: View {
     private func tab(_ id: DrawerSection, _ icon: LXIconName, _ label: String, count: Int) -> some View {
         let active = section == id
         return Button {
+            if id == .cron { openCron(nil, nil); return }
             section = id
             if let mode = id.sessionMode {
                 onModeChanged?(mode)
@@ -615,7 +619,7 @@ struct Drawer: View {
             query: query,
             activeScope: activeScope,
             liveSessions: convo.engineSessions,
-            globalSessions: projectStore.globalSessions,
+            globalSessions: globalSessionsIncludingScheduled,
             projects: projectStore.projects,
             localApps: localAppsStore.apps,
             localAppSessionPages: localAppsStore.sessionPages,
@@ -917,12 +921,24 @@ struct Drawer: View {
         .overlay(Rectangle().frame(height: 0.5).foregroundColor(t.border), alignment: .top)
     }
 
+    private var globalSessionsIncludingScheduled: [ProjectSessionSummary] {
+        var rows = projectStore.globalSessions
+        var seen = Set(rows.map(\.sessionId))
+        for session in cronState.generatedSessions where session.projectID == nil {
+            guard seen.insert(session.id).inserted else { continue }
+            rows.append(ProjectSessionSummary(sessionId: session.id, title: session.title, messageCount: 0,
+                relativeTime: formatCronEpoch(session.updatedAtMs),
+                updatedAt: Date(timeIntervalSince1970: Double(session.updatedAtMs) / 1000), mode: .code))
+        }
+        return rows
+    }
+
     private func selectWorkspace(_ scope: ConversationScope) {
         if let mode = section.sessionMode {
             onModeChanged?(mode)
         }
         switch scope {
-        case .global:
+        case .global, .scheduled:
             onSelectProject(nil)
         case let .project(id):
             onSelectProject(id)
@@ -933,7 +949,7 @@ struct Drawer: View {
 
     private func selectSession(_ sessionID: String, in scope: ConversationScope) {
         switch scope {
-        case .global:
+        case .global, .scheduled:
             if let mode = section.sessionMode { onModeChanged?(mode) }
             onSelectSession(nil, sessionID)
         case let .project(id):
@@ -955,7 +971,7 @@ struct Drawer: View {
             onModeChanged?(mode)
         }
         switch scope {
-        case .global:
+        case .global, .scheduled:
             onNewChat(nil)
         case let .project(id):
             onNewChat(id)

@@ -218,11 +218,65 @@ actor JsonCronStoreClient: CronStoreClient {
             lastFiredAtMs: previous.lastFiredAtMs,
             recurring: recurring,
             nextFireMs: expr.nextFire(after: anchor, calendar: calendar),
-            human: expr.humanDescription()
+            human: expr.humanDescription(),
+            automation: previous.automation
         )
         tasks[index] = updated
         try writeTasks(tasks)
         return updated
+    }
+
+    func migrateLegacyTasks(defaultModel: String?, reasoning: CronReasoning) async throws {
+        var tasks = try readTasks()
+        var changed = false
+        for i in tasks.indices where tasks[i].automation == nil {
+            var config = CronAutomation()
+            config.model = defaultModel ?? ""
+            config.reasoning = reasoning
+            if !tasks[i].recurring && tasks[i].nextFireMs == nil {
+                config.status = .completed
+            } else if config.model?.isEmpty != false {
+                config.status = .paused
+                config.statusReason = "Choose a model to resume this task."
+                tasks[i].nextFireMs = nil
+            }
+            tasks[i].automation = config
+            changed = true
+        }
+        if changed { try writeTasks(tasks) }
+    }
+
+    func saveConfigured(draft: CronTaskDraft) async throws -> CronTaskRecord {
+        let expression = try CronExpression(draft.cron)
+        var tasks = try readTasks()
+        let previous = tasks.first { $0.id == draft.taskID }
+        if draft.taskID != nil && previous == nil { throw CronStoreError.missingTask(draft.taskID!) }
+        let record = CronTaskRecord(
+            id: previous?.id ?? makeID(), cron: draft.cron,
+            prompt: draft.prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            createdAtMs: previous?.createdAtMs ?? now(), lastFiredAtMs: previous?.lastFiredAtMs,
+            recurring: draft.recurring,
+            nextFireMs: draft.automation.status == .active ? expression.nextFire(after: now(), calendar: calendar) : nil,
+            human: expression.humanDescription(), automation: draft.automation
+        )
+        tasks.removeAll { $0.id == record.id }
+        tasks.append(record)
+        try writeTasks(tasks)
+        return record
+    }
+
+    func updateAutomation(taskID: String, automation: CronAutomation) async throws -> CronTaskRecord {
+        var tasks = try readTasks()
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { throw CronStoreError.missingTask(taskID) }
+        let previousStatus = tasks[index].status
+        tasks[index].automation = automation
+        if automation.status != .active {
+            tasks[index].nextFireMs = nil
+        } else if previousStatus != .active {
+            tasks[index].nextFireMs = try CronExpression(tasks[index].cron).nextFire(after: now(), calendar: calendar)
+        }
+        try writeTasks(tasks)
+        return tasks[index]
     }
 
     func delete(taskID: String) async throws -> Bool {
@@ -235,13 +289,14 @@ actor JsonCronStoreClient: CronStoreClient {
 
     func nextFireTime() async throws -> UInt64? {
         try readTasks()
+            .filter(\.mobileSupported)
             .compactMap(\.nextFireMs)
             .min()
     }
 
     func dueOccurrences(nowMs: UInt64) async throws -> [CronOccurrence] {
         var occurrences: [CronOccurrence] = []
-        for task in try readTasks().sorted(by: taskSort) {
+        for task in try readTasks().sorted(by: taskSort) where task.mobileSupported {
             guard let firstDue = task.nextFireMs else { continue }
             guard firstDue <= nowMs else { continue }
             var nextDue = firstDue
@@ -267,6 +322,7 @@ actor JsonCronStoreClient: CronStoreClient {
         var tasks = try readTasks()
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return false }
         var task = tasks[index]
+        guard task.status == .active else { return false }
         guard let currentNext = task.nextFireMs, currentNext <= scheduledAtMs else {
             return false
         }
@@ -276,6 +332,9 @@ actor JsonCronStoreClient: CronStoreClient {
             task.nextFireMs = expr.nextFire(after: scheduledAtMs, calendar: calendar)
         } else {
             task.nextFireMs = nil
+            var automation = task.configuration
+            automation.status = .completed
+            task.automation = automation
         }
         tasks[index] = task
         try writeTasks(tasks)
@@ -290,7 +349,7 @@ actor JsonCronStoreClient: CronStoreClient {
     }
 
     private func writeTasks(_ tasks: [CronTaskRecord]) throws {
-        let envelope = CronTasksEnvelope(version: 1, tasks: tasks.sorted(by: taskSort))
+        let envelope = CronTasksEnvelope(version: 2, tasks: tasks.sorted(by: taskSort))
         let data = try JSONEncoder().encode(envelope)
         try DefaultProjectAtomicWriter().writeData(data, to: fileURL) { staged in
             _ = try JSONDecoder().decode(CronTasksEnvelope.self, from: staged)

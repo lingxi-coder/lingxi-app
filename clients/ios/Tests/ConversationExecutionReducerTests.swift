@@ -48,6 +48,47 @@ import SwiftUI
             return root.path
         }
 
+        func testRestoredLoopWakeupFoldsQuietTranscript() {
+            let source = makeSource()
+            source.expectSessionResumeForTesting("loop-restored")
+            source.applyForTesting(.sessionResumed(sessionId: "loop-restored", mode: .code, messages: [
+                MessageDto(role: "system", blocks: [], loopWakeup: LoopWakeupDto(message: "first", companion: nil, streak: 0, sinceMs: 0)),
+                MessageDto(role: "assistant", blocks: [.text(text: "quiet")]),
+                MessageDto(role: "system", blocks: [], loopWakeup: LoopWakeupDto(message: "second", companion: "healthy", streak: 1, sinceMs: 1)),
+            ]))
+            let visible = source.model.selectedAgentItems.compactMap { item -> String? in
+                if case let .message(message) = item { return message.text }
+                return nil
+            }
+            XCTAssertEqual(visible, ["second", "healthy"])
+            XCTAssertTrue(source.model.messages.contains { $0.text == "quiet" })
+        }
+
+        func testFixedScheduleNoticeArrivesBeforeTurnWithoutCreatingLoopFoldMarker() {
+            let source = makeSource()
+            source.applyForTesting(.scheduledTaskFire(message: "Fixed task is ready"))
+            XCTAssertEqual(source.model.messages.last?.text, "Fixed task is ready")
+            XCTAssertNil(source.model.messages.last?.loopWakeupStreak)
+            XCTAssertTrue(source.model.messages.last?.loopFoldedItemIDs.isEmpty ?? false)
+            XCTAssertFalse(source.model.streaming)
+            source.applyForTesting(.systemNotice(message: "Scheduled task text cannot bypass turn gating", isError: false))
+            XCTAssertEqual(source.model.messages.count, 1)
+            XCTAssertEqual(source.model.messages.last?.text, "Fixed task is ready")
+        }
+
+        func testLoopWakeupFoldsQuietTranscriptBeforeNextTurnStarts() {
+            let source = makeSource()
+            source.applyForTesting(.loopWakeup(message: "first", companion: nil, streak: 0, sinceMs: 0))
+            XCTAssertEqual(source.model.messages.last?.text, "first")
+            source.applyForTesting(.loopWakeup(message: "second", companion: "healthy", streak: 1, sinceMs: 1))
+            XCTAssertEqual(source.model.selectedAgentItems.count, 2)
+            source.applyForTesting(.loopWakeup(message: "third", companion: "still healthy", streak: 2, sinceMs: 1))
+            XCTAssertEqual(source.model.selectedAgentItems.count, 2)
+            XCTAssertEqual(source.model.messages.count, 5, "Folding preserves transcript data")
+            source.applyForTesting(.loopWakeup(message: "actionable", companion: nil, streak: 0, sinceMs: 0))
+            XCTAssertEqual(source.model.selectedAgentItems.count, 3)
+        }
+
         func testRetractionUsesExactIdentityAndPreservesLaterResponseAndNotice() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 901, sessionId: "retraction")

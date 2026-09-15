@@ -4,6 +4,185 @@ import XCTest
 
 @MainActor
 final class CronRepositoryTests: XCTestCase {
+    func testConfiguredTaskPausesPersistsAndResumesInFuture() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let file = directory.appendingPathComponent("tasks.json")
+        let store = JsonCronStoreClient(fileURL: file, now: { 1_700_000_000_000 }, makeID: { "configured" }, calendar: calendar)
+        var draft = CronTaskDraft.create()
+        draft.prompt = "Summarize changes"
+        draft.automation.model = "provider/model"
+        draft.automation.reasoning = CronReasoning(selection: "high")
+        draft.automation.runMode = .taskSession
+        draft.automation.notificationPolicy = .failed
+        let created = try await store.saveConfigured(draft: draft)
+        var config = created.configuration
+        config.status = .paused
+        _ = try await store.updateAutomation(taskID: created.id, automation: config)
+        let reopened = JsonCronStoreClient(fileURL: file, now: { 1_700_100_000_000 }, makeID: { "other" }, calendar: calendar)
+        let paused = try await reopened.list()
+        XCTAssertEqual(paused.first?.configuration, config)
+        let due = try await reopened.dueOccurrences(nowMs: 1_700_100_000_000)
+        XCTAssertTrue(due.isEmpty)
+        config.status = .active
+        let resumed = try await reopened.updateAutomation(taskID: created.id, automation: config)
+        XCTAssertGreaterThan(try XCTUnwrap(resumed.nextFireMs), 1_700_100_000_000)
+        XCTAssertEqual(resumed.configuration.model, "provider/model")
+        XCTAssertEqual(resumed.configuration.reasoning.selection, "high")
+    }
+
+    func testConfiguredOneShotRetainsCompletedRecord() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = JsonCronStoreClient(fileURL: directory.appendingPathComponent("tasks.json"), now: { 1_700_000_000_000 }, makeID: { "once" }, calendar: Calendar(identifier: .gregorian))
+        var draft = CronTaskDraft.create()
+        draft.prompt = "Once"
+        draft.recurring = false
+        draft.automation.model = "provider/model"
+        let task = try await store.saveConfigured(draft: draft)
+        _ = try await store.acknowledgeOccurrence(taskID: task.id, scheduledAtMs: XCTUnwrap(task.nextFireMs))
+        let completed = try await store.list()
+        XCTAssertEqual(completed.count, 1)
+        XCTAssertEqual(completed.first?.status, .completed)
+        XCTAssertNil(completed.first?.nextFireMs)
+    }
+
+    func testNotificationPolicyAndReasoningRoundTrip() throws {
+        var config = CronAutomation()
+        config.notificationPolicy = .failed
+        config.reasoning = CronReasoning(selection: "budget:8192")
+        let decoded = try JSONDecoder().decode(CronAutomation.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(decoded.reasoning.selection, "budget:8192")
+        XCTAssertFalse(decoded.shouldNotify(.succeeded))
+        XCTAssertFalse(decoded.shouldNotify(.running))
+        XCTAssertTrue(decoded.shouldNotify(.failed))
+        XCTAssertTrue(decoded.shouldNotify(.interrupted))
+        config.notificationPolicy = .none
+        XCTAssertFalse(config.shouldNotify(.failed))
+    }
+
+    func testSaveValidationKeepsDraft() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = CronRepository(appSandboxRoot: directory.path)
+        await repository.refresh()
+        repository.beginCreate()
+        repository.draft.prompt = "Keep this prompt"
+        await repository.saveDraft()
+        XCTAssertEqual(repository.draft.prompt, "Keep this prompt")
+        XCTAssertNotNil(repository.state.errorMessage)
+        XCTAssertFalse(repository.routePath.isEmpty)
+    }
+
+    func testArchivingTargetPausesTaskAndCancelsOnlyQueuedRun() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let scope = CronScope.global(appSandboxRoot: directory.path)
+        let provider = JsonCronStoreProvider()
+        let store = try await provider.store(for: scope, appSandboxRoot: directory.path)
+        var draft = CronTaskDraft.create()
+        draft.prompt = "Follow this chat"
+        draft.automation.model = "provider/model"
+        draft.automation.runMode = .selectedSession
+        draft.automation.targetSessionId = "selected-chat"
+        let task = try await store.saveConfigured(draft: draft)
+        let history = CronRunHistoryStore(fileURL: directory.appendingPathComponent("history.json"))
+        let queued = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 100)
+        let running = try await history.claim(scope: scope, taskID: "already-running", prompt: "Running", scheduledAtMs: 100)
+        _ = try await history.markRunning(runID: XCTUnwrap(running?.runID), attempt: 1)
+        let repository = CronRepository(appSandboxRoot: directory.path, storeProvider: provider, historyStore: history)
+        await repository.refresh()
+        try await repository.pauseTasksForArchivedSession(projectID: nil, sessionID: "selected-chat")
+        let paused = try await store.list()
+        let run = try await history.record(runID: XCTUnwrap(queued?.runID))
+        XCTAssertEqual(paused.first?.status, .paused)
+        XCTAssertTrue(paused.first?.configuration.statusReason?.contains("archived") == true)
+        XCTAssertEqual(run?.status, .cancelled)
+        let ongoing = try await history.record(runID: XCTUnwrap(running?.runID))
+        XCTAssertEqual(ongoing?.status, .running)
+    }
+
+    func testScheduledScopeHasDedicatedPreferenceAndWorkspaceIdentity() {
+        XCTAssertEqual(ConversationScope(workspaceKey: "scheduled"), .scheduled)
+        XCTAssertNotEqual(ConversationScope.scheduled.preferenceScope, ConversationScope.global.preferenceScope)
+        XCTAssertEqual(CronScope.global(appSandboxRoot: "/app").guestWorkspacePath, "/app/scheduled/workspace")
+    }
+
+    func testLegacyMigrationIsIdempotentAndPausesWithoutModel() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = JsonCronStoreClient(fileURL: directory.appendingPathComponent("tasks.json"), now: { 1_700_000_000_000 }, makeID: { "legacy" }, calendar: Calendar(identifier: .gregorian))
+        let legacy = try await store.create(cronExpr: "0 9 * * *", prompt: "Legacy instructions", recurring: true)
+        try await store.migrateLegacyTasks(defaultModel: nil, reasoning: CronReasoning())
+        let first = try await store.list()
+        XCTAssertEqual(first.first?.status, .paused)
+        XCTAssertEqual(first.first?.id, legacy.id)
+        XCTAssertEqual(first.first?.createdAtMs, legacy.createdAtMs)
+        XCTAssertEqual(first.first?.prompt, legacy.prompt)
+        try await store.migrateLegacyTasks(defaultModel: "provider/model", reasoning: CronReasoning(selection: "high"))
+        let second = try await store.list()
+        XCTAssertEqual(first, second)
+    }
+
+    func testRecoveryUsesNativeTerminalResultBeforeMarkingInterrupted() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let scope = CronScope.global(appSandboxRoot: directory.path)
+        let provider = JsonCronStoreProvider()
+        let store = try await provider.store(for: scope, appSandboxRoot: directory.path)
+        var draft = CronTaskDraft.create()
+        draft.prompt = "Completed before host stopped"
+        draft.automation.model = "provider/model"
+        let task = try await store.saveConfigured(draft: draft)
+        var configuration = task.configuration
+        configuration.status = .completed
+        configuration.runs = [CronAutomationRun(id: "native-run", taskId: task.id, scheduledAt: 200,
+            status: .succeeded, model: "provider/model", sessionId: "result-chat", summary: "Done")]
+        _ = try await store.updateAutomation(taskID: task.id, automation: configuration)
+        let history = CronRunHistoryStore(fileURL: directory.appendingPathComponent("history.json"))
+        let pending = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 200)
+        _ = try await history.markRunning(runID: XCTUnwrap(pending?.runID), attempt: 1)
+        let notifier = FakeNotifier()
+        let repository = CronRepository(appSandboxRoot: directory.path, storeProvider: provider, historyStore: history, notifier: notifier)
+        await repository.reconcile(reason: "restart")
+        XCTAssertEqual(repository.state.history.first?.status, .succeeded)
+        XCTAssertEqual(repository.state.history.first?.sessionID, "result-chat")
+        XCTAssertEqual(repository.state.generatedSessions.first?.id, "result-chat")
+        await repository.reconcile(reason: "again")
+        let notifications = await notifier.payloads
+        XCTAssertEqual(notifications.count, 1)
+    }
+
+    #if canImport(engine_mobileFFI)
+    func testNativeConfiguredStoreRoundTripsAndHonorsPause() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handle = try buildIosCronStore(appSandboxRoot: directory.path, projectCwd: nil)
+        try await handle.setMigrationDefaults(model: "provider/model", reasoningJson: "{\"type\":\"automatic\"}")
+        var configuration = CronAutomation()
+        configuration.model = "provider/model"
+        configuration.reasoning = CronReasoning(selection: "high")
+        configuration.runMode = .taskSession
+        let created = try await handle.createConfigured(cronExpr: "0 9 * * *", prompt: "Native round trip", recurring: true,
+            automationJson: String(decoding: JSONEncoder().encode(configuration), as: UTF8.self))
+        let decoded = try JSONDecoder().decode(CronAutomation.self, from: Data(XCTUnwrap(created.automationJson).utf8))
+        XCTAssertEqual(decoded.model, configuration.model)
+        XCTAssertEqual(decoded.reasoning, configuration.reasoning)
+        XCTAssertEqual(decoded.runMode, .taskSession)
+        configuration.status = .paused
+        _ = try await handle.updateAutomation(id: created.id, automationJson: String(decoding: JSONEncoder().encode(configuration), as: UTF8.self))
+        let due = await handle.dueOccurrences(nowMs: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000)
+        XCTAssertTrue(due.isEmpty)
+        let listed = await handle.list()
+        XCTAssertEqual(listed.count, 1)
+        let deleted = await handle.delete(id: created.id)
+        XCTAssertTrue(deleted)
+    }
+    #endif
+
     func testRefreshLoadsGlobalAndProjectScopes() async throws {
         let global = CronScope(
             scopeID: globalCronScopeID,
@@ -433,11 +612,11 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(dueCallCount, 1)
         XCTAssertEqual(acknowledgedCount, 1)
         XCTAssertEqual(notificationCount, 0)
-        XCTAssertEqual(repository.state.history.first?.status, .timedOut)
-        XCTAssertEqual(repository.state.history.first?.errorKind, .timedOut)
+        XCTAssertEqual(repository.state.history.first?.status, .interrupted)
+        XCTAssertEqual(repository.state.history.first?.errorKind, .system)
         persistedHistory = try await historyStore.records()
-        XCTAssertEqual(persistedHistory.first?.status, .timedOut)
-        XCTAssertEqual(persistedHistory.first?.errorKind, .timedOut)
+        XCTAssertEqual(persistedHistory.first?.status, .interrupted)
+        XCTAssertEqual(persistedHistory.first?.errorKind, .system)
     }
 
     func testReconcileSelfHealsTerminalOccurrenceWithoutRerunOrRenotify() async throws {
@@ -499,7 +678,7 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(repository.state.tasks.first?.task.nextFireMs, 901_000)
     }
 
-    func testReconcileAckFailureRecoversOnNextPassWithoutRerunOrRenotify() async throws {
+    func testReconcileAckFailureRecoversMissingNotificationOnceWithoutRerun() async throws {
         let global = CronScope.global(appSandboxRoot: "/tmp")
         let task = CronTaskRecord(
             id: "cron-1",
@@ -545,13 +724,16 @@ final class CronRepositoryTests: XCTestCase {
         let recoveredNotifications = await notifier.payloads.count
         let acknowledgedOccurrences = await store.acknowledgedOccurrences.count
         XCTAssertEqual(recoveredDueCalls, 1)
-        XCTAssertEqual(recoveredNotifications, 0)
+        XCTAssertEqual(recoveredNotifications, 1)
         XCTAssertEqual(acknowledgedOccurrences, 1)
         XCTAssertEqual(repository.state.history.count, 1)
         XCTAssertEqual(repository.state.tasks.first?.task.nextFireMs, 901_000)
+        await repository.reconcile(reason: "again")
+        let afterThirdPass = await notifier.payloads.count
+        XCTAssertEqual(afterThirdPass, 1)
     }
 
-    func testReconcileRecoversStaleNonterminalOccurrenceAsTimedOutWithoutRerunOrRenotify() async throws {
+    func testReconcileRecoversStartedOccurrenceWithoutRerunOrRenotify() async throws {
         let global = CronScope.global(appSandboxRoot: "/tmp")
         let task = CronTaskRecord(
             id: "cron-1",
@@ -582,6 +764,8 @@ final class CronRepositoryTests: XCTestCase {
             manual: false
         )
 
+        _ = try await historyStore.markRunning(runID: "run-stale", attempt: 1)
+
         let repository = makeRepository(
             scopes: [global],
             activeScopeID: global.scopeID,
@@ -600,9 +784,454 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(dueCalls, 0)
         XCTAssertEqual(notifications, 0)
         XCTAssertEqual(acknowledged, 1)
-        XCTAssertEqual(repository.state.history.first?.status, .timedOut)
-        XCTAssertEqual(repository.state.history.first?.errorKind, .timedOut)
+        XCTAssertEqual(repository.state.history.first?.status, .interrupted)
+        XCTAssertEqual(repository.state.history.first?.errorKind, .system)
         XCTAssertEqual(repository.state.tasks.first?.task.nextFireMs, 901_000)
+    }
+
+    func testRestartRetriesUnstartedClaimOnceForRecurringAndOneShotTasks() async throws {
+        for recurring in [true, false] {
+            let scope = CronScope.global(appSandboxRoot: "/tmp")
+            var task = CronTaskRecord(id: "pending", cron: "*/15 * * * *", prompt: "Run once",
+                createdAtMs: 0, lastFiredAtMs: nil, recurring: recurring, nextFireMs: 1_000, human: "Every 15 minutes")
+            var configuration = CronAutomation()
+            configuration.model = "provider/model"
+            task.automation = configuration
+            let store = FakeCronStore(tasks: [task])
+            let executor = FakeExecutor()
+            let notifier = FakeNotifier()
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let file = root.appendingPathComponent("history.json")
+            let beforeRestart = CronRunHistoryStore(fileURL: file, now: { 1_500 }, newID: { "persisted-claim" })
+            _ = try await beforeRestart.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 1_000)
+            let reopened = CronRunHistoryStore(fileURL: file, now: { 2_000 })
+            let repository = makeRepository(scopes: [scope], storeProvider: FakeStoreProvider(stores: [scope.scopeID: store]),
+                historyStore: reopened, executor: executor, notifier: notifier, now: { 2_000 })
+
+            await repository.reconcile(reason: "restart")
+            await repository.reconcile(reason: "again")
+
+            let calls = await executor.dueCalls.count
+            let acknowledgements = await store.acknowledgedOccurrences.count
+            let notifications = await notifier.payloads.count
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(acknowledgements, 1)
+            XCTAssertEqual(notifications, 1)
+            XCTAssertEqual(repository.state.history.count, 1)
+            XCTAssertEqual(repository.state.history.first?.runID, "persisted-claim")
+            XCTAssertEqual(repository.state.history.first?.status, .succeeded)
+        }
+    }
+
+    func testRestartRetriesUnstartedManualClaimOnce() async throws {
+        let scope = CronScope.global(appSandboxRoot: "/tmp")
+        var task = CronTaskRecord(id: "manual", cron: "*/15 * * * *", prompt: "Manual",
+            createdAtMs: 0, lastFiredAtMs: nil, recurring: true, nextFireMs: 900_000, human: "Every 15 minutes")
+        var configuration = CronAutomation()
+        configuration.model = "provider/model"
+        task.automation = configuration
+        let store = FakeCronStore(tasks: [task])
+        let executor = FakeExecutor()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let history = CronRunHistoryStore(fileURL: file, now: { 1_000 }, newID: { "manual-claim" })
+        _ = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 1_000, manual: true)
+        let repository = makeRepository(scopes: [scope], storeProvider: FakeStoreProvider(stores: [scope.scopeID: store]),
+            historyStore: CronRunHistoryStore(fileURL: file), executor: executor)
+        await repository.reconcile(reason: "restart")
+        await repository.reconcile(reason: "again")
+        let calls = await executor.manualCalls.count
+        let acknowledgements = await store.acknowledgedOccurrences.count
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(acknowledgements, 0)
+        XCTAssertEqual(repository.state.history.first?.runID, "manual-claim")
+        XCTAssertEqual(repository.state.history.first?.status, .succeeded)
+    }
+
+    func testBusyScheduledAndManualRunsRemainQueuedThenRetryAfterRestart() async throws {
+        for manual in [false, true] {
+            let scope = CronScope.global(appSandboxRoot: "/tmp")
+            var task = CronTaskRecord(id: "busy", cron: "*/15 * * * *", prompt: "Wait for chat",
+                createdAtMs: 0, lastFiredAtMs: nil, recurring: true,
+                nextFireMs: manual ? 900_000 : 1_000, human: "Every 15 minutes")
+            var configuration = CronAutomation()
+            configuration.model = "provider/model"
+            task.automation = configuration
+            let store = FakeCronStore(tasks: [task])
+            let provider = FakeStoreProvider(stores: [scope.scopeID: store])
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let file = root.appendingPathComponent("history.json")
+            let history = CronRunHistoryStore(fileURL: file, now: { 1_000 }, newID: { "busy-claim" })
+            _ = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 1_000, manual: manual)
+            let busy = CronExecutionOutcome(status: .queued, resultText: nil, errorMessage: "Waiting for chat", errorKind: nil)
+            let repository = makeRepository(scopes: [scope], storeProvider: provider, historyStore: history,
+                executor: FakeExecutor(manualResult: .success(busy), dueResult: .success(busy)))
+            await repository.reconcile(reason: "busy")
+            let beforeRetry = await store.acknowledgedOccurrences.count
+            XCTAssertEqual(beforeRetry, 0)
+            XCTAssertEqual(repository.state.history.first?.status, .queued)
+            XCTAssertEqual(repository.state.history.first?.attempt, 1)
+            let executor = FakeExecutor()
+            let restarted = makeRepository(scopes: [scope], storeProvider: provider,
+                historyStore: CronRunHistoryStore(fileURL: file), executor: executor)
+            await restarted.reconcile(reason: "restart")
+            await restarted.reconcile(reason: "again")
+            let manualCalls = await executor.manualCalls.count
+            let timestamps = await executor.manualTimestamps
+            if manual { XCTAssertEqual(timestamps, [1_000]) }
+            let dueCalls = await executor.dueCalls.count
+            let acknowledgements = await store.acknowledgedOccurrences.count
+            XCTAssertEqual(manualCalls + dueCalls, 1)
+            XCTAssertEqual(acknowledgements, manual ? 0 : 1)
+            XCTAssertEqual(restarted.state.history.count, 1)
+            XCTAssertEqual(restarted.state.history.first?.runID, "busy-claim")
+            XCTAssertEqual(restarted.state.history.first?.status, .succeeded)
+        }
+    }
+
+    func testInitialManualExecutionAndRestartRetryReceiveSameIdentity() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        var config = CronAutomation()
+        config.model = "provider/model"
+        let task = CronTaskRecord(id: "manual", cron: "0 9 * * *", prompt: "Manual", createdAtMs: 0,
+            lastFiredAtMs: nil, recurring: true, nextFireMs: 900_000, human: "Daily", automation: config)
+        let provider = FakeStoreProvider(stores: [scope.scopeID: FakeCronStore(tasks: [task])])
+        let historyFile = root.appendingPathComponent("history.json")
+        let history = CronRunHistoryStore(fileURL: historyFile)
+        let busy = FakeExecutor(manualResult: .success(CronExecutionOutcome(
+            status: .queued, resultText: nil, errorMessage: "Waiting for chat", errorKind: nil)))
+        let repository = makeRepository(scopes: [scope], storeProvider: provider, historyStore: history,
+            executor: busy, now: { 1_000 })
+        await repository.refresh()
+        await repository.runNow(scopeID: scope.scopeID, taskID: task.id)
+        let initial = await busy.manualTimestamps
+        XCTAssertEqual(initial, [1_000])
+        let success = FakeExecutor()
+        let restarted = makeRepository(scopes: [scope], storeProvider: provider,
+            historyStore: CronRunHistoryStore(fileURL: historyFile), executor: success, now: { 20_000 })
+        await restarted.reconcile(reason: "restart")
+        let retried = await success.manualTimestamps
+        XCTAssertEqual(retried, initial)
+        XCTAssertEqual(restarted.state.history.first?.status, .succeeded)
+    }
+
+    func testNotificationReservationIsExclusiveAcrossHistoryStoreInstances() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let first = CronRunHistoryStore(fileURL: file, newID: { "terminal" })
+        _ = try await first.claim(scope: .global(appSandboxRoot: root.path), taskID: "task", prompt: "Done", scheduledAtMs: 1_000)
+        _ = try await first.markTerminal(runID: "terminal", status: .succeeded)
+        let second = CronRunHistoryStore(fileURL: file)
+        async let claimA = first.claimTerminalNotification(runID: "terminal")
+        async let claimB = second.claimTerminalNotification(runID: "terminal")
+        let claims = try await [claimA, claimB]
+        XCTAssertEqual(claims.compactMap { $0 }.count, 1)
+        let reopened = CronRunHistoryStore(fileURL: file)
+        let duplicate = try await reopened.claimTerminalNotification(runID: "terminal")
+        XCTAssertNil(duplicate)
+    }
+
+    /// 🚨 The claim is written BEFORE delivery, so a refusal that keeps it makes
+    /// the run permanently un-notifiable: turning the scheduled-run toggle on or
+    /// granting permission later re-enters recovery, which hits EEXIST. Both the
+    /// Android and desktop mirrors give the key back; this pins that iOS does.
+    func testARefusedDeliveryReturnsTheNotificationClaimSoRecoveryCanRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let store = CronRunHistoryStore(fileURL: file, newID: { "terminal" })
+        _ = try await store.claim(scope: .global(appSandboxRoot: root.path), taskID: "task", prompt: "Done", scheduledAtMs: 1_000)
+        _ = try await store.markTerminal(runID: "terminal", status: .succeeded)
+
+        // Each claim is hoisted out of the assertion: XCTAssert* take a
+        // non-async autoclosure, and every call here has a side effect, so the
+        // order must stay exactly as written.
+        let firstClaim = try await store.claimTerminalNotification(runID: "terminal")
+        XCTAssertNotNil(firstClaim)
+        let secondClaim = try await store.claimTerminalNotification(runID: "terminal")
+        XCTAssertNil(secondClaim, "the claim is exclusive while it is held")
+        try await store.releaseTerminalNotification(runID: "terminal")
+        let reclaimed = try await store.claimTerminalNotification(runID: "terminal")
+        XCTAssertNotNil(reclaimed, "a released claim must be reclaimable")
+    }
+
+    func testNotificationReceiptsArePrunedWithHistoryAndStaleStoresCannotReclaim() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let stale = CronRunHistoryStore(fileURL: file)
+        var firstID = ""
+        for index in 0..<25 {
+            let history = CronRunHistoryStore(fileURL: file)
+            let run = try await history.claim(scope: scope, taskID: "task", prompt: "Done",
+                scheduledAtMs: UInt64(index), triggeredAtMs: UInt64(index))
+            let id = try XCTUnwrap(run?.runID)
+            if index == 0 { firstID = id }
+            _ = try await history.markTerminal(runID: id, status: .succeeded)
+            let receipt = try await history.claimTerminalNotification(runID: id)
+            XCTAssertNotNil(receipt)
+        }
+        let markers = file.appendingPathExtension("notification-claims")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: markers.path).count, maxCronRunsPerTask)
+        // An instance created before pruning must neither resurrect history nor
+        // reacquire the deleted receipt when recovery still holds an old ID.
+        let prunedID = firstID
+        async let staleWrite = stale.markTerminal(runID: prunedID, status: .succeeded)
+        let reopened = CronRunHistoryStore(fileURL: file)
+        async let staleClaim = reopened.claimTerminalNotification(runID: prunedID)
+        let (write, claim) = try await (staleWrite, staleClaim)
+        XCTAssertNil(write)
+        XCTAssertNil(claim)
+        let retained = try await reopened.records()
+        XCTAssertEqual(retained.count, maxCronRunsPerTask)
+        for record in retained {
+            let duplicate = try await reopened.claimTerminalNotification(runID: record.runID)
+            XCTAssertNil(duplicate)
+        }
+        // Legacy orphan receipts are reclaimed even without a new history write.
+        let orphan = markers.appendingPathComponent(String(repeating: "0", count: 64))
+        try Data().write(to: orphan)
+        _ = try await reopened.claimTerminalNotification(runID: "missing")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    func testConcurrentHistoryWritersPreserveAllNotificationReceipts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<20 {
+                group.addTask {
+                    let store = CronRunHistoryStore(fileURL: file)
+                    guard let run = try await store.claim(scope: scope, taskID: "task-\(index)",
+                        prompt: "Done", scheduledAtMs: 1_000) else {
+                        XCTFail("Independent task claim was lost")
+                        return
+                    }
+                    _ = try await store.markTerminal(runID: run.runID, status: .succeeded)
+                    let receipt = try await store.claimTerminalNotification(runID: run.runID)
+                    XCTAssertNotNil(receipt)
+                }
+            }
+            try await group.waitForAll()
+        }
+        let reopened = CronRunHistoryStore(fileURL: file)
+        let retained = try await reopened.records()
+        XCTAssertEqual(retained.count, 20)
+        for run in retained {
+            XCTAssertEqual(run.status, .succeeded)
+            let duplicate = try await reopened.claimTerminalNotification(runID: run.runID)
+            XCTAssertNil(duplicate)
+        }
+    }
+
+    func testManualRecoveryUsesPersistedExecutionTimestamp() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let provider = JsonCronStoreProvider()
+        let store = try await provider.store(for: scope, appSandboxRoot: root.path)
+        var draft = CronTaskDraft.create()
+        draft.prompt = "Manual recovery"
+        draft.automation.model = "provider/model"
+        let task = try await store.saveConfigured(draft: draft)
+        var config = task.configuration
+        config.runs = [CronAutomationRun(id: "native-manual", taskId: task.id, scheduledAt: 1_000,
+            startedAt: 1_010, finishedAt: 1_020, status: .succeeded, model: "provider/model",
+            sessionId: "actual-chat", summary: "Actual success")]
+        _ = try await store.updateAutomation(taskID: task.id, automation: config)
+        let history = CronRunHistoryStore(fileURL: root.appendingPathComponent("history.json"), newID: { "host-manual" })
+        _ = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 1_000, manual: true)
+        _ = try await history.markRunning(runID: "host-manual", attempt: 1)
+        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider, historyStore: history)
+        await repository.reconcile(reason: "restart")
+        XCTAssertEqual(repository.state.history.first?.status, .succeeded)
+        XCTAssertEqual(repository.state.history.first?.sessionID, "actual-chat")
+    }
+
+    func testLegacyAdoptedManualRecoveryUsesHostOccurrenceMarker() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let provider = JsonCronStoreProvider()
+        let store = try await provider.store(for: scope, appSandboxRoot: root.path)
+        var draft = CronTaskDraft.create()
+        draft.prompt = "Manual recovery"
+        draft.automation.model = "provider/model"
+        let task = try await store.saveConfigured(draft: draft)
+        var config = task.configuration
+        config.runs = [CronAutomationRun(id: "native-manual", taskId: task.id, scheduledAt: 1_010,
+            startedAt: 1_011, finishedAt: 1_020, status: .succeeded, model: "provider/model",
+            sessionId: "actual-chat", summary: "Actual success", manualOccurrenceAt: 1_000)]
+        _ = try await store.updateAutomation(taskID: task.id, automation: config)
+        let history = CronRunHistoryStore(fileURL: root.appendingPathComponent("history.json"), newID: { "host-manual" })
+        _ = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 1_000, manual: true)
+        _ = try await history.markRunning(runID: "host-manual", attempt: 1)
+        let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider, historyStore: history)
+        await repository.reconcile(reason: "restart")
+        XCTAssertEqual(repository.state.history.first?.status, .succeeded)
+        XCTAssertEqual(repository.state.history.first?.sessionID, "actual-chat")
+    }
+
+    func testPreIdentityManualRecoveryRequiresOneUnambiguousTerminal() async throws {
+        for ambiguous in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scope = CronScope.global(appSandboxRoot: root.path)
+            let provider = JsonCronStoreProvider()
+            let store = try await provider.store(for: scope, appSandboxRoot: root.path)
+            var draft = CronTaskDraft.create()
+            draft.prompt = "Legacy manual recovery"
+            draft.automation.model = "provider/model"
+            let task = try await store.saveConfigured(draft: draft)
+            var config = task.configuration
+            config.runs = [CronAutomationRun(id: "\(task.id)-manual-1010-0", taskId: task.id,
+                scheduledAt: 1_010, startedAt: 1_011, finishedAt: 1_020, status: .succeeded,
+                model: "provider/model", sessionId: "actual-chat", summary: "Actual success")]
+            if ambiguous {
+                config.runs.append(CronAutomationRun(id: "\(task.id)-manual-1020-1", taskId: task.id,
+                    scheduledAt: 1_020, status: .succeeded, model: "provider/model", sessionId: "other-chat"))
+            }
+            _ = try await store.updateAutomation(taskID: task.id, automation: config)
+            let history = CronRunHistoryStore(fileURL: root.appendingPathComponent("history.json"),
+                now: { 1_000 }, newID: { "host-manual" })
+            _ = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 1_000, manual: true)
+            _ = try await history.markRunning(runID: "host-manual", attempt: 1)
+            let executor = FakeExecutor()
+            let repository = CronRepository(appSandboxRoot: root.path, storeProvider: provider,
+                historyStore: history, executor: executor)
+            await repository.reconcile(reason: "upgrade")
+            await repository.reconcile(reason: "again")
+            XCTAssertEqual(repository.state.history.first?.status, ambiguous ? .interrupted : .succeeded)
+            XCTAssertEqual(repository.state.history.first?.sessionID, ambiguous ? nil : "actual-chat")
+            let calls = await executor.manualCalls.count
+            XCTAssertEqual(calls, 0, "Recovery must never replay a started run")
+        }
+    }
+
+    func testConcurrentRecoveryClaimsNotificationOnceAndPersistsReservation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        var config = CronAutomation()
+        config.model = "provider/model"
+        config.status = .completed
+        config.runs = [CronAutomationRun(id: "native", taskId: "task", scheduledAt: 1_000,
+            status: .succeeded, model: "provider/model", sessionId: "actual-chat", summary: "Done")]
+        let task = CronTaskRecord(id: "task", cron: "0 9 * * *", prompt: "Recovery", createdAtMs: 0,
+            lastFiredAtMs: 1_000, recurring: false, nextFireMs: nil, human: "Daily", automation: config)
+        let historyFile = root.appendingPathComponent("history.json")
+        let history = CronRunHistoryStore(fileURL: historyFile, newID: { "same-host-run" })
+        _ = try await history.claim(scope: scope, taskID: task.id, prompt: task.prompt, scheduledAtMs: 1_000)
+        _ = try await history.markRunning(runID: "same-host-run", attempt: 1)
+        let notifier = FakeNotifier()
+        let repository = makeRepository(scopes: [scope], storeProvider: FakeStoreProvider(
+            stores: [scope.scopeID: FakeCronStore(tasks: [task], recoveryBarrier: true)]),
+            historyStore: history, notifier: notifier)
+        async let first: Void = repository.reconcile(reason: "foreground")
+        async let second: Void = repository.reconcile(reason: "chat-idle")
+        _ = await (first, second)
+        let notifications = await notifier.payloads
+        XCTAssertEqual(notifications.count, 1)
+        let reopened = CronRunHistoryStore(fileURL: historyFile)
+        let duplicate = try await reopened.claimTerminalNotification(runID: "same-host-run")
+        XCTAssertNil(duplicate)
+        let saved = try await reopened.record(runID: "same-host-run")
+        XCTAssertEqual(saved?.status, .succeeded)
+    }
+
+    func testLegacyPolicyMigrationCapturesUnfinishedOnlyAndNeverOverwritesSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        let history = CronRunHistoryStore(fileURL: file, newID: { "legacy-pending" })
+        _ = try await history.claim(scope: scope, taskID: "pending", prompt: "Pending", scheduledAtMs: 1_000)
+        try await history.snapshotNotificationPolicy(runID: "legacy-pending", policy: .none)
+        let reopened = CronRunHistoryStore(fileURL: file, newID: { "legacy-terminal" })
+        try await reopened.snapshotNotificationPolicy(runID: "legacy-pending", policy: .all)
+        _ = try await reopened.markTerminal(runID: "legacy-pending", status: .failed)
+        let migrated = try await reopened.record(runID: "legacy-pending")
+        XCTAssertEqual(migrated?.notificationPolicy, CronNotificationPolicy.none)
+        _ = try await reopened.claim(scope: scope, taskID: "terminal", prompt: "Already notified", scheduledAtMs: 1_000)
+        _ = try await reopened.markTerminal(runID: "legacy-terminal", status: .succeeded)
+        try await reopened.snapshotNotificationPolicy(runID: "legacy-terminal", policy: .all)
+        let historical = try await reopened.record(runID: "legacy-terminal")
+        XCTAssertNil(historical?.notificationPolicy)
+    }
+
+    func testCompletedRunNotificationRecoveryUsesPersistedPolicyWithoutDueOccurrence() async throws {
+        let cases: [(CronNotificationPolicy, CronRunStatus, Int)] = [
+            (.all, .succeeded, 1), (.failed, .failed, 1), (.failed, .succeeded, 0), (.none, .failed, 0),
+        ]
+        for (savedPolicy, status, expected) in cases {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let scope = CronScope.global(appSandboxRoot: root.path)
+            var config = CronAutomation()
+            config.model = "provider/model"
+            config.status = .completed
+            config.notificationPolicy = savedPolicy == .all ? .none : .all
+            let task = CronTaskRecord(id: "one-shot", cron: "0 9 * * *", prompt: "Completed",
+                createdAtMs: 0, lastFiredAtMs: 1_000, recurring: false, nextFireMs: nil, human: "Once", automation: config)
+            let file = root.appendingPathComponent("history.json")
+            let oldHistory = CronRunHistoryStore(fileURL: file, newID: { "run" })
+            _ = try await oldHistory.claim(scope: scope, taskID: task.id, prompt: task.prompt,
+                scheduledAtMs: 1_000, notificationPolicy: savedPolicy)
+            _ = try await oldHistory.markTerminal(runID: "run", status: status)
+            let notifier = FakeNotifier()
+            let executor = FakeExecutor()
+            let repository = makeRepository(scopes: [scope], storeProvider: FakeStoreProvider(
+                stores: [scope.scopeID: FakeCronStore(tasks: [task])]),
+                historyStore: CronRunHistoryStore(fileURL: file), executor: executor, notifier: notifier)
+            await repository.reconcile(reason: "restart")
+            await repository.reconcile(reason: "again")
+            let count = await notifier.payloads.count
+            let executions = await executor.dueCalls.count
+            XCTAssertEqual(count, expected)
+            XCTAssertEqual(executions, 0)
+            XCTAssertEqual(repository.state.history.first?.notificationPolicy, savedPolicy)
+        }
+    }
+
+    func testCancellationAfterTerminalWriteRecoversNotificationOnRestart() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = CronScope.global(appSandboxRoot: root.path)
+        var config = CronAutomation()
+        config.model = "provider/model"
+        let task = CronTaskRecord(id: "one-shot", cron: "0 9 * * *", prompt: "Run once",
+            createdAtMs: 0, lastFiredAtMs: nil, recurring: false, nextFireMs: 1_000, human: "Once", automation: config)
+        let store = FakeCronStore(tasks: [task], cancelAfterAcknowledgement: true)
+        let provider = FakeStoreProvider(stores: [scope.scopeID: store])
+        let file = root.appendingPathComponent("history.json")
+        let notifier = FakeNotifier()
+        let executor = FakeExecutor()
+        let repository = makeRepository(scopes: [scope], storeProvider: provider,
+            historyStore: CronRunHistoryStore(fileURL: file), executor: executor, notifier: notifier, now: { 2_000 })
+        let firstWake = Task { await repository.reconcile(reason: "background") }
+        await firstWake.value
+        let beforeRecovery = await notifier.payloads.count
+        XCTAssertEqual(beforeRecovery, 0)
+        let reopened = CronRunHistoryStore(fileURL: file)
+        let saved = try await reopened.records()
+        XCTAssertEqual(saved.first?.status, .succeeded)
+        let restarted = makeRepository(scopes: [scope], storeProvider: provider, historyStore: reopened,
+            executor: executor, notifier: notifier, now: { 3_000 })
+        await restarted.reconcile(reason: "restart")
+        await restarted.reconcile(reason: "again")
+        let recovered = await notifier.payloads.count
+        let executions = await executor.dueCalls.count
+        XCTAssertEqual(recovered, 1)
+        XCTAssertEqual(executions, 1)
     }
 
     func testDiagnosticsSnapshotSummarizesIdentifierScopeAndCounts() {
@@ -901,14 +1530,27 @@ private actor FakeCronStore: CronStoreClient {
     private var nextCreateIndex = 100
     private(set) var acknowledgedOccurrences: [CronOccurrence] = []
     private var ackFailureCount: Int
+    private let recoveryBarrier: Bool
+    private let cancelAfterAcknowledgement: Bool
+    private var listCalls = 0
+    private var waitingList: CheckedContinuation<Void, Never>?
 
-    init(tasks: [CronTaskRecord], ackFailureCount: Int = 0) {
+    init(tasks: [CronTaskRecord], ackFailureCount: Int = 0, recoveryBarrier: Bool = false, cancelAfterAcknowledgement: Bool = false) {
         self.tasks = tasks
         self.ackFailureCount = ackFailureCount
+        self.recoveryBarrier = recoveryBarrier
+        self.cancelAfterAcknowledgement = cancelAfterAcknowledgement
     }
 
     func list() async throws -> [CronTaskRecord] {
-        tasks.sorted { lhs, rhs in
+        listCalls += 1
+        if recoveryBarrier && listCalls == 1 {
+            await withCheckedContinuation { waitingList = $0 }
+        } else if recoveryBarrier && listCalls == 2 {
+            waitingList?.resume()
+            waitingList = nil
+        }
+        return tasks.sorted { lhs, rhs in
             (lhs.nextFireMs ?? .max) < (rhs.nextFireMs ?? .max)
         }
     }
@@ -970,6 +1612,7 @@ private actor FakeCronStore: CronStoreClient {
         } else {
             tasks[index].nextFireMs = nil
         }
+        if cancelAfterAcknowledgement { withUnsafeCurrentTask { $0?.cancel() } }
         return true
     }
 }
@@ -1020,6 +1663,8 @@ private actor FakeExecutor: CronTaskExecuting {
     private let manualResult: Result<CronExecutionOutcome, Error>
     private let dueResult: Result<CronExecutionOutcome?, Error>
     private(set) var dueCalls: [(String, UInt64)] = []
+    private(set) var manualCalls: [String] = []
+    private(set) var manualTimestamps: [UInt64] = []
 
     init(
         manualResult: Result<CronExecutionOutcome, Error> = .success(
@@ -1034,7 +1679,13 @@ private actor FakeExecutor: CronTaskExecuting {
     }
 
     func runTaskNow(scope: CronScope, task: CronTaskRecord) async throws -> CronExecutionOutcome {
-        try manualResult.get()
+        manualCalls.append(task.id)
+        return try manualResult.get()
+    }
+
+    func runTaskNow(scope: CronScope, task: CronTaskRecord, scheduledAtMs: UInt64) async throws -> CronExecutionOutcome {
+        manualTimestamps.append(scheduledAtMs)
+        return try await runTaskNow(scope: scope, task: task)
     }
 
     func runTaskIfDue(scope: CronScope, task: CronTaskRecord, scheduledAtMs: UInt64) async throws -> CronExecutionOutcome? {
@@ -1094,9 +1745,15 @@ private actor GatedCronExecutor: CronTaskExecuting {
 
 private actor FakeNotifier: CronNotificationDelivering {
     private(set) var payloads: [CronNotificationPayload] = []
+    /// Set to model the real notifier's silent refusals (preference off,
+    /// authorization denied), which must give the delivery claim back.
+    var refuses = false
 
-    func deliver(_ payload: CronNotificationPayload) async {
+    func setRefuses(_ value: Bool) { refuses = value }
+
+    func deliver(_ payload: CronNotificationPayload) async -> Bool {
         payloads.append(payload)
+        return !refuses
     }
 }
 

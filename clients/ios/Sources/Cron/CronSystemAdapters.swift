@@ -9,34 +9,34 @@ import Foundation
 #endif
 
 final class UserNotificationCronNotifier: CronNotificationDelivering, @unchecked Sendable {
-    func deliver(_ payload: CronNotificationPayload) async {
+    func deliver(_ payload: CronNotificationPayload) async -> Bool {
         #if canImport(UserNotifications)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return false }
             // Checked here rather than at each call site: several paths reach
             // this delivery, and a toggle only some of them honour is worse
             // than no toggle. Read fresh — a cron run can fire long after the
             // settings screen was last open.
-            guard NotificationPreferencesStore.load().allows(.scheduledRun) else { return }
+            guard NotificationPreferencesStore.load().allows(.scheduledRun) else { return false }
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return false }
             switch settings.authorizationStatus {
             case .authorized, .provisional, .ephemeral:
                 break
             case .denied:
-                return
+                return false
             default:
                 guard (try? await center.requestAuthorization(options: [.alert, .sound, .badge])) == true else {
-                    return
+                    return false
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else { return false }
             }
             let content = UNMutableNotificationContent()
             content.title = payload.title
             content.body = payload.body
             content.sound = .default
             content.userInfo = [
-                "lingxi.route": "cron.run",
+                "lingxi.route": payload.taskOnly ? "cron.task" : "cron.run",
                 "lingxi.cron.run_id": payload.runID,
                 "lingxi.cron.scope_id": payload.scopeID,
                 "lingxi.cron.task_id": payload.taskID,
@@ -47,8 +47,11 @@ final class UserNotificationCronNotifier: CronNotificationDelivering, @unchecked
                 content: content,
                 trigger: nil
             )
-            guard !Task.isCancelled else { return }
-            try? await center.add(request)
+            guard !Task.isCancelled else { return false }
+            do { try await center.add(request) } catch { return false }
+            return true
+        #else
+            return false
         #endif
     }
 }

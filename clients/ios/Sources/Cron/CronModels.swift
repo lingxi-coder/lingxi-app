@@ -20,11 +20,123 @@ struct CronScope: Identifiable, Hashable, Codable, Sendable {
         CronScope(
             scopeID: globalCronScopeID,
             projectID: nil,
-            projectName: String(localized: "common_global"),
+            projectName: "None",
             projectCwd: nil,
-            guestWorkspacePath: appSandboxRoot
+            guestWorkspacePath: URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("scheduled/workspace", isDirectory: true).path
         )
     }
+}
+
+enum CronTaskStatus: String, Codable, CaseIterable, Sendable {
+    case active, paused, completed
+    var label: String { rawValue.capitalized }
+}
+
+enum CronRunMode: String, Codable, CaseIterable, Sendable {
+    case newSession = "new_session", selectedSession = "selected_session", taskSession = "task_session"
+    var label: String {
+        switch self {
+        case .newSession: return "New chat each run"
+        case .selectedSession: return "Selected chat"
+        case .taskSession: return "Task chat"
+        }
+    }
+}
+
+enum CronNotificationPolicy: String, Codable, CaseIterable, Sendable {
+    case all, failed, none
+    func shouldNotify(_ status: CronRunStatus) -> Bool {
+        status.isTerminal && self != .none &&
+            (self == .all || [.failed, .timedOut, .interrupted].contains(status))
+    }
+    var label: String {
+        switch self {
+        case .all: return "All runs"
+        case .failed: return "Failures only"
+        case .none: return "Off"
+        }
+    }
+}
+
+struct CronReasoning: Codable, Hashable, Sendable {
+    var type = "automatic"
+    var id: String?
+    var tokens: UInt64?
+    var selection: String {
+        switch type {
+        case "level": return id ?? "automatic"
+        case "token_budget": return "budget:\(tokens ?? 0)"
+        default: return type
+        }
+    }
+    init(selection: String = "automatic") {
+        if selection.hasPrefix("budget:"), let budget = UInt64(selection.dropFirst(7)) {
+            type = "token_budget"; tokens = budget
+        } else if ["automatic", "enabled", "disabled"].contains(selection) {
+            type = selection
+        } else {
+            type = "level"; id = selection
+        }
+    }
+}
+
+struct CronAutomationRun: Codable, Hashable, Sendable {
+    var id: String
+    var taskId: String
+    var scheduledAt: UInt64
+    var startedAt: UInt64?
+    var finishedAt: UInt64?
+    var status: CronRunStatus
+    var model: String
+    var reasoning: CronReasoning?
+    var sessionId: String?
+    var summary: String?
+    var error: String?
+    var claimGeneration: UInt64?
+    var manualOccurrenceAt: UInt64?
+}
+
+struct CronAutomation: Codable, Hashable, Sendable {
+    var version = 2
+    var runs: [CronAutomationRun] = []
+    var status: CronTaskStatus = .active
+    var statusReason: String?
+    var name: String?
+    var model: String?
+    var reasoning = CronReasoning()
+    var runMode: CronRunMode = .newSession
+    var targetSessionId: String?
+    var ownedSessionId: String?
+    var notificationPolicy: CronNotificationPolicy = .all
+
+    enum CodingKeys: String, CodingKey {
+        case version, status, statusReason, name, model, reasoning, runMode, targetSessionId, ownedSessionId, notificationPolicy, runs
+    }
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 2
+        runs = try c.decodeIfPresent([CronAutomationRun].self, forKey: .runs) ?? []
+        status = try c.decodeIfPresent(CronTaskStatus.self, forKey: .status) ?? .active
+        statusReason = try c.decodeIfPresent(String.self, forKey: .statusReason)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        reasoning = try c.decodeIfPresent(CronReasoning.self, forKey: .reasoning) ?? CronReasoning()
+        runMode = try c.decodeIfPresent(CronRunMode.self, forKey: .runMode) ?? .newSession
+        targetSessionId = try c.decodeIfPresent(String.self, forKey: .targetSessionId)
+        ownedSessionId = try c.decodeIfPresent(String.self, forKey: .ownedSessionId)
+        notificationPolicy = try c.decodeIfPresent(CronNotificationPolicy.self, forKey: .notificationPolicy) ?? .all
+    }
+
+    func shouldNotify(_ status: CronRunStatus) -> Bool {
+        notificationPolicy.shouldNotify(status)
+    }
+}
+
+struct CronSessionChoice: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let scopeID: String
 }
 
 struct CronTaskRecord: Identifiable, Hashable, Codable, Sendable {
@@ -40,7 +152,10 @@ struct CronTaskRecord: Identifiable, Hashable, Codable, Sendable {
     /// recurring interval under 15 minutes). `nil` means the task is runnable.
     var unsupportedReason: String? = nil
 
-    var mobileSupported: Bool { unsupportedReason == nil }
+    var automation: CronAutomation? = nil
+    var configuration: CronAutomation { automation ?? CronAutomation() }
+    var status: CronTaskStatus { configuration.status }
+    var mobileSupported: Bool { unsupportedReason == nil && status == .active }
 }
 
 struct CronOccurrence: Hashable, Codable, Sendable {
@@ -56,12 +171,13 @@ enum CronRunStatus: String, Codable, CaseIterable, Sendable {
     case timedOut
     case cancelled
     case skipped
+    case interrupted
 
     var isTerminal: Bool {
         switch self {
         case .queued, .running:
             return false
-        case .succeeded, .failed, .timedOut, .cancelled, .skipped:
+        case .succeeded, .failed, .timedOut, .cancelled, .skipped, .interrupted:
             return true
         }
     }
@@ -75,6 +191,7 @@ enum CronRunStatus: String, Codable, CaseIterable, Sendable {
         case .timedOut: return String(localized: "chat_status_timed_out")
         case .cancelled: return String(localized: "chat_status_cancelled")
         case .skipped: return String(localized: "cron_status_skipped")
+        case .interrupted: return "Interrupted"
         }
     }
 }
@@ -118,6 +235,9 @@ struct CronRunRecord: Identifiable, Hashable, Codable, Sendable {
     var errorMessage: String?
     var errorKind: CronRunErrorKind?
     let manual: Bool
+    var sessionID: String? = nil
+    var actualModel: String? = nil
+    var notificationPolicy: CronNotificationPolicy? = nil
 
     var id: String { runID }
 }
@@ -173,12 +293,20 @@ struct CronScopedTask: Identifiable, Hashable, Sendable {
     var id: String { "\(scope.scopeID):\(task.id)" }
 }
 
+struct CronGeneratedSession: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var projectID: String?
+    var title: String
+    var updatedAtMs: UInt64
+}
+
 struct CronRepositoryState: Equatable, Sendable {
     var loading = false
     var tasks: [CronScopedTask] = []
     var scopes: [CronScope] = []
     var activeScopeID = globalCronScopeID
     var history: [CronRunRecord] = []
+    var generatedSessions: [CronGeneratedSession] = []
     var scheduling = CronSchedulingSnapshot.initial()
     var errorMessage: String?
     var lastActionMessage: String?
@@ -246,6 +374,8 @@ struct CronTaskDraft: Equatable, Sendable {
     var cron = "0 9 * * *"
     var recurring = true
 
+    var automation = CronAutomation()
+
     var isEditing: Bool { taskID != nil }
 
     static func create(scopeID: String = globalCronScopeID) -> CronTaskDraft {
@@ -258,7 +388,8 @@ struct CronTaskDraft: Equatable, Sendable {
             taskID: task.id,
             prompt: task.prompt,
             cron: task.cron,
-            recurring: task.recurring
+            recurring: task.recurring,
+            automation: task.configuration
         )
     }
 }
@@ -268,6 +399,8 @@ struct CronExecutionOutcome: Equatable, Sendable {
     let resultText: String?
     let errorMessage: String?
     let errorKind: CronRunErrorKind?
+    var sessionID: String? = nil
+    var actualModel: String? = nil
 }
 
 struct CronNotificationPayload: Equatable, Sendable {
@@ -277,6 +410,7 @@ struct CronNotificationPayload: Equatable, Sendable {
     let title: String
     let body: String
     let status: CronRunStatus
+    var taskOnly = false
 }
 
 protocol CronScopeProviding: Sendable {
@@ -286,8 +420,11 @@ protocol CronScopeProviding: Sendable {
 
 protocol CronStoreClient: Sendable {
     func list() async throws -> [CronTaskRecord]
+    func migrateLegacyTasks(defaultModel: String?, reasoning: CronReasoning) async throws
     func create(cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord
     func update(taskID: String, cronExpr: String, prompt: String, recurring: Bool) async throws -> CronTaskRecord
+    func saveConfigured(draft: CronTaskDraft) async throws -> CronTaskRecord
+    func updateAutomation(taskID: String, automation: CronAutomation) async throws -> CronTaskRecord
     func delete(taskID: String) async throws -> Bool
     func nextFireTime() async throws -> UInt64?
     func dueOccurrences(nowMs: UInt64) async throws -> [CronOccurrence]
@@ -300,6 +437,7 @@ protocol CronStoreProviding: Sendable {
 
 protocol CronTaskExecuting: Sendable {
     func runTaskNow(scope: CronScope, task: CronTaskRecord) async throws -> CronExecutionOutcome
+    func runTaskNow(scope: CronScope, task: CronTaskRecord, scheduledAtMs: UInt64) async throws -> CronExecutionOutcome
     func runTaskIfDue(
         scope: CronScope,
         task: CronTaskRecord,
@@ -307,8 +445,20 @@ protocol CronTaskExecuting: Sendable {
     ) async throws -> CronExecutionOutcome?
 }
 
+extension CronTaskExecuting {
+    func runTaskNow(scope: CronScope, task: CronTaskRecord, scheduledAtMs: UInt64) async throws -> CronExecutionOutcome {
+        try await runTaskNow(scope: scope, task: task)
+    }
+}
+
 protocol CronNotificationDelivering: Sendable {
-    func deliver(_ payload: CronNotificationPayload) async
+    /// Returns `false` ONLY when the notification could not be shown and the
+    /// caller must return whatever delivery reservation it took — see
+    /// `CronHistoryStore.releaseTerminalNotification`. A stand-in that shows
+    /// nothing by design (tests, the no-op default) reports `true`: it is not a
+    /// refusal, and treating it as one would churn the claim on every refresh.
+    @discardableResult
+    func deliver(_ payload: CronNotificationPayload) async -> Bool
 }
 
 protocol CronBackgroundScheduling: Sendable {
@@ -347,7 +497,7 @@ struct UnavailableCronExecutor: CronTaskExecuting {
 }
 
 struct NoopCronNotifier: CronNotificationDelivering {
-    func deliver(_ payload: CronNotificationPayload) async {}
+    func deliver(_ payload: CronNotificationPayload) async -> Bool { true }
 }
 
 struct ForegroundOnlyCronScheduler: CronBackgroundScheduling {
@@ -385,7 +535,7 @@ extension CronRunRecord {
             return .cancelled
         case .skipped:
             return .skipped
-        case .failed:
+        case .failed, .interrupted:
             switch errorKind {
             case .missingCredentials:
                 return .missingCredentials
@@ -491,4 +641,15 @@ func formatCronEpoch(_ epochMs: UInt64) -> String {
             .hour(.twoDigits(amPM: .omitted))
             .minute(.twoDigits)
     )
+}
+
+extension CronStoreClient {
+    func migrateLegacyTasks(defaultModel: String?, reasoning: CronReasoning) async throws {}
+    func saveConfigured(draft: CronTaskDraft) async throws -> CronTaskRecord {
+        throw CronExecutionError(kind: .validation, message: "This task store must be upgraded before saving task settings.", statusOverride: .failed)
+    }
+
+    func updateAutomation(taskID: String, automation: CronAutomation) async throws -> CronTaskRecord {
+        throw CronExecutionError(kind: .validation, message: "This task store must be upgraded before saving task settings.", statusOverride: .failed)
+    }
 }

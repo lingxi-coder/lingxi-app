@@ -484,6 +484,9 @@ struct Message: Identifiable, Equatable {
     let text: String
     let images: [MessageImage]
 
+    var loopWakeupStreak: UInt32? = nil
+    var loopFoldedItemIDs: Set<String> = []
+
     init(id: UUID = UUID(), role: Role, tag: String? = nil, text: String, images: [MessageImage] = []) {
         self.id = id
         self.role = role

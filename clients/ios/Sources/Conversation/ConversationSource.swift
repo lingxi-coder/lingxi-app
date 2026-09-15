@@ -373,7 +373,10 @@ final class ConversationModel: ObservableObject {
         return agentTranscripts[selectedAgentID]?.messages ?? []
     }
     var selectedAgentItems: [ConversationRenderItem] {
-        guard selectedAgentID != Self.mainAgentID else { return items }
+        guard selectedAgentID != Self.mainAgentID else {
+            let hidden = Set(messages.flatMap { $0.loopFoldedItemIDs })
+            return items.filter { !hidden.contains($0.id) }
+        }
         return agentTranscripts[selectedAgentID]?.items ?? []
     }
     var selectedAgentMessageDetails: [UUID: ConversationMessageDetail] {
@@ -4592,6 +4595,28 @@ final class MockConversationSource: ConversationSource {
                     if addedSignature { appendNoticeActivity(id: "thinking-signature") }
                 }
 
+            case let .scheduledTaskFire(message):
+                // This session notice precedes turnStarted. Keep the ordinary
+                // turn-event gate intact for SystemNotice and stale turn data.
+                appendMessage(Message(role: .ai, text: message))
+
+            case let .loopWakeup(message, companion, streak, _):
+                // A scheduled fire precedes turn_started, so it must bypass
+                // the active-turn gate just like other session-level events.
+                let hidden = Set(model.messages.flatMap { $0.loopFoldedItemIDs })
+                let rows = model.items.filter { !hidden.contains($0.id) }
+                let start = rows.lastIndex { row in
+                    if case let .message(message) = row { return message.loopWakeupStreak != nil }
+                    return false
+                }
+                var wakeup = Message(role: .ai, text: message)
+                wakeup.loopWakeupStreak = streak
+                if streak > 0, let start {
+                    wakeup.loopFoldedItemIDs = Set(rows[start...].map(\.id))
+                }
+                appendMessage(wakeup)
+                if let companion { appendMessage(Message(role: .ai, text: companion)) }
+
             case let .systemNotice(message, isError):
                 guard acceptTurnEvent(event) else { return }
                 let notice = ConversationExecutionNotice(
@@ -6115,7 +6140,10 @@ final class MockConversationSource: ConversationSource {
                 }
             }.joined(separator: "|")
             let images = dto.images.map { "image|\(field($0.mediaType))|\(field($0.url))" }.joined(separator: "|")
-            return "role|\(field(dto.role))|blocks|\(field(blocks))|images|\(field(images))"
+            let wakeup = dto.loopWakeup.map {
+                "|loop|\(field($0.message))|\(field($0.companion ?? ""))|\($0.streak)|\($0.sinceMs)"
+            } ?? ""
+            return "role|\(field(dto.role))|blocks|\(field(blocks))|images|\(field(images))" + wakeup
         }
 
         fileprivate static func signatureCounts(_ signatures: [String]) -> [String: Int] {
@@ -6252,6 +6280,25 @@ final class MockConversationSource: ConversationSource {
                 let messageIdentity = wireIndex.map {
                     "\(identityPrefix)|message-index|\($0)"
                 } ?? "\(identityPrefix)|message|\(wireSignature)|occurrence|\(occurrence)"
+                if let fire = dto.loopWakeup {
+                    finishPendingRun()
+                    var wakeup = Message(id: stableUUID(messageIdentity), role: .ai, text: fire.message)
+                    wakeup.loopWakeupStreak = fire.streak
+                    if fire.streak > 0, let start = out.items.lastIndex(where: { item in
+                        if case let .message(message) = item { return message.loopWakeupStreak != nil }
+                        return false
+                    }) {
+                        wakeup.loopFoldedItemIDs = Set(out.items[start...].map(\.id))
+                    }
+                    out.messages.append(wakeup)
+                    out.items.append(.message(wakeup))
+                    if let companion = fire.companion {
+                        let row = Message(id: stableUUID(messageIdentity + "|companion"), role: .ai, text: companion)
+                        out.messages.append(row)
+                        out.items.append(.message(row))
+                    }
+                    continue
+                }
                 pendingRunIDHint = messageIdentity
                 let role: Role = (dto.role == "user") ? .user : .ai
                 let isAssistant = dto.role == "assistant"

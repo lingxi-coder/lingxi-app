@@ -16,6 +16,7 @@ final class ProjectStore {
     var loading = true
     var operation: ProjectOperation?
     var errorMessage: String?
+    var onWillArchiveSession: ((String?, String) async throws -> Void)?
 
     var activeProject: ProjectSnapshot? {
         projects.first(where: { $0.record.id == activeProjectId })
@@ -157,6 +158,7 @@ final class ProjectStore {
     }
 
     func setSessionArchived(projectId: String?, sessionId: String, archived: Bool) async throws {
+        if archived { try await onWillArchiveSession?(projectId, sessionId) }
         let repository = repository
         let next = try await executionDomain.async {
             try repository.setSessionArchived(projectId: projectId, sessionId: sessionId, archived: archived)

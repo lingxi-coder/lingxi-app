@@ -28,6 +28,7 @@ enum SessionMode: String, CaseIterable, Codable, Hashable, Sendable {
 /// conversation scope of its own whose workspace directory is the session cwd.
 enum ConversationScope: Equatable, Hashable, Sendable {
     case global
+    case scheduled
     case project(String)
     case localApp(String)
 
@@ -41,6 +42,8 @@ enum ConversationScope: Equatable, Hashable, Sendable {
     init?(workspaceKey: String) {
         if workspaceKey == "global" {
             self = .global
+        } else if workspaceKey == "scheduled" {
+            self = .scheduled
         } else if workspaceKey.hasPrefix("project.") {
             let id = String(workspaceKey.dropFirst("project.".count))
             guard !id.isEmpty else { return nil }
@@ -69,6 +72,7 @@ enum ConversationScope: Equatable, Hashable, Sendable {
     var workspaceKey: String {
         switch self {
         case .global: "global"
+        case .scheduled: "scheduled"
         case let .project(id): "project.\(id)"
         case let .localApp(id): "app.\(id)"
         }
@@ -81,6 +85,7 @@ enum ConversationScope: Equatable, Hashable, Sendable {
     var preferenceScope: String {
         switch self {
         case .global: "global"
+        case .scheduled: "scheduled"
         case let .project(id): id.lowercased()
         case let .localApp(id): "app.\(id.lowercased())"
         }

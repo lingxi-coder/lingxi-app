@@ -16,6 +16,41 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }
 
+    func testScheduledTaskCenterShowsStatusesAndPreservesDraft() {
+        openDrawer()
+        app.buttons["drawer.tab.cron"].tap()
+        let create = app.buttons["cron.add"]
+        XCTAssertTrue(create.waitForExistence(timeout: 12), app.debugDescription)
+        XCTAssertTrue(app.buttons["All"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["Active"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["Paused"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["Completed"].exists, app.debugDescription)
+        let listImage = XCTAttachment(screenshot: app.screenshot())
+        listImage.name = "Scheduled task center"
+        listImage.lifetime = .keepAlways
+        add(listImage)
+        create.tap()
+        let name = app.textFields["Task name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5), app.debugDescription)
+        let settingsOverview = XCTAttachment(screenshot: app.screenshot())
+        settingsOverview.name = "Scheduled task settings overview"
+        settingsOverview.lifetime = .keepAlways
+        add(settingsOverview)
+        name.tap()
+        name.typeText("Keep my draft")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.buttons["Keep editing"].waitForExistence(timeout: 3))
+        app.buttons["Keep editing"].tap()
+        XCTAssertEqual(name.value as? String, "Keep my draft")
+        let editorImage = XCTAttachment(screenshot: app.screenshot())
+        editorImage.name = "Scheduled task settings"
+        editorImage.lifetime = .keepAlways
+        add(editorImage)
+        app.buttons["Cancel"].tap()
+        app.buttons["Discard"].tap()
+        XCTAssertTrue(create.waitForExistence(timeout: 5))
+    }
+
     func testTimelineHidesAgentRunAndShowsCompactExecutionRows() {
         XCTAssertFalse(app.staticTexts["理解需求"].exists)
         let llmStatus = app.descendants(matching: .any)["conversation.llm-status"]

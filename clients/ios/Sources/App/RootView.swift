@@ -231,14 +231,19 @@ struct RootView: View {
                     ).config
                 }
             )
-            let cron = CronRepository(
-                appSandboxRoot: root,
-                scopeProvider: scopes,
-                storeProvider: FfiCronStoreProvider(),
-                executor: executor,
-                notifier: UserNotificationCronNotifier(),
-                scheduler: BestEffortBackgroundCronScheduler()
-            )
+            let cron: CronRepository
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
+                cron = CronRepository(appSandboxRoot: root + "/ui-test-cron")
+            } else {
+                cron = CronRepository(
+                    appSandboxRoot: root,
+                    scopeProvider: scopes,
+                    storeProvider: FfiCronStoreProvider { (providers.makeLaunchSnapshot().defaultModelID, CronReasoning()) },
+                    executor: executor,
+                    notifier: UserNotificationCronNotifier(),
+                    scheduler: BestEffortBackgroundCronScheduler()
+                )
+            }
             LocalAppBackgroundTaskBridge.shared.bind(
                 { await executor.runLocalAppBackgroundTasks() },
                 rescheduler: { await executor.rescheduleLocalAppBackgroundWake() }
@@ -251,6 +256,10 @@ struct RootView: View {
             )
         #endif
 
+        projects.onWillArchiveSession = { projectID, sessionID in
+            try await cron.pauseTasksForArchivedSession(projectID: projectID, sessionID: sessionID)
+        }
+        cron.defaultModel = snapshot.defaultModelID
         let preferences = ProjectScopedPreferences()
         let projectID = projects.activeProjectId
         _settingsStore = State(initialValue: settings)
@@ -449,6 +458,9 @@ struct RootView: View {
             }
             .onChange(of: source.model.turnCompletion) { _, _ in
                 syncConversationBackgroundSurfaces()
+                if cronRepository.state.history.contains(where: { $0.status == .queued }) {
+                    Task { await cronRepository.reconcile(reason: "chat-idle") }
+                }
             }
             .onChange(of: source.model.pendingQuestions) { _, _ in
                 syncConversationBackgroundSurfaces()
@@ -548,7 +560,10 @@ struct RootView: View {
         let notificationLifecycle = presentationLifecycle
             .onReceive(NotificationCenter.default.publisher(for: .lingxiCronNotificationOpened)) { note in
                 cronRepository.handleNotificationUserInfo(note.userInfo ?? [:])
-                if let runID = note.userInfo?["lingxi.cron.run_id"] as? String {
+                if note.userInfo?["lingxi.route"] as? String == "cron.task" {
+                    navigation.openCron(scopeID: note.userInfo?["lingxi.cron.scope_id"] as? String,
+                                        taskID: note.userInfo?["lingxi.cron.task_id"] as? String)
+                } else if let runID = note.userInfo?["lingxi.cron.run_id"] as? String {
                     navigation.openCronRun(runID)
                 }
             }
@@ -944,6 +959,7 @@ struct RootView: View {
             openSettings: { navigation.showSettings() },
             openTerminal: openCurrentWorkspaceTerminal,
             openApps: { appID in navigation.openLocalApps(appID: appID) },
+            openCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
             closeSidebar: { navigation.closeSidebar() },
             createApp: createLocalAppFromDrawer,
             onSelectProject: { switchProject(to: $0) },
@@ -1045,8 +1061,12 @@ struct RootView: View {
         case .cron(let scopeID, let taskID):
             let route = scopeID.map { CronRoute.task(scopeID: $0, taskID: taskID) }
             CronRootView(repository: cronRepository, initialRoute: route)
+                .onAppear { configureCronEditor() }
+            .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
         case .cronRun(let runID):
             CronRootView(repository: cronRepository, initialRoute: .run(runID: runID))
+                .onAppear { configureCronEditor() }
+            .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
         case .localApps(let appID):
             LocalAppsRootView(
                 store: localAppsStore,
@@ -1077,12 +1097,16 @@ struct RootView: View {
                 initialRoute: initialRoute,
                 onDismiss: { navigation.closePresentedRoute() }
             )
+            .onAppear { configureCronEditor() }
+            .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
         case .cronRun(let runID):
             CronRootView(
                 repository: cronRepository,
                 initialRoute: .run(runID: runID),
                 onDismiss: { navigation.closePresentedRoute() }
             )
+            .onAppear { configureCronEditor() }
+            .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
         case .terminal:
             EmptyView()
         case .localApps(let appID):
@@ -1377,6 +1401,31 @@ struct RootView: View {
         }
     #endif
 
+    private func configureCronEditor() {
+        cronRepository.modelChoices = source.model.availableModels
+        cronRepository.modelDetails = source.model.availableModelDetails
+        let selected = source.model.activeModelId
+        cronRepository.defaultModel = selected.isEmpty ? ProviderRepository.shared.makeLaunchSnapshot().defaultModelID : selected
+        cronRepository.defaultReasoning = CronReasoning(selection: source.model.reasoningSelection)
+        var scheduledIDs = Set<String>()
+        let archivedIDs = Set(projectStore.globalSessions.filter(\.isArchived).map(\.sessionId))
+        let scheduledChoices = cronRepository.state.generatedSessions.compactMap { session -> CronSessionChoice? in
+            guard session.projectID == nil, !archivedIDs.contains(session.id), scheduledIDs.insert(session.id).inserted else { return nil }
+            return CronSessionChoice(id: session.id, title: session.title, scopeID: globalCronScopeID)
+        }
+        cronRepository.sessionChoices = scheduledChoices + projectStore.projects.flatMap { project in
+            project.sessions.filter { !$0.isArchived }.map {
+                CronSessionChoice(id: $0.sessionId, title: "\(project.record.name) · \($0.title)", scopeID: project.record.id)
+            }
+        }
+        cronRepository.onOpenSession = { projectID, sessionID in
+            navigation.closePresentedRoute()
+            let mode = projectStore.projects.first(where: { $0.record.id == projectID })?
+                .sessions.first(where: { $0.sessionId == sessionID })?.mode ?? .code
+            switchScope(to: projectID.map(ConversationScope.project) ?? .scheduled, mode: mode, resumeSessionID: sessionID)
+        }
+    }
+
     private func wireCurrentSource(preserveCatalog: Bool = false) {
         let current = source
         #if canImport(engine_mobileFFI)
@@ -1464,6 +1513,9 @@ struct RootView: View {
                 projectStore.projects.first(where: { $0.record.id == id })
             }
             projectCwd = project?.workspace.hostURL.path
+        case .scheduled:
+            project = nil
+            projectCwd = appSandboxRoot + "/scheduled/workspace"
         case let .localApp(appID):
             // The app's workspace directory is the session cwd, resolved via
             // the SAME validated derivation the code browser uses
@@ -1482,7 +1534,7 @@ struct RootView: View {
                 projectCwd = nil
             }
         }
-        let runtime: TerminalRuntimeConfig?
+        var runtime: TerminalRuntimeConfig?
         if let appID = scope.appID {
             // Mount this app's own workspace, never the terminal's default
             // workspace. The host cwd remains the session-catalog authority;
@@ -1494,6 +1546,10 @@ struct RootView: View {
                 project: project,
                 linuxRuntime: settingsStore.linuxRuntime
             ).config
+        }
+        if scope == .scheduled {
+            runtime?.workspaceHostPath = appSandboxRoot + "/scheduled/workspace"
+            runtime?.stableWorkspaceId = "scheduled"
         }
         return ConversationSourceFactory.make(
             projectCwd: projectCwd,
@@ -1548,8 +1604,12 @@ struct RootView: View {
     /// project callbacks keep their optional-projectID spelling (`nil` ==
     /// global scope).
     private func switchProject(to projectID: String?, resumeSessionID: String? = nil, startNew: Bool = false) {
+        let scheduled = projectID == nil && resumeSessionID.map { id in
+            cronRepository.state.generatedSessions.contains { $0.projectID == nil && $0.id == id }
+        } == true
         switchScope(
-            to: ConversationScope(projectID: projectID),
+            to: scheduled ? .scheduled : ConversationScope(projectID: projectID),
+            mode: scheduled ? .code : nil,
             resumeSessionID: resumeSessionID,
             startNew: startNew
         )
@@ -2272,7 +2332,7 @@ struct RootView: View {
                 targetScope = activeScope
             }
             switch targetScope {
-            case .global:
+            case .global, .scheduled:
                 break
             case let .project(projectID):
                 guard projectStore.projects.contains(where: { $0.record.id == projectID }) else {
@@ -2615,7 +2675,7 @@ private struct ConversationProjectBridge: View {
         else { return }
         // App-scope sessions are adopted (above) but never recorded into the
         // project session index.
-        guard !scope.isLocalApp else { return }
+        guard !scope.isLocalApp && scope != .scheduled else { return }
         let indexedRow: ProjectSessionSummary?
         if let projectID {
             indexedRow = projectStore.projects.first(where: { $0.record.id == projectID })?
@@ -2666,7 +2726,7 @@ private struct ConversationProjectBridge: View {
     private func synchronizeSessions(_ rows: [EngineSession]) {
         // An app scope's engine catalog must never replace a project's cached
         // session index.
-        guard !scope.isLocalApp else { return }
+        guard !scope.isLocalApp && scope != .scheduled else { return }
         guard ConversationSessionIndexPolicy.shouldSynchronize(
             transitionPending: model.sessionTransitionPending,
             restorePending: pendingRestoreID != nil,

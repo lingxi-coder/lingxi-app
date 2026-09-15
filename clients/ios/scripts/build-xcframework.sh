@@ -31,7 +31,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"                       # clients/ios
 REPO_ROOT="$(cd "${IOS_DIR}/../.." && pwd)"                     # worktree root
 CARGO_DIR="${REPO_ROOT}/lingxi-code"                           # Rust workspace
-CARGO_TARGET_DIR="${CARGO_DIR}/target"
+# Honour an inherited CARGO_TARGET_DIR: cargo reads it from the environment, so
+# hard-coding the shared dir here would make the script look for outputs
+# somewhere cargo never wrote them. A private dir also keeps a long iOS release
+# build from holding the shared target lock against every other checkout user.
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${CARGO_DIR}/target}"
+export CARGO_TARGET_DIR
 
 CRATE="ios-framework"
 LIB_STEM="ios_framework"            # cargo turns the `-` into `_`
@@ -64,6 +69,15 @@ BUILD_TARGETS=("${DEVICE_TARGET}" "${SIM_TARGETS[@]}")
 if [[ "${LINGXI_DEVICE_ONLY:-0}" == "1" ]]; then
   BUILD_TARGETS=("${DEVICE_TARGET}")
 fi
+# Local test runs on an Apple-silicon Mac need ONLY the arm64 simulator slice.
+# Building the device + Intel-sim slices as well triples a from-scratch release
+# build of the whole engine for no benefit, and the device slice is what drags
+# in the Linux runtime below. Produces a simulator-only xcframework: good for
+# `xcodebuild test`, NOT shippable.
+if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
+  SIM_TARGETS=("aarch64-apple-ios-sim")
+  BUILD_TARGETS=("${SIM_TARGETS[@]}")
+fi
 
 # Use the Xcode-toolchain lipo (xcrun resolves it) — avoids a stray `lipo` on
 # PATH (e.g. anaconda) that does not understand Mach-O fat archives correctly.
@@ -83,7 +97,12 @@ done
 # device slice. The helper is idempotent and sources everything from the pinned
 # OpenMinis submodule; no generated binary or rootfs is committed.
 LINUX_RUNTIME_BUILD="${SCRIPT_DIR}/build-linux-runtime.sh"
-if [[ -x "${LINUX_RUNTIME_BUILD}" ]]; then
+# The staged runtime is linked only under `LIBRARY_SEARCH_PATHS[sdk=iphoneos*]`
+# and project.yml's "Stage Alpine rootfs" phase exits 0 when PLATFORM_NAME is
+# not iphoneos, so a simulator build consumes none of it.
+if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
+  log "Simulator-only build: skipping the device-only Linux runtime."
+elif [[ -x "${LINUX_RUNTIME_BUILD}" ]]; then
   if [[ "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
     STAGED_LINUX_RUNTIME="${IOS_DIR}/build/linux-runtime/openminis"
     for required in \
@@ -547,7 +566,11 @@ rm -rf "${XCFRAMEWORK}"
 mkdir -p "${FRAMEWORKS_DIR}"
 
 log "Creating ${XCFRAMEWORK} …"
-if [[ "${LINGXI_DEVICE_ONLY:-0}" == "1" ]]; then
+if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
+  xcodebuild -create-xcframework \
+    -library "${FAT_SIM_LIB}" -headers "${HEADERS_DIR}" \
+    -output "${XCFRAMEWORK}"
+elif [[ "${LINGXI_DEVICE_ONLY:-0}" == "1" ]]; then
   xcodebuild -create-xcframework \
     -library "${DEVICE_LIB}" -headers "${HEADERS_DIR}" \
     -output "${XCFRAMEWORK}"

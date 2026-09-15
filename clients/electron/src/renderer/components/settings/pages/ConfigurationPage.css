@@ -1,0 +1,13 @@
+.configuration-page { min-width: 0; }
+.configuration-list { display: grid; gap: 24px; padding: 20px; }
+.configuration-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.configuration-toolbar > input { flex: 1 1 240px; min-width: 0; }
+.configuration-entry { position: relative; padding: 16px 44px 16px 16px !important; transition: background-color 120ms ease; }
+.configuration-entry::after { content: '›'; position: absolute; right: 18px; top: 50%; transform: translateY(-50%); font-size: 22px; opacity: 0.5; }
+.configuration-entry:hover { background: rgba(128, 128, 128, 0.08) !important; }
+.configuration-entry:focus-visible, .configuration-back:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.configuration-entry > span { min-width: 0; overflow-wrap: anywhere; }
+.configuration-detail { width: 100%; box-sizing: border-box; }
+.configuration-detail > div[style] { min-width: 0; }
+.configuration-back { justify-self: start; }
+@media (prefers-reduced-motion: reduce) { .configuration-entry { transition: none; } }

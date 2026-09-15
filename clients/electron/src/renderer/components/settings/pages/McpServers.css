@@ -1,0 +1,30 @@
+.mcp-editor {
+  max-width: 820px;
+  margin-inline: auto;
+  gap: 24px !important;
+  padding: 24px !important;
+  color: var(--mcp-text);
+  container-type: inline-size;
+}
+.mcp-editor .configuration-back { border: 0 !important; padding: 0 !important; background: transparent !important; }
+.mcp-editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.mcp-editor label { min-width: 0; align-content: start; gap: 8px !important; }
+.mcp-editor input, .mcp-editor select { width: 100%; height: 38px; box-sizing: border-box; }
+.mcp-editor input, .mcp-editor select, .mcp-editor textarea { border-radius: 8px !important; padding: 9px 11px !important; }
+.mcp-editor textarea { min-height: 76px !important; line-height: 1.6; }
+.mcp-editor input::placeholder { color: var(--mcp-muted); opacity: .7; }
+.mcp-connection { display: grid; gap: 18px; padding: 20px; border: 1px solid var(--mcp-border); border-radius: 12px; }
+.mcp-section-heading h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.mcp-section-heading p { margin: 6px 0 0; color: var(--mcp-muted); font-size: 12px; line-height: 1.6; }
+.mcp-options { min-width: 0; border-top: 1px solid var(--mcp-border); padding-top: 14px; }
+.mcp-options > summary { cursor: pointer; font-size: 12px; font-weight: 500; color: var(--mcp-text); line-height: 24px; }
+.mcp-options > summary > span { margin-left: 8px; font-size: 11px; color: var(--mcp-muted); font-weight: 400; }
+.mcp-options[open] > :not(summary) { margin-top: 14px; }
+.mcp-options > summary:focus-visible { outline: 2px solid var(--mcp-text); outline-offset: 4px; border-radius: 3px; }
+.mcp-raw-config { border: 1px solid var(--mcp-border); padding: 12px 16px; border-radius: 10px; }
+.mcp-editor-actions { display: flex; gap: 8px; padding-top: 4px; }
+.mcp-editor-actions button { min-height: 36px; min-width: 84px; justify-content: center; }
+@container (max-width: 520px) {
+  .mcp-editor-grid { grid-template-columns: minmax(0, 1fr); }
+  .mcp-connection { padding: 16px; }
+}

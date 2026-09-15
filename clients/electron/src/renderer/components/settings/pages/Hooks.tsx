@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type { HookAdminCommandDto, HookDto } from '@lingxi/bridge-client';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
@@ -13,10 +13,7 @@ import {
   asRecord,
   asString,
   asStringArray,
-  detailGridStyle,
   managerDetailStyle,
-  managerShellStyle,
-  managerSidebarStyle,
   nextConfigurationOperationId,
   noteStyle,
   parseEventEnvelope,
@@ -140,6 +137,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
   const [selection, setSelection] = useState<HookSelection>({ kind: 'all' });
   const [pendingSelection, setPendingSelection] = useState<HookSelection | null>(null);
   const [search, setSearch] = useState('');
+  const [showDetail, setShowDetail] = useState(false);
   const [newEvent, setNewEvent] = useState<(typeof HOOK_EVENTS)[number]>('PreToolUse');
   const [draftText, setDraftText] = useState('{}');
   const [pageError, setPageError] = useState<string | null>(null);
@@ -266,10 +264,12 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
   const requestSelection = (next: HookSelection) => {
     if (dirty) {
       setPendingSelection(next);
+      setShowDetail(true);
       return;
     }
     setPendingSelection(null);
     setSelection(next);
+    setShowDetail(true);
   };
 
   const discardDraft = () => {
@@ -322,7 +322,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
   const detail = !document
     ? <EmptyDetail t={t} title="尚未加载 hooks 文档" body="连接到引擎后，这里会显示当前层自己的 hooks 对象与生效后的合并结果。" />
     : (
-      <div style={managerDetailStyle()}>
+      <div className="hooks-editor-body">
         <div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
             <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>
@@ -334,6 +334,17 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
             当前编辑的是当前层自己的 <code className="mono">hooks</code> 对象；不会把 effective 合并结果回写到该层。
           </div>
         </div>
+
+        {selection.kind === 'event' && <div className="hooks-child-list">
+          {selectedGroups.map((group, groupIndex) => <button type="button" className="configuration-entry" key={groupIndex} onClick={() => requestSelection({ kind: 'group', event: selection.event, groupIndex })} style={sidebarButtonStyle(t, false)}>
+            <strong>Group {groupIndex + 1}</strong><span>{asString(group.matcher, '*')} · {Array.isArray(group.hooks) ? group.hooks.length : 0} handlers</span>
+          </button>)}
+        </div>}
+        {selection.kind === 'group' && <div className="hooks-child-list">
+          {selectedHandlers.map((handler, handlerIndex) => <button type="button" className="configuration-entry" key={handlerIndex} onClick={() => requestSelection({ kind: 'handler', event: selection.event, groupIndex: selection.groupIndex, handlerIndex })} style={sidebarButtonStyle(t, false)}>
+            <strong>Handler {handlerIndex + 1}</strong><span>{asString(handler.type, 'command')}</span>
+          </button>)}
+        </div>}
 
         {selection.kind === 'event' && (
           <div style={noteStyle(t)}>
@@ -393,7 +404,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
 
         {selection.kind === 'handler' && selectedHandler && (
           <div style={{ display: 'grid', gap: 14 }}>
-            <div style={detailGridStyle()}>
+            <div className="hooks-field-grid">
               <Field t={t} label="执行类型">
                 <select value={asString(selectedHandler.type, 'command')} onChange={(event) => updateHandler(selection.event, selection.groupIndex, selection.handlerIndex, 'type', event.target.value)} aria-label="hook type" style={{ ...inputStyle(t), width: '100%' }}>
                   {HOOK_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
@@ -414,7 +425,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
             </Field>
 
             {asString(selectedHandler.type, 'command') === 'command' && (
-              <div style={detailGridStyle()}>
+              <div className="hooks-field-grid">
                 <Field t={t} label="Command">
                   <input value={asString(selectedHandler.command)} onChange={(event) => updateHandler(selection.event, selection.groupIndex, selection.handlerIndex, 'command', event.target.value)} aria-label="hook command" style={{ ...inputStyle(t), width: '100%' }} />
                 </Field>
@@ -434,7 +445,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
                 <Field t={t} label="URL">
                   <input value={asString(selectedHandler.url)} onChange={(event) => updateHandler(selection.event, selection.groupIndex, selection.handlerIndex, 'url', event.target.value)} aria-label="hook URL" style={{ ...inputStyle(t), width: '100%' }} />
                 </Field>
-                <div style={detailGridStyle()}>
+                <div className="hooks-field-grid">
                   <Field t={t} label="Headers（KEY=VALUE）">
                     <textarea value={recordToKeyValueText(selectedHandler.headers)} onChange={(event) => updateHandler(selection.event, selection.groupIndex, selection.handlerIndex, 'headers', keyValueTextToRecord(event.target.value))} rows={5} aria-label="hook headers" style={textareaStyle(t, 5)} />
                   </Field>
@@ -458,7 +469,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
 
             {asString(selectedHandler.type) === 'mcp_tool' && (
               <div style={{ display: 'grid', gap: 12 }}>
-                <div style={detailGridStyle()}>
+                <div className="hooks-field-grid">
                   <Field t={t} label="MCP server">
                     <input value={asString(selectedHandler.server)} onChange={(event) => updateHandler(selection.event, selection.groupIndex, selection.handlerIndex, 'server', event.target.value)} aria-label="hook MCP server" style={{ ...inputStyle(t), width: '100%' }} />
                   </Field>
@@ -486,7 +497,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
               ))}
             </div>
             {selectedHandler.async === true && (
-              <div style={detailGridStyle()}>
+              <div className="hooks-field-grid">
                 <Field t={t} label="Async timeout（毫秒）">
                   <input type="number" min={0} value={typeof selectedHandler.asyncTimeout === 'number' ? selectedHandler.asyncTimeout : ''} onChange={(event) => updateHandler(selection.event, selection.groupIndex, selection.handlerIndex, 'asyncTimeout', event.target.value ? Number(event.target.value) : undefined)} aria-label="hook async timeout" style={{ ...inputStyle(t), width: '100%' }} />
                 </Field>
@@ -510,18 +521,18 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
           </div>
         )}
 
-        <details open={selection.kind === 'all'}>
+        <details className="hooks-json-panel" open={selection.kind === 'all'}>
           <summary style={{ cursor: 'pointer', color: t.text2, fontSize: 13, fontWeight: 600 }}>高级 JSON 预览 / 编辑</summary>
           <Field t={t} label="当前层 hooks JSON">
             <textarea value={draftText} onChange={(event) => setDraftText(event.target.value)} rows={18} aria-label="hooks-json" style={textareaStyle(t, 18)} />
           </Field>
         </details>
 
-        <div style={actionRowStyle()}>
+        <div className="hooks-actions">
           <button type="button" disabled={loading} onClick={validateHooks} style={ghostButtonStyle(t, loading)}>
             预检
           </button>
-          <button type="button" disabled={loading || !dirty || !adminAvailable || !document.revision_sha256} onClick={saveHooks} style={ghostButtonStyle(t, loading || !dirty || !adminAvailable || !document.revision_sha256)}>
+          <button type="button" disabled={loading || !dirty || !adminAvailable || !document.revision_sha256} onClick={saveHooks} className="hooks-save" style={ghostButtonStyle(t, loading || !dirty || !adminAvailable || !document.revision_sha256)}>
             保存
           </button>
           <button type="button" disabled={loading || !dirty} onClick={discardDraft} style={ghostButtonStyle(t, loading || !dirty, true)}>
@@ -543,8 +554,8 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
     <>
       <Card title="Hooks">
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="hooks" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} label="当前层 / 生效值" />
-        <div style={managerShellStyle(t)}>
-          <div style={managerSidebarStyle(t)}>
+        <div className="configuration-page hooks-page" style={{ '--hooks-border': t.border, '--hooks-text': t.text, '--hooks-muted': t.text3, '--hooks-surface': t.surface } as CSSProperties}>
+          {!showDetail ? <div className="configuration-list">
             <div style={{ display: 'grid', gap: 10 }}>
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 hook 事件" aria-label="搜索 hooks" style={searchInputStyle(t)} />
               <div style={noteStyle(t)}>
@@ -559,9 +570,11 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
                     if (!Array.isArray(next[newEvent])) next[newEvent] = [{ hooks: [{ type: 'command', command: '' }] }];
                   });
                   setSelection({ kind: 'handler', event: newEvent, groupIndex: 0, handlerIndex: 0 });
+                  setShowDetail(true);
                 }} style={ghostButtonStyle(t, availableEvents.length === 0)}>添加</button>
               </div>
             </div>
+            <button type="button" data-testid="hooks-open-settings-files" onClick={() => onNavigate(hooksPageModel({}).escapeHatch)} style={{ ...ghostButtonStyle(t), justifySelf: 'start' }}>查看配置文件</button>
             <div style={sidebarListStyle()}>
               <div style={sidebarSectionTitleStyle(t)}>当前层事件</div>
               <button type="button" onClick={() => requestSelection({ kind: 'all' })} style={sidebarButtonStyle(t, selection.kind === 'all')}>
@@ -569,50 +582,29 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
                 <span style={{ fontSize: 11.5, color: t.text4 }}>{eventSummaries.length} 个事件</span>
               </button>
               {filteredEvents.map((entry) => {
-                const groups = Array.isArray(draftHooks[entry.event]) ? draftHooks[entry.event] as JsonRecord[] : [];
-                const expanded = selectionEvent(selection) === entry.event;
                 return (
                   <div key={entry.event} style={{ display: 'grid', gap: 6 }}>
-                    <button type="button" onClick={() => requestSelection({ kind: 'event', event: entry.event })} style={sidebarButtonStyle(t, selection.kind === 'event' && selection.event === entry.event)}>
+                    <button type="button" className="configuration-entry" onClick={() => requestSelection({ kind: 'event', event: entry.event })} style={sidebarButtonStyle(t, selection.kind === 'event' && selection.event === entry.event)}>
                       <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.event}</span>
                         <SourcePill t={t} label={`${entry.groupCount} 组`} />
                         <SourcePill t={t} label={`${entry.handlerCount} handler`} />
                       </span>
                     </button>
-                    {expanded && groups.map((groupValue, groupIndex) => {
-                      const group = asRecord(groupValue);
-                      const handlers = Array.isArray(group.hooks) ? group.hooks.map(asRecord) : [];
-                      const groupExpanded = selectionGroup(selection) === groupIndex;
-                      return (
-                        <div key={`${entry.event}:${groupIndex}`} style={{ display: 'grid', gap: 5, marginLeft: 12 }}>
-                          <button type="button" onClick={() => requestSelection({ kind: 'group', event: entry.event, groupIndex })} style={sidebarButtonStyle(t, selection.kind === 'group' && selection.event === entry.event && selection.groupIndex === groupIndex)}>
-                            <span style={{ fontSize: 12.5, fontWeight: 600 }}>Group {groupIndex + 1}</span>
-                            <span className="mono" style={{ fontSize: 11, color: t.text4 }}>{asString(group.matcher, '*')}</span>
-                          </button>
-                          {groupExpanded && handlers.map((handler, handlerIndex) => (
-                            <button key={`${entry.event}:${groupIndex}:${handlerIndex}`} type="button" onClick={() => requestSelection({ kind: 'handler', event: entry.event, groupIndex, handlerIndex })} style={{ ...sidebarButtonStyle(t, selection.kind === 'handler' && selection.event === entry.event && selection.groupIndex === groupIndex && selection.handlerIndex === handlerIndex), marginLeft: 12, width: 'calc(100% - 12px)' }}>
-                              <span style={{ fontSize: 12.5, fontWeight: 600 }}>Handler {handlerIndex + 1}</span>
-                              <span className="mono" style={{ fontSize: 11, color: t.text4 }}>{asString(handler.type, 'type required')}</span>
-                            </button>
-                          ))}
-                        </div>
-                      );
-                    })}
+
                   </div>
                 );
               })}
               {filteredEvents.length === 0 && <div style={secondaryMetaStyle(t)}>当前层还没有匹配的 hook 事件。</div>}
             </div>
-          </div>
-
-          <div style={managerDetailStyle()}>
+          </div> : <div className="configuration-detail hooks-editor" style={managerDetailStyle()}>
+            <button type="button" className="configuration-back" onClick={() => setShowDetail(false)} style={ghostButtonStyle(t)}>← 返回 Hooks</button>
             <DomainOperationBanner t={t} operation={hookOperation} fallbackDomainLabel="Hooks" />
             {pendingSelection && (
               <div style={noteStyle(t, 'warn')}>
                 当前 hooks 草稿还未保存。切换前请先保存，或者丢弃当前修改。
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button type="button" onClick={() => { discardDraft(); setSelection(pendingSelection); }} style={ghostButtonStyle(t)}>
+                  <button type="button" onClick={() => { discardDraft(); setSelection(pendingSelection); setShowDetail(true); }} style={ghostButtonStyle(t)}>
                     丢弃并切换
                   </button>
                   <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>
@@ -624,11 +616,11 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
             {loading && <div style={noteStyle(t)}>正在同步 hooks 文档…</div>}
             {detail}
-          </div>
+          </div>}
         </div>
       </Card>
 
-      <Card title="运行时 Hook Catalog">
+      {!showDetail && <Card title="运行状态">
         <Row title="刷新 Catalog" desc="这里显示当前 runtime 已加载的 hooks，不等同于某一层的静态 JSON。" align="center">
           <button type="button" onClick={() => void bridge.refreshHooks()} style={ghostButtonStyle(t)}>刷新</button>
         </Row>
@@ -640,7 +632,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
             {hook.blocking ? <SourcePill t={t} label="blocking" tone="warn" /> : null}
           </Row>
         ))}
-      </Card>
+      </Card>}
     </>
   );
 }

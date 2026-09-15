@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { Toggle } from '../primitives';
@@ -14,8 +14,6 @@ import {
   EmptyDetail,
   Field,
   managerDetailStyle,
-  managerShellStyle,
-  managerSidebarStyle,
   nextConfigurationOperationId,
   noteStyle,
   parseEventEnvelope,
@@ -69,6 +67,7 @@ interface SkillDocumentEnvelope {
 }
 
 type SkillSelection =
+  | { kind: 'list' }
   | { kind: 'skill'; id: string }
   | { kind: 'trash'; id: string }
   | { kind: 'create' };
@@ -141,7 +140,8 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
   const skillOperation = bridge.configurationOperations?.skill ?? null;
   const syncEnabled = boolFromLayer(snapshot, editingLayer, 'syncClaudeAiSkills');
 
-  const [selection, setSelection] = useState<SkillSelection>({ kind: 'create' });
+  const [selection, setSelection] = useState<SkillSelection>({ kind: 'list' });
+  const creatingSkill = useRef(false);
   const [search, setSearch] = useState('');
   const [draftContent, setDraftContent] = useState('');
   const [draftCreateName, setDraftCreateName] = useState('');
@@ -181,22 +181,23 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
     : trashedSkills;
 
   useEffect(() => {
-    if (selection.kind === 'create') return;
+    if (selection.kind === 'create' || selection.kind === 'list') return;
     const existsInSkills = activeSkills.some((entry) => entry.id === selection.id);
     const existsInTrash = trashedSkills.some((entry) => entry.id === selection.id);
     if (!existsInSkills && !existsInTrash) {
-      if (activeSkills[0]) setSelection({ kind: 'skill', id: activeSkills[0].id });
-      else if (trashedSkills[0]) setSelection({ kind: 'trash', id: trashedSkills[0].id });
-      else setSelection({ kind: 'create' });
+      setSelection({ kind: 'list' });
     }
   }, [activeSkills, selection, trashedSkills]);
 
   useEffect(() => {
-    if (selection.kind !== 'create' || !document) return;
+    if (selection.kind !== 'create' || !document || !creatingSkill.current || document.name !== draftCreateName.trim()) return;
     if (activeSkills.some((entry) => entry.id === document.id)) {
+      creatingSkill.current = false;
+      setDraftCreateName('');
+      setDraftCreateContent('---\ndescription: \n---\n');
       setSelection({ kind: 'skill', id: document.id });
     }
-  }, [activeSkills, document, selection.kind]);
+  }, [activeSkills, document, selection.kind, draftCreateName]);
 
   const selectedSkill = selection.kind === 'skill' ? activeSkills.find((entry) => entry.id === selection.id) ?? null : null;
   const selectedTrash = selection.kind === 'trash' ? trashedSkills.find((entry) => entry.id === selection.id) ?? null : null;
@@ -247,6 +248,8 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
       setPendingSelection(next);
       return;
     }
+    creatingSkill.current = false;
+    setPageError(null);
     setPendingSelection(null);
     setSelection(next);
   };
@@ -263,6 +266,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
       setRestoreName(resetTrash.name);
       setRestoreScope(defaultCreateScope(editingLayer));
     }
+    creatingSkill.current = false;
     setDraftCreateName('');
     setDraftCreateScope(defaultCreateScope(editingLayer));
     setDraftCreateContent('---\ndescription: \n---\n');
@@ -304,6 +308,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
       return;
     }
     setPageError(null);
+    creatingSkill.current = true;
     void callSkillAdmin(bridge, {
       action: 'create_skill',
       operation_id: nextConfigurationOperationId(),
@@ -374,7 +379,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
 
   const detail = selection.kind === 'create'
     ? (
-      <div style={managerDetailStyle()}>
+      <div style={{ ...managerDetailStyle(), padding: 0 }}>
         <div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
             <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>新建 Skill</div>
@@ -398,13 +403,13 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
         </Field>
         <div style={{ display: 'flex', gap: 8 }}>
           <button type="button" onClick={handleCreateSkill} style={ghostButtonStyle(t)}>创建</button>
-          <button type="button" onClick={discardDrafts} style={ghostButtonStyle(t, false, true)}>取消</button>
+          <button type="button" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t, false, true)}>取消</button>
         </div>
       </div>
     )
     : selection.kind === 'trash' && selectedTrash
       ? (
-        <div style={managerDetailStyle()}>
+        <div style={{ ...managerDetailStyle(), padding: 0 }}>
           <div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedTrash.name}</div>
@@ -442,7 +447,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
       )
       : selectedSkill
         ? (
-          <div style={managerDetailStyle()}>
+          <div style={{ ...managerDetailStyle(), padding: 0 }}>
             <div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 6 }}>
                 <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedSkill.name}</div>
@@ -503,27 +508,27 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
             )}
           </div>
         )
-        : <div style={managerDetailStyle()}><EmptyDetail t={t} title="没有可编辑的 skill" body="左侧目录为空时，可以直接创建新的 user 或 project skill。" /></div>;
+        : <div style={{ ...managerDetailStyle(), padding: 0 }}><EmptyDetail t={t} title="没有可编辑的 skill" body="可以返回列表，或创建新的用户或项目 skill。" /></div>;
 
   return (
     <>
       <Card title="Skills">
-        <div style={managerShellStyle(t)}>
-          <div style={managerSidebarStyle(t)}>
-            <div style={{ display: 'grid', gap: 10 }}>
+        <div className="configuration-page">
+          <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
+          {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+          {selection.kind === 'list' ? <div className="configuration-list">
+            <div className="configuration-toolbar">
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 skill 名称或路径" aria-label="搜索 skills" style={searchInputStyle(t)} />
               <div style={{ display: 'flex', gap: 8 }}>
                 <button type="button" onClick={() => requestSelection({ kind: 'create' })} style={ghostButtonStyle(t)}>新建</button>
                 <button type="button" onClick={handleReload} disabled={reloading} style={ghostButtonStyle(t, reloading)}>{reloading ? '重载中…' : '重新加载'}</button>
               </div>
-              <div style={noteStyle(t)}>
-                左侧目录优先来自新的 skill catalog。保存成功后会尝试热重载；如果当前有活动回合，右侧状态会明确标出需要重启。
-              </div>
+
             </div>
             <div style={sidebarListStyle()}>
-              <div style={sidebarSectionTitleStyle(t)}>Skills</div>
+              <div style={sidebarSectionTitleStyle(t)}>Skills · {filteredSkills.length}</div>
               {filteredSkills.map((entry) => (
-                <button key={entry.id} type="button" onClick={() => requestSelection({ kind: 'skill', id: entry.id })} style={sidebarButtonStyle(t, selection.kind === 'skill' && selection.id === entry.id)}>
+                <button className="configuration-entry" key={entry.id} type="button" onClick={() => requestSelection({ kind: 'skill', id: entry.id })} style={sidebarButtonStyle(t, false)}>
                   <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
                     <SourcePill t={t} label={entry.source} />
@@ -533,9 +538,9 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
                 </button>
               ))}
               {filteredSkills.length === 0 && <div style={secondaryMetaStyle(t)}>没有匹配的 skill。</div>}
-              <div style={sidebarSectionTitleStyle(t)}>Trash</div>
+              <div style={{ ...sidebarSectionTitleStyle(t), marginTop: 20 }}>回收区 · {filteredTrash.length}</div>
               {filteredTrash.map((entry) => (
-                <button key={entry.id} type="button" onClick={() => requestSelection({ kind: 'trash', id: entry.id })} style={sidebarButtonStyle(t, selection.kind === 'trash' && selection.id === entry.id)}>
+                <button className="configuration-entry" key={entry.id} type="button" onClick={() => requestSelection({ kind: 'trash', id: entry.id })} style={sidebarButtonStyle(t, false)}>
                   <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                     <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
                     <SourcePill t={t} label="已删除" tone="warn" />
@@ -545,12 +550,11 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
               ))}
               {filteredTrash.length === 0 && <div style={secondaryMetaStyle(t)}>回收区为空。</div>}
             </div>
-          </div>
-          <div style={managerDetailStyle()}>
-            <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
+          </div> : <div className="configuration-detail" style={managerDetailStyle()}>
+            <button type="button" className="configuration-back" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t)}>← 返回 Skills</button>
             {pendingSelection && (
               <div style={noteStyle(t, 'warn')}>
-                当前 detail 有未保存修改。切换前先保存，或者丢弃当前草稿。
+                当前修改尚未保存。离开前请保存，或丢弃草稿。
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <button
                     type="button"
@@ -566,13 +570,12 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
                 </div>
               </div>
             )}
-            {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
             {detail}
-          </div>
+          </div>}
         </div>
       </Card>
 
-      <Card title="Claude.ai 同步">
+      {selection.kind === 'list' && <Card title="Claude.ai 同步">
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
         <Row title="syncClaudeAiSkills" desc={(catalog.sync_claude_ai_note ?? 'Stored only. Claude.ai cloud sync is not wired on desktop.').replace('Stored only.', '仅保存。').replace('Claude.ai cloud sync is not wired on desktop.', '当前还没有接入 Claude.ai 云端同步。')} align="center">
           <Toggle value={syncDraft} onChange={savingSync ? () => undefined : setSyncDraft} />
@@ -598,16 +601,16 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
             </button>
           </div>
         </Row>
-      </Card>
+      </Card>}
 
-      <Card title="兼容视图">
+      {!adminAvailable && selection.kind === 'list' && <Card title="兼容视图">
         <div style={{ padding: '12px 18px', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
-          旧 bridge 只会上报一个扁平 discovered skills 列表。当前页会优先读取新的 skill catalog / document API；如果它们还没接上，左侧目录会退回到只读清单。
+          当前运行时仅支持查看已发现的 skills。升级运行时后可编辑和管理。
         </div>
         {model.skills.slice(0, 3).map((skill) => (
           <Row key={skill.source_dir} align="center" title={skill.name} desc={<span className="mono" style={{ fontSize: 11.5 }}>{skill.source_dir}</span>}>{null}</Row>
         ))}
-      </Card>
+      </Card>}
     </>
   );
 }

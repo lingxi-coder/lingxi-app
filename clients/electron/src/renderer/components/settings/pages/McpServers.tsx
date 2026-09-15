@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type { McpScopeDto } from '@lingxi/bridge-client';
 import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
@@ -10,13 +10,9 @@ import {
   asRecord,
   asString,
   asStringArray,
-  detailGridStyle,
   DomainOperationBanner,
-  EmptyDetail,
   Field,
   managerDetailStyle,
-  managerShellStyle,
-  managerSidebarStyle,
   nextConfigurationOperationId,
   noteStyle,
   parseEventEnvelope,
@@ -95,7 +91,7 @@ interface McpEntry {
   revision_sha256: string;
 }
 
-type Selection = { kind: 'server'; id: string } | { kind: 'create'; scope: McpScopeDto };
+type Selection = { kind: 'list' } | { kind: 'server'; id: string } | { kind: 'create'; scope: McpScopeDto };
 
 function callMcpAdmin(bridge: PageContentProps['bridge'], command: unknown) {
   const admin = (bridge as { mcpAdmin?: (payload: unknown) => Promise<unknown> }).mcpAdmin;
@@ -188,7 +184,7 @@ export function McpServers({ bridge }: PageContentProps) {
   const entries = useMemo(() => parseEntries(snapshot), [snapshot]);
   const scopes = snapshot.scopes ?? [];
   const approval = snapshot.approval ?? {};
-  const [selection, setSelection] = useState<Selection>({ kind: 'create', scope: 'user' });
+  const [selection, setSelection] = useState<Selection>({ kind: 'list' });
   const [search, setSearch] = useState('');
   const [draftScope, setDraftScope] = useState<McpScopeDto>('user');
   const [draftName, setDraftName] = useState('');
@@ -202,8 +198,9 @@ export function McpServers({ bridge }: PageContentProps) {
   }, [adminAvailable, bridge.mcpAdmin, bridge.refreshMcpServers]);
 
   useEffect(() => {
-    if (selection.kind === 'server' && entries.some((entry) => entry.id === selection.id)) return;
-    if (entries[0]) setSelection({ kind: 'server', id: entries[0].id });
+    if (selection.kind === 'server' && !entries.some((entry) => entry.id === selection.id)) {
+      setSelection({ kind: 'list' });
+    }
   }, [entries, selection]);
 
   const selected = selection.kind === 'server' ? entries.find((entry) => entry.id === selection.id) ?? null : null;
@@ -221,9 +218,9 @@ export function McpServers({ bridge }: PageContentProps) {
     }
   }, [selected, selection]);
 
-  const dirty = selected
+  const dirty = selection.kind !== 'list' && (selected
     ? draftConfigText !== prettyJson(selected.config)
-    : draftName.trim().length > 0 || draftConfigText !== '{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}';
+    : draftName.trim().length > 0 || draftConfigText !== '{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
   const draftConfig = useMemo(() => {
     try {
       const parsed = JSON.parse(draftConfigText) as unknown;
@@ -275,6 +272,7 @@ export function McpServers({ bridge }: PageContentProps) {
     }
     setPendingSelection(null);
     setSelection(next);
+    setPageError(null);
   };
 
   const filtered = search.trim()
@@ -329,22 +327,20 @@ export function McpServers({ bridge }: PageContentProps) {
 
   return (
     <>
-      <Card title="MCP Servers">
+      <Card title={selection.kind === 'list' ? 'MCP 服务器' : undefined}>
         {/* 同名不同义的提醒放在页首，而不是藏在作用域下拉旁边：读到下拉的时候，
             人已经在拿设置页的「本地」去理解这里的「本地」了。 */}
         <div data-testid="mcp-scope-vs-layers" style={noteStyle(t)}>
           {MCP_SCOPE_VS_LAYERS_NOTE}
         </div>
-        <div style={managerShellStyle(t)}>
-          <div style={managerSidebarStyle(t)}>
-            <div style={{ display: 'grid', gap: 10 }}>
+        <div className="configuration-page">
+          {selection.kind === 'list' ? <div className="configuration-list">
+            <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
+            <div className="configuration-toolbar">
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 MCP 服务器" aria-label="搜索 MCP 服务器" style={searchInputStyle(t)} />
               <div style={{ display: 'flex', gap: 8 }}>
                 <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} style={ghostButtonStyle(t)}>新建</button>
                 <button type="button" onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers())} style={ghostButtonStyle(t)}>刷新</button>
-              </div>
-              <div style={noteStyle(t, 'warn')}>
-                运行时列表仍然是跨域合并视图。左侧目录按作用域展示磁盘定义，右侧保存时带 revision 防止覆盖外部修改。
               </div>
             </div>
             <div style={sidebarListStyle()}>
@@ -352,7 +348,7 @@ export function McpServers({ bridge }: PageContentProps) {
                 <div key={scope} style={{ display: 'grid', gap: 8 }}>
                   <div style={sidebarSectionTitleStyle(t)}>{scope}</div>
                   {filtered.filter((entry) => entry.scope === scope).map((entry) => (
-                    <button key={entry.id} type="button" onClick={() => requestSelection({ kind: 'server', id: entry.id })} style={sidebarButtonStyle(t, selection.kind === 'server' && selection.id === entry.id)}>
+                    <button key={entry.id} className="configuration-entry" type="button" onClick={() => requestSelection({ kind: 'server', id: entry.id })} style={sidebarButtonStyle(t, false)}>
                       <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
                         <SourcePill t={t} label={inferTransport(entry.config)} />
@@ -364,20 +360,19 @@ export function McpServers({ bridge }: PageContentProps) {
                 </div>
               ))}
             </div>
-          </div>
-          <div style={managerDetailStyle()}>
+          </div> : <div className="configuration-detail mcp-editor" style={{ ...managerDetailStyle(), '--mcp-border': t.border, '--mcp-muted': t.text3, '--mcp-text': t.text, '--mcp-surface': t.surface, '--mcp-hover': t.surfaceHover } as CSSProperties}>
+            <button type="button" className="configuration-back" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t)}>← 返回 MCP 服务器</button>
             <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
             {pendingSelection && (
               <div style={noteStyle(t, 'warn')}>
                 当前草稿未保存。
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button type="button" onClick={() => { setPendingSelection(null); setSelection(pendingSelection); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
+                  <button type="button" onClick={() => { setPendingSelection(null); setSelection(pendingSelection); setPageError(null); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
                   <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>继续编辑</button>
                 </div>
               </div>
             )}
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-            {!selected && selection.kind !== 'create' && <EmptyDetail t={t} title="没有选中的服务器" body="从左侧选择一个条目，或者新建一个服务器。" />}
             <div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
                 <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selected?.name || '新建 MCP 服务器'}</div>
@@ -386,7 +381,7 @@ export function McpServers({ bridge }: PageContentProps) {
               </div>
               {selected && <div className="mono" style={secondaryMetaStyle(t)}>{selected.path}</div>}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+            <div className="mcp-editor-grid mcp-identity">
               <Field t={t} label="作用域">
                 <select value={draftScope} onChange={(event) => { const next = event.target.value as McpScopeDto; setDraftScope(next); setSelection({ kind: 'create', scope: next }); }} style={inputStyle(t)} aria-label="mcp-scope">
                   <option value="user">用户</option>
@@ -398,12 +393,12 @@ export function McpServers({ bridge }: PageContentProps) {
                 </div>
               </Field>
               <Field t={t} label="名称">
-                <input value={draftName} onChange={(event) => setDraftName(event.target.value)} disabled={Boolean(selected)} style={{ ...inputStyle(t), opacity: selected ? 0.65 : 1 }} aria-label="mcp-name" />
+                <input value={draftName} onChange={(event) => setDraftName(event.target.value)} disabled={Boolean(selected)} style={{ ...inputStyle(t), opacity: selected ? 0.65 : 1 }} aria-label="mcp-name" placeholder="例如：my-server" />
               </Field>
             </div>
-            <div style={noteStyle(t)}>
-              <div style={{ fontWeight: 700, marginBottom: 8 }}>结构化配置</div>
-              <div style={detailGridStyle()}>
+            <section className="mcp-connection">
+              <div className="mcp-section-heading"><h3>连接配置</h3><p>选择连接方式，并填写服务器的启动命令或地址。</p></div>
+              <div className="mcp-editor-grid">
                 <Field t={t} label="Transport">
                   <select value={transport} onChange={(event) => setTransport(event.target.value)} disabled={!draftConfig} style={inputStyle(t)} aria-label="mcp-transport">
                     <option value="stdio">stdio</option>
@@ -426,7 +421,7 @@ export function McpServers({ bridge }: PageContentProps) {
                   <Field t={t} label="Args（每行一个）">
                     <textarea value={Array.isArray(draftConfig?.args) ? draftConfig.args.map(String).join('\n') : ''} onChange={(event) => updateConfig('args', event.target.value.split('\n'))} rows={4} style={textareaStyle(t, 4)} aria-label="mcp-args" />
                   </Field>
-                  <JsonPropertyEditor t={t} label="env JSON" value={draftConfig?.env ?? {}} onCommit={(value) => updateConfig('env', value)} />
+                  <details className="mcp-options"><summary>环境变量 <span>env JSON</span></summary><JsonPropertyEditor t={t} label="env JSON" value={draftConfig?.env ?? {}} onCommit={(value) => updateConfig('env', value)} /></details>
                 </>
               ) : transport !== 'custom' ? (
                 <>
@@ -440,7 +435,8 @@ export function McpServers({ bridge }: PageContentProps) {
                   <JsonPropertyEditor t={t} label="OAuth JSON" value={draftConfig?.oauth ?? {}} onCommit={(value) => updateConfig('oauth', value)} />
                 </>
               ) : null}
-              <div style={detailGridStyle()}>
+              <details className="mcp-options"><summary>工具与加载选项 <span>按需配置</span></summary>
+              <div className="mcp-editor-grid">
                 <Field t={t} label="Always load">
                   <select value={draftConfig?.alwaysLoad === undefined ? '' : draftConfig.alwaysLoad ? 'true' : 'false'} onChange={(event) => updateConfig('alwaysLoad', event.target.value === '' ? undefined : event.target.value === 'true')} style={inputStyle(t)} aria-label="mcp-always-load">
                     <option value="">默认</option><option value="true">开启</option><option value="false">关闭</option>
@@ -456,8 +452,9 @@ export function McpServers({ bridge }: PageContentProps) {
               </div>
               <JsonPropertyEditor t={t} label="tools JSON" value={draftConfig?.tools ?? []} onCommit={(value) => updateConfig('tools', value)} />
               <JsonPropertyEditor t={t} label="toolPermissions JSON" value={draftConfig?.toolPermissions ?? {}} onCommit={(value) => updateConfig('toolPermissions', value)} />
-            </div>
-            <details>
+              </details>
+            </section>
+            <details className="mcp-options mcp-raw-config">
               <summary style={{ cursor: 'pointer', color: t.text3, fontSize: 12.5, fontWeight: 700 }}>高级配置 JSON</summary>
               <Field t={t} label="完整服务器配置">
                 <textarea value={draftConfigText} onChange={(event) => setDraftConfigText(event.target.value)} rows={16} style={textareaStyle(t, 16)} aria-label="mcp-config-json" />
@@ -471,9 +468,9 @@ export function McpServers({ bridge }: PageContentProps) {
                 <button type="button" onClick={() => setApproval('approve_all')} style={ghostButtonStyle(t)}>批准全部</button>
               </div>
             )}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              <button type="button" onClick={save} style={ghostButtonStyle(t)}>保存</button>
-              <button type="button" onClick={remove} disabled={!selected} style={ghostButtonStyle(t, !selected, true)}>移除</button>
+            <div className="mcp-editor-actions">
+              <button type="button" onClick={save} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>保存</button>
+              {selected && <button type="button" onClick={remove} style={ghostButtonStyle(t, false, true)}>移除</button>}
             </div>
             <div style={noteStyle(t)}>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>项目审批摘要</div>
@@ -482,13 +479,13 @@ export function McpServers({ bridge }: PageContentProps) {
               <div style={secondaryMetaStyle(t)}>批准全部：{approval.enable_all_project_servers ? '开启' : '关闭'}</div>
               {approval.legacy_source_present && <div style={secondaryMetaStyle(t)}>检测到旧 ~/.lingxi.json 审批来源。</div>}
             </div>
-          </div>
+          </div>}
         </div>
       </Card>
 
-      <Card title="Runtime 摘要">
+      {selection.kind === 'list' && <Card title="连接状态">
         {(snapshot.runtime_servers ?? []).length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>当前 runtime 没有已知 MCP 服务器。</div>
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>暂无运行中的 MCP 服务器。</div>
         )}
         {(snapshot.runtime_servers ?? []).map((server) => (
           <Row
@@ -500,7 +497,7 @@ export function McpServers({ bridge }: PageContentProps) {
             <SourcePill t={t} label={server.source ?? (server.writable ? 'config' : 'runtime')} />
           </Row>
         ))}
-      </Card>
+      </Card>}
     </>
   );
 }

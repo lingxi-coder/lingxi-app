@@ -1,0 +1,18 @@
+.hooks-page { color: var(--hooks-text); }
+.hooks-editor { max-width: 820px; margin-inline: auto; padding: 24px !important; gap: 24px !important; container-type: inline-size; }
+.hooks-editor .configuration-back { border: 0 !important; background: transparent !important; padding: 0 !important; }
+.hooks-editor-body { display: grid; gap: 24px; min-width: 0; }
+.hooks-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.hooks-editor label { min-width: 0; align-content: start; }
+.hooks-editor input:not([type='checkbox']), .hooks-editor select { height: 38px; box-sizing: border-box; }
+.hooks-editor input:not([type='checkbox']), .hooks-editor select, .hooks-editor textarea { padding: 9px 11px !important; border-radius: 8px !important; }
+.hooks-editor textarea { line-height: 1.6; }
+.hooks-child-list { display: grid; gap: 8px; }
+.hooks-child-list strong { font-size: 13px; font-weight: 600; }
+.hooks-child-list span { font-size: 12px; color: var(--hooks-muted); }
+.hooks-json-panel { border: 1px solid var(--hooks-border); border-radius: 12px; padding: 16px; }
+.hooks-json-panel[open] > label { margin-top: 14px; }
+.hooks-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.hooks-actions button { min-height: 36px; justify-content: center; }
+.hooks-save:not(:disabled) { background: var(--hooks-text) !important; color: var(--hooks-surface) !important; border-color: var(--hooks-text) !important; }
+@container (max-width: 520px) { .hooks-field-grid { grid-template-columns: minmax(0, 1fr); } }

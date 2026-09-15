@@ -1,6 +1,8 @@
 import { createRequire } from 'node:module';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
+import type { ScheduledTaskService } from './scheduled.js';
+import { CH_SCHEDULED } from '../shared/scheduled.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
 import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT, TERMINAL_DRAFT_SESSION, type TerminalScope } from '../shared/terminal.js';
@@ -35,7 +37,7 @@ import {
   type PinnedSessionRecord,
   type PublicSettings,
 } from './host-utils.js';
-import { validateClipboardText } from './validation.js';
+import { validateClipboardText, validateClientCommand } from './validation.js';
 import { readMicrophoneAccess, type MediaAccessReader } from './microphoneAccess.js';
 import type { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { CH_NATIVE_AUDIO_ENGINE_REQUEST, CH_NATIVE_AUDIO_EVENT, CH_NATIVE_AUDIO_REQUEST } from '../shared/nativeAudio.js';
@@ -331,6 +333,7 @@ export class HostController {
   private git?: GitService;
   private offGit?: () => void;
   private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
+  private scheduled?: ScheduledTaskService;
   private terminals?: TerminalManager;
   private offTerminals?: () => void;
   private readonly terminalDeliveries = new Map<WebContents, TerminalDelivery>();
@@ -382,6 +385,8 @@ export class HostController {
     this.gitWatches.delete(target);
     for (const watch of watches?.values() ?? []) void watch.then(stop => stop()).catch(() => undefined);
   }
+
+  attachScheduled(service: ScheduledTaskService): void { this.scheduled = service; }
 
   attachTerminals(manager: TerminalManager): void {
     this.offTerminals?.();
@@ -503,6 +508,25 @@ export class HostController {
         }
       }
       return result;
+    });
+    this.ipc.handle(CH_SCHEDULED, async (event: IpcMainInvokeEvent, input: unknown) => {
+      this.assertSender(event);
+      if (!this.scheduled || !input || typeof input !== 'object') throw new Error('Scheduled task service unavailable');
+      const request = input as Record<string, unknown>;
+      if (request['action'] === 'scopes') return this.scheduled.scopes();
+      if (typeof request['scopeId'] !== 'string') throw new Error('Invalid scheduled scope');
+      if (request['action'] === 'context') return this.scheduled.context(request['scopeId']);
+      if (request['action'] === 'manage') {
+        const validated = validateClientCommand({ type: 'cron_manage', request_id: 'host-scheduled', request: request['request'] });
+        if (validated.type !== 'cron_manage') throw new Error('Invalid scheduled request');
+        return this.scheduled.manage(request['scopeId'], validated.request);
+      }
+      if (request['action'] === 'open') {
+        if (!isSessionId(request['sessionId'])) throw new Error('Invalid scheduled session');
+        const projectPath = this.scheduled.resolveScope(request['scopeId']);
+        return this.enqueueNavigation(() => this.openSessionAndActivateInternal({ projectPath, sessionId: request['sessionId'] as string }));
+      }
+      throw new Error('Invalid scheduled action');
     });
     this.ipc.handle(CH_TERMINAL_REQUEST, async (event: IpcMainInvokeEvent, value: unknown) => {
       this.assertSender(event);
@@ -1417,6 +1441,8 @@ export class HostController {
   }
 
   dispose(): void {
+    this.scheduled?.dispose();
+    this.ipc.removeHandler(CH_SCHEDULED);
     this.offGit?.();
     for (const target of this.gitWatches.keys()) this.detachGit(target);
     this.offTerminals?.();

@@ -1,3 +1,6 @@
+import type { CronAutomationDto } from '@lingxi/bridge-client';
+
+export type ScheduledAutomation = CronAutomationDto;
 export type ScheduledTaskFrequency = 'Daily' | 'Weekdays' | 'Weekly' | 'Custom';
 export interface ScheduledCronJob {
   id: string;
@@ -8,8 +11,12 @@ export interface ScheduledCronJob {
   permanent?: boolean;
   expires_at?: number;
   session_id?: string;
+  automation?: ScheduledAutomation;
+  next_run_at?: number;
 }
 export type ScheduledTaskDraft = {
+  scopeId?: string;
+  automation?: ScheduledAutomation;
   title: string;
   instructions: string;
   frequency: ScheduledTaskFrequency;
@@ -53,8 +60,12 @@ export function scheduledTaskInput(draft: ScheduledTaskDraft) {
   const expires_at = draft.expiresAt === undefined ? undefined
     : draft.originalExpiresAt !== undefined && localExpiryInput(draft.originalExpiresAt) === draft.expiresAt
       ? draft.originalExpiresAt : new Date(draft.expiresAt).getTime();
-  if (expires_at !== undefined && (!Number.isFinite(expires_at) || expires_at <= Date.now())) throw new Error('Choose an expiry date in the future, or select No expiry.');
-  return { ...(expires_at === undefined ? { no_expiry: true } : { expires_at }), cron: scheduledTaskCron(draft), prompt: `# ${draft.title.trim().replace(/\s*\n\s*/g, ' ')}\n\n${draft.instructions.trim()}`,
+  if (expires_at !== undefined && (!Number.isFinite(expires_at) || (expires_at <= Date.now() && (!draft.automation || draft.automation.status === 'active')))) throw new Error('Choose an expiry date in the future, or select No expiry.');
+  if (draft.automation && !draft.automation.model.trim()) throw new Error('Choose a model before saving.');
+  if (draft.automation?.runMode === 'selected_session' && !draft.automation.targetSessionId) throw new Error('Choose a target chat.');
+  const automation = draft.automation ? { ...draft.automation, name: draft.title.trim().replace(/\s*\n\s*/g, ' ') } : undefined;
+  if (automation) { delete automation.runs; delete automation.ownedSessionId; }
+  return { ...(automation ? { automation } : {}), ...(expires_at === undefined ? { no_expiry: true } : { expires_at }), cron: scheduledTaskCron(draft), prompt: `# ${draft.title.trim().replace(/\s*\n\s*/g, ' ')}\n\n${draft.instructions.trim()}`,
     recurring: draft.recurring ?? true, durable: draft.durable ?? true };
 }
 
@@ -65,7 +76,7 @@ export function scheduledTaskFromJob(job: ScheduledCronJob): ScheduledTaskDraft 
     && Number(parts[0]) < 60 && Number(parts[1]) < 24 && parts[2] === '*' && parts[3] === '*';
   const frequency = simple && parts[4] === '*' ? 'Daily' : simple && parts[4] === '1-5' ? 'Weekdays'
     : simple && /^[0-6]$/.test(parts[4]) ? 'Weekly' : 'Custom';
-  return { title: heading?.[1] ?? (job.prompt.split('\n')[0].slice(0, 90) || job.id),
+  return { automation: job.automation, title: job.automation?.name ?? heading?.[1] ?? (job.prompt.split('\n')[0].slice(0, 90) || job.id),
     instructions: heading?.[2] ?? job.prompt, frequency, day: DAYS[Number(parts[4])] ?? 'Monday',
     time: simple ? `${parts[1].padStart(2, '0')}:${parts[0].padStart(2, '0')}` : '09:00',
     timezone: localScheduledTimezone(), cron: job.cron, expiresAt: job.expires_at ? localExpiryInput(job.expires_at) : undefined, originalExpiresAt: job.expires_at, recurring: job.recurring ?? false, durable: job.durable ?? true };

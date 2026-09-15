@@ -12,6 +12,7 @@ import {
 } from './credential-broker.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { HostController } from './host.js';
+import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
 import { TerminalManager } from './terminal.js';
 import { HostNotifier } from './notifications.js';
@@ -30,6 +31,7 @@ const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
 let nativeAudio: NativeAudioManager | null = null;
+let scheduled: ScheduledTaskService | null = null;
 let git: GitService | null = null;
 let terminals: TerminalManager | null = null;
 let notifier: HostNotifier | null = null;
@@ -212,6 +214,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
     notifier,
+    onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     getSavedPermissionMode: () => settings.getLastPermissionMode(),
     onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
     isPackaged: app.isPackaged,
@@ -300,6 +303,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   );
   host.attachNotifier(notifier);
   terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
+  scheduled = new ScheduledTaskService(settings, bridge, sessionCatalog, (title, body, ref) => {
+    // Propagate the refusal: `scheduledRun` returns false when the kind is off
+    // or the notifier is disposed, and the caller keeps its dedupe key.
+    return notifier?.scheduledRun(title, body, ref) ?? false;
+  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
+  host.attachScheduled(scheduled);
+  host.attachNotifier(notifier);
+  scheduled.start();
   host.attachTerminals(terminals);
   git = new GitService({ isBusy: async (root) => {
     for (const summary of bridge?.runtimeSummaries ?? []) {

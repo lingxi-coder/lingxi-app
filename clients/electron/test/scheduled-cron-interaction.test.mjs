@@ -69,11 +69,35 @@ test('scheduled tasks create, edit, retain failed edits, delete, and refresh thr
       });
     });
 
+    assert.equal(result.dirtyPollRequests, 0);
+    assert.equal(result.pollUpdated, true);
+    assert.deepEqual(result.copyDraft, {mode: 'new_session', projectEditable: true});
+    assert.equal(result.copied.jobs.length, 2);
+    assert.equal(result.copied.jobs[1].automation.ownedSessionId, undefined);
+    assert.equal(result.copied.jobs[1].automation.runs, undefined);
+    assert.deepEqual(result.narrow, {listHidden: true, overflow: false});
     assert.deepEqual(result.duringMutation, ['update'], 'navigation must not race an in-flight mutation with stale list data');
     assert.equal(result.created.jobs.length, 1);
-    assert.equal(result.created.jobs[0].cron, '0 16 * * 5');
+    assert.equal(result.created.jobs[0].cron, '25 18 * * 5');
+    assert.equal(result.created.jobs[0].expires_at, result.picker.expectedExpiry);
+    assert.equal(result.picker.invalidHourBlocked, true);
+    assert.equal(result.picker.doneFocus, 'At');
+    assert.equal(result.picker.timeDescription, '18:25');
+    assert.equal(result.picker.calendarTabStops, 1);
+    assert.equal(result.picker.escapeFocus, 'At');
+    assert.equal(result.picker.monthRollover, true);
+    assert.equal(result.picker.previousMonth, true);
+    assert.equal(result.picker.calendarFocus, true);
+    assert.equal(result.picker.narrowFits, true);
+    assert.equal(result.picker.enterCloses, true);
     assert.equal(result.created.jobs[0].durable, true);
     assert.match(result.created.jobs[0].prompt, /Weekly review/);
+    assert.equal(result.configured.jobs[0].expires_at, result.picker.expectedExpiry, 'editing other fields must preserve the selected expiry instant');
+    assert.equal(result.configured.jobs[0].automation.targetSessionId, 'fixture-session');
+    assert.deepEqual(result.configured.jobs[0].automation.reasoning, {type:'level',id:'high'});
+    assert.equal(result.configured.jobs[0].automation.notificationPolicy, 'failed');
+    assert.equal(result.activeCount, 0);
+    assert.equal(result.pausedCount, 1);
     assert.equal(result.reopenedTitle, 'Edited weekly review');
     assert.match(result.rejected.error, /Fixture backend rejected save/);
     assert.equal(result.rejected.title, 'Unsaved title');
@@ -82,7 +106,7 @@ test('scheduled tasks create, edit, retain failed edits, delete, and refresh thr
     assert.equal(result.deleted.jobs.length, 0);
     assert.equal(result.refreshed.jobs.length, 1);
     assert.equal(result.refreshed.jobs[0].id, 'external');
-    assert.deepEqual(result.refreshed.requests.map((request) => request.action), ['list', 'create', 'update', 'update', 'delete', 'list']);
+    assert.deepEqual(result.refreshed.requests.map((request) => request.action), ['list', 'create', 'update', 'update', 'update', 'delete', 'list']);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) {
       await new Promise((resolveExit) => {

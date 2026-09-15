@@ -43,6 +43,9 @@ import type {
 
 export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   cron_manage: true,
+  cron_run_completed: true,
+  cron_run_started: true,
+  scheduled_run_turn: true,
   send_prompt: true,
   cancel: true,
   attach_turn: true,
@@ -116,11 +119,15 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   cron_result: true,
+  cron_run_requested: true,
+  cron_run_bound: true,
+  scheduled_run_finished: true,
   error: true,
   message_identity: true,
   message_retracted: true,
   system_notice: true,
   loop_wakeup: true,
+  scheduled_task_fire: true,
   ask_user_question: true,
   ask_user_question_resolved: true,
   permission_request_resolved: true,
@@ -153,6 +160,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   typescript_lsp_mode_changed: true,
   conversation_controls_changed: true,
   fast_mode_changed: true,
+  openai_oauth_updated: true,
   provider_credential_status: true,
   provider_connection_tested: true,
   configuration_operation: true,

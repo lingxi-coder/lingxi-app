@@ -1,3 +1,4 @@
+import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
 import type { CronJobDto } from '@lingxi/bridge-client';
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import { CH_GIT_REQUEST, CH_GIT_EVENT } from '../shared/git.js';
@@ -158,6 +159,7 @@ export interface NativeAudioApi {
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
+  scheduled: ScheduledApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
@@ -248,6 +250,12 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  scheduled: {
+    context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),
+    scopes: () => ipcRenderer.invoke(CH_SCHEDULED, { action: 'scopes' }),
+    manage: (scopeId, request) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'manage', scopeId, request }),
+    openSession: (scopeId, sessionId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'open', scopeId, sessionId }),
+  } satisfies ScheduledApi,
   git: {
     request: (scope, request) => ipcRenderer.invoke(CH_GIT_REQUEST, scope, request),
     onChanged: (callback) => subscribe(CH_GIT_EVENT, callback),

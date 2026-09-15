@@ -90,6 +90,17 @@ export function Notifications({ bridge }: PageContentProps) {
             label="后台任务完成"
           />
         </Row>
+        <Row
+          title="定时任务报告"
+          desc="定时任务执行结束后提醒。每个任务自己的通知策略仍然生效。"
+          align="center"
+        >
+          <Toggle
+            value={prefs.scheduledRunNotifEnabled && !disabled}
+            onChange={(v) => !disabled && write({ scheduledRunNotifEnabled: v })}
+            label="定时任务报告"
+          />
+        </Row>
       </Card>
 
       <Card title="时机">

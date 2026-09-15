@@ -29,7 +29,7 @@ export class SettingsStore {
   // against it has already run it through `canonicalWorkspace` (which
   // realpaths), so a userData directory reached through a symlink — a
   // relocated home, a junction-redirected AppData, a `/var`->`/private/var`
-  // test root — would otherwise never match and the app own managed
+  // test root — would otherwise never match and the app's own scheduled
   // workspace would be rejected as "not in the project list".
   private readonly managedWorkspace: string;
   private volatileActiveSession: SessionRef | undefined;
@@ -48,7 +48,16 @@ export class SettingsStore {
 
   private readSettings(): PersistedSettings {
     try {
-      const settings = parseSettings(JSON.parse(readFileSync(this.settingsPath, 'utf8')) as unknown);
+      const raw: unknown = JSON.parse(readFileSync(this.settingsPath, 'utf8'));
+      const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      const settings = parseSettings(raw);
+      // Decode the managed scope separately so the Project limit and legacy
+      // project migration cannot discard either user projects or generic chats.
+      const managed = parseSettings({ ...input, projects: [this.scheduledWorkspace] });
+      if (input['activeProject'] === this.scheduledWorkspace) settings.activeProject = this.scheduledWorkspace;
+      if (managed.activeSession) settings.activeSession = managed.activeSession;
+      settings.pinnedSessions.push(...managed.pinnedSessions);
+      settings.archivedSessions = [...(settings.archivedSessions ?? []), ...(managed.archivedSessions ?? [])];
       if (settings.apiBaseUrl) {
         try { settings.apiBaseUrl = validateApiBaseUrl(settings.apiBaseUrl); }
         catch { delete settings.apiBaseUrl; }
@@ -85,7 +94,8 @@ export class SettingsStore {
   }
 
   activateProject(canonical: string): void {
-    this.settings = withActiveProject(this.settings, canonical);
+    this.settings = canonical === this.scheduledWorkspace
+      ? { ...this.settings, activeProject: canonical } : withActiveProject(this.settings, canonical);
     this.persist();
   }
 
@@ -160,7 +170,9 @@ export class SettingsStore {
 
   setSessionPinned(session: PinnedSessionRecord, pinned: boolean): PublicSettings {
     if (pinned && this.isSessionArchived(session)) throw new Error('Restore this archived chat before pinning it.');
-    this.settings = withSessionPinned(this.settings, session, pinned);
+    const projects = this.settings.projects;
+    const scoped = session.projectPath === this.scheduledWorkspace ? { ...this.settings, projects: [...projects, this.scheduledWorkspace] } : this.settings;
+    this.settings = { ...withSessionPinned(scoped, session, pinned), projects };
     this.persist();
     return this.getPublic();
   }
@@ -272,7 +284,7 @@ export class SettingsStore {
   }
 
   private validateSessionRef(ref: SessionRef): void {
-    if (!this.settings.projects.includes(ref.projectPath)) throw new Error('project is not in the project list');
+    if (!this.isTrustedWorkspace(ref.projectPath)) throw new Error('project is not in the project list');
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ref.sessionId)) {
       throw new Error('invalid session id');
     }

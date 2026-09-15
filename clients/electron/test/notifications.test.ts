@@ -212,6 +212,18 @@ test('taskCompleteNotifEnabled gates only finished tasks', () => {
   assert.equal(h.shown.length, 1);
 });
 
+// ── scheduled runs: the two deliberate differences ───────────────────────────
+
+test('a scheduled run notifies even with the window focused, but obeys its toggle', () => {
+  const h = harness();
+  h.focus(true);
+  assert.equal(h.notifier.scheduledRun('t', 'b', REF), true);
+  assert.equal(h.shown.length, 1);
+  h.prefs({ scheduledRunNotifEnabled: false });
+  assert.equal(h.notifier.scheduledRun('t', 'b', REF), false, 'a refused delivery must report false so the caller can keep its dedupe key');
+  assert.equal(h.shown.length, 1);
+});
+
 // ── session teardown ─────────────────────────────────────────────────────────
 
 test('ending the session disarms its pending timers', () => {
@@ -239,7 +251,7 @@ test('the idle threshold is clamped, not trusted', () => {
 
 test('isKindEnabled maps every kind to a gate', () => {
   const off = { ...defaultNotificationPreferences(), enabled: false };
-  for (const kind of ['idle_prompt', 'permission_prompt', 'agent_needs_input', 'agent_completed'] as const) {
+  for (const kind of ['idle_prompt', 'permission_prompt', 'agent_needs_input', 'agent_completed', 'scheduled_run'] as const) {
     assert.equal(isKindEnabled(off, kind), false, `${kind} must respect the master switch`);
     assert.equal(isKindEnabled(defaultNotificationPreferences(), kind), true, `${kind} defaults on`);
   }

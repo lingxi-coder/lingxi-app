@@ -28,9 +28,6 @@
  *   - `agentPushNotifEnabled`. It gates the `PushNotification` tool, which is
  *     registered-but-disabled in this port (`tools/ui/src/push_notification.rs`
  *     — its flag has no live backend), so the toggle could never do anything.
- *   - A scheduled-run kind. The desktop has no scheduled-task subsystem at
- *     this commit, so a toggle for it would be exactly the decorative setting
- *     this module replaces on mobile. Add it with its producer, not before.
  *   - The default of `inputNeededNotifEnabled`. Upstream defaults it OFF
  *     because it gates a REMOTE push that costs a round trip to a phone;
  *     these are local notifications on the machine the user is already at, so
@@ -80,6 +77,10 @@ export interface NotificationPreferences {
   inputNeededNotifEnabled: boolean;
   /** Upstream key. Gates `agent_completed`. */
   taskCompleteNotifEnabled: boolean;
+  /** Port-only: scheduled (cron) run reports. Upstream has no equivalent —
+   * its scheduled runs are a different subsystem. Still subject to the
+   * per-task `notificationPolicy` (`all` / `failed` / `none`). */
+  scheduledRunNotifEnabled: boolean;
   /** Upstream key `messageIdleNotifThresholdMs`. */
   messageIdleNotifThresholdMs: number;
 }
@@ -91,6 +92,7 @@ export function defaultNotificationPreferences(): NotificationPreferences {
     idlePromptNotifEnabled: true,
     inputNeededNotifEnabled: true,
     taskCompleteNotifEnabled: true,
+    scheduledRunNotifEnabled: true,
     messageIdleNotifThresholdMs: DEFAULT_IDLE_NOTIF_THRESHOLD_MS,
   };
 }
@@ -118,6 +120,7 @@ export function parseNotificationPreferences(value: unknown): NotificationPrefer
     idlePromptNotifEnabled: bool('idlePromptNotifEnabled'),
     inputNeededNotifEnabled: bool('inputNeededNotifEnabled'),
     taskCompleteNotifEnabled: bool('taskCompleteNotifEnabled'),
+    scheduledRunNotifEnabled: bool('scheduledRunNotifEnabled'),
     messageIdleNotifThresholdMs: normalizeIdleThresholdMs(input['messageIdleNotifThresholdMs']),
   };
 }
@@ -133,7 +136,8 @@ export type NotificationKind =
   | 'idle_prompt'
   | 'permission_prompt'
   | 'agent_needs_input'
-  | 'agent_completed';
+  | 'agent_completed'
+  | 'scheduled_run';
 
 /** Which preference gates a given notification kind. */
 export function isKindEnabled(prefs: NotificationPreferences, kind: NotificationKind): boolean {
@@ -143,5 +147,6 @@ export function isKindEnabled(prefs: NotificationPreferences, kind: Notification
     case 'permission_prompt':
     case 'agent_needs_input': return prefs.inputNeededNotifEnabled;
     case 'agent_completed': return prefs.taskCompleteNotifEnabled;
+    case 'scheduled_run': return prefs.scheduledRunNotifEnabled;
   }
 }

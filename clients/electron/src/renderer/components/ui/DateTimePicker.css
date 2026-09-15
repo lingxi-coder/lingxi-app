@@ -1,0 +1,27 @@
+.lx-date-picker { display: inline-flex; min-width: 0; }
+.lx-date-value { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.lx-date-trigger { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; border: 0; padding: 0; background: transparent; color: var(--picker-text); font: inherit; cursor: pointer; }
+.lx-date-value > span { padding: 7px 11px; border-radius: 8px; background: var(--picker-fill); font-variant-numeric: tabular-nums; }
+.lx-date-trigger:hover .lx-date-value > span, .lx-date-trigger[aria-expanded='true'] .lx-date-value > span { color: var(--picker-accent); }
+.lx-date-trigger:disabled { opacity: .45; cursor: default; }
+.lx-date-dialog { position: fixed; box-sizing: border-box; inset: auto; margin: 0; width: 320px; max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); padding: 16px; overflow: auto; border: 1px solid var(--picker-border); border-radius: 20px; background: var(--picker-bg); color: var(--picker-text); box-shadow: 0 12px 48px #0003, 0 2px 8px #0001; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
+.lx-date-dialog::backdrop { background: transparent; }
+.lx-date-dialog button { font: inherit; border: 0; cursor: pointer; color: var(--picker-accent); background: transparent; }
+.lx-date-heading { display: flex; justify-content: space-between; align-items: center; padding-bottom: 12px; font-size: 13px; color: var(--picker-secondary); }
+.lx-date-heading button { font-weight: 600; padding: 6px 4px; }
+.lx-date-month { display: flex; align-items: center; margin-bottom: 12px; }
+.lx-date-month > span { flex: 1; font-size: 16px; font-weight: 600; }
+.lx-date-month button { font-size: 27px; width: 32px; height: 32px; line-height: 1; border-radius: 8px; }
+.lx-date-calendar { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; text-align: center; }
+.lx-date-weekday { font-size: 11px; color: var(--picker-secondary); padding-bottom: 7px; }
+.lx-date-calendar button { height: 36px; width: 36px; justify-self: center; border-radius: 50%; color: var(--picker-text); font-size: 15px; font-variant-numeric: tabular-nums; }
+.lx-date-dialog button:hover { background: var(--picker-fill); }
+.lx-date-calendar button[aria-current='date'] { color: var(--picker-accent); font-weight: 600; }
+.lx-date-calendar button[aria-pressed='true'] { background: var(--picker-accent); color: var(--picker-bg); font-weight: 600; }
+.lx-date-time { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--picker-border); margin-top: 12px; padding-top: 14px; font-weight: 600; }
+.lx-date-time small { font-size: 10px; font-weight: 400; color: var(--picker-secondary); margin-left: 4px; }
+.lx-date-segments { display: flex; align-items: center; padding: 3px; border-radius: 9px; background: var(--picker-fill); }
+.lx-date-dialog .lx-date-segments input { appearance: textfield; box-sizing: border-box; width: 46px; max-width: none; min-width: 0; padding: 6px 2px; border: 0; border-radius: 6px; background: transparent; color: var(--picker-text); font: inherit; font-size: 21px; text-align: center; font-variant-numeric: tabular-nums; }
+.lx-date-segments input::-webkit-inner-spin-button { appearance: none; }
+.lx-date-dialog .lx-date-segments input:focus { background: var(--picker-bg); color: var(--picker-accent); }
+.lx-date-picker button:focus-visible, .lx-date-dialog button:focus-visible, .lx-date-dialog input:focus-visible { outline: 2px solid var(--picker-accent); outline-offset: 2px; }

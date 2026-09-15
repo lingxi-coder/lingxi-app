@@ -263,4 +263,26 @@ export class HostNotifier {
       state.permissionTimers.clear();
     }
   }
+
+  /**
+   * Scheduled (cron) runs. Port-only; upstream has no equivalent.
+   *
+   * Two deliberate differences from every other kind here:
+   *
+   * - **No dedupe ring.** `scheduled.ts` keeps its own delivered set on disk
+   *   so that a process restart cannot re-notify; a second in-memory ring
+   *   would only be able to drop what that one already let through.
+   * - **No focus gate.** The window being focused means the user is looking at
+   *   a conversation, which says nothing about a run that fired on a timer
+   *   while they were doing so. It also matters mechanically: `notifyOnce`
+   *   RESERVES the dedupe key before delivering, so a drop here would burn
+   *   the key and the run would never be reported at all. The per-task
+   *   `notificationPolicy` (`all` / `failed` / `none`) is the real filter.
+   */
+  scheduledRun(title: string, body: string, ref?: SessionRef): boolean {
+    if (this.disposed) return false;
+    if (!isKindEnabled(this.prefs, 'scheduled_run')) return false;
+    this.deps.show(title, body, ref);
+    return true;
+  }
 }

@@ -61,3 +61,27 @@ test('editing unrelated fields preserves sub-minute expiry precision', () => {
   assert.equal(scheduledTaskInput({ ...restored, title: 'Renamed' }).expires_at, expires_at);
   assert.equal(scheduledTaskInput({ ...restored, expiresAt: '2099-10-11T11:00' }).expires_at, new Date('2099-10-11T11:00').getTime());
 });
+
+test('v2 automation round-trips model, effort, lifecycle and session target', () => {
+  const automation = { version: 2 as const, status: 'paused' as const, model: 'openai/gpt-test', reasoning: { type: 'level' as const, id: 'high' }, runMode: 'selected_session' as const, targetSessionId: 'target-chat', notificationPolicy: 'failed' as const };
+  const input = scheduledTaskInput({ ...draft, automation });
+  const restored = scheduledTaskFromJob({ id: 'v2', session_id: 'source-chat', ...input });
+  assert.deepEqual(restored.automation, { ...automation, name: draft.title });
+  assert.equal(restored.automation?.targetSessionId, 'target-chat');
+  assert.throws(() => scheduledTaskInput({ ...draft, automation: { ...automation, model: '' } }), /Choose a model/);
+  assert.throws(() => scheduledTaskInput({ ...draft, automation: { ...automation, targetSessionId: undefined } }), /target chat/);
+});
+
+test('completed expiry remains editable but reactivation requires a future cutoff', () => {
+  const automation = { version: 2, status: 'completed' as const, model: 'openai/gpt-test', reasoning: { type: 'automatic' as const }, runMode: 'new_session' as const, notificationPolicy: 'all' as const };
+  assert.doesNotThrow(() => scheduledTaskInput({ ...draft, automation, expiresAt: '2000-01-01T00:00' }));
+  assert.throws(() => scheduledTaskInput({ ...draft, automation: { ...automation, status: 'active' }, expiresAt: '2000-01-01T00:00' }), /future/);
+});
+
+test('editor never sends server-owned run history or dedicated chat ownership', () => {
+  const automation = { version: 2, status: 'active' as const, model: 'openai/gpt-test', reasoning: { type: 'automatic' as const }, runMode: 'task_session' as const, notificationPolicy: 'all' as const, ownedSessionId: 'owned-chat', runs: [] };
+  const input = scheduledTaskInput({ ...draft, automation });
+  assert.equal(Object.hasOwn(input.automation!, 'ownedSessionId'), false);
+  assert.equal(Object.hasOwn(input.automation!, 'runs'), false);
+  assert.equal(automation.ownedSessionId, 'owned-chat');
+});

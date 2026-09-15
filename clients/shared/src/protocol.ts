@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '14.0.0';
+export const CLIENT_PROTOCOL_VERSION = '15.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -180,8 +180,39 @@ export type AudioResultDto =
  * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive; consumers
  * should treat the union as open-ended.
  */
+export interface CronRunDto {
+  ownerPid?: number;
+  claimGeneration?: number;
+  manualOccurrenceAt?: number;
+  id: string;
+  taskId: string;
+  scheduledAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+  model: string;
+  reasoning: ReasoningSelectionDto;
+  sessionId?: string;
+  summary?: string;
+  error?: string;
+}
+export interface CronAutomationDto {
+  name?: string;
+  version: number;
+  status: 'active' | 'paused' | 'completed';
+  statusReason?: string;
+  model: string;
+  reasoning: ReasoningSelectionDto;
+  runMode: 'new_session' | 'selected_session' | 'task_session';
+  targetSessionId?: string;
+  ownedSessionId?: string;
+  notificationPolicy: 'all' | 'failed' | 'none';
+  runs?: CronRunDto[];
+}
+
 export interface CronRequestDto {
-  action: 'list' | 'create' | 'update' | 'delete';
+  action: 'list' | 'create' | 'update' | 'delete' | 'pause' | 'resume' | 'complete' | 'history' | 'prune_history';
+  automation?: CronAutomationDto;
   id?: string;
   cron?: string;
   prompt?: string;
@@ -192,6 +223,8 @@ export interface CronRequestDto {
 }
 
 export interface CronJobDto {
+  next_run_at?: number;
+  automation?: CronAutomationDto;
   expires_at?: number;
   session_id?: string;
   id: string;
@@ -205,6 +238,9 @@ export interface CronJobDto {
 }
 
 export type ClientCommand =
+  | { type: 'cron_run_started'; run_id: string; session_id: string }
+  | { type: 'scheduled_run_turn'; run_id: string; prompt: string; model: string; reasoning: ReasoningSelectionDto }
+  | { type: 'cron_run_completed'; run_id: string; session_id?: string | null; summary?: string | null; error?: string | null }
   | { type: 'cron_manage'; request_id: string; request: CronRequestDto }
   // ── Turn driving ──────────────────────────────────────────────────────────
   | {
@@ -562,7 +598,15 @@ export type MessageBlockDto =
     };
 
 /** A complete conversation message (message.rs `MessageDto`). */
+export interface LoopWakeupDto {
+  message: string;
+  companion?: string | null;
+  streak: number;
+  since_ms: number;
+}
+
 export interface MessageDto {
+  loop_wakeup?: LoopWakeupDto | null;
   role: string;
   blocks: MessageBlockDto[];
   /** User-attached images projected as stable renderable URLs. */
@@ -1966,12 +2010,16 @@ export type AudioOpDto =
  * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive.
  */
 export type ClientEvent =
+  | { type: 'scheduled_run_finished'; run_id: string; summary?: string | null; error?: string | null }
+  | { type: 'cron_run_bound'; run_id: string; error?: string | null }
+  | { type: 'cron_run_requested'; run_id: string; task: CronJobDto }
   | { type: 'cron_result'; request_id: string; jobs: CronJobDto[]; error?: string }
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
   | { type: 'message_identity'; message_id: string }
   | { type: 'message_retracted'; message_id: string }
   | { type: 'system_notice'; message: string; is_error: boolean }
+  | { type: 'scheduled_task_fire'; message: string }
   | {
       type: 'loop_wakeup';
       /** The resume line, already rendered host-side. */
@@ -2079,6 +2127,10 @@ export type ClientEvent =
     }
   | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }
   | { type: 'fast_mode_changed'; enabled: boolean }
+  | {
+      type: 'openai_oauth_updated';
+      session: { access_token: string; refresh_token?: string; expires_at: number; account_id?: string; fedramp: boolean };
+    }
   | {
       type: 'provider_credential_status';
       operation_id: number;

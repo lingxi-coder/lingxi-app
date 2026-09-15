@@ -117,6 +117,7 @@ export interface BridgeManagerOptions {
    * a separate `Frame` arm handled by `client.on('permission')` below.
    */
   notifier?: HostNotifier;
+  onCronRunRequested?: (runtime: SessionRuntime, event: Extract<ClientEvent, { type: 'cron_run_requested' }>) => Promise<{ sessionId: string; summary: string }>;
   /** Persist only an explicitly requested, engine-confirmed model selection. */
   onModelSelected?: (model: string) => void;
   getSavedModel?: () => string | undefined;
@@ -917,6 +918,75 @@ export class SessionRuntime {
     return this.sendCronCommand({ type: 'cron_manage', request_id: randomUUID(), request });
   }
 
+  private activeCronExecutions = 0;
+  private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
+  private readonly backgroundSessionLeases = new Map<string, number>();
+  private readonly pendingRunBindings = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  markCronRunStarted(runId: string, sessionId: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pendingRunBindings.delete(runId); reject(new Error('Scheduled session binding timed out.')); }, 15_000);
+      this.pendingRunBindings.set(runId, { resolve, reject, timer });
+      try { this.requireClient().sendCommand({ type: 'cron_run_started', run_id: runId, session_id: sessionId }); }
+      catch (error) { clearTimeout(timer); this.pendingRunBindings.delete(runId); reject(error); }
+    });
+  }
+
+  async runScheduledTurn(runId: string, task: CronJobDto, beforeStart?: () => Promise<void>): Promise<string> {
+    const config = task.automation;
+    if (!config?.model) throw new Error('paused: Configure a model for this task.');
+    const generation = this.generation;
+    while (this.turnActive || this.pendingInteractions > 0) {
+      if (this.disposed || generation !== this.generation || this.state.status !== 'connected') throw new Error('interrupted: Scheduled execution interrupted.');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (this.archiving) throw new Error('paused: The target chat is being archived.');
+    const client = this.requireClient();
+    const token = Symbol('scheduled hydration');
+    this.pendingPromptHydrations.add(token);
+    const assertPreparing = () => {
+      if (this.disposed || generation !== this.generation || client !== this.client) throw new Error('interrupted: Scheduled execution interrupted.');
+      if (!this.pendingPromptHydrations.has(token)) throw new Error('cancelled: Scheduled execution was cancelled before starting.');
+      if (this.archiving) throw new Error('paused: The target chat is being archived.');
+    };
+    try {
+      if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+      assertPreparing();
+      try { await this.ensureModelProviderCredential(config.model); }
+      catch (error) { assertPreparing(); throw new Error(`paused: ${error instanceof Error ? error.message : String(error)}`); }
+      assertPreparing();
+      const catalog = await this.scheduledModelCatalog();
+      assertPreparing();
+      const model = catalog.details?.find((item) => item.reference === config.model);
+      if (!model) throw new Error('paused: The configured model is unavailable. Choose another model.');
+      const selection = config.reasoning;
+      const selectionKey = (value: typeof selection) => value.type === 'level' ? `level:${value.id}` : value.type === 'token_budget' ? `tokens:${value.tokens}` : value.type;
+      const supported = selection.type === 'automatic'
+        || model.reasoning.options.some((option) => option.persistable && selectionKey(option.selection) === selectionKey(selection))
+        || selectionKey(model.reasoning.provider_default) === selectionKey(selection)
+        || (selection.type === 'token_budget' && model.reasoning.budget_range && selection.tokens >= model.reasoning.budget_range.min_tokens && selection.tokens <= model.reasoning.budget_range.max_tokens);
+      if (!supported) throw new Error('paused: The configured reasoning setting is unavailable. Choose another effort.');
+      await beforeStart?.();
+      assertPreparing();
+      return await new Promise<string>((resolve, reject) => {
+        this.pendingScheduledTurns.set(runId, { resolve, reject });
+        this.activeTurn = true;
+        this.sessionHasHistory = true;
+        try {
+          client.sendCommand({ type: 'scheduled_run_turn', run_id: runId, prompt: task.prompt, model: config.model, reasoning: config.reasoning });
+        } catch (error) {
+          this.pendingScheduledTurns.delete(runId);
+          this.activeTurn = false;
+          reject(error);
+        }
+      });
+    } finally {
+      this.pendingPromptHydrations.delete(token);
+      this.notifyActivityChanged();
+    }
+  }
+
+
+
   private readonly modelCatalogWaiters = new Set<(event: Extract<ClientEvent, { type: 'model_list' }>) => void>();
 
   scheduledModelCatalog(): Promise<Extract<ClientEvent, { type: 'model_list' }>> {
@@ -1663,6 +1733,34 @@ export class SessionRuntime {
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation) return;
       this.gitActivity.accept(event);
+      if (event.type === 'cron_run_requested') {
+        this.activeCronExecutions++;
+        this.notifyActivityChanged();
+        void (async () => {
+          let response: Extract<ClientCommand, { type: 'cron_run_completed' }>;
+          try {
+            if (!this.opts.onCronRunRequested) throw new Error('Scheduled execution is unavailable');
+            const result = await this.opts.onCronRunRequested(this, event);
+            response = { type: 'cron_run_completed', run_id: event.run_id, session_id: result.sessionId, summary: result.summary };
+          } catch (error) {
+            response = { type: 'cron_run_completed', run_id: event.run_id, error: error instanceof Error ? error.message : String(error) };
+          }
+          if (generation !== this.generation || client !== this.client) return;
+          try {
+            client.sendCommand(response);
+            // Keep the controller leased until the scheduler has committed the
+            // result, including when the user paused the schedule mid-run.
+            const deadline = Date.now() + 15_000;
+            while (generation === this.generation && Date.now() < deadline) {
+              const jobs = await this.manageCron({ action: 'history', id: event.task.id });
+              const run = jobs.find((job) => job.id === event.task.id)?.automation?.runs?.find((item) => item.id === event.run_id);
+              if (!run || run.status !== 'running') break;
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+          } catch { this.diagnostics.add('warn', 'bridge', 'Scheduled result connection closed before acknowledgement.'); }
+        })().finally(() => { this.activeCronExecutions--; this.notifyActivityChanged(); });
+        return;
+      }
       if (event.type === 'model_list') for (const waiter of this.modelCatalogWaiters) waiter(event);
       if (isTurnOwnedEvent(event) && !this.activeTurn) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
@@ -2573,6 +2671,20 @@ export class SessionRuntimeManager {
       || status === 'connecting'
       || this.openingSessions.has(runtime.sessionId)
       || this.backgroundSessionLeases.has(runtime.sessionId);
+  }
+
+  retainBackgroundSession(ref: SessionRef): () => void {
+    assertSessionRef(ref);
+    this.backgroundSessionLeases.set(ref.sessionId, (this.backgroundSessionLeases.get(ref.sessionId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = (this.backgroundSessionLeases.get(ref.sessionId) ?? 1) - 1;
+      if (count) this.backgroundSessionLeases.set(ref.sessionId, count);
+      else this.backgroundSessionLeases.delete(ref.sessionId);
+      this.trimCache();
+    };
   }
 
   private trimCache(): void {

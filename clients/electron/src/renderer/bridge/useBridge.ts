@@ -1,9 +1,11 @@
+import type { ScheduledScope, ScheduledContext } from '../../shared/scheduled';
 import { submittedSessionCatalogs, type SubmittedSession } from './submittedSessionCatalog';
 import { saveProviderSettings } from './providerSettingsSave';
 import { requestCronManagement } from './cronManagement';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CronJobDto,
+  CronRunDto,
   CronRequestDto,
   AgentDto,
   AskUserQuestionRequestDto,
@@ -292,6 +294,11 @@ export interface UseBridge {
   removeMcpServer(scope: McpScopeDto, name: string): Promise<void>;
   /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
   manageCron(request: CronRequestDto): Promise<CronJobDto[]>;
+  scheduledScopes: ScheduledScope[];
+  scheduledContext(scopeId: string): Promise<ScheduledContext>;
+  manageScheduled(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]>;
+  readScheduledHistory(scopeId: string, jobId: string): Promise<CronRunDto[]>;
+  openScheduledSession(scopeId: string, sessionId: string): Promise<void>;
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
   mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
@@ -2334,6 +2341,33 @@ export function useBridge(): UseBridge {
     },
     [command, refreshMcpServers],
   );
+  const [remoteScheduledScopes, setRemoteScheduledScopes] = useState<ScheduledScope[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void host?.scheduled?.scopes().then((scopes) => { if (!cancelled) setRemoteScheduledScopes(scopes); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [host, bootstrap?.settings.projects]);
+  const scheduledScopes = useMemo<ScheduledScope[]>(() => remoteScheduledScopes ?? [
+    { id: 'global', label: 'No project' },
+    ...(bootstrap?.settings.projects ?? []).map((path) => ({ id: path, projectPath: path, label: path.split('/').filter(Boolean).pop() ?? path })),
+  ], [bootstrap?.settings.projects, remoteScheduledScopes]);
+  const scheduledContext = useCallback(async (scopeId: string): Promise<ScheduledContext> => {
+    if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
+    return host.scheduled.context(scopeId);
+  }, [host]);
+  const manageScheduled = useCallback(async (scopeId: string, request: CronRequestDto) => {
+    if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
+    return host.scheduled.manage(scopeId, request);
+  }, [host]);
+  const readScheduledHistory = useCallback(async (scopeId: string, jobId: string): Promise<CronRunDto[]> => {
+    const jobs = await manageScheduled(scopeId, { action: 'history', id: jobId });
+    return jobs.find((job) => job.id === jobId)?.automation?.runs ?? [];
+  }, [manageScheduled]);
+  const openScheduledSession = useCallback(async (scopeId: string, sessionId: string) => {
+    if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
+    await host.scheduled.openSession(scopeId, sessionId);
+    applyBootstrap(await host.bootstrap());
+  }, [host, applyBootstrap]);
   const manageCron = useCallback((request: CronRequestDto): Promise<CronJobDto[]> => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) {
@@ -2407,6 +2441,7 @@ export function useBridge(): UseBridge {
 
   return {
     manageCron,
+    scheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
     hosted,
     loading,
     bootstrap: presentedBootstrap,

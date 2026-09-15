@@ -141,10 +141,21 @@ Two details make that isolation real rather than nominal:
 - `npm run typecheck` is `node && web`. A failing node half short-circuits and
   the web half never runs, so both halves are run separately.
 
-Regressions were compared as failure **sets** with `comm`, not as counts. The
-11 residual failures in every run are source-scanning guards that shell out to
-`git ls-files`; the extract is not a git repository, so they fail identically
-on both sides.
+Regressions were compared as failure **sets** with `comm`, not as counts.
+
+That comparison carried a blind spot worth naming, because it survived the
+whole session. Every run reported ~11 failures on both sides, and they were
+treated as a fixed noise floor. They were not: the suite contains
+source-scanning guards that shell out to `git ls-files`, and the extract was
+not a git repository. `git init` inside the extract plus the two Rust source
+directories those guards read by path
+(`apps/bridge-server/src`, `bridge/src`) removes all of them.
+
+**On the committed tree the desktop suite is 1119 passed, 0 failed.** A failure
+set that matches the control is a weak criterion — it is blind to failures the
+harness itself manufactures. The distinguishing evidence is in the error text:
+`not a git repository` and `ENOENT: no such file` are instrumentation;
+`AssertionError` is a finding.
 
 Where a fix was small enough to state as a property, it was mutation-checked:
 the line was removed or reverted in the extract and the suite re-run, to

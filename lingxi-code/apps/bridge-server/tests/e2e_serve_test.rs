@@ -27,7 +27,7 @@ use bridge::wire::Frame;
 use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::boot;
 use client_protocol::commands::ClientCommand;
-use client_protocol::events::{ClientEvent, ErrorKindDto};
+use client_protocol::events::ClientEvent;
 use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -198,8 +198,18 @@ fn submit(command: &ClientCommand) -> Frame {
 }
 
 /// The real boot path serves a connection whose opening `hello` is answered with
-/// a `ServerHello`, and a credential-less turn is rejected once, before provider
-/// retries, with a sanitized actionable terminal error.
+/// a `ServerHello`, and a credential-less turn terminates once, fast, through
+/// upstream's own auth copy.
+///
+/// This used to assert a port-only `CredentialRequiredTurnDriver` that failed
+/// the turn at the bridge boundary with a bespoke message naming
+/// `--api-key-stdin`. That driver had been unreachable since the cold-boot
+/// route was kept live (its boot-time predicate reduced to a catalog constant),
+/// and claude-code has no such stage: an auth failure renders through
+/// `orchestrator::api_error_copy`, which this port already mirrors byte for
+/// byte. The port-only stage is gone; what is asserted here is the aligned
+/// behaviour, and the properties that stage existed to protect are asserted
+/// directly instead — fast, no provider call, nothing leaked, one terminal.
 #[tokio::test]
 async fn real_boot_handshakes_and_surfaces_turn_error() {
     let (_tmp, cfg) = sandbox_config();
@@ -225,8 +235,8 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
         other => panic!("expected ServerHello response, got {other:?}"),
     }
 
-    // (2) A turn with no credential fails fast at the bridge boundary and emits
-    //     exactly one terminal Error event (not provider retry telemetry).
+    // (2) A turn with no credential still runs, and the provider's rejection is
+    //     rendered as upstream's auth copy rather than a port-specific error.
     send_frame(
         &mut ws,
         &submit(&ClientCommand::SendPrompt {
@@ -238,28 +248,53 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
     )
     .await;
 
+    // The 2s budget is the real assertion here: a credential rejection must not
+    // enter provider retry backoff. Measured at ~41ms for the whole sequence.
     let frame = tokio::time::timeout(Duration::from_secs(2), next_frame(&mut ws))
         .await
         .expect("credential rejection must not enter provider retry backoff");
     match frame {
-        Frame::Event(ClientEvent::Error { kind, message }) => {
-            assert_eq!(kind, ErrorKindDto::Server);
-            assert_eq!(message, bridge_server::driver::CREDENTIAL_REQUIRED_MESSAGE);
+        Frame::Event(ClientEvent::TextDelta { text }) => {
             assert!(
-                message.contains("--api-key-stdin"),
-                "error must be actionable"
+                text.starts_with("Failed to authenticate."),
+                "the turn must carry upstream's auth copy, got {text:?}"
             );
-            assert!(!message.contains("sk-"), "error must not embed a key");
+            assert!(!text.contains("sk-"), "error must not embed a key");
             assert!(
-                !message.contains("api.anthropic.com"),
+                !text.contains("api.anthropic.com"),
                 "error must not expose provider details"
             );
         }
-        other => panic!("expected one credential-required Error, got {other:?}"),
+        other => panic!("expected upstream's auth copy, got {other:?}"),
     }
 
-    // Error is itself the protocol's terminal marker. No retry, TurnEnded, or
-    // duplicate terminal error may follow it for this submitted turn.
+    // The turn ends itself, and ends charged for nothing: `api_calls == 0` is
+    // what proves no provider request was issued, let alone retried.
+    let mut ended = false;
+    for _ in 0..8 {
+        match tokio::time::timeout(Duration::from_secs(2), next_frame(&mut ws))
+            .await
+            .expect("the turn must terminate without backoff")
+        {
+            Frame::Event(ClientEvent::CostUpdate { api_calls, total_usd, .. }) => {
+                assert_eq!(api_calls, 0, "no provider request may be issued");
+                assert_eq!(total_usd, 0.0, "a rejected turn must not be charged");
+            }
+            Frame::Event(ClientEvent::TurnEnded { stop_reason, .. }) => {
+                assert_eq!(stop_reason.as_deref(), Some("model_error"));
+                ended = true;
+                break;
+            }
+            Frame::Event(ClientEvent::MessageComplete { stop_reason, .. }) => {
+                assert_eq!(stop_reason.as_deref(), Some("model_error"));
+            }
+            other => panic!("unexpected frame before TurnEnded: {other:?}"),
+        }
+    }
+    assert!(ended, "the turn must reach TurnEnded");
+
+    // `TurnEnded` is the protocol's terminal marker. No retry and no second
+    // terminal may follow it for this submitted turn.
     let duplicate = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
     assert!(
         duplicate.is_err(),

@@ -44,69 +44,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::server::TurnDriver;
 
-/// Stable, non-secret failure reported when the bridge has no configured way
-/// to authenticate provider requests.
-///
-/// Keep this message independent of the prompt, provider response, and local
-/// configuration values: it is safe to display directly in desktop clients.
-pub const CREDENTIAL_REQUIRED_MESSAGE: &str =
-    "Provider credential required. Restart bridge-server with --api-key-stdin, or configure a trusted credential source, then retry.";
-
-/// A fail-fast turn driver used when boot found no provider credential source.
-///
-/// The rest of the runtime remains assembled so handshake and read-only command
-/// routing continue to work. Only model turns are stopped here, before they can
-/// enter the provider client's retry path. Each submitted turn emits exactly
-/// one terminal [`ClientEvent::Error`].
-pub struct CredentialRequiredTurnDriver {
-    event_sink: Arc<dyn ClientEventSink>,
-}
-
-impl CredentialRequiredTurnDriver {
-    /// Construct the fail-fast driver over the connection's event sink.
-    #[must_use]
-    pub fn new(event_sink: Arc<dyn ClientEventSink>) -> Self {
-        Self { event_sink }
-    }
-
-    async fn reject_turn(&self) {
-        platform_api::live_sessions::set_process_status("busy", None);
-        self.event_sink
-            .emit(ClientEvent::Error {
-                kind: ErrorKindDto::Server,
-                message: CREDENTIAL_REQUIRED_MESSAGE.to_string(),
-            })
-            .await;
-        platform_api::live_sessions::set_process_status("idle", None);
-    }
-}
-
-#[async_trait]
-impl TurnDriver for CredentialRequiredTurnDriver {
-    async fn run_turn(&self, _prompt: String) {
-        self.reject_turn().await;
-    }
-
-    async fn run_turn_with_images(&self, _prompt: String, _images: Vec<ImageRefDto>) {
-        self.reject_turn().await;
-    }
-
-    /// Without this override the trait default answers "Scheduled session
-    /// execution is unavailable", which the host surfaces verbatim as the run's
-    /// failure — so a boot with no credentials tells the user the scheduler is
-    /// broken instead of telling them to sign in. `paused:` keeps the run
-    /// retryable rather than retiring the task, exactly as the default did.
-    async fn run_scheduled_turn(
-        &self,
-        _prompt: String,
-        _model: String,
-        _reasoning: client_protocol::controls::ReasoningSelectionDto,
-        _cancel: CancellationToken,
-    ) -> Result<String, String> {
-        Err(format!("paused:{CREDENTIAL_REQUIRED_MESSAGE}"))
-    }
-}
-
 /// A msgqueue-backed [`orchestrator::prompt::mid_turn_input::MidTurnInputSource`].
 ///
 /// Bridges the orchestrator's queue-agnostic mid-turn drain seam to the

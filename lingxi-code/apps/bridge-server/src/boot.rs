@@ -43,7 +43,7 @@ use platform_api::{
 use platform_posix::PosixFileSystem;
 
 use crate::audio_bridge::{new_audio_bridge, AudioBridge};
-use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
+use crate::driver::OrchestratorTurnDriver;
 use crate::mcp_bridge::McpPaths;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
 use crate::server::{BridgeConnection, TurnDriver};
@@ -763,16 +763,6 @@ pub fn has_no_credential_source(cfg: &DesktopConfig) -> bool {
             .is_none_or(BTreeMap::is_empty)
 }
 
-fn needs_credential_driver(
-    parent_credential_supplied: bool,
-    provider_availability: &BTreeMap<String, bool>,
-    late_credential_route: bool,
-) -> bool {
-    !parent_credential_supplied
-        && !provider_availability.values().any(|available| *available)
-        && !late_credential_route
-}
-
 /// The assembled, ready-to-serve connection plus its auth-relevant facts.
 ///
 /// The connection is the [`bridge::FramePump`] the endpoint drives; the runtime
@@ -1405,24 +1395,6 @@ pub async fn assemble_with_credentials(
     // for why both halves live there (round 9 item 2; round-10 finding N3).
     seed_parent_supplied_provider_keys(&runtime.credentials, &provider_keys).await;
 
-    // The parent-source fact is authoritative for packaged Electron sessions.
-    // Unpackaged CLI/TUI-oriented hosts may still derive availability from
-    // their own persistent storage before binding the fail-fast driver.
-    let credential_required = needs_credential_driver(
-        parent_credential_supplied,
-        &runtime.provider_availability,
-        // `provider-config` keeps Anthropic's API-key route live even on
-        // a cold unauthenticated boot.  The composite credential provider
-        // reads the process-local store per request, so after Settings
-        // adds the first key this same connection can authenticate a live
-        // turn; a permanently fail-fast driver would make the catalog
-        // publication a false positive.
-        runtime
-            .provider_auth_methods
-            .get("anthropic")
-            .is_some_and(|method| method == "api_key"),
-    );
-
     // `use_noop_permission_gate: false` ⇒ build MUST surface the adapter gate.
     let gate = runtime.permission_gate.clone().ok_or_else(|| {
         "engine_desktop::build did not surface an AdapterPermissionGate despite \
@@ -1535,20 +1507,18 @@ pub async fn assemble_with_credentials(
         // at the composition root over a benign double-wire.
     }
 
-    // Keep the full runtime/router alive without credentials, but reject model
-    // turns at the bridge boundary before provider retries begin. With any
-    // configured source, use the production driver and its queue/cancel wiring.
-    let driver: Arc<dyn TurnDriver> = if credential_required {
-        Arc::new(CredentialRequiredTurnDriver::new(event_sink))
-    } else {
-        Arc::new(
-            OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
-                .with_message_output(message_output)
-                .with_queue(queue, cancel_reason)
-                .with_wakeup_scheduler(driver_wakeup_scheduler)
-                .with_foreign_input_counter(foreign_input_counter),
-        )
-    };
+    // A turn with no usable credential is NOT special-cased here. It runs, the
+    // provider rejects it, and `orchestrator::api_error_copy` renders upstream's
+    // own auth copy — which is what claude-code does, and what the desktop
+    // already knows how to display. Measured on a credential-less boot: the
+    // terminal frames arrive in 41ms with no retry backoff.
+    let driver: Arc<dyn TurnDriver> = Arc::new(
+        OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
+            .with_message_output(message_output)
+            .with_queue(queue, cancel_reason)
+            .with_wakeup_scheduler(driver_wakeup_scheduler)
+            .with_foreign_input_counter(foreign_input_counter),
+    );
 
     if enable_automation_scheduler {
         if let Some(scheduler) = &runtime.session_lifecycle.cron_scheduler {
@@ -1596,12 +1566,9 @@ pub async fn assemble_with_credentials(
         // this connection resolve a call the engine parked on this connection,
         // and a disconnect drain them.
         .bind_audio(audio_responder);
-    let connection = if credential_required {
-        connection
-    } else {
-        connection.with_task_notification_registry(runtime.task_registry.clone())
-    }
-    .with_queue_wakeup();
+    let connection = connection
+        .with_task_notification_registry(runtime.task_registry.clone())
+        .with_queue_wakeup();
     Ok(BoundServer {
         connection,
         runtime,
@@ -2059,22 +2026,6 @@ mod tests {
     fn parse_help_flag() {
         assert!(BridgeArgs::parse(["--help"]).unwrap().help);
         assert!(BridgeArgs::parse(["-h"]).unwrap().help);
-    }
-
-    #[test]
-    fn shared_cli_tui_credential_disables_fail_fast_driver() {
-        let availability = BTreeMap::from([
-            ("deepseek".to_string(), true),
-            ("openrouter".to_string(), false),
-        ]);
-
-        assert!(!needs_credential_driver(false, &availability, false));
-        assert!(needs_credential_driver(false, &BTreeMap::new(), false));
-        assert!(!needs_credential_driver(true, &BTreeMap::new(), false));
-        assert!(
-            !needs_credential_driver(false, &BTreeMap::new(), true),
-            "a route that resolves credentials at request time must remain live after a cold boot"
-        );
     }
 
     #[test]

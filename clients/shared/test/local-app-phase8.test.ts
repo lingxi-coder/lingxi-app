@@ -24,7 +24,7 @@ test('ServerHello validation is exact and fail-closed', () => {
   } satisfies ServerHello;
 
   assert.deepEqual(validateServerHello(hello), hello);
-  assert.equal(hello.capabilities.client_protocol_version, '14.0.0');
+  assert.equal(hello.capabilities.client_protocol_version, '15.0.0');
   assert.throws(
     () => validateServerHello({ ...hello, capabilities: { ...hello.capabilities, extra: true } }),
     /unsupported fields/,

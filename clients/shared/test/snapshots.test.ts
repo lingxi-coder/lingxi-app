@@ -1405,6 +1405,32 @@ function validateAudioResult(v: unknown): void {
 
 // ── ClientCommand ─────────────────────────────────────────────────────────────
 
+function validateCronJob(v: unknown): void {
+  const job = rec(v);
+  for (const key of ['id', 'cron', 'prompt']) assert.ok(isString(job[key]));
+  for (const key of ['recurring', 'durable', 'permanent']) assert.ok(isBool(job[key]));
+  assert.ok(isNumber(job['created_at']));
+  for (const key of ['last_fired_at', 'expires_at', 'next_run_at']) if (job[key] != null) assert.ok(isNumber(job[key]));
+  if (job['automation'] != null) validateCronAutomation(job['automation']);
+}
+function validateCronAutomation(v: unknown): void {
+  const config = rec(v);
+  assert.equal(config['version'], 2);
+  assert.ok(['active', 'paused', 'completed'].includes(String(config['status'])));
+  assert.ok(['new_session', 'selected_session', 'task_session'].includes(String(config['runMode'])));
+  assert.ok(['all', 'failed', 'none'].includes(String(config['notificationPolicy'])));
+  assert.ok(isString(config['model'])); validateReasoningSelection(config['reasoning']);
+  if (config['runs'] != null) {
+    assert.ok(Array.isArray(config['runs']));
+    for (const value of config['runs'] as unknown[]) {
+      const run = rec(value);
+      assert.ok(isString(run['id']) && isString(run['taskId']) && isNumber(run['scheduledAt']));
+      assert.ok(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted'].includes(String(run['status'])));
+      assert.ok(isString(run['model'])); validateReasoningSelection(run['reasoning']);
+    }
+  }
+}
+
 function validateCommand(name: string, v: unknown): void {
   const c = v as ClientCommand;
   const o = rec(c);
@@ -1500,10 +1526,22 @@ function validateCommand(name: string, v: unknown): void {
       );
       if ('credential_override' in o) assert.ok(isString(o['credential_override']));
       break;
+    case 'cron_run_started':
+      assert.ok(isString(o['run_id']) && isString(o['session_id']));
+      break;
+    case 'scheduled_run_turn':
+      assert.ok(isString(o['run_id']) && isString(o['prompt']) && isString(o['model']));
+      validateReasoningSelection(o['reasoning']);
+      break;
+    case 'cron_run_completed':
+      assert.ok(isString(o['run_id']));
+      for (const key of ['session_id', 'summary', 'error']) if (o[key] != null) assert.ok(isString(o[key]));
+      break;
     case 'cron_manage': {
       assert.ok(isString(o['request_id']));
       const request = o['request'] as Record<string, unknown>;
-      assert.ok(['list', 'create', 'update', 'delete'].includes(request['action'] as string));
+      assert.ok(['list', 'create', 'update', 'delete', 'pause', 'resume', 'complete', 'history', 'prune_history'].includes(request['action'] as string));
+      if (request['automation'] != null) validateCronAutomation(request['automation']);
       for (const key of ['id', 'cron', 'prompt']) if (key in request) assert.ok(isString(request[key]));
       for (const key of ['recurring', 'durable']) if (key in request) assert.equal(typeof request[key], 'boolean');
       break;
@@ -1964,6 +2002,13 @@ function validateEvent(name: string, v: unknown): void {
     case 'fast_mode_changed':
       assert.ok(isBool(o['enabled']));
       break;
+    case 'openai_oauth_updated': {
+      const session = rec(o['session']);
+      assert.ok(isString(session['access_token']) && isNumber(session['expires_at']) && isBool(session['fedramp']));
+      if (session['refresh_token'] != null) assert.ok(isString(session['refresh_token']));
+      if (session['account_id'] != null) assert.ok(isString(session['account_id']));
+      break;
+    }
     case 'provider_credential_status':
       assert.ok(
         isNumber(o['operation_id']) &&
@@ -2211,6 +2256,17 @@ function validateEvent(name: string, v: unknown): void {
     case 'audio_request':
       assert.ok(isNumber(o['request_id']));
       validateAudioOp(o['op']);
+      break;
+    case 'cron_run_bound':
+    case 'scheduled_run_finished':
+      assert.ok(isString(o['run_id']));
+      for (const key of ['summary', 'error']) if (o[key] != null) assert.ok(isString(o[key]));
+      break;
+    case 'cron_run_requested':
+      assert.ok(isString(o['run_id'])); validateCronJob(o['task']);
+      break;
+    case 'scheduled_task_fire':
+      assert.ok(isString(o['message']));
       break;
     case 'cron_result':
       assert.ok(isString(o['request_id']));

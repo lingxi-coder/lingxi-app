@@ -1,4 +1,5 @@
 import type { CronJobDto } from '@lingxi/bridge-client';
+import type { TerminalApi } from '../../shared/terminal.js';
 import type {
   AskUserQuestionRequestDto,
   AudioOpDto,
@@ -110,6 +111,7 @@ export interface NativeAudioApi {
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
+  terminal: TerminalApi;
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;

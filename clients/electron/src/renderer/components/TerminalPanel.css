@@ -1,0 +1,30 @@
+.desktop-workspace { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.desktop-workspace-upper { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.desktop-terminal { position: relative; display: flex; flex-direction: column; min-height: 100px; flex-shrink: 0; background: var(--terminal-bg); color: var(--terminal-text); border-top: 1px solid var(--terminal-border); }
+.desktop-terminal[hidden], .terminal-surface[hidden] { display: none; }
+.terminal-resizer { position: absolute; z-index: 3; top: -4px; left: 0; right: 0; height: 7px; cursor: ns-resize; touch-action: none; }
+.terminal-resizer:hover, .terminal-resizer:focus-visible { background: var(--terminal-hover); outline: none; }
+.terminal-toolbar { display: flex; align-items: center; gap: 5px; height: 43px; flex-shrink: 0; padding: 5px 12px; }
+.terminal-tabs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.terminal-tabs::-webkit-scrollbar { display: none; }
+.terminal-tab { display: flex; align-items: center; border-radius: 12px; color: var(--terminal-muted); flex-shrink: 0; }
+.terminal-tab[data-active='true'] { background: var(--terminal-hover); color: var(--terminal-text); }
+.terminal-tab > button:first-child { display: flex; align-items: center; gap: 9px; padding: 6px 4px 6px 10px; min-width: 80px; max-width: 250px; }
+.terminal-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-terminal button { border: 0; color: inherit; background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
+.desktop-terminal button:disabled { opacity: .4; cursor: default; }
+.desktop-terminal button:focus-visible { outline: 2px solid var(--terminal-muted); outline-offset: -2px; border-radius: 5px; }
+.terminal-icon-button { width: 30px; height: 30px; border-radius: 7px; font-size: 22px !important; color: var(--terminal-muted) !important; flex-shrink: 0; line-height: 1; }
+.terminal-icon-button:hover { background: var(--terminal-hover); color: var(--terminal-text) !important; }
+.terminal-toolbar-spacer { flex: 1; }
+.terminal-surfaces { flex: 1; min-height: 0; position: relative; }
+.terminal-surface { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 4px 18px 8px; }
+.terminal-emulator { flex: 1; min-height: 0; overflow: hidden; }
+.terminal-emulator .xterm { height: 100%; }
+.terminal-error, .terminal-exit-status { font-size: 12px; padding: 5px 18px; flex-shrink: 0; }
+.terminal-error { color: #d75b65; }
+.terminal-exit-status { color: var(--terminal-muted); }
+.terminal-exit-status button { text-decoration: underline; }
+.terminal-empty { padding: 12px 18px; font-size: 13px; color: var(--terminal-muted); }
+.terminal-emulator .xterm-scrollable-element > .scrollbar.horizontal { display: none !important; }
+.terminal-emulator .xterm-viewport { background-color: var(--terminal-bg) !important; overflow-x: hidden; }

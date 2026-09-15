@@ -1,4 +1,7 @@
 import { createRequire } from 'node:module';
+import type { TerminalManager } from './terminal.js';
+import { TerminalDelivery } from './terminal-delivery.js';
+import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT, TERMINAL_DRAFT_SESSION, type TerminalScope } from '../shared/terminal.js';
 import type { HostNotifier } from './notifications.js';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
@@ -323,6 +326,9 @@ export class HostController {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly workspaceFiles = new WorkspaceFileSearch();
+  private terminals?: TerminalManager;
+  private offTerminals?: () => void;
+  private readonly terminalDeliveries = new Map<WebContents, TerminalDelivery>();
   private notifier?: HostNotifier;
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
@@ -358,6 +364,49 @@ export class HostController {
    */
   attachNotifier(notifier: HostNotifier): void { this.notifier = notifier; }
 
+  attachTerminals(manager: TerminalManager): void {
+    this.offTerminals?.();
+    this.terminals = manager;
+    this.offTerminals = manager.onEvent((event) => {
+      for (const delivery of this.terminalDeliveries.values()) delivery.push(event);
+    });
+  }
+
+  private terminalDelivery(target: WebContents): TerminalDelivery {
+    let delivery = this.terminalDeliveries.get(target);
+    if (!delivery) {
+      delivery = new TerminalDelivery((event) => {
+        if (!target.isDestroyed()) target.send(CH_TERMINAL_EVENT, event);
+      }, (paused) => this.terminals?.setOutputPaused(String(target.id), paused));
+      this.terminalDeliveries.set(target, delivery);
+    }
+    return delivery;
+  }
+
+  private async validateSessionScope(value: unknown, projectScoped = false): Promise<TerminalScope> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid workspace scope');
+    const candidate = value as Record<string, unknown>;
+    const projectPath = this.requireProject(candidate['projectPath']);
+    if (this.isProjectClosing(projectPath)) throw new Error('project is closing');
+    const sessionId = candidate['sessionId'];
+    if (sessionId === TERMINAL_DRAFT_SESSION) {
+      const active = this.settings.getPublic().activeSession;
+      if (!projectScoped && active?.projectPath === projectPath) throw new Error('use the active session for this workspace');
+      return { projectPath, sessionId };
+    }
+    if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    const scope = { projectPath, sessionId };
+    if (this.settings.isSessionArchived(scope)) throw new Error('session is archived');
+    const runtime = this.bridge.get(sessionId);
+    if (runtime) {
+      if (runtime.projectPath !== projectPath) throw new Error('session belongs to a different project');
+    } else if (!this.terminals?.list(scope).length) {
+      await this.assertSessionBelongsToProject(scope);
+    }
+    return scope;
+  }
+
+
   registerWindow(webContents: WebContents, rendererUrl: string): void {
     const allowedOrigin = origin(rendererUrl);
     if (!allowedOrigin) throw new Error('invalid renderer URL');
@@ -365,7 +414,20 @@ export class HostController {
     origins.add(allowedOrigin);
     this.targets.set(webContents, origins);
     this.bridge.registerWindow(webContents, rendererUrl);
-    webContents.once('destroyed', () => this.targets.delete(webContents));
+    const detachTerminals = () => {
+      this.terminalDeliveries.get(webContents)?.dispose();
+      this.terminalDeliveries.delete(webContents);
+    };
+    // A replacement renderer will subscribe afresh. Its predecessor cannot
+    // keep the PTY paused waiting for acknowledgements that will never arrive.
+    webContents.on?.('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
+      if (mainFrame && !inPlace) detachTerminals();
+    });
+    webContents.on?.('render-process-gone', detachTerminals);
+    webContents.once('destroyed', () => {
+      this.targets.delete(webContents);
+      detachTerminals();
+    });
   }
 
   /** Re-deliver pending interaction prompts after the renderer document reloads. */
@@ -385,6 +447,52 @@ export class HostController {
         }
       });
     }
+    this.ipc.handle(CH_TERMINAL_REQUEST, async (event: IpcMainInvokeEvent, value: unknown) => {
+      this.assertSender(event);
+      if (!this.terminals) throw new Error('terminal service is unavailable');
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid terminal request');
+      const request = value as Record<string, unknown>;
+      if (request['kind'] === 'list' || request['kind'] === 'create') {
+        return this.enqueueNavigation(async () => {
+          this.assertSender(event);
+          const scope = await this.validateSessionScope(request['scope']);
+          this.assertSender(event);
+          const delivery = this.terminalDelivery(event.sender);
+          if (request['kind'] === 'list') {
+            const snapshots = this.terminals!.list(scope);
+            for (const snapshot of snapshots) delivery.watch(snapshot);
+            return snapshots;
+          }
+          const snapshot = await this.terminals!.create(scope);
+          delivery.watch(snapshot);
+          return snapshot;
+        });
+      }
+      const id = request['terminalId'];
+      if (typeof id !== 'string' || id.length > 128) throw new Error('invalid terminal id');
+      if (request['kind'] === 'acknowledge') {
+        const sequence = request['sequence'];
+        if (!Number.isSafeInteger(sequence) || (sequence as number) < 0) throw new Error('invalid terminal sequence');
+        this.terminalDeliveries.get(event.sender)?.acknowledge(id, sequence as number);
+        return;
+      }
+      const terminal = this.terminals.get(id);
+      if (!terminal) throw new Error('terminal no longer exists');
+      if (!this.terminalDeliveries.get(event.sender)?.has(id)) throw new Error('terminal is not attached to this window');
+      if (!this.settings.isTrustedWorkspace(terminal.scope.projectPath) || this.isProjectClosing(terminal.scope.projectPath)) throw new Error('project is unavailable');
+      switch (request['kind']) {
+        case 'input':
+          if (typeof request['data'] !== 'string' || request['data'].length > 65_536) throw new Error('invalid terminal input');
+          return this.terminals.input(id, request['data']);
+        case 'resize':
+          if (!Number.isInteger(request['cols']) || !Number.isInteger(request['rows'])
+            || (request['cols'] as number) < 1 || (request['cols'] as number) > 1000
+            || (request['rows'] as number) < 1 || (request['rows'] as number) > 1000) throw new Error('invalid terminal dimensions');
+          return this.terminals.resize(id, request['cols'] as number, request['rows'] as number);
+        case 'close': return this.terminals.close(id);
+        default: throw new Error('unsupported terminal request');
+      }
+    });
     this.ipc.handle(CH_BOOTSTRAP, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       return this.bootstrap();
@@ -1252,9 +1360,12 @@ export class HostController {
   }
 
   dispose(): void {
+    this.offTerminals?.();
+    for (const delivery of this.terminalDeliveries.values()) delivery.dispose();
+    this.terminalDeliveries.clear();
     if (!this.registered) return;
     for (const channel of [
-      CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
+      CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_WORKSPACE_FILES_SEARCH,

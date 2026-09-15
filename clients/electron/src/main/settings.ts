@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
@@ -25,10 +25,24 @@ import {
 export class SettingsStore {
   readonly settingsPath: string;
   private settings: PersistedSettings;
+  // Canonical form of the managed scope. Every caller that compares a path
+  // against it has already run it through `canonicalWorkspace` (which
+  // realpaths), so a userData directory reached through a symlink — a
+  // relocated home, a junction-redirected AppData, a `/var`->`/private/var`
+  // test root — would otherwise never match and the app own managed
+  // workspace would be rejected as "not in the project list".
+  private readonly managedWorkspace: string;
   private volatileActiveSession: SessionRef | undefined;
 
   constructor(userData: string) {
     this.settingsPath = join(userData, 'settings.v1.json');
+    const managed = join(userData, 'scheduled-workspace');
+    let canonical = managed;
+    try {
+      mkdirSync(managed, { recursive: true, mode: 0o700 });
+      canonical = realpathSync.native(managed);
+    } catch { /* Fall back to the literal path; requireProject still mkdirs. */ }
+    this.managedWorkspace = canonical;
     this.settings = this.readSettings();
   }
 
@@ -104,6 +118,14 @@ export class SettingsStore {
       this.volatileActiveSession = undefined;
     }
     return this.getPublic();
+  }
+
+  get scheduledWorkspace(): string {
+    return this.managedWorkspace;
+  }
+
+  isTrustedWorkspace(path: string): boolean {
+    return path === this.scheduledWorkspace || this.hasProject(path);
   }
 
   hasProject(canonical: string): boolean {

@@ -1,5 +1,7 @@
 import type { CronJobDto } from '@lingxi/bridge-client';
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
+import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT } from '../shared/terminal.js';
+import type { TerminalApi } from '../shared/terminal.js';
 import type {
   AskUserQuestionRequestDto,
   AudioOpDto,
@@ -154,6 +156,7 @@ export interface NativeAudioApi {
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
+  terminal: TerminalApi;
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
@@ -242,6 +245,15 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  terminal: {
+    list: (scope) => ipcRenderer.invoke(CH_TERMINAL_REQUEST, { kind: 'list', scope }),
+    create: (scope) => ipcRenderer.invoke(CH_TERMINAL_REQUEST, { kind: 'create', scope }),
+    input: (terminalId, data) => ipcRenderer.invoke(CH_TERMINAL_REQUEST, { kind: 'input', terminalId, data }),
+    resize: (terminalId, cols, rows) => ipcRenderer.invoke(CH_TERMINAL_REQUEST, { kind: 'resize', terminalId, cols, rows }),
+    close: (terminalId) => ipcRenderer.invoke(CH_TERMINAL_REQUEST, { kind: 'close', terminalId }),
+    acknowledge: (terminalId, sequence) => ipcRenderer.invoke(CH_TERMINAL_REQUEST, { kind: 'acknowledge', terminalId, sequence }),
+    onEvent: (callback) => subscribe(CH_TERMINAL_EVENT, callback),
+  },
   getPathForFile: (file) => webUtils.getPathForFile(file),
   platform: process.platform,
   isElectron: true,

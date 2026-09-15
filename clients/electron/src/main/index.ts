@@ -12,6 +12,7 @@ import {
 } from './credential-broker.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { HostController } from './host.js';
+import { TerminalManager } from './terminal.js';
 import { HostNotifier } from './notifications.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -28,6 +29,7 @@ const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
 let nativeAudio: NativeAudioManager | null = null;
+let terminals: TerminalManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
 
@@ -295,6 +297,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     nativeAudio ?? undefined,
   );
   host.attachNotifier(notifier);
+  terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
+  host.attachTerminals(terminals);
   host.registerIpc();
   createWindow();
 
@@ -333,11 +337,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   host = null;
   notifier?.dispose();
   notifier = null;
+  const currentTerminals = terminals;
+  terminals = null;
   const currentAudio = nativeAudio;
   nativeAudio = null;
   const currentBridge = bridge;
   bridge = null;
   void Promise.all([
+    currentTerminals?.dispose() ?? Promise.resolve(),
     currentAudio?.dispose() ?? Promise.resolve(),
     currentBridge?.dispose() ?? Promise.resolve(),
   ]).finally(() => app.quit());

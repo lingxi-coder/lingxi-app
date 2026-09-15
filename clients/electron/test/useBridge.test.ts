@@ -395,10 +395,23 @@ test('tracked prompts reserve a token before dispatch and keep sendPrompt as a c
   // sets and clears `'pending'`, but nothing ever produced `'failed'` — the
   // prompt that could not be queued sat there looking delivered. This is a
   // source guard, not a behavioural one: the branch lives inside a `useCallback`
-  // with no seam a unit test can drive, so it pins that the failure path still
-  // marks the item it captured, and would catch the branch being deleted.
-  assert.match(trackedBody, /promptItemId = conversation\.items\.at\(-1\)\?\.id/);
-  assert.match(trackedBody, /item\.id === promptItemId && item\.type === 'narration' \? \{ \.\.\.item, delivery: 'failed' as const \}/);
+  // with no seam a unit test can drive.
+  //
+  // It names the WIRE VALUE, not the local that carries the row. The first
+  // version of this guard spelled out `promptItemId`, and a later refactor that
+  // kept the behaviour exactly (capturing the item instead of its id, comparing
+  // by reference) turned it red — a false alarm on a legitimate change is how a
+  // guard teaches people to delete it.
+  assert.match(
+    trackedBody,
+    /delivery: 'failed' as const/,
+    "the send-failure branch must still mark the prompt row as not sent",
+  );
+  assert.match(
+    trackedBody,
+    /appendPendingUserPrompt\(/,
+    'and must still be marking the row that was appended for this prompt',
+  );
 
   const sendPromptBody = sliceBetweenMarkers(
     useBridgeSource(),

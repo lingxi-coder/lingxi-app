@@ -41,6 +41,26 @@ async function main() {
     assert.equal(await js(`document.querySelector('[aria-label="Toggle theme"]') === null && document.querySelector('#runtime-center-overview') === null && document.querySelector('.runtime-inspector') === null`), true);
     checks.push('initial closed controls');
 
+    await click('[aria-label="Toggle right panel"]');
+    assert.equal(await js(`document.querySelector('.runtime-inspector').getAnimations().length > 0`), true);
+    await click('[aria-label="Toggle right panel"]');
+    assert.equal(await js(`document.querySelector('.runtime-inspector').inert`), true);
+    await click('[aria-label="Toggle right panel"]');
+    await delay(280);
+    assert.equal(await js(`document.querySelector('.runtime-inspector').inert`), false);
+    assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector')).opacity`), '1');
+    await click('[aria-label="Hide right panel"]');
+    await waitFor(wc, `!document.querySelector('.runtime-inspector')`);
+    wc.debugger.attach('1.3');
+    await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    await click('[aria-label="Toggle right panel"]');
+    assert.equal(await js(`document.querySelector('.runtime-inspector').getAnimations({subtree:true}).length`), 0);
+    await click('[aria-label="Hide right panel"]');
+    assert.equal(await js(`document.querySelector('.runtime-inspector')`), null);
+    await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
+    wc.debugger.detach();
+
+
     assert.equal(await js(`Boolean(document.querySelector('.desktop-topbar [aria-label="More chat actions"], .desktop-topbar .git-topbar'))`), false);
     await click('[aria-label="Toggle pinned summary"]');
     await click('[aria-label="Open context summaries"]');
@@ -90,6 +110,7 @@ async function main() {
     wc.sendInputEvent({type:'keyDown',keyCode:'End'});
     wc.sendInputEvent({type:'keyUp',keyCode:'End'});
     await waitFor(wc, `document.querySelector('[data-runtime-inspector-active="true"]')?.textContent.includes('Plan')`);
+    await js(`Promise.all(document.querySelector('.runtime-inspector').getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})))`);
     await capture('details-light');
     const heights = await js(`({ chat: document.querySelector('.desktop-topbar').getBoundingClientRect().height, detail: document.querySelector('.runtime-inspector-header').getBoundingClientRect().height, panel: document.querySelector('.runtime-inspector').getBoundingClientRect().width })`);
     assert.deepEqual(heights, { chat: 56, detail: 56, panel: 390 });

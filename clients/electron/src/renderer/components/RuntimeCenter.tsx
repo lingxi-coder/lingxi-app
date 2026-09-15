@@ -1,3 +1,4 @@
+import { useInspectorMotion } from './useInspectorMotion';
 import { SummaryContextActions } from './BetaDesktop';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { GitReview, GitEnvironment } from './GitReview';
@@ -468,6 +469,7 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
   const t = useT();
   const center = bridge.runtimeCenter;
   const active = center.activeItem;
+  const motion = useInspectorMotion(center.inspectorOpen, active ? runtimeCenterItemKey(active) : 'landing', bridge.conversation.sessionKey);
   const plan = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
   const resource = active?.kind === 'resource' ? center.resources.find((entry) => entry.id === active.id) : undefined;
   const task = active?.kind === 'task' ? bridge.desktop.tasks[active.id] : undefined;
@@ -535,9 +537,9 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
     return startPollingWhileActive(() => true, bridge.refreshTasks);
   }, [center.inspectorOpen, center.overviewOpen, active?.kind, active?.id, bridge.refreshTasks]);
 
-  if (!center.inspectorOpen) return null;
+  if (!motion.present) return null;
   return (
-    <aside id="runtime-inspector" className="runtime-inspector" aria-label="Runtime inspector" style={{ background: t.surface, borderLeft: `0.5px solid ${t.border}` }}>
+    <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label="Runtime inspector" style={{ background: t.surface, borderLeft: `0.5px solid ${t.border}` }}>
       <header className="runtime-inspector-header" style={{ borderBottom: `0.5px solid ${t.border}` }}>
         <InspectorTabs bridge={bridge} />
         <button type="button" aria-label="Hide right panel" className="runtime-panel-hide" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} style={runtimeCenterButtonStyle(t, true)}><Icon name="panel-right" size={18} /></button>

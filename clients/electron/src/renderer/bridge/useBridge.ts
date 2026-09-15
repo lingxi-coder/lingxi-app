@@ -214,8 +214,6 @@ export interface UseBridge {
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
-  loginCodex(): Promise<ProviderCredentialUpdate>;
-  cancelCodexLogin(): Promise<void>;
   testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
   refreshProviderCredential(providerId: string): Promise<void>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;

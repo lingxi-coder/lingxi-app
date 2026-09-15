@@ -1953,16 +1953,18 @@ mod tests {
     /// A stale generation's guard must not stop the inbox, unregister the live
     /// generation, or disturb the retired session's inbox.
     ///
-    /// The inbox fixtures are written through `send_inbox` rather than through
-    /// the process-global accepted queue. That queue is drained by
-    /// `take_accepted_peer_reminders`, which every turn calls as it assembles
-    /// reminders — production code in another crate that takes no test lock, so
-    /// any concurrently running turn could empty it between the enqueue and the
-    /// generation switch. This test then failed inside its own FIXTURE, on a
-    /// missing file, roughly one run in three. The spill those steps exercised
-    /// is not this test's subject and is covered where the global lives, by
-    /// `uds_inbox`'s own `retarget_spills_old_generation_work_to_old_session`
-    /// and its shutdown siblings, under that crate's `test_guard`.
+    /// Nothing here depends on state that `take_accepted_peer_reminders` can
+    /// drain. That one function empties BOTH stores this test used to rely on —
+    /// the process-global accepted queue AND
+    /// `process_live_dir().drain_inbox(process_session_id())` — and every turn
+    /// calls it while assembling reminders, from another crate, holding no test
+    /// lock. A serial lock between tests cannot exclude it. So the fixture uses
+    /// `send_inbox` rather than the queue, and seeds it only once the process
+    /// session id has moved to C, which puts A's file out of that drainer's
+    /// reach. The spill those steps used to exercise is not this test's subject
+    /// and is covered where the global lives, by `uds_inbox`'s own
+    /// `retarget_spills_old_generation_work_to_old_session` and its shutdown
+    /// siblings, under that crate's `test_guard`.
     #[test]
     fn stale_live_session_guard_cannot_stop_or_unregister_new_generation() {
         let _serial = crate::driver::LOOP_KA_TEST_SERIAL
@@ -1979,8 +1981,19 @@ mod tests {
         cfg_a.session_id_override = Some(session_a.to_string());
         let guard_a = initialize_live_session(&mut cfg_a).expect("start generation A");
 
-        // Stand in for work already spilled to the retired session's inbox.
-        let dir = guard_a.dir.clone();
+        let mut cfg_c = resolve_desktop_config(&BridgeArgs::default());
+        cfg_c.cwd = cwd.path().to_path_buf();
+        cfg_c.lingxi_home = home.path().to_path_buf();
+        cfg_c.session_id_override = Some(session_c.to_string());
+        let guard_c = initialize_live_session(&mut cfg_c).expect("start generation C");
+        let dir = guard_c.dir.clone();
+
+        // Seed A's inbox only AFTER C has taken the process session id. While A
+        // is still the live generation its file inbox is fair game for
+        // `live_sessions::take_accepted_peer_reminders`, which drains
+        // `process_live_dir().drain_inbox(process_session_id())` — and that is
+        // called by every turn, from another crate, holding no test lock. Seeded
+        // before C, this file was deleted out from under the assertion below.
         let mut owned_by_a = platform_api::live_sessions::outbound_peer_message(
             "sender",
             "source-session",
@@ -1992,13 +2005,6 @@ mod tests {
             .expect("seed the retired session inbox");
         let a_inbox_path = dir.root().join(format!("{session_a}.inbox.jsonl"));
         let a_inbox_before = std::fs::read(&a_inbox_path).expect("fixture inbox exists");
-
-        let mut cfg_c = resolve_desktop_config(&BridgeArgs::default());
-        cfg_c.cwd = cwd.path().to_path_buf();
-        cfg_c.lingxi_home = home.path().to_path_buf();
-        cfg_c.session_id_override = Some(session_c.to_string());
-        let guard_c = initialize_live_session(&mut cfg_c).expect("start generation C");
-        let dir = guard_c.dir.clone();
 
         drop(guard_a);
 

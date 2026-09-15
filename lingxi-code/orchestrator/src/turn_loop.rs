@@ -4033,7 +4033,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // any hook, so there is no pre-hook context to fold — emit the raw
         // wrapped literal verbatim (claude-code's unknown-tool has no hook
         // context).
-        let Some(tool_handle) = orch.find_dispatchable_tool(name) else {
+        let Some(tool_handle) = orch.find_tool_for_dispatch(name) else {
             // Shared builder so this parity-critical string lives in one place
             // (also used by the streaming executor's add_tool).
             let suffix = crate::streaming_executor::unknown_tool_suffix_for(name, orch);

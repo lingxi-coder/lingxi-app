@@ -677,10 +677,41 @@ impl ConversationOrchestrator {
     /// registered name as unknown so `Ldt` can take the `Y7e` worker-redirect
     /// arm. The shared registry stays full — workers still resolve from
     /// `available_tools`.
+    /// Is this tool available to the model right now? A tool-pool DENY hides it,
+    /// which is what the advertised tool list and the reminders want to know.
     #[must_use]
     pub(crate) fn find_dispatchable_tool(
         &self,
         name: &str,
+    ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        self.lookup_tool(name, true)
+    }
+
+    /// The lookup a `tool_use` DISPATCH must use: identical, except a tool-pool
+    /// deny does not hide the tool.
+    ///
+    /// Upstream 2.1.270 (`GT` / `tBn`, `src_169588164.js`) makes a tool-wide
+    /// deny the FIRST branch of the authorization walk and returns a permission
+    /// DECISION from it — `Permission to use ${e.name} has been denied.` — so
+    /// the tool stays dispatchable. Hiding it here instead sent the call down
+    /// the unknown-tool path: the model was told `tool not found`, and the
+    /// permission decision never ran at all.
+    ///
+    /// Safe because the deny is re-decided downstream: `policy.rs`'s
+    /// `authorize_inner` matches the tool-wide deny set first and returns
+    /// `deny_with_rule`, so `tool.call` is never reached.
+    #[must_use]
+    pub(crate) fn find_tool_for_dispatch(
+        &self,
+        name: &str,
+    ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        self.lookup_tool(name, false)
+    }
+
+    fn lookup_tool(
+        &self,
+        name: &str,
+        honor_pool_deny: bool,
     ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
         let tool = self.tools.find_by_name(name)?;
         if self
@@ -697,7 +728,7 @@ impl ConversationOrchestrator {
             ..Default::default()
         };
         if !tool.is_enabled(&ctx)
-            || self.is_tool_pool_denied(tool.as_ref())
+            || (honor_pool_deny && self.is_tool_pool_denied(tool.as_ref()))
             || (self.is_coordinator_mode_enabled() && !self.is_coordinator_pool_tool(tool.as_ref()))
         {
             return None;

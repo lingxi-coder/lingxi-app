@@ -309,7 +309,7 @@ impl<'a> StreamingToolExecutor<'a> {
         provider_id: Option<String>,
         assistant_id: MessageId,
     ) {
-        match self.orch.find_dispatchable_tool(&name) {
+        match self.orch.find_tool_for_dispatch(&name) {
             None => {
                 let suffix = unknown_tool_suffix_for(&name, self.orch);
                 let block = synthetic_unknown_tool(id.clone(), &name, provider_id.clone(), &suffix);

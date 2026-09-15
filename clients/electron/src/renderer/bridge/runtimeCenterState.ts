@@ -87,6 +87,26 @@ export function emptyRuntimeCenterState(): RuntimeCenterState {
   };
 }
 
+/**
+ * Active children belonging to this session, excluding the main turn and parked
+ * agents.
+ *
+ * `pending` belongs here: it is the engine's own vocabulary (`client-protocol`'s
+ * agent listing is `running`/`pending`/`completed`/`failed`/`killed`/`cancelled`/
+ * `unknown`) and it is what a just-spawned subagent reports before its first
+ * turn. Leaving it out made the overview count the agent as running while
+ * `canStop` and `cancel()` saw an empty list — so Escape was a silent no-op for
+ * exactly the window in which a user is most likely to press it.
+ *
+ * `idle` stays out on purpose: a parked agent is not doing work, and stopping it
+ * is not what Escape means.
+ */
+export function runningSubagentIds(state: Pick<RuntimeCenterState, 'agents'> | undefined): string[] {
+  return Object.values(state?.agents ?? {})
+    .filter((agent) => agent.agent_id !== 'main' && ['running', 'pending', 'working', 'in_progress'].includes(agent.status))
+    .map((agent) => agent.agent_id);
+}
+
 export function resetRuntimeCenterData(state: RuntimeCenterState): RuntimeCenterState {
   return {
     ...emptyRuntimeCenterState(),

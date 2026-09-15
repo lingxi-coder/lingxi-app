@@ -391,6 +391,15 @@ test('tracked prompts reserve a token before dispatch and keep sendPrompt as a c
   assert.match(trackedBody, /Failed to queue the pending message/);
   assert.match(trackedBody, /running: wasTurnActive/);
 
+  // `Stage` renders "Not sent" for `delivery: 'failed'` and `conversation.ts`
+  // sets and clears `'pending'`, but nothing ever produced `'failed'` — the
+  // prompt that could not be queued sat there looking delivered. This is a
+  // source guard, not a behavioural one: the branch lives inside a `useCallback`
+  // with no seam a unit test can drive, so it pins that the failure path still
+  // marks the item it captured, and would catch the branch being deleted.
+  assert.match(trackedBody, /promptItemId = conversation\.items\.at\(-1\)\?\.id/);
+  assert.match(trackedBody, /item\.id === promptItemId && item\.type === 'narration' \? \{ \.\.\.item, delivery: 'failed' as const \}/);
+
   const sendPromptBody = sliceBetweenMarkers(
     useBridgeSource(),
     'const sendPrompt = useCallback',

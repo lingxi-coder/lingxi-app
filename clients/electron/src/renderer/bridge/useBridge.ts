@@ -65,6 +65,7 @@ import {
   closeRuntimeCenterItem,
   commitRuntimeResources,
   emptyRuntimeCenterState,
+  runningSubagentIds,
   openRuntimeCenterItem,
   promptRuntimeResources,
   reduceRuntimeCenterEvent,
@@ -96,6 +97,7 @@ import type {
   WorkspaceFileSearchResult,
   WorkspaceFilePreview,
   WorkspaceMetadata,
+  LingxiApi,
 } from './lingxi';
 
 /**
@@ -133,6 +135,20 @@ export interface TrackedSpeechEvent {
   readonly sequence: number;
   readonly turnId?: number;
   readonly terminal?: TrackedSpeechTerminal;
+}
+
+/** Stop explicit agent aliases through the session they belong to, even across UI navigation. */
+export async function stopSessionSubagents(
+  host: Pick<LingxiApi, 'command'>,
+  sessionId: string,
+  agentIds: readonly string[],
+): Promise<void> {
+  const results = await Promise.allSettled(agentIds.map((agentId) =>
+    host.command(sessionId, { type: 'task_stop', task_id: agentId })));
+  // Refresh after dispatch so reconnect/stale roster entries can reconcile.
+  await host.command(sessionId, { type: 'list_session_agents' });
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failures.length) throw new Error(`Failed to stop background agents: ${failures.map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason)).join('; ')}`);
 }
 
 export interface UseBridge {
@@ -295,12 +311,12 @@ export interface UseBridge {
   /** `remove_mcp_server` — idempotent removal from exactly the named scope. Refetches the MCP listing afterward. */
   removeMcpServer(scope: McpScopeDto, name: string): Promise<void>;
   /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
-  manageCron(request: CronRequestDto): Promise<CronJobDto[]>;
   scheduledScopes: ScheduledScope[];
   scheduledContext(scopeId: string): Promise<ScheduledContext>;
   manageScheduled(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]>;
   readScheduledHistory(scopeId: string, jobId: string): Promise<CronRunDto[]>;
   openScheduledSession(scopeId: string, sessionId: string): Promise<void>;
+  manageCron(request: CronRequestDto): Promise<CronJobDto[]>;
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
   mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
@@ -842,6 +858,13 @@ export function useBridge(): UseBridge {
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [pendingSession, setPendingSession] = useState<SessionRef | null>(null);
   const [runtimeStates, setRuntimeStates] = useState<Map<string, RuntimeState>>(new Map());
+  // `updateRuntime` replaces this Map on every engine event, so any callback
+  // that lists it as a dependency changes identity per streamed token. Consumers
+  // that only need to READ the latest snapshot at call time go through the ref
+  // and stay referentially stable — `bridge.cancel` is keyed on by an effect
+  // that disposes and rebuilds the voice-flow controller.
+  const runtimeStatesRef = useRef(runtimeStates);
+  runtimeStatesRef.current = runtimeStates;
   const [error, setError] = useState<string | null>(null);
   const clearError = useCallback(() => setError(null), []);
   const [audioSnapshot, setAudioSnapshot] = useState<NativeAudioSnapshot>(defaultNativeAudioSnapshot());
@@ -1582,12 +1605,17 @@ export function useBridge(): UseBridge {
         mode: saved?.mode ?? 'code', path: saved?.path ?? '',
       },
     } : undefined;
-    updateRuntime(sessionId, (state) => ({
-      ...state,
-      submittedSession: state.submittedSession ?? submittedSession,
-      conversation: appendPendingUserPrompt(state.conversation, trimmed, images),
-      runtimeCenter: addRuntimeResources(state.runtimeCenter, resources),
-    }));
+    let promptItemId: string | undefined;
+    updateRuntime(sessionId, (state) => {
+      const conversation = appendPendingUserPrompt(state.conversation, trimmed, images);
+      promptItemId = conversation.items.at(-1)?.id;
+      return {
+        ...state,
+        submittedSession: state.submittedSession ?? submittedSession,
+        conversation,
+        runtimeCenter: addRuntimeResources(state.runtimeCenter, resources),
+      };
+    });
     const queued = host.sendPrompt(sessionId, trimmed, images).then(() => {
       if (removedRuntimeIds.current.has(sessionId)) return;
       updateRuntime(sessionId, (state) => ({
@@ -1602,7 +1630,8 @@ export function useBridge(): UseBridge {
         updateRuntime(sessionId, (state) => ({
           ...state,
           conversation: {
-            ...reduceEvent(state.conversation, wasTurnActive
+            ...reduceEvent({ ...state.conversation, items: state.conversation.items.map((item) =>
+              item.id === promptItemId && item.type === 'narration' ? { ...item, delivery: 'failed' as const } : item) }, wasTurnActive
               ? { type: 'system_notice', message: 'Failed to queue the pending message.', is_error: true }
               : { type: 'error', kind: { type: 'transport' }, message: 'Failed to send the prompt to the engine.' }),
             running: wasTurnActive,
@@ -1702,7 +1731,10 @@ export function useBridge(): UseBridge {
 
   const cancel = useCallback((turnId?: number): Promise<void> => {
     const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId || !turnActiveRefs.current.get(sessionId)) return Promise.resolve();
+    if (sessionLoadingRef.current || !host || !sessionId) return Promise.resolve();
+    const foregroundActive = turnActiveRefs.current.get(sessionId) === true;
+    const agentIds = runningSubagentIds(runtimeStatesRef.current.get(sessionId)?.runtimeCenter);
+    if (!foregroundActive && !agentIds.length) return Promise.resolve();
     const cancelling = cancellingRefs.current.get(sessionId) ?? { current: false };
     const taskRef = cancellationTasks.current.get(sessionId) ?? { current: null };
     cancellingRefs.current.set(sessionId, cancelling);
@@ -1711,7 +1743,10 @@ export function useBridge(): UseBridge {
     cancelling.current = true;
     updateRuntime(sessionId, (state) => ({ ...state, isCancelling: true }));
     let task: Promise<void>;
-    task = host.cancel(sessionId, turnId).then(() => {
+    const stop = foregroundActive
+      ? host.cancel(sessionId, turnId)
+      : stopSessionSubagents(host, sessionId, agentIds);
+    task = stop.then(() => {
       updateRuntime(sessionId, (state) => ({
         ...state,
         permissionQueue: [],
@@ -1729,6 +1764,12 @@ export function useBridge(): UseBridge {
         updateRuntime(sessionId, (state) => ({ ...state, isCancelling: false }));
       }
       capture(cause);
+    }).finally(() => {
+      // Background-only cancellation has no turn_ended event to release this latch.
+      if (!foregroundActive && taskRef.current === task) {
+        clearCancellationRuntime(cancelling, taskRef);
+        updateRuntime(sessionId, (state) => ({ ...state, isCancelling: false }));
+      }
     });
     taskRef.current = task;
     return task;
@@ -1914,7 +1955,7 @@ export function useBridge(): UseBridge {
     const state = runtimeStates.get(sessionId);
     if (!summary && !state) return undefined;
     return {
-      backgroundAgentsRunning: Object.values(state?.runtimeCenter.agents ?? {}).some((agent) => agent.agent_id !== 'main' && ['running', 'working', 'in_progress'].includes(agent.status)),
+      backgroundAgentsRunning: runningSubagentIds(state?.runtimeCenter).length > 0,
       connection: state?.connection ?? summary?.connection ?? { status: 'idle' },
       turnActive: turnActiveRefs.current.get(sessionId) ?? summary?.turnActive ?? false,
       pendingInteractions: state?.pendingInteractionsOverride
@@ -2457,8 +2498,8 @@ export function useBridge(): UseBridge {
   } : null, [bootstrap, runtimeStates]);
 
   return {
-    manageCron,
     scheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
+    manageCron,
     hosted,
     loading,
     bootstrap: presentedBootstrap,

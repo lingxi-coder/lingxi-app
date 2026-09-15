@@ -316,6 +316,31 @@ async function runRemountOnLayerSwitchScenario(webContents) {
   return { markerBeforeSwitch, markerAfterSwitch, markerAfterUnrelatedRerender };
 }
 
+async function runBackClickScenario(webContents) {
+  // Model the sidebar brand's drag region, which remains beneath settings.
+  const regions = await webContents.executeJavaScript(`(() => {
+    const drag = document.createElement('div');
+    drag.className = 'drag-region';
+    Object.assign(drag.style, { position: 'absolute', top: '38px', left: '0', width: '240px', height: '48px' });
+    document.body.prepend(drag);
+    const panel = document.querySelector('[role="dialog"]');
+    const button = document.querySelector('[aria-label="Back to app"]');
+    const rect = button.getBoundingClientRect();
+    return {
+      panelRegion: getComputedStyle(panel).getPropertyValue('-webkit-app-region'),
+      backgroundRegion: getComputedStyle(drag).getPropertyValue('-webkit-app-region'),
+      x: Math.round(rect.x + rect.width / 2),
+      y: Math.round(rect.y + rect.height / 2),
+    };
+  })()`);
+  // Input injection alone bypasses OS non-client hit testing; the region
+  // assertion in the test also guards the native Electron drag exclusion.
+  webContents.sendInputEvent({ type: 'mouseDown', x: regions.x, y: regions.y, button: 'left', clickCount: 1 });
+  webContents.sendInputEvent({ type: 'mouseUp', x: regions.x, y: regions.y, button: 'left', clickCount: 1 });
+  await delay(50);
+  return { ...regions, afterClose: await webContents.executeJavaScript('window.__settingsScreenTest.state()') };
+}
+
 async function runFocusTrapScenario(webContents) {
   // Start from a controlled mount: close the default-open dialog, focus the
   // element that will stand in for "whatever opened Settings", then reopen.
@@ -579,6 +604,7 @@ async function main() {
       : scenario === 'malformed-snapshot' ? await runMalformedSnapshotScenario(webContents)
       : scenario === 'session-loading-guard' ? await runSessionLoadingGuardScenario(webContents)
       : scenario === 'focus-trap' ? await runFocusTrapScenario(webContents)
+      : scenario === 'back-click' ? await runBackClickScenario(webContents)
       : scenario === 'page-content' ? await runPageContentScenario(webContents)
       : scenario === 'layer-reseed' ? await runLayerReseedScenario(webContents)
       : scenario === 'permission-rule-dispatch' ? await runPermissionRuleDispatchScenario(webContents)

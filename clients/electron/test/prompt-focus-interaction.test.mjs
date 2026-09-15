@@ -76,6 +76,7 @@ test('real Electron preserves Sidebar focus and supports native resize dragging'
       });
     });
 
+    assert.deepEqual(result.coverage, { fillsWindow: true, coversEdges: true });
     assert.deepEqual(result.beforeTab, {
       promptOpen: true,
       activeLabel: 'Allow once',

@@ -50,6 +50,22 @@ async function main() {
     await waitFor(webContents, `Boolean(document.querySelector('[role="dialog"]'))`);
     await waitFor(webContents, `document.activeElement?.textContent?.trim() === 'Allow once'`);
 
+    const coverage = await webContents.executeJavaScript(`(() => {
+      const overlay = document.querySelector('.desktop-dialog-overlay');
+      const rect = overlay.getBoundingClientRect();
+      return {
+        fillsWindow: rect.x === 0 && rect.y === 0 && rect.width === innerWidth && rect.height === innerHeight,
+        coversEdges: [[1, 1], [innerWidth - 1, 1], [1, innerHeight - 1], [innerWidth - 1, innerHeight - 1]]
+          .every(([x, y]) => overlay.contains(document.elementFromPoint(x, y))),
+      };
+    })()`);
+    if (process.env.LINGXI_PERMISSION_SCREENSHOT) {
+      window.showInactive();
+      await delay(300);
+      await webContents.executeJavaScript(`document.getAnimations().forEach((animation) => animation.finish())`);
+      await writeFile(process.env.LINGXI_PERMISSION_SCREENSHOT, (await webContents.capturePage()).toPNG());
+    }
+
     const beforeTab = await webContents.executeJavaScript(`({
       promptOpen: Boolean(document.querySelector('[role="dialog"]')),
       activeLabel: document.activeElement?.textContent?.trim() ?? null,
@@ -107,7 +123,7 @@ async function main() {
     await delay(50);
     const afterResize = await webContents.executeJavaScript(`Math.round(document.querySelector('[aria-label="Resize sidebar"]').closest('aside').getBoundingClientRect().width)`);
 
-    process.stdout.write(`${JSON.stringify({ beforeTab, afterTab, afterDismiss, resize: { before: Math.round(resizeGeometry.before), after: afterResize } })}\n`);
+    process.stdout.write(`${JSON.stringify({ coverage, beforeTab, afterTab, afterDismiss, resize: { before: Math.round(resizeGeometry.before), after: afterResize } })}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();
     if (app.isReady()) await app.quit();

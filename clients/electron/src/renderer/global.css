@@ -802,7 +802,8 @@ body {
 
 /* Shared Desktop dialog ------------------------------------------------- */
 .desktop-dialog-overlay {
-  position: absolute;
+  /* Dialogs cover the entire window, including navigation and auxiliary panels. */
+  position: fixed;
   inset: 0;
   z-index: 60;
   display: flex;

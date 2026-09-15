@@ -183,6 +183,14 @@ test('opening settings while the session is loading sends nothing, and the snaps
   assert.ok(afterReady.refreshCalls > whileLoading.refreshCalls, 'once loading finishes the effect must retry on its own, with no separate action');
 });
 
+test('settings excludes background window dragging and Back responds to mouse input', async () => {
+  const { panelRegion, backgroundRegion, afterClose } = await runScenario('back-click');
+  assert.equal(backgroundRegion, 'drag');
+  assert.equal(panelRegion, 'no-drag', 'settings must exclude the native drag regions beneath its overlay');
+  assert.equal(afterClose.dialogPresent, false);
+  assert.equal(afterClose.closeCalls, 1);
+});
+
 test('the settings-focus behavior starts at Back, traverses search, and restores the opener on return', async () => {
   const { onMount, afterForwardTab, afterBackwardTab, afterClose } = await runScenario('focus-trap');
   assert.equal(onMount.activeElementAriaLabel, 'Back to app', 'mounting an aria-modal dialog must move focus INTO it, not leave it in the background');

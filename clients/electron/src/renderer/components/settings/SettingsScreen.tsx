@@ -645,6 +645,8 @@ export function SettingsScreen({
   return (
     <div
       ref={panelRef}
+      // Exclude the sidebar/titlebar drag regions still mounted behind settings.
+      className="no-drag"
       role="dialog"
       aria-modal="true"
       aria-label="设置"

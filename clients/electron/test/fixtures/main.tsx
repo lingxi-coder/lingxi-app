@@ -71,12 +71,15 @@ function Fixture() {
   }, []);
 
   return (
-    <Theme.Provider value={tokens('light')}>
-      <div style={{ position: 'relative', height: '100vh', display: 'flex' }}>
+    <Theme.Provider value={tokens(false)}>
+      <div className="desktop-shell" style={{ position: 'relative', height: '100vh', display: 'flex' }}>
+        <BetaSidebar bridge={bridge as never} onOpenSettings={() => {}} />
+        <main className="desktop-main" style={{ position: 'relative', flex: 1, marginBottom: 100, overflow: 'hidden' }}>
         {promptOpen && (
           <PermissionPrompt request={request} onApprove={() => {}} onDeny={() => {}} />
         )}
-        <BetaSidebar bridge={bridge as never} onOpenSettings={() => {}} />
+        </main>
+        <aside style={{ width: 120 }}>Inspector</aside>
       </div>
     </Theme.Provider>
   );

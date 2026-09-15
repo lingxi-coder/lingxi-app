@@ -168,8 +168,9 @@ export const DESKTOP_ENGINE_BUILTIN_COMMANDS = [
   'agents', 'auto-mode-setup', 'autocompact', 'brief', 'btw', 'commit',
   'commit-push-pr', 'connect', 'context', 'diff', 'doctor', 'export', 'files',
   'fork', 'fusion', 'goal', 'hooks', 'ide', 'init', 'init-verifiers', 'insights',
-  'keybindings', 'mcp', 'memory', 'plan', 'powerup', 'recap', 'release-notes',
-  'reload-skills', 'resume', 'security-review', 'skill-doctor', 'skills', 'status',
+  'keybindings', 'mcp', 'memory', 'output-style', 'plan', 'powerup', 'recap',
+  'release-notes', 'reload-skills', 'resume', 'security-review', 'skill-doctor',
+  'skills', 'status',
   'stickers', 'stop', 'subtask', 'usage', 'workflows', 'worktree',
 ] as const;
 

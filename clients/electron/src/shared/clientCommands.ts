@@ -10,9 +10,6 @@ export type DesktopDisposition = 'exposed' | 'host_private' | 'degraded' | 'not_
 
 export const CLIENT_COMMAND_DISPOSITIONS = {
   cron_manage: 'exposed',
-  scheduled_run_turn: 'host_private',
-  cron_run_completed: 'host_private',
-  cron_run_started: 'host_private',
   send_prompt: 'host_private',
   cancel: 'host_private',
   attach_turn: 'not_applicable',
@@ -102,15 +99,11 @@ export const REFRESH_LISTING_DISPOSITIONS = {
 
 export const CLIENT_EVENT_DISPOSITIONS = {
   cron_result: 'exposed',
-  cron_run_requested: 'host_private',
-  cron_run_bound: 'host_private',
-  scheduled_run_finished: 'host_private',
   error: 'exposed',
   message_identity: 'exposed',
   message_retracted: 'exposed',
   system_notice: 'exposed',
   loop_wakeup: 'exposed',
-  scheduled_task_fire: 'exposed',
   ask_user_question: 'exposed',
   ask_user_question_resolved: 'exposed',
   permission_request_resolved: 'exposed',
@@ -143,8 +136,6 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   typescript_lsp_mode_changed: 'not_applicable',
   conversation_controls_changed: 'exposed',
   fast_mode_changed: 'exposed',
-  openai_oauth_updated: 'host_private',
-  task_lifecycle: 'exposed',
   provider_credential_status: 'host_private',
   provider_connection_tested: 'host_private',
   configuration_operation: 'exposed',

@@ -100,10 +100,16 @@ export function emptyRuntimeCenterState(): RuntimeCenterState {
  *
  * `idle` stays out on purpose: a parked agent is not doing work, and stopping it
  * is not what Escape means.
+ *
+ * The list is exactly that vocabulary's live half. A coordinator worker's
+ * `working` never reaches here as itself — `coordinator_worker` normalises it to
+ * `running` on the way in, and `mergeCoordinatorWorker` spreads the normalised
+ * worker over every roster entry — so matching on it here would be matching a
+ * value nothing stores, and `in_progress` is not in the vocabulary at all.
  */
 export function runningSubagentIds(state: Pick<RuntimeCenterState, 'agents'> | undefined): string[] {
   return Object.values(state?.agents ?? {})
-    .filter((agent) => agent.agent_id !== 'main' && ['running', 'pending', 'working', 'in_progress'].includes(agent.status))
+    .filter((agent) => agent.agent_id !== 'main' && ['running', 'pending'].includes(agent.status))
     .map((agent) => agent.agent_id);
 }
 

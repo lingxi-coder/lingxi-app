@@ -1,0 +1,36 @@
+.turn-file-summary {
+  width: 100%;
+  min-width: 0;
+  margin: 14px 0 4px;
+  color: var(--files-text);
+  border: 1px solid var(--files-border);
+  border-radius: 12px;
+  overflow: hidden;
+  font-size: 13px;
+}
+.turn-file-summary header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--files-surface);
+  border-bottom: 1px solid var(--files-border);
+}
+.turn-file-summary-icon { display: grid; place-items: center; width: 36px; height: 36px; color: var(--files-muted); flex-shrink: 0; }
+.turn-file-summary-heading { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.turn-file-summary-heading strong { font-weight: 550; }
+.turn-file-summary-heading > span { color: var(--files-muted); font-size: 12px; }
+.turn-file-review { padding: 6px 10px; border: 1px solid var(--files-border); border-radius: 10px; background: transparent; color: inherit; font: inherit; cursor: pointer; flex-shrink: 0; }
+.turn-file-summary ul { list-style: none; margin: 0; padding: 4px 0; }
+.turn-file-summary li { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
+.turn-file-path { min-width: 0; flex: 1; border: 0; background: transparent; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.turn-file-path bdi { display: block; direction: rtl; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-file-path bdi > span { color: var(--files-muted); }
+.turn-file-counts { display: flex; gap: 5px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.turn-file-counts > :first-child { color: var(--files-add); }
+.turn-file-counts > :last-child { color: var(--files-remove); }
+.turn-file-review:hover, .turn-file-path:hover { opacity: .75; }
+.turn-file-summary button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.turn-file-diffs { border-top: 1px solid var(--files-border); padding: 12px 16px; max-height: 480px; overflow: auto; }
+.turn-file-diffs h3 { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; margin: 8px 0; }
+.turn-file-diffs p { font-size: 11px; color: var(--files-muted); margin: 4px 0 8px; }

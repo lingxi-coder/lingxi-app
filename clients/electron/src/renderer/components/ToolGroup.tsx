@@ -31,11 +31,11 @@ export function ToolGroup({ group, open, toolOpen, onSetOpen }: ToolGroupProps) 
     <Disclosure id={group.id} open={open} onToggle={() => onSetOpen(group.id, !open)}
       buttonClassName="tool-group-trigger"
       label={`${summary}${failureSummary} · ${group.tools.length} tools`}
-      buttonStyle={{ maxWidth: '100%', minWidth: 0, minHeight: 32, fontSize: 13, gap: 8, color: failed ? t.danger : t.text3 }}
+      buttonStyle={{ maxWidth: '100%', minWidth: 0, minHeight: 32, fontSize: 13, gap: 8, color: lastTool.status === 'error' ? t.danger : t.text3 }}
       summary={<>
         <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><Icon name={toolIconName(lastTool.view.verb)} size={18} stroke={1.8} /></span>
         <span title={summary} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>
-        {failed > 0 && <span style={{ flexShrink: 0 }}>{failureSummary}</span>}
+        {failed > 0 && <span style={{ flexShrink: 0, color: t.danger }}>{failureSummary}</span>}
       </>}
       bodyStyle={{ borderLeft: `1px solid ${t.border}`, paddingLeft: 12, margin: '4px 0 0 8px' }}>
       {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}

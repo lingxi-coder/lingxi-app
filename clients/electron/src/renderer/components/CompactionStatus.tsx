@@ -37,7 +37,7 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
   const percent = compactProgressPercent(running ? item.phase : item.status, now - (item.phaseStartedAt ?? now));
   const estimating = running && percent !== null;
   const hasMetrics = item.messagesBefore !== undefined && item.messagesAfter !== undefined && item.bytesSaved !== undefined;
-  const color = item.status === 'error' ? t.danger : item.status === 'complete' ? t.ok : t.text3;
+  const color = item.status === 'error' ? t.danger : t.text2;
   const title = running ? (PHASE_TITLES[item.phase as keyof typeof PHASE_TITLES] ?? 'Compacting context')
     : item.status === 'complete' ? (hasMetrics ? 'Context compacted' : 'Compaction finished')
       : item.status === 'skipped' ? 'No compaction needed' : item.status === 'cancelled' ? 'Compaction cancelled' : 'Compaction failed';
@@ -56,13 +56,16 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
   return (
     <div
       className="compact-status"
+      data-status={item.status}
       role={item.status === 'error' ? 'alert' : 'status'}
       aria-live="polite"
       style={style}
     >
-      <span className="compact-status-icon" aria-hidden="true">
-        <Icon name={item.status === 'complete' ? 'check' : item.status === 'error' || item.status === 'cancelled' ? 'x' : 'compact'} size={17} stroke={1.75} />
-      </span>
+      {item.status !== 'complete' && (
+        <span className="compact-status-icon" aria-hidden="true">
+          <Icon name={item.status === 'error' || item.status === 'cancelled' ? 'x' : 'compact'} size={17} stroke={1.75} />
+        </span>
+      )}
       <div className="compact-status-content">
         <div className={running ? 'compact-status-title running-sweep' : 'compact-status-title'}>{title}</div>
         {detail && <div className="compact-status-detail">{detail}</div>}

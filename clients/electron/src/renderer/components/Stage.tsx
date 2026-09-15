@@ -1,6 +1,6 @@
 import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { RunItem } from '../model/runItem';
 import {
@@ -16,6 +16,7 @@ import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
 import { TranscriptAgents } from './TranscriptAgents';
 import { transcriptRows } from './transcriptRows';
 import { ToolGroup } from './ToolGroup';
+import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
 import { commandPaletteIcon } from './commandPaletteIcons';
 import { parseSlashCommandMessage } from './slashCommandMessage';
@@ -148,8 +149,10 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
-  const tailRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const feedRef = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
+  const dragging = useRef(false);
   const scrollSession = useRef(sessionKey);
 
   /**
@@ -189,21 +192,55 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
 
   const rows = useMemo(() => transcriptRows(items, running), [items, running]);
 
-  // Follow streaming only while the reader is already near the tail.
-  useEffect(() => {
+  // Synchronize the actual scroll extent before paint, including feed padding.
+  // A tail element's scrollIntoView also moves ancestors and excludes that padding.
+  const syncTail = useCallback(() => {
+    const node = stageRef.current;
+    if (node && followTail.current && !dragging.current) {
+      const bottom = Math.max(0, node.scrollHeight - node.clientHeight);
+      if (Math.abs(node.scrollTop - bottom) > 1) node.scrollTop = bottom;
+    }
+  }, []);
+  useLayoutEffect(() => {
     if (scrollSession.current !== sessionKey) {
       followTail.current = true;
       scrollSession.current = sessionKey;
     }
-    if (followTail.current) tailRef.current?.scrollIntoView({ block: 'end' });
-  }, [items, running, agents, sessionKey]);
+    syncTail();
+  });
+  useLayoutEffect(() => {
+    const node = stageRef.current;
+    const feed = feedRef.current;
+    if (!node || !feed) return;
+    // Also covers child-only updates, images, disclosures and viewport resizing.
+    const observer = new ResizeObserver(syncTail);
+    observer.observe(node);
+    observer.observe(feed);
+    const release = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 1;
+    };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+    window.addEventListener('blur', release);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+      window.removeEventListener('blur', release);
+    };
+  }, [syncTail]);
 
   return (
-    <div className="desktop-stage" onScroll={(event) => {
+    <div ref={stageRef} className="desktop-stage" onPointerDown={() => { dragging.current = true; }} onWheel={(event) => {
+      if (event.deltaY < 0) followTail.current = false;
+    }} onScroll={(event) => {
       const node = event.currentTarget;
-      followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+      followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 1;
     }} style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingInline: 'var(--conversation-gutter, 24px)', background: t.transcriptBg, position: 'relative' }}>
       <div
+        ref={feedRef}
         className="desktop-stage-feed"
         style={{
           width: '100%', maxWidth: 'var(--conversation-width, 860px)', margin: '0 auto',
@@ -250,6 +287,7 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
           inserted, which is exactly what a streaming transcript does.
         */}
         {rows.map((item) => {
+          if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} id={item.id} files={item.files} open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />;
           if (item.type === 'narration') {
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
@@ -311,8 +349,7 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
 
         {localPlan && <div role="dialog" aria-label="Plan" style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>Close plan</button><PlanDocument content={localPlan.content}/></div>}
 
-        {/* Scroll anchor — keeps the newest content in view as deltas arrive. */}
-        <div ref={tailRef} />
+
       </div>
     </div>
   );

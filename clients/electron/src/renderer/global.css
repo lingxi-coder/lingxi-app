@@ -1,3 +1,5 @@
+@import './components/TurnFileSummary.css';
+
 :root {
   --conversation-width: 860px;
   --conversation-gutter: 24px;
@@ -377,6 +379,8 @@ body {
 .desktop-stage {
   isolation: isolate;
   overscroll-behavior: contain;
+  overflow-anchor: none;
+  scroll-behavior: auto;
 }
 
 .settings-provider-row,
@@ -510,6 +514,24 @@ body {
   height: 22px;
   display: inline-grid;
   place-items: center;
+}
+.compact-status[data-status='complete'] {
+  width: min(480px, 100%);
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 20px;
+  padding: 10px 0;
+  border-top: 1px solid var(--compact-track);
+}
+.compact-status[data-status='complete'] .compact-status-content {
+  gap: 2px;
+  padding-top: 0;
+}
+.compact-status[data-status='complete'] .compact-status-title {
+  font-size: 12px;
+  font-weight: 500;
+}
+.compact-status[data-status='complete'] .compact-status-elapsed {
+  white-space: nowrap;
 }
 .compact-status-content {
   min-width: 0;

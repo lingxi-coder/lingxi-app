@@ -17,7 +17,7 @@
  *     `input_json`/`result_json` to rebuild a header.
  */
 
-import type { MessageImageDto, ToolHeaderDto, ToolResultDisplayDto } from '@lingxi/bridge-client';
+import type { MessageImageDto, StructuredDiffDto, ToolHeaderDto, ToolResultDisplayDto } from '@lingxi/bridge-client';
 
 /** Lifecycle of one tool call as the transcript sees it. */
 export type ToolRunStatus = 'running' | 'done' | 'error';
@@ -80,12 +80,21 @@ export interface ThinkingRunItem {
   readonly streamed?: boolean;
 }
 
+/** Confirmed edits to one file during a completed turn. Counts are cumulative. */
+export interface TurnFileChange {
+  readonly path: string;
+  readonly additions: number;
+  readonly removals: number;
+  readonly diffs: StructuredDiffDto[];
+}
+
 /** The turn footer: the engine's pre-formatted cost/duration summary. */
 export interface MetaRunItem {
   readonly type: 'meta';
   readonly id: string;
   readonly dur: string;
   readonly tokens: string;
+  readonly files?: TurnFileChange[];
 }
 
 /** Output from a slash command — the engine's text, or a local command's own reply. */

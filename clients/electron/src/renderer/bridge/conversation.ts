@@ -53,6 +53,7 @@ import { fallbackToolBody, fallbackToolHeader } from '@lingxi/bridge-client/tool
 import { isSupportedImageMediaType } from '../../shared/imageInput';
 
 import type { RunItem } from '../model/runItem';
+import { collectTurnFileChanges } from '../model/turnFileChanges';
 
 /**
  * The latest live token-usage snapshot fed by `usage_update`. Mirrors the
@@ -101,6 +102,8 @@ export interface ConversationState {
   readonly openThinkingIndex: number;
   /** tool-use `id` → index of its tool card in `items`. */
   readonly toolIndex: Readonly<Record<string, number>>;
+  /** Tool ids first observed in this turn; cleared at every terminal boundary. */
+  readonly turnToolIds?: readonly string[];
   /**
    * Item ids collapsed behind a `/loop` no-op fold row.
    *
@@ -345,7 +348,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // slash pre-claim: the command expanded into a real turn, which now
       // owns `running` (released by the ordinary `turn_ended` below), and a
       // stale `pendingSlashName` must not label a later, unrelated result.
-      return { ...state, running: true, pendingSlashName: null, openAssistantIndex: -1, openThinkingIndex: -1 };
+      return { ...state, running: true, pendingSlashName: null, openAssistantIndex: -1, openThinkingIndex: -1, turnToolIds: [] };
 
     case 'turn_ended': {
       const items = state.items.slice();
@@ -358,10 +361,13 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       settleRunningTools(items, event.outcome.type === 'cancelled' ? 'error' : 'done');
       let nextId = state.nextId;
       const fmt = event.cost?.formatted;
-      if (fmt) {
+      const files = collectTurnFileChanges(items, state.turnToolIds ?? []);
+      if (fmt || files.length) {
         // `formatted` is the engine's pre-rendered "Nm Ns · N tokens · $N"
         // summary; we surface it verbatim in the existing meta row.
-        items.push({ type: 'meta', id: itemId(nextId), dur: fmt, tokens: '' });
+        items.push({ type: 'meta', id: itemId(nextId), dur: fmt ?? '', tokens: '',
+          ...(files.length ? { files } : {}),
+        });
         nextId += 1;
       }
       // NOTE: `plan` is deliberately untouched here.
@@ -369,6 +375,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         ...state,
         items,
         running: false,
+        turnToolIds: [],
         openAssistantIndex: -1,
         openThinkingIndex: -1,
         nextId,
@@ -437,6 +444,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         openAssistantIndex: -1,
         openThinkingIndex: -1,
         toolIndex: { ...state.toolIndex, [event.id]: idx },
+        turnToolIds: [...new Set([...(state.turnToolIds ?? []), event.id])],
       };
     }
 
@@ -502,6 +510,8 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // a second, generic error message to the transcript.
       return {
         ...state, items, toolIndex, openAssistantIndex, openThinkingIndex,
+        turnToolIds: previous?.type === 'tool' ? state.turnToolIds
+          : [...new Set([...(state.turnToolIds ?? []), event.id])],
         ...(event.is_error ? { lastError: `${toolName(event.tool)} failed` } : {}),
       };
     }

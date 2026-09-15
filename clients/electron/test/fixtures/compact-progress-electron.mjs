@@ -65,6 +65,11 @@ async function main() {
     results.complete = await snapshot();
     await dispatch({ type: 'compaction_completed', messages_before: 42, messages_after: 7, bytes_saved: 38_912, summary: 'Preserved the actual conversation context.' });
     results.summary = await snapshot();
+    if (process.env.LINGXI_COMPACT_SCREENSHOT) {
+      await delay(100);
+      const image = await webContents.capturePage();
+      await writeFile(`${process.env.LINGXI_COMPACT_SCREENSHOT}.complete.png`, image.toPNG());
+    }
 
     for (const phase of ['cancelled', 'error', 'skipped']) {
       await webContents.executeJavaScript('window.compactFixture.reset()');

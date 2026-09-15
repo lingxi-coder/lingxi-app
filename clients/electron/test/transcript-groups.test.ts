@@ -52,6 +52,25 @@ test('settled groups collapse to one row, expose failures and expand summaries',
   assert.doesNotMatch(opened, /Output a|Output b/);
 });
 
+test('a successful final tool keeps the group neutral while counting earlier failures', () => {
+  const tools = [tool('first', 'error'), tool('second', 'error'), tool('recovered')];
+  for (const open of [false, true]) {
+    const html = renderGroup(tools, open);
+    const trigger = html.match(/<button\b[^>]*>/)?.[0];
+    assert.ok(trigger);
+    assert.ok(trigger.includes(`color:${tokens(true).text3}`));
+    assert.match(html, /Read recovered · 2 failed · 3 tools/);
+    assert.ok(html.includes(`color:${tokens(true).danger}"> · 2 failed</span>`));
+  }
+});
+
+test('a failed final tool still marks the group as failed', () => {
+  const html = renderGroup([tool('success'), tool('last', 'error')]);
+  const trigger = html.match(/<button\b[^>]*>/)?.[0];
+  assert.ok(trigger?.includes(`color:${tokens(true).danger}`));
+  assert.match(html, /Read last · 1 failed · 2 tools/);
+});
+
 test('waiting turns show thinking even before any reasoning delta arrives', () => {
   const rows = transcriptRows([], true);
   assert.equal(rows.length, 1);

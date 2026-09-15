@@ -134,6 +134,7 @@ interface StageProps {
   /** The real conversation accumulated from the bridge. */
   liveItems?: RunItem[];
   agents?: readonly SessionAgentSummaryDto[];
+  activeAgentId?: string;
   onOpenAgent?: (agentId: string) => void;
   /** @deprecated Thinking is now an ephemeral status, never a disclosure. */
   collapseThoughtsByDefault?: boolean;
@@ -159,7 +160,7 @@ interface StageProps {
   foldedItemIds?: readonly string[];
 }
 
-export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, foldedItemIds = [] }: StageProps) {
+export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -320,7 +321,7 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
         */}
         {rows.map((item) => {
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} id={item.id} files={item.files} open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />;
-          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} />;
+          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;

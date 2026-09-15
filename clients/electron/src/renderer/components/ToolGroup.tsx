@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import type { TranscriptToolGroup } from './transcriptRows';
 import { Disclosure } from './Disclosure';
 import { ToolCall, toolIconName } from './ToolCall';
@@ -31,7 +32,7 @@ export function ToolGroup({ group, open, toolOpen, onSetOpen }: ToolGroupProps) 
     <Disclosure id={group.id} open={open} onToggle={() => onSetOpen(group.id, !open)}
       buttonClassName="tool-group-trigger"
       label={`${summary}${failureSummary} · ${group.tools.length} tools`}
-      buttonStyle={{ maxWidth: '100%', minWidth: 0, minHeight: 32, fontSize: 13, gap: 8, color: lastTool.status === 'error' ? t.danger : t.text3 }}
+      buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 32, fontSize: 13, gap: 8, color: lastTool.status === 'error' ? t.danger : t.text3 } as CSSProperties}
       summary={<>
         <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><Icon name={toolIconName(lastTool.view.verb)} size={18} stroke={1.8} /></span>
         <span title={summary} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>

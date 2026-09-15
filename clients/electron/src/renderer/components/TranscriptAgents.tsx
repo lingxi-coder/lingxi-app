@@ -7,6 +7,7 @@ import { statusLabel } from '../bridge/agentStatus';
 
 export interface TranscriptAgentsProps {
   agents?: readonly SessionAgentSummaryDto[];
+  activeAgentId?: string;
   onOpenAgent?: (agentId: string) => void;
 }
 
@@ -21,7 +22,7 @@ export function orderedTranscriptAgents(previousIds: readonly string[], agents: 
 
 const EMPTY_AGENTS: readonly SessionAgentSummaryDto[] = [];
 
-export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent }: TranscriptAgentsProps) {
+export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAgentId }: TranscriptAgentsProps) {
   const t = useT();
   const [snapshot, setSnapshot] = useState(() => ({ source: agents, rows: orderedTranscriptAgents([], agents) }));
   let rows = snapshot.rows;
@@ -48,7 +49,8 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent }: Transcr
       return <button
         key={agent.agent_id}
         type="button"
-        className="transcript-agent-row"
+        className="transcript-agent-row transcript-disclosure-trigger"
+        aria-expanded={onOpenAgent ? activeAgentId === agent.agent_id : undefined}
         data-agent-id={agent.agent_id}
         data-agent-running={running ? 'true' : undefined}
         disabled={!onOpenAgent}
@@ -59,7 +61,7 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent }: Transcr
         <span className="transcript-agent-name" title={name}>{name}</span>
         <span className="transcript-agent-status" style={{ color: failed ? t.danger : t.text3 }}>{status}</span>
         {agent.latest_activity && <span className="transcript-agent-activity" title={agent.latest_activity} style={{ color: t.text3 }}>{agent.latest_activity}</span>}
-        {onOpenAgent && <Icon name="chevronR" size={12} color={t.text3} />}
+        {onOpenAgent && <span className="transcript-disclosure-chevron" aria-hidden="true"><Icon name="chevronR" size={12} color={t.text3} /></span>}
       </button>;
     })}
   </div>;

@@ -141,6 +141,8 @@ interface StageProps {
   pendingActivity?: string;
   /** Truthful empty/onboarding copy supplied by the host state. */
   emptyMessage?: string;
+  /** Show the desktop welcome immediately, independently of engine readiness. */
+  welcomeProject?: string;
   /**
    * Which session `liveItems` belongs to (`ConversationState.sessionKey`).
    * Item ids restart at `i1` on every session change, so the collapse map is
@@ -155,7 +157,7 @@ interface StageProps {
   foldedItemIds?: readonly string[];
 }
 
-export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', agents, onOpenAgent, foldedItemIds = [] }: StageProps) {
+export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -278,7 +280,7 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
             }}
           >
             <div
-              className="desktop-empty-state"
+              className={welcomeProject !== undefined ? "desktop-empty-state desktop-welcome" : "desktop-empty-state"}
               style={{
                 '--empty-accent': t.accent,
                 '--empty-accent-bg': t.accentBg,
@@ -287,6 +289,13 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
                 '--empty-muted': t.text2,
               } as CSSProperties}
             >
+              {welcomeProject !== undefined ? <>
+                <svg className="desktop-welcome-mark" width="96" height="96" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M24 22C28 3 48 1 61 13C80 7 95 23 88 41C102 58 89 76 74 76C65 94 46 96 34 84C15 90 3 73 11 57C-1 42 7 25 24 22Z" transform="translate(4 3) scale(.9)" stroke="currentColor" strokeWidth="5.5" strokeLinejoin="round" />
+                  <path d="m29 35 8 13-8 13M53 61h18" stroke="currentColor" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <h1>What should we build{welcomeProject ? <> in <span>{welcomeProject}</span></> : ' today'}?</h1>
+              </> : <>
               <div className="desktop-empty-mark" aria-hidden="true">
                 <Icon name="spark" size={21} stroke={1.55} />
               </div>
@@ -298,6 +307,7 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
                 <span><b>02</b> Set the goal</span>
                 <span><b>03</b> Review the result</span>
               </div>
+              </>}
             </div>
           </div>
         )}

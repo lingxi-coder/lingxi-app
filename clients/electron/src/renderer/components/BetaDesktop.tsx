@@ -1519,6 +1519,16 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     if (!editor) return;
 
     const previousSessionId = draftSessionId.current;
+    // Keep text drafted during startup when the temporary session becomes real.
+    const carryDraft = activeSessionId && !bridge.error
+      && (previousSessionId === null || previousSessionId.startsWith('pending-new:'))
+      && !activeSessionId.startsWith('pending-new:');
+    if (carryDraft) {
+      const snapshot = richPromptSnapshot(editor);
+      draftsBySession.current.set(activeSessionId, {
+        ...snapshot, html: editor.innerHTML, images: [...imageAttachmentsRef.current],
+      });
+    }
     if (previousSessionId) {
       const snapshot = richPromptSnapshot(editor);
       const images = imageAttachmentsRef.current;
@@ -2286,7 +2296,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           ref={input}
           className="beta-rich-prompt"
           role="textbox"
-          contentEditable={ready}
+          contentEditable
           suppressContentEditableWarning
           spellCheck
           data-placeholder={promptPlaceholder}
@@ -2300,7 +2310,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           onPaste={pastePlainText}
           aria-label="Prompt"
           aria-multiline="true"
-          aria-disabled={!ready}
+          aria-disabled={false}
           aria-autocomplete="list"
           aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'workspace-file-results' : undefined}
           aria-expanded={slashMenuOpen || (fileMenuOpen && filePicker?.source === 'mention')}
@@ -2309,7 +2319,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             : fileMenuOpen && filePicker?.source === 'mention' && fileResults[fileResultIndex]
               ? `workspace-file-result-${fileResultIndex}`
               : undefined}
-          style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 15, padding: '16px 18px 8px', fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready ? 'text' : 'default', opacity: ready ? 1 : .68 }}
+          style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 15, padding: '16px 18px 8px', fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: 'text' }}
         />
         {slashMenuOpen && (
           <div ref={slashControl} id="slash-command-results" role="listbox" aria-label="Slash commands" style={{ ...composerMenuStyle(t, 'left'), width: 820, maxWidth: 'min(820px, calc(100vw - 44px))', maxHeight: 'min(420px, calc(100vh - 190px))', overflowY: 'auto', padding: 7 }}>

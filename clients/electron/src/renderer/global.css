@@ -1704,3 +1704,27 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
 @media (prefers-reduced-motion: reduce) {
   .sidebar-session-progress > span { animation: none; transform: rotate(-35deg); }
 }
+
+.desktop-empty-state.desktop-welcome {
+  width: 100%;
+  animation: none;
+}
+.desktop-welcome-mark {
+  flex-shrink: 0;
+  margin-bottom: 56px;
+  color: color-mix(in srgb, var(--empty-text) 30%, transparent);
+}
+.desktop-welcome h1 {
+  max-width: 100%;
+  font-size: clamp(28px, 4vw, 56px);
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -.025em;
+}
+.desktop-welcome h1 span {
+  text-decoration: underline dotted;
+  text-decoration-color: var(--empty-muted);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 9px;
+  overflow-wrap: anywhere;
+}

@@ -2108,11 +2108,28 @@ export function useBridge(): UseBridge {
       return;
     }
     const operationId = beginNavigationOperation();
+    // Reserve a local draft while the host creates the real session and starts its engine.
+    const target = { projectPath, sessionId: `pending-new:${operationId}` };
+    pendingSessionRef.current = target;
+    sessionLoadingRef.current = true;
+    setPendingSession(target);
+    setError(null);
     try {
       const snapshot = await host.newSession(projectPath, desktop.currentModel ?? undefined);
-      if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+      if (isCurrentNavigationOperation(operationId)) {
+        pendingSessionRef.current = null;
+        sessionLoadingRef.current = false;
+        setPendingSession(null);
+        applyBootstrap(snapshot);
+      }
     }
-    catch (cause) { if (isCurrentNavigationOperation(operationId)) capture(cause); }
+    catch (cause) {
+      if (!isCurrentNavigationOperation(operationId)) return;
+      pendingSessionRef.current = null;
+      sessionLoadingRef.current = false;
+      setPendingSession(null);
+      capture(cause);
+    }
   }, [addProject, applyBootstrap, beginNavigationOperation, bootstrap?.settings.activeProject, capture, desktop.currentModel, host, isCurrentNavigationOperation]);
 
   const resumeSession = useCallback(async (sessionId: string) => {

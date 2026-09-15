@@ -39,7 +39,8 @@ export function App() {
   const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
   const providerConfigured = Boolean(bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured));
   const ready = Boolean(
-    bridge.hosted
+    !bridge.loading
+    && bridge.hosted
     && workspace?.path
     && workspace.trusted
     && providerConfigured
@@ -98,10 +99,6 @@ export function App() {
           />
           {!bridge.sessionLoading && <RuntimeCenterOverview bridge={planBridge} />}
           <ErrorBanner bridge={bridge} />
-          {bridge.loading ? (
-            <div role="status" style={{ flex: 1, display: 'grid', placeItems: 'center', color: palette.text3, fontSize: 13 }}>Loading secure desktop state…</div>
-          ) : (
-            <>
               {/* The transcript keeps all remaining height; Todos live in Summary. */}
               <Stage
                 submittedPlans={bridge.sessionLoading ? [] : planCalls}
@@ -109,6 +106,7 @@ export function App() {
                 liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
                 running={!bridge.sessionLoading && bridge.running}
                 agents={stageAgents}
+                welcomeProject={(bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
                 onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
                 collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                 emptyMessage={emptyMessage}
@@ -132,8 +130,6 @@ export function App() {
                 onSetTheme={changeTheme}
                 onOpenProviderSettings={(providerId, modelReference, restoreFocus) => setSettingsRoute({ pageId: 'provider-credentials', providerId, pendingModelReference: modelReference, restoreFocus })}
               />
-            </>
-          )}
 
           </div>
 

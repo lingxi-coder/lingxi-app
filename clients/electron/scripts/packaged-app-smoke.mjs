@@ -526,6 +526,7 @@ async function closePackagedApp(browser, child, bundleId) {
 }
 
 async function assertRendererContract(page, leakPatterns) {
+  let lastDetails;
   const details = await waitFor(
     () => evaluate(page, `(() => ({
       hasLingxi: typeof window.lingxi === 'object' && window.lingxi !== null,
@@ -538,15 +539,24 @@ async function assertRendererContract(page, leakPatterns) {
       hasPrompt: Boolean(document.querySelector('[aria-label="Prompt"]')),
       promptPlaceholder: document.querySelector('[aria-label="Prompt"]')?.getAttribute('data-placeholder'),
       bodyText: document.body.innerText,
-    }))()`).then((value) => (
-      value?.hasLingxi
+    }))()`).then((value) => {
+      lastDetails = value;
+      return value?.hasLingxi
       && value.screenLabel === 'LingXi Code Desktop Beta'
       && value.hasPrompt
+      // The welcome shell now renders before persisted workspace hydration.
+      // Wait for the seeded project before asserting its bootstrap contract.
+      && /workspace/.test(value.bodyText)
         ? value
-        : undefined
-    )),
-    { timeoutMs: 15_000, label: 'renderer bootstrap' },
-  );
+        : undefined;
+    }),
+    // Bootstrap includes the broker's health and status requests (20s each).
+    // A fresh signed copy must be allowed to finish that bounded cold start.
+    { timeoutMs: 45_000, label: 'renderer bootstrap' },
+  ).catch((error) => {
+    log(`last renderer bootstrap: ${JSON.stringify(lastDetails)}`);
+    throw error;
+  });
   assert.equal(details.hasLingxi, true, 'window.lingxi must be exposed');
   assert.equal(details.isElectron, true, 'window.lingxi must identify Electron');
   assert.equal(details.hasWorkspaceFileSearch, true, 'preload must expose bounded workspace file search');
@@ -735,6 +745,133 @@ async function customProviderProbe() {
   };
 }
 
+async function assertDesktopGit(page, workspace, tempRoot) {
+  const scope = await evaluate(page, `(async () => {
+    const state = await window.lingxi.bootstrap();
+    return state.activeSession ?? { projectPath: state.workspace.path, sessionId: '__draft__' };
+  })()`);
+  const request = (operation) => evaluate(page, `window.lingxi.git.request(${JSON.stringify(scope)}, ${JSON.stringify(operation)})`);
+  const localGit = (...args) => execFileSync('git', ['-C', workspace, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  await request({ kind: 'init' });
+  localGit('config', 'user.name', 'Desktop Git Smoke');
+  localGit('config', 'user.email', 'desktop-smoke@example.invalid');
+  localGit('config', 'commit.gpgsign', 'false');
+  writeFileSync(join(workspace, '.gitignore'), '*\n!/.gitignore\n!/git-smoke.txt\n');
+  writeFileSync(join(workspace, 'git-smoke.txt'), 'initial\n');
+  let status = (await request({ kind: 'status' })).status;
+  await request({ kind: 'stage', token: status.token, paths: ['.gitignore', 'git-smoke.txt'] });
+  status = (await request({ kind: 'status' })).status;
+  await request({ kind: 'commit', token: status.token, message: 'Establish the local Git smoke fixture' });
+  status = (await request({ kind: 'status' })).status;
+  const originalBranch = status.branch;
+  await request({ kind: 'checkout', branch: 'desktop-review-smoke', create: true, token: status.token });
+  writeFileSync(join(workspace, 'git-smoke.txt'), 'initial\nDesktop Review 中文\n');
+  status = (await request({ kind: 'status' })).status;
+  assert.ok(status.files.some(file => file.path === 'git-smoke.txt'));
+  const diff = (await request({ kind: 'diff', mode: 'working', path: 'git-smoke.txt' })).diff;
+  assert.ok(diff.patch.includes('+Desktop Review 中文'));
+  await evaluate(page, `document.querySelector('button[aria-label="Git environment"]').click()`);
+  await evaluate(page, `Array.from(document.querySelectorAll('.git-environment button')).find(button => button.textContent.includes('Changes')).click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('.git-review') !== null`), { label: 'packaged Review tab' });
+  await request({ kind: 'stage', paths: ['git-smoke.txt'], token: status.token });
+  status = (await request({ kind: 'status' })).status;
+  await request({ kind: 'commit', message: 'Verify staged changes reach a local remote', token: status.token });
+  const remote = join(tempRoot, 'git-smoke-remote.git');
+  execFileSync('git', ['init', '--bare', remote], { stdio: 'pipe' });
+  localGit('remote', 'add', 'smoke-local', remote);
+  status = (await request({ kind: 'status' })).status;
+  await request({ kind: 'push', remote: 'smoke-local', branch: 'desktop-review-smoke', setUpstream: true, token: status.token });
+  assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'refs/heads/desktop-review-smoke'], { encoding: 'utf8' }).trim(), localGit('rev-parse', 'HEAD'));
+  await request({ kind: 'fetch', remote: 'smoke-local' });
+  status = (await request({ kind: 'status' })).status;
+  await request({ kind: 'pull', remote: 'smoke-local', branch: 'desktop-review-smoke', token: status.token });
+  const comparison = await request({ kind: 'diff', mode: 'branch', base: originalBranch, target: 'desktop-review-smoke' });
+  assert.ok(comparison.diff.patch.includes('Desktop Review 中文'));
+  writeFileSync(join(workspace, 'git-smoke.txt'), 'initial\nDesktop Review 中文\nReview preview\n');
+  await waitFor(() => evaluate(page, `Array.from(document.querySelectorAll('.git-file-select')).some(button => button.textContent.includes('git-smoke.txt'))`), { label: 'Git watcher updates Review' });
+  await evaluate(page, `Array.from(document.querySelectorAll('.git-file-select')).find(button => button.textContent.includes('git-smoke.txt')).click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('.git-diff')?.textContent.includes('Review preview')`), { label: 'packaged diff rendering' });
+  const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
+  writeFileSync(join(tmpdir(), 'lingxi-git-packaged.png'), Buffer.from(screenshot.data, 'base64'));
+  await evaluate(page, `document.querySelector('[aria-label="Toggle pinned summary"]').click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview')?.textContent.includes('Local') && document.querySelector('#runtime-center-overview')?.textContent.includes('desktop-review-smoke')`), { label: 'summary environment shows local and current branch' });
+  await evaluate(page, `document.querySelector('#runtime-center-overview [data-git-branch-trigger]').click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('.git-branch-row[aria-current="true"]')?.textContent.includes('Uncommitted: 1 files')`), { label: 'current branch and uncommitted count' });
+  const environmentScreenshot = await page.send('Page.captureScreenshot', { format: 'png' });
+  writeFileSync(join(tmpdir(), 'lingxi-git-environment-packaged.png'), Buffer.from(environmentScreenshot.data, 'base64'));
+  await evaluate(page, `document.querySelector('dialog[open] [aria-label="Close dialog"]').click()`);
+  log('packaged Git: init, branch, diff, stage, commit, local push/fetch/pull, Review watcher and summary environment passed');
+}
+
+async function assertBottomTerminal(page) {
+  const scope = await evaluate(page, `(async () => {
+    const state = await window.lingxi.bootstrap();
+    return state.activeSession ?? { projectPath: state.workspace.path, sessionId: '__draft__' };
+  })()`);
+  await evaluate(page, `document.querySelector('[aria-label="Toggle terminal"]').click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('#desktop-terminal:not([hidden]) .xterm') !== null`), { label: 'packaged xterm renderer' });
+  const terminals = await evaluate(page, `window.lingxi.terminal.list(${JSON.stringify(scope)})`);
+  assert.equal(terminals.length, 1);
+  const id = terminals[0].id;
+  const command = "printf '\\nTERMINAL_PACKAGED_中文\\n'; pwd\r";
+  await evaluate(page, `window.lingxi.terminal.input(${JSON.stringify(id)}, ${JSON.stringify(command)})`);
+  await waitFor(() => evaluate(page, `window.lingxi.terminal.list(${JSON.stringify(scope)}).then(rows => rows.some(row => row.output.includes('\\r\\nTERMINAL_PACKAGED_中文\\r\\n') && row.output.includes(${JSON.stringify(scope.projectPath)})))`), { label: 'packaged shell output and cwd' });
+  await evaluate(page, `document.querySelector('[aria-label="Hide terminal panel"]').click()`);
+  const hiddenCommand = "printf '\\nHIDDEN_SHELL_ALIVE\\n'\r";
+  await evaluate(page, `window.lingxi.terminal.input(${JSON.stringify(id)}, ${JSON.stringify(hiddenCommand)})`);
+  await waitFor(() => evaluate(page, `window.lingxi.terminal.list(${JSON.stringify(scope)}).then(rows => rows.some(row => row.output.includes('\\r\\nHIDDEN_SHELL_ALIVE\\r\\n')))`), { label: 'hidden terminal continues running' });
+  await evaluate(page, `document.querySelector('[aria-label="Toggle terminal"]').click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('#desktop-terminal:not([hidden]) .xterm') !== null`), { label: 'terminal restored' });
+  const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
+  writeFileSync(join(tmpdir(), 'lingxi-terminal-packaged.png'), Buffer.from(screenshot.data, 'base64'));
+  await evaluate(page, `window.lingxi.terminal.close(${JSON.stringify(id)})`);
+  assert.equal((await evaluate(page, `window.lingxi.terminal.list(${JSON.stringify(scope)})`)).length, 0);
+  await evaluate(page, `document.querySelector('[aria-label="Hide terminal panel"]').click()`);
+  log('packaged bottom terminal: renderer, Unicode, project cwd, hide/resume and close passed');
+}
+
+async function assertScheduledPersistenceBeforeRestart(page, model) {
+  const active = await evaluate(page, 'window.lingxi.bootstrap().then(value => value.activeSession)');
+  const scopes = await evaluate(page, 'window.lingxi.scheduled.scopes()');
+  assert(scopes.some(scope => scope.id === 'global'), 'No project scope is available');
+  const records = [];
+  for (const scope of scopes.filter(scope => scope.id === 'global' || scope.projectPath === active.projectPath)) {
+    const request = {
+      action: 'create', cron: '0 9 1 1 *', prompt: 'Packaged cron persistence probe',
+      recurring: true, durable: true, no_expiry: true,
+      automation: { version: 2, name: 'Packaged cron probe', status: 'active', model,
+        reasoning: { type: 'automatic' }, runMode: 'new_session', notificationPolicy: 'none' },
+    };
+    const jobs = await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(scope.id)}, ${JSON.stringify(request)})`);
+    const task = jobs.find(job => job.automation?.name === request.automation.name);
+    assert(task, 'trusted host can create a scheduled task without a CLI trust record');
+    assert.equal(task.automation.status, 'active');
+    await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(scope.id)}, ${JSON.stringify({action: 'pause', id: task.id})})`);
+    await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(scope.id)}, ${JSON.stringify({action: 'update', id: task.id, cron: request.cron, prompt: 'Updated packaged cron probe'})})`);
+    records.push({ scopeId: scope.id, id: task.id, model });
+  }
+  assert.equal(records.length, 2, 'project and managed No project scopes were exercised');
+  assert.deepEqual(await evaluate(page, 'window.lingxi.bootstrap().then(value => value.activeSession)'), active,
+    'scheduled management must not switch foreground conversation');
+  return records;
+}
+
+async function assertScheduledPersistenceAfterRestart(page, records) {
+  for (const record of records) {
+    const jobs = await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(record.scopeId)}, {action: 'list'})`);
+    const task = jobs.find(job => job.id === record.id);
+    assert.equal(task?.automation?.status, 'paused');
+    assert.equal(task.automation.model, record.model);
+    assert.deepEqual(task.automation.reasoning, { type: 'automatic' });
+    assert.equal(task.automation.runMode, 'new_session');
+    assert.equal(task.prompt, 'Updated packaged cron probe');
+    await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(record.scopeId)}, ${JSON.stringify({action: 'history', id: record.id})})`);
+    const remaining = await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(record.scopeId)}, ${JSON.stringify({action: 'delete', id: record.id})})`);
+    assert(!remaining.some(job => job.id === record.id), 'scheduled task deletion persists');
+  }
+  log('scheduled project/No project create, pause, edit, restart, history and delete verified');
+}
+
 async function prepareCustomProvider(page, probe, restore = false) {
   const sessionId = await evaluate(page, `(async () => {
     const current = await window.lingxi.bootstrap();
@@ -825,6 +962,10 @@ export async function runPackagedAppSmoke(root = packageRoot) {
   let child;
   let output = { stdout: '', stderr: '' };
   let customProbe;
+  let scheduledRecords;
+  const consoleErrors = [];
+  const runtimeExceptions = [];
+  const logErrors = [];
   try {
     const launch = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
     child = launch.child;
@@ -833,9 +974,6 @@ export async function runPackagedAppSmoke(root = packageRoot) {
     browser = debuggerConnection.browser;
     page = debuggerConnection.page;
 
-    const consoleErrors = [];
-    const runtimeExceptions = [];
-    const logErrors = [];
     await page.send('Page.enable');
     await page.send('Runtime.enable');
     await page.send('Log.enable');
@@ -847,12 +985,21 @@ export async function runPackagedAppSmoke(root = packageRoot) {
       if (params.entry?.level === 'error') logErrors.push(params.entry);
     });
 
+    log('checking renderer bootstrap');
     await assertRendererContract(page, leakPatterns);
+    log('checking renderer security');
     await assertSecurityBehavior(page);
+    log('checking bundled sidecar');
     await assertBundledSidecar(page, copiedAppPath, tempRoot);
+    log('checking terminal');
+    await assertBottomTerminal(page);
+    log('checking Desktop Git');
+    await assertDesktopGit(page, workspace, tempRoot);
 
+    log('checking credential and scheduled-task persistence');
     customProbe = await customProviderProbe();
     await prepareCustomProvider(page, customProbe);
+    scheduledRecords = await assertScheduledPersistenceBeforeRestart(page, `${customProbe.providerId}/smoke-model`);
 
     assert.equal(consoleErrors.length, 0, `renderer console errors detected: ${JSON.stringify(consoleErrors)}`);
     assert.equal(runtimeExceptions.length, 0, `renderer exceptions detected: ${JSON.stringify(runtimeExceptions)}`);
@@ -874,6 +1021,7 @@ export async function runPackagedAppSmoke(root = packageRoot) {
     output = relaunch.output;
     ({ browser, page } = await connectToDebugger(cdpPort));
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
+    await assertScheduledPersistenceAfterRestart(page, scheduledRecords);
     const customSession = await prepareCustomProvider(page, customProbe, true);
     await assertCustomProviderRequest(page, customProbe, customSession);
     await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`);
@@ -897,6 +1045,12 @@ export async function runPackagedAppSmoke(root = packageRoot) {
       ],
     };
   } finally {
+    if (consoleErrors.length) log(`renderer console errors: ${JSON.stringify(consoleErrors.slice(-3))}`);
+    if (runtimeExceptions.length) log(`renderer exceptions: ${JSON.stringify(runtimeExceptions.slice(-3))}`);
+    if (logErrors.length) log(`renderer log errors: ${JSON.stringify(logErrors.slice(-3))}`);
+    if (existsSync(runtimePaths.diagnosticsPath)) {
+      log(`app diagnostics: ${readFileSync(runtimePaths.diagnosticsPath, 'utf8').split('\n').slice(-8).join('\n')}`);
+    }
     if (page && customProbe) {
       try { await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`); } catch {}
     }

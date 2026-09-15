@@ -2073,6 +2073,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         {
             return;
         }
+        // Whatever this leaves behind belongs to the transcript just resumed,
+        // not to this session — see `current_effort_from_resume`.
+        self.model_runtime
+            .current_effort_from_resume
+            .store(true, std::sync::atomic::Ordering::Release);
         let selection = effort
             .clone()
             .map(|id| platform_api::ReasoningSelection::Level { id })
@@ -2109,6 +2114,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         {
             return;
         }
+        // Same provenance as the effort restorer above: this value belongs to
+        // the resumed transcript, not to this session.
+        self.model_runtime
+            .current_effort_from_resume
+            .store(true, std::sync::atomic::Ordering::Release);
         let (validated, thinking, provider_effort, legacy_effort) =
             self.reasoning_request_state(model, provider_id, &selection);
         *self
@@ -2545,6 +2555,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.model_runtime
             .current_effort_explicit
             .store(true, std::sync::atomic::Ordering::Release);
+        // An explicit live choice is this session's own, so a later resume
+        // with no metadata must leave it alone.
+        self.model_runtime
+            .current_effort_from_resume
+            .store(false, std::sync::atomic::Ordering::Release);
         let (validated, thinking, effort, legacy_effort) =
             self.reasoning_request_state(model, provider_id, &selection);
         *self
@@ -2576,6 +2591,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.model_runtime
             .current_effort_explicit
             .store(false, std::sync::atomic::Ordering::Release);
+        // A persisted application default is this session's own too —
+        // `current_effort_explicit` cannot tell these two apart.
+        self.model_runtime
+            .current_effort_from_resume
+            .store(false, std::sync::atomic::Ordering::Release);
+
         *self
             .model_runtime
             .current_reasoning_selection

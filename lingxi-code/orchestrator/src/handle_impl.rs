@@ -514,6 +514,22 @@ impl ConversationOrchestrator {
                 resumed_profile.as_deref(),
                 resumed_effort,
             );
+        } else if self
+            .model_runtime
+            .current_effort_from_resume
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            // This resume carries no reasoning metadata at all — a legacy
+            // transcript, or a default snapshot. Whatever is live came from an
+            // EARLIER resume, so it belongs to a transcript this session is no
+            // longer on and must not be inherited a second time. An application
+            // default or an explicit choice is this session's own and is left
+            // alone, which is the distinction `current_effort_from_resume`
+            // exists to make: `current_effort_explicit` is false for both.
+            self.restore_effort_from_resume(&resumed_model, resumed_profile.as_deref(), None);
+            self.model_runtime
+                .current_effort_from_resume
+                .store(false, std::sync::atomic::Ordering::Release);
         }
         self.restore_main_thread_agent_from_resume(
             runtime.main_thread_agent_type,

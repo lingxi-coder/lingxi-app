@@ -1108,6 +1108,15 @@ pub(crate) struct ModelRuntime {
     /// Whether the live effort came from an explicit launch/control choice.
     /// Hot resume may inherit transcript effort only while this is false.
     pub(crate) current_effort_explicit: std::sync::atomic::AtomicBool,
+    /// Whether the live effort/selection was INHERITED FROM A RESUMED
+    /// TRANSCRIPT, as opposed to seeded from the application's own default.
+    ///
+    /// `current_effort_explicit` cannot answer this: it is false for both. But a
+    /// later resume has to treat them differently — a value this session
+    /// inherited from some other transcript must not survive a resume that
+    /// carries no reasoning metadata of its own, while the application's default
+    /// must. Without the distinction, one of those two rules always loses.
+    pub(crate) current_effort_from_resume: std::sync::atomic::AtomicBool,
     /// Finding #80: once-per-session latch for the refusal→fallback-model swap
     /// (claude-code's `refusalFallbackModelLatch`). Set the first time a turn's
     /// response arrives with `stop_reason == "refusal"` AND
@@ -1205,6 +1214,7 @@ impl ModelRuntime {
             current_effort: std::sync::RwLock::new(current_effort),
             current_reasoning_selection: std::sync::RwLock::new(current_reasoning_selection),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
+            current_effort_from_resume: std::sync::atomic::AtomicBool::new(false),
             refusal_cascade: Mutex::new(
                 platform_api::refusal_driver::RefusalCascadeState::default(),
             ),

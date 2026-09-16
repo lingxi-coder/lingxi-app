@@ -1,7 +1,8 @@
 import { useInspectorMotion } from './useInspectorMotion';
 import { SummaryContextActions } from './BetaDesktop';
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { PlanDocument } from './PlanDocument';
 import { GitReview, GitEnvironment } from './GitReview';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { PlanTaskDto, SessionAgentSummaryDto, TaskRowDto } from '@lingxi/bridge-client';
 
 import { conversationFromMessages } from '../bridge/conversation';
@@ -20,7 +21,6 @@ import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { AgentAvatar } from './AgentAvatar';
 import { Stage } from './Stage';
-import { PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 
 const SECTION_LABELS: Record<RuntimeCenterSection, string> = {
@@ -468,6 +468,9 @@ function PlanDetail({ selected, plan }: { selected: PlanTaskDto | undefined; pla
 export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
   const t = useT();
   const center = bridge.runtimeCenter;
+  const [panelWidth, setPanelWidth] = useState(() => { try { return Math.max(320, Math.min(960, Number(localStorage.getItem('lingxi.inspector.width')) || 390)); } catch { return 390; } });
+  const [expanded, setExpanded] = useState(false);
+  const resize = (width: number) => { const next = Math.max(320, Math.min(window.innerWidth - 280, width)); setPanelWidth(next); try { localStorage.setItem('lingxi.inspector.width', String(next)); } catch {} };
   const active = center.activeItem;
   const motion = useInspectorMotion(center.inspectorOpen, active ? runtimeCenterItemKey(active) : 'landing', bridge.conversation.sessionKey);
   const plan = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
@@ -539,9 +542,11 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
 
   if (!motion.present) return null;
   return (
-    <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label="Runtime inspector" style={{ background: t.surface, borderLeft: `0.5px solid ${t.border}` }}>
+    <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label="Runtime inspector" style={{ position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), background: t.surface, borderLeft: `0.5px solid ${t.border}` }}>
+      {!expanded && <div className="runtime-inspector-resize" role="separator" aria-label="Resize right panel" aria-orientation="vertical" aria-valuenow={panelWidth} aria-valuemin={320} aria-valuemax={960} tabIndex={0} onKeyDown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); resize(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(window.innerWidth - e.clientX); }} onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} />}
       <header className="runtime-inspector-header" style={{ borderBottom: `0.5px solid ${t.border}` }}>
         <InspectorTabs bridge={bridge} />
+        <button type="button" aria-label={expanded ? 'Restore panel size' : 'Expand right panel'} className="runtime-panel-hide" onClick={() => setExpanded(!expanded)} style={runtimeCenterButtonStyle(t, expanded)}>{expanded ? '↙' : '↗'}</button>
         <button type="button" aria-label="Hide right panel" className="runtime-panel-hide" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} style={runtimeCenterButtonStyle(t, true)}><Icon name="panel-right" size={18} /></button>
       </header>
       <div id="runtime-inspector-panel" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : 'Details'} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>

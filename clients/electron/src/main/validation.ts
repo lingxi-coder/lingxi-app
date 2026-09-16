@@ -444,7 +444,6 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
           version: 2,
           ...(config['name'] === undefined ? {} : { name: string(config['name'], 'task name', 256) }),
           status: status as 'active' | 'paused' | 'completed', model: string(config['model'], 'task model', 256), reasoning: reasoning.selection,
-          ...(config['statusReason'] === undefined ? {} : { statusReason: string(config['statusReason'], 'task status reason', 256) }),
           runMode: runMode as 'new_session' | 'selected_session' | 'task_session',
           ...(targetSessionId ? { targetSessionId } : {}),
           notificationPolicy: notificationPolicy as 'all' | 'failed' | 'none',

@@ -1,3 +1,5 @@
+import { ScheduledTaskService } from './scheduled.js';
+import { GitService } from './git.js';
 import { app, BrowserWindow, dialog, shell, Notification, type Session } from 'electron';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
@@ -13,10 +15,8 @@ import {
 } from './credential-broker.js';
 import { CODEX_PROVIDER_ID, parseCodexSession } from './codex-auth.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
-import { HostController } from './host.js';
-import { ScheduledTaskService } from './scheduled.js';
-import { GitService } from './git.js';
 import { TerminalManager } from './terminal.js';
+import { HostController } from './host.js';
 import { HostNotifier } from './notifications.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -32,19 +32,20 @@ const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
-let nativeAudio: NativeAudioManager | null = null;
 let scheduled: ScheduledTaskService | null = null;
 let git: GitService | null = null;
 let terminals: TerminalManager | null = null;
+let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
 
 /**
- * Whether the main window has OS focus. Net-new state: nothing here tracked it
- * before, and `HostNotifier` needs it to avoid putting a banner over the window
- * the user is already looking at.
+ * Whether the main window currently has OS focus. Net-new state: nothing in
+ * this app tracked window focus before, and `HostNotifier` needs it to avoid
+ * banners over the window the user is already looking at.
  */
 let windowFocused = false;
+
 
 function developmentRendererUrl(): string | undefined {
   if (app.isPackaged) return undefined;
@@ -200,25 +201,31 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     resourcesPath: process.resourcesPath,
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
   });
-  /** The one place an OS notification is raised. Clicking it restores the
-   * session the notification came from, then raises the window. */
+  /**
+   * The one place an OS notification is raised. Shared by the scheduled-task
+   * service and `HostNotifier` so both get the same click behaviour: restore
+   * the session the notification came from, then raise the window.
+   */
   const showNotification = (title: string, body: string, ref?: SessionRef): void => {
     if (!Notification.isSupported()) return;
     const notification = new Notification({ title, body });
     notification.on('click', () => {
-      if (ref) void host?.restoreProjectSession(ref.projectPath, ref).catch((error: unknown) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
+      if (ref) void host?.restoreProjectSession(ref.projectPath, ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
       const window = BrowserWindow.getAllWindows()[0];
       window?.show(); window?.focus();
     });
     notification.show();
   };
-  notifier = new HostNotifier({ show: showNotification, isWindowFocused: () => windowFocused });
+  notifier = new HostNotifier({
+    show: showNotification,
+    isWindowFocused: () => windowFocused,
+  });
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
-    notifier,
-    onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     getSavedPermissionMode: () => settings.getLastPermissionMode(),
     onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
+    notifier,
+    onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     bridgeRoot,
@@ -312,8 +319,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
-  host.attachNotifier(notifier);
-  terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
   scheduled = new ScheduledTaskService(settings, bridge, sessionCatalog, (title, body, ref) => {
     // Propagate the refusal: `scheduledRun` returns false when the kind is off
     // or the notifier is disposed, and the caller keeps its dedupe key.
@@ -322,6 +327,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
   scheduled.start();
+  terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
   host.attachTerminals(terminals);
   git = new GitService({ isBusy: async (root) => {
     for (const summary of bridge?.runtimeSummaries ?? []) {

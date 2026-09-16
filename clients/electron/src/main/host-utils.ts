@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
-
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import { SETTINGS_VERSION } from '../shared/settings.js';
@@ -94,7 +93,8 @@ export interface PersistedSettings {
    * Omitted (not defaulted) until the first `SettingsStore.update({ voice })` call. */
   voice?: VoicePreferences;
   /** OS-notification preferences — see `shared/notificationPreferences.ts`.
-   * Omitted until the first `SettingsStore.update({ notifications })`. */
+   * Omitted (not defaulted) until the first
+   * `SettingsStore.update({ notifications })` call. */
   notifications?: NotificationPreferences;
   /** Device-local conversation model picker visibility by provider id. */
   modelPickerVisibility?: ModelPickerVisibilitySettings;

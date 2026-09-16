@@ -1,13 +1,12 @@
-import { createRequire } from 'node:module';
+import { CH_SCHEDULED } from '../shared/scheduled.js';
+import type { ScheduledTaskService } from './scheduled.js';
+import type { HostNotifier } from './notifications.js';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
-import { CODEX_PROVIDER_ID, loginCodex } from './codex-auth.js';
-import type { ScheduledTaskService } from './scheduled.js';
-import { CH_SCHEDULED } from '../shared/scheduled.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
 import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT, TERMINAL_DRAFT_SESSION, type TerminalScope } from '../shared/terminal.js';
-import type { HostNotifier } from './notifications.js';
+import { createRequire } from 'node:module';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -43,6 +42,7 @@ import { readMicrophoneAccess, type MediaAccessReader } from './microphoneAccess
 import type { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { CH_NATIVE_AUDIO_ENGINE_REQUEST, CH_NATIVE_AUDIO_EVENT, CH_NATIVE_AUDIO_REQUEST } from '../shared/nativeAudio.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
+import { CODEX_PROVIDER_ID, loginCodex } from './codex-auth.js';
 import type { SettingsStore } from './settings.js';
 
 export interface CredentialMetadata {
@@ -69,8 +69,6 @@ export interface PluginSecretMetadata {
   restartRequired?: boolean;
 }
 
-export const CH_CODEX_LOGIN = 'lingxi:codex:login';
-export const CH_CODEX_CANCEL = 'lingxi:codex:cancel';
 export const CH_BOOTSTRAP = 'lingxi:bootstrap';
 export const CH_SETTINGS_GET = 'lingxi:settings:get';
 export const CH_SETTINGS_FILE_OPEN = 'lingxi:settings:file:open';
@@ -84,6 +82,8 @@ export const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 export const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 export const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
 export const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
+export const CH_CODEX_LOGIN = 'lingxi:codex:login';
+export const CH_CODEX_CANCEL = 'lingxi:codex:cancel';
 export const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
 export const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
 export const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
@@ -328,21 +328,19 @@ function workspaceRecovery(workspace: string, error: unknown): NonNullable<Works
 }
 
 export class HostController {
+  private git?: GitService;
+  private offGit?: () => void;
+  private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
+  private terminals?: TerminalManager;
+  private offTerminals?: () => void;
+  private readonly terminalDeliveries = new Map<WebContents, TerminalDelivery>();
+  private codexLoginAbort?: AbortController;
   private registered = false;
   private navigationQueue: Promise<void> = Promise.resolve();
   private bootstrapRevision = 0;
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly workspaceFiles = new WorkspaceFileSearch();
-  private git?: GitService;
-  private offGit?: () => void;
-  private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
-  private codexLoginAbort?: AbortController;
-  private scheduled?: ScheduledTaskService;
-  private terminals?: TerminalManager;
-  private offTerminals?: () => void;
-  private readonly terminalDeliveries = new Map<WebContents, TerminalDelivery>();
-  private notifier?: HostNotifier;
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
@@ -350,6 +348,8 @@ export class HostController {
   private readonly brokerCredentialPreviews = new Map<string, string>();
   private brokerStorageError: string | undefined;
   private offNativeAudio?: () => void;
+  private scheduled?: ScheduledTaskService;
+  private notifier?: HostNotifier;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -371,10 +371,12 @@ export class HostController {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
 
+  attachScheduled(service: ScheduledTaskService): void { this.scheduled = service; }
+
   /**
-   * The notifier holds ARMED TIMERS, so it cannot poll the settings store — a
-   * preference written while an idle timer is already counting down has to be
-   * pushed at it. `CH_SETTINGS_UPDATE` is the one writer.
+   * The notifier holds ARMED TIMERS, so it cannot poll the settings store —
+   * a preference written while an idle timer is already counting down has to
+   * be pushed at it. `CH_SETTINGS_UPDATE` above is the one writer.
    */
   attachNotifier(notifier: HostNotifier): void { this.notifier = notifier; }
 
@@ -391,8 +393,6 @@ export class HostController {
     this.gitWatches.delete(target);
     for (const watch of watches?.values() ?? []) void watch.then(stop => stop()).catch(() => undefined);
   }
-
-  attachScheduled(service: ScheduledTaskService): void { this.scheduled = service; }
 
   attachTerminals(manager: TerminalManager): void {
     this.offTerminals?.();
@@ -435,7 +435,6 @@ export class HostController {
     }
     return scope;
   }
-
 
   registerWindow(webContents: WebContents, rendererUrl: string): void {
     const allowedOrigin = origin(rendererUrl);
@@ -515,58 +514,6 @@ export class HostController {
       }
       return result;
     });
-    this.ipc.handle(CH_CODEX_LOGIN, async (event: IpcMainInvokeEvent) => {
-      this.assertSender(event);
-      this.assertNoActiveTurn();
-      if (!this.credentialBroker) throw new Error('Codex 登录需要可用的安全凭据存储。');
-      if (this.codexLoginAbort) throw new Error('Codex 登录正在进行。');
-      const abort = new AbortController();
-      this.codexLoginAbort = abort;
-      const cancel = () => abort.abort();
-      event.sender.once('destroyed', cancel);
-      try {
-        await this.credentialBroker.health();
-        const session = await this.codexLogin({ openExternal: (url) => shell.openExternal(url), signal: abort.signal });
-        this.assertNoActiveTurn();
-        const stored = await this.bridge.withCodexAuthMutation(async () => {
-          if (abort.signal.aborted) throw new Error('Codex 登录已取消。');
-          return this.credentialBroker!.set(CODEX_PROVIDER_ID, JSON.stringify(session))
-            .catch(() => { throw new Error('Codex 登录凭据无法保存到安全存储，请重试。'); });
-        });
-        if (!stored.configured) throw new Error('Codex 登录凭据未能保存。');
-        this.brokerConfiguredProviders.add(CODEX_PROVIDER_ID);
-        this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
-        this.brokerStorageError = undefined;
-        // Authentication is durable even if the unrelated engine launch fails.
-        // Keep metadata authoritative; the runtime exposes its own connection error.
-        await this.restartIfConfigured().catch(() => {
-          this.diagnostics.add('warn', 'host', 'Codex authentication saved; the session runtime could not restart.');
-        });
-        return { credential: this.providerCredentialMetadata(CODEX_PROVIDER_ID), settings: this.settings.getPublic() };
-      } finally {
-        event.sender.removeListener('destroyed', cancel);
-        if (this.codexLoginAbort === abort) this.codexLoginAbort = undefined;
-      }
-    });
-    this.ipc.handle(CH_SCHEDULED, async (event: IpcMainInvokeEvent, input: unknown) => {
-      this.assertSender(event);
-      if (!this.scheduled || !input || typeof input !== 'object') throw new Error('Scheduled task service unavailable');
-      const request = input as Record<string, unknown>;
-      if (request['action'] === 'scopes') return this.scheduled.scopes();
-      if (typeof request['scopeId'] !== 'string') throw new Error('Invalid scheduled scope');
-      if (request['action'] === 'context') return this.scheduled.context(request['scopeId']);
-      if (request['action'] === 'manage') {
-        const validated = validateClientCommand({ type: 'cron_manage', request_id: 'host-scheduled', request: request['request'] });
-        if (validated.type !== 'cron_manage') throw new Error('Invalid scheduled request');
-        return this.scheduled.manage(request['scopeId'], validated.request);
-      }
-      if (request['action'] === 'open') {
-        if (!isSessionId(request['sessionId'])) throw new Error('Invalid scheduled session');
-        const projectPath = this.scheduled.resolveScope(request['scopeId']);
-        return this.enqueueNavigation(() => this.openSessionAndActivateInternal({ projectPath, sessionId: request['sessionId'] as string }));
-      }
-      throw new Error('Invalid scheduled action');
-    });
     this.ipc.handle(CH_TERMINAL_REQUEST, async (event: IpcMainInvokeEvent, value: unknown) => {
       this.assertSender(event);
       if (!this.terminals) throw new Error('terminal service is unavailable');
@@ -634,8 +581,11 @@ export class HostController {
       // session. `voice` also never restarts the bridge: recognition/synthesis read
       // `bootstrap.settings.voice` fresh on every audio request
       // (`renderer/audio/requests.ts`'s `playback()`), so a write here takes
-      // effect on the NEXT request. Only the legacy Anthropic API base changes
-      // the construction of an already-running provider client.
+      // effect on the NEXT request. `notifications` does not restart anything
+      // either, but it IS pushed at the notifier below: the notifier lives in
+      // the main process and holds armed timers, so it cannot re-read a value
+      // it is never told about. Only the legacy Anthropic API base changes the
+      // construction of an already-running provider client.
       const result = this.settings.update(patch as {
         theme?: 'dark' | 'light' | 'system';
         collapseThoughtsByDefault?: boolean;
@@ -645,8 +595,6 @@ export class HostController {
         notifications?: unknown;
         modelPickerVisibility?: unknown;
       });
-      // Pushed, not polled: the notifier holds armed timers and cannot notice a
-      // value it is never told about.
       if ('notifications' in patch) this.notifier?.setPreferences(result.notifications);
       if (restartsBridge) await this.restartIfConfigured();
       return result;
@@ -694,6 +642,25 @@ export class HostController {
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
         return this.openSessionAndActivateInternal(ref);
       });
+    });
+    this.ipc.handle(CH_SCHEDULED, async (event: IpcMainInvokeEvent, input: unknown) => {
+      this.assertSender(event);
+      if (!this.scheduled || !input || typeof input !== 'object') throw new Error('Scheduled task service unavailable');
+      const request = input as Record<string, unknown>;
+      if (request['action'] === 'scopes') return this.scheduled.scopes();
+      if (typeof request['scopeId'] !== 'string') throw new Error('Invalid scheduled scope');
+      if (request['action'] === 'context') return this.scheduled.context(request['scopeId']);
+      if (request['action'] === 'manage') {
+        const validated = validateClientCommand({ type: 'cron_manage', request_id: 'host-scheduled', request: request['request'] });
+        if (validated.type !== 'cron_manage') throw new Error('Invalid scheduled request');
+        return this.scheduled.manage(request['scopeId'], validated.request);
+      }
+      if (request['action'] === 'open') {
+        if (!isSessionId(request['sessionId'])) throw new Error('Invalid scheduled session');
+        const projectPath = this.scheduled.resolveScope(request['scopeId']);
+        return this.enqueueNavigation(() => this.openSessionAndActivateInternal({ projectPath, sessionId: request['sessionId'] as string }));
+      }
+      throw new Error('Invalid scheduled action');
     });
     this.ipc.handle(CH_SESSION_ARCHIVE_PREFLIGHT, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
       this.assertSender(event);
@@ -788,6 +755,39 @@ export class HostController {
         ? await this.setCredentialThroughBroker(provider.id, credential)
         : await this.setCredentialThroughRuntime(provider.id, credential);
       return { credential: credentialMetadata, settings: this.settings.getPublic() };
+    });
+    this.ipc.handle(CH_CODEX_LOGIN, async (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      this.assertNoActiveTurn();
+      if (!this.credentialBroker) throw new Error('Codex 登录需要可用的安全凭据存储。');
+      if (this.codexLoginAbort) throw new Error('Codex 登录正在进行。');
+      const abort = new AbortController();
+      this.codexLoginAbort = abort;
+      const cancel = () => abort.abort();
+      event.sender.once('destroyed', cancel);
+      try {
+        await this.credentialBroker.health();
+        const session = await this.codexLogin({ openExternal: (url) => shell.openExternal(url), signal: abort.signal });
+        this.assertNoActiveTurn();
+        const stored = await this.bridge.withCodexAuthMutation(async () => {
+          if (abort.signal.aborted) throw new Error('Codex 登录已取消。');
+          return this.credentialBroker!.set(CODEX_PROVIDER_ID, JSON.stringify(session))
+            .catch(() => { throw new Error('Codex 登录凭据无法保存到安全存储，请重试。'); });
+        });
+        if (!stored.configured) throw new Error('Codex 登录凭据未能保存。');
+        this.brokerConfiguredProviders.add(CODEX_PROVIDER_ID);
+        this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
+        this.brokerStorageError = undefined;
+        // Authentication is durable even if the unrelated engine launch fails.
+        // Keep metadata authoritative; the runtime exposes its own connection error.
+        await this.restartIfConfigured().catch(() => {
+          this.diagnostics.add('warn', 'host', 'Codex authentication saved; the session runtime could not restart.');
+        });
+        return { credential: this.providerCredentialMetadata(CODEX_PROVIDER_ID), settings: this.settings.getPublic() };
+      } finally {
+        event.sender.removeListener('destroyed', cancel);
+        if (this.codexLoginAbort === abort) this.codexLoginAbort = undefined;
+      }
     });
     this.ipc.handle(CH_CODEX_CANCEL, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
@@ -1518,22 +1518,22 @@ export class HostController {
   }
 
   dispose(): void {
-    this.codexLoginAbort?.abort();
     this.scheduled?.dispose();
     this.ipc.removeHandler(CH_SCHEDULED);
+    this.codexLoginAbort?.abort();
+    this.offTerminals?.();
     this.offGit?.();
     for (const target of this.gitWatches.keys()) this.detachGit(target);
-    this.offTerminals?.();
     for (const delivery of this.terminalDeliveries.values()) delivery.dispose();
     this.terminalDeliveries.clear();
     if (!this.registered) return;
     for (const channel of [
-      CH_CODEX_LOGIN, CH_CODEX_CANCEL, CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
+      CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_WORKSPACE_FILES_SEARCH,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
-      CH_PROVIDER_CONNECTION_TEST,
+      CH_PROVIDER_CONNECTION_TEST, CH_CODEX_LOGIN, CH_CODEX_CANCEL,
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,

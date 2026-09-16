@@ -25,6 +25,7 @@ import {
 export class SettingsStore {
   readonly settingsPath: string;
   private settings: PersistedSettings;
+  private volatileActiveSession: SessionRef | undefined;
   // Canonical form of the managed scope. Every caller that compares a path
   // against it has already run it through `canonicalWorkspace` (which
   // realpaths), so a userData directory reached through a symlink — a
@@ -32,7 +33,6 @@ export class SettingsStore {
   // test root — would otherwise never match and the app's own scheduled
   // workspace would be rejected as "not in the project list".
   private readonly managedWorkspace: string;
-  private volatileActiveSession: SessionRef | undefined;
 
   constructor(userData: string) {
     this.settingsPath = join(userData, 'settings.v1.json');
@@ -211,10 +211,11 @@ export class SettingsStore {
       this.settings.voice = parseVoicePreferences(patch.voice);
     }
     if ('notifications' in patch) {
-      // Whole-object replace, normalized leniently — same reasoning as `voice`
-      // above, and the same reason `parseNotificationPreferences` never turns a
-      // gate OFF for a malformed field: a corrupt value must not silently
-      // disable notifications, the one failure the settings page cannot show.
+      // Whole-object replace, normalized leniently — same reasoning as
+      // `voice` above, and the same reason `parseNotificationPreferences`
+      // never turns a gate OFF for a malformed field: a corrupt value must
+      // not silently disable notifications, which is the one failure the
+      // settings page cannot show the user.
       this.settings.notifications = parseNotificationPreferences(patch.notifications);
     }
     if ('modelPickerVisibility' in patch) {

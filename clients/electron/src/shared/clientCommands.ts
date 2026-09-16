@@ -105,16 +105,12 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   cron_run_requested: 'host_private',
   cron_run_bound: 'host_private',
   scheduled_run_finished: 'host_private',
-  scheduled_task_fire: 'exposed',
-  // Declared by the wire mirror this commit brings up to date, so the
-  // exhaustive table must cover it. The main process persists the refreshed
-  // Codex credential in bridge.ts; nothing in the renderer reads the event.
-  openai_oauth_updated: 'host_private',
   error: 'exposed',
   message_identity: 'exposed',
   message_retracted: 'exposed',
   system_notice: 'exposed',
   loop_wakeup: 'exposed',
+  scheduled_task_fire: 'exposed',
   ask_user_question: 'exposed',
   ask_user_question_resolved: 'exposed',
   permission_request_resolved: 'exposed',
@@ -147,6 +143,8 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   typescript_lsp_mode_changed: 'not_applicable',
   conversation_controls_changed: 'exposed',
   fast_mode_changed: 'exposed',
+  openai_oauth_updated: 'host_private',
+  task_lifecycle: 'exposed',
   provider_credential_status: 'host_private',
   provider_connection_tested: 'host_private',
   configuration_operation: 'exposed',
@@ -160,12 +158,6 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   agents: 'exposed',
   slash_command_catalog: 'exposed',
   slash_command_result: 'exposed',
-  // An additive SDK task-lifecycle receipt carrying opaque `event_json`.
-  // Desktop neither reads it nor forwards it: nothing outside this table
-  // references the name, and the ClientEvent switch in `main/bridge.ts`
-  // ends in `default: break;`, so an unhandled event is dropped rather
-  // than relayed to the renderer.
-  task_lifecycle: 'exposed',
   memory_entries: 'not_applicable',
   status_snapshot: 'exposed',
   settings_snapshot: 'exposed',

@@ -93,8 +93,8 @@ export interface PublicSettings {
    * OS-notification preferences (`shared/notificationPreferences.ts`). The
    * vocabulary is upstream Claude Code's (`inputNeededNotifEnabled`,
    * `taskCompleteNotifEnabled`, `messageIdleNotifThresholdMs`). Omitted (not
-   * defaulted) when never written — readers take
-   * `defaultNotificationPreferences()` for the undefined case.
+   * defaulted) when never written, matching every other optional field here —
+   * readers take `defaultNotificationPreferences()` for the undefined case.
    */
   notifications?: NotificationPreferences;
   modelPickerVisibility?: ModelPickerVisibilitySettings;

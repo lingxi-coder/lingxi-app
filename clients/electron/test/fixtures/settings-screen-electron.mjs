@@ -394,6 +394,10 @@ async function runVisualAdminScenario(window, webContents) {
   for (const page of pages) {
     await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
     await delay(100);
+    if (page === 'mcp') {
+      await webContents.executeJavaScript(`document.querySelector('.configuration-entry').click()`);
+      await delay(50);
+    }
     if (page === 'hooks') {
       for (const label of ['PreToolUse', 'Group 1', 'Handler 1']) {
         await webContents.executeJavaScript(`(() => {
@@ -586,6 +590,71 @@ async function runProviderSessionIsolation(webContents) {
   return { draftCleared, state: await run('window.__settingsScreenTest.state()') };
 }
 
+async function runConfigurationNavigation(window, webContents) {
+  const run = (code) => webContents.executeJavaScript(code);
+  const click = async (selector) => {
+    await run(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    await delay(60);
+  };
+  const button = async (label) => {
+    await run(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === ${JSON.stringify(label)}).click()`);
+    await delay(60);
+  };
+  const capture = async (name) => {
+    const dir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+    if (!dir) return;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${process.env.LINGXI_SETTINGS_SCREEN_THEME || 'light'}-${name}.png`), (await window.capturePage()).toPNG());
+  };
+  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{},project:{},local:{}})');
+  const results = {};
+  for (const page of ['skills', 'mcp']) {
+    await run(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
+    await delay(80);
+    const initialList = await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
+    const searchLabel = page === 'skills' ? '搜索 skills' : '搜索 MCP 服务器';
+    const query = page === 'skills' ? 'release-notes' : 'context7';
+    await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${searchLabel}"]`)}, ${JSON.stringify(query)})`);
+    await delay(40);
+    await capture(`${page}-list`);
+    await click('.configuration-entry');
+    const detailOnly = await run(`Boolean(document.querySelector('.configuration-detail')) && !document.querySelector('.configuration-list')`);
+    await capture(`${page}-detail`);
+    await click('.configuration-back');
+    const searchRetained = await run(`document.querySelector(${JSON.stringify(`[aria-label="${searchLabel}"]`)}).value === ${JSON.stringify(query)}`);
+    await button('新建');
+    await capture(`${page}-create`);
+    const nameLabel = page === 'skills' ? 'skill-create-name' : 'mcp-name';
+    const createOpened = await run(`Boolean(document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)})) && !document.querySelector('.configuration-list')`);
+    await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${nameLabel}"]`)}, 'draft-test')`);
+    await delay(40);
+    await click('.configuration-back');
+    const guarded = await run(`Boolean(document.querySelector('.configuration-detail')) && document.body.textContent.includes('丢弃并切换')`);
+    await button('继续编辑');
+    const draftRetained = await run(`document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)}).value === 'draft-test'`);
+    await click('.configuration-back');
+    await button('丢弃并切换');
+    const returned = await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
+    results[page] = { initialList, detailOnly, searchRetained, createOpened, guarded, draftRetained, returned };
+  }
+  await run('window.__settingsScreenTest.selectPage("hooks")');
+  await delay(80);
+  const hooksList = await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.hooks-editor')`);
+  await capture('hooks-list');
+  await button('添加');
+  const hooksDetail = await run(`Boolean(document.querySelector('[aria-label="hook command"]')) && !document.querySelector('.configuration-list')`);
+  await run(`window.__settingsScreenTest.setFieldValue('[aria-label="hook command"]', 'echo hook-test')`);
+  await delay(50);
+  await capture('hooks-create');
+  await click('.configuration-back');
+  await click('.configuration-entry');
+  const hooksGuarded = await run(`document.body.textContent.includes('丢弃并切换')`);
+  await button('继续编辑');
+  const hooksDraftRetained = await run(`document.querySelector('[aria-label="hook command"]').value === 'echo hook-test'`);
+  results.hooks = { initialList: hooksList, detailOnly: hooksDetail, guarded: hooksGuarded, draftRetained: hooksDraftRetained };
+  return results;
+}
+
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
@@ -595,7 +664,8 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
-    const result = scenario === 'provider-session-isolation' ? await runProviderSessionIsolation(webContents)
+    const result = scenario === 'configuration-navigation' ? await runConfigurationNavigation(window, webContents)
+      : scenario === 'provider-session-isolation' ? await runProviderSessionIsolation(webContents)
       : scenario === 'custom-providers' ? await runCustomProvidersScenario(window, webContents)
       : scenario === 'visual-admin' ? await runVisualAdminScenario(window, webContents)
       : scenario === 'project-tabs' ? await runProjectTabsScenario(webContents)

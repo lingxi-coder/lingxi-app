@@ -15,7 +15,7 @@ interface GitContextValue {
   view: ViewState; update(change: Partial<ViewState>): void; open(page?: Page): void; terminal(): void;
 }
 const GitContext = createContext<GitContextValue | null>(null);
-function apiAvailable(): GitApi | undefined { return typeof window === 'undefined' ? undefined : window.lingxi?.git; }
+function apiAvailable(): GitApi | undefined { return typeof window === 'undefined' ? undefined : (window.lingxi as unknown as { git?: GitApi } | undefined)?.git; }
 export function GitWorkspaceProvider({ scope, onOpen, onTerminal, children }: { scope: GitScope | null; onOpen(): void; onTerminal(): void; children: ReactNode }) {
   // Keep the workspace tree mounted while requests remain scoped to their session.
   return <GitWorkspaceSession scope={scope} onOpen={onOpen} onTerminal={onTerminal}>{children}</GitWorkspaceSession>;

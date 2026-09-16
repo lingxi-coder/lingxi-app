@@ -335,3 +335,10 @@ test('the layer switcher names the project the ENGINE reported, and switching it
   assert.ok(afterSwitch.navCalls.includes('open:/test/other:newest'),
     `expected the most recently modified session to be opened, got ${JSON.stringify(afterSwitch.navCalls)}`);
 });
+
+ test('Skills and MCP use separate list and detail pages with guarded back navigation', async () => {
+  const result = await runScenario('configuration-navigation');
+  for (const [page, checks] of Object.entries(result)) {
+    for (const [name, passed] of Object.entries(checks)) assert.equal(passed, true, `${page}: ${name}`);
+  }
+});

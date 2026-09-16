@@ -152,7 +152,14 @@ function Fixture() {
         sync_claude_ai_note: 'Stored only. Claude.ai cloud sync is not wired on desktop.',
       }),
     },
-    skillDocumentEvent: null,
+    skillDocumentEvent: {
+      type: 'skill_document' as const,
+      document_json: JSON.stringify({
+        id: '/test/home/.lingxi/skills/release-notes', name: 'release-notes', source: 'user',
+        rootDir: '/test/home/.lingxi/skills', directory: '/test/home/.lingxi/skills/release-notes',
+        writable: true, revision: 'a'.repeat(64), markdown: '# Release notes\n\nSummarize changes for users.',
+      }),
+    },
     mcpConfigurationSnapshotEvent: {
       type: 'mcp_configuration_snapshot' as const,
       snapshot_json: JSON.stringify({

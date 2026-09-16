@@ -1,7 +1,8 @@
-import type { OpenAiOAuthSession } from './host-utils.js';
 import { GitActivityTracker } from './git-activity.js';
-import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
+import type { OpenAiOAuthSession } from './host-utils.js';
 import type { HostNotifier } from './notifications.js';
+export type { OpenAiOAuthSession } from './host-utils.js';
+import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -64,16 +65,16 @@ export type ConnectionState =
   | { status: 'error'; message: string };
 
 export interface BridgeLaunchConfig {
-  openaiOAuth?: OpenAiOAuthSession;
   workspace: string;
   /** Stable identity for the engine process and its persisted transcript. */
   sessionId?: string;
   apiKey?: string;
   providerCredentials?: Record<string, string>;
+  openaiOAuth?: OpenAiOAuthSession;
   /** Broker-owned sensitive plugin options, passed only over child stdin. */
   pluginSecrets?: Record<string, Record<string, string>>;
-  scheduledController?: boolean;
   trusted: boolean;
+  scheduledController?: boolean;
   model?: string;
   apiBaseUrl?: string;
 }
@@ -112,25 +113,25 @@ export interface BridgeManagerOptions {
   readProcessCommand?: (pid: number) => string | undefined;
   /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */
   listProcessCommands?: () => readonly ProcessCommand[];
-  onModelChanged?: (model: string) => void;
-  /**
-   * OS notifications. Lives here rather than in the renderer because the
-   * renderer's session denies every Web permission but `media`, and because
-   * `permission_request` never reaches the renderer as a `ClientEvent` — it is
-   * a separate `Frame` arm handled by `client.on('permission')` below.
-   */
-  notifier?: HostNotifier;
-  resolveOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
-  onOpenAiOAuthUpdated?: (session: OpenAiOAuthSession) => Promise<void>;
-  beforeOpenAiOAuthLaunch?: () => Promise<void>;
   onCronRunRequested?: (runtime: SessionRuntime, event: Extract<ClientEvent, { type: 'cron_run_requested' }>) => Promise<{ sessionId: string; summary: string }>;
+  onModelChanged?: (model: string) => void;
   /** Persist only an explicitly requested, engine-confirmed model selection. */
   onModelSelected?: (model: string) => void;
   getSavedModel?: () => string | undefined;
   getSavedPermissionMode?: () => PermissionModeId | undefined;
   onPermissionModeSelected?: (mode: PermissionModeId) => void;
+  /**
+   * OS notifications. Lives here rather than in the renderer because the
+   * renderer's session denies every Web permission but `media`, and because
+   * `permission_request` never reaches the renderer as a `ClientEvent` — it
+   * is a separate `Frame` arm handled by `client.on('permission')` below.
+   */
+  notifier?: HostNotifier;
   /** Resolve a broker-owned credential only when this session first selects its provider. */
   resolveProviderCredential?: (providerId: string) => Promise<string | undefined>;
+  resolveOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
+  onOpenAiOAuthUpdated?: (session: OpenAiOAuthSession) => Promise<void>;
+  beforeOpenAiOAuthLaunch?: () => Promise<void>;
   /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
   onActivityChanged?: () => void;
   onFirstPromptSent?: () => boolean | void;
@@ -699,8 +700,15 @@ export class SessionRuntime {
   private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
   private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
   private archiving = false;
+  private activeCronExecutions = 0;
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
+  private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
   private activeTurn = false;
+  private openAiOAuthActive = false;
+  private preparingOpenAiOAuth = false;
+  private launchOAuthOverride: OpenAiOAuthSession | undefined;
+  private launchOAuthModel: string | undefined;
+  private oauthPersistence: Promise<void> = Promise.resolve();
   private activeTurnId: number | undefined;
   private cancellingTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
@@ -925,14 +933,6 @@ export class SessionRuntime {
     return this.sendCronCommand({ type: 'cron_manage', request_id: randomUUID(), request });
   }
 
-  private launchOAuthOverride: OpenAiOAuthSession | undefined;
-  private launchOAuthModel: string | undefined;
-  private openAiOAuthActive = false;
-  private preparingOpenAiOAuth = false;
-  private oauthPersistence: Promise<void> = Promise.resolve();
-  private activeCronExecutions = 0;
-  private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
-  private readonly backgroundSessionLeases = new Map<string, number>();
   private readonly pendingRunBindings = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   markCronRunStarted(runId: string, sessionId: string): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -940,6 +940,18 @@ export class SessionRuntime {
       this.pendingRunBindings.set(runId, { resolve, reject, timer });
       try { this.requireClient().sendCommand({ type: 'cron_run_started', run_id: runId, session_id: sessionId }); }
       catch (error) { clearTimeout(timer); this.pendingRunBindings.delete(runId); reject(error); }
+    });
+  }
+
+  private readonly modelCatalogWaiters = new Set<(event: Extract<ClientEvent, { type: 'model_list' }>) => void>();
+
+  scheduledModelCatalog(): Promise<Extract<ClientEvent, { type: 'model_list' }>> {
+    return new Promise((resolve, reject) => {
+      const done = (event: Extract<ClientEvent, { type: 'model_list' }>) => { clearTimeout(timer); this.modelCatalogWaiters.delete(done); resolve(event); };
+      const timer = setTimeout(() => { this.modelCatalogWaiters.delete(done); reject(new Error('Model catalog timed out.')); }, 15_000);
+      this.modelCatalogWaiters.add(done);
+      try { this.requireClient().sendCommand({ type: 'list_models' }); }
+      catch (error) { clearTimeout(timer); this.modelCatalogWaiters.delete(done); reject(error); }
     });
   }
 
@@ -997,20 +1009,6 @@ export class SessionRuntime {
     }
   }
 
-
-
-  private readonly modelCatalogWaiters = new Set<(event: Extract<ClientEvent, { type: 'model_list' }>) => void>();
-
-  scheduledModelCatalog(): Promise<Extract<ClientEvent, { type: 'model_list' }>> {
-    return new Promise((resolve, reject) => {
-      const done = (event: Extract<ClientEvent, { type: 'model_list' }>) => { clearTimeout(timer); this.modelCatalogWaiters.delete(done); resolve(event); };
-      const timer = setTimeout(() => { this.modelCatalogWaiters.delete(done); reject(new Error('Model catalog timed out.')); }, 15_000);
-      this.modelCatalogWaiters.add(done);
-      try { this.requireClient().sendCommand({ type: 'list_models' }); }
-      catch (error) { clearTimeout(timer); this.modelCatalogWaiters.delete(done); reject(error); }
-    });
-  }
-
   private sendCronCommand(command: Extract<ClientCommand, { type: 'cron_manage' }>): Promise<CronJobDto[]> {
     const { request_id, request } = command;
     if (this.pendingCron.has(request_id)) return Promise.reject(new Error('Scheduled task request is already pending.'));
@@ -1042,6 +1040,7 @@ export class SessionRuntime {
 
   private readonly gitActivity = new GitActivityTracker();
   get hasActiveAgents(): boolean { return this.gitActivity.active; }
+
   get hasOpenAiOAuth(): boolean { return this.openAiOAuthActive; }
   get isStarting(): boolean { return this.startPromise !== null; }
 
@@ -1069,13 +1068,16 @@ export class SessionRuntime {
     return [...this.pendingAskUserQuestionRequests.values()].map((entry) => entry.request);
   }
 
-  /** Human descriptions for background tasks, so `agent_completed` can name
-   * the task instead of printing a uuid. `task_row` is the only event that
-   * carries one; `task_status_changed` carries just the id. */
+  /**
+   * Human descriptions for background tasks, so `agent_completed` can name the
+   * task instead of printing a uuid. `task_row` is the only event that carries
+   * one; `task_status_changed` carries just the id.
+   */
   private readonly taskLabels = new Map<string, string>();
 
-  /** `undefined` until both halves are real — a notification click restores a
-   * session from this, and half a ref restores nothing. */
+  /** `undefined` until both halves are real — `main/index.ts`'s notification
+   * click handler restores a session from this, and half a ref restores
+   * nothing. */
   private get notificationRef(): SessionRef | undefined {
     const projectPath = this.projectPath || this.activeWorkspace || '';
     if (!projectPath || !isSessionId(this.sessionId)) return undefined;
@@ -1094,15 +1096,19 @@ export class SessionRuntime {
     if (!notifier) return;
     const ref = this.notificationRef;
     switch (event.type) {
-      case 'turn_started': notifier.turnStarted(this.sessionId, ref); break;
-      case 'turn_ended': notifier.turnEnded(this.sessionId, ref); break;
+      case 'turn_started':
+        notifier.turnStarted(this.sessionId, ref);
+        break;
+      case 'turn_ended':
+        notifier.turnEnded(this.sessionId, ref);
+        break;
       case 'session_ended':
         notifier.sessionEnded(this.sessionId);
         this.taskLabels.clear();
         return;
       case 'ask_user_question':
-        // Only for a request that actually got queued; one rejected by the
-        // pending-limit has no card for the user to answer.
+        // Only for a request that actually got queued above; one rejected by
+        // the pending-limit has no card for the user to answer.
         if (this.pendingAskUserQuestionIds.has(event.request.request_id)) {
           notifier.askUserQuestion(this.sessionId, event.request.request_id, ref);
         }
@@ -1123,7 +1129,8 @@ export class SessionRuntime {
         this.taskLabels.delete(event.task_id);
         break;
       }
-      default: break;
+      default:
+        break;
     }
     notifier.setDialogsOnScreen(this.sessionId, this.pendingInteractions, ref);
   }
@@ -1791,6 +1798,7 @@ export class SessionRuntime {
         }
         return;
       }
+      if (event.type === 'model_list') for (const waiter of this.modelCatalogWaiters) waiter(event);
       if (event.type === 'scheduled_run_finished') {
         const pending = this.pendingScheduledTurns.get(event.run_id);
         if (pending) {
@@ -1830,7 +1838,6 @@ export class SessionRuntime {
         })().finally(() => { this.activeCronExecutions--; this.notifyActivityChanged(); });
         return;
       }
-      if (event.type === 'model_list') for (const waiter of this.modelCatalogWaiters) waiter(event);
       if (isTurnOwnedEvent(event) && !this.activeTurn) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
@@ -2002,10 +2009,11 @@ export class SessionRuntime {
         this.notifyActivityChanged();
         this.broadcast(CH_PERMISSION, request);
         // Armed only AFTER the forward. Every early return above is a request
-        // the renderer will never draw a prompt for, and a notification about a
-        // prompt that does not exist sends the user somewhere with nothing to
-        // do. Upstream's 6s delay means a prompt answered promptly — the common
-        // case when the window is already in front of you — fires nothing.
+        // the renderer will never draw a prompt for, and a notification about
+        // a prompt that does not exist sends the user somewhere with nothing
+        // to do. Upstream's 6s delay means a prompt answered promptly — the
+        // common case when the window is already in front of you — fires
+        // nothing at all.
         this.opts.notifier?.permissionRequested(
           this.sessionId,
           request.request_id,
@@ -2531,7 +2539,7 @@ export class SessionRuntime {
     this.state = next;
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
-      this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+    this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
       // `runScheduledTurn` sets `activeTurn` by hand and only the
       // `scheduled_run_finished` handler clears it — and that handler needs the
       // pending entry this block is about to delete. Without this the latch
@@ -2566,6 +2574,8 @@ export class SessionRuntime {
   }
 
   private async stopBridge(): Promise<void> {
+    await this.oauthPersistence;
+    this.openAiOAuthActive = false;
     for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
     this.pendingCron.clear();
     for (const pending of this.pendingScheduledTurns.values()) pending.reject(new Error('Scheduled execution interrupted.'));
@@ -2602,8 +2612,6 @@ export class SessionRuntime {
     this.activeWorkspaceTrusted = false;
     this.runtimeCredentialProviders.clear();
     this.persistedCredentialProviders.clear();
-    await this.oauthPersistence;
-    this.openAiOAuthActive = false;
     this.activeCredentialProviders.clear();
     this.credentialStorageEncrypted = false;
     this.gitActivity.reset();
@@ -2731,6 +2739,8 @@ export class SessionRuntimeManager {
   private accessSequence = 0;
   private cacheTrimScheduled = false;
   private registered = false;
+  private oauthOwner: string | undefined;
+  private oauthLifecycle: Promise<void> = Promise.resolve();
 
   constructor(private readonly opts: SessionRuntimeManagerOptions) {
     const requestedLimit = opts.maxCachedRuntimes ?? DEFAULT_MAX_CACHED_RUNTIMES;
@@ -2778,54 +2788,6 @@ export class SessionRuntimeManager {
       || status === 'connecting'
       || this.openingSessions.has(runtime.sessionId)
       || this.backgroundSessionLeases.has(runtime.sessionId);
-  }
-
-  retainBackgroundSession(ref: SessionRef): () => void {
-    assertSessionRef(ref);
-    this.backgroundSessionLeases.set(ref.sessionId, (this.backgroundSessionLeases.get(ref.sessionId) ?? 0) + 1);
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      const count = (this.backgroundSessionLeases.get(ref.sessionId) ?? 1) - 1;
-      if (count) this.backgroundSessionLeases.set(ref.sessionId, count);
-      else this.backgroundSessionLeases.delete(ref.sessionId);
-      this.trimCache();
-    };
-  }
-
-  private oauthOwner: string | undefined;
-  private oauthLifecycle: Promise<void> = Promise.resolve();
-
-  private async stopOtherCodexRuntimes(sessionId?: string): Promise<void> {
-    const owner = this.oauthOwner ? this.runtimes.get(this.oauthOwner) : undefined;
-    const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
-      && (runtime.hasOpenAiOAuth || runtime === owner));
-    if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.pendingInteractions > 0
-      || !['connected', 'idle', 'error', 'disconnected'].includes(runtime.connectionState.status))) {
-      throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
-    }
-    for (const runtime of candidates) await runtime.stop();
-    this.oauthOwner = sessionId;
-  }
-
-  private claimCodexRuntime(sessionId?: string): Promise<void> {
-    const operation = this.oauthLifecycle.catch(() => undefined).then(() => this.stopOtherCodexRuntimes(sessionId));
-    this.oauthLifecycle = operation;
-    return operation;
-  }
-
-  withCodexAuthMutation<T>(mutation: () => Promise<T>): Promise<T> {
-    const operation = this.oauthLifecycle.catch(() => undefined).then(async () => {
-      await this.stopOtherCodexRuntimes();
-      return mutation();
-    });
-    this.oauthLifecycle = operation.then(() => undefined, () => undefined);
-    return operation;
-  }
-
-  async invalidateCodexRuntimes(): Promise<void> {
-    await this.withCodexAuthMutation(async () => undefined);
   }
 
   private trimCache(): void {
@@ -2973,6 +2935,20 @@ export class SessionRuntimeManager {
     }
   }
 
+  retainBackgroundSession(ref: SessionRef): () => void {
+    assertSessionRef(ref);
+    this.backgroundSessionLeases.set(ref.sessionId, (this.backgroundSessionLeases.get(ref.sessionId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = (this.backgroundSessionLeases.get(ref.sessionId) ?? 1) - 1;
+      if (count) this.backgroundSessionLeases.set(ref.sessionId, count);
+      else this.backgroundSessionLeases.delete(ref.sessionId);
+      this.trimCache();
+    };
+  }
+
   /** Keep an inactive runtime alive for the whole host operation, then enforce the cache bound. */
   async withBackgroundSession<T>(
     ref: SessionRef,
@@ -3086,6 +3062,38 @@ export class SessionRuntimeManager {
       runtime.projectPath === projectPath
       && (runtime.turnActive || runtime.pendingInteractions > 0)
     ));
+  }
+
+  private async stopOtherCodexRuntimes(sessionId?: string): Promise<void> {
+    const owner = this.oauthOwner ? this.runtimes.get(this.oauthOwner) : undefined;
+    const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
+      && (runtime.hasOpenAiOAuth || runtime === owner));
+    if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.pendingInteractions > 0
+      || !['connected', 'idle', 'error', 'disconnected'].includes(runtime.connectionState.status))) {
+      throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
+    }
+    for (const runtime of candidates) await runtime.stop();
+    this.oauthOwner = sessionId;
+  }
+
+  private claimCodexRuntime(sessionId?: string): Promise<void> {
+    const operation = this.oauthLifecycle.catch(() => undefined).then(() => this.stopOtherCodexRuntimes(sessionId));
+    this.oauthLifecycle = operation;
+    return operation;
+  }
+
+  /** Serialize credential mutation with launch ownership, including broker I/O. */
+  withCodexAuthMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    const operation = this.oauthLifecycle.catch(() => undefined).then(async () => {
+      await this.stopOtherCodexRuntimes();
+      return mutation();
+    });
+    this.oauthLifecycle = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async invalidateCodexRuntimes(): Promise<void> {
+    await this.withCodexAuthMutation(async () => undefined);
   }
 
   async refreshCachedProviderCredential(providerId: string, credential: string): Promise<void> {

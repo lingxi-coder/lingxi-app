@@ -34,10 +34,16 @@ export function App() {
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
   const workspace = bridge.bootstrap?.workspace;
+  const planCalls = useMemo(() => conversationPlans(bridge.conversation.items, bridge.runtimeCenter.submittedPlanState.calls), [bridge.runtimeCenter.submittedPlanState.calls, bridge.conversation.items]);
+  const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
   // Stage's agent-anchor cache compares this prop BY REFERENCE, so an inline
   // `Object.values(...)` (or a bare `[]` literal) would hand it a new identity on
   // every render, invalidating the anchor map and, through it, the transcript
   // `rows` memo — turning a memoized transcript into a full re-walk per render.
+  const stageAgents = useMemo(
+    () => bridge.sessionLoading ? [] : Object.values(bridge.runtimeCenter.agents),
+    [bridge.sessionLoading, bridge.runtimeCenter.agents],
+  );
   // `newSession` publishes a synthetic `pending-new:<opId>` id until the engine
   // answers. It is not a session id the main process will ever accept, so keying
   // the scope-bound panels on it empties the terminal tab strip and makes any
@@ -46,12 +52,6 @@ export function App() {
   const gitScope = selectedGitScope(bridge.bootstrap?.settings.activeProject, settledSession, workspace?.path);
   const terminalProject = bridge.activeSession?.projectPath ?? workspace?.path;
   const terminal = useTerminalPanel(terminalProject ? { projectPath: terminalProject, sessionId: settledSession?.sessionId ?? '__draft__' } : null, page === 'chat' && settingsRoute === null);
-  const stageAgents = useMemo(
-    () => bridge.sessionLoading ? [] : Object.values(bridge.runtimeCenter.agents),
-    [bridge.sessionLoading, bridge.runtimeCenter.agents],
-  );
-  const planCalls = useMemo(() => conversationPlans(bridge.conversation.items, bridge.runtimeCenter.submittedPlanState.calls), [bridge.runtimeCenter.submittedPlanState.calls, bridge.conversation.items]);
-  const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
   const providerConfigured = Boolean(bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured));
   const ready = Boolean(
     !bridge.loading
@@ -129,10 +129,10 @@ export function App() {
                 agents={stageAgents}
                 activeAgentId={bridge.runtimeCenter.inspectorOpen && bridge.runtimeCenter.activeItem?.kind === 'agent'
                   ? bridge.runtimeCenter.activeItem.id : undefined}
-                welcomeProject={(bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
                 onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
                 collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                 emptyMessage={emptyMessage}
+                welcomeProject={(bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
                 // Item ids restart at `i1` in every session; the Stage's
                 // collapse map is scoped by this and dropped when it changes.
                 sessionKey={bridge.conversation.sessionKey}

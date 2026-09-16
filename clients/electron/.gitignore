@@ -2,5 +2,6 @@ node_modules/
 .native-cache/
 out/
 dist/
+*.tsbuildinfo
 *.log
 .DS_Store

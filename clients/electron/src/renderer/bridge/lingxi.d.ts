@@ -1,7 +1,7 @@
 import type { ScheduledApi } from '../../shared/scheduled';
-import type { CronJobDto } from '@lingxi/bridge-client';
-import type { TerminalApi } from '../../shared/terminal.js';
 import type { GitApi } from '../../shared/git.js';
+import type { TerminalApi } from '../../shared/terminal.js';
+import type { CronJobDto } from '@lingxi/bridge-client';
 import type {
   AskUserQuestionRequestDto,
   AudioOpDto,
@@ -86,11 +86,11 @@ export interface DiagnosticEntry {
   message: string;
 }
 export interface BootstrapState {
+  scheduledWorkspace?: string;
   revision: number;
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
   activeSession?: SessionRef;
-  scheduledWorkspace?: string;
   runtimes: SessionRuntimeSummary[];
   projectCatalogs: Record<string, ProjectSessionCatalogState>;
   providerCredentials?: ProviderCredentialMetadata[];

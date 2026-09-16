@@ -1,10 +1,10 @@
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
-import type { CronJobDto } from '@lingxi/bridge-client';
-import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import { CH_GIT_REQUEST, CH_GIT_EVENT } from '../shared/git.js';
 import type { GitApi } from '../shared/git.js';
 import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT } from '../shared/terminal.js';
 import type { TerminalApi } from '../shared/terminal.js';
+import type { CronJobDto } from '@lingxi/bridge-client';
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type {
   AskUserQuestionRequestDto,
   AudioOpDto,
@@ -253,12 +253,6 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
-  scheduled: {
-    context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),
-    scopes: () => ipcRenderer.invoke(CH_SCHEDULED, { action: 'scopes' }),
-    manage: (scopeId, request) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'manage', scopeId, request }),
-    openSession: (scopeId, sessionId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'open', scopeId, sessionId }),
-  } satisfies ScheduledApi,
   git: {
     request: (scope, request) => ipcRenderer.invoke(CH_GIT_REQUEST, scope, request),
     onChanged: (callback) => subscribe(CH_GIT_EVENT, callback),
@@ -275,6 +269,12 @@ const api: LingxiApi = {
   getPathForFile: (file) => webUtils.getPathForFile(file),
   platform: process.platform,
   isElectron: true,
+  scheduled: {
+    context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),
+    scopes: () => ipcRenderer.invoke(CH_SCHEDULED, { action: 'scopes' }),
+    manage: (scopeId, request) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'manage', scopeId, request }),
+    openSession: (scopeId, sessionId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'open', scopeId, sessionId }),
+  } satisfies ScheduledApi,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,
   settings: () => ipcRenderer.invoke(CH_SETTINGS_GET) as Promise<PublicSettings>,
   openSettingsFile: (path) => ipcRenderer.invoke(CH_SETTINGS_FILE_OPEN, path) as Promise<void>,

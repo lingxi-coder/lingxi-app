@@ -521,6 +521,18 @@ PR 4 尾账的 `apply_step_disposition` 就落在这两个类型上：它不是�
 三个测试都断言两条入口**不一致**，而不是单独测某一条——单独测的那一半在两条被
 拉齐之后仍然是绿的。
 
+### PR 6 的文档收网
+
+`HANDOFF-2026-09-10.md` 的措辞**没有**按 PR 6 写的那样改成"一个外层 + 两种策略"。
+落地的不是一个外层函数：三个 `loop {}` 仍然在各自的入口里，共享的是形状和里面
+每一段。写成"一个外层"会制造一个更危险的误解——让人以为改一处就覆盖了全部，而
+`run_round` 和 `run_batched_round` 仍是两个函数。那一条"加分支要加两遍"的陷阱条目
+因此原样保留，表格改成说明**哪些**已经只有一处。
+
+静态检查（PR 6）：`record_prompt_snapshot_if_needed` 与 `collect_turn_reminders`
+各 1 个生产调用点；`take_lone_wakeup_turn_end` 与 `take_end_conversation_request`
+各 2 个——那是 §4 明确要保留的**顺序**差异，不是残留分支。
+
 ### 仍未落地
 
 `StreamingIterationDisposition` 没有并进 `StepExit`。它比 `StepExit` 多一个

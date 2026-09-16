@@ -1,14 +1,25 @@
-//! Top-level conversational orchestrator — drives the v0.6.0 turn loop.
+//! Top-level conversational orchestrator — drives the turn loop.
 //!
 //! `ConversationOrchestrator` is the single owner of an in-process AI
 //! coding conversation:
 //!
-//! 1. Append user prompt to `SessionState`.
-//! 2. Call `messages_create_non_stream` (batched; streaming lands in M5-04).
-//! 3. Dispatch `tool_use` blocks through `ToolRegistry` (after `PreToolUse`
-//!    hook + permission gate; both stubbed in M5-02, real in M5-05 / M5-06).
-//! 4. Append assistant message to session.
-//! 5. Loop until `stop_reason == "end_turn"` or `max_turns` exceeded.
+//! 1. Append the user prompt to `SessionState`.
+//! 2. Call the model — batched (`messages_create`) or streaming, depending on
+//!    the entry.
+//! 3. Dispatch `tool_use` blocks through `ToolRegistry`, after the `PreToolUse`
+//!    hook and the permission gate.
+//! 4. Append the assistant message to the session.
+//! 5. Loop until the turn ends or a limit stops it.
+//!
+//! There are THREE public entries over TWO loops — `run_turn`,
+//! `run_turn_with_cancel` (batched) and `run_turn_streaming` (the one
+//! `bridge-server` drives, so desktop and mobile go through it). The loops have
+//! the same shape and share the steps they have in common — preparation, the
+//! guards, the end-of-turn sequence (`conversation/drivers/`) — but they are
+//! still two loops, and a branch added to one is dead on the other.
+//! `docs/unified-conversation-driver-plan-2026-09-15.md`
+//! §9.5 lists what is shared, what deliberately is not, and which test pins
+//! each difference.
 //!
 //! See spec §2.2 (data flow diagram) and §4.2 (turn loop limits).
 #![forbid(unsafe_code)]

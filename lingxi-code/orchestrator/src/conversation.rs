@@ -1,6 +1,8 @@
 //! Conversation orchestrator.
 //!
-//! Drives the v0.6.0 batched turn loop. See module-level docs in `lib.rs`.
+//! Owns the session and every per-turn service the drivers call. The turn loops
+//! themselves live in `conversation/drivers/`. See module-level docs in
+//! `lib.rs`.
 
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;

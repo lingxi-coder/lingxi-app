@@ -55,7 +55,7 @@ test('real Electron workspace keeps summary pinned with independent details and 
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
         rejectResult(new Error(`Electron topbar fixture timed out\n${errors.join('')}`));
-      }, 20_000);
+      }, 35_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
@@ -69,7 +69,7 @@ test('real Electron workspace keeps summary pinned with independent details and 
       });
     });
 
-    assert.equal(result.checks.length, 8);
+    assert.equal(result.checks.length, 9);
     assert.deepEqual(result.overview.sections, ['Context', 'Subagents', 'Todos', 'Resources', 'Plan']);
     assert.equal(result.overview.width, 300);
     assert.deepEqual(result.heights, { chat: 56, detail: 56, panel: 390 });

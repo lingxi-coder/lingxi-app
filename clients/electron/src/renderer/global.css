@@ -131,9 +131,10 @@ body {
   z-index: 30;
   width: min(760px, calc(100% - 24px));
   height: min(520px, calc(100vh - 82px));
-  min-height: 320px;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(220px, 250px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   color: var(--summary-panel-text);
   background: color-mix(in oklab, var(--summary-panel-bg) 96%, transparent);
@@ -147,6 +148,7 @@ body {
 }
 .context-summary-sidebar {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: color-mix(in oklab, var(--summary-panel-subtle) 46%, transparent);
@@ -154,6 +156,7 @@ body {
 }
 .context-summary-heading,
 .context-summary-detail-heading {
+  flex-shrink: 0;
   min-height: 64px;
   display: flex;
   align-items: center;
@@ -181,6 +184,7 @@ body {
   line-height: 1.35;
 }
 .context-summary-list {
+  overscroll-behavior: contain;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -269,6 +273,7 @@ body {
 .context-summary-item[data-active='true'] > svg { color: var(--summary-panel-accent); }
 .context-summary-detail {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--summary-panel-bg);
@@ -300,19 +305,30 @@ body {
 }
 .context-summary-close:active { scale: .96; }
 .context-summary-detail-meta {
+  flex-shrink: 0;
   padding: 11px 18px 0;
   color: var(--summary-panel-muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
 .context-summary-markdown {
+  flex: 1;
+  min-width: 0;
   min-height: 0;
+  overscroll-behavior: contain;
   overflow: auto;
   padding: 14px 18px 22px;
   color: var(--summary-panel-secondary);
   font-size: 12.5px;
   line-height: 1.62;
 }
+/* Nested Markdown grids must shrink to the reading pane, including long paths. */
+.context-summary-markdown .markdown-content,
+.context-summary-markdown .markdown-ul,
+.context-summary-markdown .markdown-ol {
+  grid-template-columns: minmax(0, 1fr);
+}
+.context-summary-markdown .markdown-li { min-width: 0; }
 .context-summary-empty-list,
 .context-summary-empty-detail {
   display: grid;

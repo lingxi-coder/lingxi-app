@@ -164,6 +164,58 @@ async function main() {
     assert.equal(await js(`document.querySelector('#runtime-center-overview').textContent.includes('Desktop workspace')`), false);
     await capture('empty-light');
     checks.push('session reset and four empty states');
+    // Exercise actual wheel input, so an unconstrained overflow:auto child cannot pass.
+    await click('[aria-label="Hide right panel"]');
+    await js(`window.dispatchEvent(new CustomEvent('fixture-reset',{detail:{longSummaries:true}}))`);
+    await click('[aria-label="Open context summaries"]');
+    await waitFor(wc, `document.querySelectorAll('.context-summary-item').length === 13`);
+    const panes = ['.context-summary-list', '.context-summary-markdown'];
+    const measure = () => js(`(() => {
+      const panel = document.querySelector('#context-summary-panel');
+      const bounds = panel.getBoundingClientRect();
+      return {
+        viewport: { width: innerWidth, height: innerHeight },
+        bounds: { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom },
+        panes: ${JSON.stringify(panes)}.map(selector => {
+          const element = document.querySelector(selector);
+          return { top: element.scrollTop, height: element.clientHeight, contentHeight: element.scrollHeight, width: element.clientWidth, contentWidth: element.scrollWidth };
+        }),
+        headers: ['.context-summary-heading', '.context-summary-detail-heading'].map(selector => {
+          const rect = document.querySelector(selector).getBoundingClientRect();
+          return { top: rect.top, bottom: rect.bottom };
+        }),
+        overflow: ['#context-summary-panel', '.context-summary-sidebar', '.context-summary-detail'].some(selector => {
+          const element = document.querySelector(selector);
+          return element.scrollWidth > element.clientWidth + 1;
+        }),
+      };
+    })()`);
+    for (const [name, width, height] of [['regular', 1400, 900], ['narrow', 600, 600], ['short', 900, 360]]) {
+      window.setContentSize(width, height);
+      await delay(150);
+      await js(`${JSON.stringify(panes)}.forEach(selector => { document.querySelector(selector).scrollTop = 0; })`);
+      await capture(`context-long-${name}`);
+      const initial = await measure();
+      assert.ok(initial.bounds.left >= 0 && initial.bounds.top >= 0 && initial.bounds.right <= width && initial.bounds.bottom <= height, `${name}: dialog fits viewport`);
+      assert.equal(initial.overflow, false, `${name}: no horizontal container overflow`);
+      for (const [index, selector] of panes.entries()) {
+        assert.ok(initial.panes[index].height > 0 && initial.panes[index].contentHeight > initial.panes[index].height, `${name}: ${selector} is a bounded scroll pane`);
+        // Let smooth scrolling and Chromium's previous wheel gesture settle.
+        await delay(250);
+        const before = await measure();
+        const point = await js(`(() => { const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + Math.min(35, rect.height / 2)) }; })()`);
+        wc.sendInputEvent({ type: 'mouseMove', ...point });
+        wc.sendInputEvent({ type: 'mouseWheel', ...point, deltaX: 0, deltaY: -240, canScroll: true });
+        await waitFor(wc, `document.querySelector(${JSON.stringify(selector)}).scrollTop > ${before.panes[index].top}`);
+        await delay(250);
+        const after = await measure();
+        assert.equal(after.panes[1 - index].top, before.panes[1 - index].top, `${name}: panes scroll independently`);
+        assert.deepEqual(after.headers, initial.headers, `${name}: headers stay pinned`);
+        assert.ok(after.headers.every(header => header.top >= after.bounds.top && header.bottom <= after.bounds.bottom), `${name}: headers remain visible`);
+      }
+      assert.equal((await measure()).panes[1].contentWidth <= initial.panes[1].width + 1, true, `${name}: long inline paths wrap inside markdown`);
+    }
+    checks.push('long context bounded layout independent wheel scrolling and pinned headers at three viewport sizes');
     if (process.env.LINGXI_TOPBAR_SCREENSHOT) {
       await mkdir(dirname(process.env.LINGXI_TOPBAR_SCREENSHOT), { recursive: true });
       await writeFile(process.env.LINGXI_TOPBAR_SCREENSHOT, (await wc.capturePage()).toPNG());

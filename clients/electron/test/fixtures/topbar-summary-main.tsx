@@ -40,17 +40,24 @@ function initialCenter(empty: boolean) {
   } as ReturnType<typeof emptyRuntimeCenterState>;
 }
 
+const longSummary = [
+  'This session is being continued from a previous conversation that ran out of context.',
+  ...Array.from({ length: 24 }, (_, index) => `## ${index + 1}. Preserved context\n\n1. Primary request and intent\n   - Keep the camera preview responsive while inspecting deeply nested implementation details.\n     - Source: \`/workspace/mobile/app/src/main/java/com/example/inspection/${'VeryLongImplementationPath'.repeat(10)}.kt\`\n   - Verify layout and scrolling independently in both panes.\n\n\`\`\`typescript\nconst preservedContext = "${'long-code-value-'.repeat(24)}";\n\`\`\``),
+].join('\n\n');
+
 function Fixture() {
   const [compactCalls, setCompactCalls] = useState(0);
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [sessionKey, setSessionKey] = useState('session-a');
   const [empty, setEmpty] = useState(false);
+  const [longSummaries, setLongSummaries] = useState(false);
   const [center, setCenter] = useState(() => initialCenter(false));
   const palette = tokens(theme === 'dark');
   useEffect(() => {
     const reset = (event: Event) => {
       const options = (event as CustomEvent).detail;
       if (options.theme) setTheme(options.theme);
+      if (options.longSummaries !== undefined) setLongSummaries(Boolean(options.longSummaries));
       if (options.sessionKey) {
         setSessionKey(options.sessionKey);
         setEmpty(Boolean(options.empty));
@@ -72,7 +79,7 @@ function Fixture() {
     usage: { inputTokens: 18_420, outputTokens: 3_184, cacheReadTokens: 0, cacheCreationTokens: 0 },
     conversation: {
       ...emptyConversation(), activeCompactionId: compactCalls ? 'compact-active' : null, sessionKey, plan: empty ? [] : todos,
-      summaries: [
+      summaries: longSummaries ? Array.from({ length: 13 }, (_, index) => ({ id: `long-summary-${index}`, content: longSummary })) : [
         { id: 'summary-1', content: '## Provider routing\n\nPreserve the selected provider when the session resumes.', messagesBefore: 42, messagesAfter: 9, bytesSaved: 38912 },
         { id: 'summary-2', content: '## Desktop polish\n\nKeep the workspace quiet and focused.', messagesBefore: 31, messagesAfter: 7, bytesSaved: 24576 },
       ],

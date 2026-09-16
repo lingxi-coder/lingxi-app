@@ -64,6 +64,13 @@ import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
 import { defaultVoicePreferences, LANGUAGE_AUTO } from '../../shared/voicePreferences';
 import type { NativeAudioOwner, NativeAudioResponse } from '../../shared/nativeAudio';
+import {
+  modelPickerSubmenuPlacement,
+  MODEL_PICKER_MENU_WIDTH,
+  MODEL_PICKER_SUBMENU_GAP,
+  type ModelPickerSubmenuBounds,
+  type ModelPickerSubmenuPlacement,
+} from './modelPickerPlacement';
 import { PERMISSION_MODE_OPTIONS } from '../model/permissionModes';
 import type { RunItem } from '../model/runItem';
 
@@ -1209,6 +1216,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);
   const [modelQuery, setModelQuery] = useState('');
+  const [submenuBounds, setSubmenuBounds] = useState<ModelPickerSubmenuBounds | null>(null);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
@@ -1292,6 +1300,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const pickerSubmenus: readonly ModelPickerSection[] = fastModeAvailable
     ? ['model', 'effort', 'speed']
     : ['model', 'effort'];
+  // Both submenu sizes are resolved here so the panels and their headings agree
+  // on whether they are beside the menu or drilled down over it.
+  const modelListPlacement = modelPickerSubmenuPlacement(390, submenuBounds);
+  const optionListPlacement = modelPickerSubmenuPlacement(300, submenuBounds);
   const reasoningControls = bridge.desktop.conversationControls?.reasoning;
   const reasoningOptions = reasoningControls?.spec.options ?? [];
   const selectedReasoning = reasoningControls?.effective ?? reasoningControls?.requested;
@@ -1365,6 +1377,29 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       return;
     }
     setModelQuery('');
+  }, [modelOpen, modelSubmenu]);
+
+  // How much room a submenu has to fly out into. The composer dock spans the
+  // clipping `.desktop-workspace-upper` box exactly, so its left edge IS the
+  // boundary; falling back to the window keeps a dock-less host (the fixtures)
+  // measuring something real rather than nothing.
+  useLayoutEffect(() => {
+    if (!modelOpen || !modelSubmenu) {
+      setSubmenuBounds(null);
+      return;
+    }
+    const measure = () => {
+      const control = modelControl.current;
+      if (!control) return;
+      const dock = control.closest('.desktop-composer-dock');
+      setSubmenuBounds({
+        anchorRight: control.getBoundingClientRect().right,
+        boundaryLeft: dock ? dock.getBoundingClientRect().left : 0,
+      });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
   }, [modelOpen, modelSubmenu]);
 
   useEffect(() => {
@@ -2544,13 +2579,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               <Icon name="chevron" size={14} color={t.text3} />
             </button>
             {ready && modelOpen && (
+              <>
               <div
                 style={{
                   ...composerMenuStyle(t, 'right'),
-                  width: 340,
-                  maxWidth: 'min(340px, calc(100vw - 44px))',
+                  width: MODEL_PICKER_MENU_WIDTH,
+                  maxWidth: `min(${MODEL_PICKER_MENU_WIDTH}px, calc(100vw - 44px))`,
                   padding: 8,
-                  overflow: 'visible',
                 }}
                 role="menu"
                 aria-label="Model settings"
@@ -2586,133 +2621,134 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                     </button>
                   );
                 })}
-
-                {modelSubmenu === 'model' && (
-                  <div className="model-picker-model-submenu" style={{ ...modelPickerSubmenuStyle(t), width: 390, maxWidth: 'min(390px, calc(100vw - 44px))', maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label="Available models">
-                    <div style={{ flexShrink: 0, padding: '5px 10px 7px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Model</div>
-                    <div style={{ position: 'relative', flexShrink: 0, margin: '0 3px 7px' }}>
-                      <span aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', display: 'grid', placeItems: 'center', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
-                        <Icon name="search" size={14} color={t.text4} stroke={1.8} />
-                      </span>
-                      <input
-                        ref={modelSearchInput}
-                        type="text"
-                        value={modelQuery}
-                        aria-label="Search models"
-                        placeholder="Search models"
-                        autoComplete="off"
-                        spellCheck={false}
-                        onChange={(event) => setModelQuery(event.currentTarget.value)}
-                        onKeyDown={(event) => {
-                          if (event.key !== 'Escape') return;
-                          event.preventDefault();
-                          event.stopPropagation();
-                          if (modelQuery) setModelQuery('');
-                          else setModelSubmenu(null);
-                        }}
-                        style={{ width: '100%', height: 34, padding: '0 32px 0 31px', border: `0.5px solid ${t.borderStrong}`, borderRadius: 8, outline: 'none', background: t.surfaceActive, color: t.text, font: 'inherit', fontSize: 12.5 }}
-                        onFocus={(event) => { event.currentTarget.style.borderColor = t.accent; }}
-                        onBlur={(event) => { event.currentTarget.style.borderColor = t.borderStrong; }}
-                      />
-                      {modelQuery && (
-                        <button type="button" aria-label="Clear model search" onClick={() => { setModelQuery(''); modelSearchInput.current?.focus(); }} style={{ position: 'absolute', right: 5, top: '50%', display: 'grid', width: 24, height: 24, padding: 0, placeItems: 'center', transform: 'translateY(-50%)', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
-                          <Icon name="x" size={12} color={t.text3} stroke={1.9} />
-                        </button>
-                      )}
-                    </div>
-                    <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '0 3px 3px', scrollbarGutter: 'stable' }}>
-                      {filteredModelGroups.map((group, groupIndex) => {
-                        const statusProviderId = group.providerId === 'builtin' ? 'anthropic' : group.providerId;
-                        const metadata = statusProviderId
-                          ? providerCredentials?.find((entry) => entry.providerId === statusProviderId)
-                          : undefined;
-                        const knownProvider = Boolean(statusProviderId && providerById(statusProviderId));
-                        const connectionLabel = knownProvider
-                          ? providerCredentials
-                            ? metadata?.configured ? 'Connected' : 'Not connected'
-                            : 'Checking…'
-                          : undefined;
-                        const connected = metadata?.configured === true;
-                        return (
-                          <section key={group.providerId ?? 'unqualified'} aria-labelledby={`desktop-model-provider-${group.providerId ?? 'other'}`} style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}>
-                            <div id={`desktop-model-provider-${group.providerId ?? 'other'}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
-                              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{group.providerLabel}</span>
-                              {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === 'Checking…' ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
-                            </div>
-                            {modelBillingGroups(group, bridge.desktop.modelDetails).map((billingGroup, billingIndex) => (
-                              <div key={billingGroup.label ?? 'all'} style={billingIndex === 0 ? undefined : { marginTop: 4, paddingTop: 4, borderTop: `0.5px solid ${t.border}` }}>
-                                {billingGroup.label && <div style={{ padding: '5px 10px 3px', color: t.text4, fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>{billingGroup.label}</div>}
-                                {billingGroup.models.map((entry) => {
-                                  const active = entry.reference === bridge.desktop.currentModel;
-                                  const entryDetail = modelDetailsByReference.get(entry.reference);
-                                  const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
-                                    && modelSupportsFastMode(entryDetail);
-                                  const selection = resolveModelSelection(entry.reference, providerCredentials);
-                                  const unavailable = selection.kind === 'loading';
-                                  const requiresConnection = selection.kind === 'connect';
-                                  return (
-                                    <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? 'Checking provider connection…' : requiresConnection ? `Connect ${providerById(selection.providerId)?.label ?? selection.providerId} in Settings to use this model` : entry.requestModel} onClick={() => {
-                                      if (selection.kind === 'loading') return;
-                                      setModelOpen(false);
-                                      setModelSubmenu(null);
-                                      if (selection.kind === 'connect') onOpenProviderSettings(selection.providerId, entry.reference, () => modelTrigger.current?.focus());
-                                      else invoke(() => bridge.setModel(entry.reference));
-                                    }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
-                                      {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
-                                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{modelDisplayLabel(entry, bridge.desktop.modelDetails)}</span>
-                                      {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>Connect in Settings</span>}
-                                      {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            ))}
-                          </section>
-                        );
-                      })}
-                      {filteredModelGroups.length === 0 && (
-                        <div role="status" style={{ padding: '28px 16px 30px', color: t.text4, fontSize: 12, textAlign: 'center' }}>
-                          {modelQuery.trim()
-                            ? `No models match “${modelQuery.trim()}”`
-                            : visibleModelReferences.length === 0
-                              ? 'No models are visible in this picker'
-                              : 'No models match your current filters'}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {modelSubmenu === 'effort' && (
-                  <div style={{ ...modelPickerSubmenuStyle(t), width: 300, maxWidth: 'min(300px, calc(100vw - 44px))', maxHeight: 'min(430px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Reasoning effort">
-                    <div style={{ padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Effort</div>
-                    {reasoningOptions.length > 0 ? reasoningOptions.map((option) => {
-                      const active = reasoningSelectionKey(option.selection) === reasoningSelectionKey(selectedReasoning ?? { type: 'automatic' });
-                      const disabled = reasoningControls?.spec.editable === false;
-                      return (
-                        <button key={reasoningSelectionKey(option.selection)} type="button" role="menuitemradio" aria-checked={active} disabled={disabled} onClick={() => invoke(() => bridge.setReasoningSelection(option.selection))} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: disabled ? t.text4 : t.text, textAlign: 'left', cursor: disabled ? 'not-allowed' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: disabled ? .65 : 1 }} onMouseEnter={(event) => { if (!active && !disabled) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !disabled) event.currentTarget.style.background = 'transparent'; }}>
-                          <span style={{ flex: 1 }}>{reasoningSelectionLabel(option.selection)}</span>
-                          {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
-                        </button>
-                      );
-                    }) : <div style={{ padding: '5px 10px 10px', color: t.text4, fontSize: 11.5 }}>Effort is not configurable for this model.</div>}
-                  </div>
-                )}
-
-                {modelSubmenu === 'speed' && fastModeAvailable && (
-                  <div style={{ ...modelPickerSubmenuStyle(t), width: 300, maxWidth: 'min(300px, calc(100vw - 44px))', maxHeight: 'min(300px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Speed">
-                    <div style={{ padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Speed</div>
-                    <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !ready)}>
-                      <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Standard</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>Default speed</span></span>
-                      {(!bridge.desktop.fastMode || !fastModeAvailable) && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
-                    </button>
-                    {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !ready)}>
-                      <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Fast</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>1.5x speed, more usage</span></span>
-                      {bridge.desktop.fastMode && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
-                    </button>}
-                  </div>
-                )}
               </div>
+
+              {modelSubmenu === 'model' && (
+                <div style={{ ...modelPickerSubmenuStyle(t, modelListPlacement), maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label="Available models">
+                  {modelPickerSubmenuHeading(t, 'Model', '5px 10px 7px', modelListPlacement, () => setModelSubmenu(null))}
+                  <div style={{ position: 'relative', flexShrink: 0, margin: '0 3px 7px' }}>
+                    <span aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', display: 'grid', placeItems: 'center', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
+                      <Icon name="search" size={14} color={t.text4} stroke={1.8} />
+                    </span>
+                    <input
+                      ref={modelSearchInput}
+                      type="text"
+                      value={modelQuery}
+                      aria-label="Search models"
+                      placeholder="Search models"
+                      autoComplete="off"
+                      spellCheck={false}
+                      onChange={(event) => setModelQuery(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Escape') return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (modelQuery) setModelQuery('');
+                        else setModelSubmenu(null);
+                      }}
+                      style={{ width: '100%', height: 34, padding: '0 32px 0 31px', border: `0.5px solid ${t.borderStrong}`, borderRadius: 8, outline: 'none', background: t.surfaceActive, color: t.text, font: 'inherit', fontSize: 12.5 }}
+                      onFocus={(event) => { event.currentTarget.style.borderColor = t.accent; }}
+                      onBlur={(event) => { event.currentTarget.style.borderColor = t.borderStrong; }}
+                    />
+                    {modelQuery && (
+                      <button type="button" aria-label="Clear model search" onClick={() => { setModelQuery(''); modelSearchInput.current?.focus(); }} style={{ position: 'absolute', right: 5, top: '50%', display: 'grid', width: 24, height: 24, padding: 0, placeItems: 'center', transform: 'translateY(-50%)', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
+                        <Icon name="x" size={12} color={t.text3} stroke={1.9} />
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '0 3px 3px', scrollbarGutter: 'stable' }}>
+                    {filteredModelGroups.map((group, groupIndex) => {
+                      const statusProviderId = group.providerId === 'builtin' ? 'anthropic' : group.providerId;
+                      const metadata = statusProviderId
+                        ? providerCredentials?.find((entry) => entry.providerId === statusProviderId)
+                        : undefined;
+                      const knownProvider = Boolean(statusProviderId && providerById(statusProviderId));
+                      const connectionLabel = knownProvider
+                        ? providerCredentials
+                          ? metadata?.configured ? 'Connected' : 'Not connected'
+                          : 'Checking…'
+                        : undefined;
+                      const connected = metadata?.configured === true;
+                      return (
+                        <section key={group.providerId ?? 'unqualified'} aria-labelledby={`desktop-model-provider-${group.providerId ?? 'other'}`} style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}>
+                          <div id={`desktop-model-provider-${group.providerId ?? 'other'}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
+                            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{group.providerLabel}</span>
+                            {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === 'Checking…' ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
+                          </div>
+                          {modelBillingGroups(group, bridge.desktop.modelDetails).map((billingGroup, billingIndex) => (
+                            <div key={billingGroup.label ?? 'all'} style={billingIndex === 0 ? undefined : { marginTop: 4, paddingTop: 4, borderTop: `0.5px solid ${t.border}` }}>
+                              {billingGroup.label && <div style={{ padding: '5px 10px 3px', color: t.text4, fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>{billingGroup.label}</div>}
+                              {billingGroup.models.map((entry) => {
+                                const active = entry.reference === bridge.desktop.currentModel;
+                                const entryDetail = modelDetailsByReference.get(entry.reference);
+                                const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
+                                  && modelSupportsFastMode(entryDetail);
+                                const selection = resolveModelSelection(entry.reference, providerCredentials);
+                                const unavailable = selection.kind === 'loading';
+                                const requiresConnection = selection.kind === 'connect';
+                                return (
+                                  <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? 'Checking provider connection…' : requiresConnection ? `Connect ${providerById(selection.providerId)?.label ?? selection.providerId} in Settings to use this model` : entry.requestModel} onClick={() => {
+                                    if (selection.kind === 'loading') return;
+                                    setModelOpen(false);
+                                    setModelSubmenu(null);
+                                    if (selection.kind === 'connect') onOpenProviderSettings(selection.providerId, entry.reference, () => modelTrigger.current?.focus());
+                                    else invoke(() => bridge.setModel(entry.reference));
+                                  }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
+                                    {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
+                                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{modelDisplayLabel(entry, bridge.desktop.modelDetails)}</span>
+                                    {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>Connect in Settings</span>}
+                                    {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ))}
+                        </section>
+                      );
+                    })}
+                    {filteredModelGroups.length === 0 && (
+                      <div role="status" style={{ padding: '28px 16px 30px', color: t.text4, fontSize: 12, textAlign: 'center' }}>
+                        {modelQuery.trim()
+                          ? `No models match “${modelQuery.trim()}”`
+                          : visibleModelReferences.length === 0
+                            ? 'No models are visible in this picker'
+                            : 'No models match your current filters'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {modelSubmenu === 'effort' && (
+                <div style={{ ...modelPickerSubmenuStyle(t, optionListPlacement), maxHeight: 'min(430px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Reasoning effort">
+                  {modelPickerSubmenuHeading(t, 'Effort', '5px 10px 8px', optionListPlacement, () => setModelSubmenu(null))}
+                  {reasoningOptions.length > 0 ? reasoningOptions.map((option) => {
+                    const active = reasoningSelectionKey(option.selection) === reasoningSelectionKey(selectedReasoning ?? { type: 'automatic' });
+                    const disabled = reasoningControls?.spec.editable === false;
+                    return (
+                      <button key={reasoningSelectionKey(option.selection)} type="button" role="menuitemradio" aria-checked={active} disabled={disabled} onClick={() => invoke(() => bridge.setReasoningSelection(option.selection))} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: disabled ? t.text4 : t.text, textAlign: 'left', cursor: disabled ? 'not-allowed' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: disabled ? .65 : 1 }} onMouseEnter={(event) => { if (!active && !disabled) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !disabled) event.currentTarget.style.background = 'transparent'; }}>
+                        <span style={{ flex: 1 }}>{reasoningSelectionLabel(option.selection)}</span>
+                        {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
+                      </button>
+                    );
+                  }) : <div style={{ padding: '5px 10px 10px', color: t.text4, fontSize: 11.5 }}>Effort is not configurable for this model.</div>}
+                </div>
+              )}
+
+              {modelSubmenu === 'speed' && fastModeAvailable && (
+                <div style={{ ...modelPickerSubmenuStyle(t, optionListPlacement), maxHeight: 'min(300px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Speed">
+                  {modelPickerSubmenuHeading(t, 'Speed', '5px 10px 8px', optionListPlacement, () => setModelSubmenu(null))}
+                  <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !ready)}>
+                    <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Standard</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>Default speed</span></span>
+                    {(!bridge.desktop.fastMode || !fastModeAvailable) && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
+                  </button>
+                  {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !ready)}>
+                    <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Fast</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>1.5x speed, more usage</span></span>
+                    {bridge.desktop.fastMode && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
+                  </button>}
+                </div>
+              )}
+              </>
             )}
           </div>
           <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
@@ -2772,12 +2808,57 @@ function composerSendStyle(t: ReturnType<typeof useT>, enabled: boolean): CSSPro
   return { ...composerPrimaryActionStyle(t, enabled), background: enabled ? `color-mix(in srgb, ${t.accent} 85%, #000)` : t.surfaceActive, color: enabled ? '#fff' : t.text4, opacity: enabled ? 1 : .82 };
 }
 
+/** How far a composer menu floats above the control it belongs to. */
+const COMPOSER_MENU_LIFT = 9;
+
 function composerMenuStyle(t: ReturnType<typeof useT>, side: 'left' | 'right'): CSSProperties {
-  return { position: 'absolute', bottom: 'calc(100% + 9px)', [side]: 0, zIndex: 20, width: 286, padding: 7, borderRadius: 12, border: `0.5px solid ${t.borderStrong}`, background: t.surface, boxShadow: '0 16px 40px rgba(0,0,0,.22)', animation: 'fade-in .15s ease' };
+  return { position: 'absolute', bottom: `calc(100% + ${COMPOSER_MENU_LIFT}px)`, [side]: 0, zIndex: 20, width: 286, padding: 7, borderRadius: 12, border: `0.5px solid ${t.borderStrong}`, background: t.surface, boxShadow: '0 16px 40px rgba(0,0,0,.22)', animation: 'fade-in .15s ease' };
 }
 
-function modelPickerSubmenuStyle(t: ReturnType<typeof useT>): CSSProperties {
-  return { position: 'absolute', right: 'calc(100% + 12px)', bottom: 12, zIndex: 21, padding: 8, borderRadius: 12, border: `0.5px solid ${t.borderStrong}`, background: t.surface, boxShadow: '0 16px 40px rgba(0,0,0,.22)', animation: 'fade-in .15s ease' };
+/**
+ * A submenu's section title.
+ *
+ * Drilled down over the menu, the title is the only way BACK to it, so there it
+ * is a control; beside the menu the rows it would return to are already on
+ * screen and a back button is noise.
+ */
+function modelPickerSubmenuHeading(
+  t: ReturnType<typeof useT>,
+  label: string,
+  padding: string,
+  placement: ModelPickerSubmenuPlacement,
+  onBack: () => void,
+): ReactNode {
+  if (placement.right !== 0) {
+    return <div style={{ flexShrink: 0, padding, color: t.text3, fontSize: 12, fontWeight: 600 }}>{label}</div>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={onBack}
+      aria-label={`Back to model settings from ${label}`}
+      style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, width: '100%', padding, border: 0, background: 'transparent', color: t.text3, font: 'inherit', fontSize: 12, fontWeight: 600, textAlign: 'left', cursor: 'pointer' }}
+    >
+      <Icon name="chevronL" size={13} color="currentColor" stroke={2} />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+/**
+ * A model-picker submenu, positioned against the model CONTROL rather than
+ * against the menu it belongs to. Both are right-aligned to the same control,
+ * so the offsets below are plain border-box arithmetic — nesting the submenu
+ * inside the menu would measure them from its padding box instead, which is
+ * how {@link modelPickerSubmenuPlacement}'s width budget and the rendered gap
+ * would drift apart.
+ */
+function modelPickerSubmenuStyle(t: ReturnType<typeof useT>, placement: ModelPickerSubmenuPlacement): CSSProperties {
+  const bottom = placement.right === 0
+    // Drilled down over the menu: share its bottom edge so it cannot peek out.
+    ? COMPOSER_MENU_LIFT
+    : COMPOSER_MENU_LIFT + MODEL_PICKER_SUBMENU_GAP;
+  return { position: 'absolute', right: placement.right, bottom: `calc(100% + ${bottom}px)`, zIndex: 21, width: placement.width, padding: 8, borderRadius: 12, border: `0.5px solid ${t.borderStrong}`, background: t.surface, boxShadow: '0 16px 40px rgba(0,0,0,.22)', animation: 'fade-in .15s ease' };
 }
 
 function speedOptionStyle(t: ReturnType<typeof useT>, active: boolean, disabled: boolean): CSSProperties {

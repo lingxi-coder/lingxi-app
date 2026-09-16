@@ -148,10 +148,12 @@ function Fixture() {
   const [running, setRunning] = useState(false);
   const [backgroundStatuses, setBackgroundStatuses] = useState<Record<string, string | undefined>>({});
   const [cancellingSessions, setCancellingSessions] = useState<Record<string, boolean>>({});
+  const [sidebarWidth, setSidebarWidth] = useState(0);
 
   useEffect(() => {
     window.__composerDraftTest = {
       switchSession: setSessionId,
+      setSidebarWidth,
       setRunning,
       setBackgroundStatus: (session, status) => setBackgroundStatuses((current) => ({ ...current, [session]: status })),
       setCancelling: (session, cancelling) => setCancellingSessions((current) => ({ ...current, [session]: cancelling })),
@@ -167,14 +169,26 @@ function Fixture() {
 
   return (
     <Theme.Provider value={tokens('dark')}>
-      <BetaComposer
-        bridge={bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false) as never}
-        ready
-        onOpenSettings={() => undefined}
-        onOpenSettingsPage={() => undefined}
-        onSetTheme={() => undefined}
-        onOpenProviderSettings={() => undefined}
-      />
+      {/*
+        The shell around the composer is what makes composer overlays land or
+        get cut: `.desktop-workspace-upper` clips at `overflow: hidden`, and it
+        begins where the sidebar ends. Reproduced here so a picker that flies
+        out further than that gap fails the way it fails in the app instead of
+        merely hanging off an unclipped body.
+      */}
+      <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden' }}>
+        <aside data-testid="fixture-sidebar" style={{ width: sidebarWidth, flexShrink: 0, background: '#101014' }} />
+        <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
+          <BetaComposer
+            bridge={bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false) as never}
+            ready
+            onOpenSettings={() => undefined}
+            onOpenSettingsPage={() => undefined}
+            onSetTheme={() => undefined}
+            onOpenProviderSettings={() => undefined}
+          />
+        </div>
+      </div>
     </Theme.Provider>
   );
 }
@@ -183,6 +197,7 @@ declare global {
   interface Window {
     __composerDraftTest?: {
       switchSession(sessionId: string): void;
+      setSidebarWidth(width: number): void;
       setRunning(running: boolean): void;
       setBackgroundStatus(sessionId: string, status: string | undefined): void;
       setCancelling(sessionId: string, cancelling: boolean): void;

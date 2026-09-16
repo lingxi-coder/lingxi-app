@@ -23,6 +23,7 @@
  */
 
 import { memo, type CSSProperties } from 'react';
+import type { ToolIconDto } from '@lingxi/bridge-client';
 
 import { standaloneJsonForDisplay } from '../markdown';
 import type { ToolRunItem } from '../model/runItem';
@@ -32,7 +33,7 @@ import { ltrAnchored } from './bidi';
 import { CodeBlock } from './CodeBlock';
 import { DiffView } from './DiffView';
 import { Disclosure } from './Disclosure';
-import { Icon } from './Icon';
+import { ToolActivityIcon } from './ToolActivityIcon';
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
   fontSize: 13,
@@ -76,9 +77,24 @@ export function formatElapsed(ms: number): string {
   return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
 }
 
+const SEMANTIC_TOOL_ICONS = {
+  read: 'file', search: 'search', list: 'list', edit: 'compose', terminal: 'terminal',
+  globe: 'globe', workflow: 'workflow', list_checks: 'tasks', sparkles: 'spark',
+  plug: 'plug', output: 'output', stop: 'stop', wrench: 'box',
+} satisfies Record<ToolIconDto, string>;
+
 /** Existing icon vocabulary mapped onto the engine's open-ended tool verbs. */
-export function toolIconName(verb: string): string {
+export function toolIconName(verb: string, tool?: string, icon?: ToolIconDto): string {
+  // Generic MCP verbs do not distinguish visual/media and messaging tools.
+  const identity = (verb.toLowerCase() === 'generic' ? tool?.split('__').at(-1) ?? verb : verb).toLowerCase();
+  if (/(?:^|_)(?:send_message|send_input|message|chat)(?:_|$)/.test(identity)) return 'chat';
+  if (/(?:^|_)(?:view_image|image|images|screenshot)(?:_|$)/.test(identity)) return 'image';
+  if (icon) return SEMANTIC_TOOL_ICONS[icon] ?? 'box';
   const value = verb.toLowerCase();
+  if (value === 'fetch') return 'globe';
+  if (value === 'skill') return 'spark';
+  if (value === 'output') return 'output';
+  if (value === 'kill') return 'stop';
   if (['search', 'find', 'grep', 'web'].some((part) => value.includes(part))) return 'search';
   if (['bash', 'shell', 'terminal', 'command', 'exec'].some((part) => value.includes(part))) return 'terminal';
   // `TodoWrite` is a task tool even though it also contains "write".
@@ -100,7 +116,7 @@ function ToolGlyph({ item }: { item: ToolRunItem }) {
         color: 'var(--tool-icon-color)',
       }}
     >
-      <Icon name={toolIconName(item.view.verb)} size={18} color="currentColor" stroke={1.8} />
+      <ToolActivityIcon name={toolIconName(item.view.verb, item.tool, item.view.icon)} />
     </span>
   );
 }

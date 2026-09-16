@@ -32,10 +32,17 @@
 //! two snippet arms, the 16384-char cross-file budget, the line-number
 //! prefixer, the 8192-char snippet truncation) plus [`render_snippet`] — the
 //! `SEf` diff at context 8 — live here; the PRODUCER is
-//! `ConversationOrchestrator::changed_files_reminder_message`, called from the
-//! streaming turn driver's per-turn reminder fan-out in `conversation.rs`
-//! (positioned after `agent_listing_delta` and before `nested_memory`, the
-//! oracle's fan-out order @296520120).
+//! `ConversationOrchestrator::changed_files_reminder_messages`, called from the
+//! per-turn reminder collector in `conversation/drivers/prepare.rs` that BOTH
+//! turn drivers share.
+//!
+//! The oracle's fan-out (@296520120) puts `changed_files` after
+//! `agent_listing_delta` and before `nested_memory`. This port emits
+//! `nested_memory` earlier (it has to run right after the conditional-rules
+//! producer, whose claims into `sent_conditional_rules` it then skips), so
+//! here `changed_files` sits directly after
+//! `agent_listing_delta` — a deliberate position divergence recorded at the
+//! call site.
 //!
 //! Two deliberate deviations from `Izm`, both non-model-visible:
 //!

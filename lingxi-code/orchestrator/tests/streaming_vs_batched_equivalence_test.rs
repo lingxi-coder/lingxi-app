@@ -10,11 +10,15 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use protocol::{ContentBlock, ConversationMessage};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tool_api::registry::ToolRegistry;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{DescriptionOptions, PromptOptions, Tool, ToolStaticContext};
+use tool_api::{registry::ToolRegistry, ToolCallResult, ToolError, ValidationError};
 
 fn run_with_large_stack<F, Fut>(build: F)
 where
@@ -34,6 +38,10 @@ where
         .expect("spawn large-stack test thread");
     handle.join().expect("large-stack test thread panicked");
 }
+
+/// The model every fixture in this file speaks as. It must stay on the
+/// `todo_tools_gate` allowlist, or the task reminder stops firing.
+const FIXTURE_MODEL: &str = "claude-opus-4-7";
 
 fn batched_response(text: &str) -> LlmResponse {
     LlmResponse {
@@ -213,6 +221,100 @@ fn memory_prefetch(memdir: &std::path::Path) -> Arc<memory::prefetch::MemoryPref
     ))
 }
 
+/// A do-nothing tool registered under a real name.
+///
+/// Several reminders gate on a tool being DISPATCHABLE this turn
+/// (`skill_listing` on `Skill`, `task_reminder` on `TaskUpdate`), so the fixture
+/// has to put something in the registry under that name. Nothing here is ever
+/// called: the gate is `find_dispatchable_tool(name).is_some()`.
+struct NamedStubTool(&'static str);
+
+#[async_trait::async_trait]
+impl Tool for NamedStubTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| serde_json::json!({"type": "object"}));
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn validate_input(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> PermissionResult {
+        PermissionResult::Allow {
+            reason: PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: PermissionMetadata::default(),
+        }
+    }
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+        String::new()
+    }
+    async fn prompt(&self, _opts: &PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Err(ToolError::Internal("stub tool is never dispatched".into()))
+    }
+}
+
+struct StaticSkills;
+#[async_trait::async_trait]
+impl orchestrator::prompt::skill_listing::SkillListingProvider for StaticSkills {
+    async fn skill_entries(&self) -> Vec<orchestrator::prompt::skill_listing::SkillListingEntry> {
+        vec![orchestrator::prompt::skill_listing::SkillListingEntry {
+            name: "debug".into(),
+            description: "Debug a failing test".into(),
+            when_to_use: None,
+            is_bundled: false,
+        }]
+    }
+}
+
+/// Registry holding the tools the reminder gates look for.
+///
+/// Setting the registry's main-loop model here would be a no-op: orchestrator
+/// construction overwrites it from `config.model` (`conversation/wiring.rs`),
+/// and every turn republishes it from the live session
+/// (`conversation/tooling.rs`). The `OO()` gate that decides whether the task
+/// reminder renders is therefore pinned via `OrchestratorConfig::model` below.
+fn gated_tool_registry() -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry.register_builtin(Arc::new(NamedStubTool("Skill")));
+    registry.register_builtin(Arc::new(NamedStubTool("TaskUpdate")));
+    Arc::new(registry)
+}
+
 struct MockDiag(Option<String>);
 #[async_trait::async_trait]
 impl platform_api::NewDiagnosticsSource for MockDiag {
@@ -256,28 +358,112 @@ fn one_dream_notification() -> platform_api::task_registry::TaskNotification {
     }
 }
 
-fn message_texts(messages: &[ConversationMessage]) -> Vec<String> {
+/// Put the session into the state the remaining reminder gates require.
+///
+/// `plan_mode` gates on the session flag; the task/todo reminder gates on BOTH
+/// cadence counters having reached their thresholds and on a non-empty history.
+/// Applied identically to both orchestrators so any divergence in the output is
+/// the drivers', not the fixture's.
+async fn arm_gated_reminders(orch: &ConversationOrchestrator) {
+    let session = orch.session();
+    let mut s = session.lock().await;
+    s.plan_mode = true;
+    s.turns_since_last_todo_write = tool_task::reminder::TURNS_SINCE_WRITE;
+    s.turns_since_last_reminder = tool_task::reminder::TURNS_BETWEEN_REMINDERS;
+    s.history.push(ConversationMessage::user_meta(
+        protocol::MessageId::new(),
+        "seed".into(),
+    ));
+}
+
+/// Render the outgoing messages, with THIS orchestrator's own session id masked.
+///
+/// The two orchestrators are separate sessions, so anything that embeds a
+/// session id (the plan-mode reminder names the session's plan file) differs by
+/// construction. Masking each instance's OWN id — rather than scrubbing every
+/// UUID-shaped string — keeps the comparison blind to that one identifier and
+/// nothing else.
+async fn model_input_texts(
+    orch: &ConversationOrchestrator,
+    messages: &[ConversationMessage],
+) -> Vec<String> {
+    let session_id = orch.session().lock().await.session_id.as_uuid().to_string();
     messages
         .iter()
-        .map(ConversationMessage::text_content)
+        .map(|m| m.text_content().replace(&session_id, "<session-id>"))
         .collect()
 }
 
+/// The model-facing order the shared collector must produce, as
+/// (label, distinctive substring) in the order they are expected to appear.
+///
+/// Sourced from the collector's own sequence in
+/// `conversation/drivers/prepare.rs`, which this file locks; the substrings come
+/// from each renderer, not from a previous run's output. The durable
+/// task-notification leads because it is appended to the snapshot BEFORE the
+/// transient reminders, then the transient ones follow in collector order:
+/// output_style → plan_mode → skill_listing → task/todo → memory_update →
+/// total_tokens.
+///
+/// `total_tokens` is last because it is DEFAULT ON in this port
+/// (`prompt::total_tokens::PORT_DEFAULT_MODE`, oracle parity since 2026-08-20),
+/// so it fires on a stock turn. `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off` in the
+/// environment turns it back off and this test will report it missing — that is
+/// an environment override, not a regression.
+///
+/// NOT covered here, and deliberately so rather than silently: `silent_turn`
+/// needs a model-capability table entry AND a multi-turn tool-result stretch,
+/// neither of which this single-turn fixture can produce. `brief_mode`,
+/// `conditional_rules`, `nested_memory`, `new_diagnostics`, `agent_listing`,
+/// `changed_files`, `tool_search_usage`, `async_hook_response`,
+/// `relevant_memory` and `skill_discovery` stay dark here; their PRESENCE on
+/// both paths is pinned by `tests/reminder_twin_wiring_test.rs`, their position
+/// is not pinned by anything yet.
+const EXPECTED_REMINDER_ORDER: &[(&str, &str)] = &[
+    ("task_notification (durable)", "<task-notification>"),
+    ("output_style", "Explanatory output style is active"),
+    ("plan_mode", "Plan mode is active."),
+    (
+        "skill_listing",
+        "The following skills are available for use with the Skill tool:",
+    ),
+    (
+        "task_reminder",
+        "The task tools haven't been used recently.",
+    ),
+    ("memory_update", "Background memory consolidation updated"),
+    ("total_tokens", "<total_tokens>"),
+];
+
+/// Pin the RELATIVE ORDER of every reminder this fixture switches on.
+///
+/// This is the assertion with teeth. The byte-equality check between the two
+/// paths cannot see a reorder inside the collector — one function feeds both
+/// entries, so a swap moves both sides identically and the comparison still
+/// passes. Only this function fails on that.
 fn assert_shared_reminder_order(messages: &[String]) {
-    let index_of = |needle: &str| {
-        messages
+    let mut last: Option<(&str, usize)> = None;
+    for (label, needle) in EXPECTED_REMINDER_ORDER {
+        let hits = messages.iter().filter(|text| text.contains(needle)).count();
+        assert_eq!(
+            hits, 1,
+            "{label}: needle {needle:?} must match exactly one message, or the \
+             position below is meaningless (0 hits can also mean the producer \
+             is switched off in this environment): {messages:#?}"
+        );
+        let at = messages
             .iter()
             .position(|text| text.contains(needle))
-            .unwrap_or_else(|| panic!("missing {needle:?} in model input: {messages:#?}"))
-    };
-    let task_notification = index_of("<task-notification>");
-    let output_style = index_of("Explanatory output style is active");
-    let memory_update = index_of("Background memory consolidation updated");
-
-    assert!(
-        task_notification < output_style && output_style < memory_update,
-        "durable task notification must precede transient reminders, and the memory update generated by that notification must retain its collector order: {messages:#?}"
-    );
+            .expect("just counted one hit");
+        if let Some((prev_label, prev_at)) = last {
+            assert!(
+                prev_at < at,
+                "{prev_label} must precede {label} (collector order in \
+                 conversation/drivers/prepare.rs), got {prev_at} then {at}: {messages:#?}"
+            );
+        }
+        last = Some((label, at));
+    }
 }
 
 #[test]
@@ -287,6 +473,13 @@ fn batched_and_streaming_share_complete_reminder_order() {
         let streaming_memdir = tempfile::TempDir::new().expect("streaming memory directory");
         let config = OrchestratorConfig {
             output_style: Some("Explanatory".into()),
+            // `OrchestratorConfig::DEFAULT_MODEL` ("claude-opus-4-8") is an
+            // Anthropic id that is NOT on the `todo_tools_gate` allowlist, so the
+            // task reminder is correctly suppressed under it. The orchestrator
+            // republishes the registry's main-loop model from the SESSION model
+            // every turn, so pinning it here — not on the registry — is what
+            // survives into the gate.
+            model: FIXTURE_MODEL.into(),
             ..OrchestratorConfig::default()
         };
 
@@ -295,7 +488,7 @@ fn batched_and_streaming_share_complete_reminder_order() {
             config.clone(),
             batched_mock.clone(),
             Arc::new(MockStreamingApiClient::empty()),
-            Arc::new(ToolRegistry::new()),
+            gated_tool_registry(),
             orchestrator::test_support::noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),
@@ -303,12 +496,14 @@ fn batched_and_streaming_share_complete_reminder_order() {
             PathBuf::from("/tmp"),
         )
         .with_memory_prefetch(memory_prefetch(batched_memdir.path()))
+        .with_skill_listing(Arc::new(StaticSkills))
         .with_task_notifications(Arc::new(OnceTaskNotifications(std::sync::Mutex::new(
             vec![one_dream_notification()],
         ))));
+        arm_gated_reminders(&orch_b).await;
         orch_b.run_turn("ping").await.expect("batched");
         let batched_calls = batched_mock.captured_msgs().await;
-        let batched_messages = message_texts(&batched_calls[0]);
+        let batched_messages = model_input_texts(&orch_b, &batched_calls[0]).await;
 
         let stream_script = scripted![
             message_start("m1", "claude-opus-4-7"),
@@ -323,7 +518,7 @@ fn batched_and_streaming_share_complete_reminder_order() {
             config,
             Arc::new(MockApiClient::new(Vec::new())),
             streaming_mock.clone(),
-            Arc::new(ToolRegistry::new()),
+            gated_tool_registry(),
             orchestrator::test_support::noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),
@@ -331,18 +526,30 @@ fn batched_and_streaming_share_complete_reminder_order() {
             PathBuf::from("/tmp"),
         )
         .with_memory_prefetch(memory_prefetch(streaming_memdir.path()))
+        .with_skill_listing(Arc::new(StaticSkills))
         .with_task_notifications(Arc::new(OnceTaskNotifications(std::sync::Mutex::new(
             vec![one_dream_notification()],
         ))));
+        arm_gated_reminders(&orch_s).await;
         orch_s.run_turn_streaming("ping").await.expect("streaming");
         let streaming_calls = streaming_mock.captured_calls().await;
-        let streaming_messages = message_texts(&streaming_calls[0].messages);
+        let streaming_messages = model_input_texts(&orch_s, &streaming_calls[0].messages).await;
 
+        // Order first: it is the only check that can see a reorder inside the
+        // collector, and it gives the clearer message when one happens.
         assert_shared_reminder_order(&batched_messages);
         assert_shared_reminder_order(&streaming_messages);
+        // Then cross-path equality. This does NOT pin collector order — one
+        // function feeds both entries, so a swap moves both sides identically.
+        // What it does pin is that both real entries route through that
+        // collector and neither adds, drops, or repositions anything AROUND it:
+        // the durable task-notification's placement ahead of the transient
+        // reminders, the leading context, and the user message itself.
         assert_eq!(
             batched_messages, streaming_messages,
-            "both real entry paths must send byte-identical reminder order"
+            "the batched and streaming entries must send the same model input; a \
+             difference here is something one driver does outside the shared \
+             collector, not a collector-order change"
         );
     });
 }

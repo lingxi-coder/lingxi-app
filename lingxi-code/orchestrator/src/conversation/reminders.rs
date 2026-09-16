@@ -358,6 +358,18 @@ impl ConversationOrchestrator {
     /// this is where the oracle's `setAppState({pendingMemoryUpdates:[…]})`
     /// enqueue lands. The queue is drained separately by
     /// [`Self::memory_update_reminder_messages`].
+    ///
+    /// Both turn drivers reach the drain through
+    /// [`Self::task_notification_reminder_messages_in_turn`] (via the shared
+    /// collector), which is where `in_human_turn` comes from; this
+    /// `in_human_turn = false` wrapper has no production caller left and is
+    /// kept for tests that drain the registry directly.
+    ///
+    /// `#[cfg(test)]` so that stays true: without it the method is dead in a
+    /// non-test build (it has warned since the collector landed), and a future
+    /// production caller would silently contradict the paragraph above instead
+    /// of failing to compile.
+    #[cfg(test)]
     pub(crate) async fn task_notification_reminder_messages(&self) -> Vec<ConversationMessage> {
         self.task_notification_reminder_messages_in_turn(false)
             .await
@@ -382,10 +394,18 @@ impl ConversationOrchestrator {
             .collect()
     }
 
-    /// Cap on [`Self::pending_memory_updates`]. The BATCHED turn driver calls
-    /// the notification drain (which enqueues) but not
-    /// [`Self::memory_update_reminder_messages`] (which drains), so the queue
-    /// must be bounded; oldest entries are dropped.
+    /// Cap on [`Self::pending_memory_updates`]; oldest entries are dropped.
+    ///
+    /// Enqueue and drain are separate halves that used to sit on different
+    /// drivers — the batched path enqueued without ever draining, so the queue
+    /// could only grow. Both drivers now share one collector
+    /// (`conversation/drivers/prepare.rs`), which drains a few lines after it
+    /// enqueues, so in production the queue is emptied every model step. The
+    /// bound stays as defence in depth: [`Self::enqueue_memory_updates_from`]
+    /// is reached from
+    /// [`Self::task_notification_reminder_messages_in_turn`], and a caller that
+    /// drains notifications OUTSIDE the collector still enqueues here with
+    /// nothing to empty it.
     pub(crate) const MAX_PENDING_MEMORY_UPDATES: usize = 8;
 
     /// REM-14 enqueue half: turn every terminal `dream` notification into a

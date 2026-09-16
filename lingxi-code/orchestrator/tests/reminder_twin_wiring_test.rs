@@ -1,4 +1,4 @@
-//! Anti-drift: every per-turn reminder must be injected by BOTH turn drivers.
+//! Anti-drift: every per-turn reminder must reach BOTH turn drivers.
 //!
 //! claude-code has ONE main loop. LingXi has two — the batched `turn_loop.rs`
 //! and the streaming driver under `conversation/drivers` — and a reminder wired
@@ -6,64 +6,224 @@
 //! silent: the feature works when you test it, and does nothing in production
 //! if production runs the other driver.
 //!
+//! The two drivers now share ONE collector (`conversation/drivers/prepare.rs`),
+//! so the shape of the check moved with it. Instead of counting the same
+//! producer in two hand-maintained fan-outs, it pins the two halves that
+//! replaced them:
+//!
+//! 1. the shared collector invokes every producer exactly once, and
+//! 2. each driver routes through that collector exactly once, and reaches NO
+//!    producer behind its back.
+//!
+//! Half 2 is what keeps half 1 meaningful: a shared collector nothing calls is
+//! the same silent regression in a new costume, and a reminder open-coded into
+//! one driver instead of the collector is the original bug exactly.
+//!
 //! This is a SOURCE-level check, and it is honest about being weak: it proves
-//! each driver mentions each reminder, not that the message is pushed in the
-//! right position or at all. There is no driver-level integration harness for
-//! this family of reminders; until there is, this catches the one mistake that
-//! has actually been made.
+//! each producer is reached, not that the message is pushed in the right
+//! position or at all. `tests/streaming_vs_batched_equivalence_test.rs` drives
+//! both real entries and pins the ORDER of the producers that fire there; note
+//! that its byte-equality assertion cannot see a reorder INSIDE the collector,
+//! because one function feeds both paths. Order is pinned by that file's
+//! `assert_shared_reminder_order`, not by cross-path equality.
 
 const BATCHED: &str = include_str!("../src/turn_loop.rs");
 const STREAMING: &str = include_str!("../src/conversation/drivers/mod.rs");
+const COLLECTOR: &str = include_str!("../src/conversation/drivers/prepare.rs");
 const PROMPT_PIPELINE: &str = include_str!("../src/conversation/prompt.rs");
 
-/// Reminders that must appear in both drivers. Add a row when you add a
-/// reminder — the point is that forgetting the second driver fails here.
+/// The collector's own file, excluded from the driver scan below.
+///
+/// Unlike the driver set, this is pinned to ONE file. If the collector is ever
+/// split, the failures land in the safe direction — the moved producers read as
+/// missing from the collector AND as direct driver calls, so two checks go red
+/// rather than one going quietly green — but the second message will blame "the
+/// driver source". Update this constant and [`COLLECTOR`] together.
+const COLLECTOR_FILE: &str = "prepare.rs";
+
+/// Every file a turn driver can live in, as (label, source).
+///
+/// Enumerated from disk rather than `include_str!`ed by name on purpose. The
+/// unified-driver plan adds `loop_state.rs` and `disposition.rs` under
+/// `drivers/`, and a producer open-coded into a file this list did not happen
+/// to name would be invisible to every check below — the exact regression they
+/// exist to catch, arriving through the door they do not watch.
+/// Every `.rs` file under `dir`, at any depth.
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+fn driver_sources() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = vec![(
+        "turn_loop.rs".to_string(),
+        std::fs::read_to_string(root.join("src/turn_loop.rs")).expect("read src/turn_loop.rs"),
+    )];
+
+    // Recursive: a driver split into `drivers/streaming/mod.rs` must not slip
+    // past the way a flat listing would let it.
+    let drivers_dir = root.join("src/conversation/drivers");
+    let mut driver_files = Vec::new();
+    collect_rs_files(&drivers_dir, &mut driver_files);
+    driver_files.sort();
+    for path in driver_files {
+        if path.file_name().is_some_and(|name| name == COLLECTOR_FILE) {
+            continue;
+        }
+        let label = format!(
+            "drivers/{}",
+            path.strip_prefix(&drivers_dir)
+                .expect("driver path is under drivers/")
+                .to_string_lossy()
+        );
+        let source = std::fs::read_to_string(&path).expect("read driver source");
+        sources.push((label, source));
+    }
+
+    // Coverage self-check. A scan that silently found nothing — wrong working
+    // directory, renamed module — would report every check below as clean,
+    // which is worse than no check at all.
+    let found: Vec<&str> = sources.iter().map(|(name, _)| name.as_str()).collect();
+    assert!(
+        found.contains(&"turn_loop.rs") && found.contains(&"drivers/mod.rs"),
+        "the driver scan must cover at least the two known drivers; it found {found:?}"
+    );
+    sources
+}
+
+/// Every producer the shared collector must invoke, in no particular order —
+/// position is not what this file checks. Add a row when you add a reminder:
+/// forgetting to wire it into the collector fails
+/// `shared_collector_invokes_every_per_turn_reminder`, and wiring it into one
+/// driver instead fails `neither_driver_reaches_a_reminder_behind_the_collector`.
 const TWIN_REMINDERS: &[&str] = &[
+    "brief_mode_reminder_message",
+    "output_style_reminder_message",
+    "plan_mode_turn_messages",
+    "plan_mode_exit_message",
+    "skill_listing_reminder_message",
     "conditional_rules_reminder_message",
     "nested_memory_reminder_message",
     "new_diagnostics_reminder_message",
-    "skill_listing_reminder_message",
     "agent_listing_reminder_message",
     "changed_files_reminder_messages",
+    "todo_reminder_message",
+    "tool_search_usage_reminder_message",
+    "async_hook_response_reminder_message",
+    "task_notification_reminder_messages_in_turn",
     "memory_update_reminder_messages",
+    "relevant_memory_reminder_messages",
+    "skill_discovery_reminder_message",
     "silent_turn_reminder_message",
     "total_tokens_reminder_message",
 ];
 
-/// Count DRIVER call sites only. The receiver disambiguates: the streaming
-/// driver and the batched driver both name their orchestrator binding `orch`.
-fn call_sites(src: &str, receiver: &str, name: &str) -> usize {
-    src.matches(&format!("{receiver}.{name}().await")).count()
+/// Count CALL sites of `name`, wherever rustfmt put the receiver.
+///
+/// The leading dot is what makes this a call rather than a mention: a doc link
+/// spells the same method `Self::name` or `` `name` `` with no parenthesis, and
+/// a wrapped call (`self\n    .name(arg)`) still carries the dot.
+///
+/// The previous matcher was `receiver.name().await`, which scores zero for any
+/// call rustfmt wrapped or that takes an argument — two of the producers here
+/// are both. A matcher that under-counts is the dangerous direction for a
+/// presence check, because the failure looks like a missing call.
+fn call_sites(src: &str, name: &str) -> usize {
+    src.matches(&format!(".{name}(")).count()
+}
+
+/// A row-count canary for [`TWIN_REMINDERS`].
+///
+/// The list above is hand-maintained, so on its own it cannot notice a producer
+/// ADDED to the collector and not listed — the very omission it exists to
+/// catch, just one level up. Counting the producer-shaped calls in the
+/// collector and comparing against the list closes that: a new reminder makes
+/// the numbers disagree until its row is added.
+///
+/// Counting leans on the naming convention: every producer is named
+/// `*_message`, `*_messages` or `*_messages_in_turn` (`persist_message_to_jsonl`
+/// does not match, because the `(` must follow). A future producer named
+/// outside that convention would not be counted here and would need its row
+/// added by hand — the same hazard one level further out, and the reason the
+/// per-name checks below exist as well rather than this canary alone.
+#[test]
+fn twin_reminder_list_covers_every_producer_in_the_collector() {
+    let producer_calls = COLLECTOR.matches("_message(").count()
+        + COLLECTOR.matches("_messages(").count()
+        + COLLECTOR.matches("_messages_in_turn(").count();
+    assert_eq!(
+        producer_calls,
+        TWIN_REMINDERS.len(),
+        "the collector makes {producer_calls} producer calls but TWIN_REMINDERS lists \
+         {}. Add the new reminder's row above — an unlisted producer is invisible to \
+         every other check in this file.",
+        TWIN_REMINDERS.len()
+    );
 }
 
 #[test]
-fn every_per_turn_reminder_is_injected_by_both_drivers() {
+fn shared_collector_invokes_every_per_turn_reminder() {
     for name in TWIN_REMINDERS {
         assert_eq!(
-            call_sites(BATCHED, "orch", name),
+            call_sites(COLLECTOR, name),
             1,
-            "{name} must be invoked exactly once by the BATCHED driver (turn_loop.rs)"
-        );
-        assert_eq!(
-            call_sites(STREAMING, "orch", name),
-            1,
-            "{name} must be invoked exactly once by the STREAMING driver \
-             (conversation/drivers/mod.rs). A reminder wired into only the batched driver \
-             is a streaming-only regression that no unit test will catch."
+            "{name} must be invoked exactly once by the shared collector \
+             (conversation/drivers/prepare.rs). Both turn drivers read their \
+             per-turn reminders from there; a producer missing here is missing \
+             from BOTH paths."
         );
     }
 }
 
 #[test]
-fn deferred_tool_reminder_is_injected_by_both_drivers() {
-    for (name, source) in [("BATCHED", BATCHED), ("STREAMING", STREAMING)] {
-        assert_eq!(
-            source
-                .matches("tool_search_usage_reminder_message(")
-                .count(),
-            1,
-            "{name} driver must invoke the deferred-tool reminder exactly once"
-        );
+fn neither_driver_reaches_a_reminder_behind_the_collector() {
+    let sources = driver_sources();
+
+    // Exactly one route in, per driver: the batched one in turn_loop.rs, the
+    // streaming one somewhere under drivers/ (which file is not pinned — the
+    // plan moves that code — but the COUNT is).
+    let batched_entries = sources
+        .iter()
+        .filter(|(name, _)| name == "turn_loop.rs")
+        .map(|(_, src)| call_sites(src, "collect_turn_reminders"))
+        .sum::<usize>();
+    assert_eq!(
+        batched_entries, 1,
+        "the BATCHED driver (turn_loop.rs) must call collect_turn_reminders \
+         exactly once; the collector only protects paths that go through it"
+    );
+    let streaming_entries = sources
+        .iter()
+        .filter(|(name, _)| name.starts_with("drivers/"))
+        .map(|(_, src)| call_sites(src, "collect_turn_reminders"))
+        .sum::<usize>();
+    assert_eq!(
+        streaming_entries, 1,
+        "the STREAMING driver (somewhere under conversation/drivers/) must call \
+         collect_turn_reminders exactly once across all its files"
+    );
+
+    // And no way around it. A producer called straight from a driver is the
+    // single-driver wiring bug this file was written for; adding it to the
+    // collector instead is the fix, not adding it to both drivers.
+    for (file, source) in &sources {
+        for name in TWIN_REMINDERS {
+            assert_eq!(
+                call_sites(source, name),
+                0,
+                "{name} is invoked directly by the driver source {file}. Per-turn \
+                 reminders belong in the shared collector \
+                 (conversation/drivers/{COLLECTOR_FILE}) so BOTH drivers get them; a \
+                 direct call here is live on one path only."
+            );
+        }
     }
 }
 

@@ -1104,9 +1104,20 @@ async fn git_status_stays_frozen_after_session_cwd_swap() {
     assert!(!after.contains("worktree-only.txt"), "after:\n{after}");
 }
 
+/// The PROMPT half of the interactive-session wiring.
+///
+/// Race-free and therefore safe to keep in the lib binary: the bullet is gated
+/// on `prompt_is_interactive()`, which reads `self.config.interactive_session`
+/// off THIS instance, not the process-global flag.
+///
+/// The other half — that composition also publishes the process-global
+/// `session_flags` — cannot be asserted here. Every `ConversationOrchestrator`
+/// construction in this binary stores `!config.interactive_session` into that
+/// one global (`conversation/wiring.rs`), and ~130 other lib tests construct
+/// one concurrently, so a read-back races and fails intermittently. It lives in
+/// `tests/interactive_session_flag_test.rs`, which gets its own process.
 #[tokio::test]
-async fn interactive_session_flag_drives_prompt_and_session_flags() {
-    let prior = platform_api::session_flags::is_non_interactive_session();
+async fn interactive_session_flag_drives_prompt_guidance() {
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig {
             interactive_permissions: false,
@@ -1122,18 +1133,12 @@ async fn interactive_session_flag_drives_prompt_and_session_flags() {
         std::env::temp_dir(),
     );
 
-    assert!(
-        !platform_api::session_flags::is_non_interactive_session(),
-        "interactive-session composition must publish interactive session flags even when permission prompting stays headless"
-    );
-
     let prompt = orch.build_system_prompt().await;
     assert!(
         prompt.contains("If you need the user to run a shell command themselves"),
-        "interactive CLI prompt guidance must follow the explicit interactive-session flag: {prompt}"
+        "interactive CLI prompt guidance must follow the explicit interactive-session flag, \
+         even with interactive_permissions=false: {prompt}"
     );
-
-    platform_api::session_flags::set_non_interactive_session(prior);
 }
 
 #[tokio::test]

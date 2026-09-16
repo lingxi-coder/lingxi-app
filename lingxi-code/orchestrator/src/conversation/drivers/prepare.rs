@@ -33,6 +33,12 @@ impl ConversationOrchestrator {
         if let Some(reminder) = self.conditional_rules_reminder_message().await {
             transient.push(reminder);
         }
+        // Nested memory runs directly AFTER conditional rules, and the order is
+        // load-bearing, not cosmetic: both consult the same
+        // `sent_conditional_rules` set, and a `paths:`-gated rule already
+        // claimed by the conditional-rules producer is skipped here. Swapping
+        // the two changes WHICH mechanism reports such a rule, and therefore
+        // the bytes the model sees.
         if let Some(reminder) = self.nested_memory_reminder_message().await {
             transient.push(reminder);
         }
@@ -42,6 +48,14 @@ impl ConversationOrchestrator {
         if let Some(reminder) = self.agent_listing_reminder_message().await {
             transient.push(reminder);
         }
+        // DIVERGENCE (position, deliberate): the oracle's attachment fan-out
+        // (@296520120) emits `changed_files` immediately after
+        // `agent_listing_delta` and immediately BEFORE `nested_memory`. This
+        // port injects `nested_memory` above — it has to, to read the
+        // `sent_conditional_rules` claims noted there — so `changed_files`
+        // sits directly after `agent_listing_delta` instead, which preserves
+        // its order relative to everything downstream. `crate::prompt::changed_files`
+        // carries the same note from the renderer's side.
         transient.extend(self.changed_files_reminder_messages().await);
 
         // `todo_reminder_message` already returns a system-reminder envelope.

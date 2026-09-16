@@ -67,7 +67,7 @@ impl Drop for MainLoopActivityGuard {
 /// outlives the turn that owns it turns `turn_count` into a session total and
 /// freezes the output-token baseline, and
 /// `tests/turn_loop_state_boundary_test.rs` fails on both.
-struct TurnLoopState {
+pub(crate) struct TurnLoopState {
     recovery: RecoveryState,
     stop_hook_active: bool,
     stop_hook_blocking_count: u32,
@@ -278,7 +278,7 @@ impl StreamingTurnDriver<'_> {
                 user_cancel.as_ref(),
             )
             .await?;
-        let mut snapshot = prepared.snapshot;
+        let snapshot = prepared.snapshot;
         let model = prepared.model;
         let model_profile = prepared.model_profile;
         let outgoing_history_rewriter = prepared.outgoing_history_rewriter;

@@ -397,7 +397,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     let prepared = orch
         .prepare_turn_step(ModelCallPath::Batched, system, true, None)
         .await?;
-    let mut history_snapshot = prepared.snapshot;
+    let history_snapshot = prepared.snapshot;
     let model = prepared.model;
     let model_profile = prepared.model_profile;
     let outgoing_history_rewriter = prepared.outgoing_history_rewriter;

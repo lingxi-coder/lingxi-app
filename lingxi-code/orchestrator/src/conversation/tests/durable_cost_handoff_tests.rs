@@ -1068,3 +1068,109 @@ async fn streaming_settlement_failure_keeps_the_answer_and_stops_the_next_call()
         "the next call must be stopped by the pre-dispatch gate, got {error}"
     );
 }
+
+// ── §3.2: the vision-delegation cancel maps to Cancelled, under a guard ──────
+//
+// `prepare_iteration` propagates `OrchestratorError::VisionDelegationCancelled`
+// straight out — it does NOT go through the `aborted_*` end-event branch — and
+// the main streaming wrapper turns it into `TurnOutcome::Cancelled`, but only
+// when the token is actually cancelled:
+//
+//     Err(OrchestratorError::VisionDelegationCancelled) if cancel.is_cancelled()
+//
+// The guard is the part PR 5 can lose. A unified error mapping that folds this
+// arm into "any cancel-shaped error becomes Cancelled" drops it, and the row
+// above (`vision_progress_cancellation_retains_known_delegate_usage`) would not
+// notice: it aborts its task and never reads an outcome.
+
+/// A provider whose vision delegation never answers, so the cancel branch of
+/// `vision_model_call`'s `select!` is the one that resolves.
+struct BlockingVisionApi;
+
+#[async_trait::async_trait]
+impl OrchestratorApiClient for BlockingVisionApi {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        _msgs: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, LlmError> {
+        Err(LlmError::Transport {
+            message: "the main request must not run: vision is cancelled first".into(),
+        })
+    }
+
+    fn resolve_media_route(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<MediaRoute, LlmError> {
+        Ok(vision_route())
+    }
+
+    async fn analyze_vision_delegation(
+        &self,
+        _packet: VisionPacket,
+    ) -> Result<VisionDelegationResult, LlmError> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_vision_delegation_surfaces_as_cancelled_not_an_error() {
+    let image = ImageSource::Url {
+        url: "https://example.com/vision-cancel.png".into(),
+    };
+    let orchestrator = Arc::new(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(BlockingVisionApi),
+            Arc::new(MockStreamingApiClient::empty()),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_vision_delegation(true),
+    );
+
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let orchestrator = orchestrator.clone();
+        let cancel = cancel.clone();
+        async move {
+            orchestrator
+                .run_turn_streaming_with_cancel_image_sources_and_message_id(
+                    "inspect this",
+                    vec![image],
+                    cancel,
+                    Some(MessageId::new()),
+                )
+                .await
+        }
+    });
+
+    // Yield until the delegation is parked, then cancel. The turn must come back
+    // on its own — not be aborted — so the outcome can be read.
+    tokio::task::yield_now().await;
+    cancel.cancel();
+
+    let outcome = tokio::time::timeout(WAIT_BOUND, task)
+        .await
+        .expect("the cancelled vision delegation must let the turn return")
+        .expect("turn task panicked")
+        .expect("a cancelled vision delegation is an outcome, not an error");
+
+    assert_eq!(
+        outcome,
+        crate::conversation::TurnOutcome::Cancelled,
+        "§3.2: VisionDelegationCancelled propagates out of prepare_iteration and the main \
+         streaming wrapper maps it to Cancelled WHEN the token is cancelled. Losing the arm \
+         surfaces a raw error to the caller; losing its `if cancel.is_cancelled()` guard makes \
+         every vision failure look like a user interrupt."
+    );
+}

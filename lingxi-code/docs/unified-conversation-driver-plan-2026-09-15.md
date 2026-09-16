@@ -451,6 +451,55 @@ loop:
 
 ---
 
+## 9.5 实施状态（2026-09-15 收尾）
+
+标签 `ucd-p1`…`ucd-p4`。全程判据：`cargo test -p orchestrator --tests --no-fail-fast`
+89 binaries / 1555 passed / 0 failed，`cargo build --workspace --tests` 干净。
+
+### 已落地
+
+| | 位置 | 生产调用点 |
+|---|---|---|
+| 每回合 reminder | `drivers/prepare.rs` `collect_turn_reminders` | 1 |
+| 回合准备（15 步） | `drivers/prepare.rs` `prepare_turn_step` | 2（每驱动一个） |
+| prompt snapshot | `prepare_turn_step` 内 | 1（§5.2 要求的"唯一"） |
+| `TurnLoopState` + output-token baseline | `drivers/loop_state.rs` | 1（原 3 处） |
+| 顶循环 guards | `drivers/loop_state.rs` `run_turn_loop_guards` | 3（每入口一个） |
+| EndConversation 消费 | `drivers/disposition.rs` | 2（每驱动一个） |
+| token 累计 | 各入口循环体，同一边界（原 streaming 深一层） | 3 |
+
+§4 四个终态族、§3.2 五个取消阶段、§3.5 三种 guard 顺序、§3.6 epilogue 归属，
+全部有测试，且**每条都种雷验证过会红**。
+
+### 未落地：统一外层 driver（PR 5 核心）与共享 `apply_step_disposition`（PR 4 尾）
+
+这两项是**同一个被阻塞的项**，不是两件独立的欠账。测量结果：
+
+- 三条外层不是三个可折叠的相似循环。`try_run_turn` 循环体 4 处调用、
+  `try_run_turn_cancelable` 7 处、streaming `run()` **133 处**——后者把
+  open/pump/finalize 全内联，而 §5.2 明确把那块"暂留原模块"。
+- 两条 batched 的 disposition match 是 64 / 55 行、21 行不同，且差异**分散在
+  7 个 hunk 里贯穿全程**（`parentAborted` 实时值、`Terminate` 的 outcome 映射、
+  `TerminateMaxTurns` 的返回类型）。抽成共享函数需要穿 7 个变化点，参数表会与
+  差异一一对应——收益为负。
+
+**解锁条件**：先把 streaming 的 open/pump/finalize 抽成 §5.2 的
+`StreamingRound.run`，三条路径才会有一个共同的 step 结果类型可供分派；
+`apply_step_disposition` 与 §3.4 的 `strategy.run` 边界都依赖它。在那之前，
+这两项只能是投机性搬运——搬一次，PR 5 再搬一次。
+
+### 判据已就位
+
+上面每一条"不得改变"的差异都由一个**断言差异本身**的跨入口测试守着，所以后续
+做统一外层时，把两条入口拉齐会弄红一边，而不是安静通过。这是本系列最重要的
+交付物：`turn_preparation_boundary_test`、`turn_loop_state_boundary_test`、
+`turn_end_wakeup_boundary_test`、`turn_end_conversation_boundary_test`、
+`turn_epilogue_boundary_test`、`turn_cancel_mapping_test`、
+`reminder_twin_wiring_test`，加上 `stop_hooks_test` /
+`token_budget_continuation_test` / `mid_turn_input_test` 里新增的 streaming 孪生。
+
+---
+
 ## 10. 参考
 
 - `lingxi-code/orchestrator/src/conversation/drivers/mod.rs` — 三条循环、取消、late drain、file-history

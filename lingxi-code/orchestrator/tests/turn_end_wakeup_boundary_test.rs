@@ -74,8 +74,10 @@ where
 /// A tool that optionally asks the turn to end.
 ///
 /// The request travels as the MCP `_meta` key the port reads
-/// (`tool_result_turn_end`), which is the seam a test can reach without a real
-/// MCP server.
+/// (`_meta.claude/endTurn`, classified by
+/// `tool_api::tool_trait::tool_result_turn_end`; the native `result_ends_turn`
+/// seam is a separate source this file does not exercise), which is the seam a
+/// test can reach without a real MCP server.
 struct StubTool {
     name: &'static str,
     ends_turn: bool,
@@ -171,6 +173,21 @@ fn wakeup_orch(
     Arc<AtomicBool>,
     Arc<MockApiClient>,
 ) {
+    wakeup_orch_with_model(GATED_MODEL, responses, tools)
+}
+
+/// [`wakeup_orch`] on an explicit model, so the model-gate row can share this
+/// wiring instead of copying the constructor (the two copies had to be kept in
+/// sync by hand).
+fn wakeup_orch_with_model(
+    model: &str,
+    responses: Vec<llm_client::LlmResponse>,
+    tools: Vec<(&'static str, bool)>,
+) -> (
+    ConversationOrchestrator,
+    Arc<AtomicBool>,
+    Arc<MockApiClient>,
+) {
     let mut registry = ToolRegistry::new();
     for (name, ends_turn) in tools {
         registry.register_builtin(Arc::new(StubTool { name, ends_turn }));
@@ -179,7 +196,7 @@ fn wakeup_orch(
     let slot = Arc::new(AtomicBool::new(true)); // armed
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig {
-            model: GATED_MODEL.into(),
+            model: model.into(),
             ..OrchestratorConfig::default()
         },
         api.clone(),
@@ -270,9 +287,15 @@ fn a_wakeup_beside_another_tool_still_consumes_the_flag_without_ending_the_turn(
         );
 
         let outcome = orch.run_turn("ping").await.expect("turn");
+        // `turn_count` is load-bearing here: with a no-op hook executor the
+        // batched driver's only possible `Ok` variant is `EndTurn`, so
+        // `matches!(.., EndTurn { .. })` alone can never fail. Pinning 2 — the
+        // round that armed the wakeup plus the round that ends the turn — is
+        // what lets this assertion fail.
         assert!(
-            matches!(outcome, ConversationOutcome::EndTurn { .. }),
-            "the turn continues past a non-lone round and ends naturally, got {outcome:?}"
+            matches!(outcome, ConversationOutcome::EndTurn { turn_count: 2, .. }),
+            "the turn continues past a non-lone round (two turn steps) and ends naturally, \
+             got {outcome:?}"
         );
         assert_eq!(
             api.captured_msgs().await.len(),
@@ -338,34 +361,18 @@ fn a_tool_requested_end_leaves_the_wakeup_flag_armed_for_the_next_turn() {
 #[test]
 fn a_model_outside_the_gate_continues_the_turn_but_still_consumes_the_flag() {
     run_with_large_stack(|| async {
-        let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(StubTool {
-            name: "ScheduleWakeup",
-            ends_turn: false,
-        }));
-        let api = Arc::new(MockApiClient::new(vec![
-            tool_round(&[("ScheduleWakeup", ToolUseId::new())]),
-            text_end("second round"),
-        ]));
-        let slot = Arc::new(AtomicBool::new(true));
-        let orch = ConversationOrchestrator::new(
-            OrchestratorConfig {
-                // Carries no `Fable5Mitigations` and is not `claude-mythos-5`,
-                // so `lone_wakeup_ends_turn_model` refuses it. The stock
-                // default `claude-opus-4-8` would do just as well — which is
-                // why the other tests here pin `GATED_MODEL` explicitly.
-                model: "claude-3-5-sonnet".into(),
-                ..OrchestratorConfig::default()
-            },
-            api.clone(),
-            Arc::new(registry),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_loop_wakeup_armed_slot(slot.clone());
+        // `claude-3-5-sonnet` carries no `Fable5Mitigations` and is not
+        // `claude-mythos-5`, so `lone_wakeup_ends_turn_model` refuses it. The
+        // stock default `claude-opus-4-8` would do just as well — which is why
+        // the other tests here pin `GATED_MODEL` explicitly.
+        let (orch, slot, api) = wakeup_orch_with_model(
+            "claude-3-5-sonnet",
+            vec![
+                tool_round(&[("ScheduleWakeup", ToolUseId::new())]),
+                text_end("second round"),
+            ],
+            vec![("ScheduleWakeup", false)],
+        );
 
         orch.run_turn("ping").await.expect("turn");
 

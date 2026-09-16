@@ -832,3 +832,42 @@ test('an engine failure renders in the danger colour', () => {
   assert.ok(html.includes(tokens(false).danger), 'the failure must use the danger token');
   assert.doesNotMatch(html, /[✗✕]/, 'no glyph in front of the message');
 });
+
+test('no blanket focus ring, but deliberate and high-contrast ones survive', () => {
+  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
+  // Cut the @media blocks out before looking for a top-level rule: an indented
+  // `:focus-visible` inside `prefers-contrast: more` is deliberate, and a
+  // line-prefix test cannot tell the two apart.
+  const topLevel = (() => {
+    let out = '';
+    for (let i = 0; i < css.length; i += 1) {
+      if (css.startsWith('@media', i)) {
+        const open = css.indexOf('{', i);
+        let depth = 0;
+        let j = open;
+        for (; j < css.length; j += 1) {
+          if (css[j] === '{') depth += 1;
+          else if (css[j] === '}' && (depth -= 1) === 0) break;
+        }
+        i = j;
+        continue;
+      }
+      out += css[i];
+    }
+    return out;
+  })();
+  // The offender: an unscoped `:focus-visible` at the top level put a heavy
+  // accent rectangle around every focusable element, including a whole sidebar
+  // row and the whole composer.
+  assert.ok(
+    !/(^|\n)\s*:focus-visible\s*\{/.test(topLevel),
+    'no unscoped :focus-visible rule may reintroduce the blanket ring',
+  );
+  assert.ok(/:focus-visible/.test(css), 'sanity: the file still has focus rules at all');
+  // …and the composer ring, which fired on an ordinary mouse click.
+  assert.doesNotMatch(css, /\.beta-composer:focus-within\s*\{[^}]*outline:\s*2px/);
+  // Removing the blanket rule must not strip focus indication where it was
+  // chosen on purpose, nor for users who asked the OS for stronger contrast.
+  assert.match(css, /\.desktop-topbar-action:focus-visible\s*\{[^}]*outline:\s*2px/);
+  assert.match(css, /prefers-contrast: more[\s\S]*?:focus-visible\s*\{\s*outline:\s*3px/);
+});

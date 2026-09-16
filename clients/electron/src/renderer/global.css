@@ -1653,9 +1653,19 @@ aside[data-resizing='true'] > .sidebar-resize-handle::after { opacity: .72; }
 
 button { font-family: inherit; }
 textarea, input { font-family: inherit; }
-:focus-visible { outline: 2px solid var(--desktop-accent, #007aff); outline-offset: 2px; }
+/* No BLANKET focus ring. The accent outline was applied to every focusable
+   element, so a sidebar session row or the whole composer picked up a heavy
+   blue rectangle around a container that already reads as selected through its
+   own background and border.
+
+   Deliberate, component-scoped `:focus-visible` rules are untouched and still
+   apply (dialogs, the code-card copy button, tool-group triggers, topbar
+   actions), as is the `prefers-contrast: more` block near the end of this file,
+   which restores a 3px ring for users who ask the OS for stronger contrast. */
 .beta-rich-prompt:focus-visible { outline: none; }
-.beta-composer:focus-within { outline: 2px solid var(--desktop-accent, #007aff); outline-offset: 2px; }
+/* The composer ring was `:focus-within`, so it fired on an ordinary mouse click
+   into the textarea — not only on keyboard navigation — and boxed the entire
+   composer. Its own border already shows it is active. */
 .slash-command-row {
   transition: background-color 110ms ease, color 110ms ease;
 }

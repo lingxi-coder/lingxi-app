@@ -1,6 +1,7 @@
 //! Batched, cancelable, and streaming conversation turn drivers.
 
 mod disposition;
+mod loop_state;
 mod prepare;
 
 use super::*;
@@ -1659,19 +1660,25 @@ impl StreamingTurnDriver<'_> {
             // it. Claude Code 2.1.205 preserves that message when `--max-turns`
             // ends the turn, so inject it into the persisted history first.
             // With no source wired this remains a strict no-op.
-            orch.drain_mid_turn_input().await;
-
-            if orch.config.max_turns != 0 && loop_state.turn_count >= orch.config.max_turns {
-                return Err(OrchestratorError::MaxTurnsReached {
-                    max_turns: orch.config.max_turns,
-                });
+            // The cancel guard is NOT part of this: on this path it runs AFTER
+            // the increment (below), where the two batched entries have it first
+            // or not at all.
+            match orch
+                .run_turn_loop_guards(loop_state::LoopGuardOrder::Streaming, &mut loop_state)
+                .await
+            {
+                loop_state::GuardVerdict::Proceed => {}
+                loop_state::GuardVerdict::MaxTurns => {
+                    return Err(OrchestratorError::MaxTurnsReached {
+                        max_turns: orch.config.max_turns,
+                    })
+                }
+                loop_state::GuardVerdict::OverBudget => {
+                    return Err(OrchestratorError::MaxBudgetReached {
+                        budget_nano_usd: orch.config.max_budget_nano_usd.unwrap_or(0),
+                    })
+                }
             }
-            if orch.over_budget().await {
-                return Err(OrchestratorError::MaxBudgetReached {
-                    budget_nano_usd: orch.config.max_budget_nano_usd.unwrap_or(0),
-                });
-            }
-            loop_state.turn_count = loop_state.turn_count.saturating_add(1);
 
             // DEFERRED-3 / esc-interrupt FIX: top-of-loop user-interrupt guard
             // (faithful port of claude-code `query.ts:1015` — the `aborted_streaming`
@@ -2275,18 +2282,22 @@ impl ConversationOrchestrator {
             // Streaming twin already drains here (query.ts ~1570). Claude Code
             // has one main loop; the batched print path must consume mid-turn
             // input before max_turns / budget so a queued message is not dropped.
-            self.drain_mid_turn_input().await;
-            if self.config.max_turns != 0 && state.turn_count >= self.config.max_turns {
-                return Err(OrchestratorError::MaxTurnsReached {
-                    max_turns: self.config.max_turns,
-                });
+            match self
+                .run_turn_loop_guards(loop_state::LoopGuardOrder::Batched, &mut state)
+                .await
+            {
+                loop_state::GuardVerdict::Proceed => {}
+                loop_state::GuardVerdict::MaxTurns => {
+                    return Err(OrchestratorError::MaxTurnsReached {
+                        max_turns: self.config.max_turns,
+                    })
+                }
+                loop_state::GuardVerdict::OverBudget => {
+                    return Err(OrchestratorError::MaxBudgetReached {
+                        budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
+                    })
+                }
             }
-            if self.over_budget().await {
-                return Err(OrchestratorError::MaxBudgetReached {
-                    budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
-                });
-            }
-            state.turn_count = state.turn_count.saturating_add(1);
 
             let (step, output_tokens) = execute_one_turn_with_recovery_tracked(
                 self,
@@ -3323,15 +3334,18 @@ impl ConversationOrchestrator {
                 }
                 return Ok(TurnOutcome::Cancelled);
             }
-            if self.config.max_turns != 0 && state.turn_count >= self.config.max_turns {
-                return Ok(TurnOutcome::MaxTurns);
+            match self
+                .run_turn_loop_guards(loop_state::LoopGuardOrder::BatchedCancelable, &mut state)
+                .await
+            {
+                loop_state::GuardVerdict::Proceed => {}
+                loop_state::GuardVerdict::MaxTurns => return Ok(TurnOutcome::MaxTurns),
+                loop_state::GuardVerdict::OverBudget => {
+                    return Err(OrchestratorError::MaxBudgetReached {
+                        budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
+                    })
+                }
             }
-            if self.over_budget().await {
-                return Err(OrchestratorError::MaxBudgetReached {
-                    budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
-                });
-            }
-            state.turn_count = state.turn_count.saturating_add(1);
 
             // Race the recovery-aware API turn-step against the cancellation
             // token. The `_tracked` variant returns this step's output-token

@@ -123,6 +123,12 @@ const TWIN_REMINDERS: &[&str] = &[
     "skill_discovery_reminder_message",
     "silent_turn_reminder_message",
     "total_tokens_reminder_message",
+    // Moved into the collector with `prepare_turn_step` (PR 2). They are
+    // PREPENDED rather than appended to `transient`, but they are per-turn
+    // reminders both drivers must get, and they are computed once per step for
+    // the same reason as the rest.
+    "deferred_tools_reminder_message",
+    "date_change_reminder_message",
 ];
 
 /// Count CALL sites of `name`, wherever rustfmt put the receiver.
@@ -192,23 +198,36 @@ fn neither_driver_reaches_a_reminder_behind_the_collector() {
     let batched_entries = sources
         .iter()
         .filter(|(name, _)| name == "turn_loop.rs")
-        .map(|(_, src)| call_sites(src, "collect_turn_reminders"))
+        .map(|(_, src)| call_sites(src, "prepare_turn_step"))
         .sum::<usize>();
     assert_eq!(
         batched_entries, 1,
-        "the BATCHED driver (turn_loop.rs) must call collect_turn_reminders \
-         exactly once; the collector only protects paths that go through it"
+        "the BATCHED driver (turn_loop.rs) must call prepare_turn_step exactly once; \
+         the shared preparation only protects paths that go through it"
     );
     let streaming_entries = sources
         .iter()
         .filter(|(name, _)| name.starts_with("drivers/"))
-        .map(|(_, src)| call_sites(src, "collect_turn_reminders"))
+        .map(|(_, src)| call_sites(src, "prepare_turn_step"))
         .sum::<usize>();
     assert_eq!(
         streaming_entries, 1,
         "the STREAMING driver (somewhere under conversation/drivers/) must call \
-         collect_turn_reminders exactly once across all its files"
+         prepare_turn_step exactly once across all its files"
     );
+
+    // And nothing reaches the reminder collector around it: `collect_turn_reminders`
+    // is `prepare_turn_step`'s to call, so a driver calling it directly has
+    // prepared twice.
+    for (file, source) in &sources {
+        assert_eq!(
+            call_sites(source, "collect_turn_reminders"),
+            0,
+            "{file} calls collect_turn_reminders directly. It belongs to \
+             prepare_turn_step; a second call drains this step's consume-once \
+             sources again, and the second drain returns None."
+        );
+    }
 
     // And no way around it. A producer called straight from a driver is the
     // single-driver wiring bug this file was written for; adding it to the
@@ -258,23 +277,25 @@ fn neither_driver_reaches_a_reminder_behind_the_collector() {
 fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     const EXTEND: &str = "extend(turn_reminders.iter().cloned())";
 
-    // Exactly one hand-rolled assembly per driver: the main path. The receiver
-    // disambiguates the two drivers, as in `call_sites` above.
+    // ONE hand-rolled assembly in total now, and it is the shared preparation's.
+    // Before PR 2 there was one per driver; a driver that grows its own again
+    // has stopped going through `prepare_turn_step`.
     assert_eq!(
-        STREAMING
-            .matches("orch.prepend_leading_context(&mut snapshot).await")
+        COLLECTOR
+            .matches("self.prepend_leading_context(&mut snapshot).await")
             .count(),
         1,
-        "the STREAMING driver must hand-roll exactly one assembly (the main \
+        "the shared preparation must hand-roll exactly one assembly (the main \
          path); any other must go through reattach_outgoing_context"
     );
-    assert_eq!(
-        BATCHED
-            .matches("orch.prepend_leading_context(&mut history_snapshot).await")
-            .count(),
-        1,
-        "the BATCHED driver must hand-roll exactly one assembly (the main path)"
-    );
+    for (file, source) in &driver_sources() {
+        assert_eq!(
+            source.matches("prepend_leading_context(").count(),
+            0,
+            "{file} assembles its own leading context. Since PR 2 that is \
+             prepare_turn_step's job, and a second assembly is a second preparation."
+        );
+    }
 
     // Every rebuild-from-raw-history path routes through the shared helper:
     // the 529 fallback, PTL recovery and the non-streaming fallback in
@@ -296,9 +317,9 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     // re-appends. The streaming main path lives in the driver; the shared
     // `reattach_outgoing_context` helper lives in the prompt pipeline.
     assert_eq!(
-        STREAMING.matches(EXTEND).count(),
+        COLLECTOR.matches(EXTEND).count(),
         1,
-        "the streaming main path must append this step's reminders"
+        "the shared preparation's main path must append this step's reminders"
     );
     assert_eq!(
         PROMPT_PIPELINE.matches(EXTEND).count(),
@@ -307,8 +328,8 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     );
     assert_eq!(
         BATCHED.matches(EXTEND).count(),
-        1,
-        "the batched main path re-appends directly; its rebuilds go through \
-         reattach_outgoing_context"
+        0,
+        "the batched driver no longer appends reminders itself; preparation does, \
+         and its rebuilds go through reattach_outgoing_context"
     );
 }

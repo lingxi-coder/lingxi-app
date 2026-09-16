@@ -538,31 +538,29 @@ fn a_ptl_retry_does_not_duplicate_the_durable_task_notification() {
 /// question here.
 ///
 /// The plan calls for "唯一 `record_prompt_snapshot_if_needed`" inside shared
-/// preparation. Counting call sites is the honest check available today: it
-/// catches PR 2 leaving the old call behind when it moves the new one, which is
-/// the mistake that produced two preparations in the first place.
+/// preparation, and since PR 2 that is literally true: ONE call site, in
+/// `prepare_turn_step`, reached by both drivers. This test was written against
+/// the previous shape (one call per driver, two in total) and tightened to 1
+/// when the extraction landed — tightened, not renumbered: two call sites now
+/// means a step prepared twice, which is the defect it was written for.
 #[test]
-fn each_driver_records_the_prompt_snapshot_from_exactly_one_place() {
+fn the_prompt_snapshot_is_recorded_from_exactly_one_place() {
     const BATCHED: &str = include_str!("../src/turn_loop.rs");
     const STREAMING: &str = include_str!("../src/conversation/drivers/mod.rs");
     const COLLECTOR: &str = include_str!("../src/conversation/drivers/prepare.rs");
 
     let calls = |src: &str| src.matches(".record_prompt_snapshot_if_needed(").count();
     assert_eq!(
-        calls(BATCHED) + calls(STREAMING) + calls(COLLECTOR),
-        2,
-        "exactly two call sites total, one per driver. Wherever preparation lives, a step that \
-         records the snapshot twice has prepared twice, and a step that records it zero times \
-         has lost carved-slate for the session."
+        calls(COLLECTOR),
+        1,
+        "the shared preparation must record the prompt snapshot exactly once per model step; \
+         zero means the session lost carved-slate, two means it prepared twice"
     );
     assert_eq!(
-        calls(BATCHED),
-        1,
-        "the batched driver must record the prompt snapshot exactly once per model step"
-    );
-    assert_eq!(
-        calls(STREAMING),
-        1,
-        "the streaming driver must record the prompt snapshot exactly once per model step"
+        calls(BATCHED) + calls(STREAMING),
+        0,
+        "neither driver may record the snapshot itself any more. A driver that kept its own \
+         call alongside prepare_turn_step's is the leftover-call mistake that produced two \
+         preparations in the first place."
     );
 }

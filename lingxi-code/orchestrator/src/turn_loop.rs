@@ -389,91 +389,23 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     system: Option<&str>,
     mut recovery: Option<&mut RecoveryState>,
 ) -> Result<(TurnStepOutcome, u64), OrchestratorError> {
-    // P0.1 (batched twin): arm the memory-selector prefetch CONCURRENTLY with
-    // this turn (claude-code `wAo`). Fired here at turn start so the in-flight
-    // handle is ready when `relevant_memory_reminder_messages` consumes it below,
-    // before the blocking-limit estimate. A strict no-op when no prefetch is
-    // wired, keeping the locked turn-loop fixtures byte-identical. See
-    // [`ConversationOrchestrator::start_memory_prefetch`].
-    orch.start_memory_prefetch().await;
-    // EXPERIMENTAL_SKILL_SEARCH (batched twin): arm the skill-discovery prefetch
-    // CONCURRENTLY with this turn (claude-code `startSkillDiscoveryPrefetch`,
-    // bundle `B=at1?.startSkillDiscoveryPrefetch(null,V,T)`). A strict no-op when
-    // no prefetch is wired (default OFF), keeping the locked fixtures
-    // byte-identical. See [`ConversationOrchestrator::start_skill_discovery_prefetch`].
-    orch.start_skill_discovery_prefetch().await;
-    // P1 (§6.5, batched twin): background-fork a session-memory extraction if the
-    // tool-call threshold has crossed (inert unless wired + enabled).
-    orch.maybe_extract_session_memory().await;
-
-    // In-Loop Compaction Batch 4: proactively snip+micro+autocompact BEFORE
-    // snapshotting history for the model call, so a long conversation
-    // self-compacts mid-turn (TS pre-call pipeline `query.ts:365-467`). A strict
-    // no-op when no compactor is wired or the history is under threshold, so the
-    // locked turn-loop fixtures are unaffected. After a proactive compact, the
-    // snapshot below reads the NEW, compacted history.
-    orch.seed_compact_cache_safe_params(system).await;
-    orch.maybe_compact_before_call().await;
-    // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
-    // before the outgoing snapshot is cloned from history.
-    let _ = orch.drain_peer_inbox(false).await;
-
-    // Snapshot the current session history for the API call via the shared
-    // pre-call seam used by both main-loop drivers.
-    let prepared_call = orch
-        .prepare_model_call_snapshot(ModelCallPath::Batched, system, None)
+    // Shared per-step preparation. `None` for the cancel token on purpose: the
+    // batched path is covered by the outer `select!` in
+    // `try_run_turn_cancelable`, which races this ENTIRE function — preparation
+    // included. Passing a token here as well would be a second, narrower
+    // cancellation seam for the same turn.
+    let prepared = orch
+        .prepare_turn_step(ModelCallPath::Batched, system, true, None)
         .await?;
-    let mut history_snapshot = prepared_call.history_snapshot;
-    let model = prepared_call.model;
-    let model_profile = prepared_call.model_profile;
-    let outgoing_history_rewriter = prepared_call.outgoing_history_rewriter;
+    let mut history_snapshot = prepared.snapshot;
+    let model = prepared.model;
+    let model_profile = prepared.model_profile;
+    let outgoing_history_rewriter = prepared.outgoing_history_rewriter;
+    let turn_reminders = prepared.turn_reminders;
+    let tools = prepared.wire_tools;
+    let deferred_tools_reminder = prepared.deferred_reminder;
+    let date_change_reminder = prepared.date_change_reminder;
 
-    // R-P1c/R-P1d: PREPEND the leading `additionalContext` meta message
-    // (`# claudeMd` / `# userEmail` / `# currentDate`) to THIS call's OUTGOING
-    // snapshot only (never `session.history` / JSONL). 1:1 with claude-code
-    // `A6n(re, userContext)`, which prepends the meta message at every
-    // `callModel`. Recomputed each turn, never accumulates.
-    orch.prepend_leading_context(&mut history_snapshot).await;
-
-    // Collect consume-once reminder state before any retry snapshot is built.
-    // Batched turns are always human turns for task-notification provenance.
-    let reminders = orch.collect_turn_reminders(true).await;
-    let turn_reminders = reminders.transient;
-    history_snapshot.extend(reminders.task_notifications);
-
-    // 1. Call the API. Advertise the registry's wire tool definitions
-    //    (same set + serialization as the streaming path). Batch 5: the call is
-    //    wrapped in the blocking-limit preempt + 413/prompt-too-long reactive
-    //    recovery loop. When recovery is exhausted the helper returns
-    //    `PtlCallOutcome::PromptTooLong`, and we end the turn with a byte-exact
-    //    `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message instead of bubbling a
-    //    hard error.
-    let tools = orch.build_wire_tools().await;
-    // Carved-slate records the first eligible static prompt before the API
-    // request. Resume sessions (including resumes with a missing/corrupt
-    // attachment) are explicitly barred from creating a new snapshot.
-    orch.record_prompt_snapshot_if_needed(system, &tools).await;
-    history_snapshot.extend(turn_reminders.iter().cloned());
-
-    let deferred_tools_reminder = orch.deferred_tools_reminder_message();
-    if let Some(reminder) = deferred_tools_reminder.clone() {
-        orch.prepend_transient_leading_context(&mut history_snapshot, reminder);
-    }
-    // `date_change` (batched twin): sessions crossing local midnight tell the
-    // model the new date once per changed date. Prepended AFTER the deferred
-    // insert so the final order is [date_change, deferred_tools_delta, …] —
-    // matching the oracle attachment batch order (`Ky("date_change")` before
-    // `Ky("deferred_tools_delta")`). Computed ONCE per step and reused by
-    // `call_api_with_ptl_recovery`'s retry/fallback re-snapshots, which rebuild
-    // the SAME request from raw history; the dedupe is committed in there, past
-    // the blocking-limit preempt. `None` (same-date turns) keeps the locked
-    // turn-loop fixtures byte-identical. See
-    // [`ConversationOrchestrator::date_change_reminder_message`].
-    let date_change_reminder =
-        orch.date_change_reminder_message(orch.session.lock().await.session_id);
-    if let Some(reminder) = date_change_reminder.clone() {
-        orch.prepend_transient_leading_context(&mut history_snapshot, reminder);
-    }
     // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
     // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
     // applies to EXACTLY this call and never leaks to the next turn.

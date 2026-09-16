@@ -243,42 +243,32 @@ impl StreamingTurnDriver<'_> {
         loop_state: &mut StreamingTurnState,
         in_human_turn: bool,
     ) -> Result<PrepareStreamingOutcome, OrchestratorError> {
-        // P0.1 (streaming twin): arm the memory-selector prefetch CONCURRENTLY
-        // with this turn (claude-code `wAo`). Fired here at turn start so the
-        // in-flight handle is ready when `relevant_memory_reminder_messages`
-        // awaits it below, before the blocking-limit estimate. A strict no-op
-        // when no prefetch is wired, keeping the locked streaming fixtures
-        // byte-identical. See [`Self::start_memory_prefetch`].
-        orch.start_memory_prefetch().await;
-        // EXPERIMENTAL_SKILL_SEARCH (streaming twin): arm the skill-discovery
-        // prefetch CONCURRENTLY with this turn (claude-code
-        // `startSkillDiscoveryPrefetch`). A strict no-op when no prefetch is
-        // wired (default OFF), keeping the locked streaming fixtures
-        // byte-identical. See [`Self::start_skill_discovery_prefetch`].
-        orch.start_skill_discovery_prefetch().await;
-        // P1 (§6.5): background-fork a session-memory extraction if the
-        // tool-call threshold has crossed (inert unless wired + enabled).
-        orch.maybe_extract_session_memory().await;
+        // Shared per-step preparation. The token goes IN rather than racing
+        // this call from outside: streaming must not be dropped mid-flight by a
+        // `select!`, because that discards in-flight tool results (see the
+        // DEFERRED-3 note on `run_turn_streaming_inputs_locked`).
+        let prepared = orch
+            .prepare_turn_step(
+                ModelCallPath::Streaming,
+                system_prompt.as_deref(),
+                in_human_turn,
+                user_cancel.as_ref(),
+            )
+            .await?;
+        let mut snapshot = prepared.snapshot;
+        let model = prepared.model;
+        let model_profile = prepared.model_profile;
+        let outgoing_history_rewriter = prepared.outgoing_history_rewriter;
+        let turn_reminders = prepared.turn_reminders;
+        let wire_tools = prepared.wire_tools;
+        let deferred_reminder = prepared.deferred_reminder;
+        let date_change_reminder = prepared.date_change_reminder;
 
-        // In-Loop Compaction Batch 4 (streaming twin): proactively
-        // snip+micro+autocompact BEFORE snapshotting history for the
-        // stream, so a long conversation orch-compacts mid-turn. A strict
-        // no-op when no compactor is wired or the history is under
-        // threshold, so the locked streaming fixtures are unaffected. After
-        // a proactive compact the snapshot below reads the NEW history.
-        //
-        // The connect-phase streaming 413 path below reuses the same
-        // reactive truncate/compact recovery loop as the batched path.
-        orch.seed_compact_cache_safe_params(system_prompt.as_deref())
-            .await;
-        orch.maybe_compact_before_call().await;
-        // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
-        // before the outgoing snapshot is cloned from history.
-        let _ = orch.drain_peer_inbox(false).await;
-
-        // 2. Open the stream for this turn. Capture the originating cost scope
-        // before any provider work so a later session switch cannot redirect
-        // observed usage to the active session.
+        // Capture the originating cost scope so a later session switch cannot
+        // redirect observed usage to the active session. This used to be read
+        // between the peer-inbox drain and the snapshot; the slot is only ever
+        // written by `execute_clear_session` / `execute_resume_session`, never
+        // during a turn, so reading it here is the same value.
         let mut cost_scope = orch
             .model_runtime
             .cost_scope
@@ -290,72 +280,6 @@ impl StreamingTurnDriver<'_> {
                 let session_id = orch.session.lock().await.session_id;
                 cost_scope = Some(tracker.session_scope(session_id));
             }
-        }
-        let prepared_call = orch
-            .prepare_model_call_snapshot(
-                ModelCallPath::Streaming,
-                system_prompt.as_deref(),
-                user_cancel.as_ref(),
-            )
-            .await?;
-        let mut snapshot = prepared_call.history_snapshot;
-        let model = prepared_call.model;
-        let model_profile = prepared_call.model_profile;
-        let outgoing_history_rewriter = prepared_call.outgoing_history_rewriter;
-
-        // R-P1c/R-P1d (streaming twin): PREPEND the leading `additionalContext`
-        // meta message (`# claudeMd` / `# userEmail` / `# currentDate`) to THIS
-        // turn's OUTGOING snapshot only (never `session.history` / JSONL). 1:1
-        // with claude-code `A6n(re, userContext)`, which prepends the meta
-        // message at every `callModel`. Recomputed each turn, never accumulates.
-        // `currentDate` is always present, so this is `Some(_)` whenever a
-        // LINGXI.md / email / date is sourceable (i.e. always for the date).
-        orch.prepend_leading_context(&mut snapshot).await;
-
-        // Per-turn TRANSIENT reminders are collected here rather than
-        // pushed straight onto `snapshot`, because `snapshot` is MOVED into
-        // `stream()` and every recovery path below rebuilds it from
-        // `session.history`. Each of these advances session state when it
-        // is computed (sent-sets, delta trackers, consume-once drains), so
-        // recomputing them on a retry would return `None` and the reminder
-        // would be silently lost for the rest of the session. Computed
-        // ONCE, re-appended on every re-snapshot — the same discipline
-        // `deferred_reminder` and `date_change_reminder` already follow.
-        let reminders = orch.collect_turn_reminders(in_human_turn).await;
-        let turn_reminders = reminders.transient;
-        // The durable completion messages go in first: they now live in
-        // history, so they belong after the last real entry and before the
-        // transient reminders. The snapshot was taken before they were
-        // appended.
-        snapshot.extend(reminders.task_notifications);
-        snapshot.extend(turn_reminders.iter().cloned());
-
-        let wire_tools = orch.build_wire_tools().await;
-        // Carved-slate records the first eligible static prompt before opening
-        // the stream. A resumed session with no valid attachment intentionally
-        // stays live and does not create a replacement snapshot.
-        orch.record_prompt_snapshot_if_needed(system_prompt.as_deref(), &wire_tools)
-            .await;
-        let deferred_reminder = orch.deferred_tools_reminder_message();
-        if let Some(reminder) = deferred_reminder.clone() {
-            orch.prepend_transient_leading_context(&mut snapshot, reminder);
-        }
-
-        // `date_change` (streaming twin): sessions crossing local midnight
-        // tell the model the new date once. Prepended AFTER the deferred
-        // insert so the final order is [date_change, deferred_tools_delta,
-        // …] — matching the oracle attachment batch order (`Ky("date_change")`
-        // before `Ky("deferred_tools_delta")`). Computed ONCE per model
-        // step and reused by the retry/fallback re-snapshots below, exactly
-        // like `deferred_reminder`; the dedupe is committed only once the
-        // stream actually opens (below the blocking-limit preempt). `None`
-        // (the overwhelmingly common same-date case) keeps the locked
-        // streaming fixtures byte-identical. See
-        // [`Self::date_change_reminder_message`].
-        let date_change_reminder =
-            orch.date_change_reminder_message(orch.session.lock().await.session_id);
-        if let Some(reminder) = date_change_reminder.clone() {
-            orch.prepend_transient_leading_context(&mut snapshot, reminder);
         }
 
         // RECOV.1: blocking-limit preempt — the streaming twin of the batched

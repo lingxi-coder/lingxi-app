@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AskQuestionDto, AskUserQuestionRequestDto } from '@lingxi/bridge-client';
 
-import { useT } from '../theme/ThemeContext';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 
 export interface AskUserQuestionPromptProps {
@@ -42,7 +41,6 @@ export function AskUserQuestionPrompt({
   onSubmit,
   onCancel,
 }: AskUserQuestionPromptProps) {
-  const t = useT();
   const dialogRef = useRef<HTMLDivElement>(null);
   const promptHasFocus = useRef(false);
   const [current, setCurrent] = useState(0);
@@ -130,7 +128,7 @@ export function AskUserQuestionPrompt({
       eyebrow={(
         <span className="ask-dialog-eyebrow-copy">
           <span>{question.header}</span>
-          <span>{progress}</span>
+          <span className="ask-dialog-progress">{progress}</span>
         </span>
       )}
       icon="info"
@@ -164,17 +162,14 @@ export function AskUserQuestionPrompt({
         </DesktopDialogActions>
       )}
     >
-      <fieldset style={{ border: 0, margin: 0, padding: 0 }}>
-          <legend style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden' }}>
+      <fieldset className="ask-dialog-options">
+          <legend className="ask-dialog-legend">
             {question.multi_select ? 'Select one or more options' : 'Select one option'}
           </legend>
           {question.options.map((option) => (
             <label
               key={option.label}
-              style={{
-                display: 'grid', gridTemplateColumns: '20px 1fr', gap: 8,
-                padding: '9px 0', color: t.text, cursor: 'pointer',
-              }}
+              className="ask-dialog-option"
             >
               <input
                 type={question.multi_select ? 'checkbox' : 'radio'}
@@ -183,25 +178,26 @@ export function AskUserQuestionPrompt({
                 onChange={() => toggleOption(option.label)}
               />
               <span>
-                <span style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>{option.label}</span>
-                <span style={{ display: 'block', marginTop: 2, color: t.text2, fontSize: 12 }}>{option.description}</span>
+                <span className="ask-dialog-option-title">{option.label}</span>
+                <span className="ask-dialog-option-description">{option.description}</span>
                 {option.preview && (
-                  <span style={{ display: 'block', marginTop: 5, color: t.text3, fontSize: 11, whiteSpace: 'pre-wrap' }}>
+                  <span className="ask-dialog-option-preview">
                     {option.preview}
                   </span>
                 )}
               </span>
             </label>
           ))}
-          <label style={{ display: 'grid', gridTemplateColumns: '20px 1fr', gap: 8, padding: '9px 0', color: t.text }}>
+          <div className="ask-dialog-option ask-dialog-other">
+            <label className="ask-dialog-other-choice">
             <input
               type={question.multi_select ? 'checkbox' : 'radio'}
               name={`ask-${request.request_id}-${current}`}
               checked={answer.useOther}
               onChange={toggleOther}
             />
-            <span>
-              <span style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>Other</span>
+            <span className="ask-dialog-option-title">Other</span>
+            </label>
               <input
                 aria-label="Other answer"
                 value={answer.other}
@@ -209,15 +205,11 @@ export function AskUserQuestionPrompt({
                   if (!answer.useOther) toggleOther();
                 }}
                 onChange={(event) => updateAnswer({ ...answer, other: event.target.value, useOther: true })}
-                style={{
-                  boxSizing: 'border-box', width: '100%', marginTop: 6, padding: '8px 10px',
-                  borderRadius: 7, border: `0.5px solid ${t.border}`,
-                  background: t.surface, color: t.text, fontFamily: 'inherit',
-                }}
+                className="ask-dialog-other-input"
+                placeholder="Write your own answer…"
               />
-            </span>
-          </label>
-          {error && <div role="alert" style={{ color: t.danger, fontSize: 12, marginTop: 6 }}>{error}</div>}
+          </div>
+          {error && <div role="alert" className="ask-dialog-error">{error}</div>}
       </fieldset>
     </DesktopDialog>
   );

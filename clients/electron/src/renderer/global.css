@@ -1042,6 +1042,111 @@ body {
   gap: 12px;
 }
 
+/* Question prompts use the app's neutral foreground as their action color. */
+.ask-user-dialog {
+  --dialog-accent: var(--dialog-text);
+  --dialog-accent-border: var(--dialog-border-strong);
+  border-radius: 20px;
+}
+.ask-user-dialog:focus-visible { outline: 2px solid var(--dialog-border-strong); outline-offset: 2px; }
+.ask-user-dialog .desktop-dialog-header { align-items: flex-start; padding: 24px 26px 18px; }
+.ask-user-dialog .desktop-dialog-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: var(--dialog-surface-hover);
+}
+.ask-user-dialog .desktop-dialog-icon svg { width: 18px; height: 18px; }
+.ask-user-dialog .desktop-dialog-heading-copy { gap: 10px; }
+.ask-user-dialog .desktop-dialog-eyebrow { color: var(--dialog-text-2); font-weight: 600; }
+.ask-dialog-eyebrow-copy { align-items: center; min-height: 24px; }
+.ask-dialog-progress {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--dialog-surface-hover);
+  color: var(--dialog-text-3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.ask-user-dialog .desktop-dialog-header h2 { font-size: 19px; line-height: 1.4; text-wrap: pretty; }
+.ask-user-dialog .desktop-dialog-summary { font-size: 12px; }
+.ask-user-dialog .desktop-dialog-body { padding: 0 26px 22px; }
+.ask-dialog-options { display: grid; gap: 8px; border: 0; margin: 0; padding: 0; min-width: 0; }
+.ask-dialog-legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.ask-dialog-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--dialog-border);
+  border-radius: 12px;
+  background: var(--dialog-surface);
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.ask-dialog-option:hover { background: var(--dialog-surface-hover); border-color: var(--dialog-border-strong); }
+.ask-dialog-option:has(input:checked) {
+  border-color: var(--dialog-text-2);
+  background: color-mix(in oklab, var(--dialog-text) 5%, var(--dialog-surface));
+}
+.ask-dialog-option input[type='radio'],
+.ask-dialog-option input[type='checkbox'] {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  border: 1.5px solid var(--dialog-text-3);
+  border-radius: 50%;
+  background: var(--dialog-surface);
+  display: grid;
+  place-content: center;
+  cursor: pointer;
+}
+.ask-dialog-option input[type='checkbox'] { border-radius: 4px; }
+.ask-dialog-option input:checked { border-color: var(--dialog-text); background: var(--dialog-text); }
+.ask-dialog-option input[type='radio']:checked::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dialog-surface);
+}
+.ask-dialog-option input[type='checkbox']:checked::after {
+  content: '';
+  width: 7px;
+  height: 4px;
+  border: solid var(--dialog-surface);
+  border-width: 0 0 2px 2px;
+  transform: translateY(-1px) rotate(-45deg);
+}
+.ask-dialog-option input:focus-visible { outline: 2px solid var(--dialog-text-2); outline-offset: 3px; }
+.ask-dialog-option-title { display: block; font-size: 13px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.ask-dialog-option-description { display: block; margin-top: 3px; color: var(--dialog-text-2); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.ask-dialog-option-preview { display: block; margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: var(--dialog-surface-hover); color: var(--dialog-text-3); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-dialog-other { display: block; cursor: default; }
+.ask-dialog-other-choice { display: flex; gap: 10px; cursor: pointer; }
+.ask-dialog-other-input {
+  box-sizing: border-box;
+  width: calc(100% - 26px);
+  margin: 10px 0 0 26px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--dialog-border-strong);
+  background: var(--dialog-surface);
+  color: var(--dialog-text);
+  font: inherit;
+  font-size: 12px;
+}
+.ask-dialog-other-input::placeholder { color: var(--dialog-text-3); }
+.ask-dialog-error { color: var(--dialog-danger); font-size: 12px; line-height: 1.5; }
+.ask-user-dialog .desktop-dialog-footer { padding: 16px 26px 20px; border-top: 1px solid var(--dialog-border); }
+.ask-user-dialog .desktop-dialog-action { border-radius: 9px; min-height: 36px; }
+.ask-user-dialog .desktop-dialog-action--cancel { margin-right: auto; background: transparent; box-shadow: none; color: var(--dialog-text-2); }
+.ask-user-dialog .desktop-dialog-action--cancel:hover { background: var(--dialog-surface-hover); }
+.ask-user-dialog .desktop-dialog-action--primary { color: var(--dialog-window); }
+@media (prefers-reduced-motion: reduce) { .ask-dialog-option { transition: none; } }
+
 @media (max-width: 620px) {
   .desktop-dialog-overlay { padding: 16px; }
   .desktop-dialog-panel { border-radius: 20px; }

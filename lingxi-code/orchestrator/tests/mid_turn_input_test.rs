@@ -774,3 +774,79 @@ async fn the_batched_path_has_no_late_drain() {
          continuing turns that used to end."
     );
 }
+
+// ── §3.5 LoopGuardOrder ──────────────────────────────────────────────────────
+//
+// The three entries run their top-of-loop guards in three different orders, and
+// PR 5 keeps all three behind a `LoopGuardOrder` selector rather than picking
+// one:
+//
+//   Batched            drain → max_turns → budget → increment
+//   BatchedCancelable  cancel → max_turns → budget → increment   (NO drain)
+//   Streaming          drain → max_turns → budget → increment → cancel
+//
+// Verified against the source before writing this: `try_run_turn` drains,
+// `try_run_turn_cancelable` does not and checks the token first, and the
+// streaming loop increments before its cancel guard.
+//
+// The missing drain is the one difference nothing tested. It is also the easiest
+// to erase, because "every loop should drain pending input" reads like a bug fix
+// rather than a behaviour change — and a cancelable turn that starts draining
+// would pull a queued message into a turn the user is cancelling.
+
+/// `run_turn` drains at the top of its loop; `run_turn_with_cancel` does not.
+///
+/// One test over both entries because the assertion IS the difference. Separate
+/// per-entry tests would both keep passing under a unified guard order that gave
+/// the cancelable path a drain — only the comparison notices they became the
+/// same.
+#[tokio::test]
+async fn only_the_non_cancelable_batched_entry_drains_at_the_top_of_its_loop() {
+    fn build(source: Arc<CountingSource>) -> ConversationOrchestrator {
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![
+                orchestrator::test_support::mock_message_response(
+                    vec![llm_client::ContentBlock::Text {
+                        text: "done".into(),
+                        cache_control: None,
+                    }],
+                    Some("end_turn"),
+                ),
+            ])),
+            Arc::new(ToolRegistry::new()),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        orch.set_mid_turn_input(source);
+        orch
+    }
+
+    let plain = CountingSource::new();
+    build(plain.clone())
+        .run_turn("seed")
+        .await
+        .expect("batched");
+
+    let cancelable = CountingSource::new();
+    build(cancelable.clone())
+        .run_turn_with_cancel("seed", CancellationToken::new())
+        .await
+        .expect("cancelable");
+
+    assert!(
+        plain.polls() >= 1,
+        "run_turn must drain pending input at the top of its loop, before max_turns and \
+         budget, so a queued message is not dropped by a limit"
+    );
+    assert_eq!(
+        cancelable.polls(),
+        0,
+        "run_turn_with_cancel must NOT drain: its guard order is cancel → max_turns → budget, \
+         with no drain at all. Giving it one reads like a bug fix and is a behaviour change — \
+         a turn the user is cancelling would pull in a queued message on its way out."
+    );
+}

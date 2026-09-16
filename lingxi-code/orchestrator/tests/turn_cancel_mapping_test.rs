@@ -143,3 +143,115 @@ fn a_cancel_arriving_after_the_batched_step_succeeded_keeps_the_end_turn() {
         .expect("spawn");
     handle.join().expect("test thread panicked");
 }
+
+// ── §3.2 row 3: the entry pre-cancel emits NO end event ──────────────────────
+//
+// `run_turn_streaming_inputs_locked`'s pre-cancel check aborts the startup
+// prewarm and closes the Responses websocket, then returns without entering the
+// driver: "不进入 driver，不发 `aborted_*` 结束事件".
+//
+// Every existing cancel test asserts only the OUTCOME (`Cancelled`), and the
+// outcome is the one thing every cancel stage agrees on. What separates the
+// stages is their side effects — §3.2 gives each row its own column for them —
+// and a unified driver that ends every terminal through one exit would emit an
+// `aborted_*` here, where today nothing is emitted at all. Outcome-only
+// assertions cannot see that.
+//
+// The normal completion in the same test is the control: it proves the fixture
+// CAN observe an end event, so "no event" is a real absence rather than a
+// blind instrument.
+
+use orchestrator::scripted;
+use orchestrator::test_support::{
+    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
+    text_delta, MockStreamingApiClient,
+};
+use platform_api::OutputEvent;
+
+fn end_events(events: &[OutputEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A pre-cancelled streaming turn emits no end event; a normal one emits
+/// `end_turn`.
+#[test]
+fn a_pre_cancelled_streaming_turn_emits_no_end_event() {
+    let handle = std::thread::Builder::new()
+        .name("pre-cancel-no-end-event".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async {
+                    fn round() -> Vec<llm_client::LlmEvent> {
+                        scripted![
+                            message_start("m1", "claude-opus-4-7"),
+                            content_block_start_text(0),
+                            text_delta(0, "answer"),
+                            content_block_stop(0),
+                            message_delta_stop("end_turn"),
+                            message_stop(),
+                        ]
+                    }
+                    fn build(out: Arc<MockOutputStream>) -> ConversationOrchestrator {
+                        ConversationOrchestrator::new_with_streaming(
+                            OrchestratorConfig::default(),
+                            Arc::new(orchestrator::test_support::MockApiClient::new(Vec::new())),
+                            Arc::new(MockStreamingApiClient::with_turns(vec![round()])),
+                            Arc::new(ToolRegistry::new()),
+                            orchestrator::test_support::noop_hook_executor(),
+                            Arc::new(NoOpPermissionGate),
+                            out,
+                            Arc::new(StaticMemoryProvider::empty()),
+                            PathBuf::from("/tmp"),
+                        )
+                    }
+
+                    // Control: a turn that completes normally.
+                    let normal_out = Arc::new(MockOutputStream::new());
+                    let normal = build(normal_out.clone());
+                    normal
+                        .run_turn_streaming_with_cancel("hi", CancellationToken::new())
+                        .await
+                        .expect("normal");
+                    let normal_events = end_events(&normal_out.snapshot().await);
+
+                    // Pre-cancelled: the entry check fires before the driver.
+                    let cancelled_out = Arc::new(MockOutputStream::new());
+                    let cancelled = build(cancelled_out.clone());
+                    let token = CancellationToken::new();
+                    token.cancel();
+                    let outcome = cancelled
+                        .run_turn_streaming_with_cancel("hi", token)
+                        .await
+                        .expect("cancelled");
+                    let cancelled_events = end_events(&cancelled_out.snapshot().await);
+
+                    assert_eq!(outcome, TurnOutcome::Cancelled);
+                    assert_eq!(
+                        normal_events,
+                        vec!["end_turn".to_string()],
+                        "the control must observe an end event, or the absence asserted below \
+                         proves nothing about the code"
+                    );
+                    assert!(
+                        cancelled_events.is_empty(),
+                        "a pre-cancelled turn must emit NO end event — §3.2: 不进入 driver，\
+                         不发 aborted_* 结束事件. Got {cancelled_events:?}. A shared exit that \
+                         ends every terminal with an event would emit one here, and every \
+                         existing cancel test — all of which assert only the outcome — would \
+                         stay green."
+                    );
+                });
+        })
+        .expect("spawn");
+    handle.join().expect("test thread panicked");
+}

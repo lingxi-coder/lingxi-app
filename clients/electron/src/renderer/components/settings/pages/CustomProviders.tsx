@@ -121,7 +121,7 @@ const inputStyle = (t: ReturnType<typeof useT>) => ({
  */
 export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer, onLayerLockChange }: PageContentProps) {
   const t = useT();
-  const primaryButtonStyle = { ...ghostButtonStyle(t), background: t.accent, borderColor: t.accent, color: t.surface, fontWeight: 600 };
+  const primaryButtonStyle = { ...ghostButtonStyle(t), background: `color-mix(in srgb, ${t.accent} 85%, #000)`, borderColor: t.accent, color: '#fff', fontWeight: 600 };
   const providers = providersFromLayer(snapshot, editingLayer);
   const routing = routingFromLayer(snapshot, editingLayer);
 

@@ -258,7 +258,7 @@ test('project rows omit the disclosure arrow and the active session matches Sett
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
 
   assert.doesNotMatch(source, /\{active \? <Icon name="chevron"[^\n]+rotate/);
-  assert.match(activeSessionTag, /background:oklch\(26% 0\.028 270\)/);
+  assert.ok(activeSessionTag.includes(`background:${tokens(true).surfaceActive}`));
 });
 
 test('a running session does not lock global project and session navigation', () => {

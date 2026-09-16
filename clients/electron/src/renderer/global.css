@@ -8,7 +8,6 @@
   --conversation-gutter: 24px;
   --font-sans-default: -apple-system, BlinkMacSystemFont, "SF Pro Text",
     "Segoe UI", Helvetica, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif;
-  --font-openai-sans: "OpenAI Sans", var(--font-sans-default);
   --font-mono-default: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Monaco,
     Consolas, "Liberation Mono", "Courier New", monospace;
 }
@@ -41,9 +40,11 @@ body {
 }
 .desktop-sidebar {
   z-index: 2;
+  background: color-mix(in srgb, var(--sidebar-material) 94%, transparent);
+  backdrop-filter: blur(24px) saturate(1.15);
 }
 .desktop-sidebar-brand {
-  font-family: var(--font-openai-sans);
+  font-family: var(--font-sans-default);
   user-select: none;
 }
 .desktop-brand-mark {
@@ -53,7 +54,6 @@ body {
   place-items: center;
   flex: 0 0 auto;
   border-radius: 9px;
-  transform: rotate(-2deg);
 }
 .desktop-brand-label {
   margin-left: 1px;
@@ -66,7 +66,7 @@ body {
   letter-spacing: .12em;
 }
 .desktop-sidebar-footer {
-  background: linear-gradient(180deg, transparent, color-mix(in oklab, currentColor 2.8%, transparent));
+  background: transparent;
 }
 .desktop-sidebar-footer button,
 .desktop-topbar-action,
@@ -85,6 +85,8 @@ body {
 }
 .desktop-topbar {
   z-index: 45;
+  background: color-mix(in srgb, var(--toolbar-material) 92%, transparent);
+  backdrop-filter: blur(20px) saturate(1.15);
 }
 .desktop-topbar .mono {
   font-variant-numeric: tabular-nums;
@@ -97,7 +99,7 @@ body {
   flex: 0 0 32px;
   padding: 0;
   border: 0;
-  border-radius: 11px;
+  border-radius: 8px;
   outline: none;
   background: transparent;
   box-shadow: none;
@@ -110,6 +112,8 @@ body {
   box-shadow: none;
 }
 .desktop-topbar-action:focus-visible {
+  outline: 2px solid var(--desktop-accent, #007aff);
+  outline-offset: 2px;
   background: var(--topbar-action-focus);
   box-shadow: inset 0 0 0 .5px var(--topbar-action-ring);
 }
@@ -691,7 +695,7 @@ body {
 .desktop-empty-state h1 {
   max-width: 480px;
   color: var(--empty-text);
-  font-family: var(--font-openai-sans);
+  font-family: var(--font-sans-default);
   font-size: clamp(24px, 2.5vw, 31px);
   font-weight: 600;
   line-height: 1.16;
@@ -793,7 +797,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 24px;
+  border-radius: 18px;
   background: color-mix(in oklab, var(--dialog-window) 97%, transparent);
   color: var(--dialog-text);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
@@ -967,7 +971,7 @@ body {
   min-height: 36px;
   padding: 0 18px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 8px;
   cursor: pointer;
   font-family: inherit;
   font-size: 12.5px;
@@ -1009,7 +1013,7 @@ body {
 .desktop-dialog-action--primary {
   min-width: 108px;
   color: #fff;
-  background: var(--dialog-accent);
+  background: color-mix(in srgb, var(--dialog-accent) 85%, #000);
   box-shadow: 0 0 0 1px var(--dialog-accent-border);
 }
 .desktop-dialog-action--primary:hover {
@@ -1024,7 +1028,7 @@ body {
   box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-danger) 12%, transparent);
 }
 .desktop-dialog-panel[data-tone='danger'] .desktop-dialog-action--primary {
-  background: color-mix(in oklab, var(--dialog-danger) 90%, #ff4a4a);
+  background: color-mix(in srgb, var(--dialog-danger) 72%, #000);
   box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-danger) 86%, #ff4a4a);
 }
 .desktop-dialog-action:focus-visible {
@@ -1633,8 +1637,9 @@ aside[data-resizing='true'] > .sidebar-resize-handle::after { opacity: .72; }
 
 button { font-family: inherit; }
 textarea, input { font-family: inherit; }
-:focus-visible { outline: 2px solid oklch(72% 0.18 268); outline-offset: 2px; }
-input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { outline: none; }
+:focus-visible { outline: 2px solid var(--desktop-accent, #007aff); outline-offset: 2px; }
+.beta-rich-prompt:focus-visible { outline: none; }
+.beta-composer:focus-within { outline: 2px solid var(--desktop-accent, #007aff); outline-offset: 2px; }
 .slash-command-row {
   transition: background-color 110ms ease, color 110ms ease;
 }
@@ -1749,9 +1754,9 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
 }
 .composer-icon-action:active:not(:disabled),
 .composer-submit-button:active:not(:disabled) { scale: .96; }
-.composer-icon-action:focus-visible,
-.composer-submit-button:focus-visible {
-  outline: 2px solid currentColor;
+.composer-toolbar .composer-icon-action:focus-visible,
+.composer-toolbar .composer-submit-button:focus-visible {
+  outline: 2px solid var(--desktop-accent, #007aff);
   outline-offset: 3px;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -1794,21 +1799,19 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
 }
 .desktop-welcome-mark {
   flex-shrink: 0;
-  margin-bottom: 56px;
-  color: color-mix(in srgb, var(--empty-text) 30%, transparent);
+  width: 64px;
+  height: 64px;
+  margin-bottom: 24px;
+  color: var(--empty-muted);
 }
 .desktop-welcome h1 {
-  max-width: 100%;
-  font-size: clamp(28px, 4vw, 56px);
-  font-weight: 400;
+  max-width: 600px;
+  font-size: clamp(24px, 2.5vw, 32px);
+  font-weight: 600;
   line-height: 1.2;
   letter-spacing: -.025em;
 }
 .desktop-welcome h1 span {
-  text-decoration: underline dotted;
-  text-decoration-color: var(--empty-muted);
-  text-decoration-thickness: 1px;
-  text-underline-offset: 9px;
   overflow-wrap: anywhere;
 }
 
@@ -1818,3 +1821,26 @@ input:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible { o
 
 .tool-group-trigger:hover,
 .tool-group-trigger:focus-within { --tool-group-background: var(--tool-hover-background); }
+
+/* Accessibility applies to menus and portals as well as the main shell. */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .desktop-sidebar { background: var(--sidebar-material); backdrop-filter: none; }
+  .desktop-topbar { background: var(--toolbar-material); backdrop-filter: none; }
+  .context-summary-panel { background: var(--summary-panel-bg); backdrop-filter: none; }
+  .desktop-dialog-overlay { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .desktop-dialog-panel { background: var(--dialog-window); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+@media (prefers-contrast: more) {
+  button, input, textarea, select, [contenteditable='true'] { outline: 1px solid currentColor; outline-offset: -1px; }
+  :focus-visible { outline: 3px solid var(--desktop-accent, #007aff); outline-offset: 2px; }
+  .desktop-sidebar, .desktop-topbar { border-color: currentColor !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+  button:active { scale: 1 !important; }
+}

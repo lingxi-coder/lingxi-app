@@ -46,7 +46,7 @@ async function main() {
     await click('[aria-label="Toggle right panel"]');
     assert.equal(await js(`document.querySelector('.runtime-inspector').inert`), true);
     await click('[aria-label="Toggle right panel"]');
-    await delay(280);
+    await waitFor(wc, `getComputedStyle(document.querySelector('.runtime-inspector')).opacity === '1'`);
     assert.equal(await js(`document.querySelector('.runtime-inspector').inert`), false);
     assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector')).opacity`), '1');
     await click('[aria-label="Hide right panel"]');

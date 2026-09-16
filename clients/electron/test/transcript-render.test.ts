@@ -277,7 +277,7 @@ test('active agent thinking shimmers the text without a leading indicator', () =
   assert.doesNotMatch(html, /cursor-blink[^>]*>Thinking…|<svg[^>]*>[^<]*Thinking…/);
 });
 
-test('tool rows use compact adjacency hooks and a Codex-like transcript type scale', () => {
+test('tool rows use compact adjacency hooks and a system-font transcript type scale', () => {
   const html = render(React.createElement(Stage, {
     liveItems: [
       { type: 'thinking', id: 'thinking-before', text: 'Looking it up', done: true },
@@ -302,7 +302,8 @@ test('tool rows use compact adjacency hooks and a Codex-like transcript type sca
   assert.match(narration, /line-height:1\.65/);
 
   assert.match(css, /--font-sans-default:\s*-apple-system,\s*BlinkMacSystemFont/);
-  assert.match(css, /--font-openai-sans:\s*"OpenAI Sans",\s*var\(--font-sans-default\)/);
+  assert.match(css, /font-family:\s*var\(--font-sans-default\)/);
+  assert.doesNotMatch(css, /--font-openai-sans|"OpenAI Sans"/);
 });
 
 test('code cards highlight known and auto-detected languages with copy semantics', () => {

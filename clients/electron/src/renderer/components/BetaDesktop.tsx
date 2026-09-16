@@ -387,7 +387,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       className="desktop-sidebar"
       ref={asideRef}
       data-resizing={resizingSidebar || undefined}
-      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`, paddingTop: 38, boxShadow: t.dark ? '8px 0 30px rgba(0,0,0,.10)' : '8px 0 30px rgba(45,38,74,.035)' }}
+      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: `0.5px solid ${t.border}`, paddingTop: 38, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
     >
       <div className="drag-region desktop-sidebar-brand" style={{ minHeight: 48, padding: '7px 14px 6px', display: 'flex', alignItems: 'center', gap: 9 }}>
         <span className="desktop-brand-mark" style={{ color: t.accent, background: t.accentBg, boxShadow: `0 0 0 1px ${t.accentBorder}` }} aria-hidden="true"><Icon name="spark" size={13} stroke={1.7} /></span>
@@ -880,7 +880,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
     '--topbar-action-active-color': t.text,
   } as CSSProperties;
   return (
-    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 12px 0 18px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
+    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 12px 0 18px', borderBottom: `0.5px solid ${t.border}`, '--toolbar-material': t.windowBg } as CSSProperties}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
         <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
@@ -2284,7 +2284,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           setImageDragActive(false);
           void addFiles([...event.dataTransfer.files]);
         }}
-        style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 20, border: `1px solid ${imageDragActive ? t.accent : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: t.dark ? '0 8px 24px rgba(0,0,0,.20), 0 1px 3px rgba(0,0,0,.16)' : '0 8px 24px rgba(24,28,36,.06), 0 1px 3px rgba(24,28,36,.04)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
+        style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 16, border: `1px solid ${imageDragActive ? t.accent : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: '0 2px 8px rgba(0,0,0,.06)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
       >
         {imageAttachments.length > 0 && (
           <div aria-label="Image attachments" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
@@ -2742,7 +2742,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                 aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
                 title={bridge.running ? 'Send as pending message' : 'Send prompt'}
                 style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
-              ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? t.windowBg : t.text4} /></button>
+              ><Icon name="arrowU" size={18} color="currentColor" /></button>
             </span>
           </div>
         </div>
@@ -2769,7 +2769,7 @@ function composerPillStyle(t: ReturnType<typeof useT>, active: boolean): CSSProp
 }
 
 function composerSendStyle(t: ReturnType<typeof useT>, enabled: boolean): CSSProperties {
-  return { ...composerPrimaryActionStyle(t, enabled), background: enabled ? t.text : t.surfaceActive, color: enabled ? t.windowBg : t.text4, opacity: enabled ? 1 : .82 };
+  return { ...composerPrimaryActionStyle(t, enabled), background: enabled ? `color-mix(in srgb, ${t.accent} 85%, #000)` : t.surfaceActive, color: enabled ? '#fff' : t.text4, opacity: enabled ? 1 : .82 };
 }
 
 function composerMenuStyle(t: ReturnType<typeof useT>, side: 'left' | 'right'): CSSProperties {

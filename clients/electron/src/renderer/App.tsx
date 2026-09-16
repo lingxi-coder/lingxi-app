@@ -1,6 +1,6 @@
 import { conversationPlans } from './bridge/planDocuments';
 import { selectedGitScope } from './bridge/gitScope';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type CSSProperties } from 'react';
 
 import { useBridge } from './bridge/useBridge';
 import {
@@ -92,7 +92,7 @@ export function App() {
       <div
         className="desktop-shell"
         data-screen-label="LingXi Code Desktop Beta"
-        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.windowBg, color: palette.text }}
+        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.windowBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent } as CSSProperties}
       >
         <SettingsBackground active={settingsRoute !== null}>
           <BetaSidebar

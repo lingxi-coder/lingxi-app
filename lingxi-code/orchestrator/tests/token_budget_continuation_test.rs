@@ -228,3 +228,96 @@ async fn budget_on_resets_recovery_count_on_continuation() {
         "expected two continuation nudges in final snapshot"
     );
 }
+
+// ── STREAMING twin ───────────────────────────────────────────────────────────
+//
+// Everything above drives `run_turn`. The streaming loop accumulates this step's
+// output tokens in a DIFFERENT place — inside `finalize_iteration`, before the
+// disposition is decided — and then feeds the running total to the same
+// `maybe_continue_for_budget`. §3.4 of the unified-driver plan collapses those
+// two accumulation points into one, which can only be called equivalent if the
+// streaming side is pinned first.
+//
+// The property §3.4 states: "所有产生可计数输出的模型步必须在 Stop hooks /
+// budget continuation 之前累计 output tokens，含自然结束轮." Accumulating a
+// moment too late means the budget check reads a total that is short by exactly
+// this step, and the turn stops one continuation early — a quiet off-by-one in
+// how much work the agent does, with nothing failing.
+
+fn streamed_end_turn_with_output_tokens(id: &str, output_tokens: u64) -> Vec<llm_client::LlmEvent> {
+    use orchestrator::test_support::{
+        content_block_start_text, content_block_stop, message_start, message_stop, text_delta,
+    };
+    vec![
+        message_start(id, "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "done"),
+        content_block_stop(0),
+        orchestrator::test_support_stream::message_delta_stop_with_usage(
+            "end_turn",
+            Usage {
+                billable_tokens: TokenUsage {
+                    output: output_tokens,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+        message_stop(),
+    ]
+}
+
+/// STREAMING: the budget sees THIS step's tokens before deciding to continue.
+///
+/// Mirrors `budget_on_continues_then_stops_at_threshold`: 100k (20%) continues,
+/// then a cumulative 460k (92% ≥ 90%) stops. Two rounds, and the nudge appears
+/// in the second request.
+///
+/// The threshold arithmetic is what gives this teeth. If the step's tokens were
+/// accumulated AFTER the budget check rather than before, round one would test
+/// 0 instead of 100k — still a continue — but round two would test 100k instead
+/// of 460k and continue as well, so the turn would run past where it should
+/// stop.
+#[tokio::test]
+async fn streaming_budget_on_continues_then_stops_at_threshold() {
+    let streams = vec![
+        streamed_end_turn_with_output_tokens("m1", 100_000),
+        streamed_end_turn_with_output_tokens("m2", 360_000),
+        streamed_end_turn_with_output_tokens("m3", 1_000),
+    ];
+    let api = Arc::new(orchestrator::test_support::MockStreamingApiClient::with_turns(streams));
+    let cfg = OrchestratorConfig {
+        token_budget: Some(500_000),
+        enable_token_budget: true,
+        ..OrchestratorConfig::default()
+    };
+    let orch = ConversationOrchestrator::new_with_streaming(
+        cfg,
+        Arc::new(MockApiClient::new(Vec::new())),
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+
+    let outcome = orch.run_turn_streaming("do it").await.expect("ok");
+    match outcome {
+        ConversationOutcome::EndTurn { turn_count, .. } => assert_eq!(
+            turn_count, 2,
+            "the first end_turn continues on budget, the second crosses 90% and stops. A third \
+             round means the budget check read a total missing this step's tokens."
+        ),
+        other => panic!("expected EndTurn, got {other:?}"),
+    }
+
+    let calls = api.captured_calls().await;
+    assert_eq!(calls.len(), 2, "expected exactly two streamed rounds");
+    assert_eq!(
+        count_nudge_user_messages(&calls[1].messages),
+        1,
+        "the continuation nudge must reach the second request, byte-exact, exactly once"
+    );
+}

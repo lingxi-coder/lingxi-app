@@ -1584,3 +1584,161 @@ async fn fix_c_stop_prevent_continuation_default_reason() {
     });
     assert!(found, "default stopReason must be used");
 }
+
+// ── §9: the rewake wrappers are verified on their own ────────────────────────
+//
+// §3.2 is explicit that they are not derived from the main streaming wrapper:
+// "Rewake 等独立包装的预检查、结束事件及错误映射按其原实现单独验证，不从主
+// streaming 包装推导."
+//
+// The reason shows up immediately. The main streaming entry's pre-cancel emits
+// NOTHING — that is `a_pre_cancelled_streaming_turn_emits_no_end_event`.
+// `run_task_notification_rewake`'s pre-check does the opposite: it EMITS
+// `end_turn` before returning, because the host has already reserved its
+// UI/permission lifecycle for this idle turn and something has to close it.
+//
+// Same shape of guard, opposite obligation. A unified entry wrapper that gave
+// every pre-check the main entry's silence would leave the host's lifecycle
+// open, and a unified one that gave every pre-cancel an event would break the
+// main entry. Only a test per wrapper distinguishes them.
+
+/// A registry with nothing pending — the default for every method.
+struct EmptyTaskRegistry;
+
+#[async_trait::async_trait]
+impl platform_api::task_registry::TaskRegistryHandle for EmptyTaskRegistry {
+    async fn create(
+        &self,
+        _input: platform_api::task_registry::TaskCreateInput,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!("the pre-check returns before any registry mutation")
+    }
+    async fn get(
+        &self,
+        _id: &str,
+    ) -> Result<
+        Option<platform_api::task_registry::TaskRecord>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        Ok(None)
+    }
+    async fn list(
+        &self,
+        _filter: platform_api::task_registry::TaskListFilter,
+    ) -> Result<
+        Vec<platform_api::task_registry::TaskRecord>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        Ok(Vec::new())
+    }
+    async fn update(
+        &self,
+        _id: &str,
+        _patch: platform_api::task_registry::TaskUpdatePatch,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!("the pre-check returns before any registry mutation")
+    }
+    async fn set_status(
+        &self,
+        _id: &str,
+        _status: &str,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!("the pre-check returns before any registry mutation")
+    }
+    async fn kill(
+        &self,
+        _id: &str,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!("the pre-check returns before any registry mutation")
+    }
+    async fn output(
+        &self,
+        _id: &str,
+        _offset: Option<u64>,
+    ) -> Result<
+        platform_api::task_registry::TaskOutputChunk,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!("the pre-check returns before any registry mutation")
+    }
+}
+
+async fn rewake_end_events(output: &MockOutputStream) -> Vec<String> {
+    output
+        .snapshot()
+        .await
+        .iter()
+        .filter_map(|e| match e {
+            platform_api::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_task_notification_rewake_precheck_emits_its_end_turn() {
+    // Cancelled: returns Cancelled AND still emits, unlike the main entry.
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let outcome = orch
+        .run_task_notification_rewake(&EmptyTaskRegistry, cancel)
+        .await
+        .expect("rewake");
+    assert_eq!(outcome, crate::conversation::TurnOutcome::Cancelled);
+    assert_eq!(
+        rewake_end_events(&output).await,
+        vec!["end_turn".to_string()],
+        "a pre-cancelled rewake must still close the host's reserved lifecycle with an \
+         end_turn. The main streaming entry's pre-cancel emits nothing — the opposite \
+         obligation, which is why §3.2 says not to derive one from the other."
+    );
+
+    // Nothing pending and not cancelled: EndTurn, and the same emit.
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    let outcome = orch
+        .run_task_notification_rewake(
+            &EmptyTaskRegistry,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("rewake");
+    assert_eq!(outcome, crate::conversation::TurnOutcome::EndTurn);
+    assert_eq!(
+        rewake_end_events(&output).await,
+        vec!["end_turn".to_string()],
+        "a rewake whose completion was already consumed at the turn gate closes the same way"
+    );
+}

@@ -201,6 +201,49 @@ fn orch_with_output(
     ))
 }
 
+/// The STREAMING twin of [`orch`].
+///
+/// `handle_stop_at_end` returns the same four `StopHookFlow` results to both
+/// drivers, but each driver TRANSLATES them itself — streaming's match lives in
+/// `conversation/drivers/mod.rs` and turns `Terminate` into
+/// `Return(outcome)`, `TerminateMaxTurns` into `Err(MaxTurnsReached)`, and
+/// `LoopAgain` into a recovery reset plus `Continue`. Until these tests every
+/// row of that translation was unexercised: this file drove `run_turn` fifteen
+/// times and `run_turn_streaming` zero.
+fn streaming_orch(
+    streams: Vec<Vec<llm_client::LlmEvent>>,
+    hooks: Arc<HookExecutorImpl>,
+    config: OrchestratorConfig,
+) -> Arc<ConversationOrchestrator> {
+    Arc::new(ConversationOrchestrator::new_with_streaming(
+        config,
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(orchestrator::test_support::MockStreamingApiClient::with_turns(streams)),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ))
+}
+
+/// One streamed `end_turn` round.
+fn streamed_end_turn(text: &str) -> Vec<llm_client::LlmEvent> {
+    use orchestrator::test_support::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta,
+    };
+    vec![
+        message_start("m", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, text),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]
+}
+
 fn end_turn(text: &str) -> llm_client::LlmResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
@@ -980,4 +1023,134 @@ async fn goal_reason_keeps_bracket_sequences_inside_the_condition_out_of_status(
     let goal = o.get_active_goal().await.unwrap();
     assert_eq!(goal.last_reason.as_deref(), Some("tests pending"));
     assert_eq!(goal.iterations, 1);
+}
+
+// ── STREAMING twins of the four `StopHookFlow` results ───────────────────────
+//
+// §4 of the unified-driver plan marks all four rows "两者" — both drivers — and
+// they are four DIFFERENT results, not shades of one. Every test above drives
+// the batched entry; the streaming driver translates the same four itself, and
+// none of that translation was covered. PR 4 shares the end handling, so each
+// row needs a twin before the shared version can be called equivalent.
+
+/// STREAMING: `preventContinuation` terminates as `StopHookPrevented`.
+///
+/// Streaming maps `Terminate(outcome)` straight through as `Return(outcome)`,
+/// so the public outcome must be the same variant the batched entry returns —
+/// NOT a plain `EndTurn`. `run_turn_with_cancel` is the one entry allowed to
+/// flatten it (§4 records that loss and says to keep it).
+#[tokio::test]
+async fn streaming_stop_prevent_continuation_terminates() {
+    let hooks = exec_with(
+        Arc::new(StopPreventHandler),
+        builtin_hook("stop-prevent", HookEventType::Stop),
+    )
+    .await;
+    let o = streaming_orch(
+        vec![streamed_end_turn("one")],
+        hooks,
+        OrchestratorConfig::default(),
+    );
+
+    let outcome = o.run_turn_streaming("go").await.expect("streaming turn");
+    assert!(
+        matches!(outcome, ConversationOutcome::StopHookPrevented { .. }),
+        "streaming must surface StopHookPrevented, not a plain EndTurn; it returns \
+         Terminate(outcome) unchanged. Got {outcome:?}"
+    );
+}
+
+/// STREAMING: a blocking Stop hook loops the turn again.
+///
+/// `LoopAgain` becomes `Continue`, so a second round is opened. Two scripted
+/// streams: if the hook's block were dropped the first round would end the turn
+/// and the second stream would go unused.
+#[tokio::test]
+async fn streaming_stop_block_loops_the_turn_again() {
+    let hooks = exec_with(
+        Arc::new(StopBlockHandler),
+        builtin_hook("stop-block", HookEventType::Stop),
+    )
+    .await;
+    let mut cfg = OrchestratorConfig::default();
+    // Bound the loop: the hook blocks forever, so let max_turns stop it rather
+    // than the cap, which would take nine rounds.
+    cfg.max_turns = 2;
+    let o = streaming_orch(
+        vec![streamed_end_turn("one"), streamed_end_turn("two")],
+        hooks,
+        cfg,
+    );
+
+    let result = o.run_turn_streaming("go").await;
+    assert!(
+        matches!(
+            result,
+            Err(orchestrator::OrchestratorError::MaxTurnsReached { .. })
+        ),
+        "a blocking Stop hook must keep the streaming loop going until a limit stops it; \
+         got {result:?}"
+    );
+}
+
+/// STREAMING: blocking on the turn that reaches `max_turns` ends on the
+/// max-turns terminal, not on the block cap.
+///
+/// The batched twin (`stop_block_coinciding_with_max_turns_ends_without_feedback`)
+/// pins that the max-turns check runs BEFORE the cap inside the shared helper.
+/// This pins that streaming's translation of that result is
+/// `Err(MaxTurnsReached)` rather than a silent end — a `Terminate` here would
+/// look like a normal finish to every caller.
+#[tokio::test]
+async fn streaming_stop_block_at_max_turns_ends_on_the_max_turns_terminal() {
+    let hooks = exec_with(
+        Arc::new(StopBlockHandler),
+        builtin_hook("stop-block", HookEventType::Stop),
+    )
+    .await;
+    let mut cfg = OrchestratorConfig::default();
+    cfg.max_turns = 1;
+    let o = streaming_orch(
+        vec![streamed_end_turn("one"), streamed_end_turn("two")],
+        hooks,
+        cfg,
+    );
+
+    let result = o.run_turn_streaming("go").await;
+    match result {
+        Err(orchestrator::OrchestratorError::MaxTurnsReached { max_turns }) => {
+            assert_eq!(max_turns, 1, "the terminal reports the configured limit");
+        }
+        other => panic!(
+            "expected MaxTurnsReached from TerminateMaxTurns; got {other:?}. Streaming turns \
+             that result into an ERROR, not an outcome — collapsing it into Terminate would \
+             read as a normal finish."
+        ),
+    }
+}
+
+/// STREAMING: a passing Stop hook falls through to the normal end.
+///
+/// `FallThrough` is the "no hook intervened" result, and it must stay
+/// distinguishable from `LoopAgain`: exactly one round, ending normally.
+#[tokio::test]
+async fn streaming_stop_hook_pass_ends_normally() {
+    let hooks = exec_with(
+        // Same trick as the batched twin: PromptBlockHandler only answers
+        // UserPromptSubmit, so registered on Stop it returns no decision ⇒ Pass.
+        Arc::new(PromptBlockHandler),
+        builtin_hook("prompt-block", HookEventType::Stop),
+    )
+    .await;
+    let o = streaming_orch(
+        vec![streamed_end_turn("one")],
+        hooks,
+        OrchestratorConfig::default(),
+    );
+
+    let outcome = o.run_turn_streaming("go").await.expect("streaming turn");
+    assert!(
+        matches!(outcome, ConversationOutcome::EndTurn { turn_count: 1, .. }),
+        "a passing Stop hook ends the turn after exactly one round; got {outcome:?}"
+    );
 }

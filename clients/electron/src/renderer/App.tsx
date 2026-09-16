@@ -122,6 +122,7 @@ export function App() {
           <ErrorBanner bridge={bridge} />
               {/* The transcript keeps all remaining height; Todos live in Summary. */}
               <Stage
+                onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files, path })}
                 submittedPlans={bridge.sessionLoading ? [] : planCalls}
                 onOpenPlan={(id) => bridge.openRuntimeItem({ kind: 'plan-document', id })}
                 liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}

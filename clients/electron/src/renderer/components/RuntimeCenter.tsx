@@ -21,6 +21,7 @@ import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { AgentAvatar } from './AgentAvatar';
 import { Stage } from './Stage';
+import { TurnFileReview } from './TurnFileSummary';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 
 const SECTION_LABELS: Record<RuntimeCenterSection, string> = {
@@ -329,6 +330,7 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
 }
 
 function tabLabel(item: RuntimeCenterItemRef, bridge: UseBridge): string {
+  if (item.kind === 'turn-review') return item.path?.split(/[\\/]/).at(-1) || 'Edited files';
   if (item.kind === 'section') return SECTION_LABELS[item.id];
   if (item.kind === 'plan-document') {
     const plan = bridge.runtimeCenter.submittedPlanState.calls.find((call) => call.id === item.id);
@@ -344,6 +346,7 @@ function tabLabel(item: RuntimeCenterItemRef, bridge: UseBridge): string {
 
 function tabIcon(item: RuntimeCenterItemRef): string {
   if (item.kind === 'agent' || (item.kind === 'section' && item.id === 'agents')) return 'subagent';
+  if (item.kind === 'turn-review') return 'compose';
   if (item.kind === 'task') return 'activity';
   if (item.kind === 'resource' || (item.kind === 'section' && item.id === 'resources')) return 'resources';
   if (item.kind === 'todo' || item.kind === 'plan' || (item.kind === 'section' && item.id === 'todos')) return 'check';
@@ -420,7 +423,7 @@ function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefi
         {agent.model && <span> · {agent.model}</span>}
         {latestActivity && <span role="status" style={{ display: 'block', marginTop: 4, color: t.dark ? t.text2 : t.text3 }}>{shorten(latestActivity, 150)}</span>}
       </div>
-      <Stage liveItems={conversation.items} running={agent.status === 'running'} pendingActivity={latestActivity} sessionKey={`agent:${agent.agent_id}`} emptyMessage="Waiting for the agent to emit its first message." />
+      <Stage onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id: `agent:${agent.agent_id}:${id}`, files, path })} liveItems={conversation.items} running={agent.status === 'running'} pendingActivity={latestActivity} sessionKey={`agent:${agent.agent_id}`} emptyMessage="Waiting for the agent to emit its first message." />
     </div>
   );
 }
@@ -551,6 +554,7 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
       </header>
       <div id="runtime-inspector-panel" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : 'Details'} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
         {!active && <div className="runtime-inspector-landing">{(['review', 'agents', 'todos', 'resources', 'plan'] as const).map((section) => <OverviewRow key={section} icon={section === 'agents' ? 'subagent' : section === 'todos' ? 'check' : section === 'resources' ? 'resources' : 'file'} title={SECTION_LABELS[section]} onClick={() => bridge.openRuntimeItem({ kind: 'section', id: section })} />)}</div>}
+        {active?.kind === 'turn-review' && <TurnFileReview key={`${active.id}:${active.path ?? ''}`} files={active.files} path={active.path} />}
         {active?.kind === 'section' && <SectionDetail section={active.id} bridge={bridge} />}
         {active?.kind === 'task' && <TaskDetail task={task} bridge={bridge} />}
         {active?.kind === 'agent' && <AgentDetail agent={agent} bridge={bridge} />}

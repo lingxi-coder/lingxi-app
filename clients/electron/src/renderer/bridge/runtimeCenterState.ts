@@ -1,3 +1,4 @@
+import type { TurnFileChange } from '../model/runItem';
 import type {
   AttachmentDto,
   ClientEvent,
@@ -14,6 +15,7 @@ import { emptySubmittedPlanState, latestSubmittedPlan, reduceSubmittedPlanEvent,
 export type RuntimeCenterSection = 'tasks' | 'agents' | 'todos' | 'resources' | 'plan' | 'review';
 
 export type RuntimeCenterItemRef =
+  | { kind: 'turn-review'; id: string; files: readonly TurnFileChange[]; path?: string }
   | { kind: 'section'; id: 'agents' | 'todos' | 'resources' | 'plan' | 'review' }
   | { kind: 'todo'; id: string }
   | { kind: 'plan-document'; id: string }
@@ -151,7 +153,7 @@ export function openRuntimeCenterItem(
 ): RuntimeCenterState {
   const key = runtimeCenterItemKey(item);
   const tabs = state.tabs.some((tab) => runtimeCenterItemKey(tab) === key)
-    ? state.tabs
+    ? state.tabs.map(tab => item.kind === 'turn-review' && runtimeCenterItemKey(tab) === key ? item : tab)
     : [...state.tabs, item];
   return { ...state, tabs, activeItem: item, inspectorOpen: true };
 }

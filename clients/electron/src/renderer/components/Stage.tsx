@@ -2,7 +2,7 @@ import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
-import type { RunItem } from '../model/runItem';
+import type { RunItem, TurnFileChange } from '../model/runItem';
 import {
   commandDefaultOpen,
   narrationDefaultOpen,
@@ -129,6 +129,7 @@ import { visibleRows } from './loopFold';
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
+  onReviewFiles?(id: string, files: readonly TurnFileChange[], path?: string): void;
   submittedPlans?: readonly SubmittedPlan[];
   onOpenPlan?: (id: string) => void;
   /** The real conversation accumulated from the bridge. */
@@ -160,7 +161,7 @@ interface StageProps {
   foldedItemIds?: readonly string[];
 }
 
-export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
+export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -320,7 +321,7 @@ export function Stage({ submittedPlans = [], onOpenPlan, liveItems = [], running
           inserted, which is exactly what a streaming transcript does.
         */}
         {rows.map((item) => {
-          if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} id={item.id} files={item.files} open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />;
+          if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
           if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {
             const document = submittedPlans.find(plan => plan.id === item.id);

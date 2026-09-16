@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'turn-file-summary-electron.mjs');
 
-test('turn file summary reviews changes and preserves collapsed state', async () => {
+test('turn file summary opens historical changes in the right panel', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-turn-file-summary-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-turn-file-summary-electron-'));
   const vite = await createServer({
@@ -54,26 +54,33 @@ test('turn file summary reviews changes and preserves collapsed state', async ()
     const result = await new Promise((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        rejectResult(new Error(`Electron compaction fixture timed out\n${errors.join('')}`));
+        rejectResult(new Error(`Electron turn file summary fixture timed out\n${errors.join('')}`));
       }, 20_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
         const line = output.join('').trim().split('\n').at(-1);
         if (code !== 0 || !line) {
-          rejectResult(new Error(`Electron compaction fixture exited ${code ?? signal}\n${errors.join('')}`));
+          rejectResult(new Error(`Electron turn file summary fixture exited ${code ?? signal}\n${errors.join('')}`));
           return;
         }
         try { resolveResult(JSON.parse(line)); }
-        catch (error) { rejectResult(new Error(`Invalid Electron compaction fixture output: ${line}`, { cause: error })); }
+        catch (error) { rejectResult(new Error(`Invalid Electron turn file summary fixture output: ${line}`, { cause: error })); }
       });
     });
 
     assert.equal(result.files, 2);
-    assert.equal(result.initialDiffs, 0);
-    assert.equal(result.openDiffs, 2);
-    assert.equal(result.closedDiffs, 0);
-    assert.equal(result.expanded, 'true');
+    assert.equal(result.initiallyClosed, true);
+    assert.equal(result.inlineDiffs, 0);
+    assert.equal(result.allFilesVisible, true);
+    assert.equal(result.rightPanel, true);
+    assert.equal(result.selectedFileOnly, true);
+    assert.equal(result.selectedFileSurvivesTab, true);
+    assert.equal(result.reviewResetsAll, true);
+    assert.equal(result.tabCount, 1);
+    assert.equal(result.closedWithoutInlineDiffs, true);
+    assert.equal(result.darkNarrowVisible, true);
+    assert.equal(result.darkHeadingMatchesTheme, true);
     assert.equal(result.narrowOverflow, false);
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

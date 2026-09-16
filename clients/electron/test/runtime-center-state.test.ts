@@ -399,3 +399,20 @@ for (const reset of ['connection', 'resume'] as const) {
     assert.equal(state.agents.pane.status, 'completed', 'restored history must not inherit a pre-restart running status');
   });
 }
+
+test('turn review keeps one tab and restores the latest file selection', () => {
+  const files = [{ path: '.lingxi/plans/plan.md', additions: 203, removals: 0, diffs: [] }];
+  let state = openRuntimeCenterItem(emptyRuntimeCenterState(), { kind: 'turn-review', id: 'turn-1', files });
+  assert.equal(state.inspectorOpen, true);
+  state = openRuntimeCenterItem(state, { kind: 'turn-review', id: 'turn-1', files, path: files[0]!.path });
+  assert.equal(state.tabs.length, 1);
+  assert.deepEqual(state.tabs[0], state.activeItem);
+  state = openRuntimeCenterItem(state, { kind: 'section', id: 'todos' });
+  state = openRuntimeCenterItem(state, state.tabs[0]!);
+  assert.equal(state.activeItem?.kind === 'turn-review' && state.activeItem.path, files[0]!.path);
+  state = openRuntimeCenterItem(state, { kind: 'turn-review', id: 'turn-1', files });
+  assert.equal(state.activeItem?.kind === 'turn-review' && state.activeItem.path, undefined);
+  assert.deepEqual(state.tabs[0], state.activeItem);
+  state = openRuntimeCenterItem(state, { kind: 'turn-review', id: 'turn-2', files: [] });
+  assert.equal(state.tabs.length, 3, 'different turns keep independent reviews');
+});

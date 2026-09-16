@@ -513,3 +513,264 @@ async fn user_interrupt_default_injects_interrupt_message() {
         "a default (user) interrupt MUST inject the interrupt message (today's behavior)"
     );
 }
+
+// ── §4 late-drain rows ───────────────────────────────────────────────────────
+//
+// `mid_turn_input_arriving_during_final_response_continues_the_turn` above pins
+// the NATURAL end: streaming's `Complete` arm gives pending input one last drain
+// AFTER `emit_end_turn` has already fired, and continues the SAME turn on a hit.
+//
+// §4 keeps one neighbour of that row deliberately different: a tool-requested
+// end produces `ForcedComplete`, which breaks immediately and does NOT drain.
+// The two arms sit three lines apart:
+//
+//     Complete(id)       => { if orch.drain_mid_turn_input().await { continue; } … }
+//     ForcedComplete(id) => { final_message_id = id; break; }
+//
+// A shared end-handler that gives every "the turn is finishing" disposition the
+// same last drain erases that, and the only visible symptom is a turn the tool
+// asked to end carrying on for another model round.
+//
+// §4 also records that batched has NO late drain at all — its loop ends the turn
+// the moment the step reports `Ended`.
+
+/// Counts how many times the loop asked for pending input, and never yields any.
+///
+/// Counting the ASKS is the point: "did this disposition take the late drain?"
+/// is a question about whether the drain ran, and inferring it from the number
+/// of model rounds fails when nothing was left to drain anyway.
+struct CountingSource(std::sync::atomic::AtomicUsize);
+
+impl CountingSource {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(std::sync::atomic::AtomicUsize::new(0)))
+    }
+    fn polls(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl MidTurnInputSource for CountingSource {
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+}
+
+/// A tool that asks the turn to end, via the `_meta` key the port classifies.
+struct EndTurnTool;
+
+#[async_trait]
+impl Tool for EndTurnTool {
+    fn name(&self) -> &str {
+        "EndsTurn"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn validate_input(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+        String::new()
+    }
+    async fn prompt(&self, _opts: &PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Ok(ToolCallResult {
+            data: json!({ "content": "done" }),
+            model_content: None,
+            new_messages: vec![],
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: Some(json!({"_meta": {"claude/endTurn": true}})),
+        })
+    }
+}
+
+fn streaming_round_calling(tool: &str, id: ToolUseId) -> Vec<llm_client::LlmEvent> {
+    vec![
+        message_start("m1", "claude-opus-4-7"),
+        orchestrator::test_support_stream::content_block_start_tool_use(0, id, tool),
+        input_json_delta(0, "{}"),
+        content_block_stop(0),
+        message_delta_stop("tool_use"),
+        message_stop(),
+    ]
+}
+
+fn text_round(id: &str, text: &str) -> Vec<llm_client::LlmEvent> {
+    vec![
+        message_start(id, "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, text),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]
+}
+
+/// STREAMING: a tool-requested end does NOT take the late drain.
+///
+/// Measured by counting how many times the loop ASKS for pending input. A
+/// natural end asks once more than a tool-requested one, because `Complete`
+/// drains after `emit_end_turn` and `ForcedComplete` breaks straight out.
+///
+/// The first version of this test asserted a model-round count instead, and a
+/// probe that added the drain to `ForcedComplete` left it green: the input had
+/// already been taken by the top-of-loop drain, so the extra drain found
+/// nothing and changed no rounds. Counting rounds answers "did the turn carry
+/// on", which is a different question from "did the drain run".
+#[tokio::test]
+async fn a_tool_requested_end_does_not_take_the_late_drain() {
+    let forced = CountingSource::new();
+    {
+        let api = Arc::new(MockStreamingApiClient::with_turns(vec![
+            streaming_round_calling("EndsTurn", ToolUseId::new()),
+            text_round("m2", "should never be requested"),
+        ]));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EndTurnTool));
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            api.clone(),
+            Arc::new(registry),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        orch.set_mid_turn_input(forced.clone());
+        orch.run_turn_streaming("seed").await.expect("streaming");
+        assert_eq!(
+            api.captured_calls().await.len(),
+            1,
+            "a tool-requested end stops at that round"
+        );
+    }
+
+    let natural = CountingSource::new();
+    {
+        let api = Arc::new(MockStreamingApiClient::with_turns(vec![text_round(
+            "m1", "answer",
+        )]));
+        let orch = build_orch(api.clone());
+        orch.set_mid_turn_input(natural.clone());
+        orch.run_turn_streaming("seed").await.expect("streaming");
+        assert_eq!(api.captured_calls().await.len(), 1, "one round either way");
+    }
+
+    assert!(
+        natural.polls() > forced.polls(),
+        "the natural end must ask for pending input MORE times than the tool-requested one \
+         ({} vs {}): `Complete` drains after emit_end_turn, `ForcedComplete` breaks straight \
+         out three lines away. A shared end-handler that drains on every finishing \
+         disposition makes these equal, and a turn the tool asked to stop runs on.",
+        natural.polls(),
+        forced.polls()
+    );
+}
+
+/// BATCHED has no late drain at all.
+///
+/// The same pending input that continues a streaming turn strands on the batched
+/// path: its loop ends as soon as the step reports `Ended`. §4 records this as a
+/// real difference to preserve, not an oversight to harmonise — PR 4 must not
+/// hand batched a drain while unifying the end handling.
+///
+/// Counts polls for the same reason as the test above, plus one of its own: an
+/// assertion that batched "does not drain again" is vacuous if batched never
+/// drains at all, so the lower bound is asserted too.
+#[tokio::test]
+async fn the_batched_path_has_no_late_drain() {
+    let api = Arc::new(MockApiClient::new(vec![
+        orchestrator::test_support::mock_message_response(
+            vec![llm_client::ContentBlock::Text {
+                text: "first answer".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        ),
+        orchestrator::test_support::mock_message_response(
+            vec![llm_client::ContentBlock::Text {
+                text: "should never be requested".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        ),
+    ]));
+    let source = CountingSource::new();
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        PathBuf::from("/tmp"),
+    );
+    orch.set_mid_turn_input(source.clone());
+
+    orch.run_turn("seed").await.expect("batched");
+
+    assert_eq!(
+        api.captured_msgs().await.len(),
+        1,
+        "the batched loop ends the turn as soon as the step reports Ended"
+    );
+    assert!(
+        source.polls() >= 1,
+        "batched must drain at the TOP of its loop — without that this test proves nothing, \
+         because 'it does not drain a second time' is free if it never drains at all"
+    );
+    assert_eq!(
+        source.polls(),
+        1,
+        "exactly the one top-of-loop drain, and no post-emit drain. Batched has no late-drain \
+         arm; giving it one while unifying the end handling would be a behaviour change \
+         dressed as unification, and input arriving during the final response would start \
+         continuing turns that used to end."
+    );
+}

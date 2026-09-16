@@ -44,7 +44,15 @@ impl Drop for MainLoopActivityGuard {
 /// Keeping these counters together makes their session/turn lifetime explicit
 /// and lets the streaming driver hand a single state value to its preparation,
 /// pump, finalize, tool, and disposition phases.
-struct StreamingTurnState {
+/// The per-turn loop state all three entries share.
+///
+/// Named for the loop rather than the transport since PR 3: the batched and
+/// streaming loops keep their own shapes, but they no longer keep their own
+/// idea of what a turn's state IS. Each field is per-TURN — a state object that
+/// outlives the turn that owns it turns `turn_count` into a session total and
+/// freezes the output-token baseline, and
+/// `tests/turn_loop_state_boundary_test.rs` fails on both.
+struct TurnLoopState {
     recovery: RecoveryState,
     stop_hook_active: bool,
     stop_hook_blocking_count: u32,
@@ -60,7 +68,7 @@ struct StreamingTurnState {
     user_cancel: Option<CancellationToken>,
 }
 
-impl StreamingTurnState {
+impl TurnLoopState {
     fn new(
         orch: &ConversationOrchestrator,
         last_message_id: MessageId,
@@ -240,7 +248,7 @@ impl StreamingTurnDriver<'_> {
         orch: &ConversationOrchestrator,
         system_prompt: &Option<String>,
         user_cancel: &Option<CancellationToken>,
-        loop_state: &mut StreamingTurnState,
+        loop_state: &mut TurnLoopState,
         in_human_turn: bool,
     ) -> Result<PrepareStreamingOutcome, OrchestratorError> {
         // Shared per-step preparation. The token goes IN rather than racing
@@ -395,7 +403,7 @@ impl StreamingTurnDriver<'_> {
         prepared: PreparedStreamingIteration,
         system_prompt: &Option<String>,
         user_cancel: &Option<CancellationToken>,
-        loop_state: &mut StreamingTurnState,
+        loop_state: &mut TurnLoopState,
     ) -> Result<OpenStreamingOutcome<'a>, OrchestratorError> {
         let PreparedStreamingIteration {
             snapshot,
@@ -843,7 +851,7 @@ impl StreamingTurnDriver<'_> {
         prepared: PreparedStreamingIteration,
         system_prompt: &Option<String>,
         user_cancel: &Option<CancellationToken>,
-        loop_state: &mut StreamingTurnState,
+        loop_state: &mut TurnLoopState,
     ) -> Result<PumpStreamingOutcome<'a>, OrchestratorError> {
         let OpenedStreamingIteration {
             opened,
@@ -1219,7 +1227,7 @@ impl StreamingTurnDriver<'_> {
         pumped_iteration: PumpedStreamingIteration<'_>,
         system_prompt: &Option<String>,
         user_cancel: &Option<CancellationToken>,
-        loop_state: &mut StreamingTurnState,
+        loop_state: &mut TurnLoopState,
     ) -> Result<FinalizedStreamingIteration, OrchestratorError> {
         let PumpedStreamingIteration {
             pumped,
@@ -1636,7 +1644,7 @@ impl StreamingTurnDriver<'_> {
         }
 
         orch.begin_output_turn(user_msg.id()).await?;
-        let mut loop_state = StreamingTurnState::new(
+        let mut loop_state = TurnLoopState::new(
             orch,
             prior_message_id.unwrap_or_else(|| user_msg.id()),
             user_cancel.clone(),
@@ -2241,40 +2249,33 @@ impl ConversationOrchestrator {
         // 2. Turn-by-turn driver.
         // A1: per-conversation max_output_tokens recovery bookkeeping carried
         // across turn-steps (the 3-retry limit is consecutive).
-        let mut recovery = RecoveryState::default();
         // hooks B4: Stop-hook re-entry guard. Set true after a Stop hook blocks
         // and we loop once more; a second block then passes (no infinite loop).
-        let mut stop_hook_active = false;
         // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
         // bumped per block; ends the turn via the cap once it would exceed
         // LINGXI_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
-        let mut stop_hook_blocking_count: u32 = 0;
         // A3: token-budget continuation bookkeeping. `Some` only when the gate
         // is enabled AND a budget is set; otherwise the budget check is a
         // NO-OP and the loop stops at the first `end_turn` (parity default).
-        let mut budget = self.new_budget_tracker();
-        let mut global_turn_tokens: u64 = 0;
         // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot the
         // cumulative pool as this turn begins, so a workflow launched this turn
         // reads `budget.spent()` = `pool - baseline` (output spent THIS turn).
-        self.begin_output_turn(MessageId::new()).await?;
+        let turn_message_id = MessageId::new();
+        self.begin_output_turn(turn_message_id).await?;
         // claude-code `D = Date.now()` at the top of the query generator: the
         // duration base for the analytics that fire from its `finally`.
-        *self.compaction_runtime.query_started_at.lock().unwrap() = std::time::Instant::now();
-        self.compaction_runtime.turn_start_output_baseline.store(
-            self.compaction_runtime
-                .output_token_pool
-                .load(std::sync::atomic::Ordering::Relaxed),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        let mut turn_count: u32 = 0;
+        // Shared per-turn loop state, constructed HERE, directly after
+        // `begin_output_turn`, because the constructor is what takes
+        // `query_started_at` and the output-token baseline — §5.1 freezes that
+        // adjacency, and `tests/turn_loop_state_boundary_test.rs` checks it.
+        let mut state = TurnLoopState::new(self, turn_message_id, None);
         let final_message_id;
         loop {
             // Streaming twin already drains here (query.ts ~1570). Claude Code
             // has one main loop; the batched print path must consume mid-turn
             // input before max_turns / budget so a queued message is not dropped.
             self.drain_mid_turn_input().await;
-            if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
+            if self.config.max_turns != 0 && state.turn_count >= self.config.max_turns {
                 return Err(OrchestratorError::MaxTurnsReached {
                     max_turns: self.config.max_turns,
                 });
@@ -2284,17 +2285,17 @@ impl ConversationOrchestrator {
                     budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
                 });
             }
-            turn_count = turn_count.saturating_add(1);
+            state.turn_count = state.turn_count.saturating_add(1);
 
             let (step, output_tokens) = execute_one_turn_with_recovery_tracked(
                 self,
                 system_prompt.as_deref(),
-                Some(&mut recovery),
+                Some(&mut state.recovery),
             )
             .await?;
             // A3: accumulate the running per-turn output tokens (TS
             // `getTurnOutputTokens()`). No-op for accounting when budget is off.
-            global_turn_tokens = global_turn_tokens.saturating_add(output_tokens);
+            state.global_turn_tokens = state.global_turn_tokens.saturating_add(output_tokens);
             match step {
                 TurnStepOutcome::Continue => continue,
                 TurnStepOutcome::Ended {
@@ -2309,7 +2310,7 @@ impl ConversationOrchestrator {
                     if tool_requested_end {
                         self.fire_tool_result_end_stop_hooks(
                             &stop_reason,
-                            stop_hook_active,
+                            state.stop_hook_active,
                             // Non-cancelable path: this turn has no user-cancel
                             // token, so `parentAborted` can never be true here.
                             false,
@@ -2319,9 +2320,9 @@ impl ConversationOrchestrator {
                         match self
                             .handle_stop_at_end(
                                 &stop_reason,
-                                &mut stop_hook_active,
-                                &mut stop_hook_blocking_count,
-                                turn_count,
+                                &mut state.stop_hook_active,
+                                &mut state.stop_hook_blocking_count,
+                                state.turn_count,
                                 id,
                                 // Non-cancelable path: this turn has no user-cancel
                                 // token, so `parentAborted` can never be true here.
@@ -2342,7 +2343,7 @@ impl ConversationOrchestrator {
                                 // `query.ts:1291` sets `maxOutputTokensRecoveryCount: 0`
                                 // + `maxOutputTokensOverride: undefined` on the
                                 // stop-hook-blocking continuation).
-                                recovery.reset_max_output_tokens_recovery();
+                                state.recovery.reset_max_output_tokens_recovery();
                                 continue;
                             }
                             StopHookFlow::FallThrough => {}
@@ -2356,9 +2357,9 @@ impl ConversationOrchestrator {
                         && stop_reason == "end_turn"
                         && self
                             .maybe_continue_for_budget(
-                                budget.as_mut(),
-                                &mut recovery,
-                                global_turn_tokens,
+                                state.budget.as_mut(),
+                                &mut state.recovery,
+                                state.global_turn_tokens,
                             )
                             .await
                     {
@@ -2373,7 +2374,7 @@ impl ConversationOrchestrator {
         }
 
         Ok(ConversationOutcome::EndTurn {
-            turn_count,
+            turn_count: state.turn_count,
             final_message_id,
         })
     }
@@ -2737,7 +2738,7 @@ impl ConversationOrchestrator {
 
     async fn finish_natural_streaming_end(
         &self,
-        loop_state: &mut StreamingTurnState,
+        loop_state: &mut TurnLoopState,
         assistant_id: MessageId,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
         // hooks B4: Stop hooks BEFORE the budget check (streaming
@@ -2793,7 +2794,7 @@ impl ConversationOrchestrator {
 
     async fn finish_tool_requested_streaming_end(
         &self,
-        loop_state: &mut StreamingTurnState,
+        loop_state: &mut TurnLoopState,
         assistant_id: MessageId,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
         self.fire_tool_result_end_stop_hooks(
@@ -2809,7 +2810,7 @@ impl ConversationOrchestrator {
 
     async fn decide_streaming_disposition(
         &self,
-        loop_state: &mut StreamingTurnState,
+        loop_state: &mut TurnLoopState,
         pumped: &crate::streaming_loop::PumpedTurn,
         assistant_id: MessageId,
         tool_prevent_continuation: bool,
@@ -3293,30 +3294,22 @@ impl ConversationOrchestrator {
         // here: a `max_tokens` stop_reason now drives the A1 multi-turn recovery
         // nudge (and exhaustion-ends) exactly as the main batched path does,
         // rather than legacy-continuing without the nudge.
-        let mut recovery = RecoveryState::default();
         // hooks B4: Stop-hook re-entry guard (cancelable twin).
-        let mut stop_hook_active = false;
         // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
         // bumped per block; ends the turn via the cap once it would exceed
         // LINGXI_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
-        let mut stop_hook_blocking_count: u32 = 0;
         // A3: token-budget continuation bookkeeping (no-op unless gated + set).
-        let mut budget = self.new_budget_tracker();
-        let mut global_turn_tokens: u64 = 0;
         // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot
         // the cumulative pool as this turn begins, so a workflow launched this
         // turn reads `budget.spent()` = output spent THIS turn.
-        self.begin_output_turn(MessageId::new()).await?;
+        let turn_message_id = MessageId::new();
+        self.begin_output_turn(turn_message_id).await?;
         // claude-code `D = Date.now()` at the top of the query generator: the
         // duration base for the analytics that fire from its `finally`.
-        *self.compaction_runtime.query_started_at.lock().unwrap() = std::time::Instant::now();
-        self.compaction_runtime.turn_start_output_baseline.store(
-            self.compaction_runtime
-                .output_token_pool
-                .load(std::sync::atomic::Ordering::Relaxed),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        let mut turn_count: u32 = 0;
+        // Shared per-turn loop state; the token rides along so the stop-hook
+        // firings reached through `&ConversationOrchestrator` can report
+        // `parentAborted`.
+        let mut state = TurnLoopState::new(self, turn_message_id, Some(cancel.clone()));
         loop {
             if cancel.is_cancelled() {
                 // claude-code `query.ts:1046-1050`: inject the non-tool-use
@@ -3332,7 +3325,7 @@ impl ConversationOrchestrator {
                 }
                 return Ok(TurnOutcome::Cancelled);
             }
-            if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
+            if self.config.max_turns != 0 && state.turn_count >= self.config.max_turns {
                 return Ok(TurnOutcome::MaxTurns);
             }
             if self.over_budget().await {
@@ -3340,7 +3333,7 @@ impl ConversationOrchestrator {
                     budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
                 });
             }
-            turn_count = turn_count.saturating_add(1);
+            state.turn_count = state.turn_count.saturating_add(1);
 
             // Race the recovery-aware API turn-step against the cancellation
             // token. The `_tracked` variant returns this step's output-token
@@ -3349,7 +3342,7 @@ impl ConversationOrchestrator {
                 r = execute_one_turn_with_recovery_tracked(
                     self,
                     system_prompt.as_deref(),
-                    Some(&mut recovery),
+                    Some(&mut state.recovery),
                 ) => r?,
                 () = cancel.cancelled() => {
                     // claude-code `query.ts:1046-1050`: inject the non-tool-use
@@ -3367,7 +3360,7 @@ impl ConversationOrchestrator {
             };
             // A3: accumulate the running per-turn output tokens (TS
             // `getTurnOutputTokens()`). No-op for accounting when budget is off.
-            global_turn_tokens = global_turn_tokens.saturating_add(output_tokens);
+            state.global_turn_tokens = state.global_turn_tokens.saturating_add(output_tokens);
             match step {
                 TurnStepOutcome::Continue => continue,
                 TurnStepOutcome::Ended {
@@ -3385,7 +3378,7 @@ impl ConversationOrchestrator {
                     if tool_requested_end {
                         self.fire_tool_result_end_stop_hooks(
                             &stop_reason,
-                            stop_hook_active,
+                            state.stop_hook_active,
                             cancel.is_cancelled(),
                         )
                         .await;
@@ -3393,9 +3386,9 @@ impl ConversationOrchestrator {
                         match self
                             .handle_stop_at_end(
                                 &stop_reason,
-                                &mut stop_hook_active,
-                                &mut stop_hook_blocking_count,
-                                turn_count,
+                                &mut state.stop_hook_active,
+                                &mut state.stop_hook_blocking_count,
+                                state.turn_count,
                                 id,
                                 cancel.is_cancelled(),
                             )
@@ -3410,7 +3403,7 @@ impl ConversationOrchestrator {
                                 // reset the max_output_tokens recovery bookkeeping so
                                 // the continued turn starts a fresh escalation episode
                                 // (TS `query.ts:1291`), matching `run_turn`.
-                                recovery.reset_max_output_tokens_recovery();
+                                state.recovery.reset_max_output_tokens_recovery();
                                 continue;
                             }
                             StopHookFlow::FallThrough => {}
@@ -3430,9 +3423,9 @@ impl ConversationOrchestrator {
                         && stop_reason == "end_turn"
                         && self
                             .maybe_continue_for_budget(
-                                budget.as_mut(),
-                                &mut recovery,
-                                global_turn_tokens,
+                                state.budget.as_mut(),
+                                &mut state.recovery,
+                                state.global_turn_tokens,
                             )
                             .await
                     {

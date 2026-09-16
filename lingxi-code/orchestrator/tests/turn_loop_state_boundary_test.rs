@@ -7,7 +7,7 @@
 //!
 //! All three entries already agree on the order — `begin_output_turn` first,
 //! then the baseline — but they reach it differently: streaming inside
-//! `StreamingTurnState::new`, the two batched entries inline in the public
+//! `TurnLoopState::new`, the two batched entries inline in the public
 //! wrapper. A single shared constructor has to land on the same instant for all
 //! three, and "the same instant" is only checkable while something pins it.
 //!
@@ -154,7 +154,7 @@ fn every_entry_captures_the_output_token_baseline_at_turn_start() {
         assert_eq!(
             orch.turn_start_output_baseline().load(Ordering::Relaxed),
             SEEDED_POOL,
-            "run_turn_streaming takes its baseline inside StreamingTurnState::new rather than \
+            "run_turn_streaming takes its baseline inside TurnLoopState::new rather than \
              in the entry wrapper; a shared constructor must land on the same instant"
         );
     });
@@ -218,17 +218,18 @@ fn each_entry_takes_the_baseline_directly_after_begin_output_turn() {
 
     let baselines = DRIVERS.matches("turn_start_output_baseline.store(").count();
     assert_eq!(
-        baselines, 3,
-        "expected one baseline capture per entry (run_turn, run_turn_with_cancel, \
-         StreamingTurnState::new). More means an entry takes it twice and the second \
-         wins; fewer means an entry lost it and reports every turn as producing nothing."
+        baselines, 1,
+        "the baseline must be taken from exactly ONE place — `TurnLoopState::new`. Before PR 3 \
+         there were three, one per entry, and this assertion counted three; it tightened when \
+         the shared constructor landed. Two or more means an entry takes its own again, and \
+         the second write wins whichever moment it happens to run at."
     );
 
     // Every turn-start sequence reaches the baseline immediately.
     //
     // Checked forwards from `begin_output_turn`, not backwards from the store,
     // because the streaming entry takes its baseline inside
-    // `StreamingTurnState::new` — a constructor defined ~1500 lines from where
+    // `TurnLoopState::new` — a constructor defined ~1500 lines from where
     // it is called. Adjacency holds at the CALL, which is what §5.1 is about.
     let starts: Vec<usize> = DRIVERS
         .match_indices("begin_output_turn(")
@@ -243,7 +244,7 @@ fn each_entry_takes_the_baseline_directly_after_begin_output_turn() {
         let window: String = DRIVERS[at..].lines().take(8).collect::<Vec<_>>().join("\n");
         assert!(
             window.contains("turn_start_output_baseline.store(")
-                || window.contains("StreamingTurnState::new("),
+                || window.contains("TurnLoopState::new("),
             "turn start #{index} does not reach its output-token baseline within eight lines \
              of begin_output_turn. §5.1 freezes that adjacency: work that slips in between \
              runs against a turn whose output accounting has not started yet.\n{window}"

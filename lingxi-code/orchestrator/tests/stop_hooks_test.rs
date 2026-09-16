@@ -1223,3 +1223,156 @@ async fn streaming_stop_hook_pass_ends_normally() {
         "a passing Stop hook ends the turn after exactly one round; got {outcome:?}"
     );
 }
+
+// ── a tool-requested end is not a Stop-hook decision point ───────────────────
+//
+// A tool that sets `claude/endTurn` has already decided the turn is over, so
+// both drivers fire the Stop hooks for telemetry and IGNORE the verdict
+// (`fire_tool_result_end_stop_hooks`) rather than acting on it
+// (`handle_stop_at_end`). That used to be guaranteed structurally — the
+// tool-requested helper simply called the other function — and is now a
+// `tool_requested_end` flag into one shared end-of-turn sequence, which is a
+// flag that can be passed wrong. Passed wrong, a BLOCKING Stop hook resurrects
+// a turn the tool ended, and nothing in the suite noticed.
+
+/// A tool that ends the turn via `_meta: { "claude/endTurn": true }`.
+struct EndsTurnTool;
+
+#[async_trait]
+impl tool_api::tool_trait::Tool for EndsTurnTool {
+    fn name(&self) -> &str {
+        "EndsTurn"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| serde_json::json!({ "type": "object" }));
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn validate_input(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> Result<(), tool_api::tool_trait::ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+    async fn description(
+        &self,
+        _input: &serde_json::Value,
+        _opts: &tool_api::tool_trait::DescriptionOptions,
+    ) -> String {
+        String::new()
+    }
+    async fn prompt(&self, _opts: &tool_api::tool_trait::PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: tool_api::progress::ToolProgressSender,
+    ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
+        Ok(tool_api::tool_trait::ToolCallResult {
+            data: serde_json::json!({ "content": "done" }),
+            model_content: None,
+            new_messages: vec![],
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: Some(serde_json::json!({"_meta": {"claude/endTurn": true}})),
+        })
+    }
+}
+
+fn round_calling_ends_turn() -> Vec<llm_client::LlmEvent> {
+    use orchestrator::test_support::{
+        content_block_stop, input_json_delta, message_delta_stop, message_start, message_stop,
+    };
+    vec![
+        message_start("m1", "claude-opus-4-7"),
+        orchestrator::test_support_stream::content_block_start_tool_use(
+            0,
+            protocol::ToolUseId::new(),
+            "EndsTurn",
+        ),
+        input_json_delta(0, "{}"),
+        content_block_stop(0),
+        message_delta_stop("tool_use"),
+        message_stop(),
+    ]
+}
+
+/// STREAMING: a blocking Stop hook must NOT reopen a turn a tool ended.
+///
+/// The control is its neighbour `streaming_stop_block_loops_the_turn_again`: on
+/// a NATURAL end the very same handler keeps the loop going until `max_turns`
+/// stops it. So a single round here is the tool-requested branch ignoring the
+/// verdict, not a hook that failed to fire — and this test bounds `max_turns`
+/// the same way, so a reopened turn surfaces as `MaxTurnsReached` rather than as
+/// a quiet extra round.
+#[tokio::test]
+async fn a_blocking_stop_hook_does_not_reopen_a_tool_requested_end() {
+    let api = Arc::new(
+        orchestrator::test_support::MockStreamingApiClient::with_turns(vec![
+            round_calling_ends_turn(),
+            streamed_end_turn("must never be requested"),
+        ]),
+    );
+    let mut registry = tool_api::registry::ToolRegistry::new();
+    registry.register_builtin(Arc::new(EndsTurnTool));
+    let hooks = exec_with(
+        Arc::new(StopBlockHandler),
+        builtin_hook("stop-block", HookEventType::Stop),
+    )
+    .await;
+    let mut cfg = OrchestratorConfig::default();
+    cfg.max_turns = 2;
+    let orch = ConversationOrchestrator::new_with_streaming(
+        cfg,
+        Arc::new(MockApiClient::new(Vec::new())),
+        api.clone(),
+        Arc::new(registry),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+
+    let result = orch.run_turn_streaming("go").await;
+    assert!(
+        result.is_ok(),
+        "a tool asked the turn to end, so the Stop hooks fire for telemetry and \
+         their verdict is IGNORED. Acting on the block reopens the turn and it \
+         runs out of max_turns instead: {result:?}"
+    );
+    assert_eq!(
+        api.captured_calls().await.len(),
+        1,
+        "exactly one round — the tool's decision stands"
+    );
+}

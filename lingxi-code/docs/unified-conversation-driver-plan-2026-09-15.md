@@ -454,7 +454,7 @@ loop:
 ## 9.5 实施状态（2026-09-15 收尾）
 
 标签 `ucd-p1`…`ucd-p4`。全程判据：`cargo test -p orchestrator --tests --no-fail-fast`
-89 binaries / 1555 passed / 0 failed，`cargo build --workspace --tests` 干净。
+90 binaries / 1558 passed / 0 failed，`cargo build --workspace --tests` 干净。
 
 ### 已落地
 
@@ -471,28 +471,68 @@ loop:
 §4 四个终态族、§3.2 五个取消阶段、§3.5 三种 guard 顺序、§3.6 epilogue 归属，
 全部有测试，且**每条都种雷验证过会红**。
 
-### 未落地：统一外层 driver（PR 5 核心）与共享 `apply_step_disposition`（PR 4 尾）
+### 统一外层 driver（PR 5 核心）
 
-这两项是**同一个被阻塞的项**，不是两件独立的欠账。测量结果：
+三条外层现在是同一个形状，就是 §5.5 画的那个：
 
-- 三条外层不是三个可折叠的相似循环。`try_run_turn` 循环体 4 处调用、
-  `try_run_turn_cancelable` 7 处、streaming `run()` **133 处**——后者把
-  open/pump/finalize 全内联，而 §5.2 明确把那块"暂留原模块"。
-- 两条 batched 的 disposition match 是 64 / 55 行、21 行不同，且差异**分散在
-  7 个 hunk 里贯穿全程**（`parentAborted` 实时值、`Terminate` 的 outcome 映射、
-  `TerminateMaxTurns` 的返回类型）。抽成共享函数需要穿 7 个变化点，参数表会与
-  差异一一对应——收益为负。
+```text
+loop:
+    run_turn_loop_guards(order, state)      // §3.5，三种顺序
+    （streaming 在这里插自己的 cancel 守卫）
+    verdict = 本轮的 round
+    match verdict { Continue / 终态 } → 各入口自己命名
+```
 
-**解锁条件**：先把 streaming 的 open/pump/finalize 抽成 §5.2 的
-`StreamingRound.run`，三条路径才会有一个共同的 step 结果类型可供分派；
-`apply_step_disposition` 与 §3.4 的 `strategy.run` 边界都依赖它。在那之前，
-这两项只能是投机性搬运——搬一次，PR 5 再搬一次。
+| | 位置 | 生产调用点 |
+|---|---|---|
+| streaming 循环体 | `drivers/mod.rs` `run_round` → `StepExit` | 1 |
+| batched 循环体 | `drivers/mod.rs` `run_batched_round` | 2（两个 batched 入口） |
+| 结束序列（Stop hooks → budget → emit） | `drivers/disposition.rs` `end_of_turn_sequence` | 3（原来三份拷贝） |
+
+§5.4 的三种退出方式（`Continue` / `FinishThroughEpilogue` / `ReturnDirect`）落成
+`StepExit`；`TurnEndVerdict` 是结束序列的裁决，跟 `GuardVerdict` 同一套做法——
+**报告事件、不报告 outcome**，命名留在各入口，§3.2 的分歧因此仍然看得见。
+
+PR 4 尾账的 `apply_step_disposition` 就落在这两个类型上：它不是一个函数，而是
+`end_of_turn_sequence` 裁决 + 各入口一段四臂 match 命名。写成一个"按入口分派"的
+函数会把命名收进去，正是 §3.2 不允许的那件事。
+
+#### 之前判"收益为负"是错的
+
+上一轮的测量没错，从测量得出的结论错了。两条 batched disposition 确实是
+7 个 hunk，但剥掉注释后语义分歧只有四处，而且其中三处是**同一件事**：两个入口
+给终态取了不同的名字。把它们折成一个参数表并不需要七个参数——只需要
+"返回事件、让调用方命名"，而这个做法本系列早在 `GuardVerdict` 就已经用过了。
+解锁它的不是新信息，是本仓库里已有的一个模式。
+
+#### 抽取过程中补上的三个测试
+
+重构会把测试掏空，也会把结构保证降级成可传错的参数。这次每一步都对**新结构**
+重新种雷，三个雷活了下来，对应三个此前从未被驱动过的行为：
+
+| 种的雷 | 补的测试 |
+|---|---|
+| cancelable 入口的 Stop-hook max-turns 改成跟孪生一样 raise `Err` | `stop_hooks_test::the_cancelable_entry_reports_a_stop_block_at_max_turns_as_an_outcome` |
+| cancelable 入口不再上报自己的 cancel token（`parentAborted` 恒 false） | `goal_evaluated_analytics_tests::the_two_batched_entries_supply_different_parent_aborted_flags` |
+| 工具请求的结束走完整 Stop-hook 裁决分支 | `stop_hooks_test::a_blocking_stop_hook_does_not_reopen_a_tool_requested_end` |
+
+前两个是重构把"相隔 1000 行的两份代码"变成"相邻四行"带来的新风险；第三个是把
+原本由**结构**保证的区别（那个 helper 直接调另一个函数）降级成了一个布尔参数。
+三个测试都断言两条入口**不一致**，而不是单独测某一条——单独测的那一半在两条被
+拉齐之后仍然是绿的。
+
+### 仍未落地
+
+`StreamingIterationDisposition` 没有并进 `StepExit`。它比 `StepExit` 多一个
+`Complete` / `ForcedComplete` 的区别（自然结束还要吃一次 late drain，工具请求的
+结束不吃），合并要把那次 drain 移进 `decide_streaming_disposition`，收益是少一层
+4 行映射，风险是动 §3.6 的 drain 时点。没做。
 
 ### 判据已就位
 
-上面每一条"不得改变"的差异都由一个**断言差异本身**的跨入口测试守着，所以后续
-做统一外层时，把两条入口拉齐会弄红一边，而不是安静通过。这是本系列最重要的
-交付物：`turn_preparation_boundary_test`、`turn_loop_state_boundary_test`、
+上面每一条"不得改变"的差异都由一个**断言差异本身**的跨入口测试守着。统一外层
+做完之后这些全部仍然是绿的，且每一条都对**新结构**重新种过雷——重构能把测试掏空
+和弄红一样容易，绿不是证据。这是本系列最重要的交付物：`turn_preparation_boundary_test`、`turn_loop_state_boundary_test`、
 `turn_end_wakeup_boundary_test`、`turn_end_conversation_boundary_test`、
 `turn_epilogue_boundary_test`、`turn_cancel_mapping_test`、
 `reminder_twin_wiring_test`，加上 `stop_hooks_test` /

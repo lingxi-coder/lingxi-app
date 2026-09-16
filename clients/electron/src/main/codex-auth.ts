@@ -12,6 +12,8 @@ export interface CodexOAuthSession {
   expires_at: number;
   account_id?: string;
   fedramp: boolean;
+  /** Display-only; never used to authorize a request. */
+  email?: string;
 }
 
 export function parseCodexSession(value: unknown): CodexOAuthSession {
@@ -22,6 +24,8 @@ export function parseCodexSession(value: unknown): CodexOAuthSession {
   if (!token(row.access_token) || !Number.isSafeInteger(row.expires_at) || (row.expires_at as number) <= 0
     || (row.refresh_token != null && !token(row.refresh_token))
     || (row.account_id != null && (typeof row.account_id !== 'string' || row.account_id.length > 512))
+    || (row.email != null && (typeof row.email !== 'string' || row.email.length === 0
+      || row.email.length > 320 || /[\u0000-\u001f\u007f]/.test(row.email)))
     || typeof row.fedramp !== 'boolean') throw new Error('Codex 登录凭据无效，请重新登录。');
   return {
     access_token: row.access_token,
@@ -29,6 +33,7 @@ export function parseCodexSession(value: unknown): CodexOAuthSession {
     expires_at: row.expires_at as number,
     ...(row.account_id ? { account_id: row.account_id as string } : {}),
     fedramp: row.fedramp,
+    ...(row.email ? { email: row.email as string } : {}),
   };
 }
 
@@ -54,6 +59,7 @@ export function sessionFromTokenResponse(value: unknown, now = Date.now()): Code
     expires_at: Math.floor(now / 1000 + expiresIn),
     account_id: auth?.chatgpt_account_id ?? identity.chatgpt_account_id,
     fedramp: auth?.chatgpt_account_is_fedramp === true,
+    email: identity.email,
   });
 }
 

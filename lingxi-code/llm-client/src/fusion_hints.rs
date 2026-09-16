@@ -53,6 +53,11 @@ const TABLE: &[(&str, &str, FusionModelHints)] = &[
     // OpenAI
     (
         "openai",
+        "gpt-6-astra",
+        q(110, FusionLatencyClass::Slow, FusionCostClass::High, true),
+    ),
+    (
+        "openai",
         "gpt-5.6-sol",
         q(100, FusionLatencyClass::Slow, FusionCostClass::High, true),
     ),
@@ -70,6 +75,16 @@ const TABLE: &[(&str, &str, FusionModelHints)] = &[
         "openai",
         "gpt-5.6-luna",
         q(75, FusionLatencyClass::Fast, FusionCostClass::Low, false),
+    ),
+    (
+        "openai-chatgpt",
+        "gpt-6-astra",
+        q(
+            110,
+            FusionLatencyClass::Slow,
+            FusionCostClass::Subscription,
+            true,
+        ),
     ),
     (
         "openai-chatgpt",

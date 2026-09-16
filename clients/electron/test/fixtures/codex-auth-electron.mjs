@@ -29,8 +29,13 @@ try {
   await click('[data-testid=codex-login]');
   await run('window.__codexAuthTest.complete()');
   await wait('document.body.textContent.includes("重新登录")');
+  // The signed-in account is shown on the 账号 row, and only while signed in.
+  assert.equal(await run('document.body.textContent.includes("已登录：user@example.com")'), true);
+  assert.equal(await run('document.documentElement.scrollWidth > innerWidth'), false);
+  writeFileSync('/tmp/lingxi-codex-auth-signed-in.png', (await window.webContents.capturePage()).toPNG());
   await run('[...document.querySelectorAll("button")].find((button) => button.textContent === "退出登录").click()');
   await wait('!window.__codexAuthTest.state().configured');
+  assert.equal(await run('document.body.textContent.includes("user@example.com")'), false);
   await click('[data-testid=codex-login]');
   await run('window.__codexAuthTest.fail()');
   await wait('document.body.textContent.includes("OAuth callback timed out")');

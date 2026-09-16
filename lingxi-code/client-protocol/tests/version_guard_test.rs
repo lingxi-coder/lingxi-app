@@ -442,6 +442,7 @@ fn current_contract_index() -> ContractIndex {
     put("OpenAiOAuthSessionDto.refresh_token", "Option<String>");
     put("OpenAiOAuthSessionDto.expires_at", "u64");
     put("OpenAiOAuthSessionDto.account_id", "Option<String>");
+    put("OpenAiOAuthSessionDto.email", "Option<String>");
     put("OpenAiOAuthSessionDto.fedramp", "bool");
     put("ClientEvent::ProviderConnectionTested.operation_id", "u64");
     put(

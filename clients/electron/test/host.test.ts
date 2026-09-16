@@ -1175,6 +1175,7 @@ test('Codex login keeps tokens in broker and stops OAuth before logout', async (
   const handlers = new Map<string, (...args: any[]) => any>();
   const operations: string[] = [];
   let configured = false;
+  let storedSession = '';
   const host = new HostController(
     { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
     { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
@@ -1189,15 +1190,16 @@ test('Codex login keeps tokens in broker and stops OAuth before logout', async (
       set: async (id: string, secret: string) => {
         assert.equal(id, 'openai-chatgpt');
         assert.equal(JSON.parse(secret).refresh_token, 'private-refresh');
-        operations.push('store'); configured = true;
+        operations.push('store'); configured = true; storedSession = secret;
         return { providerId: id, configured: true, maskedValue: 'must-not-expose' };
       },
       delete: async () => { operations.push('delete'); configured = false; },
       listStatus: async () => [{ providerId: 'openai-chatgpt', configured }],
+      resolve: async () => (configured ? storedSession : undefined),
       preview: async () => { throw new Error('OAuth previews must never be requested'); },
     } as any,
     undefined,
-    async () => { operations.push('login'); return { access_token: 'private-access', refresh_token: 'private-refresh', expires_at: 9999, fedramp: false }; },
+    async () => { operations.push('login'); return { access_token: 'private-access', refresh_token: 'private-refresh', expires_at: 9999, fedramp: false, email: 'user@example.com' }; },
   );
   const frame = { url: 'http://127.0.0.1:4242' };
   const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {} };
@@ -1205,12 +1207,18 @@ test('Codex login keeps tokens in broker and stops OAuth before logout', async (
   host.registerWindow(sender as any, frame.url); host.registerIpc();
   const result = await handlers.get(CH_CODEX_LOGIN)!(event);
   assert.deepEqual(operations, ['health', 'login', 'stop-oauth', 'store']);
-  assert.deepEqual(result.credential, { providerId: 'openai-chatgpt', configured: true, encryptionAvailable: true });
+  assert.deepEqual(result.credential, {
+    providerId: 'openai-chatgpt', configured: true, encryptionAvailable: true, codexAccountEmail: 'user@example.com',
+  });
   assert.equal(JSON.stringify(result).includes('private'), false);
-  await handlers.get(CH_PROVIDER_CREDENTIALS_GET)!(event, 'openai-chatgpt');
+  // The address is re-read from the broker on every status refresh, so it
+  // survives an app restart instead of living only in the login response.
+  const relisted = await handlers.get(CH_PROVIDER_CREDENTIALS_GET)!(event, 'openai-chatgpt');
+  assert.equal(relisted.find((entry: any) => entry.providerId === 'openai-chatgpt').codexAccountEmail, 'user@example.com');
   await assert.rejects(handlers.get(CH_PROVIDER_CREDENTIAL_SET)!(event, 'openai-chatgpt', 'api-key'), /账号登录/);
   const cleared = await handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR)!(event, 'openai-chatgpt');
   assert.equal(cleared.configured, false);
+  assert.equal(cleared.codexAccountEmail, undefined);
   assert.deepEqual(operations.slice(-2), ['stop-oauth', 'delete']);
   await handlers.get(CH_CODEX_CANCEL)!(event);
 });

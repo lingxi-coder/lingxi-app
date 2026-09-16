@@ -75,6 +75,8 @@ pub struct OpenAiLoginInfo {
     pub account_id: Option<String>,
     /// `FedRAMP` account flag from the `id_token` JWT.
     pub fedramp: bool,
+    /// `email` claim from the `id_token` JWT (may be absent on older tokens).
+    pub email: Option<String>,
     /// Minted `sk-...` API key from the RFC-8693 exchange.
     pub api_key: String,
 }
@@ -151,6 +153,7 @@ impl OpenAiOAuthHandle {
                 vec![],
                 claims.account_id.as_deref(),
                 claims.fedramp,
+                claims.email.as_deref(),
             )
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
@@ -161,6 +164,7 @@ impl OpenAiOAuthHandle {
         Ok(OpenAiLoginInfo {
             account_id: claims.account_id,
             fedramp: claims.fedramp,
+            email: claims.email,
             api_key,
         })
     }
@@ -274,6 +278,7 @@ impl OpenAiOAuthHandle {
                 vec![], // scopes not returned in exchange response body
                 claims.account_id.as_deref(),
                 claims.fedramp,
+                claims.email.as_deref(),
             )
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
@@ -288,6 +293,7 @@ impl OpenAiOAuthHandle {
         Ok(OpenAiLoginInfo {
             account_id: claims.account_id,
             fedramp: claims.fedramp,
+            email: claims.email,
             api_key,
         })
     }
@@ -328,6 +334,7 @@ impl OpenAiOAuthHandle {
                 vec![],
                 claims.account_id.as_deref(),
                 claims.fedramp,
+                claims.email.as_deref(),
             )
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
@@ -339,6 +346,7 @@ impl OpenAiOAuthHandle {
         Ok(OpenAiLoginInfo {
             account_id: claims.account_id,
             fedramp: claims.fedramp,
+            email: claims.email,
             api_key,
         })
     }
@@ -348,8 +356,8 @@ impl OpenAiOAuthHandle {
     /// Retrieve the currently-persisted session identity without any network
     /// call. Returns `None` when no valid session exists.
     pub async fn current_user(&self) -> Option<OpenAiLoginInfo> {
-        // We read back what was persisted: account_id, fedramp from the meta,
-        // and the api_key from the provider-key slot.
+        // We read back what was persisted: account_id, fedramp, email from the
+        // meta, and the api_key from the provider-key slot.
         let tokens = self
             .credentials
             .get_openai_oauth_tokens()
@@ -367,6 +375,7 @@ impl OpenAiOAuthHandle {
         Some(OpenAiLoginInfo {
             account_id: tokens.account_id,
             fedramp: tokens.fedramp,
+            email: tokens.email,
             api_key,
         })
     }

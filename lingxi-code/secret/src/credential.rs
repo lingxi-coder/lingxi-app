@@ -115,6 +115,8 @@ pub struct OpenAiOAuthTokens {
     pub account_id: Option<String>,
     /// `FedRAMP` account flag (from `chatgpt_account_is_fedramp` JWT claim).
     pub fedramp: bool,
+    /// Signed-in email (from the `email` JWT claim), for display only.
+    pub email: Option<String>,
 }
 
 /// Receives rotations for a host-owned persistent OAuth session.
@@ -132,6 +134,10 @@ struct OpenAiOAuthSessionMeta {
     scopes: Vec<String>,
     account_id: Option<String>,
     fedramp: bool,
+    /// Absent in entries written before email was captured; keep the default
+    /// so an old `openai-oauth-meta` blob still deserializes.
+    #[serde(default)]
+    email: Option<String>,
 }
 
 /// Failure modes for [`CredentialManager`] operations.
@@ -802,6 +808,7 @@ impl CredentialManager {
         scopes: Vec<String>,
         account_id: Option<&str>,
         fedramp: bool,
+        email: Option<&str>,
     ) -> Result<(), CredentialError> {
         let now = self.clock.now();
 
@@ -846,6 +853,7 @@ impl CredentialManager {
             scopes,
             account_id: account_id.map(str::to_string),
             fedramp,
+            email: email.map(str::to_string),
         };
         // Serialization of this fixed-shape struct cannot fail; fall back to an
         // empty object rather than panicking.
@@ -876,6 +884,7 @@ impl CredentialManager {
                     scopes: meta.scopes,
                     account_id: account_id.map(str::to_string),
                     fedramp,
+                    email: email.map(str::to_string),
                 })
                 .await;
         }
@@ -928,6 +937,7 @@ impl CredentialManager {
             scopes: meta.scopes,
             account_id: meta.account_id,
             fedramp: meta.fedramp,
+            email: meta.email,
         }))
     }
 
@@ -1079,6 +1089,7 @@ mod oauth_tests {
                 vec![],
                 Some("acct"),
                 false,
+                Some("acct@example.com"),
             )
             .await
             .unwrap();
@@ -1089,6 +1100,7 @@ mod oauth_tests {
             "rotated"
         );
         assert_eq!(sessions[0].account_id.as_deref(), Some("acct"));
+        assert_eq!(sessions[0].email.as_deref(), Some("acct@example.com"));
         assert_eq!(
             manager
                 .get_openai_oauth_tokens()
@@ -1733,6 +1745,7 @@ mod oauth_tests {
             vec!["openid".to_string()],
             Some("acc_1"),
             false,
+            Some("acc_1@example.com"),
         )
         .await
         .expect("store");
@@ -1752,13 +1765,59 @@ mod oauth_tests {
         assert_eq!(got.scopes, vec!["openid"]);
         assert_eq!(got.account_id.as_deref(), Some("acc_1"));
         assert!(!got.fedramp);
+        assert_eq!(got.email.as_deref(), Some("acc_1@example.com"));
+    }
+
+    /// Sessions persisted before email was captured have no `email` key in the
+    /// `openai-oauth-meta` blob; they must still load (with `email: None`)
+    /// rather than failing as `Unavailable`.
+    #[tokio::test]
+    async fn openai_oauth_tokens_load_from_legacy_meta_without_email() {
+        let (storage, cm) = manager();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let meta = |kind: SecretKind| SecureStorageMetadata {
+            created_at: now,
+            last_accessed: None,
+            kind: kind.as_dto(),
+        };
+        storage
+            .store(
+                OAUTH_SERVICE,
+                OPENAI_OAUTH_ACCESS_ACCOUNT,
+                SecureStorageData::new(
+                    b"legacy-access".to_vec(),
+                    meta(SecretKind::OpenAiOAuthAccessToken),
+                ),
+            )
+            .await
+            .expect("store legacy access");
+        storage
+            .store(
+                OAUTH_SERVICE,
+                OPENAI_OAUTH_META_ACCOUNT,
+                SecureStorageData::new(
+                    br#"{"expires_at":{"secs_since_epoch":5000,"nanos_since_epoch":0},"scopes":[],"account_id":"legacy","fedramp":false}"#.to_vec(),
+                    meta(SecretKind::OpenAiOAuthSessionMeta),
+                ),
+            )
+            .await
+            .expect("store legacy meta");
+
+        let got = cm
+            .get_openai_oauth_tokens()
+            .await
+            .expect("get")
+            .expect("legacy session must still load");
+        assert_eq!(got.access_token.expose_secret(), "legacy-access");
+        assert_eq!(got.account_id.as_deref(), Some("legacy"));
+        assert!(got.email.is_none());
     }
 
     #[tokio::test]
     async fn openai_oauth_tokens_round_trip_fedramp() {
         let (_storage, cm) = manager();
         let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
-        cm.store_openai_oauth_tokens("acc2", None, expires, vec![], None, true)
+        cm.store_openai_oauth_tokens("acc2", None, expires, vec![], None, true, None)
             .await
             .expect("store");
         let got = cm
@@ -1776,7 +1835,7 @@ mod oauth_tests {
     async fn openai_oauth_tokens_delete() {
         let (_storage, cm) = manager();
         let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
-        cm.store_openai_oauth_tokens("a", Some("r"), expires, vec![], Some("x"), false)
+        cm.store_openai_oauth_tokens("a", Some("r"), expires, vec![], Some("x"), false, None)
             .await
             .expect("store");
         cm.delete_openai_oauth_tokens().await.expect("delete");
@@ -1798,11 +1857,11 @@ mod oauth_tests {
         let (_storage, cm) = manager();
         let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
         // First write a refresh token.
-        cm.store_openai_oauth_tokens("a1", Some("r1"), expires, vec![], Some("id1"), false)
+        cm.store_openai_oauth_tokens("a1", Some("r1"), expires, vec![], Some("id1"), false, None)
             .await
             .expect("store with refresh");
         // Rotate to a token set with no refresh token.
-        cm.store_openai_oauth_tokens("a2", None, expires, vec![], Some("id1"), false)
+        cm.store_openai_oauth_tokens("a2", None, expires, vec![], Some("id1"), false, None)
             .await
             .expect("store without refresh");
         let got = cm
@@ -1822,9 +1881,17 @@ mod oauth_tests {
         cm.store_oauth_tokens("ant-acc", Some("ant-ref"), expires, vec![], "e@x", "o")
             .await
             .expect("store anthropic");
-        cm.store_openai_oauth_tokens("oai-acc", Some("oai-ref"), expires, vec![], None, false)
-            .await
-            .expect("store openai");
+        cm.store_openai_oauth_tokens(
+            "oai-acc",
+            Some("oai-ref"),
+            expires,
+            vec![],
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect("store openai");
 
         let ant = cm
             .get_oauth_tokens()

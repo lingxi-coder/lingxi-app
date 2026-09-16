@@ -216,6 +216,7 @@ kimi-code	k3
 zhipuai-coding-plan	glm-5.3
 zai	glm-5.3
 zai	glm-5.3-flash
+openai	gpt-6-astra
 openai	gpt-5.6-sol
 openai	gpt-5.6-terra
 openai	gpt-5.6-luna
@@ -257,7 +258,7 @@ nvidia/nemotron-3.5-lightning:free
 nvidia/nemotron-3-ultra-550b-a55b:free
 EOF
 
-for model_id in gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna; do
+for model_id in gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna; do
   jq --arg model "$model_id" -e '.models[$model]' \
     "$data_dir/openai-chatgpt.json" >/dev/null || {
     echo "Hand-authored ChatGPT model missing: $model_id" >&2

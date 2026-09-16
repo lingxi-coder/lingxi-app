@@ -566,6 +566,7 @@ export interface OpenAiOAuthSession {
   expires_at: number;
   account_id?: string;
   fedramp: boolean;
+  email?: string;
 }
 
 export function buildCredentialEnvelope(config: {

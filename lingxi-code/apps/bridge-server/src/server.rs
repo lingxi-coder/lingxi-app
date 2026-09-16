@@ -2112,6 +2112,7 @@ mod tests {
             expires_at: 2_000_000_000,
             account_id: Some("acct".into()),
             fedramp: false,
+            email: Some("acct@example.com".into()),
         };
         connection
             .event_sink()

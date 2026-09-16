@@ -1025,6 +1025,7 @@
   "ModelPricingTierDto.reasoning_per_million": "Option<f64>",
   "OpenAiOAuthSessionDto.access_token": "String",
   "OpenAiOAuthSessionDto.account_id": "Option<String>",
+  "OpenAiOAuthSessionDto.email": "Option<String>",
   "OpenAiOAuthSessionDto.expires_at": "u64",
   "OpenAiOAuthSessionDto.fedramp": "bool",
   "OpenAiOAuthSessionDto.refresh_token": "Option<String>",

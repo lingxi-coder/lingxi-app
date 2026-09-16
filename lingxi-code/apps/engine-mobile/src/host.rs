@@ -3319,6 +3319,7 @@ async fn build_mobile_inner_with_ask(
             tokens.expires_at,
             tokens.account_id,
             tokens.fedramp,
+            tokens.email,
             http.clone(),
             clock.clone(),
             None,

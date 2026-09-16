@@ -51,6 +51,9 @@ pub struct OpenAiOAuthSessionDto {
     /// Government account routing flag.
     #[serde(default)]
     pub fedramp: bool,
+    /// Signed-in email, for display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 impl std::fmt::Debug for OpenAiOAuthSessionDto {

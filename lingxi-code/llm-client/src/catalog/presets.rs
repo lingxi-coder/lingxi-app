@@ -278,7 +278,8 @@ pub fn builtin_presets() -> BuiltinCatalog {
                 display_pricing.source = Some("official".to_string());
             }
             if preset.billing_mode == ModelBillingMode::Subscription
-                || (preset.profile_name == "openai" && model.id.starts_with("gpt-5.6-"))
+                || (preset.profile_name == "openai"
+                    && (model.id.starts_with("gpt-5.6-") || model.id.starts_with("gpt-6-")))
             {
                 display_pricing.source = Some("official".to_string());
             }
@@ -454,9 +455,9 @@ mod tests {
         assert_eq!(count("glm-coding"), 10);
         assert_eq!(count("zai"), 16);
         // OpenAI API and ChatGPT OAuth profiles intentionally share the latest
-        // GPT-5.6 ids; callers qualify the profile when choosing a route.
-        assert_eq!(count("openai"), 47);
-        assert_eq!(count("openai-chatgpt"), 3);
+        // GPT-6 / GPT-5.6 ids; callers qualify the profile when choosing a route.
+        assert_eq!(count("openai"), 48);
+        assert_eq!(count("openai-chatgpt"), 4);
         assert_eq!(count("github-copilot"), 33);
         // Gemini slice vendored verbatim from models.dev (google provider).
         assert_eq!(count("gemini"), 38);
@@ -612,5 +613,22 @@ mod tests {
         );
         assert!(openai.reasoning.can_disable);
         assert_eq!(chatgpt.reasoning.levels, openai.reasoning.levels);
+
+        // Astra is the one OpenAI flagship with no `none` effort: the model page
+        // lists only low/medium/high/xhigh/max, so the off switch must not be
+        // offered even though every 5.6 sibling offers it.
+        let astra = listings
+            .iter()
+            .find(|item| {
+                item.profile_name == "openai-chatgpt" && item.request_model == "gpt-6-astra"
+            })
+            .expect("GPT-6 Astra listing");
+        assert_eq!(
+            astra.reasoning.levels,
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(!astra.reasoning.can_disable);
+        assert_eq!(astra.metadata.context_window_tokens, Some(1_050_000));
+        assert_eq!(astra.metadata.max_output_tokens, Some(128_000));
     }
 }

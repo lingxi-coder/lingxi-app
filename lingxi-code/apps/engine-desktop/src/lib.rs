@@ -10655,6 +10655,7 @@ async fn resolve_llm_stack_with_credentials(
                     tokens.expires_at,
                     tokens.account_id,
                     tokens.fedramp,
+                    tokens.email,
                     http.clone(),
                     clock.clone(),
                     Some(Arc::new(telemetry::AnalyticsBus::new())),

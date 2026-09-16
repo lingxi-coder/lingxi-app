@@ -25,6 +25,7 @@ import { isSessionId } from './bridge.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
+  resolveCodexOAuthSession,
   resolveProviderTestCredential,
   type CredentialBrokerStatus,
   type ProviderCredentialBroker,
@@ -54,6 +55,11 @@ export interface CredentialMetadata {
   runtimeOnly?: true;
   /** Display-safe reason why the signed credential broker is unavailable. */
   storageError?: string;
+  /**
+   * Signed-in Codex account address, for display only. Never carries a token;
+   * the credential itself stays in the main process.
+   */
+  codexAccountEmail?: string;
 }
 
 export interface ProviderCredentialMetadata extends CredentialMetadata {
@@ -347,6 +353,7 @@ export class HostController {
   private readonly brokerConfiguredProviders = new Set<string>();
   private readonly brokerCredentialPreviews = new Map<string, string>();
   private brokerStorageError: string | undefined;
+  private codexAccountEmail: string | undefined;
   private offNativeAudio?: () => void;
   private scheduled?: ScheduledTaskService;
   private notifier?: HostNotifier;
@@ -778,6 +785,7 @@ export class HostController {
         this.brokerConfiguredProviders.add(CODEX_PROVIDER_ID);
         this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
         this.brokerStorageError = undefined;
+        this.codexAccountEmail = session.email;
         // Authentication is durable even if the unrelated engine launch fails.
         // Keep metadata authoritative; the runtime exposes its own connection error.
         await this.restartIfConfigured().catch(() => {
@@ -803,6 +811,7 @@ export class HostController {
         await this.bridge.withCodexAuthMutation(() => this.credentialBroker!.delete(CODEX_PROVIDER_ID));
         this.brokerConfiguredProviders.delete(CODEX_PROVIDER_ID);
         this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
+        this.codexAccountEmail = undefined;
         return this.providerCredentialMetadata(CODEX_PROVIDER_ID);
       }
       if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
@@ -1067,7 +1076,10 @@ export class HostController {
         fingerprint: workspace.fingerprint,
         recovery: workspace.recovery,
       },
-      providerCredentials: this.providerCredentialSnapshot(),
+      // The signed-in account address is personal data and stays out of the
+      // exported report; the settings page reads it over IPC instead.
+      providerCredentials: this.providerCredentialSnapshot()
+        .map(({ codexAccountEmail: _email, ...metadata }) => metadata),
       connection: this.currentRuntime()?.connectionState ?? { status: 'idle' },
       bridgeRuntime: this.currentRuntime()?.runtimeVersions
         ?? (this.bridge as unknown as { runtimeVersions?: unknown }).runtimeVersions,
@@ -1138,6 +1150,9 @@ export class HostController {
         return { providerId, configured: false, encryptionAvailable: false,
           storageError: 'Codex 登录需要支持安全凭据代理的桌面构建。' };
       }
+      const codexEmail = providerId === CODEX_PROVIDER_ID && this.codexAccountEmail
+        ? { codexAccountEmail: this.codexAccountEmail }
+        : {};
       if (persistedProviders.has(providerId)) {
         return {
           providerId,
@@ -1146,6 +1161,7 @@ export class HostController {
           ...(credentialPreviews[providerId]
             ? { credentialPreview: credentialPreviews[providerId] }
             : {}),
+          ...codexEmail,
         };
       }
       if (activeProviders.has(providerId)) {
@@ -1157,6 +1173,7 @@ export class HostController {
             ? { credentialPreview: credentialPreviews[providerId] }
             : {}),
           runtimeOnly: true,
+          ...codexEmail,
         };
       }
       return {
@@ -1185,6 +1202,17 @@ export class HostController {
     for (const providerId of nextConfigured) this.brokerConfiguredProviders.add(providerId);
     for (const providerId of this.credentialProviderIds()) {
       if (!nextConfigured.has(providerId)) this.brokerCredentialPreviews.delete(providerId);
+    }
+    // The account address is read back here rather than carried in memory from
+    // login, so it survives an app restart. It is display-only: a session that
+    // fails to parse must not fail the broker status refresh, which is what
+    // gates every other provider row.
+    try {
+      this.codexAccountEmail = nextConfigured.has(CODEX_PROVIDER_ID)
+        ? (await resolveCodexOAuthSession(this.credentialBroker))?.email
+        : undefined;
+    } catch {
+      this.codexAccountEmail = undefined;
     }
     if (!previewProviderId || previewProviderId === CODEX_PROVIDER_ID) return;
     const preview = await this.credentialBroker.preview(previewProviderId);

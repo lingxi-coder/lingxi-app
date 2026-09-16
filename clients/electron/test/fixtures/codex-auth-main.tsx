@@ -12,7 +12,12 @@ function Fixture() {
   const [pendingModel, setPendingModel] = useState<string | undefined>();
   const calls = useRef({ login: 0, cancel: 0, logout: 0, apply: 0, close: 0 });
   const pending = useRef<{ resolve: (value: any) => void; reject: (error: Error) => void } | null>(null);
-  const metadata = { providerId: 'openai-chatgpt', configured, encryptionAvailable: true };
+  const accountEmail = 'user@example.com';
+  const credential = (isConfigured: boolean) => ({
+    providerId: 'openai-chatgpt', configured: isConfigured, encryptionAvailable: true,
+    ...(isConfigured ? { codexAccountEmail: accountEmail } : {}),
+  });
+  const metadata = credential(configured);
   const settings = { modelPickerVisibility: {} };
   const bridge = {
     bootstrap: { settings, providerCredentials: [metadata] },
@@ -28,13 +33,13 @@ function Fixture() {
     },
     clearProviderCredential: async (id: string) => {
       if (id !== 'openai-chatgpt') throw new Error('Unexpected provider');
-      calls.current.logout++; setConfigured(false); return { ...metadata, configured: false };
+      calls.current.logout++; setConfigured(false); return credential(false);
     },
     setModel: async (model: string) => { calls.current.apply++; setCurrentModel(model); },
     setModelPickerVisibility: async () => {},
   };
   (window as any).__codexAuthTest = {
-    complete() { setConfigured(true); pending.current?.resolve({ credential: { ...metadata, configured: true }, settings }); pending.current = null; },
+    complete() { setConfigured(true); pending.current?.resolve({ credential: credential(true), settings }); pending.current = null; },
     fail() { pending.current?.reject(new Error('OAuth callback timed out')); pending.current = null; },
     close() { setOpen(false); },
     open(withModel = false) { setPendingModel(withModel ? 'openai-chatgpt/gpt-5.6-sol' : undefined); setOpen(true); },

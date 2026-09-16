@@ -69,6 +69,8 @@ pub struct TokenInfo {
     pub account_id: Option<String>,
     /// `FedRAMP` account flag (from `id_token` claims).
     pub fedramp: bool,
+    /// Signed-in email (from `id_token` claims), for display only.
+    pub email: Option<String>,
     /// Wall-clock time of the last successful refresh (for 8-day check).
     pub last_refresh: Option<SystemTime>,
 }
@@ -110,6 +112,7 @@ impl AuthState {
         expires_at: SystemTime,
         account_id: Option<String>,
         fedramp: bool,
+        email: Option<String>,
         http: Arc<dyn platform_api::HttpTransport>,
         clock: Arc<dyn platform_api::Clock>,
         bus: Option<Arc<telemetry::AnalyticsBus>>,
@@ -123,6 +126,7 @@ impl AuthState {
                 expires_at,
                 account_id,
                 fedramp,
+                email,
                 last_refresh: None,
             }),
             refresh_lock: Arc::new(Mutex::new(())),
@@ -150,6 +154,7 @@ impl AuthState {
                 expires_at,
                 account_id: None,
                 fedramp: false,
+                email: None,
                 last_refresh: None,
             }),
             refresh_lock: Arc::new(Mutex::new(())),
@@ -266,6 +271,7 @@ impl AuthState {
             vec![],
             info.account_id.as_deref(),
             info.fedramp,
+            info.email.as_deref(),
         )
         .await
         .map_err(|e| OAuthError::TokenExchange(format!("keychain store: {e}")))?;
@@ -396,19 +402,23 @@ impl RefreshDriver {
         };
         let new_expiry = now + Duration::from_secs(expires_in);
 
-        // Update account_id/fedramp from id_token if present.
-        let (new_account_id, new_fedramp) = if let Some(ref id_token) = body.id_token {
+        // Update account_id/fedramp/email from id_token if present.
+        let (new_account_id, new_fedramp, new_email) = if let Some(ref id_token) = body.id_token {
             if let Some(claims) = crate::oauth::openai::token_data::parse_id_token(id_token) {
-                (claims.account_id, claims.fedramp)
+                // An id_token that omits `email` must not erase the identity
+                // captured at login: the claim is stable for a given account,
+                // and the refresh response sometimes drops it.
+                let previous = self.state.token.read().await.email.clone();
+                (claims.account_id, claims.fedramp, claims.email.or(previous))
             } else {
                 // id_token present but unparseable — preserve existing values.
                 let t = self.state.token.read().await;
-                (t.account_id.clone(), t.fedramp)
+                (t.account_id.clone(), t.fedramp, t.email.clone())
             }
         } else {
             // No id_token in response — preserve existing values.
             let t = self.state.token.read().await;
-            (t.account_id.clone(), t.fedramp)
+            (t.account_id.clone(), t.fedramp, t.email.clone())
         };
 
         let new_access_token_str = body.access_token.clone();
@@ -418,6 +428,7 @@ impl RefreshDriver {
             expires_at: new_expiry,
             account_id: new_account_id,
             fedramp: new_fedramp,
+            email: new_email,
             last_refresh: Some(now),
         };
 
@@ -682,6 +693,7 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
             Some("acc_XYZ".into()),
             false,
+            Some("acc_xyz@example.com".into()),
             http.clone() as Arc<dyn platform_api::HttpTransport>,
             clock.clone() as Arc<dyn platform_api::Clock>,
             None,
@@ -731,6 +743,7 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
             None,
             false,
+            None,
             http.clone() as Arc<dyn platform_api::HttpTransport>,
             clock.clone() as Arc<dyn platform_api::Clock>,
             None,
@@ -795,6 +808,7 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             None,
             false,
+            None,
             http as Arc<dyn platform_api::HttpTransport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
@@ -807,6 +821,93 @@ mod refresh_tests {
         let t = state.token.read().await;
         assert_eq!(t.account_id.as_deref(), Some("acc_XYZ"));
         assert!(t.fedramp);
+    }
+
+    /// A rotation response whose `id_token` omits `email` must not erase the
+    /// address captured at login — the refresh endpoint routinely returns a
+    /// narrower claim set than the original authorization-code exchange, and
+    /// the settings page would otherwise lose the account name an hour in.
+    #[tokio::test]
+    async fn reactive_refresh_keeps_email_when_id_token_omits_it() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let hdr = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD
+            .encode(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acc_XYZ"}}"#);
+        let id_token = format!("{hdr}.{payload}.sig");
+        let resp = format!(
+            r#"{{"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600,"id_token":"{id_token}"}}"#
+        );
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 200,
+                body: resp,
+            },
+        )]);
+        let clock = TestClock::new(0);
+        let state = AuthState::new(
+            OpenAiOAuthConfig::default(),
+            Secret::new("OLD_ACCESS".into()),
+            Some(Secret::new("OLD_REFRESH".into())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            Some("acc_XYZ".into()),
+            false,
+            Some("user@example.com".into()),
+            http as Arc<dyn platform_api::HttpTransport>,
+            clock as Arc<dyn platform_api::Clock>,
+            None,
+            None,
+        );
+        let driver = RefreshDriver::new(state.clone());
+        let prev = state.token.read().await.token_hash();
+        driver.refresh(prev).await.expect("refresh ok");
+
+        let t = state.token.read().await;
+        assert_eq!(t.account_id.as_deref(), Some("acc_XYZ"));
+        assert_eq!(t.email.as_deref(), Some("user@example.com"));
+    }
+
+    /// When the refresh `id_token` does carry `email`, it wins over the
+    /// carried-forward value (a rare but real case: the account switched
+    /// addresses between rotations).
+    #[tokio::test]
+    async fn reactive_refresh_takes_email_from_id_token_when_present() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let hdr = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(
+            br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acc_XYZ"},"email":"new@example.com"}"#,
+        );
+        let id_token = format!("{hdr}.{payload}.sig");
+        let resp = format!(
+            r#"{{"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600,"id_token":"{id_token}"}}"#
+        );
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 200,
+                body: resp,
+            },
+        )]);
+        let clock = TestClock::new(0);
+        let state = AuthState::new(
+            OpenAiOAuthConfig::default(),
+            Secret::new("OLD_ACCESS".into()),
+            Some(Secret::new("OLD_REFRESH".into())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            Some("acc_XYZ".into()),
+            false,
+            Some("old@example.com".into()),
+            http as Arc<dyn platform_api::HttpTransport>,
+            clock as Arc<dyn platform_api::Clock>,
+            None,
+            None,
+        );
+        let driver = RefreshDriver::new(state.clone());
+        let prev = state.token.read().await.token_hash();
+        driver.refresh(prev).await.expect("refresh ok");
+
+        let t = state.token.read().await;
+        assert_eq!(t.email.as_deref(), Some("new@example.com"));
     }
 
     #[tokio::test]
@@ -827,6 +928,7 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             None,
             false,
+            None,
             http as Arc<dyn platform_api::HttpTransport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
@@ -861,6 +963,7 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             None,
             false,
+            None,
             http.clone() as Arc<dyn platform_api::HttpTransport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
@@ -894,6 +997,7 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(2),
             None,
             false,
+            None,
             http.clone() as Arc<dyn platform_api::HttpTransport>,
             clock.clone() as Arc<dyn platform_api::Clock>,
             None,

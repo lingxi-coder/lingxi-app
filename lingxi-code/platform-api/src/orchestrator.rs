@@ -1490,6 +1490,11 @@ pub fn reasoning_control_spec_for_model(
                     (vec!["minimal", "low", "medium", "high"], false)
                 }
                 "gpt-5-pro" => (vec!["high"], false),
+                // Astra rejects `reasoning.effort: "none"` outright (the model
+                // page lists its efforts as low/medium/high/xhigh/max), so the
+                // explicit Disabled selection must stay off this row even
+                // though its siblings can be turned off.
+                "gpt-6-astra" => (vec!["low", "medium", "high", "xhigh", "max"], false),
                 "gpt-5.1"
                 | "gpt-5.2"
                 | "gpt-5.3-codex-spark"
@@ -1762,11 +1767,11 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
         ),
         "openai" => matches!(
             request_model,
-            "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+            "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
         ),
         "openai-chatgpt" => matches!(
             request_model,
-            "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+            "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
         ),
         "deepseek" => matches!(
             request_model,

@@ -10,12 +10,28 @@ const jwt = (value: unknown) => `header.${Buffer.from(JSON.stringify(value)).toS
 test('Codex token response retains expiry, account and refresh without minting an API key', () => {
   assert.deepEqual(sessionFromTokenResponse({
     access_token: 'access-secret', refresh_token: 'refresh-secret', expires_in: 120,
-    id_token: jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-1', chatgpt_account_is_fedramp: true } }),
+    id_token: jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-1', chatgpt_account_is_fedramp: true }, email: 'user@example.com' }),
   }, 1_000_000), {
-    access_token: 'access-secret', refresh_token: 'refresh-secret', expires_at: 1120, account_id: 'account-1', fedramp: true,
+    access_token: 'access-secret', refresh_token: 'refresh-secret', expires_at: 1120, account_id: 'account-1', fedramp: true, email: 'user@example.com',
+  });
+  // An id_token without an `email` claim stays valid; the field is optional.
+  assert.deepEqual(sessionFromTokenResponse({
+    access_token: 'access-secret', expires_in: 120,
+    id_token: jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-1' } }),
+  }, 1_000_000), {
+    access_token: 'access-secret', expires_at: 1120, account_id: 'account-1', fedramp: false,
   });
   assert.throws(() => sessionFromTokenResponse({ access_token: 'secret', expires_in: -1 }));
   assert.throws(() => parseCodexSession({ access_token: 'secret', expires_at: 'later', fedramp: false }));
+});
+
+test('a malformed display email is rejected rather than stored', () => {
+  const base = { access_token: 'secret', expires_at: 1_000, fedramp: false };
+  assert.equal(parseCodexSession({ ...base, email: 'user@example.com' }).email, 'user@example.com');
+  assert.equal(parseCodexSession(base).email, undefined);
+  for (const email of ['', 'a\nb@example.com', 'x'.repeat(321)]) {
+    assert.throws(() => parseCodexSession({ ...base, email }), /Codex 登录凭据无效/);
+  }
 });
 
 test('OAuth secrets never enter the ordinary API-key credential path', async () => {

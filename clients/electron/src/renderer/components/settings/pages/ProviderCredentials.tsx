@@ -466,7 +466,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
         {isCodexAuth ? (
           <Row title="ChatGPT 账号" desc={connecting
             ? '请在浏览器中完成 ChatGPT 登录。等待授权返回…'
-            : '通过浏览器登录 ChatGPT 账号，授权凭据由安全存储管理。'} align="center">
+            : selectedMetadata?.codexAccountEmail
+              ? `已登录：${selectedMetadata.codexAccountEmail}`
+              : '通过浏览器登录 ChatGPT 账号，授权凭据由安全存储管理。'} align="center">
             <div style={{ display: 'flex', gap: 7 }}>
               <button type="button" data-testid="codex-login" disabled={credentialWriteDisabled || oauthStorageUnavailable}
                 onClick={() => void loginCodex()} style={ghostButtonStyle(t, credentialWriteDisabled || oauthStorageUnavailable)}>

@@ -267,6 +267,7 @@ impl secret::credential::OpenAiOAuthObserver for OpenAiOAuthHostObserver {
                         .as_secs(),
                     account_id: tokens.account_id,
                     fedramp: tokens.fedramp,
+                    email: tokens.email,
                 },
             })
             .await;
@@ -288,6 +289,9 @@ fn validate_openai_oauth_session(
             .account_id
             .as_deref()
             .is_some_and(|id| id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control))
+        || session.email.as_deref().is_some_and(|email| {
+            email.is_empty() || email.len() > 320 || email.chars().any(char::is_control)
+        })
         || session.expires_at == 0
         || std::time::UNIX_EPOCH
             .checked_add(std::time::Duration::from_secs(session.expires_at))
@@ -1373,6 +1377,7 @@ pub async fn assemble_with_credentials(
                 vec![],
                 session.account_id.as_deref(),
                 session.fedramp,
+                session.email.as_deref(),
             )
             .await
             .map_err(|_| "failed to seed Codex OAuth session".to_string())?;
@@ -2146,16 +2151,32 @@ mod tests {
 
     #[test]
     fn codex_oauth_envelope_is_validated_and_debug_redacted() {
-        let mut input = std::io::Cursor::new(br#"{"openai_oauth":{"access_token":"access-private","refresh_token":"refresh-private","expires_at":2000000000,"account_id":"acct","fedramp":false}}"#);
+        let mut input = std::io::Cursor::new(br#"{"openai_oauth":{"access_token":"access-private","refresh_token":"refresh-private","expires_at":2000000000,"account_id":"acct","fedramp":false,"email":"user@example.com"}}"#);
         let envelope = read_credential_envelope(&mut input).unwrap();
         let session = envelope.openai_oauth.as_ref().unwrap();
         assert_eq!(session.account_id.as_deref(), Some("acct"));
+        assert_eq!(session.email.as_deref(), Some("user@example.com"));
         assert!(!format!("{envelope:?}").contains("private"));
         for invalid in ["", "bad\nheader"] {
             let mut session = session.clone();
             session.access_token = invalid.into();
             assert!(validate_openai_oauth_session(&session).is_err());
         }
+        // Email is display-only, but it is still attacker-controlled input
+        // crossing the parent/child boundary, so it carries the same shape
+        // bounds as the account id. `None` stays valid (older sessions).
+        for invalid in [
+            String::new(),
+            "bad\nheader".to_string(),
+            format!("{}@example.com", "a".repeat(320)),
+        ] {
+            let mut session = session.clone();
+            session.email = Some(invalid);
+            assert!(validate_openai_oauth_session(&session).is_err());
+        }
+        let mut session = session.clone();
+        session.email = None;
+        assert!(validate_openai_oauth_session(&session).is_ok());
     }
 
     #[test]

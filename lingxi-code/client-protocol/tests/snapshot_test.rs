@@ -651,6 +651,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     expires_at: 2_000_000_000,
                     account_id: Some("account-fixture".into()),
                     fedramp: false,
+                    email: Some("user@example.com".into()),
                 },
             },
         ),

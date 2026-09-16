@@ -74,7 +74,7 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; storageError?: string }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; storageError?: string; codexAccountEmail?: string }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface PluginSecretMetadata { pluginId: string; key: string; configured: boolean; maskedValue?: string; storageError?: string; restartRequired?: boolean }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }

@@ -15,6 +15,7 @@ import { Icon } from './Icon';
 import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
 import { TranscriptAgents } from './TranscriptAgents';
 import { anchorTranscriptAgents, placeTranscriptAgents, type AgentAnchors } from './transcriptAgentPlacement';
+import { ApiRetryNotice, type ApiRetryStatus } from './ApiRetryNotice';
 import { transcriptRows } from './transcriptRows';
 import { ToolGroup } from './ToolGroup';
 import { TurnFileSummary } from './TurnFileSummary';
@@ -143,6 +144,11 @@ interface StageProps {
   running?: boolean;
   /** Activity already displayed by the caller; suppresses only the generic waiting fallback. */
   pendingActivity?: string;
+  /**
+   * The API retry the engine is waiting out, if any. Replaces the bare
+   * "Thinking…" indicator for the duration of the backoff.
+   */
+  apiRetry?: ApiRetryStatus | null;
   /** Truthful empty/onboarding copy supplied by the host state. */
   emptyMessage?: string;
   /** Show the desktop welcome immediately, independently of engine readiness. */
@@ -161,7 +167,7 @@ interface StageProps {
   foldedItemIds?: readonly string[];
 }
 
-export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
+export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -337,6 +343,10 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
             );
           }
           if (item.type === 'thinking') {
+            // A backoff owns the waiting indicator while it lasts: "Thinking…"
+            // during a multi-minute retry is what made a rate-limited turn look
+            // like nothing was happening at all.
+            if (apiRetry) return <ApiRetryNotice key={item.id} retry={apiRetry} />;
             return (
               <div className="transcript-run-item transcript-thinking" data-run-type="thinking" key={item.id} role="status">
                 <span className="running-sweep" style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>Thinking…</span>

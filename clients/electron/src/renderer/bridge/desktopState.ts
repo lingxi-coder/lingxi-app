@@ -43,6 +43,16 @@ export interface DesktopState {
   readonly lastCompaction: Extract<ClientEvent, { type: 'compaction_completed' }> | null;
   readonly lastPermissionResolution: Extract<ClientEvent, { type: 'permission_request_resolved' }> | null;
   readonly lastApiRetry: Extract<ClientEvent, { type: 'api_retry' }> | null;
+  /**
+   * The retry the engine is waiting out RIGHT NOW, or null.
+   *
+   * Distinct from {@link lastApiRetry}, which is a sticky record for the
+   * Diagnostics page and deliberately survives the turn. A waiting indicator
+   * must not: left sticky it would re-announce a retry from a previous turn.
+   * Cleared by the next thing the turn does — the retry is over the moment any
+   * other signal arrives.
+   */
+  readonly apiRetry: Extract<ClientEvent, { type: 'api_retry' }> | null;
 }
 
 export function emptyDesktopState(): DesktopState {
@@ -68,6 +78,7 @@ export function emptyDesktopState(): DesktopState {
     lastCompaction: null,
     lastPermissionResolution: null,
     lastApiRetry: null,
+    apiRetry: null,
   };
 }
 
@@ -111,11 +122,11 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'session_list':
       return { ...state, sessions: mergeSessionCatalog(state.sessions, event.sessions) };
     case 'session_started':
-      return startSession({ ...state, lastCost: null, status: null }, event.session_id, event.mode);
+      return startSession({ ...state, lastCost: null, status: null, apiRetry: null }, event.session_id, event.mode);
     case 'session_resumed':
-      return { ...state, activeSessionId: event.session_id, lastCost: null, status: null };
+      return { ...state, activeSessionId: event.session_id, lastCost: null, status: null, apiRetry: null };
     case 'session_ended':
-      return { ...state, activeSessionId: null, lastCost: null, status: null };
+      return { ...state, activeSessionId: null, lastCost: null, status: null, apiRetry: null };
     case 'model_list':
       return { ...state, models: [...event.models], modelDetails: [...(event.details ?? [])], currentModel: event.current };
     case 'provider_model_catalog':
@@ -132,7 +143,7 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       return { ...state, permissionMode: event.mode };
     case 'turn_ended':
       // Both events carry authoritative session totals, never per-turn deltas.
-      return { ...state, lastCost: event.cost };
+      return { ...state, lastCost: event.cost, apiRetry: null };
     case 'cost_update':
       return {
         ...state,
@@ -183,7 +194,17 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'commands_changed':
       return { ...state, slashCommands: [...event.commands] };
     case 'api_retry':
-      return { ...state, lastApiRetry: event };
+      return { ...state, lastApiRetry: event, apiRetry: event };
+    // Anything the turn emits means the wait ended. `turn_ended` is NOT enough
+    // on its own: a retry that succeeds streams content for the rest of the
+    // turn, and the notice has to go the moment the first token lands.
+    case 'turn_started':
+    case 'text_delta':
+    case 'thinking_delta':
+    case 'tool_use_started':
+    case 'message_complete':
+    case 'error':
+      return state.apiRetry ? { ...state, apiRetry: null } : state;
     default:
       return state;
   }

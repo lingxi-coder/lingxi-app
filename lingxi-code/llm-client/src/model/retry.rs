@@ -620,6 +620,20 @@ pub fn next_step_with_backoff(
                 return DriveStep::Terminal;
             }
 
+            // A wait the SERVER named that outlasts our whole remaining ladder
+            // cannot be retried into success: the loop gives up before the limit
+            // clears, so every sleep in between is spent to reach the same
+            // failure. Surface it now, with the provider's own message.
+            //
+            // Only fires on an explicit server value — a 429 with no hint keeps
+            // the ladder, because burst throttling clears in seconds and is
+            // exactly what the ladder is for.
+            if let Some(wait) = retry_after {
+                if *wait > remaining_backoff_window(state, ctl, backoff_ms) {
+                    return DriveStep::Terminal;
+                }
+            }
+
             // Retry-watchdog (`oMe()`, `SLp(e)=nMe(e)||status===429`): a 429
             // capacity outage is EXEMPT from budget exhaustion, same as 529.
             if !ctl.watchdog && state.attempt >= ctl.max_retries {
@@ -768,6 +782,30 @@ pub fn capacity_base_delay_ms(attempt: u32, backoff_ms: Option<u64>, watchdog: b
     base.saturating_mul(factor)
         .min(WATCHDOG_MAX_BACKOFF_MS)
         .max(1)
+}
+
+/// Total time the retry ladder would still spend sleeping, from `state.attempt`
+/// to the budget's end.
+///
+/// The comparison point for a server-named rate-limit wait: a `Retry-After`
+/// longer than this cannot be retried into success, because the loop gives up
+/// before the limit clears.
+///
+/// The watchdog is excluded on purpose — its ladder runs to 6h, so under it
+/// there is effectively always more window and the caller should keep waiting.
+#[must_use]
+pub fn remaining_backoff_window(
+    state: &RetryState,
+    ctl: &RetryControl,
+    backoff_ms: Option<u64>,
+) -> std::time::Duration {
+    if ctl.watchdog {
+        return std::time::Duration::MAX;
+    }
+    let total: u64 = (state.attempt..ctl.max_retries)
+        .map(|attempt| capacity_base_delay_ms(attempt, backoff_ms, false))
+        .sum();
+    std::time::Duration::from_millis(total)
 }
 
 // ---------------------------------------------------------------------------

@@ -116,6 +116,101 @@ mod next_step_tests {
         RetryControl::default()
     }
 
+    /// REGRESSION: a rate-limited turn sat on "Thinking…" for minutes and then
+    /// failed anyway.
+    ///
+    /// When the server names a wait longer than the whole remaining ladder, the
+    /// loop gives up before the limit clears — so every sleep in between buys
+    /// nothing and is spent to reach the same failure.
+    #[test]
+    fn a_server_wait_longer_than_the_ladder_fails_fast() {
+        let ctl = ctl_default();
+        let window = remaining_backoff_window(&RetryState::default(), &ctl, None);
+        assert!(
+            window > Duration::ZERO,
+            "the default ladder must have a window"
+        );
+
+        let mut state = RetryState::default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(window + Duration::from_secs(1)),
+                scope: None,
+            },
+            0,
+        );
+        assert_eq!(
+            step,
+            DriveStep::Terminal,
+            "a wait past the window cannot be retried into success"
+        );
+        assert_eq!(state.attempt, 0, "no budget consumed");
+    }
+
+    /// The other half, and the reason this is not "never retry a 429": burst
+    /// throttling names a short wait and clears well inside the ladder. Failing
+    /// those fast would turn a self-healing pause into a user-visible error.
+    #[test]
+    fn a_short_server_wait_still_retries() {
+        let ctl = ctl_default();
+        let mut state = RetryState::default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(Duration::from_secs(2)),
+                scope: None,
+            },
+            0,
+        );
+        assert!(
+            matches!(step, DriveStep::RetryAfter(_)),
+            "a 2s wait is what the ladder is for"
+        );
+        assert_eq!(state.attempt, 1);
+    }
+
+    /// A 429 with NO server hint keeps the ladder too — absent is not a signal
+    /// that the wait is long, and burst throttling frequently sends none.
+    #[test]
+    fn a_rate_limit_with_no_hint_keeps_the_ladder() {
+        let ctl = ctl_default();
+        let mut state = RetryState::default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: None,
+                scope: None,
+            },
+            0,
+        );
+        assert!(matches!(step, DriveStep::RetryAfter(_)));
+    }
+
+    /// The window shrinks as the budget is spent, so the same server wait can be
+    /// retryable early and terminal later. Pins that it is measured from the
+    /// CURRENT attempt, not from a fixed constant.
+    #[test]
+    fn the_window_is_measured_from_the_current_attempt() {
+        let ctl = ctl_default();
+        let fresh = remaining_backoff_window(&RetryState::default(), &ctl, None);
+        let spent = remaining_backoff_window(
+            &RetryState {
+                attempt: ctl.max_retries - 1,
+                ..RetryState::default()
+            },
+            &ctl,
+            None,
+        );
+        assert!(
+            spent < fresh,
+            "a nearly-exhausted budget has less window left"
+        );
+    }
+
     fn ctl_with_fallback() -> RetryControl {
         RetryControl {
             fallback_model: Some("claude-sonnet-4-6".into()),

@@ -7253,3 +7253,30 @@ mod tests {
         assert_eq!(beta_req.max_tokens, Some(32_000));
     }
 }
+
+#[cfg(test)]
+mod subscription_rate_limit_tests {
+    /// REGRESSION: a ChatGPT-login 429 burned the full retry ladder.
+    ///
+    /// The rule "a subscription's 429 is terminal" already existed, but only in
+    /// Claude.ai vocabulary (`RetryState::is_subscriber`, fed from a snapshot
+    /// whose `subscription_type` is an Anthropic concept). An OpenAI plan can
+    /// never set it, so the ChatGPT profile fell through to the API-key path and
+    /// retried a quota that resets on the plan's clock, not ours.
+    #[test]
+    fn a_subscription_profile_fails_fast_while_an_api_key_retries() {
+        use super::super::rate_limit_cannot_clear as cannot_clear;
+        // The credential that motivated this: ChatGPT OAuth, a plan quota.
+        assert!(cannot_clear(Some("openai-chatgpt"), "gpt-6-astra"));
+        // The same MODEL on an API key keeps the ladder — the model is not the
+        // discriminator, the credential is.
+        assert!(!cannot_clear(Some("openai"), "gpt-6-astra"));
+        // Unchanged: OpenRouter's free tier, matched on the model suffix.
+        assert!(cannot_clear(Some("openrouter"), "z-ai/glm-4.6:free"));
+        assert!(!cannot_clear(Some("openrouter"), "z-ai/glm-4.6"));
+        // Anthropic is untouched here on purpose: its subscription is already
+        // handled by the parity subscriber gate.
+        assert!(!cannot_clear(Some("anthropic"), "claude-opus-5"));
+        assert!(!cannot_clear(None, "claude-opus-5"));
+    }
+}

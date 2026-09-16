@@ -127,6 +127,7 @@ export function App() {
                 onOpenPlan={(id) => bridge.openRuntimeItem({ kind: 'plan-document', id })}
                 liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
                 running={!bridge.sessionLoading && bridge.running}
+                apiRetry={bridge.sessionLoading ? null : bridge.desktop.apiRetry}
                 agents={stageAgents}
                 activeAgentId={bridge.runtimeCenter.inspectorOpen && bridge.runtimeCenter.activeItem?.kind === 'agent'
                   ? bridge.runtimeCenter.activeItem.id : undefined}

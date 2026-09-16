@@ -7,6 +7,7 @@
 //! `crate::*` + `protocol`/`traits`/`telemetry` — never any orchestrator-internal
 //! path. The orchestrator's consumer-trait impls delegate to it 1:1.
 
+use crate::agent_cache_ttl_1h_override;
 use crate::convert::{
     ensure_tool_result_pairing, normalize_messages_for_api_with_tool_search, to_llm_messages,
     to_tool_declarations,
@@ -35,7 +36,6 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use crate::agent_cache_ttl_1h_override;
 
 /// Mirror claude-code `getPromptCachingEnabled` (services/api/claude.ts:333).
 ///
@@ -272,6 +272,34 @@ pub enum RequestIdOrigin {
 /// and is unused by other providers, so it targets exactly the flaky free tier.
 fn is_free_tier_model(model: &str) -> bool {
     model.ends_with(":free")
+}
+
+/// Profiles whose credential is a SUBSCRIPTION rather than an API key.
+///
+/// The distinction is the whole point: an API key's 429 is burst throttling and
+/// clears in seconds, while a plan's quota resets on the plan's own clock —
+/// minutes to hours. Retrying the second kind spends the entire ladder to reach
+/// the same failure, which is what made a rate-limited ChatGPT-login turn sit on
+/// "Thinking…" for minutes before reporting "api call failed: rate limited".
+///
+/// Anthropic's Claude.ai subscription is NOT listed: it is already covered by
+/// the parity subscriber gate (`RetryState::is_subscriber`, fed from the live
+/// subscription snapshot). That gate speaks Claude.ai's vocabulary
+/// (`subscription_type == "enterprise"`), so an OpenAI plan can never set it —
+/// which is exactly why the ChatGPT profile has to be named here.
+fn is_subscription_profile(profile: Option<&str>) -> bool {
+    matches!(profile, Some("openai-chatgpt"))
+}
+
+/// Whether a 429 on this route is known not to clear inside the retry-backoff
+/// window, and so must surface immediately rather than burn the ~160s ladder.
+///
+/// Both arms are the same criterion — a quota that resets on someone else's
+/// clock — reached by the two identities we can see before the error arrives.
+/// A server-named `Retry-After` that outlasts the window is handled separately,
+/// per-error, in `next_step_with_backoff`.
+fn rate_limit_cannot_clear(profile: Option<&str>, model: &str) -> bool {
+    is_free_tier_model(model) || is_subscription_profile(profile)
 }
 
 fn openrouter_free_rate_limit_message(body: Option<&serde_json::Value>) -> String {
@@ -705,11 +733,15 @@ impl ApiService {
     ) -> Result<LlmResponse, LlmError> {
         request.stream = false;
         let mut control = resolve_retry_control_with_settings(
-            &request.model, None, self.effective_subscriber().is_subscriber,
-            &ResolveRetryEnv::from_process_env(), self.settings_max_retries,
+            &request.model,
+            None,
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
         );
         control.max_retries = max_retries;
-        self.drive_non_stream(request, control, DispatchHeaderState::AUXILIARY).await
+        self.drive_non_stream(request, control, DispatchHeaderState::AUXILIARY)
+            .await
     }
 
     /// Stream a canonical request through the accounting-aware physical driver.
@@ -1284,7 +1316,6 @@ impl ApiService {
         stream: bool,
         max_tokens: Option<u32>,
     ) -> Result<LlmRequest, LlmError> {
-
         // Pre-wire pipeline (claude-code order): strip_excess_media →
         // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
         // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
@@ -2818,10 +2849,10 @@ impl ApiService {
             consecutive_overloaded: initial_consecutive_overloaded,
             is_subscriber: sub.is_subscriber,
             is_enterprise: sub.is_enterprise,
-            // Fail FAST on a rate limit from an OpenRouter FREE-tier model (its
-            // 429 is quota exhaustion that won't clear in the backoff window); paid
-            // models + Anthropic keep the parity 429-retry.
-            rate_limit_terminal: is_free_tier_model(&req.model),
+            // Fail FAST on a rate limit that cannot clear in the backoff window
+            // (a subscription plan's quota, an OpenRouter free-tier share);
+            // API-key routes + Anthropic keep the parity 429-retry.
+            rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.model),
             ..RetryState::default()
         };
         // thinking_budget for telemetry: Adaptive → 0, Enabled{b} → b.
@@ -2855,8 +2886,7 @@ impl ApiService {
             };
             if !connections_captured {
                 connections_captured = true;
-                connection_chain
-                    .clone_from(&prepared.route.resolved_route.connection_chain);
+                connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
                 failover = prepared.route.resolved_route.failover;
             }
             Self::log_deepseek_prepared_request(&req.model, &prepared, false);
@@ -3846,8 +3876,8 @@ impl ApiService {
         let mut state = RetryState {
             is_subscriber: sub.is_subscriber,
             is_enterprise: sub.is_enterprise,
-            // Free-tier rate limits fail fast (see non-stream drive).
-            rate_limit_terminal: is_free_tier_model(&req.model),
+            // Subscription / free-tier rate limits fail fast (see non-stream drive).
+            rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.model),
             ..RetryState::default()
         };
         // Stream path uses settings-based retry control (same precedence as non-stream).
@@ -3886,8 +3916,7 @@ impl ApiService {
             };
             if !connections_captured {
                 connections_captured = true;
-                connection_chain
-                    .clone_from(&prepared.route.resolved_route.connection_chain);
+                connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
                 failover = prepared.route.resolved_route.failover;
             }
             Self::log_deepseek_prepared_request(&req.model, &prepared, true);

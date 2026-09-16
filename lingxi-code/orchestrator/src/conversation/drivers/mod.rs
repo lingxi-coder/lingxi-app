@@ -1,4 +1,17 @@
 //! Batched, cancelable, and streaming conversation turn drivers.
+//!
+//! Three public entries — `run_turn`, `run_turn_with_cancel`,
+//! `run_turn_streaming` — over two loops. The per-turn work they share lives
+//! in the submodules: `prepare` (reminders, the fifteen preparation steps, the
+//! prompt snapshot), `loop_state` (`TurnLoopState` and the top-of-loop guards)
+//! and `disposition` (end-of-turn signal consumption).
+//!
+//! What stays per-entry is what actually differs, and each difference is held
+//! by a test that asserts it rather than a comment that describes it: the
+//! guard ORDER (`LoopGuardOrder` — the cancelable entry does not drain,
+//! streaming checks cancel last), cancel handling and its outcome mapping
+//! (§3.2 of the unified-driver plan), and the file-history epilogue, which
+//! only the streaming loop runs.
 
 mod disposition;
 mod loop_state;
@@ -1579,7 +1592,7 @@ impl StreamingTurnDriver<'_> {
                 }
                 vec![(
                     QueuedPromptInput {
-                    goal_retry_id: None,
+                        goal_retry_id: None,
                         text: prompt.to_string(),
                         is_meta: !in_human_turn,
                         message_id,
@@ -3556,7 +3569,9 @@ impl ConversationOrchestrator {
         message_id: Option<MessageId>,
         in_human_turn: bool,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        if in_human_turn { self.reset_goal_interruption(); }
+        if in_human_turn {
+            self.reset_goal_interruption();
+        }
         let turn_guard = self.turn_gate.lock().await;
         self.run_turn_streaming_with_origin_locked(
             &turn_guard,
@@ -3579,7 +3594,9 @@ impl ConversationOrchestrator {
         if inputs.is_empty() {
             return Ok(TurnOutcome::EndTurn);
         }
-        if inputs.iter().any(|input| !input.is_meta) { self.reset_goal_interruption(); }
+        if inputs.iter().any(|input| !input.is_meta) {
+            self.reset_goal_interruption();
+        }
         let turn_guard = self.turn_gate.lock().await;
         let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
         let prompt = inputs[primary].text.clone();
@@ -3630,23 +3647,37 @@ impl ConversationOrchestrator {
         in_human_turn: bool,
         queued_inputs: Option<Vec<QueuedPromptInput>>,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        if in_human_turn { self.reset_goal_interruption(); }
+        if in_human_turn {
+            self.reset_goal_interruption();
+        }
         let mut queued_inputs = queued_inputs;
         if let Some(inputs) = &mut queued_inputs {
             let mut admitted = Vec::with_capacity(inputs.len());
             for input in inputs.drain(..) {
                 if let Some(id) = input.goal_retry_id.as_deref() {
-                    if !self.admit_goal_retry(id).await { continue; }
+                    if !self.admit_goal_retry(id).await {
+                        continue;
+                    }
                 }
                 admitted.push(input);
             }
             *inputs = admitted;
             if inputs.is_empty() {
-                self.output.emit_end_turn("end_turn", &self.snapshot_cost_real().await).await;
+                self.output
+                    .emit_end_turn("end_turn", &self.snapshot_cost_real().await)
+                    .await;
                 return Ok(TurnOutcome::EndTurn);
             }
         }
-        let admitted_prompt = queued_inputs.as_ref().and_then(|inputs| inputs.iter().find(|i| !i.is_meta).or_else(|| inputs.first())).map(|i| i.text.clone());
+        let admitted_prompt = queued_inputs
+            .as_ref()
+            .and_then(|inputs| {
+                inputs
+                    .iter()
+                    .find(|i| !i.is_meta)
+                    .or_else(|| inputs.first())
+            })
+            .map(|i| i.text.clone());
         let prompt = admitted_prompt.as_deref().unwrap_or(prompt);
         let _activity_guard = self.main_loop_activity(in_human_turn);
         tracing::info!(

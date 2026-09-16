@@ -770,8 +770,26 @@ async function assertDesktopGit(page, workspace, tempRoot) {
   assert.ok(status.files.some(file => file.path === 'git-smoke.txt'));
   const diff = (await request({ kind: 'diff', mode: 'working', path: 'git-smoke.txt' })).diff;
   assert.ok(diff.patch.includes('+Desktop Review 中文'));
-  await evaluate(page, `document.querySelector('button[aria-label="Git environment"]').click()`);
-  await evaluate(page, `Array.from(document.querySelectorAll('.git-environment button')).find(button => button.textContent.includes('Changes')).click()`);
+  // Open Review through Summary. The topbar Git pill this used to click was
+  // REMOVED on purpose by `ecf0bf8d7` ("remove the topbar Git and More
+  // controls") fifteen minutes after this section was written, and that commit
+  // recorded `Not-tested: Rebuilt signed macOS package` — so nothing ran this
+  // again until the next package. `GitTopBar` still compiles and is still
+  // exercised by `test/fixtures/git-main.tsx`; it simply has no production call
+  // site, so the selector could never match here. Summary is the surviving
+  // route, and the steps below already use its toggle.
+  //
+  // Both steps are load-bearing, and the asserts below are what make that
+  // checkable: Review must be ABSENT first, or the wait for it passes on a panel
+  // that was already there. Deleting the `Changes` click once left the section
+  // green, which looked like the click was decoration — re-running with the
+  // preconditions asserted showed Review never appears without it. That first
+  // run had simply landed with the runtime centre already on `review`.
+  assert.equal(await evaluate(page, `document.querySelector('.git-review') !== null`), false);
+  assert.equal(await evaluate(page, `document.querySelector('#runtime-center-overview') !== null`), false);
+  await evaluate(page, `document.querySelector('[aria-label="Toggle pinned summary"]').click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview .git-environment-content') !== null`), { label: 'summary Git environment' });
+  await evaluate(page, `Array.from(document.querySelectorAll('#runtime-center-overview .git-environment-content button')).find(button => button.textContent.includes('Changes')).click()`);
   await waitFor(() => evaluate(page, `document.querySelector('.git-review') !== null`), { label: 'packaged Review tab' });
   await request({ kind: 'stage', paths: ['git-smoke.txt'], token: status.token });
   status = (await request({ kind: 'status' })).status;

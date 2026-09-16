@@ -3,8 +3,9 @@
 //! Three public entries — `run_turn`, `run_turn_with_cancel`,
 //! `run_turn_streaming` — over two loops. The per-turn work they share lives
 //! in the submodules: `prepare` (reminders, the fifteen preparation steps, the
-//! prompt snapshot), `loop_state` (`TurnLoopState` and the top-of-loop guards)
-//! and `disposition` (end-of-turn signal consumption).
+//! prompt snapshot), `loop_state` (`TurnLoopState`, the top-of-loop guards, and
+//! `StepExit` — how one iteration ended) and `disposition` (end-of-turn signal
+//! consumption).
 //!
 //! What stays per-entry is what actually differs, and each difference is held
 //! by a test that asserts it rather than a comment that describes it: the
@@ -19,6 +20,7 @@ mod prepare;
 
 use super::*;
 use crate::streaming_loop::ExecutorPump;
+use loop_state::StepExit;
 use protocol::ContentBlock;
 
 /// One queued prompt, retaining its own transcript identity and origin class.
@@ -1533,6 +1535,235 @@ impl StreamingTurnDriver<'_> {
         })
     }
 
+    /// One iteration of the streaming turn loop: prepare → pump → finalize →
+    /// abort checkpoint → disposition.
+    ///
+    /// Everything the loop does AFTER its top-of-loop guards lives here, so the
+    /// loop itself is the guard sequence plus a three-way branch on what this
+    /// returned — the shape §5.4 wants both turn loops to share. The guards stay
+    /// outside on purpose: §3.5 gives each entry a different order, and the
+    /// streaming cancel guard runs between them and this call.
+    async fn run_round(
+        orch: &ConversationOrchestrator,
+        system_prompt: &Option<String>,
+        user_cancel: &Option<CancellationToken>,
+        loop_state: &mut TurnLoopState,
+        in_human_turn: bool,
+    ) -> Result<StepExit, OrchestratorError> {
+        let prepared = match Self::prepare_iteration(
+            orch,
+            system_prompt,
+            user_cancel,
+            loop_state,
+            in_human_turn,
+        )
+        .await?
+        {
+            PrepareStreamingOutcome::Ready(iteration) => iteration,
+            PrepareStreamingOutcome::Complete(message_id) => {
+                return Ok(StepExit::FinishThroughEpilogue(message_id));
+            }
+        };
+
+        let pumped =
+            Self::pump_iteration(orch, prepared, system_prompt, user_cancel, loop_state).await;
+        let pumped_iteration = match pumped {
+            Err(error) => {
+                // `open_iteration` enables SDK frame buffering before the
+                // stream is opened. Every error path must release that
+                // session-scoped buffer or later tool frames disappear.
+                orch.set_tool_frame_buffering(false).await;
+                return Err(error);
+            }
+            Ok(PumpStreamingOutcome::Pumped(iteration)) => iteration,
+            Ok(PumpStreamingOutcome::Complete(message_id)) => {
+                orch.set_tool_frame_buffering(false).await;
+                return Ok(StepExit::FinishThroughEpilogue(message_id));
+            }
+        };
+
+        let finalized = match Self::finalize_iteration(
+            orch,
+            pumped_iteration,
+            system_prompt,
+            user_cancel,
+            loop_state,
+        )
+        .await
+        {
+            Ok(finalized) => finalized,
+            Err(error) => {
+                orch.set_tool_frame_buffering(false).await;
+                return Err(error);
+            }
+        };
+        let FinalizedStreamingIteration {
+            pumped,
+            assistant_id,
+            tool_prevent_continuation,
+            post_tool_batch_calls,
+            pre_batch_mcp_tool_count,
+            partial_finalize,
+            partial_finalize_notice_id,
+            aborted_during_stream,
+        } = finalized;
+
+        // A3: accumulate this step's output tokens (TS
+        // `getTurnOutputTokens()`), ONCE, after the model step has returned
+        // and before the disposition reads the running total.
+        //
+        // §3.4 wants a single accumulation boundary per step. This used to
+        // sit inside `finalize_iteration`, where the two batched entries
+        // accumulate in their loop bodies instead — three sites, one of them
+        // a step deeper than the others. Moving it here puts all three on
+        // the same boundary. Safe because nothing reads `global_turn_tokens`
+        // between the old site and the disposition that consumes it, and
+        // `streaming_budget_on_continues_then_stops_at_threshold` fails if
+        // the accumulation lands after the budget check rather than before.
+        loop_state.global_turn_tokens = loop_state
+            .global_turn_tokens
+            .saturating_add(pumped.output_tokens);
+
+        // DEFERRED-3 / esc-interrupt FIX: "we were aborted" — the single
+        // post-drive abort checkpoint. Once the user-interrupt token has fired,
+        // the executor above already drained the bare REJECT_MESSAGE
+        // `tool_result`s into history (model-visible). The turn MUST now STOP —
+        // claude-code returns with NO further `callModel`, honoring
+        // REJECT_MESSAGE's "STOP what you are doing and wait for the user".
+        // Looping into the `Some("tool_use") => continue` arm below would (1)
+        // issue a wasted extra round-trip after every ESC and (2) let a
+        // Block-behavior tool emitted on that continuation actually EXECUTE
+        // (`abort_reason_for` returns `None` for Block tools) despite the
+        // interrupt — both of which claude-code structurally prevents by
+        // returning here first. `None` token (plain `run_turn_streaming`) →
+        // never fires → identical to before.
+        //
+        // #5: the terminal reason + interrupt message depend on WHICH ref
+        // checkpoint observed the abort (captured in `aborted_during_stream`
+        // before the drive): an abort already set when the stream ended is
+        // `aborted_streaming` / `[Request interrupted by user]` (query.ts:1015,
+        // `toolUse:false`); an abort that fired only DURING the tool drive is
+        // `aborted_tools` / `[Request interrupted by user for tool use]`
+        // (query.ts:1485, `toolUse:true`).
+        if user_cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            // Abort wins over a result-level end request. Results that were
+            // allowed to finish (notably Block-behavior tools) may have
+            // recorded one before this checkpoint, so drain the side table
+            // even though the end-turn path below is intentionally skipped.
+            let _ = orch
+                .take_pending_tool_result_turn_ends(
+                    &pumped
+                        .tool_uses
+                        .iter()
+                        .map(|tool_use| tool_use.id.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .await;
+            let cost = orch.snapshot_cost_real().await;
+            let (abort_reason, interrupt_message) = if aborted_during_stream {
+                ("aborted_streaming", INTERRUPT_MESSAGE)
+            } else {
+                ("aborted_tools", INTERRUPT_MESSAGE_FOR_TOOL_USE)
+            };
+            orch.output.emit_end_turn(abort_reason, &cost).await;
+            // NOW-ABORT disambiguation: a `Now`-driven cancellation means the
+            // urgent queued command will run next via the between-turn drain —
+            // DON'T inject the user-interrupt message. For a plain user
+            // interrupt (the default with no reason flag wired) inject as
+            // before. claude-code `query.ts:1046-1050`/`1501-1505`:
+            // `createUserInterruptionMessage`.
+            if orch.cancel_reason_now()
+                != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
+            {
+                orch.inject_user_message(interrupt_message).await;
+            }
+            return Ok(StepExit::FinishThroughEpilogue(assistant_id));
+        }
+
+        // P1-04 (cc 2.1.199): a finalized partial ends the turn once its
+        // dispatched tools have drained (above) and the incomplete-response
+        // notice has been surfaced — cc `break e`s out of the stream loop after
+        // yielding the notice; it does NOT re-enter the continuation logic. We
+        // terminate here (reason `model_error`, matching the api-error catch)
+        // rather than looping on the synthesized `tool_use`/`end_turn`, so the
+        // user sees the partial + notice and can retry. The synthesized
+        // stop_reason still rides on the persisted partial assistant line
+        // (patched above) for resume fidelity.
+        if partial_finalize.is_some() {
+            if crate::turn_loop::truncated_response_recovery_eligible(
+                &orch.config.query_source,
+                orch.prompt_is_interactive(),
+            ) && loop_state.recovery.max_output_tokens_recovery_count
+                < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+            {
+                let is_subagent = crate::turn_loop::truncated_response_recovery_is_subagent(
+                    &orch.config.query_source,
+                );
+                let nudge = if is_subagent {
+                    crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT
+                } else {
+                    crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN
+                };
+                orch.inject_meta_user_message(nudge).await;
+                loop_state.recovery.max_output_tokens_recovery_count = loop_state
+                    .recovery
+                    .max_output_tokens_recovery_count
+                    .saturating_add(1);
+                loop_state.recovery.max_output_tokens_override = None;
+                return Ok(StepExit::Continue);
+            }
+            // A finalized partial is terminal before normal tool-result
+            // disposition. Do not leave an end marker from a completed
+            // result live in the session-scoped side table.
+            let _ = orch
+                .take_pending_tool_result_turn_ends(
+                    &pumped
+                        .tool_uses
+                        .iter()
+                        .map(|tool_use| tool_use.id.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .await;
+            let cost = orch.snapshot_cost_real().await;
+            orch.output.emit_end_turn("model_error", &cost).await;
+            return Ok(StepExit::FinishThroughEpilogue(
+                partial_finalize_notice_id.unwrap_or(assistant_id),
+            ));
+        }
+
+        match orch
+            .decide_streaming_disposition(
+                loop_state,
+                &pumped,
+                assistant_id,
+                tool_prevent_continuation,
+                post_tool_batch_calls,
+                pre_batch_mcp_tool_count,
+            )
+            .await?
+        {
+            StreamingIterationDisposition::Continue => Ok(StepExit::Continue),
+            StreamingIterationDisposition::Complete(message_id) => {
+                // Pending input can arrive while the final response is
+                // streaming, after the top-of-loop drain has already run.
+                // Give it one final drain before committing the natural
+                // end-turn so it continues this same turn.
+                if orch.drain_mid_turn_input().await {
+                    return Ok(StepExit::Continue);
+                }
+                Ok(StepExit::FinishThroughEpilogue(message_id))
+            }
+            StreamingIterationDisposition::ForcedComplete(message_id) => {
+                Ok(StepExit::FinishThroughEpilogue(message_id))
+            }
+            // §3.6: the ONE disposition that skips the epilogue.
+            StreamingIterationDisposition::Return(outcome) => Ok(StepExit::ReturnDirect(outcome)),
+        }
+    }
+
     async fn run(self) -> Result<ConversationOutcome, OrchestratorError> {
         let Self {
             orch,
@@ -1723,7 +1954,7 @@ impl StreamingTurnDriver<'_> {
                 break;
             }
 
-            let prepared = match Self::prepare_iteration(
+            match Self::run_round(
                 orch,
                 &system_prompt,
                 &user_cancel,
@@ -1732,217 +1963,14 @@ impl StreamingTurnDriver<'_> {
             )
             .await?
             {
-                PrepareStreamingOutcome::Ready(iteration) => iteration,
-                PrepareStreamingOutcome::Complete(message_id) => {
+                StepExit::Continue => continue,
+                StepExit::FinishThroughEpilogue(message_id) => {
                     final_message_id = message_id;
                     break;
                 }
-            };
-
-            let pumped = Self::pump_iteration(
-                orch,
-                prepared,
-                &system_prompt,
-                &user_cancel,
-                &mut loop_state,
-            )
-            .await;
-            let pumped_iteration = match pumped {
-                Err(error) => {
-                    // `open_iteration` enables SDK frame buffering before the
-                    // stream is opened. Every error path must release that
-                    // session-scoped buffer or later tool frames disappear.
-                    orch.set_tool_frame_buffering(false).await;
-                    return Err(error);
-                }
-                Ok(PumpStreamingOutcome::Pumped(iteration)) => iteration,
-                Ok(PumpStreamingOutcome::Complete(message_id)) => {
-                    orch.set_tool_frame_buffering(false).await;
-                    final_message_id = message_id;
-                    break;
-                }
-            };
-
-            let finalized = match Self::finalize_iteration(
-                orch,
-                pumped_iteration,
-                &system_prompt,
-                &user_cancel,
-                &mut loop_state,
-            )
-            .await
-            {
-                Ok(finalized) => finalized,
-                Err(error) => {
-                    orch.set_tool_frame_buffering(false).await;
-                    return Err(error);
-                }
-            };
-            let FinalizedStreamingIteration {
-                pumped,
-                assistant_id,
-                tool_prevent_continuation,
-                post_tool_batch_calls,
-                pre_batch_mcp_tool_count,
-                partial_finalize,
-                partial_finalize_notice_id,
-                aborted_during_stream,
-            } = finalized;
-
-            // A3: accumulate this step's output tokens (TS
-            // `getTurnOutputTokens()`), ONCE, after the model step has returned
-            // and before the disposition reads the running total.
-            //
-            // §3.4 wants a single accumulation boundary per step. This used to
-            // sit inside `finalize_iteration`, where the two batched entries
-            // accumulate in their loop bodies instead — three sites, one of them
-            // a step deeper than the others. Moving it here puts all three on
-            // the same boundary. Safe because nothing reads `global_turn_tokens`
-            // between the old site and the disposition that consumes it, and
-            // `streaming_budget_on_continues_then_stops_at_threshold` fails if
-            // the accumulation lands after the budget check rather than before.
-            loop_state.global_turn_tokens = loop_state
-                .global_turn_tokens
-                .saturating_add(pumped.output_tokens);
-
-            // DEFERRED-3 / esc-interrupt FIX: "we were aborted" — the single
-            // post-drive abort checkpoint. Once the user-interrupt token has fired,
-            // the executor above already drained the bare REJECT_MESSAGE
-            // `tool_result`s into history (model-visible). The turn MUST now STOP —
-            // claude-code returns with NO further `callModel`, honoring
-            // REJECT_MESSAGE's "STOP what you are doing and wait for the user".
-            // Looping into the `Some("tool_use") => continue` arm below would (1)
-            // issue a wasted extra round-trip after every ESC and (2) let a
-            // Block-behavior tool emitted on that continuation actually EXECUTE
-            // (`abort_reason_for` returns `None` for Block tools) despite the
-            // interrupt — both of which claude-code structurally prevents by
-            // returning here first. `None` token (plain `run_turn_streaming`) →
-            // never fires → identical to before.
-            //
-            // #5: the terminal reason + interrupt message depend on WHICH ref
-            // checkpoint observed the abort (captured in `aborted_during_stream`
-            // before the drive): an abort already set when the stream ended is
-            // `aborted_streaming` / `[Request interrupted by user]` (query.ts:1015,
-            // `toolUse:false`); an abort that fired only DURING the tool drive is
-            // `aborted_tools` / `[Request interrupted by user for tool use]`
-            // (query.ts:1485, `toolUse:true`).
-            if user_cancel
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
-            {
-                // Abort wins over a result-level end request. Results that were
-                // allowed to finish (notably Block-behavior tools) may have
-                // recorded one before this checkpoint, so drain the side table
-                // even though the end-turn path below is intentionally skipped.
-                let _ = orch
-                    .take_pending_tool_result_turn_ends(
-                        &pumped
-                            .tool_uses
-                            .iter()
-                            .map(|tool_use| tool_use.id.clone())
-                            .collect::<Vec<_>>(),
-                    )
-                    .await;
-                let cost = orch.snapshot_cost_real().await;
-                let (abort_reason, interrupt_message) = if aborted_during_stream {
-                    ("aborted_streaming", INTERRUPT_MESSAGE)
-                } else {
-                    ("aborted_tools", INTERRUPT_MESSAGE_FOR_TOOL_USE)
-                };
-                orch.output.emit_end_turn(abort_reason, &cost).await;
-                // NOW-ABORT disambiguation: a `Now`-driven cancellation means the
-                // urgent queued command will run next via the between-turn drain —
-                // DON'T inject the user-interrupt message. For a plain user
-                // interrupt (the default with no reason flag wired) inject as
-                // before. claude-code `query.ts:1046-1050`/`1501-1505`:
-                // `createUserInterruptionMessage`.
-                if orch.cancel_reason_now()
-                    != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                {
-                    orch.inject_user_message(interrupt_message).await;
-                }
-                final_message_id = assistant_id;
-                break;
-            }
-
-            // P1-04 (cc 2.1.199): a finalized partial ends the turn once its
-            // dispatched tools have drained (above) and the incomplete-response
-            // notice has been surfaced — cc `break e`s out of the stream loop after
-            // yielding the notice; it does NOT re-enter the continuation logic. We
-            // terminate here (reason `model_error`, matching the api-error catch)
-            // rather than looping on the synthesized `tool_use`/`end_turn`, so the
-            // user sees the partial + notice and can retry. The synthesized
-            // stop_reason still rides on the persisted partial assistant line
-            // (patched above) for resume fidelity.
-            if partial_finalize.is_some() {
-                if crate::turn_loop::truncated_response_recovery_eligible(
-                    &orch.config.query_source,
-                    orch.prompt_is_interactive(),
-                ) && loop_state.recovery.max_output_tokens_recovery_count
-                    < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
-                {
-                    let is_subagent = crate::turn_loop::truncated_response_recovery_is_subagent(
-                        &orch.config.query_source,
-                    );
-                    let nudge = if is_subagent {
-                        crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT
-                    } else {
-                        crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN
-                    };
-                    orch.inject_meta_user_message(nudge).await;
-                    loop_state.recovery.max_output_tokens_recovery_count = loop_state
-                        .recovery
-                        .max_output_tokens_recovery_count
-                        .saturating_add(1);
-                    loop_state.recovery.max_output_tokens_override = None;
-                    continue;
-                }
-                // A finalized partial is terminal before normal tool-result
-                // disposition. Do not leave an end marker from a completed
-                // result live in the session-scoped side table.
-                let _ = orch
-                    .take_pending_tool_result_turn_ends(
-                        &pumped
-                            .tool_uses
-                            .iter()
-                            .map(|tool_use| tool_use.id.clone())
-                            .collect::<Vec<_>>(),
-                    )
-                    .await;
-                let cost = orch.snapshot_cost_real().await;
-                orch.output.emit_end_turn("model_error", &cost).await;
-                final_message_id = partial_finalize_notice_id.unwrap_or(assistant_id);
-                break;
-            }
-
-            match orch
-                .decide_streaming_disposition(
-                    &mut loop_state,
-                    &pumped,
-                    assistant_id,
-                    tool_prevent_continuation,
-                    post_tool_batch_calls,
-                    pre_batch_mcp_tool_count,
-                )
-                .await?
-            {
-                StreamingIterationDisposition::Continue => continue,
-                StreamingIterationDisposition::Complete(message_id) => {
-                    // Pending input can arrive while the final response is
-                    // streaming, after the top-of-loop drain has already run.
-                    // Give it one final drain before committing the natural
-                    // end-turn so it continues this same turn.
-                    if orch.drain_mid_turn_input().await {
-                        continue;
-                    }
-                    final_message_id = message_id;
-                    break;
-                }
-                StreamingIterationDisposition::ForcedComplete(message_id) => {
-                    final_message_id = message_id;
-                    break;
-                }
-                StreamingIterationDisposition::Return(outcome) => return Ok(outcome),
+                // §3.6: skips the file-history epilogue below, which is exactly
+                // what `Return` has always done.
+                StepExit::ReturnDirect(outcome) => return Ok(outcome),
             }
         }
 

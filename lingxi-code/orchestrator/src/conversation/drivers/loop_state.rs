@@ -84,3 +84,27 @@ impl ConversationOrchestrator {
         GuardVerdict::Proceed
     }
 }
+
+/// How one iteration of a turn loop ended (§5.4).
+///
+/// The loop body is not a function today because its exits are three different
+/// control-flow statements — `continue`, `break` (with a message id the epilogue
+/// needs), and `return` — and only a value can carry all three across a function
+/// boundary. Naming them is what lets the body move out of the loop.
+///
+/// The distinction that matters is the last two. `FinishThroughEpilogue` leaves
+/// the loop and RUNS the turn epilogue (§3.6: the streaming-only file-history
+/// snapshot); `ReturnDirect` leaves the whole driver and SKIPS it. §3.6 gives
+/// exactly one disposition — `Return` — the second behavior, and
+/// `tests/turn_epilogue_boundary_test.rs` pins it. Collapsing the two into one
+/// "the step is over" variant is the obvious simplification and the one that
+/// silently hands every terminal the epilogue.
+pub(crate) enum StepExit {
+    /// Run another iteration.
+    Continue,
+    /// End the loop with this id as the turn's final message, then run the
+    /// epilogue.
+    FinishThroughEpilogue(MessageId),
+    /// Return this outcome from the driver without running the epilogue.
+    ReturnDirect(ConversationOutcome),
+}

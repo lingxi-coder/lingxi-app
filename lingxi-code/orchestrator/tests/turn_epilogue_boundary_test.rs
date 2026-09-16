@@ -420,6 +420,88 @@ fn the_streaming_return_arm_skips_the_epilogue() {
     });
 }
 
+/// A mid-turn input source that cancels the turn when the loop drains it.
+///
+/// Streaming's guard order is drain -> max_turns -> budget -> increment ->
+/// cancel, so cancelling from inside the drain lands the token exactly where the
+/// loop-top guard reads it — between rounds, not during one. That is the
+/// difference between §3.2 row 5 and row 6.
+struct CancelsOnDrain(tokio_util::sync::CancellationToken);
+
+#[async_trait::async_trait]
+impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for CancelsOnDrain {
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        self.0.cancel();
+        None
+    }
+}
+
+/// §3.2 row 5 — the LOOP-TOP guard.
+///
+/// The cancel lands during the top-of-loop drain, so the guard a few lines later
+/// catches it before any model call. It emits `aborted_streaming` from the
+/// driver's own literal emit — the site the row-6 test does NOT reach — and runs
+/// the epilogue.
+///
+/// Distinct from the ENTRY pre-cancel: that check lives in
+/// `run_turn_streaming_inputs_locked`, before the driver is entered at all, and
+/// emits nothing. Here the driver has been entered and its loop is running.
+#[test]
+fn the_loop_top_guard_emits_aborted_streaming_and_runs_the_epilogue() {
+    run_with_large_stack(|| async {
+        let f = fixture();
+        let token = tokio_util::sync::CancellationToken::new();
+        let out = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(MockStreamingApiClient::with_turns(vec![streamed_end_turn(
+                "m1",
+            )])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            out.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            f.dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(f.writer.clone())
+        .with_file_history(f.file_history.clone());
+        orch.set_mid_turn_input(Arc::new(CancelsOnDrain(token.clone())));
+
+        orch.run_turn_streaming_with_cancel("ping", token.clone())
+            .await
+            .expect("streaming");
+
+        let ends: Vec<String> = out
+            .snapshot()
+            .await
+            .iter()
+            .filter_map(|e| match e {
+                platform_api::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            token.is_cancelled(),
+            "the drain must have cancelled the token"
+        );
+        assert_eq!(
+            ends,
+            vec!["aborted_streaming".to_string()],
+            "the loop-top guard emits aborted_streaming. Unlike the entry pre-cancel, the \
+             driver HAS been entered; unlike the post-drive abort, no round was driven."
+        );
+        assert_eq!(
+            snapshot_lines(&f.session_path),
+            1,
+            "and it breaks rather than returning, so the epilogue after the loop runs. §3.2 \
+             gives this row 执行 in the epilogue column."
+        );
+    });
+}
+
 /// §3.2 row 6 — the POST-DRIVE stream/tool abort — and the mirror of
 /// `a_pre_cancelled_streaming_turn_emits_no_end_event`.
 ///

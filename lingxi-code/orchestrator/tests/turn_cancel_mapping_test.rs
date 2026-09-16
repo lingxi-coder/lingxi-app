@@ -255,3 +255,22 @@ fn a_pre_cancelled_streaming_turn_emits_no_end_event() {
         .expect("spawn");
     handle.join().expect("test thread panicked");
 }
+
+// ── §3.5 cancel-before-max_turns: NOT deterministically testable ────────────
+//
+// Attempted and removed rather than shipped. The two guards can only both be
+// true from the second loop iteration onward — at the first top `turn_count` is
+// 0, so `0 >= max_turns` is false for any real limit. Reaching a second top with
+// the token already set needs the cancel to land BETWEEN rounds, and on this
+// path there is no such window: the `select!` races the whole step, so a cancel
+// arriving during one is taken there, and a cancel arriving before the loop is
+// the pre-cancel case where `max_turns` cannot also trip.
+//
+// The fixture that looked like it worked — a tool that cancels the token, with
+// `max_turns: 1` — ends in iteration ONE (measured: one API call), so the
+// max-turns guard never runs and the assertion about cancel beating it was
+// vacuous. Both cancel branches were probed and neither mattered, which is what
+// exposed it.
+//
+// Left here as a note rather than a test, because a test whose premise is false
+// is worse than no test: it reports coverage of an ordering nothing checks.

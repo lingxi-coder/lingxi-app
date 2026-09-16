@@ -494,6 +494,75 @@ async fn stop_block_coinciding_with_max_turns_ends_without_feedback() {
     );
 }
 
+/// CANCELABLE: the same blocking-Stop-hook-at-`max_turns` fixture ends on a
+/// DIFFERENT terminal than `run_turn`'s, and this asserts the difference rather
+/// than either side alone.
+///
+/// `handle_stop_at_end` hands both batched entries the same
+/// `StopHookFlow::TerminateMaxTurns`, and each names it itself: `run_turn`
+/// raises `Err(MaxTurnsReached)`, `run_turn_with_cancel` returns
+/// `Ok(TurnOutcome::MaxTurns)` — mirroring its own top-of-loop guard, which is
+/// the whole reason §3.2 keeps the two mappings apart. Both call sites now sit
+/// four lines apart on the same shared round, which is exactly the shape a later
+/// "these are the same, merge them" tidy-up reaches for. Before this test that
+/// tidy-up was silent: the twin and the streaming row were covered, this row
+/// was driven zero times, and rewriting the cancelable arm to raise `Err` like
+/// its neighbour left the whole suite green.
+#[tokio::test]
+async fn the_cancelable_entry_reports_a_stop_block_at_max_turns_as_an_outcome() {
+    async fn fixture(max_turns: u32) -> (Arc<ConversationOrchestrator>, Arc<MockApiClient>) {
+        let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
+        let hooks = exec_with(
+            Arc::new(StopBlockHandler),
+            builtin_hook("stop-block", HookEventType::Stop),
+        )
+        .await;
+        let mut cfg = OrchestratorConfig::default();
+        cfg.max_turns = max_turns;
+        let orch = Arc::new(ConversationOrchestrator::new(
+            cfg,
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            hooks,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        ));
+        (orch, api)
+    }
+
+    // The cancelable entry, with a token that never fires: the turn reaches the
+    // Stop hook normally, and the hook blocks on the turn that hits the cap.
+    let (cancelable, cancelable_api) = fixture(1).await;
+    let cancelable_result = cancelable
+        .run_turn_with_cancel("hi", CancellationToken::new())
+        .await;
+    assert_eq!(
+        cancelable_api.captured_msgs().await.len(),
+        1,
+        "exactly one API call — the blocking branch must have ended at max_turns, \
+         or the assertion below is about some other terminal"
+    );
+    assert!(
+        matches!(cancelable_result, Ok(TurnOutcome::MaxTurns)),
+        "run_turn_with_cancel must report the Stop-hook max-turns terminal as an \
+         OUTCOME, matching its own top-of-loop guard: {cancelable_result:?}"
+    );
+
+    // The non-cancelable twin, same fixture, raises instead of returning.
+    let (plain, plain_api) = fixture(1).await;
+    let plain_result = plain.run_turn("hi").await;
+    assert_eq!(plain_api.captured_msgs().await.len(), 1);
+    assert!(
+        matches!(
+            plain_result,
+            Err(orchestrator::OrchestratorError::MaxTurnsReached { max_turns: 1 })
+        ),
+        "run_turn must raise the same terminal: {plain_result:?}"
+    );
+}
+
 #[tokio::test]
 async fn stop_prevent_continuation_terminates() {
     let api = Arc::new(MockApiClient::new(vec![end_turn("done")]));

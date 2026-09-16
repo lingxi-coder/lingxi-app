@@ -108,3 +108,28 @@ pub(crate) enum StepExit {
     /// Return this outcome from the driver without running the epilogue.
     ReturnDirect(ConversationOutcome),
 }
+
+/// What one iteration of the BATCHED turn loop decided (§5.4).
+///
+/// The streaming loop's [`StepExit`] carries its outcome; this one does not,
+/// for the same reason [`GuardVerdict`] does not: the two batched entries map
+/// these terminals to different public types, and §3.2 keeps the difference.
+/// `run_turn` returns `ConversationOutcome` and ends the Stop-hook max-turns
+/// branch as `Err(MaxTurnsReached)`; `run_turn_with_cancel` returns
+/// `TurnOutcome` and ends it as `Ok(TurnOutcome::MaxTurns)`, matching its own
+/// top-of-loop guard. Naming the EVENT here and leaving the NAMING to each call
+/// site is what keeps that visible.
+pub(crate) enum BatchedRoundExit {
+    /// Run another iteration — a `Continue` step, a Stop hook asking to keep
+    /// working, or the token budget granting more.
+    Continue,
+    /// A Stop hook ended the turn. `handle_stop_at_end` already emitted the
+    /// end-turn event; the outcome it built rides along for the entry that can
+    /// express it.
+    StopHookTerminated(ConversationOutcome),
+    /// The Stop-hook blocking branch hit `max_turns`.
+    MaxTurns,
+    /// Natural end of turn, end event already emitted, with the id of the final
+    /// message for the entry that reports one.
+    EndTurn(MessageId),
+}

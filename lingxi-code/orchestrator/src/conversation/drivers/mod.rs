@@ -20,7 +20,7 @@ mod prepare;
 
 use super::*;
 use crate::streaming_loop::ExecutorPump;
-use loop_state::StepExit;
+use loop_state::{BatchedRoundExit, StepExit};
 use protocol::ContentBlock;
 
 /// One queued prompt, retaining its own transcript identity and origin class.
@@ -2228,6 +2228,112 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// What both batched entries do once a turn-step has returned: accumulate
+    /// its output tokens, then run the end-of-turn sequence — Stop hooks BEFORE
+    /// the token budget (`query.ts:1262-1308`).
+    ///
+    /// Returns what happened rather than an outcome, exactly as
+    /// [`loop_state::GuardVerdict`] does for the guards above it. The two
+    /// entries name these terminals differently — `run_turn` speaks
+    /// `ConversationOutcome` and ends the Stop-hook max-turns branch as
+    /// `Err(MaxTurnsReached)`, `run_turn_with_cancel` speaks `TurnOutcome` and
+    /// ends it as `Ok(TurnOutcome::MaxTurns)` — and §3.2 keeps that difference.
+    /// Folding the mapping in here is what would erase it, so it stays at each
+    /// call site, where a test can see the two disagree.
+    ///
+    /// `parent_cancel` is the entry's user-cancel token rather than a resolved
+    /// bool, so claude-code's `parentAborted` is still read at the same two
+    /// Stop-hook sites it is read at today. The non-cancelable entry has no
+    /// token and passes `None`, which is why `parentAborted` can never be true
+    /// there.
+    async fn run_batched_round(
+        &self,
+        state: &mut TurnLoopState,
+        step: TurnStepOutcome,
+        output_tokens: u64,
+        parent_cancel: Option<&CancellationToken>,
+    ) -> BatchedRoundExit {
+        // A3: accumulate the running per-turn output tokens (TS
+        // `getTurnOutputTokens()`). No-op for accounting when budget is off.
+        state.global_turn_tokens = state.global_turn_tokens.saturating_add(output_tokens);
+        match step {
+            TurnStepOutcome::Continue => BatchedRoundExit::Continue,
+            TurnStepOutcome::Ended {
+                final_message_id: id,
+                stop_reason,
+                allow_budget_continuation,
+                tool_requested_end,
+            } => {
+                // hooks B4: fire Stop hooks BEFORE the token-budget check
+                // (order: recovery → stop-hooks → token-budget, TS
+                // `query.ts:1262-1308`).
+                if tool_requested_end {
+                    self.fire_tool_result_end_stop_hooks(
+                        &stop_reason,
+                        state.stop_hook_active,
+                        parent_cancel.is_some_and(CancellationToken::is_cancelled),
+                    )
+                    .await;
+                } else {
+                    match self
+                        .handle_stop_at_end(
+                            &stop_reason,
+                            &mut state.stop_hook_active,
+                            &mut state.stop_hook_blocking_count,
+                            state.turn_count,
+                            id,
+                            parent_cancel.is_some_and(CancellationToken::is_cancelled),
+                        )
+                        .await
+                    {
+                        // `handle_stop_at_end` already emitted the end-turn here,
+                        // so neither caller re-emits on this branch.
+                        StopHookFlow::Terminate(outcome) => {
+                            return BatchedRoundExit::StopHookTerminated(outcome)
+                        }
+                        StopHookFlow::TerminateMaxTurns => return BatchedRoundExit::MaxTurns,
+                        StopHookFlow::LoopAgain => {
+                            // RECOV.4: a Stop hook forced the loop to continue —
+                            // reset the max_output_tokens recovery bookkeeping so the
+                            // continued turn starts a fresh escalation episode (TS
+                            // `query.ts:1291` sets `maxOutputTokensRecoveryCount: 0`
+                            // + `maxOutputTokensOverride: undefined` on the
+                            // stop-hook-blocking continuation).
+                            state.recovery.reset_max_output_tokens_recovery();
+                            return BatchedRoundExit::Continue;
+                        }
+                        StopHookFlow::FallThrough => {}
+                    }
+                }
+                // A3: at a natural end-of-turn, consult the token budget. If it
+                // says `continue`, inject the meta nudge, reset the A1 recovery
+                // count (per `query.ts:1332`), and loop again instead of ending.
+                // When budget is off this is a no-op.
+                //
+                // Gate on `end_turn`: unlike the streaming twin, which is
+                // structurally in the hardcoded `"end_turn"` branch, both batched
+                // entries carry the live `stop_reason`, so a TERMINAL end
+                // (blocking_limit / prompt_too_long) must NOT trigger budget
+                // continuation.
+                if allow_budget_continuation
+                    && stop_reason == "end_turn"
+                    && self
+                        .maybe_continue_for_budget(
+                            state.budget.as_mut(),
+                            &mut state.recovery,
+                            state.global_turn_tokens,
+                        )
+                        .await
+                {
+                    return BatchedRoundExit::Continue;
+                }
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn(&stop_reason, &cost).await;
+                BatchedRoundExit::EndTurn(id)
+            }
+        }
+    }
+
     /// Drive one user prompt through the turn loop until `end_turn` or
     /// `max_turns` is exhausted.
     ///
@@ -2357,80 +2463,18 @@ impl ConversationOrchestrator {
                 Some(&mut state.recovery),
             )
             .await?;
-            // A3: accumulate the running per-turn output tokens (TS
-            // `getTurnOutputTokens()`). No-op for accounting when budget is off.
-            state.global_turn_tokens = state.global_turn_tokens.saturating_add(output_tokens);
-            match step {
-                TurnStepOutcome::Continue => continue,
-                TurnStepOutcome::Ended {
-                    final_message_id: id,
-                    stop_reason,
-                    allow_budget_continuation,
-                    tool_requested_end,
-                } => {
-                    // hooks B4: fire Stop hooks BEFORE the token-budget check
-                    // (order: recovery → stop-hooks → token-budget, TS
-                    // `query.ts:1262-1308`).
-                    if tool_requested_end {
-                        self.fire_tool_result_end_stop_hooks(
-                            &stop_reason,
-                            state.stop_hook_active,
-                            // Non-cancelable path: this turn has no user-cancel
-                            // token, so `parentAborted` can never be true here.
-                            false,
-                        )
-                        .await;
-                    } else {
-                        match self
-                            .handle_stop_at_end(
-                                &stop_reason,
-                                &mut state.stop_hook_active,
-                                &mut state.stop_hook_blocking_count,
-                                state.turn_count,
-                                id,
-                                // Non-cancelable path: this turn has no user-cancel
-                                // token, so `parentAborted` can never be true here.
-                                false,
-                            )
-                            .await
-                        {
-                            StopHookFlow::Terminate(outcome) => return Ok(outcome),
-                            StopHookFlow::TerminateMaxTurns => {
-                                return Err(OrchestratorError::MaxTurnsReached {
-                                    max_turns: self.config.max_turns,
-                                });
-                            }
-                            StopHookFlow::LoopAgain => {
-                                // RECOV.4: a Stop hook forced the loop to continue —
-                                // reset the max_output_tokens recovery bookkeeping so the
-                                // continued turn starts a fresh escalation episode (TS
-                                // `query.ts:1291` sets `maxOutputTokensRecoveryCount: 0`
-                                // + `maxOutputTokensOverride: undefined` on the
-                                // stop-hook-blocking continuation).
-                                state.recovery.reset_max_output_tokens_recovery();
-                                continue;
-                            }
-                            StopHookFlow::FallThrough => {}
-                        }
-                    }
-                    // A3: at a natural end-of-turn, consult the token budget. If
-                    // it says `continue`, inject the meta nudge, reset the A1
-                    // recovery count (per `query.ts:1332`), and loop again
-                    // instead of breaking. When budget is off this is a no-op.
-                    if allow_budget_continuation
-                        && stop_reason == "end_turn"
-                        && self
-                            .maybe_continue_for_budget(
-                                state.budget.as_mut(),
-                                &mut state.recovery,
-                                state.global_turn_tokens,
-                            )
-                            .await
-                    {
-                        continue;
-                    }
-                    let cost = self.snapshot_cost_real().await;
-                    self.output.emit_end_turn(&stop_reason, &cost).await;
+            match self
+                .run_batched_round(&mut state, step, output_tokens, None)
+                .await
+            {
+                BatchedRoundExit::Continue => continue,
+                BatchedRoundExit::StopHookTerminated(outcome) => return Ok(outcome),
+                BatchedRoundExit::MaxTurns => {
+                    return Err(OrchestratorError::MaxTurnsReached {
+                        max_turns: self.config.max_turns,
+                    })
+                }
+                BatchedRoundExit::EndTurn(id) => {
                     final_message_id = id;
                     break;
                 }
@@ -3422,83 +3466,23 @@ impl ConversationOrchestrator {
                     return Ok(TurnOutcome::Cancelled);
                 }
             };
-            // A3: accumulate the running per-turn output tokens (TS
-            // `getTurnOutputTokens()`). No-op for accounting when budget is off.
-            state.global_turn_tokens = state.global_turn_tokens.saturating_add(output_tokens);
-            match step {
-                TurnStepOutcome::Continue => continue,
-                TurnStepOutcome::Ended {
-                    stop_reason,
-                    final_message_id: id,
-                    allow_budget_continuation,
-                    tool_requested_end,
-                } => {
-                    // hooks B4: Stop hooks (cancelable twin). `TurnOutcome` does
-                    // not distinguish StopHookPrevented from EndTurn, so both the
-                    // Terminate and FallThrough dispositions end the REPL turn as
-                    // EndTurn; only `LoopAgain` (a Stop hook asking to keep
-                    // working) loops. `handle_stop_at_end` already emits the
-                    // end-turn on Terminate, so we don't re-emit there.
-                    if tool_requested_end {
-                        self.fire_tool_result_end_stop_hooks(
-                            &stop_reason,
-                            state.stop_hook_active,
-                            cancel.is_cancelled(),
-                        )
-                        .await;
-                    } else {
-                        match self
-                            .handle_stop_at_end(
-                                &stop_reason,
-                                &mut state.stop_hook_active,
-                                &mut state.stop_hook_blocking_count,
-                                state.turn_count,
-                                id,
-                                cancel.is_cancelled(),
-                            )
-                            .await
-                        {
-                            StopHookFlow::Terminate(_) => return Ok(TurnOutcome::EndTurn),
-                            // Binary blocking-branch max-turns end — mirror this fn's
-                            // own top-of-loop guard, which returns `TurnOutcome::MaxTurns`.
-                            StopHookFlow::TerminateMaxTurns => return Ok(TurnOutcome::MaxTurns),
-                            StopHookFlow::LoopAgain => {
-                                // RECOV.4: a Stop hook forced the loop to continue —
-                                // reset the max_output_tokens recovery bookkeeping so
-                                // the continued turn starts a fresh escalation episode
-                                // (TS `query.ts:1291`), matching `run_turn`.
-                                state.recovery.reset_max_output_tokens_recovery();
-                                continue;
-                            }
-                            StopHookFlow::FallThrough => {}
-                        }
-                    }
-                    // A3: at a natural end-of-turn, consult the token budget. If
-                    // it says continue, inject the meta nudge, reset the A1
-                    // recovery count, and loop again instead of ending. When the
-                    // budget is off this is a no-op (parity default).
-                    //
-                    // Gate on `end_turn` (matching `run_turn`): unlike the
-                    // streaming twin, which is structurally in the hardcoded
-                    // `"end_turn"` branch, this driver carries the live
-                    // `stop_reason`, so a TERMINAL end (blocking_limit /
-                    // prompt_too_long) must NOT trigger budget continuation.
-                    if allow_budget_continuation
-                        && stop_reason == "end_turn"
-                        && self
-                            .maybe_continue_for_budget(
-                                state.budget.as_mut(),
-                                &mut state.recovery,
-                                state.global_turn_tokens,
-                            )
-                            .await
-                    {
-                        continue;
-                    }
-                    let cost = self.snapshot_cost_real().await;
-                    self.output.emit_end_turn(&stop_reason, &cost).await;
-                    return Ok(TurnOutcome::EndTurn);
-                }
+            match self
+                .run_batched_round(&mut state, step, output_tokens, Some(&cancel))
+                .await
+            {
+                BatchedRoundExit::Continue => continue,
+                // `TurnOutcome` does not distinguish StopHookPrevented from
+                // EndTurn, so a Stop-hook termination ends the REPL turn as
+                // EndTurn — the outcome the twin returns verbatim is dropped here
+                // on purpose.
+                BatchedRoundExit::StopHookTerminated(_) => return Ok(TurnOutcome::EndTurn),
+                // Binary blocking-branch max-turns end — mirror this fn's own
+                // top-of-loop guard, which returns `TurnOutcome::MaxTurns` where
+                // the twin returns `Err(MaxTurnsReached)`.
+                BatchedRoundExit::MaxTurns => return Ok(TurnOutcome::MaxTurns),
+                // This path has no epilogue and no final-message-id to carry, so
+                // it returns straight out instead of leaving the loop.
+                BatchedRoundExit::EndTurn(_) => return Ok(TurnOutcome::EndTurn),
             }
         }
     }

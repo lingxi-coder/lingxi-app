@@ -1518,6 +1518,11 @@ body {
 .code-card .hljs-strong { font-weight: 700; }
 
 .markdown-content { color: var(--text); overflow-wrap: anywhere; }
+/* …but a toned row owns its colour. `.markdown-content` sets `color` outright,
+   which beats the value the narration wrapper computes and passes down by
+   inheritance — so an engine failure rendered in ordinary text colour even
+   though the row was correctly marked `tone: 'danger'`. */
+[data-tone] .markdown-content { color: inherit; }
 .markdown-content p,
 .markdown-content ul,
 .markdown-content ol,

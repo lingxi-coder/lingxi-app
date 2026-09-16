@@ -40,7 +40,10 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   const slashCommand = user ? parseSlashCommandMessage(item.text) : null;
   const slashIcon = slashCommand ? commandPaletteIcon(slashCommand.name) : null;
   return (
-    <div className={user ? 'user-message-bubble' : undefined} data-delivery={delivery} style={{
+    // `data-tone` is what lets the stylesheet reach INSIDE the markdown body:
+    // `.markdown-content` hard-sets `color: var(--text)`, so the colour computed
+    // here never reached the text on its own.
+    <div className={user ? 'user-message-bubble' : undefined} data-delivery={delivery} data-tone={item.tone} style={{
       maxWidth: user ? images.length ? 'min(430px, 100%)' : 'min(700px, 90%)' : '100%',
       minWidth: 0,
       position: user ? 'relative' : undefined,

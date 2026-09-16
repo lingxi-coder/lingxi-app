@@ -822,6 +822,19 @@ test('background slash launch receipts yield to their matching agent card', () =
   assert.match(stage({ ...receipt, output: 'Could not start /code-review in the background: unavailable' }), /Could not start/);
 });
 
+test('a muted narration now mutes its body too, not just its wrapper', () => {
+  // The same `.markdown-content` override meant a `tone: 'muted'` row had a
+  // muted wrapper and a full-strength body. Widening the fix to `[data-tone]`
+  // rather than only `danger` is deliberate, so pin it.
+  const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) },
+    React.createElement(Stage, {
+      liveItems: [{ type: 'narration', id: 'm1', text: 'Conversation compacted', tone: 'muted', role: 'assistant' }],
+      sessionKey: 'muted',
+    } as never)));
+  assert.match(html, /data-tone="muted"/);
+  assert.ok(html.includes(tokens(false).text3), 'the muted token reaches the row');
+});
+
 test('an engine failure renders in the danger colour', () => {
   // The row used to render in the ordinary text colour with a "✗ " prefix, so
   // a failed turn read like any other assistant line.
@@ -829,8 +842,20 @@ test('an engine failure renders in the danger colour', () => {
   const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) },
     React.createElement(Stage, { liveItems: state.items, sessionKey: 'err' } as never)));
   assert.match(html, /api call failed: rate limited/);
-  assert.ok(html.includes(tokens(false).danger), 'the failure must use the danger token');
   assert.doesNotMatch(html, /[✗✕]/, 'no glyph in front of the message');
+  // `html.includes(danger)` alone was VACUOUS: the token does appear, on the
+  // wrapper's own `color`, while `.markdown-content` overrode it further down
+  // and the text still rendered black. renderToStaticMarkup applies no
+  // stylesheet, so the markup could never show that. Pin both halves of what
+  // actually has to be true instead.
+  assert.match(html, /data-tone="danger"/, 'the row must be marked for the stylesheet to reach');
+  assert.ok(html.includes(tokens(false).danger), 'and carry the danger colour');
+  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
+  assert.match(
+    css,
+    /\[data-tone\][^{]*\.markdown-content\s*\{[^}]*color:\s*inherit/,
+    'a toned row must beat `.markdown-content { color: var(--text) }`',
+  );
 });
 
 test('no blanket focus ring, but deliberate and high-contrast ones survive', () => {

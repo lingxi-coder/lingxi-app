@@ -88,6 +88,84 @@ fn epilogue_tool_registry() -> Arc<ToolRegistry> {
     Arc::new(r)
 }
 
+/// A tool that cancels the turn's token, so the NEXT loop-top guard sees it.
+///
+/// This is how §3.2's loop-top row is reached: the round completes, the
+/// disposition says continue, and the guard at the top of the next iteration
+/// finds the token already set.
+struct CancellingTool(tokio_util::sync::CancellationToken);
+
+#[async_trait::async_trait]
+impl tool_api::tool_trait::Tool for CancellingTool {
+    fn name(&self) -> &str {
+        "CancelsTurn"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| serde_json::json!({"type": "object"}));
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn validate_input(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> Result<(), tool_api::ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+    async fn description(
+        &self,
+        _input: &serde_json::Value,
+        _opts: &tool_api::tool_trait::DescriptionOptions,
+    ) -> String {
+        String::new()
+    }
+    async fn prompt(&self, _opts: &tool_api::tool_trait::PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: tool_api::progress::ToolProgressSender,
+    ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+        self.0.cancel();
+        Ok(tool_api::ToolCallResult {
+            data: serde_json::json!({"ok": true}),
+            model_content: None,
+            new_messages: vec![],
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+        })
+    }
+}
+
 struct NoopTool;
 
 #[async_trait::async_trait]
@@ -338,6 +416,85 @@ fn the_streaming_return_arm_skips_the_epilogue() {
             "a turn that ends through the Return arm must persist NO snapshot: it returns from \
              inside the loop and the epilogue is after it. Hoisting the epilogue into a shared \
              exit hands it to terminals that return early on purpose."
+        );
+    });
+}
+
+/// §3.2 row 6 — the POST-DRIVE stream/tool abort — and the mirror of
+/// `a_pre_cancelled_streaming_turn_emits_no_end_event`.
+///
+/// The tool cancels the token during its own execution, so the cancel is caught
+/// after the round is driven rather than at the next loop top. `aborted_during_
+/// stream` is true there, so the reason is `aborted_streaming` rather than
+/// `aborted_tools`, and the epilogue RUNS.
+///
+/// Against the entry pre-cancel, which emits nothing and runs nothing, these are
+/// opposite side effects behind the same `Cancelled` outcome. With both pinned,
+/// a shared exit cannot flatten them without turning one red.
+///
+/// NOT this test: §3.2 row 5, the loop-top guard. That one needs a cancel
+/// landing BETWEEN rounds rather than during one, and it emits from a different
+/// site (`drivers/mod.rs`'s literal `emit_end_turn("aborted_streaming")`, which
+/// this test does not reach — mutating it leaves this test green, which is how
+/// the mislabel was found). It remains uncovered.
+#[test]
+fn the_post_drive_abort_emits_aborted_streaming_and_runs_the_epilogue() {
+    run_with_large_stack(|| async {
+        let f = fixture();
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(CancellingTool(token.clone())));
+        let out = Arc::new(MockOutputStream::new());
+
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(MockStreamingApiClient::with_turns(vec![
+                streamed_tool_round("m1", "CancelsTurn"),
+                streamed_end_turn("m2"),
+            ])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            out.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            f.dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(f.writer.clone())
+        .with_file_history(f.file_history.clone());
+
+        orch.run_turn_streaming_with_cancel("ping", token.clone())
+            .await
+            .expect("streaming");
+
+        let ends: Vec<String> = out
+            .snapshot()
+            .await
+            .iter()
+            .filter_map(|e| match e {
+                platform_api::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            token.is_cancelled(),
+            "the tool must have cancelled the token, or this exercises the natural end instead"
+        );
+        assert_eq!(
+            ends,
+            vec!["aborted_streaming".to_string()],
+            "the post-drive abort emits aborted_STREAMING when the cancel landed during the \
+             stream. Pinned exactly rather than as any aborted_*: aborted_TOOLS is the same \
+             row's other branch (cancel during tool execution) and a guard accepting either \
+             could not tell them apart. The entry pre-cancel emits neither."
+        );
+        assert_eq!(
+            snapshot_lines(&f.session_path),
+            1,
+            "and it must RUN the epilogue, unlike the pre-cancel and unlike the Return arm. \
+             §3.2 gives this row 执行 in the epilogue column; the cancel-ish terminals have \
+             different answers and a shared exit owes each of them."
         );
     });
 }

@@ -54,7 +54,12 @@ export interface NarrationRunItem {
    * one, `N > 0` when the `N` groups before it are collapsed behind this row.
    */
   readonly loopWakeupStreak?: number;
-  readonly tone?: 'muted';
+  /**
+   * Semantic colouring. `danger` is the engine reporting a failure — carried as
+   * a TONE rather than baked into {@link text}, so the renderer decides how a
+   * failure looks and the copy stays the provider's own message.
+   */
+  readonly tone?: 'muted' | 'danger';
   readonly strong?: boolean;
   readonly role?: 'user' | 'assistant';
   /** Local prompt awaiting a turn boundary; absent on restored history. */

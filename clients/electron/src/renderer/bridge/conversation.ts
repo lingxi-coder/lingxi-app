@@ -1041,7 +1041,12 @@ function samePlan(a: readonly PlanTaskDto[], b: readonly PlanTaskDto[]): boolean
 function pushError(state: ConversationState, message: string): ConversationState {
   const items = state.items.slice();
   closeThinking(items, state.openThinkingIndex);
-  items.push({ type: 'narration', id: itemId(state.nextId), text: `✗ ${message}`, strong: true, role: 'assistant' });
+  // The failure is carried as a tone, not as a glyph glued to the copy: the
+  // text belongs to the provider ("api call failed: rate limited"), and a
+  // prefix baked into it cannot be styled, selected around, or read out
+  // sensibly — it also survived into `lastError` and anywhere else the message
+  // is reused.
+  items.push({ type: 'narration', id: itemId(state.nextId), text: message, tone: 'danger', strong: true, role: 'assistant' });
   return {
     ...state,
     items,

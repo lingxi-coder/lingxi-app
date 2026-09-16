@@ -32,7 +32,7 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   const t = useT();
   const user = item.role === 'user';
   const delivery = user ? item.delivery : undefined;
-  const color = item.tone === 'muted' ? t.text3 : t.text;
+  const color = item.tone === 'muted' ? t.text3 : item.tone === 'danger' ? t.danger : t.text;
   const images = item.images?.filter((image) => image.url.trim().length > 0) ?? [];
   const collapsible = narrationShouldCollapse(item);
   const expanded = !collapsible || open;

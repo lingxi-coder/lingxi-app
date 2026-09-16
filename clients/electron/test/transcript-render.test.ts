@@ -43,6 +43,7 @@ import { DiffView } from '../src/renderer/components/DiffView';
 import { Disclosure } from '../src/renderer/components/Disclosure';
 import { PermissionPrompt } from '../src/renderer/components/PermissionPrompt';
 import { Stage } from '../src/renderer/components/Stage';
+import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 import { parseSlashCommandMessage } from '../src/renderer/components/slashCommandMessage';
 import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
 import {
@@ -819,4 +820,15 @@ test('background slash launch receipts yield to their matching agent card', () =
   assert.match(stage({ ...receipt, isError: true }), /Command failed/);
   assert.match(stage({ ...receipt, output: receipt.output + '\nImportant additional output' }), /Important additional output/);
   assert.match(stage({ ...receipt, output: 'Could not start /code-review in the background: unavailable' }), /Could not start/);
+});
+
+test('an engine failure renders in the danger colour', () => {
+  // The row used to render in the ordinary text colour with a "✗ " prefix, so
+  // a failed turn read like any other assistant line.
+  const state = reduceEvent(emptyConversation(), { type: 'error', message: 'api call failed: rate limited' } as never);
+  const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) },
+    React.createElement(Stage, { liveItems: state.items, sessionKey: 'err' } as never)));
+  assert.match(html, /api call failed: rate limited/);
+  assert.ok(html.includes(tokens(false).danger), 'the failure must use the danger token');
+  assert.doesNotMatch(html, /[✗✕]/, 'no glyph in front of the message');
 });

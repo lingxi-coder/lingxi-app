@@ -295,6 +295,18 @@ test('turn_ended keeps the plan; a session change clears it', () => {
 
 // ── errors / notices ─────────────────────────────────────────────────────────
 
+test('an engine error carries a danger tone, not a glyph glued to the copy', () => {
+  // The message is the provider's own ("api call failed: rate limited"). A
+  // prefix baked into `text` cannot be coloured or selected around, and it
+  // followed the message everywhere the text was reused.
+  const s = reduceEvent(emptyConversation(), { type: 'error', message: 'api call failed: rate limited' });
+  const last = s.items.at(-1) as Narration;
+  assert.equal(last.text, 'api call failed: rate limited', 'the copy is exactly what the engine said');
+  assert.doesNotMatch(last.text, /[✗✕×]/, 'no decoration inside the text');
+  assert.equal(last.tone, 'danger', 'the failure is typed, so the renderer can colour it');
+  assert.equal(s.lastError, 'api call failed: rate limited');
+});
+
 test('error event records lastError but only turn_ended releases the running turn', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'turn_started' });

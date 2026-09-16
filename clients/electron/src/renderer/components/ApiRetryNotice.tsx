@@ -41,11 +41,25 @@ export function ApiRetryNotice({ retry }: { retry: ApiRetryStatus }) {
   }, [retry]);
   const left = secondsRemaining(retry.delay_ms, elapsed);
   return (
+    // Coloured as an error, not as neutral progress: this row exists because a
+    // call FAILED, and the retry is the recovery attempt. Rendering it in the
+    // same grey as "Thinking…" reads as ordinary work in progress, which is the
+    // impression that made a rate-limited turn look like nothing was wrong.
     <div className="transcript-run-item transcript-api-retry" data-run-type="api-retry" role="status">
-      <span className="running-sweep" style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>
+      <span
+        className="running-sweep"
+        style={{
+          '--sweep-base': t.danger,
+          // The sweep band must stay ON the danger hue. `t.text` is what the
+          // neutral "Thinking…" sweep uses, and over red it reads as a dark
+          // smear rather than a shimmer. Lightening `danger` keeps the row one
+          // colour, and the reduced-motion rule below falls back to the base.
+          '--sweep-highlight': `color-mix(in oklab, ${t.danger} 55%, white)`,
+        } as CSSProperties}
+      >
         {left > 0 ? `Retrying in ${left}s…` : 'Retrying…'}
       </span>
-      <span style={{ color: t.text3, fontSize: 13, marginLeft: 8 }}>
+      <span style={{ color: t.danger, fontSize: 13, marginLeft: 8 }}>
         {`attempt ${retry.attempt}/${retry.max_retries} · ${retry.message}`}
       </span>
     </div>

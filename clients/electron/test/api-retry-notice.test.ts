@@ -60,6 +60,22 @@ const stage = (apiRetry: unknown) => renderToStaticMarkup(React.createElement(
   React.createElement(Stage, { liveItems: [], running: true, sessionKey: 'k', apiRetry } as never),
 ));
 
+test('the retry reads as an error, not as neutral progress', () => {
+  // The row exists because a call FAILED. In the same grey as "Thinking…" it
+  // reads as ordinary work in progress — the impression that made a
+  // rate-limited turn look like nothing was wrong.
+  const danger = tokens(false).danger;
+  const html = stage(reduce(retry()).apiRetry);
+  assert.ok(html.includes(danger), `the notice must use the danger token ${danger}`);
+  assert.ok(
+    !html.includes(`color:${tokens(false).text3}`),
+    'the muted token is what it used to be styled with',
+  );
+  // The sweep band stays on the same hue, so the row never smears to a
+  // different colour mid-animation.
+  assert.match(html, /color-mix\(in oklab, [^)]*\)/);
+});
+
 test('the retry replaces the bare Thinking indicator the user was stuck on', () => {
   const waiting = stage(null);
   assert.match(waiting, /Thinking/);

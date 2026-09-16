@@ -1271,11 +1271,6 @@ impl StreamingTurnDriver<'_> {
                 .await;
         }
 
-        // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
-        loop_state.global_turn_tokens = loop_state
-            .global_turn_tokens
-            .saturating_add(pumped.output_tokens);
-
         // BILLING: record streaming-turn usage into CostTracker — mirrors the
         // non-streaming path in `turn_loop.rs`. #5 (main-loop parity): pass
         // the REAL wall-clock duration (stream-open → pump completion) and
@@ -1793,6 +1788,22 @@ impl StreamingTurnDriver<'_> {
                 partial_finalize_notice_id,
                 aborted_during_stream,
             } = finalized;
+
+            // A3: accumulate this step's output tokens (TS
+            // `getTurnOutputTokens()`), ONCE, after the model step has returned
+            // and before the disposition reads the running total.
+            //
+            // §3.4 wants a single accumulation boundary per step. This used to
+            // sit inside `finalize_iteration`, where the two batched entries
+            // accumulate in their loop bodies instead — three sites, one of them
+            // a step deeper than the others. Moving it here puts all three on
+            // the same boundary. Safe because nothing reads `global_turn_tokens`
+            // between the old site and the disposition that consumes it, and
+            // `streaming_budget_on_continues_then_stops_at_threshold` fails if
+            // the accumulation lands after the budget check rather than before.
+            loop_state.global_turn_tokens = loop_state
+                .global_turn_tokens
+                .saturating_add(pumped.output_tokens);
 
             // DEFERRED-3 / esc-interrupt FIX: "we were aborted" — the single
             // post-drive abort checkpoint. Once the user-interrupt token has fired,

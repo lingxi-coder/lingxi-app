@@ -80,6 +80,12 @@ pub struct ReplayedSession {
     /// This is not representable in `SessionState.history`, but must survive a
     /// cold resume for effort and compaction behavior to remain continuous.
     pub runtime_metadata: ResumeRuntimeMetadata,
+    /// The spawn results in [`Self::display_history`], keyed by `tool_use_id` —
+    /// see [`agent_spawn_results_from_messages`]. A host lowering that
+    /// transcript passes this to
+    /// `client_adapter::lowering::lower_transcript_with_agent_spawns` so a
+    /// replayed subagent card still knows which call created it.
+    pub agent_spawn_results: std::collections::HashMap<String, Value>,
 }
 
 impl ReplayedSession {
@@ -220,6 +226,10 @@ pub async fn replay_session_state(
         last_message_uuid: last_uuid,
         messages,
         runtime_metadata,
+        // Built from the DISPLAY entries, which is exactly the history the
+        // hosts lower for the client — and, being non-sidechain, is what makes
+        // this map main-chain-only.
+        agent_spawn_results: agent_spawn_results_from_messages(&display_entries),
     })
 }
 
@@ -779,6 +789,57 @@ fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
         .flat_map(|blocks| blocks.iter())
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+}
+
+/// Recover the SPAWN results from the persisted MAIN-CHAIN transcript: each
+/// `toolUseResult` payload that names a spawned agent, keyed by the
+/// `tool_use_id` it answers.
+///
+/// The turn loop stamps a tool's raw structured result on the persisted
+/// `tool_result` user line as `toolUseResult` (`conversation/transcript.rs`)
+/// precisely because `ContentBlock::ToolResult` cannot hold it: that block keeps
+/// only the model-facing TEXT. For an `Agent`/`Skill` call that payload's
+/// `agentId` is the ONLY structural link from a subagent back to the call that
+/// spawned it, and replay used to drop it — so every subagent card fell through
+/// to the end-of-transcript fallback after a restart.
+///
+/// Scope, all three parts load-bearing:
+///
+/// * **Spawns only.** A payload that does not name an agent is left out: a
+///   tool's `data` is the uncapped raw result (`Read`'s image base64, `Edit`'s
+///   whole pre-edit file) that no client renders, and carrying all of them
+///   measured 2.0x-34.5x on real transcripts against the capped text it would
+///   replace. This also keeps the ERROR arms out, which record a bare
+///   `Value::String` rather than the live `{"error": …}` shape.
+/// * **Main chain only.** Callers pass the non-sidechain display entries, so
+///   this can never describe a SUBAGENT's own transcript. Those are read from a
+///   separate per-agent file (`engine-desktop::session_agents`), which drops the
+///   sibling before lowering and needs its own recovery — do not reach for this
+///   map there; it would compile, stay green, and be empty.
+/// * **Single-block lines only.** Mirrors the writer: `take_tool_use_result`
+///   stamps the field only when the line holds exactly one `tool_result`
+///   (`sole_tool_result_id`). Fanning one payload across a multi-block line
+///   would hand tool B tool A's `agentId` and anchor a card to the WRONG call —
+///   a wrong answer in place of the old missing one.
+#[must_use]
+pub fn agent_spawn_results_from_messages(
+    messages: &[JsonlMessage],
+) -> std::collections::HashMap<String, Value> {
+    let mut results = std::collections::HashMap::new();
+    for message in messages {
+        let Some(result) = message.extra.get("toolUseResult") else {
+            continue;
+        };
+        if result.get("agentId").and_then(Value::as_str).is_none() {
+            continue;
+        }
+        let mut ids = tool_result_ids(message);
+        let (Some(only), None) = (ids.next(), ids.next()) else {
+            continue;
+        };
+        results.insert(only.to_string(), result.clone());
+    }
+    results
 }
 
 /// Extract all persisted deferred hook tools that have no later tool result.

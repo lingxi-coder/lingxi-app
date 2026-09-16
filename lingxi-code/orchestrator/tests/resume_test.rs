@@ -1738,3 +1738,132 @@ async fn scheduled_actual_settings_do_not_replace_persisted_human_defaults() {
         );
     }
 }
+
+/// REGRESSION: a resumed transcript dropped every tool's STRUCTURED result, so
+/// after a restart the desktop could no longer tell which call had spawned
+/// which subagent and stacked all of their cards at the bottom of the
+/// transcript.
+///
+/// `ContentBlock::ToolResult` can only hold the model-facing TEXT, which is
+/// why the turn loop stamps the raw structured result on the persisted
+/// `tool_result` line as `toolUseResult` in the first place. Replay has to hand
+/// that back, or the sole structural link from a subagent to its creation site
+/// (the Agent tool's `data.agentId`) exists only for the life of one process.
+#[tokio::test]
+async fn replay_recovers_the_structured_spawn_results_the_transcript_stamped() {
+    let (_temp, lingxi_home, cwd, sid, last_uuid, fs) = setup_two_turn_jsonl().await;
+    let transcript_path = session::jsonl::session_path(&lingxi_home, &cwd, &sid.to_string());
+    let spawn_uuid = Uuid::new_v4();
+    let result_uuid = Uuid::new_v4();
+    let agent_id = "7a1c9e0e-0000-4000-8000-00000000abcd";
+    let lines = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&json!({
+            "type": "assistant",
+            "uuid": spawn_uuid.to_string(),
+            "parentUuid": last_uuid.to_string(),
+            "sessionId": sid.to_string(),
+            "timestamp": "2026-05-25T12:00:02.000Z",
+            "cwd": cwd,
+            "version": "0.12.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_spawn", "name": "Agent",
+                 "input": {"description": "review", "subagent_type": "Explore"}}
+            ]}
+        }))
+        .unwrap(),
+        serde_json::to_string(&json!({
+            "type": "user",
+            "uuid": result_uuid.to_string(),
+            "parentUuid": spawn_uuid.to_string(),
+            "sessionId": sid.to_string(),
+            "timestamp": "2026-05-25T12:00:03.000Z",
+            "cwd": cwd,
+            "version": "0.12.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_spawn",
+                 "content": "Async agent launched successfully.", "is_error": false}
+            ]},
+            // The model-facing text above never names the id in a form a client
+            // may read; this sibling is the only structured copy.
+            "toolUseResult": {"status": "async_launched", "agentId": agent_id}
+        }))
+        .unwrap(),
+    );
+    tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript_path)
+        .await
+        .unwrap()
+        .write_all(lines.as_bytes())
+        .await
+        .unwrap();
+
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
+        .await
+        .expect("replay ok");
+    assert_eq!(
+        replayed.agent_spawn_results.get("toolu_spawn"),
+        Some(&json!({"status": "async_launched", "agentId": agent_id})),
+        "the structured result is keyed by the tool_use_id it answers",
+    );
+}
+
+/// The map is deliberately NARROWER than "every persisted `toolUseResult`",
+/// on both axes, and neither bound is visible from a call site.
+///
+/// * A payload that names no agent stays out. A tool's `data` is its raw
+///   uncapped result — `Read` ships an image's base64 where the model-facing
+///   text is the 41-byte "[Image content provided in tool result.]", `Edit`
+///   ships `originalFile` — and none of it renders. Carrying all of them
+///   measured 2.0x-34.5x growth on real transcripts for a payload that crosses
+///   as ONE `SessionResumed` frame.
+/// * A multi-block line stays out, mirroring the writer: `take_tool_use_result`
+///   stamps the field only for a line holding exactly one `tool_result`
+///   (`sole_tool_result_id`). Fanning one payload across several blocks would
+///   give tool B tool A's `agentId` — a card anchored to the WRONG call.
+#[test]
+fn spawn_result_recovery_skips_non_spawns_and_multi_block_lines() {
+    let line = |content: serde_json::Value, result: serde_json::Value| {
+        serde_json::from_value::<session::jsonl::JsonlMessage>(json!({
+            "type": "user",
+            "uuid": Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": Uuid::new_v4().to_string(),
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "message": {"role": "user", "content": content},
+            "toolUseResult": result,
+        }))
+        .expect("a well-formed jsonl line")
+    };
+    let block = |id: &str| json!({"type": "tool_result", "tool_use_id": id, "content": "x", "is_error": false});
+    let spawn =
+        json!({"status": "async_launched", "agentId": "7a1c9e0e-0000-4000-8000-00000000abcd"});
+
+    let messages = vec![
+        line(json!([block("toolu_spawn")]), spawn.clone()),
+        // A Bash payload — structured, large, and naming no agent.
+        line(
+            json!([block("toolu_bash")]),
+            json!({"stdout": "...", "exit_code": 0}),
+        ),
+        // The error arms record a bare string, not the live `{"error": …}`.
+        line(
+            json!([block("toolu_failed")]),
+            json!("Error: something went wrong"),
+        ),
+        // Two results on one line: the writer would not have stamped this.
+        line(json!([block("toolu_a"), block("toolu_b")]), spawn.clone()),
+    ];
+
+    let recovered = orchestrator::agent_spawn_results_from_messages(&messages);
+    assert_eq!(
+        recovered,
+        std::collections::HashMap::from([("toolu_spawn".to_string(), spawn)]),
+        "only the single-block line that names an agent is recovered",
+    );
+}

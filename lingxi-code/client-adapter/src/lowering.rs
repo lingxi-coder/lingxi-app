@@ -654,6 +654,55 @@ fn lower_message_image(block: &protocol::ContentBlock) -> Option<MessageImageDto
 /// have produced.
 #[must_use]
 pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
+    lower_transcript_with_agent_spawns(history, &std::collections::HashMap::new())
+}
+
+/// [`lower_transcript`] with each SPAWN result's structured payload restored.
+///
+/// `ContentBlock::ToolResult` keeps only the model-facing text, so a replayed
+/// `Agent`/`Skill` call loses the `agentId` its live `ToolUseResult` carried —
+/// and with it the only structural link from a subagent card back to the call
+/// that spawned it. `agent_spawns` is
+/// [`orchestrator::resume::ReplayedSession::agent_spawn_results`]: the persisted
+/// `toolUseResult` payloads that name a spawned agent, keyed by `tool_use_id`.
+///
+/// Deliberately NOT every tool's payload. A tool's structured `data` is the
+/// uncapped raw result — `Read` carries an image's base64, `Edit` carries the
+/// whole pre-edit file — none of which renders (`display` is derived from the
+/// text, and this DTO has no `content_blocks`), while the model-facing text it
+/// would replace is the one `tool_result_persistence` already capped. Restoring
+/// all of them measured 2.0x-34.5x on real transcripts for a payload that ships
+/// as a single `SessionResumed` frame; restoring only the spawn results is
+/// 1.00x-1.04x.
+#[must_use]
+pub fn lower_transcript_with_agent_spawns<S: std::hash::BuildHasher>(
+    history: &[ConversationMessage],
+    agent_spawns: &std::collections::HashMap<String, serde_json::Value, S>,
+) -> Vec<MessageDto> {
+    let mut transcript = lower_transcript_inner(history);
+    // A post-pass rather than a hook inside `lower_content_block_with`: that
+    // function is on the LIVE `MessageComplete` path too, and nothing about
+    // this override needs the pairing index — the lowered block already carries
+    // the `id` to look up and the `result_json` to replace.
+    if !agent_spawns.is_empty() {
+        for block in transcript
+            .iter_mut()
+            .flat_map(|message| &mut message.blocks)
+        {
+            if let MessageBlockDto::ToolResult {
+                id, result_json, ..
+            } = block
+            {
+                if let Some(data) = agent_spawns.get(id.as_str()) {
+                    *result_json = value_to_json_string(data);
+                }
+            }
+        }
+    }
+    transcript
+}
+
+fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
     let mut transcript = Vec::with_capacity(history.len());
     // ONE index for the WHOLE transcript: a `ToolUse` in assistant message N
     // pairs with its `ToolResult` in user message N+1.
@@ -1313,6 +1362,117 @@ mod tests {
         );
         let diff = display.diff.as_ref().expect("a structured diff");
         assert_eq!(diff.rows.len(), 2, "one removed row + one added row");
+    }
+
+    /// REGRESSION: after a restart EVERY subagent card piled up at the bottom
+    /// of the transcript instead of sitting at the call that spawned it.
+    ///
+    /// The desktop anchors a subagent to its creation site by reading `agentId`
+    /// off the spawn tool's structured result
+    /// (`clients/electron/src/renderer/components/transcriptAgentPlacement.ts`),
+    /// which the LIVE `ToolUseResult` event carries (`output_stream.rs` lowers
+    /// the full `data`). A replayed `ContentBlock::ToolResult` keeps only the
+    /// model-facing TEXT, so `result_json` came back as a bare JSON String,
+    /// the anchor never resolved, and every agent fell through to the
+    /// "wherever the transcript currently ends" fallback. The JSONL kept the
+    /// payload all along as `toolUseResult`; the post-pass puts it back.
+    #[test]
+    fn a_replayed_spawn_result_carries_the_structured_payload_the_jsonl_kept() {
+        use protocol::{ContentBlock, MessageId, ToolUseId};
+        let spawn = ToolUseId::new();
+        let read = ToolUseId::new();
+        let text = "Async agent launched successfully.";
+        let call = |tu: &ToolUseId, tool: &str| ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: tu.clone(),
+                name: tool.to_string(),
+                input: serde_json::json!({ "description": "review" }),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".to_string()),
+        };
+        let returned = |tu: &ToolUseId, content: &str| ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tu.clone(),
+                content: content.to_string(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let history = vec![
+            call(&spawn, "Agent"),
+            returned(&spawn, text),
+            call(&read, "Read"),
+            returned(&read, "file contents"),
+        ];
+        let data = serde_json::json!({
+            "status": "async_launched",
+            "agentId": "7a1c9e0e-0000-4000-8000-00000000abcd",
+        });
+        let spawns = std::collections::HashMap::from([(spawn.to_string(), data.clone())]);
+
+        let result_json = |dtos: &[MessageDto], index: usize| {
+            let MessageBlockDto::ToolResult { result_json, .. } = &dtos[index].blocks[0] else {
+                panic!("expected a ToolResult block");
+            };
+            serde_json::from_str::<serde_json::Value>(result_json).unwrap()
+        };
+        let seeded = lower_transcript_with_agent_spawns(&history, &spawns);
+        let bare = lower_transcript(&history);
+
+        assert_eq!(
+            result_json(&seeded, 1),
+            data,
+            "the spawn payload reaches result_json verbatim",
+        );
+        // Pins the defect itself: with nothing seeded the payload is the TEXT,
+        // so `agentId` is unreachable however a client parses it.
+        assert_eq!(
+            result_json(&bare, 1),
+            serde_json::Value::String(text.to_string()),
+        );
+        // And pins the BOUND: a tool the map does not name is untouched, so a
+        // `Read`/`Edit`/`Bash` row still ships its capped model-facing text
+        // rather than the uncapped raw `data` (image base64, whole pre-edit
+        // files) that measured 2.0x-34.5x on real transcripts.
+        assert_eq!(
+            result_json(&seeded, 3),
+            serde_json::Value::String("file contents".to_string()),
+        );
+        // The pre-derived display is never re-derived, seeded or not.
+        assert_eq!(seeded[1].blocks[0].clone(), {
+            let MessageBlockDto::ToolResult { display, .. } = &bare[1].blocks[0] else {
+                panic!("expected a ToolResult block");
+            };
+            let MessageBlockDto::ToolResult {
+                id,
+                tool,
+                is_error,
+                old_string,
+                new_string,
+                file_path,
+                ..
+            } = &seeded[1].blocks[0]
+            else {
+                panic!("expected a ToolResult block");
+            };
+            MessageBlockDto::ToolResult {
+                id: id.clone(),
+                tool: tool.clone(),
+                result_json: value_to_json_string(&data),
+                is_error: *is_error,
+                old_string: old_string.clone(),
+                new_string: new_string.clone(),
+                file_path: file_path.clone(),
+                display: display.clone(),
+            }
+        });
     }
 
     /// REGRESSION: a resumed transcript persists a tool result's MODEL-FACING

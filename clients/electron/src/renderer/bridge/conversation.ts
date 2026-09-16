@@ -1,4 +1,4 @@
-import { resultAgentId } from '../components/transcriptAgentPlacement';
+import { spawnResultAgentId } from '../components/transcriptAgentPlacement';
 /**
  * Live-conversation reducer (M10 A1 — C3).
  *
@@ -498,7 +498,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       const previous = idx === undefined ? undefined : state.items[idx];
       const settled = {
         status: event.is_error ? ('error' as const) : ('done' as const),
-        agentId: resultAgentId(event.result_json),
+        agentId: spawnResultAgentId(event.tool, event.result_json),
         ...(event.display
           ? { result: event.display }
           : { note: fallbackToolBody(event.result_json) }),
@@ -924,7 +924,7 @@ export function conversationFromMessages(
           const idx = toolIndex.get(block.id);
           const settled = {
             status: block.is_error ? ('error' as const) : ('done' as const),
-            agentId: resultAgentId(block.result_json),
+            agentId: spawnResultAgentId(block.tool, block.result_json),
             ...(block.display
               ? { result: block.display }
               : { note: fallbackToolBody(block.result_json) }),

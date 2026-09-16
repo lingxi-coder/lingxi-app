@@ -2757,7 +2757,14 @@ impl EngineCommandRouter {
                         }
                     };
                     (
-                        client_adapter::lowering::lower_transcript(&replayed.display_history),
+                        // Same transcript the resume path emits, so it must be
+                        // lowered the same way — a `main` row whose spawn
+                        // results were dropped here would re-open the very
+                        // anchoring gap the resume path closes.
+                        client_adapter::lowering::lower_transcript_with_agent_spawns(
+                            &replayed.display_history,
+                            &replayed.agent_spawn_results,
+                        ),
                         engine_desktop::session_agents::transcript_revision(&raw),
                     )
                 }
@@ -3898,8 +3905,10 @@ impl CommandRouter for EngineCommandRouter {
                 // the renderer receives the complete main-thread transcript so
                 // pre-compaction messages remain visible without re-entering
                 // the LLM context.
-                let messages =
-                    client_adapter::lowering::lower_transcript(&replayed.display_history);
+                let messages = client_adapter::lowering::lower_transcript_with_agent_spawns(
+                    &replayed.display_history,
+                    &replayed.agent_spawn_results,
+                );
                 let resume_plan_mode = replayed.state.plan_mode;
                 let previous_session_id = self.handle.current_session_id().await;
                 let previous_permission_mode = self

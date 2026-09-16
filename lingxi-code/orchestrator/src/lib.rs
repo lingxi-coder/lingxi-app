@@ -101,7 +101,7 @@ pub use prompt::{
 };
 pub use provider_adapter::ProviderApiAdapter;
 pub use resume::{
-    deferred_tool_replays_from_messages, prompt_snapshot_from_messages,
+    agent_spawn_results_from_messages, deferred_tool_replays_from_messages, prompt_snapshot_from_messages,
     replay_deferred_tools_after_resume, replay_session_state, runtime_metadata_from_messages,
     state_from_messages, ReplayedSession, ResumeError, ResumeRuntimeMetadata,
 };

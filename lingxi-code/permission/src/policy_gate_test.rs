@@ -2901,6 +2901,87 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         assert_eq!(gate.permission_mode().as_deref(), Some("auto"));
     }
 
+    /// REGRESSION: "Full access" silently skipped the plan dialog.
+    ///
+    /// Every other gate here is a SAFETY gate, and BypassPermissions is the user
+    /// accepting an action's risk. The plan dialog is not that — it is the one
+    /// place the user reads the plan and says go. Suppressing it left the
+    /// transcript announcing "User has approved the plan" for a plan the user
+    /// was never shown, which is what this reproduces.
+    #[tokio::test]
+    async fn full_access_still_asks_the_user_to_approve_a_plan() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let inner = Arc::new(PlanApprovalInner {
+            seen: seen.clone(),
+            response: PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+        });
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::BypassPermissions,
+                Vec::new(),
+            )),
+            inner,
+        );
+        let outcome = gate
+            .check_exit_plan_mode("1. Ship it", &PermissionCheckContext::default())
+            .await;
+        assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
+        // The allow is worth nothing on its own — a skipped dialog also allows.
+        // The subject is that the plan REACHED the approval transport.
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            1,
+            "Full access must still raise the plan dialog"
+        );
+        assert_eq!(seen[0].0, "ExitPlanMode");
+        assert_eq!(seen[0].1["plan"], "1. Ship it");
+    }
+
+    /// The headless carve-out the fix above deliberately keeps: with no dialog
+    /// to show, the MODE decides, exactly as it did before.
+    #[tokio::test]
+    async fn a_headless_session_keeps_the_mode_decision_for_a_plan() {
+        let headless = PermissionCheckContext {
+            is_non_interactive_session: true,
+            ..PermissionCheckContext::default()
+        };
+        let build = |mode| {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let inner = Arc::new(PlanApprovalInner {
+                seen: seen.clone(),
+                response: PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                },
+            });
+            (
+                seen,
+                PolicyPermissionGate::new(
+                    Arc::new(PermissionPolicy::from_rules(mode, Vec::new())),
+                    inner,
+                ),
+            )
+        };
+        let (seen, gate) = build(PermissionMode::BypassPermissions);
+        assert!(matches!(
+            gate.check_exit_plan_mode("p", &headless).await,
+            PermissionOutcome::Allow { .. }
+        ));
+        assert!(seen.lock().unwrap().is_empty(), "headless raises no dialog");
+
+        let (_, gate) = build(PermissionMode::Default);
+        assert!(matches!(
+            gate.check_exit_plan_mode("p", &headless).await,
+            PermissionOutcome::Deny { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn exit_plan_approval_computes_auto_eligibility_and_consumes_it() {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));

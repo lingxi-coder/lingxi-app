@@ -2297,14 +2297,25 @@ impl PermissionGate for PolicyPermissionGate {
         // first-class request.  Do not route it through the ordinary policy
         // authorize path: ExitPlanMode is AllowByDefault there, which would
         // skip the approval dialog entirely.
-        if self.effective_mode_for_tool("ExitPlanMode") == PermissionMode::BypassPermissions {
-            return PermissionOutcome::Allow {
-                updated_input: None,
-                permission_updates: Vec::new(),
-                decision_classification: None,
-            };
-        }
+        //
+        // BypassPermissions does NOT skip this dialog. Every other gate here is
+        // a SAFETY gate, and "Full access" is the user saying they accept the
+        // risk of an action; the plan dialog is not that. It is the one point
+        // where the user reads the plan and says go — a product decision, not a
+        // risk decision — so suppressing it in Full access left the user with a
+        // transcript that announced "User has approved the plan" for a plan they
+        // were never shown.
         if ctx.is_non_interactive_session {
+            // Headless has no dialog to show, so the mode still decides:
+            // BypassPermissions means "never block me" and keeps its allow;
+            // every other mode fails closed exactly as before.
+            if self.effective_mode_for_tool("ExitPlanMode") == PermissionMode::BypassPermissions {
+                return PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                };
+            }
             return PermissionOutcome::Deny {
                 reason: headless_deny_message("ExitPlanMode"),
             };

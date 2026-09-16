@@ -7570,9 +7570,9 @@ impl MobileEngineHandle {
                         &self.inner.workflow_launcher.app_data_root,
                     )
                     .await;
-                let messages = client_adapter::lowering::lower_transcript_with_agent_spawns(
+                let messages = client_adapter::lowering::lower_transcript_with_tool_results(
                     &replayed.display_history,
-                    &replayed.agent_spawn_results,
+                    &replayed.client_state_tool_results,
                 );
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {

@@ -36,6 +36,29 @@ function object(json: string): Record<string, unknown> {
 function content(value: Record<string, unknown>): string {
   return typeof value.plan === 'string' && value.plan.trim() ? value.plan : '';
 }
+/**
+ * Did this ExitPlanMode result record an approval?
+ *
+ * Only replay needs to ask: a LIVE result reaching the reducer at all means the
+ * gate already allowed the call. On replay the sole witness is the payload's
+ * `model_content`, and `tools/plan/src/plan_mode.rs` writes one of THREE
+ * approval strings there — `EXIT_PLAN_APPROVED_PREFIX` ("…your plan."),
+ * `EXIT_PLAN_APPROVED_EMPTY_MSG` ("…exiting plan mode."), and
+ * `EXIT_PLAN_APPROVED_AGENT_MSG` ("…the plan.").
+ *
+ * Match their shared stem rather than re-listing the endings: the previous
+ * alternation spelled out two of the three and silently dropped the agent one,
+ * so an identical approved plan read `approved` in one shape and stayed
+ * `submitted` in the other. A denial never reaches here — it arrives as
+ * `is_error` and is handled above.
+ *
+ * There is deliberately no `plan_mode` check: that key is not in the tool's
+ * `data` at all (`plan_mode.rs` emits `{plan, isAgent, filePath, hasTaskTool,
+ * planWasEdited, model_content}`), so testing it was dead either way.
+ */
+function approvedByResult(value: Record<string, unknown>): boolean {
+  return typeof value.model_content === 'string' && /^User has approved /.test(value.model_content);
+}
 function resolutionStatus(resolution: string): SubmittedPlan['status'] {
   return resolution === 'approved' ? 'approved' : resolution === 'denied' ? 'rejected' : 'failed';
 }
@@ -97,8 +120,7 @@ function result(state: SubmittedPlanState, id: string, json: string, isError: bo
   }
   if (prior.resultReceived && (historical || prior.status !== 'submitted')) return state;
   const status = prior.status === 'rejected' ? 'rejected' : isError ? 'failed'
-    : !historical || value.plan_mode === false
-      || (typeof value.model_content === 'string' && /^User has approved (?:your plan|exiting plan mode)\./.test(value.model_content)) ? 'approved' : prior.status;
+    : !historical || approvedByResult(value) ? 'approved' : prior.status;
   return { ...state, calls: state.calls.map((call) => call.id === id ? {
     ...call,
     content: !isError && body ? body : call.content,

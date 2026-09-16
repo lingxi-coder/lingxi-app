@@ -54,7 +54,10 @@ test('history requires explicit success evidence and ignores ordinary prose', ()
  assert.equal(s.submittedPlan?.status, 'submitted');
  s = event(s, { type: 'message_complete', message: { role: 'assistant', blocks: [
  { type: 'tool_use', id: 'v', tool: 'ExitPlanMode', input_json: '{"plan":"# Verified"}' },
- { type: 'tool_result', id: 'v', tool: 'ExitPlanMode', result_json: '{"plan_mode":false}', is_error: false },
+ // A real approval payload. This used to read `{"plan_mode":false}`, a shape
+ // the engine never emits — `plan_mode.rs` asserts `data.get("plan_mode").is_none()`
+ // for both plan tools, so the branch it pinned could only ever fire in this test.
+ { type: 'tool_result', id: 'v', tool: 'ExitPlanMode', result_json: '{"plan":"# Verified","model_content":"User has approved your plan."}', is_error: false },
  ] } });
  assert.equal(s.submittedPlan?.status, 'approved');
 });
@@ -144,4 +147,44 @@ test('connection reset retains completed plans but history does not retain aband
  pending = event(pending, { type: 'session_resumed', session_id: session, mode: 'code', messages: [] } as ClientEvent);
  assert.equal(pending.submittedPlan, null);
  assert.deepEqual(pending.submittedPlanState.calls, []);
+});
+
+// ── restored plan cards ──────────────────────────────────────────────────────
+// A resumed session used to show an approved plan as "Preparing plan…": the
+// replayed `result_json` was a bare JSON string, so the reducer recovered
+// neither the document nor the approval and fell back to `submitted`.
+const resumed = (resultJson: string): ClientEvent => ({
+  type: 'session_resumed', session_id: session, mode: 'code', messages: [
+    { role: 'assistant', blocks: [{ type: 'tool_use', id: 'a', tool: 'ExitPlanMode', input_json: '{}' }] },
+    { role: 'user', blocks: [{ type: 'tool_result', id: 'a', tool: 'ExitPlanMode', result_json: resultJson, is_error: false }] },
+  ],
+} as ClientEvent);
+
+test('a restored plan keeps its document and its approval', () => {
+  // ExitPlanMode's input carries no plan (its schema has none) — the document
+  // only ever arrives in the result payload.
+  const s = event(emptyRuntimeCenterState(), resumed(JSON.stringify({
+    plan: '# Ship it', model_content: 'User has approved your plan. You can now start coding.',
+  })));
+  assert.deepEqual(s.submittedPlan, { id: 'a', content: '# Ship it', status: 'approved' });
+});
+
+test('every approval wording the engine writes reads as approved', () => {
+  // The three constants in tools/plan/src/plan_mode.rs. The agent one was the
+  // drift: the old alternation listed the other two and silently dropped it.
+  for (const model_content of [
+    'User has approved your plan. You can now start coding. Start with updating your todo list if applicable',
+    'User has approved exiting plan mode. You can now proceed.',
+    'User has approved the plan. There is nothing else needed from you now. Please respond with "ok"',
+  ]) {
+    const s = event(emptyRuntimeCenterState(), resumed(JSON.stringify({ plan: '# P', model_content })));
+    assert.equal(s.submittedPlan?.status, 'approved', model_content.slice(0, 40));
+  }
+});
+
+test('a replayed result with no approval wording does not invent one', () => {
+  // The flattened shape a pre-fix transcript still replays as: a bare JSON
+  // string parses to no object, so nothing may be claimed about approval.
+  const s = event(emptyRuntimeCenterState(), resumed(JSON.stringify('User has approved your plan.')));
+  assert.equal(s.submittedPlan, null, 'no document, so no card at all');
 });

@@ -80,12 +80,13 @@ pub struct ReplayedSession {
     /// This is not representable in `SessionState.history`, but must survive a
     /// cold resume for effort and compaction behavior to remain continuous.
     pub runtime_metadata: ResumeRuntimeMetadata,
-    /// The spawn results in [`Self::display_history`], keyed by `tool_use_id` —
-    /// see [`agent_spawn_results_from_messages`]. A host lowering that
-    /// transcript passes this to
-    /// `client_adapter::lowering::lower_transcript_with_agent_spawns` so a
-    /// replayed subagent card still knows which call created it.
-    pub agent_spawn_results: std::collections::HashMap<String, Value>,
+    /// The [`CLIENT_STATE_TOOLS`] results in [`Self::display_history`], keyed by
+    /// `tool_use_id` — see [`client_state_tool_results_from_messages`]. A host
+    /// lowering that transcript passes this to
+    /// `client_adapter::lowering::lower_transcript_with_tool_results` so a
+    /// replayed subagent card still knows which call created it, and a replayed
+    /// plan card still has its document and its approval.
+    pub client_state_tool_results: std::collections::HashMap<String, Value>,
 }
 
 impl ReplayedSession {
@@ -229,7 +230,7 @@ pub async fn replay_session_state(
         // Built from the DISPLAY entries, which is exactly the history the
         // hosts lower for the client — and, being non-sidechain, is what makes
         // this map main-chain-only.
-        agent_spawn_results: agent_spawn_results_from_messages(&display_entries),
+        client_state_tool_results: client_state_tool_results_from_messages(&display_entries),
     })
 }
 
@@ -791,26 +792,38 @@ fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
         .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
 }
 
-/// Recover the SPAWN results from the persisted MAIN-CHAIN transcript: each
-/// `toolUseResult` payload that names a spawned agent, keyed by the
-/// `tool_use_id` it answers.
+/// The tools whose STRUCTURED result a client rebuilds UI state from, and which
+/// therefore has to survive a replay.
+///
+/// Deliberately an allowlist and not a shape test. Every other tool's `data` is
+/// the uncapped raw result — `Read` ships an image's base64, `Edit` ships the
+/// whole pre-edit file — which no client renders and which would replace the
+/// capped model-facing text; carrying all of them measured 2.0x-34.5x growth on
+/// real transcripts for a payload that crosses as ONE `SessionResumed` frame.
+///
+/// * `Agent` / `Task` / `Skill` — the payload's `agentId` is the only structural
+///   link from a subagent card back to the call that spawned it.
+/// * `ExitPlanMode` — the payload's `plan` is the plan document and its
+///   `model_content` is the approval wording. Without them a resumed plan card
+///   has no body and falls back to its `submitted` placeholder, so a plan the
+///   user actually approved reads as still being prepared.
+pub const CLIENT_STATE_TOOLS: &[&str] = &["Agent", "Task", "Skill", "ExitPlanMode"];
+
+/// Recover the [`CLIENT_STATE_TOOLS`] results from the persisted MAIN-CHAIN
+/// transcript, keyed by the `tool_use_id` each one answers.
 ///
 /// The turn loop stamps a tool's raw structured result on the persisted
 /// `tool_result` user line as `toolUseResult` (`conversation/transcript.rs`)
 /// precisely because `ContentBlock::ToolResult` cannot hold it: that block keeps
-/// only the model-facing TEXT. For an `Agent`/`Skill` call that payload's
-/// `agentId` is the ONLY structural link from a subagent back to the call that
-/// spawned it, and replay used to drop it — so every subagent card fell through
-/// to the end-of-transcript fallback after a restart.
+/// only the model-facing TEXT. Replay used to drop it, so every client that
+/// rebuilds state from `result_json` saw nothing after a restart.
 ///
 /// Scope, all three parts load-bearing:
 ///
-/// * **Spawns only.** A payload that does not name an agent is left out: a
-///   tool's `data` is the uncapped raw result (`Read`'s image base64, `Edit`'s
-///   whole pre-edit file) that no client renders, and carrying all of them
-///   measured 2.0x-34.5x on real transcripts against the capped text it would
-///   replace. This also keeps the ERROR arms out, which record a bare
-///   `Value::String` rather than the live `{"error": …}` shape.
+/// * **Allowlisted tools only** — see [`CLIENT_STATE_TOOLS`]. The pairing index
+///   below is what makes this a TOOL test rather than a guess at the payload's
+///   shape: the `tool_result` line names only the id it answers, so the name has
+///   to come from the `tool_use` in an earlier message.
 /// * **Main chain only.** Callers pass the non-sidechain display entries, so
 ///   this can never describe a SUBAGENT's own transcript. Those are read from a
 ///   separate per-agent file (`engine-desktop::session_agents`), which drops the
@@ -819,24 +832,45 @@ fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
 /// * **Single-block lines only.** Mirrors the writer: `take_tool_use_result`
 ///   stamps the field only when the line holds exactly one `tool_result`
 ///   (`sole_tool_result_id`). Fanning one payload across a multi-block line
-///   would hand tool B tool A's `agentId` and anchor a card to the WRONG call —
+///   would hand tool B tool A's payload and anchor a card to the WRONG call —
 ///   a wrong answer in place of the old missing one.
 #[must_use]
-pub fn agent_spawn_results_from_messages(
+pub fn client_state_tool_results_from_messages(
     messages: &[JsonlMessage],
 ) -> std::collections::HashMap<String, Value> {
+    let mut names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     let mut results = std::collections::HashMap::new();
     for message in messages {
+        for block in message
+            .message
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            if let (Some(id), Some(name)) = (
+                block.get("id").and_then(Value::as_str),
+                block.get("name").and_then(Value::as_str),
+            ) {
+                names.insert(id, name);
+            }
+        }
         let Some(result) = message.extra.get("toolUseResult") else {
             continue;
         };
-        if result.get("agentId").and_then(Value::as_str).is_none() {
-            continue;
-        }
         let mut ids = tool_result_ids(message);
         let (Some(only), None) = (ids.next(), ids.next()) else {
             continue;
         };
+        if !names
+            .get(only)
+            .is_some_and(|name| CLIENT_STATE_TOOLS.contains(name))
+        {
+            continue;
+        }
         results.insert(only.to_string(), result.clone());
     }
     results

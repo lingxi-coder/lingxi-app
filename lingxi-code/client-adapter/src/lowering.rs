@@ -654,17 +654,19 @@ fn lower_message_image(block: &protocol::ContentBlock) -> Option<MessageImageDto
 /// have produced.
 #[must_use]
 pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
-    lower_transcript_with_agent_spawns(history, &std::collections::HashMap::new())
+    lower_transcript_with_tool_results(history, &std::collections::HashMap::new())
 }
 
-/// [`lower_transcript`] with each SPAWN result's structured payload restored.
+/// [`lower_transcript`] with the client-state tools' structured payloads restored.
 ///
 /// `ContentBlock::ToolResult` keeps only the model-facing text, so a replayed
-/// `Agent`/`Skill` call loses the `agentId` its live `ToolUseResult` carried —
-/// and with it the only structural link from a subagent card back to the call
-/// that spawned it. `agent_spawns` is
-/// [`orchestrator::resume::ReplayedSession::agent_spawn_results`]: the persisted
-/// `toolUseResult` payloads that name a spawned agent, keyed by `tool_use_id`.
+/// call loses everything its live `ToolUseResult` carried in `data` — the
+/// `agentId` that links a subagent card to the call that spawned it, and the
+/// `plan`/`model_content` that give a plan card its document and its approval.
+/// `tool_results` is
+/// [`orchestrator::resume::ReplayedSession::client_state_tool_results`]: those
+/// payloads keyed by `tool_use_id`, already restricted to
+/// `orchestrator::CLIENT_STATE_TOOLS`.
 ///
 /// Deliberately NOT every tool's payload. A tool's structured `data` is the
 /// uncapped raw result — `Read` carries an image's base64, `Edit` carries the
@@ -672,19 +674,19 @@ pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
 /// text, and this DTO has no `content_blocks`), while the model-facing text it
 /// would replace is the one `tool_result_persistence` already capped. Restoring
 /// all of them measured 2.0x-34.5x on real transcripts for a payload that ships
-/// as a single `SessionResumed` frame; restoring only the spawn results is
+/// as a single `SessionResumed` frame; restoring only the allowlisted ones is
 /// 1.00x-1.04x.
 #[must_use]
-pub fn lower_transcript_with_agent_spawns<S: std::hash::BuildHasher>(
+pub fn lower_transcript_with_tool_results<S: std::hash::BuildHasher>(
     history: &[ConversationMessage],
-    agent_spawns: &std::collections::HashMap<String, serde_json::Value, S>,
+    tool_results: &std::collections::HashMap<String, serde_json::Value, S>,
 ) -> Vec<MessageDto> {
     let mut transcript = lower_transcript_inner(history);
     // A post-pass rather than a hook inside `lower_content_block_with`: that
     // function is on the LIVE `MessageComplete` path too, and nothing about
     // this override needs the pairing index — the lowered block already carries
     // the `id` to look up and the `result_json` to replace.
-    if !agent_spawns.is_empty() {
+    if !tool_results.is_empty() {
         for block in transcript
             .iter_mut()
             .flat_map(|message| &mut message.blocks)
@@ -693,7 +695,7 @@ pub fn lower_transcript_with_agent_spawns<S: std::hash::BuildHasher>(
                 id, result_json, ..
             } = block
             {
-                if let Some(data) = agent_spawns.get(id.as_str()) {
+                if let Some(data) = tool_results.get(id.as_str()) {
                     *result_json = value_to_json_string(data);
                 }
             }
@@ -1423,7 +1425,7 @@ mod tests {
             };
             serde_json::from_str::<serde_json::Value>(result_json).unwrap()
         };
-        let seeded = lower_transcript_with_agent_spawns(&history, &spawns);
+        let seeded = lower_transcript_with_tool_results(&history, &spawns);
         let bare = lower_transcript(&history);
 
         assert_eq!(

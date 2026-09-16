@@ -28,7 +28,12 @@ test('completed ExitPlanMode without a document does not keep preparing or open 
  const liveItems:RunItem[]=[{id:'plan',type:'tool',tool:'ExitPlanMode',status:'done',view:{label:'ExitPlanMode'} as never}];
  const state=reduceSubmittedPlanMessages(emptySubmittedPlanState(),[{blocks:[
   {type:'tool_use',id:'plan',tool:'ExitPlanMode',input_json:'{}'},
-  {type:'tool_result',id:'plan',tool:'ExitPlanMode',result_json:JSON.stringify({plan_mode:false,plan:null,filePath:'/missing/plan.md'}),is_error:false},
+  // The payload the engine actually emits for an approved, document-less exit,
+  // copied from a real transcript. This used to carry `plan_mode:false`, a key
+  // `plan_mode.rs` asserts is absent from both plan tools' results — so the
+  // branch it relied on could only ever fire here, and the real shape fell
+  // through to 'submitted' and rendered "Preparing plan…" forever.
+  {type:'tool_result',id:'plan',tool:'ExitPlanMode',result_json:JSON.stringify({plan:null,isAgent:false,filePath:'/missing/plan.md',hasTaskTool:true,planWasEdited:false,model_content:'User has approved exiting plan mode. You can now proceed.'}),is_error:false},
  ]}] as never,'empty');
  const html=renderToStaticMarkup(React.createElement(Theme.Provider,{value:tokens(false)},React.createElement(Stage,{liveItems,sessionKey:'empty',submittedPlans:state.calls,onOpenPlan:()=>{}})));
  assert.match(html,/Plan mode exited/);

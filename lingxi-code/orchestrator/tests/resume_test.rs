@@ -1750,7 +1750,7 @@ async fn scheduled_actual_settings_do_not_replace_persisted_human_defaults() {
 /// that back, or the sole structural link from a subagent to its creation site
 /// (the Agent tool's `data.agentId`) exists only for the life of one process.
 #[tokio::test]
-async fn replay_recovers_the_structured_spawn_results_the_transcript_stamped() {
+async fn replay_recovers_the_structured_client_state_results_the_transcript_stamped() {
     let (_temp, lingxi_home, cwd, sid, last_uuid, fs) = setup_two_turn_jsonl().await;
     let transcript_path = session::jsonl::session_path(&lingxi_home, &cwd, &sid.to_string());
     let spawn_uuid = Uuid::new_v4();
@@ -1807,7 +1807,7 @@ async fn replay_recovers_the_structured_spawn_results_the_transcript_stamped() {
         .await
         .expect("replay ok");
     assert_eq!(
-        replayed.agent_spawn_results.get("toolu_spawn"),
+        replayed.client_state_tool_results.get("toolu_spawn"),
         Some(&json!({"status": "async_launched", "agentId": agent_id})),
         "the structured result is keyed by the tool_use_id it answers",
     );
@@ -1816,18 +1816,19 @@ async fn replay_recovers_the_structured_spawn_results_the_transcript_stamped() {
 /// The map is deliberately NARROWER than "every persisted `toolUseResult`",
 /// on both axes, and neither bound is visible from a call site.
 ///
-/// * A payload that names no agent stays out. A tool's `data` is its raw
+/// * A tool outside `CLIENT_STATE_TOOLS` stays out. Its `data` is the raw
 ///   uncapped result — `Read` ships an image's base64 where the model-facing
 ///   text is the 41-byte "[Image content provided in tool result.]", `Edit`
 ///   ships `originalFile` — and none of it renders. Carrying all of them
 ///   measured 2.0x-34.5x growth on real transcripts for a payload that crosses
-///   as ONE `SessionResumed` frame.
+///   as ONE `SessionResumed` frame. The gate is the paired tool NAME, which the
+///   result line does not carry — hence the call fixtures below.
 /// * A multi-block line stays out, mirroring the writer: `take_tool_use_result`
 ///   stamps the field only for a line holding exactly one `tool_result`
 ///   (`sole_tool_result_id`). Fanning one payload across several blocks would
 ///   give tool B tool A's `agentId` — a card anchored to the WRONG call.
 #[test]
-fn spawn_result_recovery_skips_non_spawns_and_multi_block_lines() {
+fn client_state_recovery_skips_other_tools_and_multi_block_lines() {
     let line = |content: serde_json::Value, result: serde_json::Value| {
         serde_json::from_value::<session::jsonl::JsonlMessage>(json!({
             "type": "user",
@@ -1840,30 +1841,50 @@ fn spawn_result_recovery_skips_non_spawns_and_multi_block_lines() {
         }))
         .expect("a well-formed jsonl line")
     };
+    // The result line names only the id it answers, so the tool NAME has to
+    // come from the paired call in an earlier message.
+    let call = |id: &str, tool: &str| {
+        serde_json::from_value::<session::jsonl::JsonlMessage>(json!({
+            "type": "assistant",
+            "uuid": Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": Uuid::new_v4().to_string(),
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": id, "name": tool, "input": {}}
+            ]},
+        }))
+        .expect("a well-formed jsonl line")
+    };
     let block = |id: &str| json!({"type": "tool_result", "tool_use_id": id, "content": "x", "is_error": false});
     let spawn =
         json!({"status": "async_launched", "agentId": "7a1c9e0e-0000-4000-8000-00000000abcd"});
 
+    let plan = json!({"plan": "1. Ship it", "model_content": "User has approved your plan."});
     let messages = vec![
+        call("toolu_spawn", "Agent"),
         line(json!([block("toolu_spawn")]), spawn.clone()),
-        // A Bash payload — structured, large, and naming no agent.
+        call("toolu_plan", "ExitPlanMode"),
+        line(json!([block("toolu_plan")]), plan.clone()),
+        // A Bash payload — structured, large, and not a client-state tool.
+        call("toolu_bash", "Bash"),
         line(
             json!([block("toolu_bash")]),
             json!({"stdout": "...", "exit_code": 0}),
         ),
-        // The error arms record a bare string, not the live `{"error": …}`.
-        line(
-            json!([block("toolu_failed")]),
-            json!("Error: something went wrong"),
-        ),
         // Two results on one line: the writer would not have stamped this.
+        call("toolu_a", "Agent"),
+        call("toolu_b", "Agent"),
         line(json!([block("toolu_a"), block("toolu_b")]), spawn.clone()),
     ];
 
-    let recovered = orchestrator::agent_spawn_results_from_messages(&messages);
+    let recovered = orchestrator::client_state_tool_results_from_messages(&messages);
     assert_eq!(
         recovered,
-        std::collections::HashMap::from([("toolu_spawn".to_string(), spawn)]),
-        "only the single-block line that names an agent is recovered",
+        std::collections::HashMap::from([
+            ("toolu_spawn".to_string(), spawn),
+            ("toolu_plan".to_string(), plan),
+        ]),
+        "only single-block lines answering a client-state tool are recovered",
     );
 }

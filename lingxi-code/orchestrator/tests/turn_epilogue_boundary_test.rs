@@ -1,0 +1,343 @@
+//! §3.6, the file-history epilogue: who runs it, and who deliberately does not.
+//!
+//! The epilogue lives in the streaming `run()` alone — `make_snapshot` at turn
+//! start, `append_file_history_snapshot` AFTER the loop. `try_run_turn` and
+//! `try_run_turn_cancelable` have no equivalent, and §3.6 says so outright:
+//! "PR 5 不得给 batched print/REPL 新增 file-history，也不得让 streaming 的
+//! `ReturnDirect` 突然获得收尾." §8 lists "给 batched 误加 file-history" as its
+//! own risk row.
+//!
+//! Three properties, and the second and third are the ones PR 5 can break by
+//! being tidy:
+//!
+//!   * streaming's normal completion persists a snapshot;
+//!   * batched persists none — it has no epilogue at all;
+//!   * streaming's `Return(...)` arm returns from INSIDE the loop, so it skips
+//!     the epilogue that sits after it. EndConversation takes that arm.
+//!
+//! Observed at the real output — the transcript file — rather than through a
+//! mock writer, because "was a snapshot persisted" is a question about the
+//! JSONL, and the line carries its own marker (`"type":"file-history-snapshot"`).
+
+use llm_client::ContentBlock as LlmContentBlock;
+use orchestrator::test_support::{
+    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
+    mock_message_response, noop_hook_executor, text_delta, MockApiClient, MockOutputStream,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+};
+use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
+use platform_api::FileSystem;
+use platform_posix::fs::PosixFileSystem;
+use session::jsonl::JsonlWriter;
+use std::future::Future;
+use std::sync::Arc;
+use tempfile::tempdir;
+use tool_api::registry::ToolRegistry;
+
+fn run_with_large_stack<F, Fut>(build: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()>,
+{
+    let handle = std::thread::Builder::new()
+        .name("turn-epilogue-boundary".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(build());
+        })
+        .expect("spawn");
+    handle.join().expect("test thread panicked");
+}
+
+/// Everything a turn needs to be able to persist a file-history snapshot: a
+/// transcript to write to, and a `FileHistory` to snapshot.
+struct Fixture {
+    dir: tempfile::TempDir,
+    session_path: std::path::PathBuf,
+    writer: Arc<JsonlWriter>,
+    file_history: Arc<session::FileHistory>,
+}
+
+fn fixture() -> Fixture {
+    let dir = tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs));
+    let file_history = Arc::new(session::FileHistory::new(
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        "epilogue-test".to_string(),
+    ));
+    Fixture {
+        dir,
+        session_path,
+        writer,
+        file_history,
+    }
+}
+
+/// How many `file-history-snapshot` lines the transcript carries.
+/// A registry with one inert tool, so a streamed tool round can dispatch.
+fn epilogue_tool_registry() -> Arc<ToolRegistry> {
+    let mut r = ToolRegistry::new();
+    r.register_builtin(Arc::new(NoopTool));
+    Arc::new(r)
+}
+
+struct NoopTool;
+
+#[async_trait::async_trait]
+impl tool_api::tool_trait::Tool for NoopTool {
+    fn name(&self) -> &str {
+        "Noop"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| serde_json::json!({"type": "object"}));
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn validate_input(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> Result<(), tool_api::ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+    async fn description(
+        &self,
+        _input: &serde_json::Value,
+        _opts: &tool_api::tool_trait::DescriptionOptions,
+    ) -> String {
+        String::new()
+    }
+    async fn prompt(&self, _opts: &tool_api::tool_trait::PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: tool_api::progress::ToolProgressSender,
+    ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+        Ok(tool_api::ToolCallResult {
+            data: serde_json::json!({"ok": true}),
+            model_content: None,
+            new_messages: vec![],
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+        })
+    }
+}
+
+fn snapshot_lines(path: &std::path::Path) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("file-history-snapshot")
+        })
+        .count()
+}
+
+/// A streamed round that CALLS A TOOL.
+///
+/// The EndConversation arm lives in the tool-round disposition, so a text-only
+/// `end_turn` never reaches it — the turn ends through the natural `Complete`
+/// arm instead, which does run the epilogue. The first draft of the Return test
+/// scripted text and failed on exactly that.
+fn streamed_tool_round(id: &str, tool: &str) -> Vec<llm_client::LlmEvent> {
+    vec![
+        message_start(id, "claude-opus-4-7"),
+        orchestrator::test_support_stream::content_block_start_tool_use(
+            0,
+            protocol::ToolUseId::new(),
+            tool,
+        ),
+        orchestrator::test_support::input_json_delta(0, "{}"),
+        content_block_stop(0),
+        message_delta_stop("tool_use"),
+        message_stop(),
+    ]
+}
+
+fn streamed_end_turn(id: &str) -> Vec<llm_client::LlmEvent> {
+    scripted![
+        message_start(id, "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "answer"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]
+}
+
+/// STREAMING persists the snapshot after a normal completion.
+///
+/// This is the control the other two tests are measured against: without it,
+/// "batched wrote none" and "the Return arm wrote none" could both be true
+/// because nothing in the fixture can write one at all.
+#[test]
+fn streaming_persists_a_file_history_snapshot_after_a_normal_turn() {
+    run_with_large_stack(|| async {
+        let f = fixture();
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(MockStreamingApiClient::with_turns(vec![streamed_end_turn(
+                "m1",
+            )])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            f.dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(f.writer.clone())
+        .with_file_history(f.file_history.clone());
+
+        orch.run_turn_streaming("ping").await.expect("streaming");
+
+        assert_eq!(
+            snapshot_lines(&f.session_path),
+            1,
+            "the streaming epilogue must persist exactly one file-history snapshot per turn; \
+             /rewind and --resume rebuild their index from these lines"
+        );
+    });
+}
+
+/// BATCHED persists none — it has no epilogue.
+///
+/// Same wiring, same opportunity, different driver. §3.6 records the absence as
+/// a fact about today's code, and §8 lists "giving batched file-history" as a
+/// risk of PR 5 rather than a fix: `run_turn` backs print and the stdio REPL,
+/// and handing them a restore point they never had changes what those
+/// transcripts contain.
+#[test]
+fn the_batched_entries_persist_no_file_history_snapshot() {
+    run_with_large_stack(|| async {
+        for (label, cancelable) in [("run_turn", false), ("run_turn_with_cancel", true)] {
+            let f = fixture();
+            let orch = ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![mock_message_response(
+                    vec![LlmContentBlock::Text {
+                        text: "answer".into(),
+                        cache_control: None,
+                    }],
+                    Some("end_turn"),
+                )])),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                f.dir.path().to_path_buf(),
+            )
+            .with_jsonl_writer(f.writer.clone())
+            .with_file_history(f.file_history.clone());
+
+            if cancelable {
+                orch.run_turn_with_cancel("ping", tokio_util::sync::CancellationToken::new())
+                    .await
+                    .expect(label);
+            } else {
+                orch.run_turn("ping").await.expect(label);
+            }
+
+            assert_eq!(
+                snapshot_lines(&f.session_path),
+                0,
+                "{label} must persist NO file-history snapshot. The epilogue lives in the \
+                 streaming run() alone; a shared one that every entry reaches would add \
+                 restore points to print and the stdio REPL, which have never had them."
+            );
+        }
+    });
+}
+
+/// STREAMING's `Return(...)` arm skips the epilogue.
+///
+/// `EndConversation` returns from INSIDE the loop, and the epilogue sits after
+/// it — so a turn that ends that way persists no snapshot even though the same
+/// driver persists one on a normal end. §4 spells this out as "ReturnDirect,
+/// 跳过 epilogue", and §3.6 forbids letting it "suddenly acquire" one.
+///
+/// This is the row a unified driver is most likely to erase: moving the
+/// epilogue into a shared exit path gives it to every terminal, including the
+/// ones that return early on purpose.
+#[test]
+fn the_streaming_return_arm_skips_the_epilogue() {
+    run_with_large_stack(|| async {
+        let f = fixture();
+        let end_slot: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(MockStreamingApiClient::with_turns(vec![
+                streamed_tool_round("m1", "Noop"),
+                streamed_end_turn("m2"),
+            ])),
+            epilogue_tool_registry(),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            f.dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(f.writer.clone())
+        .with_file_history(f.file_history.clone())
+        .with_end_conversation_slot(end_slot.clone());
+
+        orch.run_turn_streaming("ping").await.expect("streaming");
+
+        assert_eq!(
+            snapshot_lines(&f.session_path),
+            0,
+            "a turn that ends through the Return arm must persist NO snapshot: it returns from \
+             inside the loop and the epilogue is after it. Hoisting the epilogue into a shared \
+             exit hands it to terminals that return early on purpose."
+        );
+    });
+}

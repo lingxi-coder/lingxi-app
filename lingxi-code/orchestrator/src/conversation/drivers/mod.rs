@@ -1,5 +1,6 @@
 //! Batched, cancelable, and streaming conversation turn drivers.
 
+mod disposition;
 mod prepare;
 
 use super::*;
@@ -2910,14 +2911,11 @@ impl ConversationOrchestrator {
                 // if raised, surface the end message and terminate instead
                 // of continuing. Default-OFF (no slot wired) → strict no-op
                 // → byte-identical to before.
-                if self
-                    .end_conversation_slot
-                    .as_ref()
-                    .is_some_and(|s| s.swap(false, std::sync::atomic::Ordering::SeqCst))
-                {
-                    self.output
-                        .emit_text(crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE)
-                        .await;
+                // Consumed BEFORE the lone-wakeup check below, and the arm
+                // returns on a hit — so a wakeup arming survives an
+                // EndConversation turn here, where on the batched path it does
+                // not. Deliberate; see the shared helper's note.
+                if self.take_end_conversation_request().await {
                     return Ok(StreamingIterationDisposition::Return(
                         ConversationOutcome::EndTurn {
                             turn_count: loop_state.turn_count,

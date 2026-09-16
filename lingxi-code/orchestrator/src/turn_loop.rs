@@ -1005,15 +1005,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // shared end-request slot during tool execution above. Consume it; if
     // raised, terminate the conversation and surface the end message to the
     // user. Default-OFF (no slot wired) → never raised → byte-identical.
-    let end_conversation_requested = orch
-        .end_conversation_slot
-        .as_ref()
-        .is_some_and(|s| s.swap(false, std::sync::atomic::Ordering::SeqCst));
-    if end_conversation_requested {
-        orch.output
-            .emit_text(crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE)
-            .await;
-    }
+    // Consumed AFTER the lone-wakeup resolution above, unlike the streaming
+    // twin.  still outranks every other signal in the
+    // disposition match below.
+    let end_conversation_requested = orch.take_end_conversation_request().await;
 
     // Oer only exhausts two consecutive malformed attempts: every other
     // transition replaces `malformed_tool_use_retry` in the oracle state.

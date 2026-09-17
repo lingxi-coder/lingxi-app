@@ -155,6 +155,19 @@ pub enum MarketplaceExternalSource {
         #[serde(default)]
         registry: Option<String>,
     },
+    /// Run a shell command that prints exactly one absolute plugin directory
+    /// (oracle plugin command source). `mode:"link"` uses that directory in
+    /// place; omitted/`copy` copies it into the plugin cache.
+    Command {
+        /// Shell command whose stdout is a single absolute plugin path.
+        command: String,
+        /// Timeout in seconds (oracle default 60 when unset).
+        #[serde(default)]
+        timeout: Option<u64>,
+        /// How the printed directory is consumed.
+        #[serde(default)]
+        mode: Option<MarketplaceCommandMode>,
+    },
     /// File source (port-only superset; see the enum doc comment).
     File { path: String },
     /// Directory source (port-only superset; see the enum doc comment).
@@ -169,6 +182,17 @@ pub enum MarketplaceExternalSource {
         #[serde(default)]
         error: Option<String>,
     },
+}
+
+/// How a marketplace `source:"command"` result is installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarketplaceCommandMode {
+    /// Copy the command's output directory into the plugin cache.
+    Copy,
+    /// Use the command's output directory in place (linked, not copied).
+    /// Unsupported on Windows (oracle `c6e`).
+    Link,
 }
 
 /// One plugin entry in a marketplace catalog.
@@ -498,6 +522,53 @@ mod tests {
                 assert_eq!(sha256.as_deref(), Some("b".repeat(64)).as_deref());
             }
             other => panic!("expected Archive, got {other:?}"),
+        }
+    }
+
+    /// Oracle plugin command source: `{source:"command", command, timeout?,
+    /// mode?: "link"|"copy"}`. `mode:"link"` uses the command's output
+    /// directory in place; omitted mode is copy-into-cache.
+    #[test]
+    fn command_source_parses_command_timeout_and_link_mode() {
+        let source: MarketplaceExternalSource = serde_json::from_value(serde_json::json!({
+            "source": "command",
+            "command": "printf '%s\\n' /tmp/produced-plugin",
+            "timeout": 15,
+            "mode": "link"
+        }))
+        .expect("parse command source");
+        match source {
+            MarketplaceExternalSource::Command {
+                command,
+                timeout,
+                mode,
+            } => {
+                assert_eq!(command, "printf '%s\\n' /tmp/produced-plugin");
+                assert_eq!(timeout, Some(15));
+                assert_eq!(mode, Some(MarketplaceCommandMode::Link));
+            }
+            other => panic!("expected Command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_source_default_mode_is_copy_when_omitted() {
+        let source: MarketplaceExternalSource = serde_json::from_value(serde_json::json!({
+            "source": "command",
+            "command": "echo /tmp/plugin"
+        }))
+        .expect("parse command source");
+        match source {
+            MarketplaceExternalSource::Command {
+                command,
+                timeout,
+                mode,
+            } => {
+                assert_eq!(command, "echo /tmp/plugin");
+                assert_eq!(timeout, None);
+                assert_eq!(mode, None);
+            }
+            other => panic!("expected Command, got {other:?}"),
         }
     }
 }

@@ -574,8 +574,6 @@ const GOAL_PROMPT_TIMEOUT_SECS: u64 = 30;
 const GOAL_STOP_HOOK_NAME: &str = "__session_goal_stop";
 const GOAL_STOP_HOOK_PRIORITY: i32 = 1_000_000;
 
-
-
 enum StopHookFlow {
     /// Terminate the turn loop, returning this outcome (`emit_end_turn` already
     /// fired inside the helper).
@@ -1175,9 +1173,9 @@ pub struct AppAgentPromptProfile {
 /// Cached start-of-conversation git probe + `gitStatus:` attachment.
 pub(crate) struct GitStatusSnapshot {
     /// Env-block `Is a git repository` probe.
-    probe: Option<crate::prompt::GitStatus>,
+    pub(crate) probe: Option<crate::prompt::GitStatus>,
     /// Rendered `gitStatus:` system-prompt attachment.
-    block: Option<String>,
+    pub(crate) block: Option<String>,
 }
 
 pub struct ConversationOrchestrator {
@@ -1425,10 +1423,10 @@ mod compaction_impl;
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
 pub use drivers_impl::QueuedPromptInput;
-#[path = "conversation/hooks.rs"]
-mod hooks_impl;
 #[path = "conversation/goal_retry.rs"]
 mod goal_retry_impl;
+#[path = "conversation/hooks.rs"]
+mod hooks_impl;
 #[path = "conversation/model.rs"]
 mod model_impl;
 #[path = "conversation/prompt.rs"]

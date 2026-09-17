@@ -260,7 +260,7 @@ pub use orchestrator::{
     ConversationControls, CostSnapshot, CurrentUsageSnapshot, DeferredToolReplay, SummarizeDirection,
     DirectoryAddedHookSummary, DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome,
     split_connection_profile, ConnectionRef, GoalClearedReason, GoalStatusAttachment, GoalStatusKind, HandleError, HookInfo,
-    McpActionState,
+    LoopUsageProvider, LoopUsageRow, McpActionState,
     McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelBillingMode,
     ModelCapabilities, ModelListing, ModelMetadata, ModelPricing, ModelPricingTier,
     ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent, OutputStream,

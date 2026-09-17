@@ -3991,6 +3991,68 @@ mod tests {
         ));
     }
 
+    /// 2.1.269: `Edit(secrets/**)` deny applies to Bash `tee` destinations, not
+    /// only `>` redirects. `Bash(tee:*)` must not cover dests outside cwd.
+    #[test]
+    fn tee_destination_matching_edit_deny_rule_is_denied() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(secrets/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        for command in ["tee secrets/keys.txt", "echo x | tee secrets/keys.txt"] {
+            match p.authorize("Bash", &bash(command)) {
+                PermissionResult::Deny {
+                    explanation,
+                    reason,
+                    ..
+                } => {
+                    assert!(
+                        explanation.as_deref().is_some_and(
+                            |e| e.starts_with("tee in '/proj/secrets/keys.txt' was blocked.")
+                        ),
+                        "command {command:?}: {explanation:?}"
+                    );
+                    assert!(
+                        matches!(reason, PermissionDecisionReason::MatchedRule { .. }),
+                        "deny must be rule-typed, got {reason:?}"
+                    );
+                }
+                other => panic!("expected tee Edit-deny for {command:?}, got {other:?}"),
+            }
+        }
+        assert!(
+            !matches!(
+                p.authorize("Bash", &bash("tee out/log.txt")),
+                PermissionResult::Deny { .. }
+            ),
+            "a non-denied tee dest inside cwd is not this guard"
+        );
+    }
+
+    #[test]
+    fn bash_tee_star_allow_does_not_cover_dests_outside_cwd() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(tee:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("tee /etc/passwd")) {
+            PermissionResult::Ask { prompt, .. } => {
+                assert!(
+                    prompt
+                        .message
+                        .starts_with("tee in '/etc/passwd' was blocked."),
+                    "{}",
+                    prompt.message
+                );
+            }
+            other => panic!("expected containment ask, got {other:?}"),
+        }
+        assert!(matches!(
+            p.authorize("Bash", &bash("tee")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
     /// The command-path deny is bypass-immune (a deny short-circuits before the
     /// mode layer).
     #[test]
@@ -4162,6 +4224,104 @@ mod tests {
             restricted.authorize("Read", &read("/home/u/.lingxi/CLAUDE.md")),
             PermissionResult::Deny { .. }
         ));
+    }
+
+    /// HP-4 / oracle `XY`: session-scoped BK allowances (plan files, tool
+    /// results, scratchpad, job tmp, project temp) survive the read block.
+    #[test]
+    fn read_block_allows_session_scoped_bk_paths() {
+        let plans = PathBuf::from("/home/u/.lingxi/plans");
+        let matcher = crate::plan_files::PlanFileMatcher::with_identity(
+            crate::plan_files::PlanFileIdentity {
+                plans_dir: plans.clone(),
+                slug: "sprint".into(),
+                workshop_enabled: false,
+            },
+        );
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())
+            .with_roots(roots())
+            .with_block_reads_outside_working_directories(true)
+            .with_plan_files(std::sync::Arc::new(matcher))
+            .with_session_read_allowances([
+                SessionReadAllowance::directory(
+                    PathBuf::from("/home/u/.lingxi/projects/-proj/sid/tool-results"),
+                    TOOL_RESULT_READ_ALLOW_REASON,
+                ),
+                SessionReadAllowance::directory(
+                    PathBuf::from("/tmp/lingxi-scratch"),
+                    SCRATCHPAD_READ_ALLOW_REASON,
+                ),
+                SessionReadAllowance::directory(
+                    PathBuf::from("/home/u/.lingxi/jobs/j1/tmp"),
+                    JOB_TMP_READ_ALLOW_REASON,
+                ),
+                SessionReadAllowance::directory(
+                    PathBuf::from("/tmp/lingxi-proj-temp"),
+                    PROJECT_TEMP_READ_ALLOW_REASON,
+                ),
+            ]);
+
+        let plan = p.authorize("Read", &read("/home/u/.lingxi/plans/sprint.md"));
+        assert!(
+            matches!(
+                &plan,
+                PermissionResult::Allow {
+                    reason: PermissionDecisionReason::Other { reason },
+                    ..
+                } if reason == crate::plan_files::PLAN_FILE_READ_ALLOW_REASON
+            ),
+            "plan file must be allowed, got {plan:?}"
+        );
+
+        for (path, reason) in [
+            (
+                "/home/u/.lingxi/projects/-proj/sid/tool-results/out.bin",
+                TOOL_RESULT_READ_ALLOW_REASON,
+            ),
+            ("/tmp/lingxi-scratch/notes.md", SCRATCHPAD_READ_ALLOW_REASON),
+            (
+                "/home/u/.lingxi/jobs/j1/tmp/chunk",
+                JOB_TMP_READ_ALLOW_REASON,
+            ),
+            ("/tmp/lingxi-proj-temp/x", PROJECT_TEMP_READ_ALLOW_REASON),
+        ] {
+            let out = p.authorize("Read", &read(path));
+            assert!(
+                !matches!(out, PermissionResult::Deny { .. }),
+                "{path} must survive the read block, got {out:?}"
+            );
+            if let PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other { reason: got },
+                ..
+            } = &out
+            {
+                assert_eq!(got, reason, "{path}");
+            }
+        }
+
+        // A sibling that is not a session allowance is still blocked.
+        assert!(matches!(
+            p.authorize("Read", &read("/tmp/unrelated.txt")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn job_tmp_allowance_requires_bg_session_and_jobs_root() {
+        let home = PathBuf::from("/home/u/.lingxi");
+        let job = PathBuf::from("/home/u/.lingxi/jobs/j1");
+        let allowance = job_tmp_session_allowance(&home, Some("bg"), Some(&job))
+            .expect("bg job under jobs/ must be allowed");
+        assert_eq!(allowance.path, PathBuf::from("/home/u/.lingxi/jobs/j1/tmp"));
+        assert_eq!(allowance.reason, JOB_TMP_READ_ALLOW_REASON);
+
+        assert!(job_tmp_session_allowance(&home, Some("interactive"), Some(&job)).is_none());
+        assert!(job_tmp_session_allowance(&home, Some("daemon"), Some(&job)).is_none());
+        assert!(job_tmp_session_allowance(&home, Some("bg"), None).is_none());
+        assert!(
+            job_tmp_session_allowance(&home, Some("bg"), Some(Path::new("/tmp/not-jobs/j1")),)
+                .is_none()
+        );
     }
 
     /// 🚨 PARITY `mEt`: under the read block, an additional working directory

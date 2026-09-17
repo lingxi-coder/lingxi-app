@@ -21,6 +21,7 @@ fn plugin_seed_env_lock() -> &'static std::sync::Mutex<()> {
 
 pub mod agent_validation;
 pub mod brand_normalize;
+mod command_source;
 pub mod dependency;
 pub mod discovery;
 mod git;
@@ -51,13 +52,14 @@ pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationErr
 pub use brand_normalize::{
     known_pairs, load_frozen_identities, normalize, BrandPair, FrozenIdentity, NormalizeReport,
 };
+pub use command_source::materialize_command_plugin_source;
 pub use dependency::{
     merge_dependency_requirements, parse_dependencies, version_satisfies_all, PluginDependency,
 };
 pub use discovery::{
-    discover_cli_plugin_dirs, discover_effective_plugins, discover_enabled_plugins,
-    discover_installed_plugins, discover_recorded_plugins, has_control_or_bidi_formatting,
-    validate_marketplace_name, validate_plugin_name,
+    cli_plugin_dir_collection_children, discover_cli_plugin_dirs, discover_effective_plugins,
+    discover_enabled_plugins, discover_installed_plugins, discover_recorded_plugins,
+    has_control_or_bidi_formatting, validate_marketplace_name, validate_plugin_name,
 };
 pub use git::{
     clone_plugin_git, clone_plugin_git_pinned, is_confusable_authority_url, is_suspicious_url,
@@ -72,12 +74,12 @@ pub use manifest::{
 pub use marketplace::MarketplaceManager;
 /// Normalize an extracted MCP bundle into the shared plugin manifest layout.
 pub use mcpb::ensure_plugin_manifest;
+pub use mcpb::prepare_extract_dir;
 /// Stable content hash used for deterministic external-source cache keys.
 pub use mcpb::sha256_hex as plugin_source_sha256;
 /// Guarded zip extraction used by both installed MCP bundles and session-only
 /// `--plugin-url` archives.
 pub use mcpb::unpack_mcpb as unpack_plugin_archive;
-pub use mcpb::prepare_extract_dir;
 pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 pub use theme_registry::{PluginThemeEntry, PluginThemeRegistry};

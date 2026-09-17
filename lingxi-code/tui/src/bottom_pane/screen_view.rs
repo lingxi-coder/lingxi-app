@@ -267,7 +267,7 @@ impl ScreenView {
     ///   real accumulated figures, dimmed.
     #[must_use]
     pub fn usage(cost: &CostSnapshot, default_tab: UsageTab) -> Self {
-        let usage_lines = vec![
+        let mut usage_lines = vec![
             header("Session token usage"),
             row("└ Input", &cost.input_tokens.to_string()),
             row("└ Output", &cost.output_tokens.to_string()),
@@ -280,6 +280,10 @@ impl ScreenView {
                 Style::default().add_modifier(Modifier::DIM),
             )),
         ];
+        if !cost.loops.is_empty() {
+            usage_lines.push(Line::from(""));
+            usage_lines.extend(Self::loops_section_lines(&cost.loops));
+        }
         let stats_lines: Vec<Line<'static>> = cost::render::cost_summary_from_snapshot(cost)
             .lines()
             .map(|l| {
@@ -298,6 +302,29 @@ impl ScreenView {
             UsageTab::Stats => 1,
         };
         Self::tabbed("Usage", tabs, default, "tab to switch · esc to close")
+    }
+
+    /// Oracle `gl()`: Loops is a Usage *section*, hidden when there are no
+    /// rows — never a third tab.
+    fn loops_section_lines(rows: &[platform_api::LoopUsageRow]) -> Vec<Line<'static>> {
+        const MAX_ROWS: usize = 10;
+        let mut lines = vec![header("Loops")];
+        lines.push(row("every / runs / tokens / last", ""));
+        let shown = rows.len().min(MAX_ROWS);
+        for loop_row in &rows[..shown] {
+            let summary = format!(
+                "{} · {} · {} · {}",
+                loop_row.every, loop_row.runs, loop_row.tokens, loop_row.last_run
+            );
+            lines.push(row(&loop_row.prompt, &summary));
+        }
+        if rows.len() > MAX_ROWS {
+            lines.push(Line::from(Span::styled(
+                format!("… {} more", rows.len() - MAX_ROWS),
+                Style::default().add_modifier(Modifier::DIM),
+            )));
+        }
+        lines
     }
 
     /// The `/context` screen — claude-code 2.1.205's "Visualize current context
@@ -1325,6 +1352,62 @@ mod tests {
         assert!(text.contains("Total code changes:"), "{text}");
         assert!(text.contains("Usage by model:"), "{text}");
         assert!(text.contains("claude-opus-4-8:"), "{text}");
+    }
+
+    #[test]
+    fn usage_tab_hides_loops_section_when_empty() {
+        let snap = CostSnapshot::default();
+        let s = ScreenView::usage(&snap, UsageTab::Usage);
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        s.render(area, &mut buf);
+        let text: String = (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("Loops"),
+            "empty loops must hide the section, got {text}"
+        );
+    }
+
+    #[test]
+    fn usage_tab_shows_loops_section_when_present() {
+        let snap = CostSnapshot {
+            loops: vec![platform_api::LoopUsageRow {
+                prompt: "check deploy".into(),
+                every: "5m".into(),
+                runs: 3,
+                tokens: 1200,
+                last_run: "2m ago".into(),
+            }],
+            ..CostSnapshot::default()
+        };
+        let s = ScreenView::usage(&snap, UsageTab::Usage);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        s.render(area, &mut buf);
+        let text: String = (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Loops"), "{text}");
+        assert!(text.contains("check deploy"), "{text}");
+        assert!(text.contains("5m"), "{text}");
     }
 
     #[test]

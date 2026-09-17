@@ -465,6 +465,110 @@ pub fn human_schedule(cron: &str) -> String {
     cron.to_string()
 }
 
+/// Compact `/usage` Loops `every` column (oracle `Pm()`).
+///
+/// `dynamic` when the job is a self-paced loop sentinel. Common `*/N` forms
+/// collapse to `5m` / `2h` / `1d` / `at 09:30`. Anything else falls back to
+/// [`human_schedule`] lowercased.
+#[must_use]
+pub fn loop_every_label(cron: &str, is_dynamic: bool) -> String {
+    if is_dynamic {
+        return "dynamic".to_string();
+    }
+    if cron.trim().is_empty() {
+        return "?".to_string();
+    }
+    fn step_n(field: &str) -> Option<&str> {
+        field
+            .strip_prefix("*/")
+            .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    }
+    fn all_digits(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    let parts: Vec<&str> = cron
+        .split(is_cron_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() == 5 {
+        let (minute, hour, dom, month, dow) = (parts[0], parts[1], parts[2], parts[3], parts[4]);
+        if hour == "*" && dom == "*" && month == "*" && dow == "*" {
+            if minute == "*" {
+                return "1m".to_string();
+            }
+            if let Some(n) = step_n(minute) {
+                return format!("{n}m");
+            }
+        }
+        if minute == "0" && dom == "*" && month == "*" && dow == "*" {
+            if hour == "*" {
+                return "1h".to_string();
+            }
+            if let Some(n) = step_n(hour) {
+                return format!("{n}h");
+            }
+        }
+        if minute == "0" && hour == "0" && month == "*" && dow == "*" {
+            if dom == "*" {
+                return "1d".to_string();
+            }
+            if let Some(n) = step_n(dom) {
+                return format!("{n}d");
+            }
+        }
+        if all_digits(minute) && all_digits(hour) && dom == "*" && month == "*" && dow == "*" {
+            let minute_n: u32 = minute.parse().unwrap_or(0);
+            let hour_n: u32 = hour.parse().unwrap_or(0);
+            return format!("at {hour_n:02}:{minute_n:02}");
+        }
+    }
+    human_schedule(cron).to_lowercase()
+}
+
+/// Relative last-run label for `/usage` Loops (`3m ago`, or `–` when never).
+#[must_use]
+pub fn loop_last_run_label(last_run: Option<SystemTime>, now: SystemTime) -> String {
+    let Some(last_run) = last_run else {
+        return "–".to_string();
+    };
+    let Ok(elapsed) = now.duration_since(last_run) else {
+        return "just now".to_string();
+    };
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        return format!("{secs}s ago");
+    }
+    if secs < 3_600 {
+        return format!("{}m ago", secs / 60);
+    }
+    if secs < 86_400 {
+        return format!("{}h ago", secs / 3_600);
+    }
+    format!("{}d ago", secs / 86_400)
+}
+
+/// One `/usage` Loops row from a scheduled job (oracle `gl()` row shape).
+///
+/// Live scheduler jobs do not yet carry per-run token totals; `tokens` is 0
+/// and `runs` is 1 after the first fire, 0 before.
+#[must_use]
+pub fn loop_usage_row(
+    prompt: &str,
+    cron: &str,
+    is_dynamic: bool,
+    last_run: Option<SystemTime>,
+    now: SystemTime,
+) -> platform_api::LoopUsageRow {
+    let fired = last_run.is_some();
+    platform_api::LoopUsageRow {
+        prompt: prompt.to_string(),
+        every: loop_every_label(cron, is_dynamic),
+        runs: u64::from(fired),
+        tokens: 0,
+        last_run: loop_last_run_label(last_run, now),
+    }
+}
+
 /// JS `new Date(ms).toLocaleString()` in the en-US default form the binary
 /// prints into the missed-task prompt: `M/D/YYYY, h:mm:ss AM`, local time.
 #[must_use]
@@ -942,5 +1046,36 @@ mod tests {
                 "{input:?}"
             );
         }
+    }
+
+    #[test]
+    fn loop_every_label_matches_oracle_pm() {
+        assert_eq!(loop_every_label("", false), "?");
+        assert_eq!(loop_every_label("* * * * *", true), "dynamic");
+        assert_eq!(loop_every_label("* * * * *", false), "1m");
+        assert_eq!(loop_every_label("*/5 * * * *", false), "5m");
+        assert_eq!(loop_every_label("0 * * * *", false), "1h");
+        assert_eq!(loop_every_label("0 */2 * * *", false), "2h");
+        assert_eq!(loop_every_label("0 0 * * *", false), "1d");
+        assert_eq!(loop_every_label("0 0 */3 * *", false), "3d");
+        assert_eq!(loop_every_label("30 9 * * *", false), "at 09:30");
+    }
+
+    #[test]
+    fn loop_usage_row_hides_last_run_until_fired() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(3_600);
+        let idle = loop_usage_row("check deploy", "*/5 * * * *", false, None, now);
+        assert_eq!(idle.every, "5m");
+        assert_eq!(idle.runs, 0);
+        assert_eq!(idle.last_run, "–");
+        let fired = loop_usage_row(
+            "check deploy",
+            "*/5 * * * *",
+            false,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(3_600 - 120)),
+            now,
+        );
+        assert_eq!(fired.runs, 1);
+        assert_eq!(fired.last_run, "2m ago");
     }
 }

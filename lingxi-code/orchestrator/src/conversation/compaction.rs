@@ -57,7 +57,10 @@ impl ConversationOrchestrator {
                 outgoing_history_rewriter: None,
             }
         };
-        if let Some(settings) = crate::scheduled_turn::current() { draft.model = settings.model; draft.model_profile = Some(settings.provider); }
+        if let Some(settings) = crate::scheduled_turn::current() {
+            draft.model = settings.model;
+            draft.model_profile = Some(settings.provider);
+        }
         let prepared = match self.model_runtime.model_call_preparer.as_ref() {
             Some(preparer) => {
                 preparer
@@ -399,111 +402,112 @@ impl ConversationOrchestrator {
         self.output.emit_compaction_started().await;
 
         let outcome = async {
-        let pre_compact = self.fire_pre_compact("manual", user_context).await;
-        if let Some(detail) = pre_compact.blocked_by {
-            let msg = if detail.is_empty() {
-                "Compaction blocked by PreCompact hook".to_string()
-            } else {
-                format!("Compaction blocked by PreCompact hook: {detail}")
+            let pre_compact = self.fire_pre_compact("manual", user_context).await;
+            if let Some(detail) = pre_compact.blocked_by {
+                let msg = if detail.is_empty() {
+                    "Compaction blocked by PreCompact hook".to_string()
+                } else {
+                    format!("Compaction blocked by PreCompact hook: {detail}")
+                };
+                tracing::warn!("{msg}");
+                return Err(platform_api::HandleError::ActionFailed(msg));
+            }
+
+            // `xe = lRe(we.newCustomInstructions, m ? `User context: ${m}` : undefined)`.
+            // The label matters: without it the summarizer reads the user's note as
+            // another instruction from the system rather than as the user saying
+            // what they care about.
+            let labelled_context = user_context
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|text| format!("User context: {text}"));
+            let merged_instructions = merge_compact_instructions(
+                pre_compact.additional_instructions.as_deref(),
+                labelled_context.as_deref(),
+            );
+
+            let system_prompt = self.effective_system_prompt().await;
+            let tools = self.build_wire_tools().await;
+            self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
+                .await;
+
+            self.output.emit_compaction_phase("summarizing").await;
+            let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
+                platform_api::HandleError::ActionFailed(format!(
+                    "Compaction cost preflight failed: {error}"
+                ))
+            })?;
+            let api_started = std::time::Instant::now();
+            let context = split.summarizer_context(&history_before);
+            let mut result = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    return Err(platform_api::HandleError::ActionFailed(
+                        "Compaction canceled.".into(),
+                    ));
+                }
+                r = compactor.summarize_selection(
+                    context,
+                    &split.to_summarize,
+                    merged_instructions.as_deref(),
+                    direction,
+                ) => r
+                    .map_err(Self::summarize_error)?,
             };
-            tracing::warn!("{msg}");
-            return Err(platform_api::HandleError::ActionFailed(msg));
-        }
-
-        // `xe = lRe(we.newCustomInstructions, m ? `User context: ${m}` : undefined)`.
-        // The label matters: without it the summarizer reads the user's note as
-        // another instruction from the system rather than as the user saying
-        // what they care about.
-        let labelled_context = user_context
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(|text| format!("User context: {text}"));
-        let merged_instructions = merge_compact_instructions(
-            pre_compact.additional_instructions.as_deref(),
-            labelled_context.as_deref(),
-        );
-
-        let system_prompt = self.effective_system_prompt().await;
-        let tools = self.build_wire_tools().await;
-        self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
-            .await;
-
-        self.output.emit_compaction_phase("summarizing").await;
-        let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
-            platform_api::HandleError::ActionFailed(format!(
-                "Compaction cost preflight failed: {error}"
-            ))
-        })?;
-        let api_started = std::time::Instant::now();
-        let context = split.summarizer_context(&history_before);
-        let mut result = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
+            let compact_duration = api_started.elapsed();
+            let cost_receipt =
+                self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
+            if cancel.is_cancelled() {
                 return Err(platform_api::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
-            r = compactor.summarize_selection(
-                context,
-                &split.to_summarize,
-                merged_instructions.as_deref(),
-                direction,
-            ) => r
-                .map_err(Self::summarize_error)?,
-        };
-        let compact_duration = api_started.elapsed();
-        let cost_receipt =
-            self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
-        if cancel.is_cancelled() {
-            return Err(platform_api::HandleError::ActionFailed(
-                "Compaction canceled.".into(),
-            ));
+            self.settle_compaction_usage(cost_receipt)
+                .await
+                .map_err(|error| {
+                    platform_api::HandleError::ActionFailed(format!(
+                        "Compaction cost settlement failed: {error}"
+                    ))
+                })?;
+
+            // The kept half rides through `apply_post_compact`'s preserved-tail
+            // slot; `placement` decides which side of the summary it lands on.
+            result.messages_to_preserve =
+                compaction::partial::zero_preserved_tail_usage(split.to_keep.clone());
+
+            let placement = match direction {
+                compaction::prompt::SummarizeDirection::UpTo => SummaryPlacement::BeforeKept,
+                compaction::prompt::SummarizeDirection::From => SummaryPlacement::AfterKept,
+            };
+
+            let Some(summary_out) = self
+                .apply_post_compact_placed(
+                    result,
+                    compaction::CompactTrigger::Manual,
+                    pre_tokens_estimate,
+                    messages_before,
+                    bytes_before,
+                    compact_started,
+                    Some(&cancel),
+                    placement,
+                    Some(SelectorBoundaryMetadata {
+                        messages_summarized,
+                        user_context: user_context
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                            .map(ToString::to_string),
+                    }),
+                )
+                .await
+            else {
+                return Err(platform_api::HandleError::ActionFailed(
+                    "Compaction canceled.".into(),
+                ));
+            };
+
+            Ok(summary_out)
         }
-        self.settle_compaction_usage(cost_receipt)
-            .await
-            .map_err(|error| {
-                platform_api::HandleError::ActionFailed(format!(
-                    "Compaction cost settlement failed: {error}"
-                ))
-            })?;
-
-        // The kept half rides through `apply_post_compact`'s preserved-tail
-        // slot; `placement` decides which side of the summary it lands on.
-        result.messages_to_preserve =
-            compaction::partial::zero_preserved_tail_usage(split.to_keep.clone());
-
-        let placement = match direction {
-            compaction::prompt::SummarizeDirection::UpTo => SummaryPlacement::BeforeKept,
-            compaction::prompt::SummarizeDirection::From => SummaryPlacement::AfterKept,
-        };
-
-        let Some(summary_out) = self
-            .apply_post_compact_placed(
-                result,
-                compaction::CompactTrigger::Manual,
-                pre_tokens_estimate,
-                messages_before,
-                bytes_before,
-                compact_started,
-                Some(&cancel),
-                placement,
-                Some(SelectorBoundaryMetadata {
-                    messages_summarized,
-                    user_context: user_context
-                        .map(str::trim)
-                        .filter(|text| !text.is_empty())
-                        .map(ToString::to_string),
-                }),
-            )
-            .await
-        else {
-            return Err(platform_api::HandleError::ActionFailed(
-                "Compaction canceled.".into(),
-            ));
-        };
-
-        Ok(summary_out)
-        }.await;
+        .await;
         if let Err(error) = &outcome {
             let detail = match error {
                 platform_api::HandleError::ActionFailed(detail) => detail.as_str(),
@@ -1586,6 +1590,9 @@ impl ConversationOrchestrator {
             .lock()
             .await
             .clear();
+        // Compaction rewrites history; a frozen git-status snapshot from the
+        // pre-compact conversation would otherwise ride into the next turn.
+        *self.prompt_runtime.git_status_snapshot.lock().await = None;
         *self.prompt_runtime.pending_memory_prefetch.lock().await = None;
         *self.prompt_runtime.pending_skill_prefetch.lock().await = None;
         // P1-05: persist the full compaction transition (claude 2.1.207

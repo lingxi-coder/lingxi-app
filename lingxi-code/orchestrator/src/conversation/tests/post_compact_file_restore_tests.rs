@@ -639,6 +639,62 @@ async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
 }
 
 #[tokio::test]
+async fn apply_post_compact_clears_cached_git_status() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let orch = orch_with_bus(
+        dir.path().to_path_buf(),
+        tool_api::read_file_state::new_read_file_state_map(),
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    *orch.prompt_runtime.git_status_snapshot.lock().await = Some(GitStatusSnapshot {
+        probe: None,
+        block: Some("stale git status".to_string()),
+    });
+    let result = compaction::IterationCompactionResult {
+        messages: vec![ConversationMessage::user(
+            MessageId::new(),
+            "summary".to_string(),
+        )],
+        layers_applied: vec![compaction::CompactionLayer::Autocompact],
+        total_tokens_freed: 1,
+        cache_hit: false,
+        consecutive_failures: 0,
+        was_compacted: true,
+        rapid_refill_breaker_tripped: false,
+        consecutive_rapid_refills: 0,
+        messages_to_preserve: Vec::new(),
+        media_analysis_to_preserve: Vec::new(),
+        compaction_usage: None,
+        compaction_model: None,
+        raw_summary_text: "test summary".to_string(),
+    };
+
+    let applied = orch
+        .apply_post_compact(
+            result,
+            compaction::CompactTrigger::Manual,
+            1,
+            1,
+            1,
+            std::time::Instant::now(),
+            None,
+        )
+        .await;
+
+    assert!(applied.is_some());
+    assert!(
+        orch.prompt_runtime
+            .git_status_snapshot
+            .lock()
+            .await
+            .is_none(),
+        "compact must invalidate the frozen git-status cache"
+    );
+}
+
+#[tokio::test]
 async fn transcript_append_failure_emits_session_persistence_failed() {
     let _rg = registry_guard();
     let dir = tempfile::tempdir().expect("tempdir");

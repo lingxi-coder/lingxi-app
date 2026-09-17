@@ -26,6 +26,9 @@ pub enum AddDirValidation {
     PathNotFound { absolute: String },
     /// The resolved path exists but is a file, not a directory.
     NotADirectory { input: String, parent: String },
+    /// UNC / `/net/<host>` automount — refused before `stat` (claude-code
+    /// `resultType:"networkPath"`).
+    NetworkPath { directory_path: String },
     /// The path resolved to an existing directory at `absolute`.
     Success { absolute: String },
 }
@@ -67,8 +70,20 @@ fn normalize(path: &Path) -> PathBuf {
 /// Resolve `input` to an absolute, normalized path and validate that it exists
 /// and is a directory. Relative inputs resolve against the process cwd (the
 /// session working directory), matching claude-code `resolve(expandPath(...))`.
+/// Network paths are refused **before** `stat`, matching `validateDirectoryForWorkspace`.
 #[must_use]
 pub fn resolve_and_validate(input: &str) -> AddDirValidation {
+    resolve_and_validate_inner(input, true)
+}
+
+/// Like [`resolve_and_validate`] but does not refuse network paths. `/cd` reuses
+/// the expand/stat checks without the working-directory network gate.
+#[must_use]
+pub fn resolve_existing_directory(input: &str) -> AddDirValidation {
+    resolve_and_validate_inner(input, false)
+}
+
+fn resolve_and_validate_inner(input: &str, reject_network: bool) -> AddDirValidation {
     if input.is_empty() {
         return AddDirValidation::EmptyPath;
     }
@@ -82,6 +97,17 @@ pub fn resolve_and_validate(input: &str) -> AddDirValidation {
     };
     let absolute = normalize(&absolute);
     let absolute_str = absolute.to_string_lossy().to_string();
+    if reject_network {
+        let cwd = std::env::current_dir().ok();
+        let cwd = cwd.as_deref().and_then(Path::to_str);
+        if permission::is_network_working_directory_against(input, cwd)
+            || permission::is_network_working_directory_against(&absolute_str, cwd)
+        {
+            return AddDirValidation::NetworkPath {
+                directory_path: input.to_string(),
+            };
+        }
+    }
     match std::fs::metadata(&absolute) {
         Ok(meta) if meta.is_dir() => AddDirValidation::Success {
             absolute: absolute_str,
@@ -114,6 +140,9 @@ pub fn help_message(result: &AddDirValidation) -> String {
         AddDirValidation::NotADirectory { input, parent } => format!(
             "{input} is not a directory. Did you mean to add the parent directory {parent}?"
         ),
+        AddDirValidation::NetworkPath { directory_path } => {
+            permission::network_working_directory_message(directory_path)
+        }
         AddDirValidation::Success { absolute } => {
             format!("Added {absolute} as a working directory.")
         }
@@ -190,6 +219,34 @@ mod tests {
                 parent: "/root/a".into(),
             }),
             "a/b is not a directory. Did you mean to add the parent directory /root/a?"
+        );
+        assert_eq!(
+            help_message(&AddDirValidation::NetworkPath {
+                directory_path: "//fileserver/share".into(),
+            }),
+            "//fileserver/share is a network path, which cannot be added as a working directory. On Windows, map the share to a drive letter and pass it at launch with --add-dir (a drive letter added mid-session does not yet carry remote-read trust)."
+        );
+    }
+
+    #[test]
+    fn unc_and_net_automount_are_refused_before_stat() {
+        assert!(matches!(
+            resolve_and_validate("//fileserver/share"),
+            AddDirValidation::NetworkPath { .. }
+        ));
+        assert!(matches!(
+            resolve_and_validate("/net/somehost/data"),
+            AddDirValidation::NetworkPath { .. }
+        ));
+        let missing =
+            std::env::temp_dir().join(format!("lingxi-cd-missing-{}", std::process::id()));
+        let input = missing.to_string_lossy().to_string();
+        assert!(
+            matches!(
+                resolve_existing_directory(&input),
+                AddDirValidation::PathNotFound { .. }
+            ),
+            "/cd still stats local paths rather than using the network gate"
         );
     }
 }

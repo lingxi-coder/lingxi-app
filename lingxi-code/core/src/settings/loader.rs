@@ -204,10 +204,13 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn settings_size_limit_error() -> std::io::Error {
+/// Byte-exact claude-code size-limit copy (`Settings file exceeds the 2MiB limit`).
+pub const SETTINGS_FILE_SIZE_LIMIT_MESSAGE: &str = "Settings file exceeds the 2MiB limit";
+
+pub(crate) fn settings_size_limit_error() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
-        "Settings file exceeds the 2MiB limit",
+        SETTINGS_FILE_SIZE_LIMIT_MESSAGE,
     )
 }
 

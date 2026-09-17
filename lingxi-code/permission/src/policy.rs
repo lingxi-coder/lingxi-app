@@ -256,7 +256,72 @@ pub struct PermissionPolicy {
     /// parallel test harness cannot make one test's launch kind leak into
     /// another's authorize.
     pub interactive_session: bool,
+    /// Session-scoped read-block allowances (oracle `XY` / `BK`): tool-result
+    /// files, scratchpad, job `tmp/`, project temp. Empty by default so
+    /// `authorize` is unchanged until the host publishes the session dirs.
+    pub session_read_allowances: Vec<SessionReadAllowance>,
 }
+
+/// One session directory that remains readable under the read block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionReadAllowance {
+    /// Directory (or file) that is allowed.
+    pub path: PathBuf,
+    /// Oracle `decisionReason.reason` when this allowance matches.
+    pub reason: String,
+}
+
+impl SessionReadAllowance {
+    /// Allow `path` and every descendant.
+    #[must_use]
+    pub fn directory(path: PathBuf, reason: &'static str) -> Self {
+        Self {
+            path,
+            reason: reason.to_string(),
+        }
+    }
+
+    fn covers(&self, candidate: &Path) -> bool {
+        candidate == self.path || candidate.starts_with(&self.path)
+    }
+}
+
+/// Oracle `vc()`: `{jobDir}/tmp` is readable under the read block only for a
+/// `bg` session whose `JOB_DIR` sits under `{configHome}/jobs`.
+#[must_use]
+pub fn job_tmp_session_allowance(
+    lingxi_home: &Path,
+    session_kind: Option<&str>,
+    job_dir: Option<&Path>,
+) -> Option<SessionReadAllowance> {
+    if session_kind != Some("bg") {
+        return None;
+    }
+    let job_dir = job_dir?;
+    if job_dir.as_os_str().is_empty() {
+        return None;
+    }
+    let jobs_root = lingxi_home.join("jobs");
+    if !job_dir.starts_with(&jobs_root) {
+        return None;
+    }
+    Some(SessionReadAllowance::directory(
+        job_dir.join("tmp"),
+        JOB_TMP_READ_ALLOW_REASON,
+    ))
+}
+
+/// Oracle `XY`: "Tool result files are allowed for reading".
+pub const TOOL_RESULT_READ_ALLOW_REASON: &str = "Tool result files are allowed for reading";
+/// Oracle `XY`: "Scratchpad files for current session are allowed for reading".
+pub const SCRATCHPAD_READ_ALLOW_REASON: &str =
+    "Scratchpad files for current session are allowed for reading";
+/// Oracle `XY`: "Job tmp/ subtree for current bg session is allowed for reading".
+pub const JOB_TMP_READ_ALLOW_REASON: &str =
+    "Job tmp/ subtree for current bg session is allowed for reading";
+/// Oracle `XY`: "Project temp directory files are allowed for reading".
+pub const PROJECT_TEMP_READ_ALLOW_REASON: &str =
+    "Project temp directory files are allowed for reading";
 
 impl PermissionPolicy {
     /// Build a fresh policy with no rules and the given mode.
@@ -286,7 +351,18 @@ impl PermissionPolicy {
             bash_command_clamps: Vec::new(),
             apply_auto_mode_restrictions: false,
             interactive_session: false,
+            session_read_allowances: Vec::new(),
         }
+    }
+
+    /// Publish session-scoped read-block allowances (oracle `XY`).
+    #[must_use]
+    pub fn with_session_read_allowances(
+        mut self,
+        allowances: impl IntoIterator<Item = SessionReadAllowance>,
+    ) -> Self {
+        self.session_read_allowances = allowances.into_iter().collect();
+        self
     }
 
     /// Publish the session's plan-file identity holder — see
@@ -936,6 +1012,23 @@ impl PermissionPolicy {
     /// temp — and `Rzt()` bundled skill reference files. Their absence makes the
     /// block STRICTER than the oracle, never looser.
     fn read_block_allowance(&self, path: &Path, roots: &FsRoots) -> Option<String> {
+        if !self.restricted && !self.block_reads_outside_working_directories {
+            return None;
+        }
+        // Session-scoped carve-outs survive both `--restricted` and the
+        // read block (oracle `XY`: plan / tool-results / scratchpad / job tmp
+        // / project temp are not gated on `!restricted`).
+        if let Some(plan_files) = self.plan_files.as_ref() {
+            if plan_files.matches(path, Some(roots.cwd.as_path()), true) {
+                return Some(crate::plan_files::PLAN_FILE_READ_ALLOW_REASON.to_string());
+            }
+        }
+        for allowance in &self.session_read_allowances {
+            if allowance.covers(path) {
+                return Some(allowance.reason.clone());
+            }
+        }
+        // `readBlockFence && !restricted`: config-home memory / skills / …
         if self.restricted || !self.block_reads_outside_working_directories {
             return None;
         }
@@ -1099,6 +1192,7 @@ impl PermissionPolicy {
             bash_command_clamps: self.bash_command_clamps.clone(),
             apply_auto_mode_restrictions: self.apply_auto_mode_restrictions,
             interactive_session: self.interactive_session,
+            session_read_allowances: self.session_read_allowances.clone(),
         }
     }
 
@@ -2408,13 +2502,7 @@ impl PermissionPolicy {
                     let Some(pattern) = rule.value.rule_content.as_deref() else {
                         return RulePatternMatch::NoMatch;
                     };
-                    test_rule_pattern(
-                        &target.resolved,
-                        pattern,
-                        rule.source,
-                        rule.behavior,
-                        roots,
-                    )
+                    test_rule_pattern(&target.resolved, pattern, rule.source, rule.behavior, roots)
                 }) {
                     return Some(PermissionResult::Deny {
                         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },

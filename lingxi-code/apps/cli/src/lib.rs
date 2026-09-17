@@ -74,12 +74,13 @@ pub mod exit_codes;
 pub mod idle_notify;
 pub mod init;
 pub mod logging;
+mod loop_wakeup;
 pub mod mode;
 mod model_selection;
 pub mod output;
 pub mod output_adapter;
-pub mod permission_prompt_notify;
 mod permission_mode_preference;
+pub mod permission_prompt_notify;
 pub(crate) mod process_wrapper;
 pub mod queued_commands;
 pub mod repl;
@@ -89,7 +90,6 @@ pub mod run;
 pub mod session_cost;
 pub mod sigint;
 mod startup_resources;
-mod loop_wakeup;
 mod startup_trace;
 pub mod stream_json;
 pub mod stream_json_input;
@@ -720,7 +720,11 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     platform_api::session_flags::set_system_prompt_snapshot(parsed.system_prompt_snapshot);
     // 2.1.270 `oVn`: streaming input or an SDK URL makes print non-single-shot.
     platform_api::session_flags::set_single_shot_print_session(
-        (parsed.print || parsed.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty()))
+        (parsed.print
+            || parsed
+                .prompt
+                .as_deref()
+                .is_some_and(|prompt| !prompt.trim().is_empty()))
             && parsed.input_format.as_deref() != Some("stream-json")
             && parsed.sdk_url.as_deref().unwrap_or("").is_empty(),
     );
@@ -908,7 +912,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         eprintln!("lingxi-cli: {error}");
         return exit_codes::RUNTIME_ERROR;
     }
-    if let Some(settings) = crate::init::parse_flag_settings(parsed.settings.as_deref()) {
+    let flag_settings = match crate::init::parse_flag_settings_checked(parsed.settings.as_deref()) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("lingxi-cli: {error}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    if let Some(settings) = flag_settings {
         if let Ok(value) = serde_json::to_value(settings) {
             let _ = mcp::enterprise_policy::install_flag_settings_policy(value);
         }
@@ -1530,7 +1541,11 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
     let mut settings = read_cli_mode_settings(argv);
     if let Some(mode) = permission_mode_preference::load(argv) {
         settings.default_mode = Some(mode);
+        // A remembered mode is the user's last interactive pick — trusted,
+        // same as userSettings for `C(e)`.
         settings.auto_default_from_trusted = mode == permission::PermissionMode::Auto;
+        settings.bypass_default_from_trusted =
+            mode == permission::PermissionMode::BypassPermissions;
     }
     // MODE-ENV-SCRUB-03: `LINGXI_SUBPROCESS_ENV_SCRUB` (the port's spelling of
     // `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, `platforms/posix` runner) forces the
@@ -1609,6 +1624,9 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
     // resolver drops it (a committed project settings file cannot enable
     // classifier-driven auto-accept mode).
     let mut auto_default_from_trusted = false;
+    // 2.1.257 `C("bypassPermissions")`: sticky true if ANY trusted tier
+    // declared bypass. Project/local cannot grant it.
+    let mut bypass_default_from_trusted = false;
     // MODE-BG-DISCLAIMER-02: sticky across tiers (any tier accepting wins — `Pq()`).
     let mut skip_dangerous_mode_permission_prompt = false;
     let home = incl_user
@@ -1624,10 +1642,13 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if let Some(m) = permission::default_mode_from_settings_json(&raw) {
                 default_mode = Some(m);
-                if m == permission::PermissionMode::Auto
-                    && permission::loader::auto_mode_grantable_by_source(source)
-                {
-                    auto_default_from_trusted = true;
+                if permission::loader::auto_mode_grantable_by_source(source) {
+                    if m == permission::PermissionMode::Auto {
+                        auto_default_from_trusted = true;
+                    }
+                    if m == permission::PermissionMode::BypassPermissions {
+                        bypass_default_from_trusted = true;
+                    }
                 }
             }
             if permission::bypass_permissions_disabled_from_settings_json(&raw) {
@@ -1661,10 +1682,13 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         let source = permission::PermissionRuleSource::FlagSettings;
         if let Some(m) = permission::default_mode_from_settings_json(&raw) {
             default_mode = Some(m);
-            if m == permission::PermissionMode::Auto
-                && permission::loader::auto_mode_grantable_by_source(source)
-            {
-                auto_default_from_trusted = true;
+            if permission::loader::auto_mode_grantable_by_source(source) {
+                if m == permission::PermissionMode::Auto {
+                    auto_default_from_trusted = true;
+                }
+                if m == permission::PermissionMode::BypassPermissions {
+                    bypass_default_from_trusted = true;
+                }
             }
         }
         if permission::bypass_permissions_disabled_from_settings_json(&raw) {
@@ -1695,6 +1719,7 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         bypass_disabled,
         auto_mode_disabled,
         auto_default_from_trusted,
+        bypass_default_from_trusted,
         is_bg_session,
         skip_dangerous_mode_permission_prompt,
         bypass_permissions_mode_accepted,
@@ -2016,6 +2041,48 @@ mod cli_mode_settings_tests {
             Some(permission::PermissionMode::AcceptEdits)
         );
         assert!(s.bypass_disabled);
+        assert!(!s.bypass_default_from_trusted);
+
+        if let Some(cwd) = prior_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+        match prior_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// 2.1.257: a project `.lingxi/settings.json` `defaultMode: bypassPermissions`
+    /// is recorded as the merged defaultMode but is NOT a trusted grant.
+    #[test]
+    fn project_bypass_default_mode_is_not_a_trusted_grant() {
+        let _g = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior_home = std::env::var_os("HOME");
+        let prior_cwd = std::env::current_dir().ok();
+
+        let home = tempfile::tempdir().expect("home tempdir");
+        let proj = tempfile::tempdir().expect("proj tempdir");
+        let proj_lingxi = proj.path().join(".lingxi");
+        std::fs::create_dir_all(&proj_lingxi).expect("mkdir .lingxi");
+        std::fs::write(
+            proj_lingxi.join("settings.json"),
+            r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#,
+        )
+        .expect("write settings");
+        std::env::set_var("HOME", home.path());
+        std::env::set_current_dir(proj.path()).expect("chdir proj");
+
+        let s = read_cli_mode_settings(&argv());
+        assert_eq!(
+            s.default_mode,
+            Some(permission::PermissionMode::BypassPermissions)
+        );
+        assert!(!s.bypass_default_from_trusted);
+        let (mode, notice) = resolve_permission_mode(&argv());
+        assert_eq!(mode, permission::PermissionMode::Default);
+        assert!(notice.is_none());
 
         if let Some(cwd) = prior_cwd {
             let _ = std::env::set_current_dir(cwd);

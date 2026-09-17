@@ -1687,6 +1687,144 @@ pub async fn discover_cli_plugin_dirs_no_mcp(
     discover_cli_plugin_dirs_impl(paths, true, None).await
 }
 
+/// Oracle `KMe` (2.1.265): a `--plugin-dir` path is either one plugin or a
+/// folder of plugins. Zip paths are never classified here (`X1s` skips them).
+enum CliPluginDirKind {
+    Plugin,
+    Collection {
+        children: Vec<String>,
+        skipped: Vec<String>,
+    },
+}
+
+/// Oracle `W0e`: names that mark a directory as plugin content rather than a
+/// collection of plugins. LingXi's manifest dir is `.lingxi-plugin`.
+const CLI_PLUGIN_CONTENT_NAMES: &[&str] = &[
+    branding::PLUGIN_MANIFEST_DIR,
+    "commands",
+    "skills",
+    "agents",
+    "hooks",
+    "themes",
+    "output-styles",
+    "monitors",
+    "workflows",
+    "SKILL.md",
+    ".mcp.json",
+    ".lsp.json",
+];
+
+/// Oracle `VJt`: component directories. A parent that only has these (and
+/// each child itself has a manifest) is a collection, not a plugin.
+const CLI_PLUGIN_COMPONENT_DIR_NAMES: &[&str] = &[
+    "commands",
+    "skills",
+    "agents",
+    "hooks",
+    "themes",
+    "output-styles",
+    "monitors",
+    "workflows",
+];
+
+async fn child_has_readable_manifest(dir: &Path) -> bool {
+    let manifest = dir.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json");
+    match tokio::fs::OpenOptions::new()
+        .read(true)
+        .open(&manifest)
+        .await
+    {
+        Ok(_) => true,
+        Err(err) => {
+            // Oracle `egn`: ENOENT / ENOTDIR → no manifest; any other error
+            // (EACCES, EISDIR, …) still counts as "present" so a collection
+            // does not swallow an unreadable child plugin.
+            err.kind() != std::io::ErrorKind::NotFound && err.raw_os_error() != Some(20)
+        }
+    }
+}
+
+/// Oracle `KMe`/`Evo`/`xvo`.
+async fn classify_cli_plugin_dir(path: &Path) -> CliPluginDirKind {
+    let mut reader = match tokio::fs::read_dir(path).await {
+        Ok(reader) => reader,
+        Err(_) => return CliPluginDirKind::Plugin,
+    };
+    let mut entries = Vec::new();
+    while let Ok(Some(entry)) = reader.next_entry().await {
+        let file_type = entry.file_type().await.ok();
+        entries.push((entry.file_name(), file_type));
+    }
+
+    let content: Vec<_> = entries
+        .iter()
+        .filter(|(name, _)| {
+            name.to_str()
+                .is_some_and(|n| CLI_PLUGIN_CONTENT_NAMES.contains(&n))
+        })
+        .collect();
+    let component_dirs: Vec<_> = content
+        .iter()
+        .filter(|(name, _)| {
+            name.to_str()
+                .is_some_and(|n| CLI_PLUGIN_COMPONENT_DIR_NAMES.contains(&n))
+        })
+        .collect();
+
+    let looks_like_plugin = component_dirs.len() < content.len();
+    let mut component_missing_manifest = false;
+    if !looks_like_plugin {
+        for (name, _) in &component_dirs {
+            if !child_has_readable_manifest(&path.join(name)).await {
+                component_missing_manifest = true;
+                break;
+            }
+        }
+    }
+    if looks_like_plugin || component_missing_manifest {
+        return CliPluginDirKind::Plugin;
+    }
+
+    let mut candidates: Vec<String> = entries
+        .iter()
+        .filter(|(name, file_type)| {
+            let Some(n) = name.to_str() else {
+                return false;
+            };
+            if n.starts_with('.') {
+                return false;
+            }
+            file_type
+                .as_ref()
+                .is_some_and(|kind| kind.is_dir() || kind.is_symlink())
+        })
+        .filter_map(|(name, _)| name.to_str().map(str::to_string))
+        .collect();
+    candidates.sort();
+
+    let mut children = Vec::new();
+    let mut skipped = Vec::new();
+    for name in candidates {
+        if child_has_readable_manifest(&path.join(&name)).await {
+            children.push(name);
+        } else {
+            skipped.push(name);
+        }
+    }
+    CliPluginDirKind::Collection { children, skipped }
+}
+
+/// Child directory names of a `--plugin-dir` folder-of-plugins, in sorted
+/// order. `None` when `path` is a single plugin (or unreadable), matching
+/// oracle `wAr`/`KMe` so a watcher can re-scan without reloading a plugin
+/// root as a collection.
+pub async fn cli_plugin_dir_collection_children(path: &Path) -> Option<Vec<String>> {
+    match classify_cli_plugin_dir(path).await {
+        CliPluginDirKind::Collection { children, .. } => Some(children),
+        CliPluginDirKind::Plugin => None,
+    }
+}
+
 async fn discover_cli_plugin_dirs_impl(
     paths: &[PathBuf],
     sdk_skip_mcp_discovery: bool,
@@ -1719,7 +1857,7 @@ async fn discover_cli_plugin_dirs_impl(
             .extension()
             .and_then(|s| s.to_str())
             .is_some_and(|s| s.eq_ignore_ascii_case("zip"));
-        let plugin_root = if is_zip {
+        let plugin_roots: Vec<PathBuf> = if is_zip {
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -1754,28 +1892,49 @@ async fn discover_cli_plugin_dirs_impl(
             }
             tracing::debug!("Extracted inline plugin zip to {}", dest.display());
             // `Yor`: unwrap a single wrapper directory holding the manifest.
-            unwrap_zip_root(&dest).await
+            vec![unwrap_zip_root(&dest).await]
         } else {
-            path
-        };
-        match load_plugin_from_path_with_mcp_gate_and_bus(
-            &plugin_root,
-            sdk_skip_mcp_discovery,
-            None,
-            analytics_bus,
-        )
-        .await
-        {
-            Some((id, manifest)) => {
-                tracing::debug!("Loaded inline plugin from path: {}", manifest.name);
-                out.push((id, manifest, plugin_root));
+            match classify_cli_plugin_dir(&path).await {
+                CliPluginDirKind::Plugin => vec![path],
+                CliPluginDirKind::Collection { children, skipped } => {
+                    let loading = if children.is_empty() {
+                        "none".to_string()
+                    } else {
+                        children.join(", ")
+                    };
+                    let skipped_note = if skipped.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; no manifest in {}", skipped.join(", "))
+                    };
+                    tracing::info!(
+                        "--plugin-dir {} is a folder of plugins: loading {loading}{skipped_note}",
+                        path.display()
+                    );
+                    children.into_iter().map(|name| path.join(name)).collect()
+                }
             }
-            None => {
-                tracing::warn!(
-                    "Failed to load session plugin from {}: no readable {}/plugin.json",
-                    raw.display(),
-                    branding::PLUGIN_MANIFEST_DIR
-                );
+        };
+        for plugin_root in plugin_roots {
+            match load_plugin_from_path_with_mcp_gate_and_bus(
+                &plugin_root,
+                sdk_skip_mcp_discovery,
+                None,
+                analytics_bus,
+            )
+            .await
+            {
+                Some((id, manifest)) => {
+                    tracing::debug!("Loaded inline plugin from path: {}", manifest.name);
+                    out.push((id, manifest, plugin_root));
+                }
+                None => {
+                    tracing::warn!(
+                        "Failed to load session plugin from {}: no readable {}/plugin.json",
+                        plugin_root.display(),
+                        branding::PLUGIN_MANIFEST_DIR
+                    );
+                }
             }
         }
     }

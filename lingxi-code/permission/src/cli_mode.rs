@@ -57,9 +57,18 @@ pub struct CliModeSettings {
     /// [`crate::loader::auto_mode_grantable_by_source`]). When `default_mode` is
     /// `Auto` but this is `false`, the auto request is IGNORED (the repo-
     /// controllable `projectSettings`/`localSettings` may not enable classifier-
-    /// driven auto-accept). Irrelevant for the five external modes, which may be
-    /// set from any tier.
+    /// driven auto-accept).
     pub auto_default_from_trusted: bool,
+    /// 2.1.257 `C("bypassPermissions")`: did a trusted tier declare
+    /// `defaultMode: "bypassPermissions"`?
+    ///
+    /// Same source list as [`Self::auto_default_from_trusted`]
+    /// (`le=["policySettings","flagSettings","userSettings"]`). Project and
+    /// local files are repo-controllable and must not grant bypass. When
+    /// [`Self::default_mode`] is [`PermissionMode::BypassPermissions`] and this
+    /// is `false`, the request is dropped and the session does not fall through
+    /// to the auto fallback (`if(!s) p.push("default")`).
+    pub bypass_default_from_trusted: bool,
     /// `MODE-BG-DISCLAIMER-02`: is this a background session
     /// (`LINGXI_SESSION_KIND == "bg"`, claude-code `CLAUDE_CODE_SESSION_KIND`)?
     /// The bg-disclaimer downgrade only applies in background sessions
@@ -343,16 +352,34 @@ pub fn initial_permission_mode_from_cli_with_ide(
             }
         }
     } else if let Some(default_mode) = settings.default_mode {
-        // MODE-SETTINGS-AUTO-TRUST-01: a settings `defaultMode: "auto"` is only
-        // honored when a trusted tier (policy/user/flag) granted it. From the
-        // repo-controllable projectSettings/localSettings tiers it is IGNORED
-        // (klc warns + emits `tengu_settings_auto_mode_untrusted_source_ignored`;
-        // the warn/telemetry are omitted at this pure layer). The five external
-        // modes are unaffected — they may be set from any tier.
-        let untrusted_auto =
-            default_mode == PermissionMode::Auto && !settings.auto_default_from_trusted;
-        if !untrusted_auto {
-            ordered.push(default_mode);
+        // MODE-SETTINGS-AUTO-TRUST-01 / 2.1.257 `C(e)`: auto AND
+        // bypassPermissions are only honored when a trusted tier
+        // (policy/user/flag) declared that mode. Project/local are
+        // repo-controllable. Warn + `tengu_settings_{auto,bypass}_mode_untrusted_source_ignored`
+        // are omitted at this pure layer (callers log them).
+        //
+        // bypassPermissions then still runs `O("bypassPermissions")` (the bg
+        // disclaimer gate). Untrusted bypass pushes Default when `ordered` is
+        // empty so the auto fallback cannot resurrect it (`if(!s) p.push("default")`).
+        match default_mode {
+            PermissionMode::BypassPermissions => {
+                if !settings.bypass_default_from_trusted {
+                    if ordered.is_empty() {
+                        ordered.push(PermissionMode::Default);
+                    }
+                } else if bg_bypass_downgrade {
+                    if ordered.is_empty() {
+                        notification = Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG.to_string());
+                    }
+                    ordered.push(PermissionMode::Default);
+                } else {
+                    ordered.push(default_mode);
+                }
+            }
+            PermissionMode::Auto if !settings.auto_default_from_trusted => {
+                // dropped; fallback below stays Default
+            }
+            _ => ordered.push(default_mode),
         }
     }
 
@@ -371,6 +398,8 @@ pub fn initial_permission_mode_from_cli_with_ide(
     let fallback = if bypass_was_blocked
         || (settings.default_mode == Some(PermissionMode::Auto)
             && !settings.auto_default_from_trusted)
+        || (settings.default_mode == Some(PermissionMode::BypassPermissions)
+            && !settings.bypass_default_from_trusted)
     {
         PermissionMode::Default
     } else {
@@ -390,6 +419,7 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            bypass_default_from_trusted: false,
             is_bg_session: false,
             skip_dangerous_mode_permission_prompt: false,
             bypass_permissions_mode_accepted: false,
@@ -478,15 +508,23 @@ mod tests {
     }
 
     #[test]
-    fn a_non_ide_session_still_honours_settings_bypass_without_consent() {
-        // The branch must be scoped to `YCe()`: an ordinary CLI session keeps
-        // the pre-2.1.238 behavior.
+    fn a_non_ide_session_still_honours_trusted_settings_bypass_without_ide_consent() {
+        // The IDE-consent branch is scoped to `YCe()`. A CLI session whose
+        // trusted tier declared bypass still does not need the VS Code flag.
+        // 2.1.257's `C("bypassPermissions")` gate is separate: untrusted
+        // project/local bypass is dropped (see
+        // `settings_bypass_from_untrusted_tier_is_ignored`).
+        let trusted = CliModeSettings {
+            default_mode: Some(PermissionMode::BypassPermissions),
+            bypass_default_from_trusted: true,
+            ..no_settings()
+        };
         let (mode, notice) = initial_permission_mode_from_cli_with_ide(
             None,
             false,
             None,
             false,
-            &settings_default(PermissionMode::BypassPermissions),
+            &trusted,
             IdeSessionInputs::NONE,
         );
         assert_eq!(mode, PermissionMode::BypassPermissions);
@@ -643,10 +681,7 @@ mod tests {
             default_mode: Some(PermissionMode::AcceptEdits),
             bypass_disabled: false,
             auto_mode_disabled: false,
-            auto_default_from_trusted: false,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+            ..no_settings()
         };
         let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::AcceptEdits);
@@ -658,10 +693,7 @@ mod tests {
             default_mode: None,
             bypass_disabled: true,
             auto_mode_disabled: false,
-            auto_default_from_trusted: false,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+            ..no_settings()
         };
         let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &s);
         assert_eq!(mode, PermissionMode::Default);
@@ -679,10 +711,7 @@ mod tests {
             default_mode: None,
             bypass_disabled: true,
             auto_mode_disabled: false,
-            auto_default_from_trusted: false,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+            ..no_settings()
         };
         let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, None, false, &s);
         assert_eq!(mode, PermissionMode::Plan);
@@ -718,10 +747,7 @@ mod tests {
             default_mode: Some(PermissionMode::BypassPermissions),
             bypass_disabled: false,
             auto_mode_disabled: false,
-            auto_default_from_trusted: false,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+            ..no_settings()
         };
         let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), false, None, true, &s);
         assert_eq!(mode, PermissionMode::Default);
@@ -784,10 +810,7 @@ mod tests {
             default_mode: Some(PermissionMode::Plan),
             bypass_disabled: false,
             auto_mode_disabled: false,
-            auto_default_from_trusted: false,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+            ..no_settings()
         };
         let (mode, _) = initial_permission_mode_from_cli(
             None,
@@ -857,10 +880,7 @@ mod tests {
             default_mode: Some(PermissionMode::Auto),
             bypass_disabled: false,
             auto_mode_disabled: false,
-            auto_default_from_trusted: false,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+            ..no_settings()
         };
         let (mode, notice) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::Default);
@@ -872,12 +892,8 @@ mod tests {
         // policy/user/flag tiers may grant auto.
         let s = CliModeSettings {
             default_mode: Some(PermissionMode::Auto),
-            bypass_disabled: false,
-            auto_mode_disabled: false,
             auto_default_from_trusted: true,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+            ..no_settings()
         };
         let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::Auto);
@@ -885,8 +901,8 @@ mod tests {
 
     #[test]
     fn settings_external_modes_honored_from_untrusted_tier() {
-        // The trust gate applies ONLY to auto; the five external modes may be
-        // set from any tier even when auto_default_from_trusted is false.
+        // Plan / acceptEdits / dontAsk may still be set from any tier.
+        // bypassPermissions is trust-gated like auto (2.1.257 `C("bypassPermissions")`).
         for m in [
             PermissionMode::Plan,
             PermissionMode::AcceptEdits,
@@ -894,16 +910,77 @@ mod tests {
         ] {
             let s = CliModeSettings {
                 default_mode: Some(m),
-                bypass_disabled: false,
-                auto_mode_disabled: false,
-                auto_default_from_trusted: false,
-                is_bg_session: false,
-                skip_dangerous_mode_permission_prompt: false,
-                bypass_permissions_mode_accepted: false,
+                ..no_settings()
             };
             let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
             assert_eq!(mode, m);
         }
+    }
+
+    #[test]
+    fn settings_bypass_from_untrusted_tier_is_ignored() {
+        // 2.1.257: project/local `defaultMode: "bypassPermissions"` is dropped
+        // like untrusted auto. Oracle `if(!C("bypassPermissions")) { … if(!s)
+        // p.push("default") }` — no user-facing notice (warn + telemetry only).
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::BypassPermissions),
+            bypass_default_from_trusted: false,
+            ..no_settings()
+        };
+        let (mode, notice) = initial_permission_mode_from_cli(None, false, None, false, &s);
+        assert_eq!(mode, PermissionMode::Default);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn settings_bypass_from_trusted_tier_is_honored() {
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::BypassPermissions),
+            bypass_default_from_trusted: true,
+            ..no_settings()
+        };
+        let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
+        assert_eq!(mode, PermissionMode::BypassPermissions);
+    }
+
+    #[test]
+    fn untrusted_bypass_does_not_fall_through_to_auto_fallback() {
+        // An empty `orderedModes` otherwise falls through to Auto. Untrusted
+        // bypass must push Default instead (`if(!s) p.push("default")`).
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::BypassPermissions),
+            bypass_default_from_trusted: false,
+            ..no_settings()
+        };
+        let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
+        assert_ne!(mode, PermissionMode::Auto);
+        assert_eq!(mode, PermissionMode::Default);
+    }
+
+    #[test]
+    fn untrusted_bypass_does_not_shadow_a_cli_flag() {
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::BypassPermissions),
+            bypass_default_from_trusted: false,
+            ..no_settings()
+        };
+        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, None, false, &s);
+        assert_eq!(mode, PermissionMode::Plan);
+    }
+
+    #[test]
+    fn trusted_settings_bypass_in_bg_without_disclaimer_downgrades() {
+        // After C() succeeds, oracle still runs `O("bypassPermissions")` (the
+        // bg disclaimer gate) on the settings arm.
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::BypassPermissions),
+            bypass_default_from_trusted: true,
+            is_bg_session: true,
+            ..no_settings()
+        };
+        let (mode, notice) = initial_permission_mode_from_cli(None, false, None, false, &s);
+        assert_eq!(mode, PermissionMode::Default);
+        assert_eq!(notice.as_deref(), Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG));
     }
 
     #[test]
@@ -914,10 +991,7 @@ mod tests {
             default_mode: Some(PermissionMode::Auto),
             bypass_disabled: false,
             auto_mode_disabled: false,
-            auto_default_from_trusted: false,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+            ..no_settings()
         };
         let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, None, false, &s);
         assert_eq!(mode, PermissionMode::Plan);
@@ -932,6 +1006,7 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            bypass_default_from_trusted: false,
             is_bg_session: true,
             skip_dangerous_mode_permission_prompt: false,
             bypass_permissions_mode_accepted: false,

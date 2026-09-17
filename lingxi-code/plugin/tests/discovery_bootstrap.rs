@@ -326,3 +326,68 @@ async fn cli_plugin_dir_loads_a_zip_with_wrapper_dir() {
     // The returned dir is the UNWRAPPED plugin root (holds the manifest dir).
     assert!(discovered[0].2.join(".lingxi-plugin").is_dir());
 }
+
+/// Write a minimal named plugin at `root/<dir_name>` whose manifest `name` is
+/// `plugin_name` (oracle 2.1.265 `--plugin-dir` folder-of-plugins).
+fn write_named_fixture_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
+    let plugin_dir = root.join(dir_name);
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    fs::write(
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+        format!(r#"{{"name":"{plugin_name}","version":"1.0.0"}}"#),
+    )
+    .unwrap();
+}
+
+/// 2.1.265: `--plugin-dir` pointing at a folder of plugins loads each child
+/// that has a readable `.lingxi-plugin/plugin.json` (oracle `X1s`/`KMe`).
+#[tokio::test]
+async fn cli_plugin_dir_loads_each_child_of_a_folder_of_plugins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let collection = tmp.path().join("plugins");
+    write_named_fixture_plugin(&collection, "beta", "beta-plugin");
+    write_named_fixture_plugin(&collection, "alpha", "alpha-plugin");
+    fs::create_dir_all(collection.join("empty-child")).unwrap();
+    fs::create_dir_all(collection.join(".hidden")).unwrap();
+    write_named_fixture_plugin(&collection.join(".hidden"), "nope", "hidden-plugin");
+
+    let discovered = plugin::discover_cli_plugin_dirs(&[collection]).await;
+    let mut names: Vec<_> = discovered.iter().map(|d| d.1.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["alpha-plugin", "beta-plugin"],
+        "each manifest child loads; skipped/hidden children do not"
+    );
+}
+
+/// A directory that is itself a plugin (has `.lingxi-plugin/plugin.json`) is
+/// NOT expanded as a collection, even when it also has component subdirs.
+#[tokio::test]
+async fn cli_plugin_dir_does_not_expand_a_plugin_into_component_children() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture_plugin(tmp.path(), "myplugin");
+    let discovered = plugin::discover_cli_plugin_dirs(&[tmp.path().join("myplugin")]).await;
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].1.name, "myplugin");
+}
+
+/// 2.1.265 watch snapshot: re-classifying a folder of plugins picks up a
+/// child added after the first load (oracle `watchCollections` / `wAr`).
+#[tokio::test]
+async fn cli_plugin_dir_collection_children_picks_up_a_new_child() {
+    let tmp = tempfile::tempdir().unwrap();
+    let collection = tmp.path().join("plugins");
+    write_named_fixture_plugin(&collection, "alpha", "alpha-plugin");
+
+    let first = plugin::cli_plugin_dir_collection_children(&collection)
+        .await
+        .expect("folder of plugins");
+    assert_eq!(first, ["alpha"]);
+
+    write_named_fixture_plugin(&collection, "beta", "beta-plugin");
+    let second = plugin::cli_plugin_dir_collection_children(&collection)
+        .await
+        .expect("folder of plugins");
+    assert_eq!(second, ["alpha", "beta"]);
+}

@@ -45,8 +45,8 @@ pub use run_due::{
     FireStatus, FiredJob,
 };
 pub use schedule::{
-    human_schedule, iso_8601_utc, local_date_time_string, parse_cron, short_local_timestamp,
-    CronExpression, CronField, CronParseError,
+    human_schedule, iso_8601_utc, local_date_time_string, loop_every_label, loop_last_run_label,
+    loop_usage_row, parse_cron, short_local_timestamp, CronExpression, CronField, CronParseError,
 };
 pub use scheduler::{
     register_live_job, session_jobs, task_registry_identity, unregister_live_job, CronScheduler,

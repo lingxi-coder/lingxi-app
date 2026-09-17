@@ -66,6 +66,9 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     ("enabledPlugins", MergeStrategy::DeepMerge),
     ("pluginConfigs", MergeStrategy::DeepMerge),
     ("extraKnownMarketplaces", MergeStrategy::DeepMerge),
+    // Per-model effort / cap overrides. Nested `maxEffortLevel` is folded at
+    // the consumer (lowest wins); DeepMerge keeps sibling model keys.
+    ("modelSettings", MergeStrategy::DeepMerge),
     // `attribution` is a plain object of optional strings, so the customizer's
     // array special-case never applies and it deep-merges per field: a layer
     // naming only `pr` leaves an inherited `commit` in place.
@@ -158,6 +161,19 @@ pub enum TeammateMode {
 /// trailer at its default. An empty string DISABLES that trailer, which is why
 /// these are `Option<String>` rather than `String` — "unset" and "set to empty"
 /// must stay distinguishable.
+/// Per-model effort overrides (`modelSettings.<model>`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSettings {
+    /// Persisted effort for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_level: Option<String>,
+    /// Cap for this model; replaces the top-level `maxEffortLevel`. `"max"`
+    /// exempts the model from the top-level cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_effort_level: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Attribution {
@@ -421,6 +437,24 @@ pub struct SettingsJson {
     /// this key in BOTH directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_memory_enabled: Option<bool>,
+
+    /// Persisted `/effort` default (`effortLevel`). `max` is session-only and
+    /// is not written here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_level: Option<String>,
+
+    /// Client-side effort cap (`maxEffortLevel`). `/effort`, `--effort`,
+    /// `LINGXI_EFFORT_LEVEL`, and model defaults above this value are clamped
+    /// to it. `"max"` does not cap. Across settings files the **lowest**
+    /// applicable value wins — do not rely on the merged scalar for that fold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_effort_level: Option<String>,
+
+    /// Per-model `effortLevel` / `maxEffortLevel`. A matching model's
+    /// `maxEffortLevel` replaces the top-level cap for that model (`"max"`
+    /// exempts it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_settings: Option<BTreeMap<String, ModelSettings>>,
 
     /// Scalar field (later source wins). Session-scoped gate for dynamic
     /// workflows. Absence resolves to enabled at the composition root, matching
@@ -875,7 +909,9 @@ impl FusionModelSelectionJson {
     fn validate(&self, field: &str) -> Result<(), crate::settings::SettingsError> {
         use crate::settings::SettingsError::SchemaViolation;
         if self.profile.trim().is_empty() {
-            return Err(SchemaViolation(format!("{field}.profile must not be empty")));
+            return Err(SchemaViolation(format!(
+                "{field}.profile must not be empty"
+            )));
         }
         if self.model.trim().is_empty() {
             return Err(SchemaViolation(format!("{field}.model must not be empty")));
@@ -1509,13 +1545,11 @@ mod tests {
         let invalid: FusionSettingsJson =
             serde_json::from_str(r#"{"completionPolicy":"quorum_after_grace","partialOk":false}"#)
                 .unwrap();
-        assert!(
-            invalid
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("completionPolicy")
-        );
+        assert!(invalid
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("completionPolicy"));
         let wait_all: FusionSettingsJson =
             serde_json::from_str(r#"{"completionPolicy":"wait_all","partialOk":false}"#).unwrap();
         wait_all.validate().unwrap();
@@ -1712,7 +1746,10 @@ mod tests {
                 "google/gemini-3-pro".to_string(),
             ]
         );
-        assert_eq!(fusion.analyst_model.as_ref().unwrap().model, "gpt-5.6-terra");
+        assert_eq!(
+            fusion.analyst_model.as_ref().unwrap().model,
+            "gpt-5.6-terra"
+        );
         assert_eq!(
             fusion.synthesizer_model.as_ref().unwrap().profile,
             "anthropic"
@@ -1789,7 +1826,9 @@ mod tests {
             ]}}"#,
         )
         .unwrap();
-        roster_only.validate().expect("roster alone is a valid file");
+        roster_only
+            .validate()
+            .expect("roster alone is a valid file");
         let bar_only: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"minSuccessfulPanels":3,"qualityPanelCount":3}}"#)
                 .unwrap();
@@ -1859,6 +1898,41 @@ mod tests {
         assert!(
             strategy_for("permissions").is_some(),
             "permissions has a merge strategy"
+        );
+    }
+
+    #[test]
+    fn max_effort_level_and_model_settings_parse() {
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{
+                "maxEffortLevel": "high",
+                "effortLevel": "medium",
+                "modelSettings": {
+                    "claude-opus-4-7": { "maxEffortLevel": "low" }
+                }
+            }"#,
+        )
+        .expect("maxEffortLevel schema");
+        assert_eq!(parsed.max_effort_level.as_deref(), Some("high"));
+        assert_eq!(parsed.effort_level.as_deref(), Some("medium"));
+        assert_eq!(
+            parsed
+                .model_settings
+                .as_ref()
+                .and_then(|m| m.get("claude-opus-4-7"))
+                .and_then(|e| e.max_effort_level.as_deref()),
+            Some("low")
+        );
+        assert!(
+            matches!(
+                strategy_for("modelSettings"),
+                Some(MergeStrategy::DeepMerge)
+            ),
+            "modelSettings deep-merges; the lowest-wins cap is folded at the consumer"
+        );
+        assert!(
+            strategy_for("maxEffortLevel").is_none(),
+            "top-level maxEffortLevel is not last-wins-merged"
         );
     }
 

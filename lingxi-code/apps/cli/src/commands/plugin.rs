@@ -169,14 +169,8 @@ pub struct InstallArgs {
     // CLI-07 (cc 2.1.238, cc-238.js @235156585): NEW in 2.1.238 — 2.1.220's
     // `plugin install` carried only `-s, --scope` and `--config`.
     //
-    // PARSED, NOT CONSUMED — deliberately. The prompt this flag waives guards
-    // the two marketplace source kinds LingXi's schema does not have: a
-    // `command`-declared install and a `headersHelper`-fetched archive
-    // (`plugin::marketplace::MarketplaceExternalSource` is github | git | url |
-    // npm | file | directory, and `plugin_install` never shells out to a
-    // marketplace-declared command). With no such source there is no
-    // confirmation to skip, so accepting the flag is a faithful no-op rather
-    // than a fake grant; wiring appears with the source kind, not before it.
+    // `-y` is the terminal consent for a `source:"command"` marketplace entry
+    // (oracle `jl({yes})`). `headersHelper` archives remain unimplemented.
     #[arg(short = 'y', long)]
     pub yes: bool,
 

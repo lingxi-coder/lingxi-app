@@ -119,9 +119,26 @@ fn command_spec(command: &str) -> Option<(OperationType, &'static str)> {
         "sha256sum" => (Read, "compute SHA-256 checksums for files in"),
         "sha1sum" => (Read, "compute SHA-1 checksums for files in"),
         "md5sum" => (Read, "compute MD5 checksums for files in"),
+        "tee" => (Write, "write to files in"),
         _ => return None,
     };
     Some(spec)
+}
+
+/// Oracle `CU`: basename-strip `rm`/`rmdir`/`tee`, and map `tee.exe` / `TEE.EXE`
+/// (any case) onto `tee`. Other commands keep the original argv[0] so a
+/// `/usr/bin/cat` stays unrestricted unless the table lists that spelling.
+fn command_spec_name(command: &str) -> &str {
+    let n = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    if matches!(n, "rm" | "rmdir" | "tee") {
+        return n;
+    }
+    let lower = n.to_ascii_lowercase();
+    if lower == "tee" || lower.strip_suffix(".exe") == Some("tee") {
+        "tee"
+    } else {
+        command
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -516,6 +533,18 @@ fn extract_paths(command: &str, args: &[String], home: Option<&str>) -> Vec<Stri
         "git" => extract_git(args),
         // awk: bespoke extractor (skip program, validate -f/-E script files).
         "awk" => extract_awk(args),
+        // tee: filter flags, then drop the stdio devices the oracle's `aHo`
+        // skips (`/dev/null|stdout|stderr|tty`). Empty after that is the
+        // passthrough `gHo` special-case ("Path validation passed for tee").
+        "tee" => filter_out_flags(args)
+            .into_iter()
+            .filter(|path| {
+                !matches!(
+                    path.as_str(),
+                    "/dev/null" | "/dev/stdout" | "/dev/stderr" | "/dev/tty"
+                )
+            })
+            .collect(),
         // cut/paste/column: hQi flag-arg consumption then positional passthrough.
         "cut" => hqi_extract(
             args,
@@ -1495,7 +1524,8 @@ pub fn check_command_path_containment(
         let Some((base, args)) = tokens.split_first() else {
             continue;
         };
-        let Some((mut operation_type, action_verb)) = command_spec(base) else {
+        let spec_name = command_spec_name(base);
+        let Some((mut operation_type, action_verb)) = command_spec(spec_name) else {
             continue; // not a path-restricted command → passthrough
         };
 
@@ -1548,7 +1578,7 @@ pub fn check_command_path_containment(
         if base == "cd" {
             continue;
         }
-        let paths = extract_paths(base, args, home.as_deref());
+        let paths = extract_paths(spec_name, args, home.as_deref());
         for path in &paths {
             match validate_path(path, operation_type, roots) {
                 PathGuard::Ask(reason) => {
@@ -1579,7 +1609,7 @@ pub fn check_command_path_containment(
                             && path.split(['/', '\\']).any(glob_segment_can_match_dotdot)
                         {
                             let message = format!(
-                                "{base} names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
+                                "{spec_name} names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
                             );
                             return Some(PathConstraintAsk {
                                 reason: message.clone(),
@@ -1590,9 +1620,9 @@ pub fn check_command_path_containment(
                         }
                         if !path_in_allowed_working_path(&resolved, block_dirs, roots) {
                             let message = crate::read_block::outside_path_message(
-                                base,
+                                spec_name,
                                 &resolved.to_string_lossy(),
-                                crate::read_block::outside_path_shape_for(base),
+                                crate::read_block::outside_path_shape_for(spec_name),
                             );
                             return Some(PathConstraintAsk {
                                 message,
@@ -1614,7 +1644,7 @@ pub fn check_command_path_containment(
                         // No custom `decisionReason.reason` is attached in TS for
                         // the containment case, so the message doubles as reason.
                         let message = format!(
-                            "{base} in '{resolved_disp}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."
+                            "{spec_name} in '{resolved_disp}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."
                         );
                         return Some(PathConstraintAsk {
                             reason: message.clone(),
@@ -1727,7 +1757,8 @@ pub fn command_path_deny_targets(
         let Some((base, args)) = tokens.split_first() else {
             continue;
         };
-        let Some((mut operation_type, action_verb)) = command_spec(base) else {
+        let spec_name = command_spec_name(base);
+        let Some((mut operation_type, action_verb)) = command_spec(spec_name) else {
             continue;
         };
         if base == "sed"
@@ -1748,7 +1779,7 @@ pub fn command_path_deny_targets(
         if base == "cd" {
             continue;
         }
-        let paths = extract_paths(base, args, home.as_deref());
+        let paths = extract_paths(spec_name, args, home.as_deref());
         for path in &paths {
             // Only paths that clear every pre-guard (resolved) are deny-checked;
             // a pre-guard Ask preempts the deny walk in CC.
@@ -1757,7 +1788,7 @@ pub fn command_path_deny_targets(
                 let dir_list = format_directory_list(&dirs);
                 let resolved_str = resolved.to_string_lossy().into_owned();
                 let blocked_message = format!(
-                    "{base} in '{resolved_str}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."
+                    "{spec_name} in '{resolved_str}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."
                 );
                 targets.push(CommandPathTarget {
                     resolved: resolved_str,
@@ -1940,6 +1971,50 @@ mod tests {
         assert!(check("mkdir sub/newdir").is_none());
         assert!(check("mv a.txt b.txt").is_none());
         assert!(check("cp a.txt b.txt").is_none());
+    }
+
+    // ── 2.1.269: tee write-path containment + empty-tee passthrough ────────
+
+    #[test]
+    fn tee_out_of_cwd_asks() {
+        let a = check("tee /etc/passwd").expect("ask");
+        assert_eq!(
+            a.message,
+            "tee in '/etc/passwd' was blocked. For security, LingXi may \
+             only write to files in the allowed working directories for \
+             this session: '/proj/work'."
+        );
+    }
+
+    #[test]
+    fn piped_tee_out_of_cwd_asks() {
+        let a = check("echo x | tee /etc/passwd").expect("ask");
+        assert!(a.message.starts_with("tee in '/etc/passwd' was blocked."));
+        assert!(a.message.contains("write to files in"));
+    }
+
+    #[test]
+    fn empty_tee_and_stdio_devices_passthrough() {
+        assert!(check("tee").is_none());
+        assert!(check("tee -a").is_none());
+        assert!(check("echo x | tee").is_none());
+        assert!(check("tee /dev/null").is_none());
+        assert!(check("tee /dev/stderr").is_none());
+    }
+
+    #[test]
+    fn tee_in_cwd_not_blocked() {
+        assert!(check("tee ./out.txt").is_none());
+        assert!(check("tee -a local.log").is_none());
+    }
+
+    #[test]
+    fn tee_exe_and_usr_bin_tee_use_the_tee_spec() {
+        assert!(command_spec(command_spec_name("tee.exe")).is_some());
+        assert!(command_spec(command_spec_name("/usr/bin/tee")).is_some());
+        assert!(command_spec(command_spec_name("TEE.EXE")).is_some());
+        let a = check("/usr/bin/tee /etc/passwd").expect("ask");
+        assert!(a.message.starts_with("tee in '/etc/passwd' was blocked."));
     }
 
     // ── D2: mv/cp WITH a flag → ask (COMMAND_VALIDATOR) ────────────────────

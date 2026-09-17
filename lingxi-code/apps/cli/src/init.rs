@@ -54,8 +54,7 @@ pub struct Runtime {
     pub fusion_recorder: Arc<dyn platform_api::FusionRunRecorder>,
     /// Per-session recorder factory used to drain mounted outboxes during CLI
     /// shutdown or an in-process session remount.
-    pub fusion_recorder_factory:
-        Arc<engine_desktop::fusion_recorder::DesktopFusionRecorderFactory>,
+    pub fusion_recorder_factory: Arc<engine_desktop::fusion_recorder::DesktopFusionRecorderFactory>,
     /// Ordered producer/cost/session/outbox drain retained across the desktop
     /// runtime projection.
     pub session_lifecycle: Arc<engine_desktop::DesktopSessionLifecycle>,
@@ -1207,16 +1206,39 @@ fn flag_settings_env(settings: &str) -> std::collections::BTreeMap<String, Strin
 /// settings composition. Accepts the same inline-object-or-file shape as the
 /// existing flagSettings consumers. Invalid input remains absent here; the CLI
 /// validation/error surface continues to be owned by argument initialization.
+///
+/// A `--settings` **file** above 2 MiB is a hard error (same copy as ambient
+/// settings). Inline JSON is not a file and is not size-capped here.
 pub(crate) fn parse_flag_settings(
     settings: Option<&str>,
 ) -> Option<lingxi_core::settings::SettingsJson> {
-    let raw = settings?.trim();
+    parse_flag_settings_checked(settings).ok().flatten()
+}
+
+/// [`parse_flag_settings`] that surfaces the 2 MiB file cap as `Err`.
+pub(crate) fn parse_flag_settings_checked(
+    settings: Option<&str>,
+) -> Result<Option<lingxi_core::settings::SettingsJson>, &'static str> {
+    let Some(raw) = settings.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
     let text = if raw.starts_with('{') {
         raw.to_string()
     } else {
-        std::fs::read_to_string(raw).ok()?
+        let path = std::path::Path::new(raw);
+        let metadata = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(_) => return Ok(None),
+        };
+        if metadata.len() > lingxi_core::settings::loader::MAX_SETTINGS_FILE_BYTES {
+            return Err(lingxi_core::settings::loader::SETTINGS_FILE_SIZE_LIMIT_MESSAGE);
+        }
+        match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(_) => return Ok(None),
+        }
     };
-    serde_json::from_str(&text).ok()
+    Ok(serde_json::from_str(&text).ok())
 }
 
 /// Build the full runtime from parsed argv + the chosen output stream.
@@ -1299,14 +1321,13 @@ pub async fn build_runtime_from_config(
             .and_then(protocol::SessionId::parse_prefixed)
             .unwrap_or_else(protocol::SessionId::new);
         cfg.session_id_override = Some(session_id.as_uuid().to_string());
-        let lease = platform_api::live_sessions::LiveSessionDir::at_live(
-            cfg.lingxi_home.join("sessions"),
-        )
-            .claim_session_id(&session_id.to_string(), std::process::id())
-            .map_err(|error| InitError::Orchestrator(format!(
-                "session writer claim failed: {error}"
-            )))?
-            .into_shared();
+        let lease =
+            platform_api::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"))
+                .claim_session_id(&session_id.to_string(), std::process::id())
+                .map_err(|error| {
+                    InitError::Orchestrator(format!("session writer claim failed: {error}"))
+                })?
+                .into_shared();
         cfg.session_writer_lease = Some(lease);
     }
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
@@ -2067,5 +2088,24 @@ mod tests {
         assert!(parse_flag_settings(None).is_none());
         assert!(parse_flag_settings(Some("{not-json")).is_none());
         assert!(parse_flag_settings(Some("/definitely/not/a/settings/file")).is_none());
+    }
+
+    #[test]
+    fn parse_flag_settings_rejects_files_above_two_mebibytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("too-big.json");
+        let over =
+            usize::try_from(lingxi_core::settings::loader::MAX_SETTINGS_FILE_BYTES).unwrap() + 1;
+        std::fs::write(&path, vec![b' '; over]).unwrap();
+        let err = parse_flag_settings_checked(path.to_str()).unwrap_err();
+        assert_eq!(
+            err,
+            lingxi_core::settings::loader::SETTINGS_FILE_SIZE_LIMIT_MESSAGE
+        );
+        assert!(parse_flag_settings(path.to_str()).is_none());
+        // Inline JSON is not a file — the cap does not apply.
+        assert!(parse_flag_settings_checked(Some(r#"{"model":"opus"}"#))
+            .unwrap()
+            .is_some());
     }
 }

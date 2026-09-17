@@ -104,6 +104,17 @@ enum EffortLevel {
 }
 
 impl EffortLevel {
+    /// Rank in oracle `Ic` (`low < medium < high < xhigh < max`).
+    fn rank(self) -> u8 {
+        match self {
+            EffortLevel::Low => 0,
+            EffortLevel::Medium => 1,
+            EffortLevel::High => 2,
+            EffortLevel::Xhigh => 3,
+            EffortLevel::Max => 4,
+        }
+    }
+
     /// The canonical lowercase string for this level (`String(e)` / `Jse`).
     fn as_str(self) -> &'static str {
         match self {
@@ -404,7 +415,130 @@ fn resolve_applied_effort(model: &str, app_state: Option<EffortLevel>) -> Option
 /// with the `?? 'high'` API-default fallback, then `convertEffortValueToLevel`.
 fn get_displayed_effort_level(model: &str, app_state: Option<EffortLevel>) -> EffortLevel {
     let resolved = resolve_applied_effort(model, app_state).unwrap_or(EffortLevel::High);
-    convert_effort_value_to_level(resolved)
+    clamp_effort(
+        convert_effort_value_to_level(resolved),
+        fold_max_effort_cap_from_disk(model),
+    )
+}
+
+fn clamp_effort(level: EffortLevel, cap: Option<EffortLevel>) -> EffortLevel {
+    match cap {
+        Some(cap) if level.rank() > cap.rank() => cap,
+        _ => level,
+    }
+}
+
+fn model_settings_key_matches(key: &str, model: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    key == model || (!key.is_empty() && (model.starts_with(&key) || key.starts_with(&model)))
+}
+
+fn parse_max_effort_token(raw: &str) -> Option<EffortLevel> {
+    parse_effort_level(raw)
+}
+
+fn layer_max_effort_cap(value: &Value, model: &str, any_per_model: bool) -> Option<EffortLevel> {
+    let mut per_model: Option<EffortLevel> = None;
+    if any_per_model {
+        if let Some(settings) = value.get("modelSettings").and_then(Value::as_object) {
+            for (key, entry) in settings {
+                if !model_settings_key_matches(key, model) {
+                    continue;
+                }
+                let Some(level) = entry
+                    .get("maxEffortLevel")
+                    .and_then(Value::as_str)
+                    .and_then(parse_max_effort_token)
+                else {
+                    continue;
+                };
+                per_model = Some(match per_model {
+                    Some(prev) if level.rank() < prev.rank() => level,
+                    Some(prev) => prev,
+                    None => level,
+                });
+            }
+        }
+    }
+    per_model.or_else(|| {
+        value
+            .get("maxEffortLevel")
+            .and_then(Value::as_str)
+            .and_then(parse_max_effort_token)
+    })
+}
+
+/// Lowest applicable `maxEffortLevel` across settings JSON documents.
+/// `"max"` does not cap. Per-model caps replace the top-level value inside
+/// the same file when any layer carries `modelSettings.*.maxEffortLevel`.
+fn fold_max_effort_cap<'a>(
+    raws: impl IntoIterator<Item = &'a str>,
+    model: &str,
+) -> Option<EffortLevel> {
+    let parsed: Vec<Value> = raws
+        .into_iter()
+        .filter_map(|raw| serde_json::from_str(raw).ok())
+        .collect();
+    let any_per_model = parsed.iter().any(|value| {
+        value
+            .get("modelSettings")
+            .and_then(Value::as_object)
+            .is_some_and(|settings| {
+                settings
+                    .values()
+                    .any(|entry| entry.get("maxEffortLevel").is_some())
+            })
+    });
+    let mut cap: Option<EffortLevel> = None;
+    for value in &parsed {
+        let Some(level) = layer_max_effort_cap(value, model, any_per_model) else {
+            continue;
+        };
+        if level == EffortLevel::Max {
+            continue;
+        }
+        cap = Some(match cap {
+            Some(prev) if level.rank() < prev.rank() => level,
+            Some(prev) => prev,
+            None => level,
+        });
+    }
+    cap
+}
+
+fn fold_max_effort_cap_from_disk(model: &str) -> Option<EffortLevel> {
+    let mut raws = Vec::new();
+    if let Some(path) = user_settings_path() {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            raws.push(raw);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for name in ["settings.json", "settings.local.json"] {
+            let path = cwd.join(branding::DOT_DIR).join(name);
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                raws.push(raw);
+            }
+        }
+    }
+    if let Ok(level) = std::env::var("LINGXI_MAX_EFFORT_LEVEL") {
+        if !level.trim().is_empty() {
+            raws.push(format!(
+                r#"{{"maxEffortLevel":{}}}"#,
+                serde_json::Value::String(level)
+            ));
+        }
+    }
+    fold_max_effort_cap(raws.iter().map(String::as_str), model)
+}
+
+fn effort_exceeds_cap_message(requested: EffortLevel, model: &str, cap: EffortLevel) -> String {
+    format!(
+        "Effort '{}' exceeds the cap for {model} set by your settings or organization; using '{}'.",
+        requested.as_str(),
+        cap.as_str()
+    )
 }
 
 /// Read and classify `LINGXI_EFFORT_LEVEL` (`getEffortEnvOverride`).
@@ -521,12 +655,17 @@ impl EffortHandler {
 
     /// `setEffortValue` (`effort.tsx` L16-61) — the valid-level branch.
     async fn set_effort(&self, level: EffortLevel) -> String {
+        let model = self.handle.get_status_snapshot().await.model;
+        let cap = fold_max_effort_cap_from_disk(&model);
+        let applied = clamp_effort(level, cap);
+        let cap_notice =
+            (applied != level).then(|| effort_exceeds_cap_message(level, &model, applied));
         // toPersistableEffort: low/medium/high persist, max is session-only.
-        let persistable = to_persistable(level);
-        if !self.supports_level(level).await {
+        let persistable = to_persistable(applied);
+        if !self.supports_level(applied).await {
             return format!(
                 "Failed to set effort level: {} is unsupported for the active model",
-                level.as_str()
+                applied.as_str()
             );
         }
 
@@ -534,16 +673,16 @@ impl EffortHandler {
         let live = match &env {
             EnvOverride::Pinned {
                 level: env_level, ..
-            } => Some(env_level.as_str().to_string()),
+            } => Some(clamp_effort(*env_level, cap).as_str().to_string()),
             EnvOverride::Cleared => None,
-            EnvOverride::Unset => Some(level.as_str().to_string()),
+            EnvOverride::Unset => Some(applied.as_str().to_string()),
         };
         let previous = self.handle.current_effort().await;
         if let Err(error) = self.handle.set_effort_level(live).await {
             return format!("Failed to set effort level: {error}");
         }
         if persistable.is_some() {
-            if let Err(msg) = persist_effort_level(Some(level)) {
+            if let Err(msg) = persist_effort_level(Some(applied)) {
                 let _ = self.handle.set_effort_level(previous).await;
                 return format!("Failed to set effort level: {msg}");
             }
@@ -556,18 +695,18 @@ impl EffortHandler {
             EnvOverride::Pinned {
                 level: env_level,
                 raw,
-            } if env_level != level => {
+            } if env_level != applied => {
                 if persistable.is_none() {
                     // Session-only level can't outlast the env (L38).
                     format!(
                         "Not applied: {EFFORT_ENV_VAR}={raw} overrides effort this session, and {} is session-only (nothing saved)",
-                        level.as_str()
+                        applied.as_str()
                     )
                 } else {
                     // Persisted, but env wins until cleared (L47).
                     format!(
                         "{EFFORT_ENV_VAR}={raw} overrides this session — clear it and {} takes over",
-                        level.as_str()
+                        applied.as_str()
                     )
                 }
             }
@@ -576,6 +715,9 @@ impl EffortHandler {
             // sessions)"` for a persistable level and `" (this session only)"`
             // for a session-only (`max`) level.
             _ => {
+                if let Some(notice) = cap_notice {
+                    return notice;
+                }
                 let suffix = if persistable.is_some() {
                     " (saved as your default for new sessions)"
                 } else {
@@ -583,8 +725,8 @@ impl EffortHandler {
                 };
                 format!(
                     "Set effort level to {}{suffix}: {}",
-                    level.as_str(),
-                    level.description()
+                    applied.as_str(),
+                    applied.description()
                 )
             }
         }
@@ -822,6 +964,73 @@ Effort levels:\n\
         assert_eq!(parse_effort_level("med"), Some(EffortLevel::Medium));
         // `ultracode` is NOT a parse-level member (routed separately).
         assert_eq!(parse_effort_level("ultracode"), None);
+    }
+
+    #[test]
+    fn max_effort_cap_lowest_wins_and_skips_max() {
+        assert_eq!(
+            fold_max_effort_cap([r#"{"maxEffortLevel":"high"}"#], "claude-opus-4-7"),
+            Some(EffortLevel::High)
+        );
+        assert_eq!(
+            fold_max_effort_cap(
+                [
+                    r#"{"maxEffortLevel":"high"}"#,
+                    r#"{"maxEffortLevel":"low"}"#,
+                ],
+                "claude-opus-4-7"
+            ),
+            Some(EffortLevel::Low)
+        );
+        assert_eq!(
+            fold_max_effort_cap([r#"{"maxEffortLevel":"max"}"#], "claude-opus-4-7"),
+            None
+        );
+        assert_eq!(
+            fold_max_effort_cap(
+                [
+                    r#"{"maxEffortLevel":"high","modelSettings":{"claude-opus-4-7":{"maxEffortLevel":"low"}}}"#
+                ],
+                "claude-opus-4-7"
+            ),
+            Some(EffortLevel::Low)
+        );
+        assert_eq!(
+            fold_max_effort_cap(
+                [
+                    r#"{"maxEffortLevel":"high","modelSettings":{"claude-opus-4-7":{"maxEffortLevel":"max"}}}"#
+                ],
+                "claude-opus-4-7"
+            ),
+            None,
+            "per-model max exempts that model"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_effort_level_clamps_xhigh_to_high() {
+        let env = TestEnv::new();
+        env.write_settings(r#"{"maxEffortLevel":"high"}"#);
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_status_snapshot(platform_api::StatusSnapshot {
+            model: "claude-opus-4-7".into(),
+            ..Default::default()
+        });
+        let handler = EffortHandler::new(mock.clone());
+        match handler.handle(&args("xhigh")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(
+                    s,
+                    "Effort 'xhigh' exceeds the cap for claude-opus-4-7 set by your settings or organization; using 'high'."
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert_eq!(mock.current_effort().await.as_deref(), Some("high"));
+        assert_eq!(
+            env.read_settings().unwrap().get("effortLevel"),
+            Some(&json!("high"))
+        );
     }
 
     #[tokio::test]

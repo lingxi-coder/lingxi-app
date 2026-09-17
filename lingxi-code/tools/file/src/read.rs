@@ -15,6 +15,7 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
@@ -344,8 +345,8 @@ fn format_line_too_long(path: &Path, line: u64) -> String {
     )
 }
 
-async fn read_text_range_streaming(
-    bytes: &[u8],
+async fn read_text_range_streaming<R: Read>(
+    mut reader: R,
     canon: &Path,
     offset: u64,
     limit: u64,
@@ -367,9 +368,16 @@ async fn read_text_range_streaming(
     let mut total_bytes_read = 0_usize;
     let mut nul_scan_remaining = NUL_SCAN_WINDOW;
     let mut utf8_tail: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; STREAMING_READ_CHUNK_BYTES];
 
-    for chunk in bytes.chunks(STREAMING_READ_CHUNK_BYTES) {
-        let n = chunk.len();
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|error| ToolError::Io(error.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buf[..n];
         total_bytes_read += n;
 
         let scan = nul_scan_remaining.min(n);
@@ -1105,6 +1113,19 @@ fn read_rooted_snapshot(
     platform_api::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
 }
 
+fn open_rooted_file(
+    requested: &std::path::Path,
+    approved: &std::path::Path,
+    trusted_dirs: &[std::path::PathBuf],
+) -> Result<std::fs::File, platform_api::rooted_fs::RootedFsError> {
+    let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
+        return Err(platform_api::rooted_fs::RootedFsError::Fs(
+            platform_api::FsError::OutsideWorkspace(approved.display().to_string()),
+        ));
+    };
+    platform_api::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
+}
+
 fn symlink_resolution_changed_message(path: &str) -> String {
     format!(
         "Refusing to read {path}: its symlink resolution changed after permission was checked. If a link in the working directory is being rewritten concurrently, stop that and retry."
@@ -1807,9 +1828,12 @@ impl Tool for FileReadTool {
         // `file_path` (the documented/expected case) is unaffected.
         let task_output_id = if let Some(registry) = self.ctx.task_registry.as_ref() {
             registry.task_output_directory().await.and_then(|root| {
-                platform_api::task_output::output_id(Path::new(&root), Path::new(file_path)).map(str::to_owned)
+                platform_api::task_output::output_id(Path::new(&root), Path::new(file_path))
+                    .map(str::to_owned)
             })
-        } else { None };
+        } else {
+            None
+        };
         let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
@@ -1867,32 +1891,75 @@ impl Tool for FileReadTool {
         // trusted root. This is deliberately not `tokio::fs::read(&canon)`:
         // reopening the canonical pathname would reintroduce a parent/leaf
         // symlink retarget window.
-        let snapshot = match read_rooted_snapshot(&path, &canon, &trusted_dirs) {
-            Ok(snapshot) => snapshot,
-            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => {
-                // Missing-file UX (`FileReadTool.ts:608-649`). On ENOENT TS first
-                // tries the macOS-screenshot AM/PM space variant (regular space ⇄
-                // thin space, U+202F), then reports the friendly message if that
-                // variant is also absent.
-                if let Some(alt) = get_alternate_screenshot_path(&canon) {
-                    if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
-                        match read_rooted_snapshot(&alt, &alt_canon, &trusted_dirs) {
-                            Ok(snapshot) => {
-                                canon = alt_canon;
-                                snapshot
+        //
+        // TL-1: a ranged Read of a >256KB file must not `read_to_end` the
+        // whole body. Hint from a metadata stat; on success we keep the
+        // no-follow handle and stream lines. Anything else falls through to
+        // the existing snapshot path.
+        let skip_full_load = input_limit.is_some()
+            && !is_image_path(&canon)
+            && !is_pdf_path(&canon)
+            && !std::path::Path::new(file_path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"))
+            && std::fs::metadata(&canon)
+                .map(|metadata| metadata.len() > MAX_FILE_READ_SIZE)
+                .unwrap_or(false);
+        let mut stream_source: Option<std::fs::File> = None;
+        let snapshot = 'load: {
+            if skip_full_load {
+                if let Ok(file) = open_rooted_file(&path, &canon, &trusted_dirs) {
+                    if let Ok(metadata) = file.metadata() {
+                        if metadata.len() > MAX_FILE_READ_SIZE {
+                            let size = metadata.len();
+                            let modified = metadata.modified().ok();
+                            stream_source = Some(file);
+                            break 'load platform_api::rooted_fs::RootedFileSnapshot {
+                                bytes: Vec::new(),
+                                size,
+                                modified,
+                                mode: None,
+                            };
+                        }
+                    }
+                }
+            }
+            match read_rooted_snapshot(&path, &canon, &trusted_dirs) {
+                Ok(snapshot) => snapshot,
+                Err(platform_api::rooted_fs::RootedFsError::Fs(
+                    platform_api::FsError::NotFound(_),
+                )) => {
+                    // Missing-file UX (`FileReadTool.ts:608-649`). On ENOENT TS first
+                    // tries the macOS-screenshot AM/PM space variant (regular space ⇄
+                    // thin space, U+202F), then reports the friendly message if that
+                    // variant is also absent.
+                    if let Some(alt) = get_alternate_screenshot_path(&canon) {
+                        if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
+                            match read_rooted_snapshot(&alt, &alt_canon, &trusted_dirs) {
+                                Ok(snapshot) => {
+                                    canon = alt_canon;
+                                    snapshot
+                                }
+                                Err(platform_api::rooted_fs::RootedFsError::Fs(
+                                    platform_api::FsError::NotFound(_),
+                                )) => {
+                                    let not_found =
+                                        std::io::Error::from(std::io::ErrorKind::NotFound);
+                                    return self
+                                        .file_not_found(&invocation_id, &canon, &not_found)
+                                        .await;
+                                }
+                                Err(error) => {
+                                    self.emit_failed(&invocation_id, "io_metadata").await;
+                                    return Err(ToolError::Io(error.to_string()));
+                                }
                             }
-                            Err(platform_api::rooted_fs::RootedFsError::Fs(
-                                platform_api::FsError::NotFound(_),
-                            )) => {
-                                let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
-                                return self
-                                    .file_not_found(&invocation_id, &canon, &not_found)
-                                    .await;
-                            }
-                            Err(error) => {
-                                self.emit_failed(&invocation_id, "io_metadata").await;
-                                return Err(ToolError::Io(error.to_string()));
-                            }
+                        } else {
+                            let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+                            return self
+                                .file_not_found(&invocation_id, &canon, &not_found)
+                                .await;
                         }
                     } else {
                         let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
@@ -1900,36 +1967,31 @@ impl Tool for FileReadTool {
                             .file_not_found(&invocation_id, &canon, &not_found)
                             .await;
                     }
-                } else {
-                    let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
-                    return self
-                        .file_not_found(&invocation_id, &canon, &not_found)
-                        .await;
                 }
-            }
-            Err(platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged)
-            | Err(platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged) => {
-                self.emit_failed(&invocation_id, "symlink_resolution_changed")
-                    .await;
-                return Err(ToolError::InvalidInput(symlink_resolution_changed_message(
-                    file_path,
-                )));
-            }
-            Err(platform_api::rooted_fs::RootedFsError::NotRegularFile)
-                if std::path::Path::new(file_path)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb")) =>
-            {
-                self.emit_failed(&invocation_id, "notebook_not_regular_file")
-                    .await;
-                return Err(ToolError::Io(
-                    crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE.to_string(),
-                ));
-            }
-            Err(error) => {
-                self.emit_failed(&invocation_id, "io_metadata").await;
-                return Err(ToolError::Io(error.to_string()));
+                Err(platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged)
+                | Err(platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged) => {
+                    self.emit_failed(&invocation_id, "symlink_resolution_changed")
+                        .await;
+                    return Err(ToolError::InvalidInput(symlink_resolution_changed_message(
+                        file_path,
+                    )));
+                }
+                Err(platform_api::rooted_fs::RootedFsError::NotRegularFile)
+                    if std::path::Path::new(file_path)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb")) =>
+                {
+                    self.emit_failed(&invocation_id, "notebook_not_regular_file")
+                        .await;
+                    return Err(ToolError::Io(
+                        crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE.to_string(),
+                    ));
+                }
+                Err(error) => {
+                    self.emit_failed(&invocation_id, "io_metadata").await;
+                    return Err(ToolError::Io(error.to_string()));
+                }
             }
         };
         let size = snapshot.size;
@@ -2147,16 +2209,27 @@ impl Tool for FileReadTool {
             && input_limit.is_some()
             && size > MAX_FILE_READ_SIZE
         {
-            let streamed = match read_text_range_streaming(
-                &snapshot.bytes,
-                &canon,
-                offset,
-                input_limit.expect("checked is_some"),
-                ext.as_deref(),
-                max_output_tokens,
-            )
-            .await
-            {
+            let streamed = match if let Some(file) = stream_source.take() {
+                read_text_range_streaming(
+                    file,
+                    &canon,
+                    offset,
+                    input_limit.expect("checked is_some"),
+                    ext.as_deref(),
+                    max_output_tokens,
+                )
+                .await
+            } else {
+                read_text_range_streaming(
+                    snapshot.bytes.as_slice(),
+                    &canon,
+                    offset,
+                    input_limit.expect("checked is_some"),
+                    ext.as_deref(),
+                    max_output_tokens,
+                )
+                .await
+            } {
                 Ok(result) => result,
                 Err(e) => {
                     self.emit_failed(&invocation_id, "streaming_range_read")
@@ -2224,7 +2297,9 @@ impl Tool for FileReadTool {
                 "startLine": line_range_start,
                 "totalLines": total_lines,
             });
-            if let Some(id) = &task_output_id { file["taskId"] = json!(id); }
+            if let Some(id) = &task_output_id {
+                file["taskId"] = json!(id);
+            }
             return Ok(ToolCallResult {
                 data: json!({ "type": "text", "file": file }),
                 model_content: Some(model_content),
@@ -2575,7 +2650,9 @@ impl Tool for FileReadTool {
             "startLine": line_range_start,
             "totalLines": total_lines,
         });
-        if let Some(id) = &task_output_id { file["taskId"] = json!(id); }
+        if let Some(id) = &task_output_id {
+            file["taskId"] = json!(id);
+        }
         if partial_note.is_some() {
             file["truncatedByTokenCap"] = json!(true);
         }
@@ -2727,6 +2804,32 @@ mod tests {
     #[test]
     fn max_size_byte_locked() {
         assert_eq!(MAX_FILE_READ_SIZE, 262_144);
+    }
+
+    #[tokio::test]
+    async fn ranged_streaming_read_keeps_only_selected_lines() {
+        let mut body = String::new();
+        for i in 1..=5_000 {
+            body.push_str(&format!("line-{i}\n"));
+        }
+        let result = read_text_range_streaming(
+            std::io::Cursor::new(body.into_bytes()),
+            Path::new("big.txt"),
+            1,
+            2,
+            None,
+            100_000,
+        )
+        .await
+        .expect("stream");
+        assert!(result.content.contains("line-1"), "got {}", result.content);
+        assert!(result.read_lines <= 2);
+        assert!(
+            result.content.len() < 64,
+            "selected body must not hold the whole file, got {}",
+            result.content.len()
+        );
+        assert!(result.total_lines >= 5_000);
     }
 
     #[test]

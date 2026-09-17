@@ -703,11 +703,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         dynamic_description: None,
         hint: "[prompt]",
         // Optional (NOT Required): a bare `/fork` must reach the handler
-        // rather than falling through as an LLM prompt. NOTE: `cmd_fork` still
-        // dispatches the legacy `ForkHandler` (`y$m`), whose empty-argument arm
-        // prints "Usage: /fork <directive>"; only the advertised copy is
-        // aligned here. Switching the TUI to `ForkBackgroundHandler` needs a
-        // live `fork_to_background_session` override and is out of scope.
+        // rather than falling through as an LLM prompt. `cmd_fork` dispatches
+        // `ForkBackgroundHandler` (`vAd`) — prompt is optional, no usage gate.
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_fork,

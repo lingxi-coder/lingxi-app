@@ -356,6 +356,23 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Attach a `/usage` Loops provider (typically the live cron scheduler).
+    #[must_use]
+    pub fn with_loop_usage(mut self, provider: Arc<dyn platform_api::LoopUsageProvider>) -> Self {
+        self.model_runtime.loop_usage = Some(provider);
+        self
+    }
+
+    /// Optional form used by composition roots that may have cron disabled.
+    #[must_use]
+    pub fn with_loop_usage_opt(
+        mut self,
+        provider: Option<Arc<dyn platform_api::LoopUsageProvider>>,
+    ) -> Self {
+        self.model_runtime.loop_usage = provider;
+        self
+    }
+
     /// Attach the host's shared output book. Inert unless explicitly wired.
     #[must_use]
     pub fn with_workflow_output_scopes(

@@ -1328,21 +1328,22 @@ async fn load_boot_permission_tiers_with_flag(
                 ),
             }
             if let Some(m) = permission::default_mode_from_settings_json(&raw) {
-                // MODE-SETTINGS-AUTO-TRUST-01: a `defaultMode: "auto"` is only
-                // honored from a TRUSTED tier (policy/user/flag). The
-                // repo-controllable `projectSettings`/`localSettings` tiers may
-                // set the five external modes but NOT auto — a committed
-                // `.lingxi/settings.json` must not put the session into
-                // classifier-driven auto-accept mode. (Non-auto modes fold as
-                // before, last-tier-wins.)
-                if m != permission::PermissionMode::Auto
-                    || permission::loader::auto_mode_grantable_by_source(source)
-                {
+                // MODE-SETTINGS-AUTO-TRUST-01 / 2.1.257 `C(e)`: auto AND
+                // bypassPermissions are only honored from a TRUSTED tier
+                // (policy/user/flag). Project/local are repo-controllable.
+                if permission::default_mode_applies_from_source(m, source) {
                     mode = m; // later tiers read last → their defaultMode wins
+                } else if m == permission::PermissionMode::BypassPermissions {
+                    tracing::warn!(
+                        source = ?source,
+                        "{}",
+                        permission::UNTRUSTED_BYPASS_DEFAULT_MODE_WARN
+                    );
                 } else {
                     tracing::warn!(
                         source = ?source,
-                        "settings defaultMode \"auto\" ignored — only policy/user/flag settings may grant auto mode (projectSettings and localSettings are repo-controllable)"
+                        "{}",
+                        permission::UNTRUSTED_AUTO_DEFAULT_MODE_WARN
                     );
                 }
             }
@@ -1383,14 +1384,19 @@ async fn load_boot_permission_tiers_with_flag(
             Err(e) => tracing::warn!(error = %e, "skipping malformed flag settings permissions"),
         }
         if let Some(m) = permission::default_mode_from_settings_json(&raw) {
-            if m != permission::PermissionMode::Auto
-                || permission::loader::auto_mode_grantable_by_source(source)
-            {
+            if permission::default_mode_applies_from_source(m, source) {
                 mode = m;
+            } else if m == permission::PermissionMode::BypassPermissions {
+                tracing::warn!(
+                    source = ?source,
+                    "{}",
+                    permission::UNTRUSTED_BYPASS_DEFAULT_MODE_WARN
+                );
             } else {
                 tracing::warn!(
                     source = ?source,
-                    "settings defaultMode \"auto\" ignored — only policy/user/flag settings may grant auto mode (projectSettings and localSettings are repo-controllable)"
+                    "{}",
+                    permission::UNTRUSTED_AUTO_DEFAULT_MODE_WARN
                 );
             }
         }
@@ -8625,13 +8631,8 @@ fn resolve_bash_edit_diff_with(
         cfg.permission_mode,
         permission::PermissionMode::Auto | permission::PermissionMode::BypassPermissions
     );
-    if !tool_shell::bash_edit_diff::enabled(
-        env_override,
-        trusted_tier,
-        merged,
-        permissive,
-        rollout,
-    ) {
+    if !tool_shell::bash_edit_diff::enabled(env_override, trusted_tier, merged, permissive, rollout)
+    {
         return None;
     }
     Some(Arc::new(tool_api::builtin_context::BashEditDiffSetup {
@@ -9667,6 +9668,49 @@ impl PluginRuntime {
     }
 }
 
+/// Oracle `W$s`: collection watch is on unless
+/// `CLAUDE_CODE_PLUGIN_DIR_WATCH=false`.
+fn plugin_dir_watch_enabled() -> bool {
+    match std::env::var("CLAUDE_CODE_PLUGIN_DIR_WATCH") {
+        Ok(value) if value == "0" || value.eq_ignore_ascii_case("false") => false,
+        _ => true,
+    }
+}
+
+async fn cli_plugin_dir_collection_snapshot(
+    paths: &[std::path::PathBuf],
+) -> Vec<(std::path::PathBuf, Vec<String>)> {
+    let mut out = Vec::new();
+    for path in paths {
+        let Ok(canonical) = tokio::fs::canonicalize(path).await else {
+            continue;
+        };
+        if let Some(children) = plugin::cli_plugin_dir_collection_children(&canonical).await {
+            out.push((canonical, children));
+        }
+    }
+    out.sort_by(|left, right| left.0.cmp(&right.0));
+    out
+}
+
+/// Oracle `watchCollections`: when `--plugin-dir` is a folder of plugins,
+/// children added or removed while running reload the live plugin set.
+fn spawn_cli_plugin_dir_collection_watch(runtime: Arc<PluginRuntime>) {
+    tokio::spawn(async move {
+        let mut snapshot = cli_plugin_dir_collection_snapshot(&runtime.cli_plugin_dirs).await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let next = cli_plugin_dir_collection_snapshot(&runtime.cli_plugin_dirs).await;
+            if next != snapshot {
+                snapshot = next;
+                let _ = runtime.refresh().await;
+            }
+        }
+    });
+}
+
 /// SKILLLIST.1: `CommandRegistry`-backed skill-listing provider for the per-turn
 /// `skill_listing` system-reminder. Reads the shared registry lazily at turn time
 /// and applies the TS `getSkillToolCommands` eligibility filter
@@ -9882,6 +9926,46 @@ fn sanitize_path_component(name: &str) -> String {
 #[must_use]
 pub fn session_task_output_dir(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
     platform_api::task_output::session_output_dir(&lingxi_temp_dir_path(), cwd, session_id)
+}
+
+fn session_kind_for_job_tmp() -> Option<String> {
+    std::env::var("LINGXI_SESSION_KIND")
+        .or_else(|_| std::env::var("CLAUDE_CODE_SESSION_KIND"))
+        .ok()
+}
+
+fn job_dir_from_env() -> Option<std::path::PathBuf> {
+    std::env::var_os("LINGXI_JOB_DIR")
+        .or_else(|| std::env::var_os("CLAUDE_JOB_DIR"))
+        .map(std::path::PathBuf::from)
+}
+
+/// Session-scoped read-block allowances (oracle `XY` / `BK`): tool results,
+/// project temp, and — for a `bg` job — `{jobDir}/tmp`.
+#[must_use]
+pub fn session_read_allowances_for_boot(
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_uuid: &str,
+    session_kind: Option<&str>,
+    job_dir: Option<&std::path::Path>,
+) -> Vec<permission::SessionReadAllowance> {
+    let mut allowances = vec![
+        permission::SessionReadAllowance::directory(
+            session::jsonl::tool_results_dir(lingxi_home, &cwd.to_string_lossy(), session_uuid),
+            permission::TOOL_RESULT_READ_ALLOW_REASON,
+        ),
+        permission::SessionReadAllowance::directory(
+            session_task_output_dir(cwd, session_uuid),
+            permission::PROJECT_TEMP_READ_ALLOW_REASON,
+        ),
+    ];
+    if let Some(job_tmp) =
+        permission::job_tmp_session_allowance(lingxi_home, session_kind, job_dir)
+    {
+        allowances.push(job_tmp);
+    }
+    allowances
 }
 
 /// # Errors
@@ -13253,6 +13337,13 @@ pub async fn build_with_credential_stack(
                     permission::powershell_parse::SystemPwshParser,
                 ))
                 .with_plan_files(plan_files.clone())
+                .with_session_read_allowances(session_read_allowances_for_boot(
+                    &cfg.lingxi_home,
+                    &cwd,
+                    &main_session_uuid,
+                    session_kind_for_job_tmp().as_deref(),
+                    job_dir_from_env().as_deref(),
+                ))
                 // `zj`'s `!Ae()` — plan mode counts as bypassPermissions only
                 // in an interactive launch. `interactive_session` is the
                 // `host.launchOptions.isInteractive()` twin resolved above.
@@ -15568,6 +15659,11 @@ pub async fn build_with_credential_stack(
         // subagent spawner's subagents dir — one consistent session id end-to-end.
         .with_session_id(main_session_id)
         .with_cost_tracker(cost_tracker.clone())
+        .with_loop_usage_opt(
+            cron_scheduler
+                .clone()
+                .map(|scheduler| scheduler as Arc<dyn platform_api::LoopUsageProvider>),
+        )
         .with_cost_session_switcher_opt(Some(session_state_manager.clone()))
         .with_session_activation_observer(Arc::new(ProcessSessionActivationObserver))
         // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
@@ -16257,6 +16353,11 @@ pub async fn build_with_credential_stack(
             flag_settings: cfg.flag_settings.clone(),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }));
+        if inline_plugins && plugin_dir_watch_enabled() {
+            if let Some(runtime) = plugin_runtime.clone() {
+                spawn_cli_plugin_dir_collection_watch(runtime);
+            }
+        }
     }
     // Inventory only configs that actually reached the live registry. Counting
     // discovered plugin manifests here over-reported blocked, colliding, or
@@ -25991,6 +26092,35 @@ must be filtered out: got {after:?}"
         assert!(dir.ends_with("tasks"));
     }
 
+    #[test]
+    fn session_read_allowances_include_job_tmp_only_for_bg_jobs() {
+        let home = std::path::Path::new("/home/u/.lingxi");
+        let cwd = std::path::Path::new("/w/p");
+        let job = std::path::Path::new("/home/u/.lingxi/jobs/j1");
+        let with_job = super::session_read_allowances_for_boot(
+            home,
+            cwd,
+            "sid",
+            Some("bg"),
+            Some(job),
+        );
+        assert!(
+            with_job.iter().any(|a| {
+                a.path == std::path::PathBuf::from("/home/u/.lingxi/jobs/j1/tmp")
+                    && a.reason == permission::JOB_TMP_READ_ALLOW_REASON
+            }),
+            "bg job tmp must be published, got {with_job:?}"
+        );
+
+        let without = super::session_read_allowances_for_boot(home, cwd, "sid", Some("bg"), None);
+        assert!(
+            without
+                .iter()
+                .all(|a| a.reason != permission::JOB_TMP_READ_ALLOW_REASON),
+            "missing job dir must not invent a tmp allowance"
+        );
+    }
+
     // ── `/reload-plugins` — `PluginRuntime::refresh` live reconcile ──────────
 
     /// Write a plugin into the versioned cache layout
@@ -28413,8 +28543,7 @@ mod bash_edit_diff_wiring_tests {
 
         let eff = effective(&cfg);
         assert_eq!(
-            eff.as_ref()
-                .and_then(|e| e.settings.bash_edit_diff_enabled),
+            eff.as_ref().and_then(|e| e.settings.bash_edit_diff_enabled),
             Some(true),
             "the project layer must actually be reaching the merged settings, \
              or this test proves nothing"
@@ -28435,8 +28564,9 @@ mod bash_edit_diff_wiring_tests {
             r#"{"bashEditDiffEnabled": true}"#,
         );
 
-        let setup = resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "sess", None, false)
-            .expect("the user tier enables it");
+        let setup =
+            resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "sess", None, false)
+                .expect("the user tier enables it");
         assert_eq!(
             setup.shadow_root,
             cfg.lingxi_home.join("bash-edit-diff").join("sess"),

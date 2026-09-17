@@ -694,6 +694,18 @@ impl ClaimedCronJob {
     }
 }
 
+fn is_dynamic_loop_prompt(prompt: &str) -> bool {
+    prompt == crate::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL
+        || prompt == crate::LOOP_FILE_DYNAMIC_SENTINEL
+}
+
+#[async_trait::async_trait]
+impl platform_api::LoopUsageProvider for CronScheduler {
+    async fn usage_rows(&self) -> Vec<platform_api::LoopUsageRow> {
+        self.loop_usage_rows().await
+    }
+}
+
 impl CronScheduler {
     /// Construct a new scheduler over the single project tasks file
     /// `<project_root>/.lingxi/scheduled_tasks.json` (1:1 with claude-code
@@ -1170,6 +1182,30 @@ impl CronScheduler {
         let mut jobs: Vec<_> = self.session_tasks.read().await.values().cloned().collect();
         jobs.sort_by(|a, b| a.id.cmp(&b.id));
         jobs
+    }
+
+    /// `/usage` Loops rows for every live job (session + durable).
+    pub async fn loop_usage_rows(&self) -> Vec<platform_api::LoopUsageRow> {
+        let now = self.clock.now();
+        let tasks = self.tasks.read().await;
+        let mut rows: Vec<_> = tasks
+            .values()
+            .map(|task| {
+                crate::schedule::loop_usage_row(
+                    &task.prompt,
+                    &task.schedule.raw,
+                    is_dynamic_loop_prompt(&task.prompt),
+                    task.last_run,
+                    now,
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.tokens
+                .cmp(&a.tokens)
+                .then_with(|| a.prompt.cmp(&b.prompt))
+        });
+        rows
     }
 
     async fn unregister_job(&self, id: &str, owner: Option<&str>) -> bool {

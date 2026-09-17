@@ -1133,6 +1133,8 @@ pub(crate) struct ModelRuntime {
     /// this so production `lingxi-cli` reports real cost; library callers
     /// (e.g. unit tests) may leave it `None`.
     pub(crate) cost_tracker: Option<Arc<cost::CostTracker>>,
+    /// Optional `/usage` Loops source (cron scheduler). `None` hides the section.
+    pub(crate) loop_usage: Option<Arc<dyn platform_api::LoopUsageProvider>>,
     pub(crate) output_scopes: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
     pub(crate) output_turn: std::sync::Mutex<Option<super::output_accounting_impl::OutputTurn>>,
     /// Session-pinned response finalizer scope captured before provider work.
@@ -1219,6 +1221,7 @@ impl ModelRuntime {
                 platform_api::refusal_driver::RefusalCascadeState::default(),
             ),
             cost_tracker: None,
+            loop_usage: None,
             output_scopes: None,
             output_turn: std::sync::Mutex::new(None),
             cost_scope: std::sync::Mutex::new(None),

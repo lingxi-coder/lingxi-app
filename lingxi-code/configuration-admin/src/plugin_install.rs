@@ -144,6 +144,7 @@ fn marketplace_entry_source_path(
         name,
         plugins_dir,
         None,
+        false,
     ))
 }
 
@@ -153,6 +154,7 @@ async fn marketplace_entry_source_path_with_bus(
     name: &str,
     plugins_dir: &Path,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
+    yes: bool,
 ) -> Result<Option<PathBuf>, String> {
     use plugin::marketplace::{MarketplaceExternalSource, MarketplacePluginSource};
 
@@ -173,13 +175,15 @@ async fn marketplace_entry_source_path_with_bus(
             | MarketplaceExternalSource::Url { .. }
             | MarketplaceExternalSource::GitSubdir { .. }
             | MarketplaceExternalSource::Archive { .. }
-            | MarketplaceExternalSource::Npm { .. } => {
+            | MarketplaceExternalSource::Npm { .. }
+            | MarketplaceExternalSource::Command { .. } => {
                 return materialize_external_plugin_source_with_bus(
                     plugins_dir,
                     marketplace,
                     name,
                     source,
                     analytics_bus,
+                    yes,
                 )
                 .await
                 .map(Some);
@@ -389,6 +393,16 @@ fn materialize_npm_source(
     confined_source_subdir(&root.join("node_modules"), package_path.to_str())
 }
 
+/// CLI `-y` (oracle `jl({yes})`) or an explicit env grant.
+///
+/// `LINGXI_PLUGIN_COMMAND_SOURCE_CONSENT=1` accepts any command; a value equal
+/// to the exact command string accepts only that command.
+fn command_source_is_consented(yes: bool, command: &str) -> bool {
+    yes || std::env::var("LINGXI_PLUGIN_COMMAND_SOURCE_CONSENT")
+        .ok()
+        .is_some_and(|value| value == "1" || value == command)
+}
+
 fn remote_fetch_source_kind(
     source: &plugin::marketplace::MarketplaceExternalSource,
 ) -> Option<&'static str> {
@@ -401,6 +415,7 @@ fn remote_fetch_source_kind(
         MarketplaceExternalSource::GitSubdir { .. } => Some("git-subdir"),
         MarketplaceExternalSource::Archive { .. } => Some("archive"),
         MarketplaceExternalSource::Npm { .. } => Some("npm"),
+        MarketplaceExternalSource::Command { .. } => Some("command"),
         MarketplaceExternalSource::File { .. }
         | MarketplaceExternalSource::Directory { .. }
         | MarketplaceExternalSource::Unsupported { .. } => None,
@@ -426,7 +441,8 @@ fn remote_fetch_host(source: &plugin::marketplace::MarketplaceExternalSource) ->
                 .trim_end_matches(':')
                 .to_string();
         }
-        MarketplaceExternalSource::File { .. }
+        MarketplaceExternalSource::Command { .. }
+        | MarketplaceExternalSource::File { .. }
         | MarketplaceExternalSource::Directory { .. }
         | MarketplaceExternalSource::Unsupported { .. } => return String::new(),
     };
@@ -667,13 +683,15 @@ fn resolve_external_plugin_source(
     source: &plugin::marketplace::MarketplaceExternalSource,
     work: &Path,
 ) -> Result<PathBuf, String> {
-    current_thread_runtime().block_on(resolve_external_plugin_source_with_bus(source, work, None))
+    current_thread_runtime()
+        .block_on(resolve_external_plugin_source_with_bus(source, work, None, false))
 }
 
 async fn resolve_external_plugin_source_with_bus(
     source: &plugin::marketplace::MarketplaceExternalSource,
     work: &Path,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
+    yes: bool,
 ) -> Result<PathBuf, String> {
     use plugin::marketplace::MarketplaceExternalSource;
 
@@ -755,6 +773,10 @@ async fn resolve_external_plugin_source_with_bus(
                 version,
                 registry,
             } => materialize_npm_source(package, version.as_deref(), registry.as_deref(), work),
+            MarketplaceExternalSource::Command { command, .. } => {
+                let consented = command_source_is_consented(yes, command);
+                plugin::materialize_command_plugin_source(source, work, consented)
+            }
             MarketplaceExternalSource::File { .. }
             | MarketplaceExternalSource::Directory { .. } => {
                 Err("local marketplace source must stay inside its catalog root".to_string())
@@ -784,6 +806,7 @@ fn materialize_external_plugin_source(
         name,
         source,
         None,
+        false,
     ))
 }
 
@@ -793,6 +816,7 @@ async fn materialize_external_plugin_source_with_bus(
     name: &str,
     source: &plugin::marketplace::MarketplaceExternalSource,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
+    yes: bool,
 ) -> Result<PathBuf, String> {
     let cache_key = external_source_cache_key(source);
     let destination = plugins_dir
@@ -818,7 +842,8 @@ async fn materialize_external_plugin_source_with_bus(
     std::fs::create_dir_all(&work)
         .map_err(|error| format!("failed to create plugin source staging: {error}"))?;
 
-    let resolved = resolve_external_plugin_source_with_bus(source, &work, analytics_bus).await;
+    let resolved =
+        resolve_external_plugin_source_with_bus(source, &work, analytics_bus, yes).await;
     let result = (|| -> Result<(), String> {
         let resolved = resolved?;
         copy_dir(&resolved, &payload).map_err(|error| error.to_string())?;
@@ -855,13 +880,14 @@ fn resolve_plugin_source(
     arg: &str,
     plugins_dir: &Path,
 ) -> Result<Option<(String, String, PathBuf)>, String> {
-    current_thread_runtime().block_on(resolve_plugin_source_with_bus(arg, plugins_dir, None))
+    current_thread_runtime().block_on(resolve_plugin_source_with_bus(arg, plugins_dir, None, false))
 }
 
 async fn resolve_plugin_source_with_bus(
     arg: &str,
     plugins_dir: &Path,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
+    yes: bool,
 ) -> Result<Option<(String, String, PathBuf)>, String> {
     let (name, requested_marketplace) = split_id(arg);
     let registry = load_registry(plugins_dir);
@@ -881,6 +907,7 @@ async fn resolve_plugin_source_with_bus(
                 name,
                 plugins_dir,
                 analytics_bus,
+                yes,
             )
             .await?
             else {
@@ -911,6 +938,7 @@ async fn resolve_plugin_source_with_bus(
                     name,
                     plugins_dir,
                     analytics_bus,
+                    yes,
                 )
                 .await?
                 {
@@ -1262,6 +1290,7 @@ pub fn run_install(
         home,
         cwd,
         None,
+        false,
     ))
 }
 
@@ -1282,6 +1311,7 @@ pub fn run_install_with_bus(
         home,
         cwd,
         analytics_bus,
+        false,
     ))
 }
 
@@ -1293,6 +1323,7 @@ async fn run_install_async(
     home: &Path,
     cwd: &Path,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
+    yes: bool,
 ) -> Result<String, String> {
     let parsed_scope = parse_scope(scope)?;
     let telemetry_scope = crate::plugin_telemetry::telemetry_scope(Some(parsed_scope.label()));
@@ -1330,6 +1361,7 @@ async fn run_install_async(
         &mut Vec::new(),
         &mut created_paths,
         analytics_bus,
+        yes,
     )
     .await;
     if result.is_err() {
@@ -1739,6 +1771,7 @@ async fn run_install_inner(
     dependency_stack: &mut Vec<String>,
     created_paths: &mut Vec<PathBuf>,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
+    yes: bool,
 ) -> Result<String, String> {
     // Scope is validated BEFORE the "Installing plugin …" progress prefix — the
     // binary emits the bare `Invalid scope: …` line with no prefix.
@@ -1757,7 +1790,7 @@ async fn run_install_inner(
 
     // Resolve only after the marketplace policy gate. External typed sources
     // are materialized into a confined source cache by the same resolver.
-    let resolved = resolve_plugin_source_with_bus(arg, plugins_dir, analytics_bus)
+    let resolved = resolve_plugin_source_with_bus(arg, plugins_dir, analytics_bus, yes)
         .await
         .map_err(|reason| {
             format!(
@@ -1816,6 +1849,7 @@ async fn run_install_inner(
         dependency_stack,
         created_paths,
         analytics_bus,
+        yes,
     )
     .await;
     dependency_stack.pop();
@@ -1996,6 +2030,7 @@ async fn install_declared_dependencies(
     dependency_stack: &mut Vec<String>,
     created_paths: &mut Vec<PathBuf>,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
+    yes: bool,
 ) -> Result<(), String> {
     let registry = load_registry(plugins_dir);
     let market_root = registry
@@ -2054,7 +2089,7 @@ async fn install_declared_dependencies(
             ));
         }
         let (_, _, dependency_source) =
-            resolve_plugin_source_with_bus(&dependency_id, plugins_dir, analytics_bus)
+            resolve_plugin_source_with_bus(&dependency_id, plugins_dir, analytics_bus, yes)
                 .await?
                 .ok_or_else(|| format!("Plugin dependency \"{dependency_id}\" was not found"))?;
         let available = plugin_version(&dependency_source);
@@ -2077,6 +2112,7 @@ async fn install_declared_dependencies(
             dependency_stack,
             created_paths,
             analytics_bus,
+            yes,
         ))
         .await?;
     }
@@ -2128,7 +2164,7 @@ fn add_required_by_metadata(
 pub async fn run_install_with_credential_factory<F, Fut>(
     arg: &str,
     scope: Option<&str>,
-    _yes: bool,
+    yes: bool,
     config: &[String],
     plugins_dir: &Path,
     home: &Path,
@@ -2141,7 +2177,7 @@ where
     Fut: std::future::Future<Output = Result<Arc<secret::CredentialManager>, String>>,
 {
     let Some((plugin_key, _, plugin_source)) =
-        resolve_plugin_source_with_bus(arg, plugins_dir, analytics_bus.as_ref()).await?
+        resolve_plugin_source_with_bus(arg, plugins_dir, analytics_bus.as_ref(), yes).await?
     else {
         let result = run_install_async(
             arg,
@@ -2151,6 +2187,7 @@ where
             home,
             cwd,
             analytics_bus.as_ref(),
+            yes,
         )
         .await;
         if result.is_ok() {
@@ -2175,6 +2212,7 @@ where
             home,
             cwd,
             analytics_bus.as_ref(),
+            yes,
         )
         .await;
         if result.is_ok() {
@@ -2214,6 +2252,7 @@ where
         home,
         cwd,
         analytics_bus.as_ref(),
+        yes,
     )
     .await;
     if result.is_err() {
@@ -2593,7 +2632,14 @@ async fn resolve_source_with_bus(
         return Ok(None);
     };
     Ok(
-        marketplace_entry_source_path_with_bus(&root, market, name, plugins_dir, analytics_bus)
+        marketplace_entry_source_path_with_bus(
+            &root,
+            market,
+            name,
+            plugins_dir,
+            analytics_bus,
+            false,
+        )
             .await?
             .map(|source| (market.to_string(), source)),
     )
@@ -3487,6 +3533,7 @@ mod tests {
                 "urlrepo",
                 &source,
                 Some(&bus),
+                false,
             ))
             .unwrap();
         let events = runtime.block_on(sink.events());
@@ -3544,6 +3591,7 @@ mod tests {
                 "urlrepo-pinned",
                 &source,
                 Some(&bus),
+                false,
             ))
             .expect_err("a mismatched sha pin must refuse the install");
         let events = runtime.block_on(sink.events());
@@ -3577,6 +3625,7 @@ mod tests {
                 "hello",
                 &source,
                 Some(&bus),
+                false,
             ))
             .expect_err("directory sources should not route through remote fetch");
         assert!(error.contains("local marketplace source"));
@@ -4976,5 +5025,96 @@ mod tests {
             .filter(|name| name.starts_with(".staged-") || name.starts_with(".backup-"))
             .collect();
         assert!(leftovers.is_empty(), "unexpected leftovers: {leftovers:?}");
+    }
+
+    /// Marketplace `source:"command"` plugin plus a producer directory whose
+    /// path the command prints.
+    fn command_source_env() -> (Env, String) {
+        let e = env();
+        let producer = e._tmp.path().join("produced-from-cmd");
+        std::fs::create_dir_all(producer.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::create_dir_all(producer.join("commands")).unwrap();
+        std::fs::write(
+            producer
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"fromcmd","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(producer.join("commands").join("hi.md"), "# hi").unwrap();
+        let command = format!("printf '%s\\n' '{}'", producer.display());
+        std::fs::write(
+            e.market
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            serde_json::to_string(&serde_json::json!({
+                "name": "mymkt",
+                "owner": {"name": "me"},
+                "plugins": [{
+                    "name": "fromcmd",
+                    "source": {
+                        "source": "command",
+                        "command": command
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        (e, command)
+    }
+
+    /// Oracle `ht`: a command-source plugin is not run until the command has
+    /// been reviewed. `plugin install` without `-y` must refuse.
+    #[test]
+    fn command_source_install_without_yes_is_not_run() {
+        let (e, _) = command_source_env();
+        let err = run_install("fromcmd@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("must not install an unreviewed command source");
+        assert!(
+            err.contains("has not been reviewed yet"),
+            "got: {err}"
+        );
+        assert!(
+            !installed_path(&e.plugins).exists()
+                || installed_db(&e)
+                    .get("plugins")
+                    .and_then(Value::as_object)
+                    .map(|plugins| !plugins.contains_key("fromcmd@mymkt"))
+                    .unwrap_or(true),
+            "unreviewed command source must not be recorded as installed"
+        );
+    }
+
+    /// CLI `-y` is the terminal consent for that marketplace-declared command
+    /// (oracle `jl({yes})` when not nested inside a Claude session).
+    #[test]
+    fn command_source_install_with_yes_runs_the_command() {
+        let (e, _) = command_source_env();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(run_install_with_credential_factory(
+            "fromcmd@mymkt",
+            None,
+            true,
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+            None,
+            || async {
+                Err("unexpected credential initialization for non-sensitive plugin".to_string())
+            },
+        ));
+        assert!(result.is_ok(), "install with -y should succeed: {result:?}");
+        let db = installed_db(&e);
+        assert!(
+            db.get("plugins")
+                .and_then(Value::as_object)
+                .is_some_and(|plugins| plugins.contains_key("fromcmd@mymkt")),
+            "installed registry missing fromcmd@mymkt: {db}"
+        );
     }
 }

@@ -28,14 +28,10 @@ fn parse_wrapper(raw: &str) -> Result<Vec<String>, String> {
     Ok(tokens)
 }
 
-fn parse_flag_settings(raw: Option<&str>) -> Option<lingxi_core::settings::SettingsJson> {
-    let raw = raw?.trim();
-    let text = if raw.starts_with('{') {
-        raw.to_string()
-    } else {
-        std::fs::read_to_string(raw).ok()?
-    };
-    serde_json::from_str(&text).ok()
+fn parse_flag_settings(
+    raw: Option<&str>,
+) -> Result<Option<lingxi_core::settings::SettingsJson>, String> {
+    crate::init::parse_flag_settings_checked(raw).map_err(str::to_string)
 }
 
 /// Resolve and freeze the process wrapper before any self-spawn.
@@ -52,7 +48,7 @@ pub(crate) async fn configure(
                 .into_iter()
                 .filter_map(|raw| serde_json::from_str(&raw).ok())
                 .collect();
-        let cli_layer = parse_flag_settings(flag_settings);
+        let cli_layer = parse_flag_settings(flag_settings)?;
         let empty_env = std::collections::BTreeMap::new();
         lingxi_core::settings::Settings::load_with_layers_from_user_path(
             lingxi_core::settings::LoadInputs {

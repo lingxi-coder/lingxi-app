@@ -568,9 +568,8 @@ pub struct ChatWidget {
     /// the embedder wires one). Holds only the PERSISTED half — the candidate
     /// models come from [`Self::session`] at open time so a provider connected
     /// mid-session is offered without a relaunch.
-    fusion_settings: Option<
-        std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>>,
-    >,
+    fusion_settings:
+        Option<std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>>>,
     /// Composition-root-shared `/permissions` rule snapshot slot (`None` until
     /// the embedder wires one via [`Self::set_permission_snapshot`]). Preloaded
     /// at startup from the user/project/local settings files and kept current
@@ -1007,12 +1006,14 @@ impl ChatWidget {
             && !self.bottom_pane.has_active_view()
             && !self.bottom_pane.completion_is_open()
             && self.bottom_pane.composer_is_empty()
-            && !(key.code == crossterm::event::KeyCode::Esc
-                && self.bottom_pane.vim_insert_mode())
+            && !(key.code == crossterm::event::KeyCode::Esc && self.bottom_pane.vim_insert_mode())
             && (key.code == crossterm::event::KeyCode::Esc
                 || (key.modifiers == crossterm::event::KeyModifiers::CONTROL
-                    && matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C')))) {
-            if let Some(cancel) = &self.loop_interrupt { cancel(); }
+                    && matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C'))))
+        {
+            if let Some(cancel) = &self.loop_interrupt {
+                cancel();
+            }
         }
         if key.kind == crossterm::event::KeyEventKind::Press {
             if let Some(registry) = &self.task_registry {
@@ -3550,7 +3551,7 @@ impl ChatWidget {
     /// `/cd <path>`: move this session to a new working directory (parity
     /// 2.1.207 `local-jsx` `name:"cd"`). The path is `~`-expanded, resolved
     /// against the cwd, normalized, and validated (must exist + be a directory,
-    /// reusing [`crate::add_dir::resolve_and_validate`]); on success a confirm
+    /// reusing [`crate::add_dir::resolve_existing_directory`]); on success a confirm
     /// dialog opens over the byte-exact [`command_api::cd::CONFIRM_PROMPT`], and
     /// on accept the shared-`SessionCwd` swap + `tengu_cd_command` telemetry +
     /// the byte-exact result message all run OFF-LOOP through the permission
@@ -3564,7 +3565,7 @@ impl ChatWidget {
         if input.is_empty() {
             return self.show_system_text("Usage: /cd <path>", false);
         }
-        match crate::add_dir::resolve_and_validate(input) {
+        match crate::add_dir::resolve_existing_directory(input) {
             crate::add_dir::AddDirValidation::Success { absolute } => {
                 self.bottom_pane
                     .show_cd_confirm(std::path::PathBuf::from(&absolute), absolute);
@@ -3683,7 +3684,10 @@ impl ChatWidget {
     pub(crate) fn cmd_tasks(&mut self, args: &str) -> ChatOutcome {
         if let Some(parsed) = platform_api::human_task_message::parse(args) {
             return match parsed {
-                Ok((task_id, message)) => ChatOutcome::TaskAction(TaskAction::Message { task_id: task_id.into(), message: message.into() }),
+                Ok((task_id, message)) => ChatOutcome::TaskAction(TaskAction::Message {
+                    task_id: task_id.into(),
+                    message: message.into(),
+                }),
                 Err(error) => self.show_system_text(error, true),
             };
         }
@@ -4477,14 +4481,18 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/fork`: fork the conversation into a detached background agent (the live
-    /// `fork_conversation` override spawns it via the `SubagentSpawner`). Bare
-    /// `/fork` reaches the handler's "Usage: /fork \<directive\>" text.
+    /// `/fork`: copy this conversation into a new background session (agent-view
+    /// default, `ForkBackgroundHandler` / `vAd`). Bare `/fork` is valid — the
+    /// prompt is optional.
     pub(crate) fn cmd_fork(&mut self, args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/fork is unavailable (no engine handle wired)", true);
         };
-        self.run_core_command("fork", args, &command_core::fork::ForkHandler::new(handle))
+        self.run_core_command(
+            "fork",
+            args,
+            &command_core::fork::ForkBackgroundHandler::new(handle),
+        )
     }
 
     /// `/subtask`: send a subagent off with the full conversation context; its
@@ -4813,7 +4821,12 @@ impl ChatWidget {
             })
             .unwrap_or_default()
             .into_iter()
-            .filter(|task| matches!(task.status.as_str(), "running" | "pending" | "paused" | "queued") || task.is_parked)
+            .filter(|task| {
+                matches!(
+                    task.status.as_str(),
+                    "running" | "pending" | "paused" | "queued"
+                ) || task.is_parked
+            })
             .map(|task| task.description)
             .collect::<Vec<_>>();
         if items.is_empty() {
@@ -6271,18 +6284,29 @@ mod tests {
             _ => panic!("expected human message task action"),
         }
         let mut view = widget();
-        assert!(matches!(view.cmd_tasks("message a123"), ChatOutcome::Continue));
-        assert!(!cells(&view).is_empty(), "invalid input surfaces usage rather than sending an empty message");
+        assert!(matches!(
+            view.cmd_tasks("message a123"),
+            ChatOutcome::Continue
+        ));
+        assert!(
+            !cells(&view).is_empty(),
+            "invalid input surfaces usage rather than sending an empty message"
+        );
     }
 
     #[test]
     fn assistant_text_that_looks_like_task_message_does_not_become_user_input() {
         let mut view = widget();
         view.apply_turn_event(TurnEvent::TurnStarted);
-        view.apply_turn_event(TurnEvent::TextDelta("/tasks message a123 resume stopped work".into()));
+        view.apply_turn_event(TurnEvent::TextDelta(
+            "/tasks message a123 resume stopped work".into(),
+        ));
         view.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         assert!(view.bottom_pane.composer().text().is_empty());
-        assert!(matches!(view.handle_key(press(KeyCode::Enter)), ChatOutcome::Continue));
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Enter)),
+            ChatOutcome::Continue
+        ));
         assert!(view.bottom_pane.view_stack().active().is_none());
     }
 
@@ -6382,7 +6406,10 @@ mod tests {
         widget.set_loop_interrupt(std::sync::Arc::new(move || {
             observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }));
-        widget.handle_key(KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE));
+        widget.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
         assert_eq!(called.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -8295,16 +8322,15 @@ mod tests {
         );
     }
 
-    /// `/fork` dispatches to `ForkHandler` with the live handle: bare `/fork`
-    /// reaches the handler's usage text (proving it is NOT `ArgSpec::Required`),
-    /// and a directive reaches the transcript gate (mock has no prior turn).
+    /// `/fork` dispatches to `ForkBackgroundHandler`: bare `/fork` copies the
+    /// session (no usage gate), and a prompt uses the same background-copy seam.
     #[test]
     fn fork_command_wired_to_orchestrator_handle() {
         let (mut widget, _mock) = widget_with_orchestrator();
         assert!(matches!(widget.cmd_fork(""), ChatOutcome::Continue));
         assert_eq!(
             cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body(),
-            "Usage: /fork \\<directive\\>",
+            "Copied conversation into a new background session (mock-bg-abcd).",
         );
 
         let (mut widget, _mock) = widget_with_orchestrator();
@@ -8314,7 +8340,7 @@ mod tests {
         ));
         assert_eq!(
             cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body(),
-            "Cannot fork before the first conversation turn",
+            "Copied conversation into a new background session (mock-bg-abcd).",
         );
     }
 
@@ -8929,7 +8955,10 @@ mod tests {
                     platform_api::FusionModelChoice::new("anthropic", "claude-opus-5"),
                     platform_api::FusionModelChoice::new("openai", "gpt-5.6-sol"),
                 ],
-                analyst: Some(platform_api::FusionModelChoice::new("openai", "gpt-5.6-sol")),
+                analyst: Some(platform_api::FusionModelChoice::new(
+                    "openai",
+                    "gpt-5.6-sol",
+                )),
                 synthesizer: Some(platform_api::FusionModelChoice::new(
                     "anthropic",
                     "claude-opus-5",
@@ -10766,16 +10795,20 @@ mod tests {
             "expected a switch to claude-sonnet-5"
         );
         // A pending or failed switch must retain the actual current model.
-        assert!(widget.session.models.iter().any(|m| {
-            m.is_current && m.request_model == "claude-opus-4-8"
-        }));
+        assert!(widget
+            .session
+            .models
+            .iter()
+            .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" }));
         widget.apply_turn_event(TurnEvent::SystemNotice {
             body: "Could not change model".into(),
             is_error: true,
         });
-        assert!(widget.session.models.iter().any(|m| {
-            m.is_current && m.request_model == "claude-opus-4-8"
-        }));
+        assert!(widget
+            .session
+            .models
+            .iter()
+            .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" }));
         widget.apply_turn_event(TurnEvent::ModelChanged {
             model: "claude-sonnet-5".into(),
             profile: Some("anthropic".into()),
@@ -10887,9 +10920,14 @@ mod tests {
     #[test]
     fn permission_mode_confirmation_restores_rejected_optimistic_choice() {
         let mut widget = widget_with_models();
-        widget.bottom_pane.set_permission_mode(permission::PermissionMode::BypassPermissions);
+        widget
+            .bottom_pane
+            .set_permission_mode(permission::PermissionMode::BypassPermissions);
         widget.apply_turn_event(TurnEvent::PermissionModeChanged("default".into()));
-        assert_eq!(widget.bottom_pane.permission_mode(), permission::PermissionMode::Default);
+        assert_eq!(
+            widget.bottom_pane.permission_mode(),
+            permission::PermissionMode::Default
+        );
     }
 
     #[test]

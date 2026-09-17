@@ -28,6 +28,138 @@
 use crate::rule::PermissionRuleSource;
 use std::path::{Path, PathBuf};
 
+/// Help copy for a refused network working directory (claude-code `nZ`
+/// `networkPath`, minus terminal bold). Shared by `/add-dir`, `--add-dir`,
+/// and `permissions.additionalDirectories`.
+#[must_use]
+pub fn network_working_directory_message(directory_path: &str) -> String {
+    format!(
+        "{directory_path} is a network path, which cannot be added as a working directory. On Windows, map the share to a drive letter and pass it at launch with --add-dir (a drive letter added mid-session does not yet carry remote-read trust)."
+    )
+}
+
+/// Lexical network-path detector used before `stat` (claude-code `as` + the
+/// non-walk arms of `epe`): UNC except WSL localhost, `/net/<host>` and
+/// `/Network/Servers/<host>` automounts whose host does not match `cwd`, and
+/// the bare `/net` map root.
+#[must_use]
+pub fn is_network_working_directory(path: &str) -> bool {
+    let cwd = std::env::current_dir().ok();
+    is_network_working_directory_against(path, cwd.as_deref().and_then(Path::to_str))
+}
+
+/// [`is_network_working_directory`] with an explicit cwd for automount-host
+/// matching (tests, and callers that already resolved the session cwd).
+#[must_use]
+pub fn is_network_working_directory_against(path: &str, cwd: Option<&str>) -> bool {
+    if is_unc_except_wsl(path) {
+        return true;
+    }
+    if is_net_map_root(path) {
+        return true;
+    }
+    if let Some(host) = automount_host(path) {
+        match cwd.and_then(automount_host) {
+            Some(cwd_host) if cwd_host == host => {}
+            _ => return true,
+        }
+    }
+    false
+}
+
+fn is_double_slash(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    )
+}
+
+/// Oracle `N3`: `\\??\` / `//??/` NT namespace prefix.
+fn is_nt_namespace(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 4
+        && matches!(bytes[0], b'/' | b'\\')
+        && bytes[1] == b'?'
+        && bytes[2] == b'?'
+        && matches!(bytes[3], b'/' | b'\\')
+}
+
+/// Oracle `Ji`: `//wsl.localhost/` / `//wsl$/` (any slash style).
+fn is_wsl_unc(path: &str) -> bool {
+    let rest = path.get(2..).unwrap_or("");
+    let lower = rest.to_ascii_lowercase();
+    lower.starts_with("wsl.localhost/")
+        || lower.starts_with("wsl.localhost\\")
+        || lower.starts_with("wsl$/")
+        || lower.starts_with("wsl$\\")
+}
+
+/// Oracle `as` = `Rn && !Ji`.
+fn is_unc_except_wsl(path: &str) -> bool {
+    if !(is_double_slash(path) || is_nt_namespace(path)) {
+        return false;
+    }
+    !is_wsl_unc(path)
+}
+
+fn posix_components(path: &str) -> Option<Vec<&str>> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut out = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            out.pop();
+            continue;
+        }
+        out.push(part);
+    }
+    Some(out)
+}
+
+fn is_automount_prefix(components: &[&str]) -> bool {
+    match components {
+        [first, _] if first.eq_ignore_ascii_case("net") => true,
+        [first, second, _]
+            if first.eq_ignore_ascii_case("network") && second.eq_ignore_ascii_case("servers") =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn automount_host(path: &str) -> Option<String> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut components = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            components.pop();
+            continue;
+        }
+        components.push(part);
+        if is_automount_prefix(&components) {
+            return components.last().map(|host| host.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+fn is_net_map_root(path: &str) -> bool {
+    posix_components(path).is_some_and(|components| {
+        components.len() == 1 && components[0].eq_ignore_ascii_case("net")
+    })
+}
+
 /// One additional working directory and the source that contributed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkingDirectory {
@@ -56,6 +188,11 @@ impl AdditionalWorkingDirs {
     /// takes the NEW source, exactly like re-setting a JS Map key.
     pub fn insert(&mut self, path: impl Into<PathBuf>, source: PermissionRuleSource) {
         let path = path.into();
+        let displayed = path.to_string_lossy();
+        if is_network_working_directory(&displayed) {
+            tracing::warn!("{}", network_working_directory_message(&displayed));
+            return;
+        }
         if let Some(existing) = self.entries.iter_mut().find(|entry| entry.path == path) {
             existing.source = source;
             return;
@@ -179,6 +316,55 @@ mod tests {
         assert_eq!(
             dirs.read_block_paths(),
             vec![PathBuf::from("/from-cli"), PathBuf::from("/from-local")]
+        );
+    }
+
+    #[test]
+    fn unc_and_automount_paths_are_network() {
+        assert!(is_network_working_directory_against(
+            "//fileserver/share",
+            Some("/proj")
+        ));
+        assert!(is_network_working_directory_against(
+            r"\\fileserver\share",
+            Some("/proj")
+        ));
+        assert!(is_network_working_directory_against(
+            "/net/host/data",
+            Some("/proj")
+        ));
+        assert!(is_network_working_directory_against(
+            "/Network/Servers/host/data",
+            Some("/proj")
+        ));
+        assert!(is_network_working_directory_against("/net", Some("/proj")));
+        assert!(!is_network_working_directory_against(
+            "//wsl.localhost/Ubuntu/home",
+            Some("/proj")
+        ));
+        assert!(!is_network_working_directory_against(
+            "/tmp/work",
+            Some("/proj")
+        ));
+        assert!(!is_network_working_directory_against(
+            "/net/host/other",
+            Some("/net/host/project")
+        ));
+    }
+
+    #[test]
+    fn insert_drops_network_paths() {
+        let mut dirs = AdditionalWorkingDirs::new();
+        dirs.insert("//fileserver/share", PermissionRuleSource::CliArg);
+        dirs.insert("/tmp/ok", PermissionRuleSource::CliArg);
+        assert_eq!(dirs.paths(), vec![PathBuf::from("/tmp/ok")]);
+    }
+
+    #[test]
+    fn network_message_matches_oracle_wording() {
+        assert_eq!(
+            network_working_directory_message("//fileserver/share"),
+            "//fileserver/share is a network path, which cannot be added as a working directory. On Windows, map the share to a drive letter and pass it at launch with --add-dir (a drive letter added mid-session does not yet carry remote-read trust)."
         );
     }
 }

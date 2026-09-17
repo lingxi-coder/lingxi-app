@@ -136,11 +136,12 @@ pub use layers::{
 pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json, auto_mode_disabled_from_settings_json,
-    block_reads_outside_working_directories_from_settings_json,
+    auto_mode_grantable_by_source, block_reads_outside_working_directories_from_settings_json,
     bypass_permissions_disabled_from_settings_json, classify_all_shell_from_settings_json,
-    default_mode_from_settings_json, fold_block_reads_outside_working_directories,
-    permission_rule_file_warning, permission_rule_startup_warning,
-    permission_rules_from_settings_json,
+    default_mode_applies_from_source, default_mode_from_settings_json,
+    fold_block_reads_outside_working_directories, permission_rule_file_warning,
+    permission_rule_startup_warning, permission_rules_from_settings_json,
+    UNTRUSTED_AUTO_DEFAULT_MODE_WARN, UNTRUSTED_BYPASS_DEFAULT_MODE_WARN,
 };
 pub use mcp_policy::{
     clamp_mcp_permission_result, mcp_server_policy_rules, permission_rules_from_mcp_tool_policies,
@@ -156,7 +157,11 @@ pub use persist::{
     remove_permission_update, replace_permission_rules, AutoModeSaveOutcome, PermissionPaths,
     PersistError,
 };
-pub use policy::{tool_wide_name_matches, PermissionPolicy};
+pub use policy::{
+    job_tmp_session_allowance, tool_wide_name_matches, PermissionPolicy, SessionReadAllowance,
+    JOB_TMP_READ_ALLOW_REASON, PROJECT_TEMP_READ_ALLOW_REASON, SCRATCHPAD_READ_ALLOW_REASON,
+    TOOL_RESULT_READ_ALLOW_REASON,
+};
 pub use policy_gate::{LiveModelContext, LiveModelProvider, PolicyPermissionGate};
 pub use prompting_gate::InteractivePromptingGate;
 pub use read_deny_globs::read_deny_exclude_globs;
@@ -175,6 +180,10 @@ pub use sed_validation::{
 };
 pub use shadow::{detect_unreachable_rules, is_shared_setting_source, ShadowType, UnreachableRule};
 pub use update::PermissionUpdate;
+pub use working_dirs::{
+    is_network_working_directory, is_network_working_directory_against,
+    network_working_directory_message, AdditionalWorkingDirs, WorkingDirectory,
+};
 pub use workspace_lease::{
     local_app_id_for_root, WorkspaceLeaseInfo, WorkspacePermissionLease,
     WorkspacePermissionLeaseRegistry,

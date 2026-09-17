@@ -32,6 +32,7 @@ const FIELD_MAP: &[(&str, &str, FieldKind)] = &[
         FieldKind::Array,
     ),
     ("ENABLED_TOOLS", "enabledTools", FieldKind::Array),
+    ("MAX_EFFORT_LEVEL", "maxEffortLevel", FieldKind::Scalar),
     (
         "ADDITIONAL_INCLUDES",
         "additionalIncludes",

@@ -104,6 +104,33 @@ pub struct CostSnapshot {
     /// shown empty.
     #[serde(default)]
     pub prompt_cache_line: Option<String>,
+    /// `/usage` Loops section (oracle `gl()`). Empty means the section is
+    /// omitted entirely — it is not a tab.
+    #[serde(default)]
+    pub loops: Vec<LoopUsageRow>,
+}
+
+/// Supplies `/usage` Loops rows (oracle `gl()`). Hosts that run a cron
+/// scheduler implement this; others leave it unwired and the section stays hidden.
+#[async_trait]
+pub trait LoopUsageProvider: Send + Sync {
+    /// Current loop/cron usage rows, empty when none have run or been scheduled.
+    async fn usage_rows(&self) -> Vec<LoopUsageRow>;
+}
+
+/// One scheduled loop/cron row on the `/usage` Loops section.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LoopUsageRow {
+    /// Truncated prompt shown in the first column.
+    pub prompt: String,
+    /// Human interval (`5m`, `2h`, `at 09:00`, `dynamic`).
+    pub every: String,
+    /// Completed runs this session.
+    pub runs: u64,
+    /// Cumulative tokens for those runs.
+    pub tokens: u64,
+    /// Pre-formatted last-run label (`3m ago`, or `–` when never).
+    pub last_run: String,
 }
 
 /// Token classes from the most recent successful model response.
@@ -1773,10 +1800,7 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
             request_model,
             "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
         ),
-        "deepseek" => matches!(
-            request_model,
-            "deepseek-flash" | "deepseek-v4-pro"
-        ),
+        "deepseek" => matches!(request_model, "deepseek-flash" | "deepseek-v4-pro"),
         "kimi" => request_model == "kimi-k3",
         "kimi-code" => request_model == "k3",
         "gemini" => matches!(
@@ -2158,7 +2182,6 @@ pub struct OutputStyleListing {
     /// listing renders in.
     pub styles: Vec<(String, Option<String>)>,
 }
-
 
 /// Public handle to the orchestrator that slash commands operate against.
 ///

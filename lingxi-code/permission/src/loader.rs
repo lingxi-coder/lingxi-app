@@ -407,25 +407,20 @@ pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
     }
 }
 
-/// `MODE-SETTINGS-AUTO-TRUST-01`: may a settings tier of this `source` GRANT
-/// `defaultMode: "auto"`?
+/// `MODE-SETTINGS-AUTO-TRUST-01` / 2.1.257 `C(e)`: may a settings tier of this
+/// `source` GRANT a trust-gated `defaultMode` (`"auto"` or `"bypassPermissions"`)?
 ///
-/// claude-code 2.1.211's `initialPermissionModeFromCLI` only honors a settings
-/// `defaultMode` of `"auto"` when it was declared by a TRUSTED tier —
-/// `policySettings`, `userSettings`, or `flagSettings`
-/// (`!["policySettings","userSettings","flagSettings"].some(t =>
-/// getSettings(t)?.permissions?.defaultMode==="auto")` → ignore). A
-/// `defaultMode: "auto"` coming from `projectSettings` or `localSettings` is
-/// IGNORED (warn + `tengu_settings_auto_mode_untrusted_source_ignored`) because
-/// those files are repo-controllable: a committed `.lingxi/settings.json` in an
-/// untrusted repo must NOT be able to put the session into classifier-driven
-/// auto-accept mode.
+/// claude-code's `le=["policySettings","flagSettings","userSettings"]` is the
+/// same list for both: `C(e){return F().some((o)=>fe(o)?.permissions?.defaultMode===e)}`.
+/// A `defaultMode` of `"auto"` or `"bypassPermissions"` from `projectSettings`
+/// or `localSettings` is IGNORED (warn +
+/// `tengu_settings_{auto,bypass}_mode_untrusted_source_ignored`) because those
+/// files are repo-controllable.
 ///
 /// Returns `true` for the trusted tiers (User/Policy/Flag) and `false` for the
 /// repo-controllable ones (Project/Local) and the runtime tiers
-/// (CliArg/Command/Session), which never carry a settings `defaultMode`. This is
-/// citation-neutral: the five external modes may still be set from ANY tier;
-/// only `auto` is trust-gated.
+/// (CliArg/Command/Session), which never carry a settings `defaultMode`.
+/// Plan / acceptEdits / dontAsk / default may still be set from any tier.
 #[must_use]
 pub fn auto_mode_grantable_by_source(source: PermissionRuleSource) -> bool {
     matches!(
@@ -435,6 +430,30 @@ pub fn auto_mode_grantable_by_source(source: PermissionRuleSource) -> bool {
             | PermissionRuleSource::FlagSettings
     )
 }
+
+/// 2.1.257: may this settings *source* apply `defaultMode` of `mode`?
+///
+/// Auto (2.1.211) and bypassPermissions (2.1.257) require
+/// [`auto_mode_grantable_by_source`]. Other modes apply from any tier.
+#[must_use]
+pub fn default_mode_applies_from_source(
+    mode: crate::mode::PermissionMode,
+    source: PermissionRuleSource,
+) -> bool {
+    match mode {
+        crate::mode::PermissionMode::Auto | crate::mode::PermissionMode::BypassPermissions => {
+            auto_mode_grantable_by_source(source)
+        }
+        _ => true,
+    }
+}
+
+/// Byte-exact 2.1.257 warn when an untrusted tier's `defaultMode: "bypassPermissions"`
+/// is dropped. Em-dash is ASCII `--` in the oracle's `—` (U+2014).
+pub const UNTRUSTED_BYPASS_DEFAULT_MODE_WARN: &str = "settings defaultMode \"bypassPermissions\" ignored \u{2014} only policy/user/flag settings may grant bypass mode (projectSettings and localSettings are repo-controllable)";
+
+/// Byte-exact warn when an untrusted tier's `defaultMode: "auto"` is dropped.
+pub const UNTRUSTED_AUTO_DEFAULT_MODE_WARN: &str = "settings defaultMode \"auto\" ignored \u{2014} only policy/user/flag settings may grant auto mode (projectSettings and localSettings are repo-controllable)";
 
 /// Does this settings file DISABLE `bypassPermissions` mode? True iff
 /// `permissions.disableBypassPermissionsMode == "disable"` (claude-code's
@@ -537,6 +556,7 @@ pub fn additional_directories_from_settings_json(raw: &str) -> Vec<std::path::Pa
             p.additional_directories
                 .into_iter()
                 .filter(|path| !path.contains('\0'))
+                .filter(|path| !crate::working_dirs::is_network_working_directory(path))
                 .map(std::path::PathBuf::from)
                 .collect()
         })
@@ -595,7 +615,7 @@ mod tests {
 
     #[test]
     fn auto_mode_grantable_only_from_trusted_tiers() {
-        // MODE-SETTINGS-AUTO-TRUST-01: policy/user/flag may grant auto.
+        // `le` / `C(e)`: policy/user/flag may grant auto AND bypassPermissions.
         assert!(auto_mode_grantable_by_source(
             PermissionRuleSource::UserSettings
         ));
@@ -620,6 +640,45 @@ mod tests {
         assert!(!auto_mode_grantable_by_source(
             PermissionRuleSource::Session
         ));
+    }
+
+    #[test]
+    fn default_mode_applies_from_source_trust_gates_auto_and_bypass_only() {
+        use crate::mode::PermissionMode;
+        let project = PermissionRuleSource::ProjectSettings;
+        let user = PermissionRuleSource::UserSettings;
+        assert!(!default_mode_applies_from_source(
+            PermissionMode::Auto,
+            project
+        ));
+        assert!(!default_mode_applies_from_source(
+            PermissionMode::BypassPermissions,
+            project
+        ));
+        assert!(default_mode_applies_from_source(
+            PermissionMode::BypassPermissions,
+            user
+        ));
+        assert!(default_mode_applies_from_source(
+            PermissionMode::Plan,
+            project
+        ));
+        assert!(default_mode_applies_from_source(
+            PermissionMode::AcceptEdits,
+            project
+        ));
+    }
+
+    #[test]
+    fn untrusted_bypass_warn_is_byte_exact() {
+        assert_eq!(
+            UNTRUSTED_BYPASS_DEFAULT_MODE_WARN,
+            "settings defaultMode \"bypassPermissions\" ignored \u{2014} only policy/user/flag settings may grant bypass mode (projectSettings and localSettings are repo-controllable)"
+        );
+        assert_eq!(
+            UNTRUSTED_AUTO_DEFAULT_MODE_WARN,
+            "settings defaultMode \"auto\" ignored \u{2014} only policy/user/flag settings may grant auto mode (projectSettings and localSettings are repo-controllable)"
+        );
     }
 
     #[test]
@@ -872,6 +931,13 @@ mod tests {
                 r#"{ "permissions": { "additionalDirectories": ["../sibling", "bad\u0000path", "~/work"] } }"#
             ),
             vec![PathBuf::from("../sibling"), PathBuf::from("~/work")]
+        );
+        // UNC / `/net/<host>` are refused before they become working dirs.
+        assert_eq!(
+            f(
+                r#"{ "permissions": { "additionalDirectories": ["../sibling", "//fileserver/share", "/net/host/data", "/abs/dir"] } }"#
+            ),
+            vec![PathBuf::from("../sibling"), PathBuf::from("/abs/dir")]
         );
     }
 

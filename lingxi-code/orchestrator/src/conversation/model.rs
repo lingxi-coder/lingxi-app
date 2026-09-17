@@ -81,7 +81,7 @@ fn parse_prompt_suggestion_response(raw: &str) -> Option<String> {
         || lowered.starts_with("invalid api key")
         || lowered.starts_with("image was too large")
         || speaker.is_match(suggestion)
-        || suggestion.split_whitespace().count() > 12
+        || prompt_suggestion_word_weight(suggestion) > 12
         || suggestion.encode_utf16().count() >= 100
         || multiple_sentences.is_match(suggestion)
         || suggestion.contains('\n')
@@ -92,15 +92,74 @@ fn parse_prompt_suggestion_response(raw: &str) -> Option<String> {
         return None;
     }
 
-    let word_count = suggestion.split_whitespace().count();
-    if word_count < 2
-        && !suggestion.starts_with('/')
-        && !PROMPT_SUGGESTION_SINGLE_WORD_ALLOWLIST.contains(&lowered.as_str())
-    {
-        return None;
+    let weighted_words = prompt_suggestion_word_weight(suggestion);
+    if weighted_words < 2 && !suggestion.starts_with('/') {
+        let cjk = prompt_suggestion_cjk_count(suggestion);
+        if cjk > 0 {
+            if cjk < 2 {
+                return None;
+            }
+        } else if !PROMPT_SUGGESTION_SINGLE_WORD_ALLOWLIST.contains(&lowered.as_str()) {
+            return None;
+        }
     }
 
     Some(suggestion.to_string())
+}
+
+fn prompt_suggestion_script_counts(text: &str) -> (u32, u32, u32, u32) {
+    let han = regex::Regex::new(r"\p{Han}").expect("han script");
+    let phonetic = regex::Regex::new(
+        r"[\p{Hiragana}\p{Katakana}\u{30FC}\u{FF70}\p{Thai}\p{Lao}\p{Khmer}\p{Myanmar}]",
+    )
+    .expect("phonetic scripts");
+    let hangul = regex::Regex::new(r"\p{Hangul}").expect("hangul script");
+    let letter_or_number = regex::Regex::new(r"[\p{L}\p{N}]").expect("letter or number");
+    let mut han_n = 0;
+    let mut phonetic_n = 0;
+    let mut hangul_n = 0;
+    let mut other_n = 0;
+    let mut buf = [0u8; 4];
+    for c in text.chars() {
+        let s = c.encode_utf8(&mut buf);
+        if han.is_match(s) {
+            han_n += 1;
+        } else if phonetic.is_match(s) {
+            phonetic_n += 1;
+        } else if hangul.is_match(s) {
+            hangul_n += 1;
+        } else if letter_or_number.is_match(s) {
+            other_n += 1;
+        }
+    }
+    (han_n, phonetic_n, hangul_n, other_n)
+}
+
+/// Oracle `PQn`: whitespace tokens, with Han/kana/Thai weighted so CJK
+/// suggestions are not dropped as "one English word".
+fn prompt_suggestion_word_weight(text: &str) -> usize {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let mut weight = 0.0_f64;
+    for token in trimmed.split_whitespace() {
+        let (han, phonetic, hangul, other) = prompt_suggestion_script_counts(token);
+        weight += if han == 0 && phonetic == 0 {
+            1.0
+        } else {
+            let mixed = if other + hangul > 0 { 1.0 } else { 0.0 };
+            mixed + f64::from(han) / 2.0 + f64::from(phonetic) / 4.0
+        };
+    }
+    weight.ceil() as usize
+}
+
+/// Oracle `RQn`: Han + kana/Thai + Hangul count. A CJK token with ≥2 of these
+/// letters is kept even when the whitespace word count is 1.
+fn prompt_suggestion_cjk_count(text: &str) -> u32 {
+    let (han, phonetic, hangul, _) = prompt_suggestion_script_counts(text);
+    han + phonetic + hangul
 }
 
 fn is_cross_device(error: &std::io::Error) -> bool {
@@ -1195,9 +1254,14 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     /// the current session id (backward-compat shape).
     pub async fn snapshot_cost_real(&self) -> platform_api::CostSnapshot {
         let session_id = self.session.lock().await.session_id;
+        let loops = match &self.model_runtime.loop_usage {
+            Some(provider) => provider.usage_rows().await,
+            None => Vec::new(),
+        };
         let Some(tracker) = self.model_runtime.cost_tracker.as_ref() else {
             return platform_api::CostSnapshot {
                 session_id,
+                loops,
                 ..platform_api::CostSnapshot::default()
             };
         };
@@ -1280,6 +1344,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                     cache_read_input_tokens: state.last_cache_read_input_tokens,
                     cache_creation_input_tokens: state.last_cache_creation_input_tokens,
                 }),
+            loops,
         }
     }
 
@@ -3039,6 +3104,25 @@ mod session_sidecar_tests {
             Some("用户: 继续测试"),
             "the oracle's JavaScript \\w speaker prefix is ASCII-only"
         );
+        assert_eq!(
+            parse_prompt_suggestion_response("继续").as_deref(),
+            Some("继续"),
+            "a two-Han token is kept even though whitespace word-count is 1"
+        );
+        assert_eq!(
+            parse_prompt_suggestion_response("テスト").as_deref(),
+            Some("テスト"),
+            "katakana is a phonetic script and counts toward the CJK keep"
+        );
+        assert_eq!(
+            parse_prompt_suggestion_response("한글").as_deref(),
+            Some("한글")
+        );
+        assert_eq!(
+            parse_prompt_suggestion_response("好"),
+            None,
+            "a single Han letter is still too few"
+        );
     }
 
     #[test]
@@ -3068,7 +3152,10 @@ mod side_question_reminder_tests {
     fn the_reminder_forbids_writing_tool_calls_as_text() {
         let r = ConversationOrchestrator::SIDE_QUESTION_SYSTEM_REMINDER;
         let bullet = "- Do NOT write tool calls or tool output as text (for example invoke or function_calls XML blocks) - nothing you write here is executed; if answering would need reading files, running commands, or searching, say that can't be checked from a side question and suggest asking in the main conversation";
-        assert!(r.contains(bullet), "the 2.1.269 bullet must be present verbatim");
+        assert!(
+            r.contains(bullet),
+            "the 2.1.269 bullet must be present verbatim"
+        );
     }
 
     /// Position matters: the oracle puts it directly after the no-tools bullet,
@@ -3080,7 +3167,9 @@ mod side_question_reminder_tests {
             .find("- You have NO tools available")
             .expect("no-tools bullet");
         let dont_write = r.find("- Do NOT write tool calls").expect("new bullet");
-        let one_off = r.find("- This is a one-off response").expect("one-off bullet");
+        let one_off = r
+            .find("- This is a one-off response")
+            .expect("one-off bullet");
         assert!(
             no_tools < dont_write && dont_write < one_off,
             "bullet order must be: no-tools, do-not-write, one-off"

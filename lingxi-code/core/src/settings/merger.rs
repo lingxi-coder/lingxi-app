@@ -121,31 +121,28 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         agent_push_notif_enabled: next
             .agent_push_notif_enabled
             .or(prev.agent_push_notif_enabled),
-        task_output_max_chars: next
-            .task_output_max_chars
-            .or(prev.task_output_max_chars),
+        task_output_max_chars: next.task_output_max_chars.or(prev.task_output_max_chars),
         workflow_keyword_trigger_enabled: next
             .workflow_keyword_trigger_enabled
             .or(prev.workflow_keyword_trigger_enabled),
         auto_memory_enabled: next.auto_memory_enabled.or(prev.auto_memory_enabled),
-        bash_output_max_chars: next
-            .bash_output_max_chars
-            .or(prev.bash_output_max_chars),
+        effort_level: next.effort_level.or(prev.effort_level),
+        // Cap fold (lowest wins) is done at the /effort consumer over raw
+        // files; the merged view is still later-source-wins like other scalars.
+        max_effort_level: next.max_effort_level.or(prev.max_effort_level),
+        model_settings: merge_model_settings(prev.model_settings, next.model_settings),
+        bash_output_max_chars: next.bash_output_max_chars.or(prev.bash_output_max_chars),
         // `attribution` is a plain OBJECT, and the upstream customizer
         // special-cases only arrays (see the note above `permissions`), so two
         // layers deep-merge per field rather than the later one replacing the
         // whole object: a user-level `attribution.commit` survives a project
         // that sets only `attribution.pr`.
         attribution: merge_attribution(prev.attribution, next.attribution),
-        include_co_authored_by: next
-            .include_co_authored_by
-            .or(prev.include_co_authored_by),
+        include_co_authored_by: next.include_co_authored_by.or(prev.include_co_authored_by),
         include_git_instructions: next
             .include_git_instructions
             .or(prev.include_git_instructions),
-        bash_edit_diff_enabled: next
-            .bash_edit_diff_enabled
-            .or(prev.bash_edit_diff_enabled),
+        bash_edit_diff_enabled: next.bash_edit_diff_enabled.or(prev.bash_edit_diff_enabled),
         enable_workflows: next.enable_workflows.or(prev.enable_workflows),
         workflow_size_guideline: next
             .workflow_size_guideline
@@ -226,6 +223,30 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
         fusion: merge_fusion_settings(prev.fusion, next.fusion),
+    }
+}
+
+fn merge_model_settings(
+    prev: Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>>,
+    next: Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>>,
+) -> Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>> {
+    match (prev, next) {
+        (None, other) | (other, None) => other,
+        (Some(mut prev), Some(next)) => {
+            for (key, nv) in next {
+                prev.entry(key)
+                    .and_modify(|pv| {
+                        if nv.effort_level.is_some() {
+                            pv.effort_level.clone_from(&nv.effort_level);
+                        }
+                        if nv.max_effort_level.is_some() {
+                            pv.max_effort_level.clone_from(&nv.max_effort_level);
+                        }
+                    })
+                    .or_insert(nv);
+            }
+            Some(prev)
+        }
     }
 }
 
@@ -1024,6 +1045,11 @@ mod tests {
                 json!({"fastPanelCount": 2}),
             ),
             (
+                "modelSettings",
+                json!({"claude-opus-4-7": {"maxEffortLevel": "high"}}),
+                json!({"claude-sonnet-4-5": {"effortLevel": "medium"}}),
+            ),
+            (
                 "modelOverrides",
                 json!({"lower": "m1"}),
                 json!({"upper": "m2"}),
@@ -1186,6 +1212,10 @@ mod tests {
             // pair drawn from its own fields, and the two sides must name
             // DIFFERENT ones so a per-field merge is visible as combining.
             (json!({"commit": "lower"}), json!({"pr": "upper"})),
+            (
+                json!({"claude-opus-4-7": {"maxEffortLevel": "high"}}),
+                json!({"claude-sonnet-4-5": {"effortLevel": "medium"}}),
+            ),
             (json!(["lower"]), json!(["upper"])),
             (json!("lower"), json!("upper")),
             (json!(true), json!(false)),

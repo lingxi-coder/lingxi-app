@@ -160,6 +160,7 @@ pub mod subagent_output_guard;
 pub mod subagent_spawn;
 pub mod subscription;
 pub mod swarm;
+pub mod tag_escape;
 pub mod task_activity;
 pub mod task_registry;
 pub mod team_registry;

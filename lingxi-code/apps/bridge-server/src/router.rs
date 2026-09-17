@@ -498,11 +498,15 @@ impl EngineCommandRouter {
         // session after a switch that already committed.
         let mut problems: Vec<String> = Vec::new();
         if let Some(scheduler) = &self.session_cron {
-            if let Err(error) = scheduler.set_session_id(current.as_uuid().to_string()).await {
+            if let Err(error) = scheduler
+                .set_session_id(current.as_uuid().to_string())
+                .await
+            {
                 problems.push(format!("scheduled tasks could not restart: {error}"));
             }
         }
-        if let Err(error) = engine_desktop::refresh_process_session_presence(previous, current).await
+        if let Err(error) =
+            engine_desktop::refresh_process_session_presence(previous, current).await
         {
             problems.push(error.to_string());
         }

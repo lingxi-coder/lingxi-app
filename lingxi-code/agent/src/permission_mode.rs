@@ -232,8 +232,7 @@ pub(crate) fn effective_child_mode(
     }
     // `else if (So === "bypassPermissions") { if (ey() || !1 || Rn.restricted) }`.
     // Reached only when the confined arm did not fire (the oracle's `else`).
-    if effective == PermissionMode::BypassPermissions
-        && (gates.bypass_disabled || gates.restricted)
+    if effective == PermissionMode::BypassPermissions && (gates.bypass_disabled || gates.restricted)
     {
         warn(&format!(
             "Subagent declared permissionMode: bypassPermissions but this session is not \
@@ -561,11 +560,18 @@ mod tests {
             ..SpawnBypassGates::default()
         };
         for (def_mode, expected) in [
-            (AgentPermissionMode::AcceptEdits, PermissionMode::AcceptEdits),
+            (
+                AgentPermissionMode::AcceptEdits,
+                PermissionMode::AcceptEdits,
+            ),
             (AgentPermissionMode::Auto, PermissionMode::Auto),
         ] {
             let (mode, warnings) = ecm_gated(None, PermissionMode::Default, def_mode, gates);
-            assert_eq!(mode, Some(expected), "{def_mode:?} must survive the bypass arm");
+            assert_eq!(
+                mode,
+                Some(expected),
+                "{def_mode:?} must survive the bypass arm"
+            );
             assert!(warnings.is_empty());
         }
     }
@@ -610,7 +616,10 @@ mod tests {
         ] {
             let (mode, warnings) =
                 ecm_gated(None, parent, AgentPermissionMode::BypassPermissions, gates);
-            assert_eq!(mode, None, "outer guard must still win for parent {parent:?}");
+            assert_eq!(
+                mode, None,
+                "outer guard must still win for parent {parent:?}"
+            );
             assert!(warnings.is_empty());
         }
     }

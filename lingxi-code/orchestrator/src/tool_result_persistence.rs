@@ -188,7 +188,9 @@ pub fn wrap_utf16(
         "{PERSISTED_OUTPUT_OPEN}\n{}Preview (first {}):\n",
         persisted_lead(original_size, filepath, truncated_at),
         format_bytes(PREVIEW_CHARS)
-    ).encode_utf16().collect();
+    )
+    .encode_utf16()
+    .collect();
     units.extend_from_slice(preview);
     units.extend(if has_more { "\n...\n" } else { "\n" }.encode_utf16());
     units.extend(PERSISTED_OUTPUT_CLOSE.encode_utf16());
@@ -235,7 +237,10 @@ pub fn wrap(
 pub fn microcompact_replacement(filepath: &str, truncated_at: Option<usize>) -> String {
     let truncated = match truncated_at {
         None => String::new(),
-        Some(cap) => format!(" (truncated to the first {} of the output)", format_bytes(cap)),
+        Some(cap) => format!(
+            " (truncated to the first {} of the output)",
+            format_bytes(cap)
+        ),
     };
     format!(
         "{PERSISTED_OUTPUT_OPEN}Tool result saved to: {filepath}{truncated}\n\nUse Read to view{PERSISTED_OUTPUT_CLOSE}"
@@ -538,9 +543,16 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("sess").join(TOOL_RESULTS_DIR);
         let body = "hello world";
-        let p = persist(tmp.path(), &dir, "toolu_abc", body, false, MAX_PERSIST_UTF16_UNITS)
-            .await
-            .expect("persist ok");
+        let p = persist(
+            tmp.path(),
+            &dir,
+            "toolu_abc",
+            body,
+            false,
+            MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        .expect("persist ok");
         assert_eq!(p.filepath, dir.join("toolu_abc.txt"));
         assert_eq!(p.original_size, body.len());
         assert!(!p.is_json);
@@ -556,9 +568,16 @@ mod tests {
     async fn persist_uses_a_json_extension_for_array_bodies() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
-        let p = persist(tmp.path(), &dir, "id1", "[\n  1\n]", true, MAX_PERSIST_UTF16_UNITS)
-            .await
-            .expect("persist ok");
+        let p = persist(
+            tmp.path(),
+            &dir,
+            "id1",
+            "[\n  1\n]",
+            true,
+            MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        .expect("persist ok");
         assert_eq!(p.filepath, dir.join("id1.json"));
         assert!(p.is_json);
     }
@@ -569,9 +588,16 @@ mod tests {
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("id1.txt"), "OLD").expect("seed");
-        let p = persist(tmp.path(), &dir, "id1", "NEW-BODY", false, MAX_PERSIST_UTF16_UNITS)
-            .await
-            .expect("EEXIST is success");
+        let p = persist(
+            tmp.path(),
+            &dir,
+            "id1",
+            "NEW-BODY",
+            false,
+            MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        .expect("EEXIST is success");
         assert_eq!(p.filepath, dir.join("id1.txt"));
         // The oracle does NOT overwrite: `writeExclusive` threw, the catch
         // swallowed EEXIST, and the pre-existing file stays as it was.
@@ -587,9 +613,16 @@ mod tests {
     async fn persisted_size_counts_utf16_units() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
-        let result = persist(tmp.path(), &dir, "unicode", "中😀", false, MAX_PERSIST_UTF16_UNITS)
-            .await
-            .unwrap();
+        let result = persist(
+            tmp.path(),
+            &dir,
+            "unicode",
+            "中😀",
+            false,
+            MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.original_size, 3);
         assert_eq!(std::fs::read_to_string(result.filepath).unwrap(), "中😀");
     }
@@ -600,9 +633,16 @@ mod tests {
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
         std::fs::create_dir_all(dir.join("id.txt")).unwrap();
         assert_eq!(
-            persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS)
-                .await
-                .unwrap_err(),
+            persist(
+                tmp.path(),
+                &dir,
+                "id",
+                "new",
+                false,
+                MAX_PERSIST_UTF16_UNITS
+            )
+            .await
+            .unwrap_err(),
             "tool result path is not a regular file; not persisted"
         );
     }
@@ -617,7 +657,16 @@ mod tests {
         let target = tmp.path().join("target");
         std::fs::write(&target, "old").unwrap();
         symlink(&target, dir.join("id.txt")).unwrap();
-        let result = persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS).await.unwrap();
+        let result = persist(
+            tmp.path(),
+            &dir,
+            "id",
+            "new",
+            false,
+            MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read_to_string(target).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(result.filepath).unwrap(), "new");
     }
@@ -666,14 +715,30 @@ mod tests {
         let collision = dir.join("id.txt");
         std::fs::hard_link(&target, &collision).unwrap();
         assert_eq!(
-            persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS)
-                .await
-                .unwrap_err(),
+            persist(
+                tmp.path(),
+                &dir,
+                "id",
+                "new",
+                false,
+                MAX_PERSIST_UTF16_UNITS
+            )
+            .await
+            .unwrap_err(),
             "tool result path has another name; not persisted"
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
         std::fs::remove_file(target).unwrap();
-        persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS).await.unwrap();
+        persist(
+            tmp.path(),
+            &dir,
+            "id",
+            "new",
+            false,
+            MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read_to_string(collision).unwrap(), "old");
     }
 
@@ -688,16 +753,30 @@ mod tests {
         std::fs::write(&target, "old").unwrap();
         std::fs::hard_link(&target, dir.join("id.txt")).unwrap();
         assert_eq!(
-            persist(tmp.path(), &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS)
-                .await
-                .unwrap_err(),
+            persist(
+                tmp.path(),
+                &dir,
+                "id",
+                "new",
+                false,
+                MAX_PERSIST_UTF16_UNITS
+            )
+            .await
+            .unwrap_err(),
             "tool result path has another name; not persisted"
         );
         let link = tmp.path().join("linked");
         symlink(&dir, &link).unwrap();
-        let err = persist(tmp.path(), &link.join("nested"), "other", "new", false, MAX_PERSIST_UTF16_UNITS)
-            .await
-            .unwrap_err();
+        let err = persist(
+            tmp.path(),
+            &link.join("nested"),
+            "other",
+            "new",
+            false,
+            MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("is a link or not a directory"));
         assert!(!dir.join("nested").exists());
         assert_eq!(std::fs::read_to_string(target).unwrap(), "old");
@@ -802,7 +881,9 @@ mod tests {
         // Truncated: the CAP, twice, and no claim that the file is complete.
         let cut = wrap(5_000_000_000, "/t/x.txt", "P", false, Some(1_073_741_824));
         assert!(
-            cut.contains("Output exceeded the 1GB persist limit; only the first 1GB were saved to: /t/x.txt"),
+            cut.contains(
+                "Output exceeded the 1GB persist limit; only the first 1GB were saved to: /t/x.txt"
+            ),
             "{cut}"
         );
         assert!(

@@ -72,7 +72,9 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     // `function U2(){return a.CLAUDE_CODE_SIMPLE}`), so with the env unset this
     // is the aligned shape — the old `4` predated the feature.
     assert_eq!(
-        msgs.iter().map(|m| m.message_type.as_str()).collect::<Vec<_>>(),
+        msgs.iter()
+            .map(|m| m.message_type.as_str())
+            .collect::<Vec<_>>(),
         vec!["user", "attachment", "assistant", "user", "assistant"],
         "unexpected JSONL entry sequence"
     );

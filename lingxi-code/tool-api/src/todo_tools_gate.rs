@@ -230,7 +230,10 @@ mod tests {
             "qwen-max",
             "",
         ] {
-            assert!(on(model), "{model:?} is not an Anthropic id and must keep the tools");
+            assert!(
+                on(model),
+                "{model:?} is not an Anthropic id and must keep the tools"
+            );
         }
     }
 
@@ -253,9 +256,18 @@ mod tests {
     fn background_opt_in_and_env_each_re_enable_a_gated_model() {
         let gated = "claude-sonnet-5";
         assert!(!on(gated), "precondition: this model is gated");
-        assert!(todo_tools_enabled_inner(Some(gated), true, false, false), "bg session");
-        assert!(todo_tools_enabled_inner(Some(gated), false, true, false), "opt-in");
-        assert!(todo_tools_enabled_inner(Some(gated), false, false, true), "env");
+        assert!(
+            todo_tools_enabled_inner(Some(gated), true, false, false),
+            "bg session"
+        );
+        assert!(
+            todo_tools_enabled_inner(Some(gated), false, true, false),
+            "opt-in"
+        );
+        assert!(
+            todo_tools_enabled_inner(Some(gated), false, false, true),
+            "env"
+        );
     }
 
     /// The allowlist is the oracle's, verbatim — a drifted entry silently

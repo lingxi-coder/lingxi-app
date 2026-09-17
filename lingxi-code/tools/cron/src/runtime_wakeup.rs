@@ -16,7 +16,16 @@ pub struct WakeupTask {
 }
 impl WakeupTask {
     pub fn command_id(&self) -> String {
-        format!("{}-{}-{}", if self.task_kind_loop { "loop-wakeup" } else { "cron-fire" }, self.task_id, self.fire_id.as_uuid())
+        format!(
+            "{}-{}-{}",
+            if self.task_kind_loop {
+                "loop-wakeup"
+            } else {
+                "cron-fire"
+            },
+            self.task_id,
+            self.fire_id.as_uuid()
+        )
     }
     pub fn scheduled(fire: &cron::scheduler::SessionCronFire) -> Self {
         let mut task = Self::new(Duration::ZERO, &fire.prompt);

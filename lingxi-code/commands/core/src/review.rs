@@ -67,7 +67,7 @@ const LIST_PROMPT: &str = "Run `gh pr list` to show the open pull requests, then
 /// first whitespace token (stripped of backticks and a leading `#`) is the PR
 /// number; the rest join as extra instructions.
 fn build_prompt(args: &str) -> String {
-    let mut tokens = args.trim().split_whitespace();
+    let mut tokens = args.split_whitespace();
     let first = tokens.next().unwrap_or("");
     let number = first.replace('`', "");
     let number = number.strip_prefix('#').unwrap_or(&number);

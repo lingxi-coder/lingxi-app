@@ -22,7 +22,9 @@ impl CliLoopHost {
         reason: orchestrator::prompt::mid_turn_input::CancelReasonFlag,
     ) -> Arc<Self> {
         let state = Arc::new(loop_tools::LoopRuntime::default());
-        let session_id = Arc::new(std::sync::Mutex::new(Some(runtime.orchestrator.current_session_id().await)));
+        let session_id = Arc::new(std::sync::Mutex::new(Some(
+            runtime.orchestrator.current_session_id().await,
+        )));
         let delivery = Arc::new(CliDelivery {
             session_id: session_id.clone(),
             queue,
@@ -82,7 +84,11 @@ impl CliLoopHost {
         }
         self.reason.reset();
         if let Some(raw) = raw_loop {
-            let resolved = self.state.try_resolve_loop_default_fire(raw, &self.cwd.project_root(), &self.cwd.cwd())?;
+            let resolved = self.state.try_resolve_loop_default_fire(
+                raw,
+                &self.cwd.project_root(),
+                &self.cwd.cwd(),
+            )?;
             self.state.begin_tick(raw.to_owned());
             Ok(Some(resolved))
         } else {
@@ -95,16 +101,37 @@ impl CliLoopHost {
     pub fn resolve_scheduled(&self, raw: &str) -> std::io::Result<String> {
         self.state.take_in_flight_prompt();
         self.state.invalidate_noop_streak();
-        self.state.try_resolve_loop_default_fire(raw, &self.cwd.project_root(), &self.cwd.cwd())
+        self.state
+            .try_resolve_loop_default_fire(raw, &self.cwd.project_root(), &self.cwd.cwd())
     }
-    pub async fn run_scheduled(&self, prompt: &str, command: &msgqueue::QueuedCommand, cancel: CancellationToken) -> Result<(), String> {
-        let orch = self.orch.upgrade().ok_or_else(|| "session closed before scheduled delivery".to_string())?;
-        orch.run_queued_prompt_batch(vec![orchestrator::QueuedPromptInput {
-                    goal_retry_id: command.uuid.starts_with("goal-retry-").then(|| command.uuid.clone()),
-            text: prompt.to_string(), is_meta: true, message_id: None, queue_priority: Some("later".into()),
-            scheduled_task_id: command.scheduled_task_id.clone(),
-            scheduled_fire_id: command.scheduled_fire_id.clone(),
-        }], cancel).await.map(|_| ()).map_err(|error| error.to_string())
+    pub async fn run_scheduled(
+        &self,
+        prompt: &str,
+        command: &msgqueue::QueuedCommand,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        let orch = self
+            .orch
+            .upgrade()
+            .ok_or_else(|| "session closed before scheduled delivery".to_string())?;
+        orch.run_queued_prompt_batch(
+            vec![orchestrator::QueuedPromptInput {
+                goal_retry_id: command
+                    .uuid
+                    .starts_with("goal-retry-")
+                    .then(|| command.uuid.clone()),
+                text: prompt.to_string(),
+                is_meta: true,
+                message_id: None,
+                queue_priority: Some("later".into()),
+                scheduled_task_id: command.scheduled_task_id.clone(),
+                scheduled_fire_id: command.scheduled_fire_id.clone(),
+            }],
+            cancel,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     }
     pub async fn finish(&self, cancel: &CancellationToken) {
         let aborted = cancel.is_cancelled()
@@ -154,7 +181,13 @@ struct CliDelivery {
 }
 #[async_trait::async_trait]
 impl loop_tools::WakeupDelivery for CliDelivery {
-    async fn deliver(&self, command_id: &str, prompt: String, _reason: String, task: loop_tools::WakeupTask) {
+    async fn deliver(
+        &self,
+        command_id: &str,
+        prompt: String,
+        _reason: String,
+        task: loop_tools::WakeupTask,
+    ) {
         while self.queue.has_active_turn().await {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -170,7 +203,10 @@ impl loop_tools::WakeupDelivery for CliDelivery {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let streak = task.task_kind_loop.then(|| self.state.noop_streak()).flatten();
+        let streak = task
+            .task_kind_loop
+            .then(|| self.state.noop_streak())
+            .flatten();
         let (message, companion) = task.lines(now_ms, streak);
         let since_ms = streak.map_or(0, |(_, since)| {
             since
@@ -184,7 +220,13 @@ impl loop_tools::WakeupDelivery for CliDelivery {
                 companion.clone(),
                 streak.map_or(0, |(n, _)| n),
                 since_ms,
-                orchestrator::ScheduledLoopFire { fire_id: task.fire_id, task_id: task.task_id.clone(), cron: task.cron.clone(), prompt: task.display_prompt.clone(), task_kind_loop: task.task_kind_loop },
+                orchestrator::ScheduledLoopFire {
+                    fire_id: task.fire_id,
+                    task_id: task.task_id.clone(),
+                    cron: task.cron.clone(),
+                    prompt: task.display_prompt.clone(),
+                    task_kind_loop: task.task_kind_loop,
+                },
             )
             .await
         {
@@ -238,23 +280,38 @@ impl loop_tools::WakeupDelivery for CliDelivery {
 #[async_trait::async_trait]
 impl loop_tools::SessionCronDelivery for CliDelivery {
     async fn clear_queued(&self) {
-        let ids: Vec<_> = self.queue.snapshot().await.into_iter()
-            .filter(|command| command.source == msgqueue::QueueSource::Cron && command.uuid.starts_with("cron-fire-"))
-            .map(|command| command.uuid).collect();
+        let ids: Vec<_> = self
+            .queue
+            .snapshot()
+            .await
+            .into_iter()
+            .filter(|command| {
+                command.source == msgqueue::QueueSource::Cron
+                    && command.uuid.starts_with("cron-fire-")
+            })
+            .map(|command| command.uuid)
+            .collect();
         self.queue.remove(&ids, "session changed").await;
     }
-    async fn is_loading(&self) -> bool { self.queue.has_active_turn().await }
+    async fn is_loading(&self) -> bool {
+        self.queue.has_active_turn().await
+    }
     async fn enqueue(&self, fire: loop_tools::SessionCronFire) -> Result<(), String> {
         if fire.cron.is_empty() {
-            self.queue.enqueue(msgqueue::QueuedCommand {
-                scheduled_task_id: None,
-                scheduled_fire_id: None,
-                uuid: format!("cron-fire-{}", fire.id),
-                content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
-                priority: msgqueue::QueuePriority::Later,
-                queued_at: std::time::SystemTime::now(), source: msgqueue::QueueSource::Cron,
-                agent_id: None, skip_slash_commands: true, is_meta: true,
-            }).await;
+            self.queue
+                .enqueue(msgqueue::QueuedCommand {
+                    scheduled_task_id: None,
+                    scheduled_fire_id: None,
+                    uuid: format!("cron-fire-{}", fire.id),
+                    content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
+                    priority: msgqueue::QueuePriority::Later,
+                    queued_at: std::time::SystemTime::now(),
+                    source: msgqueue::QueueSource::Cron,
+                    agent_id: None,
+                    skip_slash_commands: true,
+                    is_meta: true,
+                })
+                .await;
             return Ok(());
         }
         let task = loop_tools::WakeupTask::scheduled(&fire);

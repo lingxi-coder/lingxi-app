@@ -1226,7 +1226,7 @@ pub async fn assemble_with_credentials(
     // Preserve only the non-secret parent-source fact before `cfg` moves. The
     // authoritative decision is completed after `build`, when the runtime has
     // checked the same Rust secure store used by CLI and TUI.
-    let parent_credential_supplied =
+    let _parent_credential_supplied =
         !has_no_credential_source(&cfg) || !provider_keys.is_empty() || openai_oauth.is_some();
 
     // Capture the persisted-session inputs before `cfg` moves into the desktop
@@ -1294,7 +1294,10 @@ pub async fn assemble_with_credentials(
     // The orchestrator's output stream + the gate's request sink BOTH ride the
     // same connection-scoped outbound channel (the F2-06 contract).
     let event_sink = connection.event_sink();
-    let cron_firer = Arc::new(crate::cron_host::HostCronFirer::new(event_sink.clone(), cfg.cwd.clone()));
+    let cron_firer = Arc::new(crate::cron_host::HostCronFirer::new(
+        event_sink.clone(),
+        cfg.cwd.clone(),
+    ));
     // Subagent lifecycle/message events use the same authenticated sink as the
     // main turn. `initialize_live_session` canonicalizes this id before this
     // function is entered, so the observer and engine transcript share one
@@ -2057,7 +2060,8 @@ mod tests {
         let ordinary = BridgeArgs::parse(["--trusted-workspace"]).unwrap();
         assert!(!ordinary.scheduled_controller);
         assert!(!resolve_desktop_config(&ordinary).enable_automation_scheduler);
-        let controller = BridgeArgs::parse(["--trusted-workspace", "--scheduled-controller"]).unwrap();
+        let controller =
+            BridgeArgs::parse(["--trusted-workspace", "--scheduled-controller"]).unwrap();
         assert!(controller.scheduled_controller);
         assert!(resolve_desktop_config(&controller).enable_automation_scheduler);
         assert!(usage().contains("--scheduled-controller"));
@@ -2142,9 +2146,8 @@ mod tests {
         let mut oversized = std::io::Cursor::new(
             format!(r#"{{"provider_keys":{{"openai":"{secret}"}}}}"#).into_bytes(),
         );
-        let error = read_credential_envelope(&mut oversized)
-            .err()
-            .expect("oversized envelope must fail");
+        let error =
+            read_credential_envelope(&mut oversized).expect_err("oversized envelope must fail");
         assert!(error.contains("limit"));
         assert!(!error.contains(&secret));
     }

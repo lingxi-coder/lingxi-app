@@ -1032,7 +1032,7 @@ mod tests {
     /// entirely live and nothing may be dropped from it.
     #[test]
     fn sc08_no_boundary_is_a_skip() {
-        let lines = vec![msg("a", None), msg("b", Some("a")), title("s", "hi")];
+        let lines = [msg("a", None), msg("b", Some("a")), title("s", "hi")];
         assert!(matches!(
             build_compact_plan(lines.iter().map(String::as_str)),
             PlanOutcome::Skip
@@ -1115,7 +1115,7 @@ mod tests {
     #[test]
     fn sc08_broken_preserved_walk_aborts() {
         let meta = r#"{"preservedSegment":{"headUuid":"a","anchorUuid":"a","tailUuid":"c"}}"#;
-        let lines = vec![
+        let lines = [
             msg("a", None),
             // "b" is missing, so the walk from "c" dead-ends before "a".
             msg("c", Some("b")),
@@ -1127,7 +1127,7 @@ mod tests {
         ));
 
         let pm = r#"{"preservedMessages":{"anchorUuid":"a","uuids":["a","gone"]}}"#;
-        let lines = vec![msg("a", None), boundary("bnd", pm)];
+        let lines = [msg("a", None), boundary("bnd", pm)];
         assert!(matches!(
             build_compact_plan(lines.iter().map(String::as_str)),
             PlanOutcome::Abort(PlanAbort::PreservedUuidMissing)

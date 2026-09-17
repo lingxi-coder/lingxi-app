@@ -749,7 +749,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let lf = IdeLockfile::new_for_ide_dir(tmp.path().to_path_buf(), 43127, vec![]);
         lf.write().unwrap();
-        std::fs::set_permissions(&lf.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(lf.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(discover_all_with(tmp.path(), |_| true).is_empty());
     }
 

@@ -702,8 +702,8 @@ mod worktree_delete {
     }
 
     fn remove_dir_contents(dir_fd: &OwnedFd) -> std::io::Result<()> {
-        let mut dir = Dir::read_from(dir_fd).map_err(std::io::Error::from)?;
-        while let Some(entry) = dir.next() {
+        let dir = Dir::read_from(dir_fd).map_err(std::io::Error::from)?;
+        for entry in dir {
             let entry = entry.map_err(std::io::Error::from)?;
             let name = entry.file_name();
             if name.to_bytes() == b"." || name.to_bytes() == b".." {

@@ -191,9 +191,9 @@ fn include_git_instructions_from(disable_env: Option<bool>, setting: Option<bool
 /// Read an env var as the oracle's parsed-proxy boolean: `None` when the
 /// variable is absent, else whether its value is truthy.
 fn env_tristate(name: &str) -> Option<bool> {
-    std::env::var(name).ok().map(|raw| {
-        platform_api::env::is_env_truthy(Some(raw.as_str()))
-    })
+    std::env::var(name)
+        .ok()
+        .map(|raw| platform_api::env::is_env_truthy(Some(raw.as_str())))
 }
 
 // ===== Commit / PR attribution ==============================================
@@ -1575,8 +1575,7 @@ mod tests {
     /// which is the whole point of a per-trailer override.
     #[test]
     fn naming_one_trailer_leaves_the_other_at_its_default() {
-        let (commit, pr) =
-            resolve_attribution(Some("mine".into()), None, None, "COMMIT", "PR");
+        let (commit, pr) = resolve_attribution(Some("mine".into()), None, None, "COMMIT", "PR");
         assert_eq!(commit, "mine");
         assert_eq!(pr, "PR", "an unnamed trailer must not be erased");
 
@@ -1619,7 +1618,10 @@ mod tests {
     fn the_attribution_object_wins_over_include_co_authored_by() {
         let (commit, pr) =
             resolve_attribution(Some("mine".into()), None, Some(false), "COMMIT", "PR");
-        assert_eq!(commit, "mine", "an explicit trailer survives the coarse switch");
+        assert_eq!(
+            commit, "mine",
+            "an explicit trailer survives the coarse switch"
+        );
         assert_eq!(
             pr, "PR",
             "and the unnamed one falls back to its DEFAULT, not to empty"

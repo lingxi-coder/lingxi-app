@@ -236,10 +236,25 @@ pub fn session_kind() -> Option<String> {
 /// (`..., "message":…, "isVisibleInTranscriptOnly":true, "isCompactSummary":
 /// true, "uuid":…` — real 2.1.207 transcripts). Skipped from the tail ONLY on
 /// user lines, so a non-user line carrying them still round-trips verbatim.
-const SCHEDULED_FIRE_HEAD: &[&str] = &["subtype", "content", "isMeta", "taskId", "cron", "prompt",
-    "taskKind", "cronKind", "noOpStreak", "streakStartedAt", "foldedUuids"];
+const SCHEDULED_FIRE_HEAD: &[&str] = &[
+    "subtype",
+    "content",
+    "isMeta",
+    "taskId",
+    "cron",
+    "prompt",
+    "taskKind",
+    "cronKind",
+    "noOpStreak",
+    "streakStartedAt",
+    "foldedUuids",
+];
 
-const USER_HEAD_EXTRA: &[&str] = &["isVisibleInTranscriptOnly", "isCompactSummary", "turnCompanion"];
+const USER_HEAD_EXTRA: &[&str] = &[
+    "isVisibleInTranscriptOnly",
+    "isCompactSummary",
+    "turnCompanion",
+];
 
 /// `extra` keys emitted BETWEEN `timestamp` and the common trailer, in this
 /// exact order — claude's tool-result head.
@@ -314,7 +329,8 @@ impl Serialize for JsonlMessage {
         // `type` discriminator and writes NO inner `message`.
         let is_attachment = self.message_type == "attachment";
         let is_api_error = self.extra.contains_key("isApiErrorMessage");
-        let is_scheduled_fire = is_system && self.extra.get("subtype").and_then(Value::as_str) == Some("scheduled_task_fire");
+        let is_scheduled_fire = is_system
+            && self.extra.get("subtype").and_then(Value::as_str) == Some("scheduled_task_fire");
         // Compact-boundary system line: claude flattens the system envelope
         // (`subtype`/`content`/`level`/`compactMetadata` are top-level
         // siblings, no inner `message`). Only THIS system subtype gets the
@@ -423,12 +439,16 @@ impl Serialize for JsonlMessage {
         } else if is_scheduled_fire {
             map.serialize_entry("type", &self.message_type)?;
             for key in ["subtype", "content", "isMeta"] {
-                if let Some(value) = self.extra.get(key) { map.serialize_entry(key, value)?; }
+                if let Some(value) = self.extra.get(key) {
+                    map.serialize_entry(key, value)?;
+                }
             }
             map.serialize_entry("timestamp", &self.timestamp)?;
             map.serialize_entry("uuid", &self.uuid)?;
             for key in &SCHEDULED_FIRE_HEAD[3..] {
-                if let Some(value) = self.extra.get(*key) { map.serialize_entry(*key, value)?; }
+                if let Some(value) = self.extra.get(*key) {
+                    map.serialize_entry(*key, value)?;
+                }
             }
         } else if is_compact_boundary {
             // (f1) compact-boundary system head — claude's flattened envelope
@@ -520,7 +540,9 @@ impl Serialize for JsonlMessage {
             if is_user && USER_HEAD_EXTRA.contains(&k.as_str()) {
                 continue;
             }
-            if is_scheduled_fire && SCHEDULED_FIRE_HEAD.contains(&k.as_str()) { continue; }
+            if is_scheduled_fire && SCHEDULED_FIRE_HEAD.contains(&k.as_str()) {
+                continue;
+            }
             if is_compact_boundary && BOUNDARY_HEAD_EXTRA.contains(&k.as_str()) {
                 continue;
             }

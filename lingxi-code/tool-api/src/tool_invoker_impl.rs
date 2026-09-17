@@ -236,7 +236,9 @@ impl ToolInvoker for RegistryToolInvoker {
 
         if tool.native_input_validation() {
             match tool.parse_native_input(&input) {
-                Some(Ok(parsed)) => { input = parsed; }
+                Some(Ok(parsed)) => {
+                    input = parsed;
+                }
                 Some(Err(error)) => {
                     return Err(ToolInvokerError::Validation(format!(
                         "InputValidationError: {}",

@@ -337,7 +337,7 @@ impl ApiServiceModel {
         self.record_delegation_accounting(
             delegate_model,
             delegate_profile,
-            result.usage.clone(),
+            result.usage,
             result.elapsed,
             result.retry_count,
             result.api_calls,
@@ -364,7 +364,7 @@ impl ApiServiceModel {
                         delegate_model,
                         Some(delegate_profile),
                     ),
-                    usage.clone(),
+                    usage,
                     elapsed,
                     retry_count,
                     usage.tokens.cache_read,
@@ -749,7 +749,7 @@ fn subtract_fingerprints(
         return Some(analysis);
     }
     let mut trimmed = analysis;
-    trimmed.media_fingerprints = retained.iter().cloned().collect();
+    trimmed.media_fingerprints = retained.to_vec();
     trimmed
         .media
         .retain(|observation| !excluded.contains(&observation.fingerprint));

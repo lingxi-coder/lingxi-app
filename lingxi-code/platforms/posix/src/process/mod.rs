@@ -11,10 +11,10 @@ pub mod active_children;
 mod agent_processes;
 pub mod kill_tree;
 pub mod runner;
-pub mod supervisor;
 pub mod spawn_unsafe;
-pub mod wrap;
+pub mod supervisor;
 mod watchdog;
+pub mod wrap;
 
 pub use active_children::{
     enable_print_mode_child_cleanup, kill_all_active_children, print_mode_child_cleanup_enabled,

@@ -15,6 +15,21 @@
 //! registry-assembly functions.
 
 #![forbid(unsafe_code)]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 40 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
+// Dead code kept visible, not swept: this crate had 26 item(s) rustc could
+// reach from nothing when the workspace was measured (2026-09-16). The lint
+// stays `warn` at the workspace level so a NEW crate still inherits it; this
+// allow is scoped here so the count is per crate and repayable by deleting this
+// line. This is the category where "named, computed, never wired" hides — some
+// of these read like features that were built and never connected. Each wants a
+// decision (delete, or wire), not a blanket deletion.
+#![allow(dead_code)]
 
 use command_api::CommandRegistry;
 use command_core::{
@@ -1046,8 +1061,7 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
     // Bundled programmatic skills (`/loop`), mirroring desktop. Gated on the cron
     // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
     // job is inert, but the skill's listing/usage path is harmless and faithful.
-    let cron_enabled =
-        tool_cron::cron_tools_enabled();
+    let cron_enabled = tool_cron::cron_tools_enabled();
     command_core::register_bundled_skills(reg, cron_enabled);
 }
 

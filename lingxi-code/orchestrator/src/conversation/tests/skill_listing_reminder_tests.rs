@@ -157,7 +157,7 @@ async fn plan_mode_reminder_none_when_plan_mode_off() {
     // Default session: plan mode OFF ⇒ no reminder (keeps the default build
     // byte-identical).
     let orch = orch_with(ToolRegistry::new(), None);
-    assert!(orch.session().lock().await.plan_mode == false);
+    assert!(!orch.session().lock().await.plan_mode);
     assert!(orch.plan_mode_turn_messages().await.is_empty());
 }
 

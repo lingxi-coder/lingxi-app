@@ -1338,7 +1338,12 @@ mod tests {
                 TaskRecord {
                     task_id: "a1b2c3d4e".to_string(),
                     task_type: "in_process_teammate".to_string(),
-                    status: if killed_by.is_some() { "killed" } else { "running" }.to_string(),
+                    status: if killed_by.is_some() {
+                        "killed"
+                    } else {
+                        "running"
+                    }
+                    .to_string(),
                     description: "research".to_string(),
                     killed_by: killed_by.map(str::to_string),
                     ..TaskRecord::default()

@@ -3597,7 +3597,12 @@ impl LocalAppsHostBroker {
         let mut dependencies = contract
             .core_packages
             .iter()
-            .map(|(package, version)| (package.to_string(), Value::String((*version).to_string())))
+            .map(|(package, version)| {
+                (
+                    (*package).to_string(),
+                    Value::String((*version).to_string()),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         for (package, version) in requested_dependencies {
             dependencies.insert(package.clone(), Value::String(version.clone()));
@@ -5114,7 +5119,7 @@ impl LocalAppsHostBroker {
         app_id: &str,
     ) -> Result<DependencyInstallCompletion, String> {
         let workspace = layout.root().join(layout.workspace_rel());
-        let lock_digest = match Self::dependency_lock_digest(&layout) {
+        let lock_digest = match Self::dependency_lock_digest(layout) {
             Ok(digest) => digest,
             Err(error) => return Err(error),
         };
@@ -5129,7 +5134,7 @@ impl LocalAppsHostBroker {
             let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_lock_wait");
             snapshot_lock.lock().instrument(lock_wait_span).await
         };
-        let dependency_staging = match Self::prepare_dependency_staging(&layout) {
+        let dependency_staging = match Self::prepare_dependency_staging(layout) {
             Ok(path) => path,
             Err(error) => return Err(error),
         };
@@ -5183,7 +5188,7 @@ impl LocalAppsHostBroker {
                 return Err(error);
             }
             return self
-                .finalize_dependency_install(&layout, &dependency_staging, &lock_digest)
+                .finalize_dependency_install(layout, &dependency_staging, &lock_digest)
                 .await;
         }
         let Some(runtime) = self.mobile_linux() else {
@@ -5194,7 +5199,7 @@ impl LocalAppsHostBroker {
         };
         let build_mount = MountSpec {
             host_path: workspace.clone(),
-            guest_path: guest_paths::local_app_build_project(&app_id, "store"),
+            guest_path: guest_paths::local_app_build_project(app_id, "store"),
             read_only: false,
             purpose: MountPurpose::LocalAppBuild,
         };
@@ -5250,7 +5255,7 @@ impl LocalAppsHostBroker {
                     let _ = Self::remove_owned_path(&dependency_staging);
                     return Err(error);
                 }
-                self.finalize_dependency_install(&layout, &dependency_staging, &lock_digest)
+                self.finalize_dependency_install(layout, &dependency_staging, &lock_digest)
                     .await
             }
             Err(error) => {
@@ -11144,12 +11149,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 let _ = Self::remove_owned_path(&dependency_staging);
                 return Err(error);
             }
-            if let Err(error) = self
-                .finalize_dependency_install(&layout, &dependency_staging, &lock_digest)
-                .await
-            {
-                return Err(error);
-            }
+            self.finalize_dependency_install(&layout, &dependency_staging, &lock_digest)
+                .await?;
             drop(_snapshot_guard);
             service
                 .complete_dependency_install_with_metadata(

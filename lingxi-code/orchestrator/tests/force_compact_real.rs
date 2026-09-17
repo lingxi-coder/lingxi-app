@@ -779,8 +779,15 @@ async fn summarize_up_to_replaces_the_past_and_keeps_the_present() {
         texts[1].contains("Summary:"),
         "the summary must lead the kept messages: {texts:?}"
     );
-    let kept: Vec<&String> = texts.iter().filter(|t| t.starts_with("ASSISTANT-3")).collect();
-    assert_eq!(kept.len(), 1, "the chosen message is KEPT by up_to: {texts:?}");
+    let kept: Vec<&String> = texts
+        .iter()
+        .filter(|t| t.starts_with("ASSISTANT-3"))
+        .collect();
+    assert_eq!(
+        kept.len(),
+        1,
+        "the chosen message is KEPT by up_to: {texts:?}"
+    );
     assert!(
         !texts.iter().any(|t| t.starts_with("USER-0")),
         "everything before the chosen message is summarized away: {texts:?}"

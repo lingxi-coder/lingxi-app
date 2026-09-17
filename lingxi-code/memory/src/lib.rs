@@ -26,11 +26,11 @@ pub use file::{
     parse_markdown_with_frontmatter, MemoryError, MemoryFile, MemoryFrontmatter,
     MAX_ENTRYPOINT_BYTES, MAX_ENTRYPOINT_LINES,
 };
+pub use gate::{auto_memory_enabled, AutoMemoryEnv};
 pub use index_cap::{
     human_bytes, measure, memory_index_cap_notice, memory_index_cap_notice_measured, IndexMeasure,
     MemoryIndexNotice, TENGU_MEMDIR_ENTRYPOINT_NEAR_CAP,
 };
-pub use gate::{auto_memory_enabled, AutoMemoryEnv};
 pub use tier::MemoryTier;
 
 // ------ M3-02 wire-identifier constants ------

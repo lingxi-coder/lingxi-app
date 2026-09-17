@@ -710,23 +710,24 @@ pub fn builtin_agent_definitions_with_gates(
     // `if(d8())n.push(b0,$Ee)` — Explore and Plan are registered as a pair.
     if include_explore_plan {
         defs.push(
-        // `Explore` carries BOTH `whenToUse` (`vto`, full) and `whenToUseLean`
-        // (`Cto`, lean). `when_to_use` holds the FULL text — `U2n` renders the
-        // lean one only when the session is lean, and every non-listing surface
-        // reads the full one. The lean variant is supplied by
-        // [`when_to_use_lean`] and carried on the listing entry.
-        def(
-            "Explore",
-            EXPLORE_WHEN_TO_USE,
-            AgentToolPolicy::Except(read_only_disallowed()),
-            // claude-code 2.1.198 `qme` frontmatter is `model:"inherit"` (was
-            // `"haiku"`): the effective model is computed per-session by `GAe`
-            // (`crate::model_resolution::resolve_builtin_explore_model`) —
-            // inherit the session model, capped at "opus" for fable/mythos-class
-            // firstParty sessions.
-            AgentModel::Inherit,
-            EXPLORE_PROMPT,
-        ));
+            // `Explore` carries BOTH `whenToUse` (`vto`, full) and `whenToUseLean`
+            // (`Cto`, lean). `when_to_use` holds the FULL text — `U2n` renders the
+            // lean one only when the session is lean, and every non-listing surface
+            // reads the full one. The lean variant is supplied by
+            // [`when_to_use_lean`] and carried on the listing entry.
+            def(
+                "Explore",
+                EXPLORE_WHEN_TO_USE,
+                AgentToolPolicy::Except(read_only_disallowed()),
+                // claude-code 2.1.198 `qme` frontmatter is `model:"inherit"` (was
+                // `"haiku"`): the effective model is computed per-session by `GAe`
+                // (`crate::model_resolution::resolve_builtin_explore_model`) —
+                // inherit the session model, capped at "opus" for fable/mythos-class
+                // firstParty sessions.
+                AgentModel::Inherit,
+                EXPLORE_PROMPT,
+            ),
+        );
         defs.push(def(
             "Plan",
             "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
@@ -1083,7 +1084,8 @@ mod tests {
             );
         }
         // The dynamic agent is a real host-context prompt.
-        for ty in ["statusline-setup"] {
+        {
+            let ty = "statusline-setup";
             let p = find(&defs, ty).system_prompt.as_deref().unwrap();
             assert!(
                 !p.contains("[NOTE: This is a placeholder"),

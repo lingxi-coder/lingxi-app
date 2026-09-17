@@ -33,17 +33,30 @@ pub fn is_public_monitor_address(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ip) => {
             let o = ip.octets();
-            !(ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
-                || ip.is_broadcast() || ip.is_documentation() || ip.is_multicast()
-                || o[0] == 0 || o[0] >= 240 || (o[0] == 100 && (64..128).contains(&o[1]))
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_multicast()
+                || o[0] == 0
+                || o[0] >= 240
+                || (o[0] == 100 && (64..128).contains(&o[1]))
                 || (o[0] == 198 && (o[1] == 18 || o[1] == 19)))
         }
         std::net::IpAddr::V6(ip) => {
-            if let Some(v4) = ip.to_ipv4_mapped() { return is_public_monitor_address(std::net::IpAddr::V4(v4)); }
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_public_monitor_address(std::net::IpAddr::V4(v4));
+            }
             let first = ip.segments()[0];
-            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast()
-                && first & 0xfe00 != 0xfc00 && first & 0xffc0 != 0xfe80
-                && first & 0xe000 == 0x2000 && !(first == 0x2001 && ip.segments()[1] == 0xdb8)
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+                && first & 0xfe00 != 0xfc00
+                && first & 0xffc0 != 0xfe80
+                && first & 0xe000 == 0x2000
+                && !(first == 0x2001 && ip.segments()[1] == 0xdb8)
         }
     }
 }
@@ -56,8 +69,12 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> MonitorSock
 #[async_trait]
 pub trait MonitorWebSocketProxy: Send + Sync {
     /// Return a tunnel, or None when the host's proxy/NO_PROXY policy says direct.
-    async fn connect_proxy(&self, host: &str, port: u16, secure: bool)
-        -> std::io::Result<Option<Box<dyn MonitorSocketIo>>>;
+    async fn connect_proxy(
+        &self,
+        host: &str,
+        port: u16,
+        secure: bool,
+    ) -> std::io::Result<Option<Box<dyn MonitorSocketIo>>>;
 }
 
 /// Frames delivered by a passive Monitor WebSocket (no request frame is sent).
@@ -74,7 +91,8 @@ pub enum MonitorWebSocketFrame {
 }
 
 /// Bounded passive socket event channel. Dropping it closes the socket.
-pub type MonitorWebSocketReceiver = tokio::sync::mpsc::Receiver<Result<MonitorWebSocketFrame, HttpError>>;
+pub type MonitorWebSocketReceiver =
+    tokio::sync::mpsc::Receiver<Result<MonitorWebSocketFrame, HttpError>>;
 
 /// SSE stream together with the HTTP response metadata that preceded it.
 ///
@@ -368,7 +386,9 @@ pub trait HttpTransport: Send + Sync {
     /// Validate Monitor endpoint DNS before any task is registered.
     /// The connection path must validate again and pin its vetted addresses.
     async fn preflight_monitor_websocket(&self, _url: &str) -> Result<(), HttpError> {
-        Err(HttpError::InvalidRequest("passive websocket monitoring is unsupported".into()))
+        Err(HttpError::InvalidRequest(
+            "passive websocket monitoring is unsupported".into(),
+        ))
     }
 
     /// Open a passive, public-network-only WebSocket with no initial frame.
@@ -379,7 +399,9 @@ pub trait HttpTransport: Send + Sync {
         _url: String,
         _protocols: Vec<String>,
     ) -> Result<MonitorWebSocketReceiver, HttpError> {
-        Err(HttpError::InvalidRequest("passive websocket monitoring is unsupported".into()))
+        Err(HttpError::InvalidRequest(
+            "passive websocket monitoring is unsupported".into(),
+        ))
     }
 
     /// Open a provider WebSocket stream, send the request body as the first

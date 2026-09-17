@@ -168,11 +168,7 @@ impl TaskRegistryHandle for Tasks {
         Err(TaskRegistryError::Internal("unused".into()))
     }
 
-    async fn set_status(
-        &self,
-        _id: &str,
-        _status: &str,
-    ) -> Result<TaskRecord, TaskRegistryError> {
+    async fn set_status(&self, _id: &str, _status: &str) -> Result<TaskRecord, TaskRegistryError> {
         Err(TaskRegistryError::Internal("unused".into()))
     }
 
@@ -193,18 +189,12 @@ impl TaskRegistryHandle for Tasks {
 async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_intact() {
     let root = tempfile::tempdir().unwrap();
     let sessions = platform_api::live_sessions::LiveSessionDir::at(root.path().join("sessions"));
-    let session_a = protocol::SessionId::parse_prefixed(
-        "11111111-2222-4333-8444-555555555555",
-    )
-    .unwrap();
-    let session_b = protocol::SessionId::parse_prefixed(
-        "22222222-3333-4444-8555-666666666666",
-    )
-    .unwrap();
-    let session_c = protocol::SessionId::parse_prefixed(
-        "33333333-4444-4555-8666-777777777777",
-    )
-    .unwrap();
+    let session_a =
+        protocol::SessionId::parse_prefixed("11111111-2222-4333-8444-555555555555").unwrap();
+    let session_b =
+        protocol::SessionId::parse_prefixed("22222222-3333-4444-8555-666666666666").unwrap();
+    let session_c =
+        protocol::SessionId::parse_prefixed("33333333-4444-4555-8666-777777777777").unwrap();
     let session_a_text = session_a.as_uuid().to_string();
     let session_b_text = session_b.as_uuid().to_string();
     let session_c_text = session_c.as_uuid().to_string();
@@ -213,11 +203,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
     platform_api::live_sessions::set_process_name("bridge-test");
     let socket = root.path().join("bridge.sock");
     let socket_text = socket.to_string_lossy().into_owned();
-    platform_api::uds_inbox::start_process_inbox_for_session(
-        &socket,
-        &session_a_text,
-    )
-    .unwrap();
+    platform_api::uds_inbox::start_process_inbox_for_session(&socket, &session_a_text).unwrap();
     sessions
         .upsert_identity(
             std::process::id(),
@@ -228,12 +214,8 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
             None,
         )
         .unwrap();
-    let mut old_generation = platform_api::live_sessions::outbound_peer_message(
-        "sender",
-        "source",
-        "owned by A",
-        None,
-    );
+    let mut old_generation =
+        platform_api::live_sessions::outbound_peer_message("sender", "source", "owned by A", None);
     old_generation.msg_id = Some("old-generation".into());
     platform_api::uds_inbox::enqueue_accepted(old_generation);
 
@@ -242,15 +224,12 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         next: Mutex::new(session_b),
         fail: std::sync::atomic::AtomicBool::new(false),
     });
-    let router = EngineCommandRouter::new(
-        handle.clone(),
-        Arc::new(Auth),
-        Arc::new(Tasks),
-        None,
-        None,
-    );
+    let router =
+        EngineCommandRouter::new(handle.clone(), Arc::new(Auth), Arc::new(Tasks), None, None);
     let sink = Arc::new(Sink::default());
-    router.route(ClientCommand::ClearSession, sink.clone()).await;
+    router
+        .route(ClientCommand::ClearSession, sink.clone())
+        .await;
 
     assert!(sink
         .0
@@ -268,9 +247,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         live.messaging_socket_path.as_deref(),
         Some(socket_text.as_str())
     );
-    let old = sessions
-        .drain_inbox(&session_a_text)
-        .unwrap();
+    let old = sessions.drain_inbox(&session_a_text).unwrap();
     assert_eq!(old.len(), 1);
     assert_eq!(old[0].msg_id.as_deref(), Some("old-generation"));
 
@@ -294,14 +271,12 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         session_b_text
     );
 
-    handle.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    handle
+        .fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     let cwd = root.path().to_string_lossy().into_owned();
     let lingxi_home = root.path().join(branding::DOT_DIR);
-    let resume_path = session::jsonl::path::session_path(
-        &lingxi_home,
-        &cwd,
-        &session_c_text,
-    );
+    let resume_path = session::jsonl::path::session_path(&lingxi_home, &cwd, &session_c_text);
     std::fs::create_dir_all(resume_path.parent().unwrap()).unwrap();
     std::fs::write(
         &resume_path,
@@ -321,18 +296,13 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         ),
     )
     .unwrap();
-    let resume_router = EngineCommandRouter::new(
-        handle.clone(),
-        Arc::new(Auth),
-        Arc::new(Tasks),
-        None,
-        None,
-    )
-    .with_session_store(SessionStoreContext::new(
-        lingxi_home,
-        cwd,
-        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
-    ));
+    let resume_router =
+        EngineCommandRouter::new(handle.clone(), Arc::new(Auth), Arc::new(Tasks), None, None)
+            .with_session_store(SessionStoreContext::new(
+                lingxi_home,
+                cwd,
+                Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+            ));
     let resumed_sink = Arc::new(Sink::default());
     resume_router
         .route(

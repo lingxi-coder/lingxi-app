@@ -108,7 +108,7 @@ pub fn subagent_env_block(
 ) -> String {
     let mut s = String::with_capacity(512);
     s.push_str("Here is useful information about the environment you are running in:\n<env>\n");
-    write!(&mut s, "Working directory: {}\n", cwd.display()).unwrap();
+    writeln!(&mut s, "Working directory: {}", cwd.display()).unwrap();
     // claude-code worktree notice (`nIm`, emitted when in a git worktree): tells
     // the isolated agent to run everything from the worktree and never `cd` back
     // to the original checkout. The em-dash is U+2014.
@@ -118,24 +118,24 @@ pub fn subagent_env_block(
 Run all commands from this directory. Do NOT `cd` to the original repository root.\n",
         );
     }
-    write!(
+    writeln!(
         &mut s,
-        "Is directory a git repo: {}\n",
+        "Is directory a git repo: {}",
         if is_git_repo { "Yes" } else { "No" }
     )
     .unwrap();
     // Optional additional-working-dirs element (prefixes the Platform line).
     if !additional_dirs.is_empty() {
-        write!(
+        writeln!(
             &mut s,
-            "Additional working directories: {}\n",
+            "Additional working directories: {}",
             additional_dirs.join(", ")
         )
         .unwrap();
     }
-    write!(&mut s, "Platform: {platform}\n").unwrap();
-    write!(&mut s, "Shell: {shell}\n").unwrap();
-    write!(&mut s, "OS Version: {os_version}\n").unwrap();
+    writeln!(&mut s, "Platform: {platform}").unwrap();
+    writeln!(&mut s, "Shell: {shell}").unwrap();
+    writeln!(&mut s, "OS Version: {os_version}").unwrap();
     s.push_str("</env>\n");
     // Model line `o` — named form when the marketing name is known, else the
     // bare-id fallback (claude-code `og(e)` truthy/falsy). NO leading newline:

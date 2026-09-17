@@ -841,7 +841,10 @@ mod tests {
         let mut request = req();
         request.cross_provider = false;
         let error = resolve(&request, &configured(), &three_provider_catalog()).unwrap_err();
-        assert!(matches!(error, FusionError::CrossProviderDenied), "{error:?}");
+        assert!(
+            matches!(error, FusionError::CrossProviderDenied),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -875,7 +878,10 @@ mod tests {
         let error = resolve(&req(), &config, &catalog).unwrap_err();
         let rendered = error.to_string();
         assert!(rendered.contains("same underlying model"), "{rendered}");
-        assert!(rendered.contains("openrouter/openai/gpt-5.6-sol"), "{rendered}");
+        assert!(
+            rendered.contains("openrouter/openai/gpt-5.6-sol"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -972,7 +978,8 @@ mod tests {
         assert_eq!(resolved.synthesizer.profile, "google");
         assert_eq!(resolved.synthesizer.model, "gemini-3-pro");
         assert_ne!(
-            resolved.synthesizer.model, req().parent_model,
+            resolved.synthesizer.model,
+            req().parent_model,
             "the merge no longer implicitly runs on the session's own model"
         );
     }
@@ -1017,7 +1024,10 @@ mod tests {
 
     // ---- the explicit per-run `--models` path (unchanged contract) ------
 
-    fn explicit(config_min: u8, models: Vec<FusionModelRef>) -> (FusionRequest, FusionRuntimeConfig) {
+    fn explicit(
+        config_min: u8,
+        models: Vec<FusionModelRef>,
+    ) -> (FusionRequest, FusionRuntimeConfig) {
         let mut request = req();
         request.models = Some(models);
         let mut config = configured();
@@ -1069,7 +1079,10 @@ mod tests {
         );
         let error = resolve(&request, &config, &catalog)
             .expect_err("explicit unknown capacity must fail closed");
-        assert!(matches!(error, FusionError::InvalidCustomModels(_)), "{error:?}");
+        assert!(
+            matches!(error, FusionError::InvalidCustomModels(_)),
+            "{error:?}"
+        );
     }
 
     #[test]

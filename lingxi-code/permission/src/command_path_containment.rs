@@ -1402,9 +1402,7 @@ pub fn check_command_path_containment(
             }
             // `if (C === "xargs") return Op(C)` — it builds its argv at run time.
             if verb == "xargs" {
-                let message = format!(
-                    "xargs names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
-                );
+                let message = "xargs names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)".to_string();
                 return Some(PathConstraintAsk {
                     reason: message.clone(),
                     message,
@@ -1447,9 +1445,7 @@ pub fn check_command_path_containment(
                     }
                     // `gmo`: `if (hi(d)) return Op(e)`.
                     if has_glob_metachar(raw) || raw.contains('$') || raw.contains('`') {
-                        let message = format!(
-                            "git names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
-                        );
+                        let message = "git names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)".to_string();
                         return Some(PathConstraintAsk {
                             reason: message.clone(),
                             message,

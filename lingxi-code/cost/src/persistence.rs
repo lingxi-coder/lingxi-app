@@ -144,7 +144,7 @@ impl From<&CostState> for CostStateVector {
             total_web_search_requests: state.total_web_search_requests,
             total_lines_added: state.total_lines_added,
             total_lines_removed: state.total_lines_removed,
-            last_usage: state.last_usage.clone(),
+            last_usage: state.last_usage,
             last_usage_revision: state.last_usage_revision,
             last_cache_read_input_tokens: state.last_cache_read_input_tokens,
             last_cache_creation_input_tokens: state.last_cache_creation_input_tokens,
@@ -867,7 +867,10 @@ mod thaw_tests {
         assert!(gate.thaw_if_intact(|| panic!("must not validate an open gate")));
 
         gate.freeze("write failed");
-        assert!(!gate.thaw_if_intact(|| false), "an unproven ledger stays shut");
+        assert!(
+            !gate.thaw_if_intact(|| false),
+            "an unproven ledger stays shut"
+        );
         assert_eq!(gate.frozen_reason().as_deref(), Some("write failed"));
 
         assert!(gate.thaw_if_intact(|| true));

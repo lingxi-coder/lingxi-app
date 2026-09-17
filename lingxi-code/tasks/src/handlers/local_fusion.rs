@@ -14,10 +14,10 @@ use async_trait::async_trait;
 use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionCompletionSink,
     FusionError, FusionExecutor, FusionInheritance, FusionOrigin, FusionPreparedSummary,
-    FusionResult, FusionRunFacts, FusionRunId, FusionRunIdentity,
-    FusionRunOutcome, FusionStatus, FusionSubmission, PreparedFusionRun, RuntimeSpawner,
-    SubagentInheritance, ToolInvoker, FusionRunRecorder, FusionSlashPublicationTarget,
-    FusionRunRecorderFactory, FusionTerminalCapability,
+    FusionResult, FusionRunFacts, FusionRunId, FusionRunIdentity, FusionRunOutcome,
+    FusionRunRecorder, FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionStatus,
+    FusionSubmission, FusionTerminalCapability, PreparedFusionRun, RuntimeSpawner,
+    SubagentInheritance, ToolInvoker,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -197,8 +197,8 @@ async fn finalize_fusion_outcome(
             // even when their best-effort UI sink fails. Typed production
             // receipts are projected before the terminal row becomes visible;
             // they never call the legacy sink or get published twice.
-            let legacy_sink = outcome.publication.status
-                == platform_api::FusionPublicationStatus::NotRequired;
+            let legacy_sink =
+                outcome.publication.status == platform_api::FusionPublicationStatus::NotRequired;
             let mut receipt = outcome.publication.clone();
             if !legacy_sink {
                 status_sink
@@ -457,10 +457,7 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     // the commit→completion-sink window.
     let may_finalize = {
         let mut workers = workers.lock().await;
-        match workers.get_mut(&worker_task_id) {
-            Some(_) => true,
-            None => false,
-        }
+        workers.get_mut(&worker_task_id).is_some()
     };
     let (last_realized_output_tokens, last_egress_profiles) =
         forwarder.await.unwrap_or((None, None));

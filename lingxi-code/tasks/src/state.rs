@@ -778,7 +778,6 @@ mod taskstate_scope_readback_tripwire {
             "the rest of the row must still serialize normally. Got: {json}"
         );
     }
-
 }
 
 /// A cancellable environment scan; it never produces a conversation completion.

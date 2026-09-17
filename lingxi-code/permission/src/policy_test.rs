@@ -5236,6 +5236,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(non_snake_case)]
     fn a_rule_set_without_a_negation_still_reports_its_FIRST_match() {
         // The per-source state machine must be a no-op for every rule set that
         // spells no `!`: npm `ignore` skips a positive pattern once the source

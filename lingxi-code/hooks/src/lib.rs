@@ -13,8 +13,14 @@
 //! See spec §9 (Hook System) and D17 (Runtime boundary — no direct tokio).
 
 #![forbid(unsafe_code)]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 61 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
 
-pub mod function_hook;
 mod agent_executor;
 pub mod async_registry;
 pub mod attachment;
@@ -24,6 +30,7 @@ pub mod definition;
 pub mod events;
 pub mod executor;
 pub mod file_changed_firer;
+pub mod function_hook;
 pub mod hook_payload;
 mod http_executor;
 pub mod loader;

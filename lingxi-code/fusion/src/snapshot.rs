@@ -146,7 +146,7 @@ impl CatalogSnapshot {
             routes.insert((row.profile.clone(), row.model.clone()));
         }
         routes.extend(extra_routes.iter().cloned());
-        CapturedPriceBook::capture(prices, routes.into_iter())
+        CapturedPriceBook::capture(prices, routes)
     }
 }
 

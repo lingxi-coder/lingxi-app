@@ -27,9 +27,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use tui_core::multiagent::{sanitize_task_text, MultiAgentEvent, TaskRow};
-use tui_core::render::truncate_to_width_ellipsis;
 use tui_core::theme::Theme;
-use unicode_width::UnicodeWidthStr;
 
 use crate::bottom_pane::view::{BottomPaneView, TaskAction, ViewOutcome};
 use crate::renderable::Renderable;
@@ -176,7 +174,7 @@ impl TasksView {
         self.lines_at_width(None)
     }
 
-    fn lines_at_width(&self, width: Option<u16>) -> Vec<Line<'static>> {
+    fn lines_at_width(&self, _width: Option<u16>) -> Vec<Line<'static>> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         let accent = crate::style_adapter::to_ratatui(self.theme.suggestion);
         let dim_style = Style::default().fg(dim);

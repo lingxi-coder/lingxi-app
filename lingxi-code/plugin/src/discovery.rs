@@ -3016,7 +3016,7 @@ async fn emit_plugin_renamed_event(
             ("removed", chain_depth.to_string(), String::new())
         }
         RenameResolution::Unresolved { reason } => {
-            ("unresolved", String::new(), reason.to_string())
+            ("unresolved", String::new(), (*reason).to_string())
         }
     };
     let key = format!(
@@ -3870,7 +3870,7 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
     // (`vve`: `let B=KY().safeParse(U)`), not the 7-key config table `ZGn`
     // that `.mcp.json` / settings / `--mcp-config` go through — so the two
     // internal-only IDE transports are accepted here and rejected there.
-    match mcp::parse_plugin_mcp_json_string(&raw, mcp::ConfigScope::Dynamic) {
+    match mcp::parse_plugin_mcp_json_string(raw, mcp::ConfigScope::Dynamic) {
         Ok(configs) => configs.into_iter().map(|c| (c.name.clone(), c)).collect(),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .mcp.json");
@@ -4015,7 +4015,7 @@ async fn load_plugin_settings(
 
     let settings_path = plugin_dir.join("settings.json");
     let selected = match canonical_regular_path_under(plugin_dir, &settings_path)
-        .map(|path| tokio::fs::read_to_string(path))
+        .map(tokio::fs::read_to_string)
     {
         None => manifest_settings.cloned().unwrap_or_default(),
         Some(read) => match read.await {

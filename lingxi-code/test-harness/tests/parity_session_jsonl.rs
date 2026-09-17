@@ -118,7 +118,10 @@ async fn single_turn_produces_the_fixture_line_count() {
         lines.len(),
         f.meta.single_turn_sequence.len(),
         "single turn must produce the fixture's line count, got {:?}",
-        lines.iter().map(|l| l.message_type.as_str()).collect::<Vec<_>>()
+        lines
+            .iter()
+            .map(|l| l.message_type.as_str())
+            .collect::<Vec<_>>()
     );
     // The extra line over the original user+assistant pair is the static
     // system-prompt snapshot, which upstream records unless CLAUDE_CODE_SIMPLE

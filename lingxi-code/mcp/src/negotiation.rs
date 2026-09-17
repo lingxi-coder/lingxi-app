@@ -124,7 +124,9 @@ mod tests {
         McpTransportSpec::Http {
             url: "https://mcp.example".into(),
             headers: platform_api::McpHeaders::from_iter(
-                headers.iter().map(|(k, v)| (k.to_string(), v.to_string())),
+                headers
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
             ),
             headers_helper: None,
             oauth: None,

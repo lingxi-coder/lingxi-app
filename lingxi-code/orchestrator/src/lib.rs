@@ -23,6 +23,13 @@
 //!
 //! See spec §2.2 (data flow diagram) and §4.2 (turn loop limits).
 #![forbid(unsafe_code)]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 15 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
 
 pub mod api_error_copy;
 pub mod bg_snapshot;
@@ -101,9 +108,10 @@ pub use prompt::{
 };
 pub use provider_adapter::ProviderApiAdapter;
 pub use resume::{
-    client_state_tool_results_from_messages, deferred_tool_replays_from_messages, prompt_snapshot_from_messages,
-    replay_deferred_tools_after_resume, replay_session_state, runtime_metadata_from_messages,
-    state_from_messages, ReplayedSession, ResumeError, ResumeRuntimeMetadata, CLIENT_STATE_TOOLS,
+    client_state_tool_results_from_messages, deferred_tool_replays_from_messages,
+    prompt_snapshot_from_messages, replay_deferred_tools_after_resume, replay_session_state,
+    runtime_metadata_from_messages, state_from_messages, ReplayedSession, ResumeError,
+    ResumeRuntimeMetadata, CLIENT_STATE_TOOLS,
 };
 pub use stop_hook_snapshot::{
     build_background_tasks, build_session_crons, CronSnapshotInput, StopHookSnapshotProvider,

@@ -105,9 +105,7 @@ impl ReadAutoAllow for PolicyReadAutoAllow {
             return false;
         }
         // `qE(e, n)` — the non-prompting evaluation of a Read of this path.
-        let result = self
-            .policy
-            .authorize("Read", &json!({ "file_path": path }));
+        let result = self.policy.authorize("Read", &json!({ "file_path": path }));
         decision_permits_read(&result, self.policy.mode)
     }
 }
@@ -190,7 +188,10 @@ mod tests {
     fn ask_reads_only_under_bypass() {
         let pending = ask(mode_reason());
         assert!(!decision_permits_read(&pending, PermissionMode::Default));
-        assert!(!decision_permits_read(&pending, PermissionMode::AcceptEdits));
+        assert!(!decision_permits_read(
+            &pending,
+            PermissionMode::AcceptEdits
+        ));
         assert!(decision_permits_read(
             &pending,
             PermissionMode::BypassPermissions
@@ -210,9 +211,7 @@ mod tests {
             behavior: PermissionBehavior::Ask,
             source: crate::rule::PermissionRuleSource::UserSettings,
         };
-        let by_rule = ask(PermissionDecisionReason::MatchedRule {
-            rule: rule.clone(),
-        });
+        let by_rule = ask(PermissionDecisionReason::MatchedRule { rule: rule.clone() });
         assert!(
             !decision_permits_read(&by_rule, PermissionMode::BypassPermissions),
             "an explicit ask RULE keeps the path unreadable even in bypass mode"
@@ -220,9 +219,7 @@ mod tests {
 
         let mut allow_rule = rule;
         allow_rule.behavior = PermissionBehavior::Allow;
-        let by_allow_rule = ask(PermissionDecisionReason::MatchedRule {
-            rule: allow_rule,
-        });
+        let by_allow_rule = ask(PermissionDecisionReason::MatchedRule { rule: allow_rule });
         assert!(
             decision_permits_read(&by_allow_rule, PermissionMode::BypassPermissions),
             "only an ASK rule is excluded; another rule that merely led to ask is not"

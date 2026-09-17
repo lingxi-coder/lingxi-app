@@ -248,160 +248,6 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schemas_and_prompts_match_real_binary_wire_captures_byte_for_byte() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../test-harness/src/parity/fixtures/send_message_2_1_263_wire.json"
-        ))
-        .unwrap();
-        assert_eq!(fixture["version"], "2.1.263");
-        for case in fixture["cases"].as_array().unwrap() {
-            let cross = case["cross_session"].as_bool().unwrap();
-            let teams = case["teams"].as_bool().unwrap();
-            assert_eq!(
-                serde_json::to_string(schema(cross, teams)).unwrap(),
-                case["input_schema_json"].as_str().unwrap(),
-                "schema flags cross={cross} teams={teams}"
-            );
-            assert_eq!(
-                prompt(cross, teams),
-                case["prompt"].as_str().unwrap(),
-                "prompt flags cross={cross} teams={teams}"
-            );
-        }
-    }
-
-    #[test]
-    fn shutdown_envelopes_match_oracle_with_fixed_clock() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../test-harness/src/parity/fixtures/send_message_2_1_263_wire.json"
-        ))
-        .unwrap();
-        let timestamp = "2026-09-08T12:34:56.789Z";
-        for case in fixture["shutdown_envelopes"].as_array().unwrap() {
-            let input = &case["input"];
-            let request_id = input["requestId"].as_str().unwrap();
-            let from = input["from"].as_str().unwrap();
-            let frame = match case["kind"].as_str().unwrap() {
-                "approved" => shutdown_approved(
-                    request_id,
-                    from,
-                    timestamp,
-                    input["paneId"].as_str(),
-                    input["backendType"].as_str(),
-                ),
-                "rejected" => shutdown_rejected(
-                    request_id,
-                    from,
-                    input["reason"].as_str().unwrap(),
-                    timestamp,
-                ),
-                "request" => {
-                    shutdown_request(request_id, from, input["reason"].as_str(), timestamp)
-                }
-                _ => unreachable!(),
-            };
-            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
-        }
-        assert_eq!(
-            protocol_timestamp(std::time::UNIX_EPOCH),
-            "1970-01-01T00:00:00.000Z"
-        );
-        assert_eq!(
-            protocol_timestamp(
-                std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_788_870_896_789)
-            ),
-            timestamp
-        );
-    }
-
-    #[test]
-    fn plan_response_fields_and_order_match_current_oracle() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../test-harness/src/parity/fixtures/send_message_2_1_263_wire.json"
-        ))
-        .unwrap();
-        for case in fixture["plan_responses"].as_array().unwrap() {
-            let frame = plan_response(
-                "plan-1@scout",
-                case["approved"].as_bool().unwrap(),
-                case["feedback"].as_str(),
-                "2026-09-08T12:34:56.789Z",
-                case["mode"].as_str(),
-            );
-            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
-            assert!(frame.get("from").is_none());
-        }
-    }
-
-    #[test]
-    fn routing_colors_and_field_order_match_oracle() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../test-harness/src/parity/fixtures/send_message_2_1_263_wire.json"
-        ))
-        .unwrap();
-        for case in fixture["routing_cases"].as_array().unwrap() {
-            let frame = routing(
-                case["sender"].as_str().unwrap(),
-                case["senderColor"].as_str(),
-                case["target"].as_str().unwrap(),
-                case["targetColor"].as_str(),
-                case["summary"].as_str(),
-                case["content"].as_str(),
-            );
-            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
-        }
-    }
-
-    #[test]
-    fn summaries_derive_first_trimmed_line_and_truncate() {
-        let coerced =
-            coerce(&json!({"to":"worker","message":"  First line\nSecond line"})).unwrap();
-        assert_eq!(coerced.input["summary"], "First line");
-        assert_eq!(coerced.shape_class, "derive_summary");
-        let coerced =
-            coerce(&json!({"to":"worker","message":"body","summary":"x".repeat(201)})).unwrap();
-        assert_eq!(coerced.input["summary"], format!("{}…", "x".repeat(199)));
-        assert_eq!(coerced.shape_class, "truncate_summary");
-    }
-
-    #[test]
-    fn schemas_gate_only_protocol_messages_and_cross_session_options() {
-        for cross in [false, true] {
-            for teams in [false, true] {
-                let value = schema(cross, teams);
-                assert_eq!(value["properties"].get("notify_when_idle").is_some(), cross);
-                assert_eq!(value["properties"]["message"].get("anyOf").is_some(), teams);
-                assert_eq!(value["required"], json!(["to", "message"]));
-                assert_eq!(
-                    prompt(cross, teams).contains("## Protocol responses"),
-                    teams
-                );
-                assert_eq!(prompt(cross, teams).contains("## Cross-session"), cross);
-            }
-        }
-    }
-
-    #[test]
-    fn lifecycle_and_permission_frames_are_rejected_but_prose_is_allowed() {
-        for kind in [
-            "permission_request",
-            "shutdown_approved",
-            "mode_set_request",
-            "idle_notification",
-            "task_assignment",
-        ] {
-            assert!(plain_message_error(&json!({"type":kind}).to_string()).is_some());
-        }
-        assert_eq!(plain_message_error("The task is complete."), None);
-        assert_eq!(plain_message_error(r#"{"type":"application-event"}"#), None);
-    }
-}
-
 /// Validation shared by the coordinator and the ordinary-agent mailbox host.
 pub fn validate(input: &Value, teams: bool, is_subagent: bool) -> Result<(), String> {
     let to = input.get("to").and_then(Value::as_str).unwrap_or("");
@@ -593,4 +439,158 @@ pub fn routing(
         frame["content"] = json!(content);
     }
     frame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schemas_and_prompts_match_real_binary_wire_captures_byte_for_byte() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../test-harness/src/parity/fixtures/send_message_2_1_263_wire.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["version"], "2.1.263");
+        for case in fixture["cases"].as_array().unwrap() {
+            let cross = case["cross_session"].as_bool().unwrap();
+            let teams = case["teams"].as_bool().unwrap();
+            assert_eq!(
+                serde_json::to_string(schema(cross, teams)).unwrap(),
+                case["input_schema_json"].as_str().unwrap(),
+                "schema flags cross={cross} teams={teams}"
+            );
+            assert_eq!(
+                prompt(cross, teams),
+                case["prompt"].as_str().unwrap(),
+                "prompt flags cross={cross} teams={teams}"
+            );
+        }
+    }
+
+    #[test]
+    fn shutdown_envelopes_match_oracle_with_fixed_clock() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../test-harness/src/parity/fixtures/send_message_2_1_263_wire.json"
+        ))
+        .unwrap();
+        let timestamp = "2026-09-08T12:34:56.789Z";
+        for case in fixture["shutdown_envelopes"].as_array().unwrap() {
+            let input = &case["input"];
+            let request_id = input["requestId"].as_str().unwrap();
+            let from = input["from"].as_str().unwrap();
+            let frame = match case["kind"].as_str().unwrap() {
+                "approved" => shutdown_approved(
+                    request_id,
+                    from,
+                    timestamp,
+                    input["paneId"].as_str(),
+                    input["backendType"].as_str(),
+                ),
+                "rejected" => shutdown_rejected(
+                    request_id,
+                    from,
+                    input["reason"].as_str().unwrap(),
+                    timestamp,
+                ),
+                "request" => {
+                    shutdown_request(request_id, from, input["reason"].as_str(), timestamp)
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
+        }
+        assert_eq!(
+            protocol_timestamp(std::time::UNIX_EPOCH),
+            "1970-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            protocol_timestamp(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_788_870_896_789)
+            ),
+            timestamp
+        );
+    }
+
+    #[test]
+    fn plan_response_fields_and_order_match_current_oracle() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../test-harness/src/parity/fixtures/send_message_2_1_263_wire.json"
+        ))
+        .unwrap();
+        for case in fixture["plan_responses"].as_array().unwrap() {
+            let frame = plan_response(
+                "plan-1@scout",
+                case["approved"].as_bool().unwrap(),
+                case["feedback"].as_str(),
+                "2026-09-08T12:34:56.789Z",
+                case["mode"].as_str(),
+            );
+            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
+            assert!(frame.get("from").is_none());
+        }
+    }
+
+    #[test]
+    fn routing_colors_and_field_order_match_oracle() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../test-harness/src/parity/fixtures/send_message_2_1_263_wire.json"
+        ))
+        .unwrap();
+        for case in fixture["routing_cases"].as_array().unwrap() {
+            let frame = routing(
+                case["sender"].as_str().unwrap(),
+                case["senderColor"].as_str(),
+                case["target"].as_str().unwrap(),
+                case["targetColor"].as_str(),
+                case["summary"].as_str(),
+                case["content"].as_str(),
+            );
+            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn summaries_derive_first_trimmed_line_and_truncate() {
+        let coerced =
+            coerce(&json!({"to":"worker","message":"  First line\nSecond line"})).unwrap();
+        assert_eq!(coerced.input["summary"], "First line");
+        assert_eq!(coerced.shape_class, "derive_summary");
+        let coerced =
+            coerce(&json!({"to":"worker","message":"body","summary":"x".repeat(201)})).unwrap();
+        assert_eq!(coerced.input["summary"], format!("{}…", "x".repeat(199)));
+        assert_eq!(coerced.shape_class, "truncate_summary");
+    }
+
+    #[test]
+    fn schemas_gate_only_protocol_messages_and_cross_session_options() {
+        for cross in [false, true] {
+            for teams in [false, true] {
+                let value = schema(cross, teams);
+                assert_eq!(value["properties"].get("notify_when_idle").is_some(), cross);
+                assert_eq!(value["properties"]["message"].get("anyOf").is_some(), teams);
+                assert_eq!(value["required"], json!(["to", "message"]));
+                assert_eq!(
+                    prompt(cross, teams).contains("## Protocol responses"),
+                    teams
+                );
+                assert_eq!(prompt(cross, teams).contains("## Cross-session"), cross);
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_and_permission_frames_are_rejected_but_prose_is_allowed() {
+        for kind in [
+            "permission_request",
+            "shutdown_approved",
+            "mode_set_request",
+            "idle_notification",
+            "task_assignment",
+        ] {
+            assert!(plain_message_error(&json!({"type":kind}).to_string()).is_some());
+        }
+        assert_eq!(plain_message_error("The task is complete."), None);
+        assert_eq!(plain_message_error(r#"{"type":"application-event"}"#), None);
+    }
 }

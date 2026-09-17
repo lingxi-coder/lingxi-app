@@ -398,7 +398,9 @@ where
     let managed = binding
         .and_then(|bound| bound.on_exit.as_ref())
         .is_some_and(|sink| sink.manages_output());
-    let stop_notify = binding.and_then(|b| b.on_exit.as_ref()).and_then(|s| s.stop_notify());
+    let stop_notify = binding
+        .and_then(|b| b.on_exit.as_ref())
+        .and_then(|s| s.stop_notify());
     let mut stop_handled = false;
     let mut watchdog = super::watchdog::ShellWatchdog::new(tokio::time::Instant::now());
     watchdog.observe(&output.initial);
@@ -658,9 +660,13 @@ impl PosixProcess {
         use std::io::Write as _;
 
         let (task_id, path, mut file) = self.create_task_output_file()?;
-        file.write_all(&framed_output[..framed_output.len().min(platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize)])
-            .and_then(|()| file.flush())
-            .map_err(|error| ProcessError::Io(format!("write task output: {error}")))?;
+        file.write_all(
+            &framed_output[..framed_output
+                .len()
+                .min(platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize)],
+        )
+        .and_then(|()| file.flush())
+        .map_err(|error| ProcessError::Io(format!("write task output: {error}")))?;
         let size = u64::try_from(framed_output.len()).unwrap_or(u64::MAX);
         Ok(platform_api::ProcessOutputFile {
             task_id,
@@ -813,13 +819,18 @@ impl ProcessRunner for PosixProcess {
         true
     }
 
-    async fn kill_owner_processes(&self,owner:&str)->Vec<u32>{
-        let owned=platform_api::agent_processes::snapshot_entries(owner);
+    async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+        let owned = platform_api::agent_processes::snapshot_entries(owner);
         for &entry in &owned {
-            if platform_api::shell_supervisor::kill_owned_registration(owner,entry).await.is_none()
-                && platform_api::agent_processes::is_current(owner,entry){let _=kill_tree_force(entry.pid);}
+            if platform_api::shell_supervisor::kill_owned_registration(owner, entry)
+                .await
+                .is_none()
+                && platform_api::agent_processes::is_current(owner, entry)
+            {
+                let _ = kill_tree_force(entry.pid);
+            }
         }
-        owned.into_iter().map(|entry|entry.pid).collect()
+        owned.into_iter().map(|entry| entry.pid).collect()
     }
 
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
@@ -1016,7 +1027,9 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         max_output_bytes: Option<usize>,
     ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
-        if super::supervisor::enabled(cmd) { return super::supervisor::execute(cmd, max_output_bytes, false).await; }
+        if super::supervisor::enabled(cmd) {
+            return super::supervisor::execute(cmd, max_output_bytes, false).await;
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -1033,7 +1046,8 @@ impl ProcessRunner for PosixProcess {
             attach_setsid(&mut tcmd);
         }
 
-        let mut child = super::spawn_unsafe::spawn_with_capability(tcmd, cmd.background_task()).await?;
+        let mut child =
+            super::spawn_unsafe::spawn_with_capability(tcmd, cmd.background_task()).await?;
         let agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
         // Capture this before polling `wait()`: Tokio clears `Child::id()` once
         // the direct child has been reaped. A busy executor can observe the
@@ -1478,7 +1492,9 @@ impl ProcessRunner for PosixProcess {
         if super::supervisor::enabled(cmd) {
             return match super::supervisor::execute(cmd, None, true).await?.outcome {
                 platform_api::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
-                _ => Err(ProcessError::Io("supervisor returned foreground result".into())),
+                _ => Err(ProcessError::Io(
+                    "supervisor returned foreground result".into(),
+                )),
             };
         }
         // When the caller bound a task identity (the Bash tool does, so the
@@ -1515,7 +1531,14 @@ impl ProcessRunner for PosixProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         attach_setsid(&mut tcmd);
-        if binding.as_ref().and_then(|b|b.on_exit.as_ref()).and_then(|s|s.stop_notify()).is_some(){tcmd.kill_on_drop(true);}
+        if binding
+            .as_ref()
+            .and_then(|b| b.on_exit.as_ref())
+            .and_then(|s| s.stop_notify())
+            .is_some()
+        {
+            tcmd.kill_on_drop(true);
+        }
 
         let mut child = super::spawn_unsafe::spawn_with_capability(tcmd, binding.as_ref()).await?;
         let pid = child
@@ -1560,13 +1583,39 @@ impl ProcessRunner for PosixProcess {
         Ok(ProcessHandle { task_id, pid })
     }
 
-    async fn acknowledge_shell(&self, handle: &ProcessHandle)->Result<(),ProcessError>{platform_api::shell_supervisor::acknowledge(handle).await}
-    async fn export_shell(&self, handle: &ProcessHandle) -> Result<platform_api::process::ShellProcessHandoff, ProcessError> { self.acknowledge_shell(handle).await?;super::supervisor::export(handle) }
-    async fn validate_shell(&self, handoff: &platform_api::process::ShellProcessHandoff) -> Result<(), ProcessError> { super::supervisor::validate(handoff).await }
-    async fn adopt_shell(&self, handoff: &platform_api::process::ShellProcessHandoff, sink: std::sync::Arc<dyn platform_api::BackgroundExitSink>) -> Result<ProcessHandle, ProcessError> { super::supervisor::adopt(handoff,sink).await }
-    async fn release_shell(&self, handoff: &platform_api::process::ShellProcessHandoff) -> Result<(), ProcessError> { super::supervisor::release(handoff).await }
+    async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+        platform_api::shell_supervisor::acknowledge(handle).await
+    }
+    async fn export_shell(
+        &self,
+        handle: &ProcessHandle,
+    ) -> Result<platform_api::process::ShellProcessHandoff, ProcessError> {
+        self.acknowledge_shell(handle).await?;
+        super::supervisor::export(handle)
+    }
+    async fn validate_shell(
+        &self,
+        handoff: &platform_api::process::ShellProcessHandoff,
+    ) -> Result<(), ProcessError> {
+        super::supervisor::validate(handoff).await
+    }
+    async fn adopt_shell(
+        &self,
+        handoff: &platform_api::process::ShellProcessHandoff,
+        sink: std::sync::Arc<dyn platform_api::BackgroundExitSink>,
+    ) -> Result<ProcessHandle, ProcessError> {
+        super::supervisor::adopt(handoff, sink).await
+    }
+    async fn release_shell(
+        &self,
+        handoff: &platform_api::process::ShellProcessHandoff,
+    ) -> Result<(), ProcessError> {
+        super::supervisor::release(handoff).await
+    }
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
-        if let Some(result) = super::supervisor::kill(handle).await { return result; }
+        if let Some(result) = super::supervisor::kill(handle).await {
+            return result;
+        }
         // Parity: claude-code's `#doKill` calls `treeKill(pid, 'SIGKILL')` directly
         // (ShellCommand.ts:337-343) — no SIGTERM grace period. Use kill_tree_force
         // (immediate SIGKILL) instead of kill_tree_unix (SIGTERM + 5 s + SIGKILL).
@@ -1674,7 +1723,10 @@ mod async_hook_tests {
         assert_eq!(capture.force_spilled(), "prefix\u{fffd}".as_bytes());
         let mut capture = FramedOutputCapture::new(0);
         capture.observe_stderr(&[0xf0, 0x9f]);
-        assert_eq!(capture.into_spilled().unwrap(), "[stderr] \u{fffd}".as_bytes());
+        assert_eq!(
+            capture.into_spilled().unwrap(),
+            "[stderr] \u{fffd}".as_bytes()
+        );
     }
 
     #[tokio::test]
@@ -1687,29 +1739,44 @@ mod async_hook_tests {
         }
         #[async_trait]
         impl platform_api::BackgroundExitSink for Sink {
-            fn manages_output(&self) -> bool { true }
+            fn manages_output(&self) -> bool {
+                true
+            }
             async fn append_output(&self, _: &str, content: &str) -> Result<(), ProcessError> {
-                self.chunks.lock().unwrap().push_str(content); Ok(())
+                self.chunks.lock().unwrap().push_str(content);
+                Ok(())
             }
             async fn flush_output(&self, _: &str) -> Result<(), ProcessError> {
-                self.flushed.store(true, Ordering::SeqCst); Ok(())
+                self.flushed.store(true, Ordering::SeqCst);
+                Ok(())
             }
-            async fn on_exit(&self, _: &str, _: Option<i32>) { self.done.notify_one(); }
+            async fn on_exit(&self, _: &str, _: Option<i32>) {
+                self.done.notify_one();
+            }
         }
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
         let path = dir.path().join("no-direct-file/output");
-        let command = sh("printf routed").with_background_task(platform_api::BackgroundTaskBinding {
-            task_id: "bmanaged1".into(), output_path: path.clone(), on_exit: Some(sink.clone()), on_demand: None,
-        });
+        let command =
+            sh("printf routed").with_background_task(platform_api::BackgroundTaskBinding {
+                task_id: "bmanaged1".into(),
+                output_path: path.clone(),
+                on_exit: Some(sink.clone()),
+                on_demand: None,
+            });
         let process = PosixProcess::new();
         let handle = process.spawn_background(&command).await.unwrap();
         let done = tokio::time::timeout(Duration::from_secs(5), sink.done.notified()).await;
-        if done.is_err() { let _ = process.kill(&handle).await; }
+        if done.is_err() {
+            let _ = process.kill(&handle).await;
+        }
         done.unwrap();
         assert_eq!(*sink.chunks.lock().unwrap(), "routed");
         assert!(sink.flushed.load(Ordering::SeqCst));
-        assert!(!path.exists(), "managed output must not also be written directly");
+        assert!(
+            !path.exists(),
+            "managed output must not also be written directly"
+        );
     }
 
     fn sh(script: &str) -> SandboxedCommand {

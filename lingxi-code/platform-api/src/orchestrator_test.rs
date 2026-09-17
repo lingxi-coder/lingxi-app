@@ -536,10 +536,7 @@ mod provider_boot_default_tests {
 
     #[test]
     fn deepseek_defaults_to_current_v4_flash_and_hides_retired_ids() {
-        assert_eq!(
-            provider_default_model("deepseek"),
-            Some("deepseek-flash")
-        );
+        assert_eq!(provider_default_model("deepseek"), Some("deepseek-flash"));
         assert!(is_curated_model("deepseek", "deepseek-flash"));
         assert!(is_curated_model("deepseek", "deepseek-v4-pro"));
         assert!(!is_curated_model("deepseek", "deepseek-chat"));

@@ -381,7 +381,7 @@ impl IosIshRuntime {
         .await
         .map_err(|error| MobileLinuxError::Io(format!("join install_rootfs: {error}")))?
         .map_err(MobileLinuxError::Io)?;
-        let _ = parse_native_ok(&response)?;
+        parse_native_ok(&response)?;
         Ok(())
     }
 
@@ -396,7 +396,7 @@ impl IosIshRuntime {
         .await
         .map_err(|error| MobileLinuxError::Io(format!("join boot: {error}")))?
         .map_err(MobileLinuxError::Io)?;
-        let _ = parse_native_ok(&response)?;
+        parse_native_ok(&response)?;
         Ok(())
     }
 
@@ -414,7 +414,7 @@ impl IosIshRuntime {
         .await
         .map_err(|error| MobileLinuxError::Io(format!("join configure_mounts_json: {error}")))?
         .map_err(MobileLinuxError::Io)?;
-        let _ = parse_native_ok(&response)?;
+        parse_native_ok(&response)?;
         Ok(())
     }
 
@@ -837,7 +837,7 @@ impl IosIshRuntime {
         .await
         .map_err(|error| MobileLinuxError::Io(format!("join write_pty: {error}")))?
         .map_err(MobileLinuxError::Io)?;
-        let _ = parse_native_ok(&response)?;
+        parse_native_ok(&response)?;
         Ok(())
     }
 
@@ -861,7 +861,7 @@ impl IosIshRuntime {
         .await
         .map_err(|error| MobileLinuxError::Io(format!("join resize_pty: {error}")))?
         .map_err(MobileLinuxError::Io)?;
-        let _ = parse_native_ok(&response)?;
+        parse_native_ok(&response)?;
         Ok(())
     }
 
@@ -879,7 +879,7 @@ impl IosIshRuntime {
         .await
         .map_err(|error| MobileLinuxError::Io(format!("join close_pty: {error}")))?
         .map_err(MobileLinuxError::Io)?;
-        let _ = parse_native_ok(&response)?;
+        parse_native_ok(&response)?;
         Ok(())
     }
 

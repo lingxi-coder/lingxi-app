@@ -60,8 +60,8 @@ fn no_version_facing_identifier_keeps_its_own_copy() {
         .parent()
         .expect("engine root")
         .to_path_buf();
-    let lsp_client = std::fs::read_to_string(sources.join("lsp/src/client.rs"))
-        .expect("read lsp client");
+    let lsp_client =
+        std::fs::read_to_string(sources.join("lsp/src/client.rs")).expect("read lsp client");
     assert!(
         lsp_client.contains("platform_api::CLAUDE_CODE_VERSION"),
         "the LSP clientInfo version must derive from the shared constant, not a literal"

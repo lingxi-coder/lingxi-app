@@ -130,10 +130,7 @@ fn every_active_entry_still_points_at_the_tree() {
                 Some(rest) => root.join(rest.trim_start_matches('/')),
                 None => root.join(rel),
             };
-            assert!(
-                path.exists(),
-                "{id}: anchor path no longer exists: {rel}"
-            );
+            assert!(path.exists(), "{id}: anchor path no longer exists: {rel}");
             let hits = occurrences(&path, text);
             match kind {
                 "present" => assert!(

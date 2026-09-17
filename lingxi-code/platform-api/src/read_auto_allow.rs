@@ -47,7 +47,9 @@ pub fn set_read_auto_allow_probe(probe: Arc<dyn ReadAutoAllow>) {
 /// un-wired host must lose that permission, not gain it.
 #[must_use]
 pub fn read_auto_allowed(path: &str) -> bool {
-    PROBE.get().is_some_and(|probe| probe.read_auto_allowed(path))
+    PROBE
+        .get()
+        .is_some_and(|probe| probe.read_auto_allowed(path))
 }
 
 /// Whether a probe has been published — for hosts that want to assert their own

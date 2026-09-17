@@ -487,7 +487,7 @@ pub(crate) fn analyst_user_message(
     let mut reports = Vec::new();
     for panel in sorted_reports(panels) {
         if let Some(report) = &panel.report {
-            let mut entry = json!({
+            let entry = json!({
                 "panel_id": panel.anonymous_id,
                 "report": report,
             });

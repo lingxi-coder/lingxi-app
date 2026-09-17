@@ -608,8 +608,8 @@ fn parse_dir_change(sub: &str) -> Option<(String, String)> {
             .first()
             .map(|target| (verb.clone(), (*target).clone())),
         "env" => {
-            let mut iter = args.iter().enumerate();
-            while let Some((idx, arg)) = iter.next() {
+            let iter = args.iter().enumerate();
+            for (idx, arg) in iter {
                 if arg == "-C" || arg == "--chdir" {
                     return args.get(idx + 1).map(|t| (verb.clone(), t.clone()));
                 }

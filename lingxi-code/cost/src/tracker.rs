@@ -413,14 +413,19 @@ impl CostSessionScope {
                 .response_settlements
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !retained.contains_key(&mutation_id) {
+            // One hash lookup instead of contains_key + insert. The key is cloned
+            // into `entry` so the original can move into the slot it names;
+            // `clippy --fix` suggests the reverse order, which does not compile.
+            if let std::collections::hash_map::Entry::Vacant(vacant) =
+                retained.entry(mutation_id.clone())
+            {
                 let slot = Arc::new(CostResponseSlot {
-                    mutation_id: mutation_id.clone(),
+                    mutation_id,
                     observation: observation.clone(),
                     result: std::sync::Mutex::new(None),
                     notify: tokio::sync::Notify::new(),
                 });
-                retained.insert(mutation_id, slot.clone());
+                vacant.insert(slot.clone());
                 break slot;
             }
         };
@@ -717,7 +722,7 @@ impl CostTracker {
     /// malformed/bare claim that does not parse to the tracker session is
     /// rejected before any persistence authority is installed.
     pub fn try_with_durable_persistence(
-        mut self,
+        self,
         hydration: CostHydration,
         persistence: Arc<dyn CostPersistence>,
         writer_lease: platform_api::live_sessions::SharedSessionWriterLease,

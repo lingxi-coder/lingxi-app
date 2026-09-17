@@ -902,7 +902,10 @@ mod tests {
 
         let outcome = fh.rewind_files(msg).await.expect("rewind");
         assert_eq!(outcome.skipped_links, 1, "the link must be counted");
-        assert!(outcome.changed.is_empty(), "nothing may be reported changed");
+        assert!(
+            outcome.changed.is_empty(),
+            "nothing may be reported changed"
+        );
         assert_eq!(
             std::fs::read_to_string(&outsider).unwrap(),
             "DO NOT TOUCH\n",

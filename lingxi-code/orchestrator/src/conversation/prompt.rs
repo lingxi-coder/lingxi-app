@@ -310,7 +310,11 @@ impl ConversationOrchestrator {
     /// `CLAUDE_CODE_REMOTE` is deliberately omitted: remote surfaces are out of
     /// scope for this port, and it is a pure disjunct, so the only behaviour it
     /// could add is for a session that is remote AND simple.
-    pub(crate) fn snapshot_gate(explicit: Option<bool>, background_session: bool, simple_mode: bool) -> bool {
+    pub(crate) fn snapshot_gate(
+        explicit: Option<bool>,
+        background_session: bool,
+        simple_mode: bool,
+    ) -> bool {
         if explicit == Some(false) {
             return false;
         }
@@ -326,8 +330,7 @@ impl ConversationOrchestrator {
             platform_api::env::is_env_truthy(std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref());
         // `CLAUDE_CODE_SESSION_KIND` in claude-code; the port already spells it
         // `LINGXI_SESSION_KIND` at its other reader (`tool_api::defer`).
-        let background_session =
-            std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg");
+        let background_session = std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg");
         let source = crate::config::sanitize_query_source(&self.config.query_source);
         Self::snapshot_gate(
             platform_api::session_flags::system_prompt_snapshot(),

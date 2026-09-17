@@ -2677,6 +2677,10 @@ impl McpRegistry {
         let client = if let Some(client) = self.get_client(server).await {
             Some(client)
         } else {
+            // ⚠️ Do NOT collapse this into `else if`. `clippy --fix` did exactly
+            // that on 2026-09-16 and silently dropped both the `cfg(test)` pause
+            // below and the comment explaining the stage, which deadlocked 12
+            // registry tests that wait on it.
             #[cfg(test)]
             self.maybe_pause_after_initial_client_miss().await;
             // §11 Stage 2 — lazy dial: a `Cached` server was served from disk
@@ -3234,7 +3238,7 @@ impl McpRegistry {
             } = consult;
             match decision {
                 crate::discovery_cache::Decision::Fresh { entry, age_ms } => {
-                    return Ok(self
+                    return self
                         .serve_discovery_cache_hit(
                             &config,
                             &key,
@@ -3243,7 +3247,7 @@ impl McpRegistry {
                             true,
                             operation_guard,
                         )
-                        .await?);
+                        .await;
                 }
                 crate::discovery_cache::Decision::Stale { entry, age_ms } => {
                     let entry_era = entry

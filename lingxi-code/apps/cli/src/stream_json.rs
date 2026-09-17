@@ -1096,10 +1096,7 @@ impl StreamJsonStream {
     /// The orchestrator's list is the authoritative record; the
     /// `permission_denied` system frames are documented by claude-code as
     /// advisory and incomplete, so they are NOT the source here.
-    pub fn share_permission_denials(
-        &self,
-        cell: Arc<Mutex<Vec<platform_api::PermissionDenial>>>,
-    ) {
+    pub fn share_permission_denials(&self, cell: Arc<Mutex<Vec<platform_api::PermissionDenial>>>) {
         let _ = self.permission_denials.set(cell);
     }
 
@@ -1569,10 +1566,17 @@ impl StreamJsonStream {
 #[async_trait]
 impl OutputStream for StreamJsonStream {
     async fn emit_task_lifecycle(&self, event: &Value) {
-        if self.suppress_frames { return; }
+        if self.suppress_frames {
+            return;
+        }
         let mut frame = event.clone();
-        let Some(frame_object) = frame.as_object_mut() else { return; };
-        frame_object.insert("session_id".into(), json!(self.session_id.lock().await.clone()));
+        let Some(frame_object) = frame.as_object_mut() else {
+            return;
+        };
+        frame_object.insert(
+            "session_id".into(),
+            json!(self.session_id.lock().await.clone()),
+        );
         frame_object.insert("uuid".into(), json!(uuid::Uuid::new_v4().to_string()));
         self.enqueue(&frame);
     }
@@ -3000,7 +3004,9 @@ mod tests {
         let stream = StreamJsonStream::new(make_params("sess-task"));
         let mut rx = stream.drain_rx.lock().await.take().unwrap();
         stream.emit_task_lifecycle(&json!({"type":"system", "subtype":"task_started", "task_id":"b12345678", "description":"build", "task_type":"local_bash"})).await;
-        let OutboundMsg::Line(line) = rx.try_recv().unwrap() else { panic!("expected SDK frame"); };
+        let OutboundMsg::Line(line) = rx.try_recv().unwrap() else {
+            panic!("expected SDK frame");
+        };
         let frame: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(frame["subtype"], "task_started");
         assert_eq!(frame["task_id"], "b12345678");
@@ -3180,7 +3186,15 @@ mod tests {
 
         // The error frame reports the same list — it is the same run.
         let err = stream
-            .build_result_error_frame("error_during_execution", vec![], &cost, "m", "off", None, &[])
+            .build_result_error_frame(
+                "error_during_execution",
+                vec![],
+                &cost,
+                "m",
+                "off",
+                None,
+                &[],
+            )
             .await;
         assert_eq!(err["permission_denials"].as_array().unwrap().len(), 1);
     }

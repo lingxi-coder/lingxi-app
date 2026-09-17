@@ -2411,7 +2411,11 @@ fn a_second_call_site_in_a_non_composition_module_makes_the_gate_red_with_file_a
     let message = panic_payload
         .downcast_ref::<String>()
         .cloned()
-        .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .or_else(|| {
+            panic_payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+        })
         .unwrap_or_default();
     assert!(
         message.contains("composition.rs:3"),

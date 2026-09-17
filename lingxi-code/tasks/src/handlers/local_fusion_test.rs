@@ -5,8 +5,8 @@ use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, F
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use platform_api::{
     BudgetError, FusionDecision, FusionNeedsParentReason, FusionOrigin, FusionPreset,
-    FusionRequest, FusionRunOutcome, FusionRunRecorder, FusionSlashPublicationTarget,
-    FusionTiming, FusionUsage,
+    FusionRequest, FusionRunOutcome, FusionRunRecorder, FusionSlashPublicationTarget, FusionTiming,
+    FusionUsage,
 };
 use serde_json::json;
 use std::any::Any;
@@ -692,9 +692,7 @@ impl FusionExecutor for FailingExecutor {
         ::platform_api::prepared_from_oneshot(
             submission,
             timeout,
-            move |_request, _inherit, _progress| async move {
-                Err(this.error.clone())
-            },
+            move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
         )
     }
 }

@@ -473,7 +473,11 @@ impl MockTaskRegistryHandle {
     }
 
     /// Deliver to the actual externally bound foreground runner in tests.
-    pub async fn send_foreground_message(&self, id: &str, message: String) -> Result<(), TaskRegistryError> {
+    pub async fn send_foreground_message(
+        &self,
+        id: &str,
+        message: String,
+    ) -> Result<(), TaskRegistryError> {
         let receiver = self.receivers.lock().unwrap().get(id).cloned().unwrap();
         receiver.send(message).await
     }
@@ -529,38 +533,105 @@ impl Default for MockTaskRegistryHandle {
 
 #[async_trait]
 impl TaskRegistryHandle for MockTaskRegistryHandle {
-    async fn register_agent_resume_recipe(&self, id: &str, request: SubagentSpawnRequest, inheritance: SubagentInheritance) -> Result<(), TaskRegistryError> {
-        if !self.records.lock().unwrap().contains_key(id) { return Err(TaskRegistryError::NotFound(id.into())); }
-        if self.reject_resume_recipe.load(Ordering::SeqCst) { return Err(TaskRegistryError::Internal("resume recipe rejected".into())); }
-        self.resume_recipes.lock().unwrap().insert(id.into(), (request, inheritance));
+    async fn register_agent_resume_recipe(
+        &self,
+        id: &str,
+        request: SubagentSpawnRequest,
+        inheritance: SubagentInheritance,
+    ) -> Result<(), TaskRegistryError> {
+        if !self.records.lock().unwrap().contains_key(id) {
+            return Err(TaskRegistryError::NotFound(id.into()));
+        }
+        if self.reject_resume_recipe.load(Ordering::SeqCst) {
+            return Err(TaskRegistryError::Internal("resume recipe rejected".into()));
+        }
+        self.resume_recipes
+            .lock()
+            .unwrap()
+            .insert(id.into(), (request, inheritance));
         Ok(())
     }
-    async fn bind_agent_message_receiver(&self, id: &str, receiver: Arc<dyn platform_api::task_registry::TaskMessageReceiver>) -> Result<(), TaskRegistryError> { self.receivers.lock().unwrap().insert(id.to_string(), receiver); Ok(()) }
+    async fn bind_agent_message_receiver(
+        &self,
+        id: &str,
+        receiver: Arc<dyn platform_api::task_registry::TaskMessageReceiver>,
+    ) -> Result<(), TaskRegistryError> {
+        self.receivers
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), receiver);
+        Ok(())
+    }
 
-    async fn register_foreground_agent(&self, registration: platform_api::task_registry::ForegroundAgentRegistration) -> Result<platform_api::task_registry::ForegroundAgentHandle, TaskRegistryError> {
+    async fn register_foreground_agent(
+        &self,
+        registration: platform_api::task_registry::ForegroundAgentRegistration,
+    ) -> Result<platform_api::task_registry::ForegroundAgentHandle, TaskRegistryError> {
         let id = self.fresh_id("local_agent");
-        self.records.lock().unwrap().insert(id.clone(), TaskRecord {
-            task_id: id.clone(), task_type: "local_agent".into(), status: "running".into(),
-            owner_agent_id: Some(registration.agent_id.to_string()), is_backgrounded: Some(false), ..Default::default()
-        });
-        Ok(platform_api::task_registry::ForegroundAgentHandle {task_id: id.clone(), output_path: format!("/tmp/{id}.output")})
+        self.records.lock().unwrap().insert(
+            id.clone(),
+            TaskRecord {
+                task_id: id.clone(),
+                task_type: "local_agent".into(),
+                status: "running".into(),
+                owner_agent_id: Some(registration.agent_id.to_string()),
+                is_backgrounded: Some(false),
+                ..Default::default()
+            },
+        );
+        Ok(platform_api::task_registry::ForegroundAgentHandle {
+            task_id: id.clone(),
+            output_path: format!("/tmp/{id}.output"),
+        })
     }
     async fn unregister_foreground_agent(&self, id: &str) {
         let mut records = self.records.lock().unwrap();
-        if records.get(id).is_some_and(|r| r.is_backgrounded != Some(true)) { records.remove(id); }
+        if records
+            .get(id)
+            .is_some_and(|r| r.is_backgrounded != Some(true))
+        {
+            records.remove(id);
+        }
     }
-    async fn bind_background_killer(&self, id: &str, killer: Arc<dyn platform_api::task_registry::TaskKiller>) -> Result<(), TaskRegistryError> { self.killers.lock().unwrap().insert(id.to_string(), killer); Ok(()) }
-    async fn bind_background_requester(&self, id: &str, requester: Arc<dyn platform_api::task_registry::TaskBackgrounder>) -> Result<(), TaskRegistryError> {
-        self.backgrounders.lock().unwrap().insert(id.into(), requester); Ok(())
+    async fn bind_background_killer(
+        &self,
+        id: &str,
+        killer: Arc<dyn platform_api::task_registry::TaskKiller>,
+    ) -> Result<(), TaskRegistryError> {
+        self.killers.lock().unwrap().insert(id.to_string(), killer);
+        Ok(())
+    }
+    async fn bind_background_requester(
+        &self,
+        id: &str,
+        requester: Arc<dyn platform_api::task_registry::TaskBackgrounder>,
+    ) -> Result<(), TaskRegistryError> {
+        self.backgrounders
+            .lock()
+            .unwrap()
+            .insert(id.into(), requester);
+        Ok(())
     }
     async fn background_task(&self, id: &str) -> bool {
         let requester = self.backgrounders.lock().unwrap().get(id).cloned();
         if let Some(requester) = requester {
-            self.records.lock().unwrap().get_mut(id).unwrap().is_backgrounded = Some(true);
-            requester.background().await; true
-        } else { false }
+            self.records
+                .lock()
+                .unwrap()
+                .get_mut(id)
+                .unwrap()
+                .is_backgrounded = Some(true);
+            requester.background().await;
+            true
+        } else {
+            false
+        }
     }
-    async fn set_agent_outcome(&self, id: &str, outcome: platform_api::task_registry::AgentTerminalOutcome) {
+    async fn set_agent_outcome(
+        &self,
+        id: &str,
+        outcome: platform_api::task_registry::AgentTerminalOutcome,
+    ) {
         self.outcomes.lock().unwrap().insert(id.into(), outcome);
     }
 

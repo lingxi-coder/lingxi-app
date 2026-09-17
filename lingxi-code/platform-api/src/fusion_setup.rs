@@ -289,7 +289,10 @@ mod tests {
             "analystModel": {"profile": "openai"}
         }});
         let read = FusionModelRoles::from_settings_json(&settings);
-        assert_eq!(read.panels, vec![FusionModelChoice::new("anthropic", "claude-opus-5")]);
+        assert_eq!(
+            read.panels,
+            vec![FusionModelChoice::new("anthropic", "claude-opus-5")]
+        );
         assert_eq!(read.analyst, None);
         assert_eq!(
             read.missing_roles(),

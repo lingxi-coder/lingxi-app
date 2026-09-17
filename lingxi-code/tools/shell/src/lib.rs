@@ -21,9 +21,17 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+// Dead code kept visible, not swept: this crate had 1 item(s) rustc could
+// reach from nothing when the workspace was measured (2026-09-16). The lint
+// stays `warn` at the workspace level so a NEW crate still inherits it; this
+// allow is scoped here so the count is per crate and repayable by deleting this
+// line. This is the category where "named, computed, never wired" hides — some
+// of these read like features that were built and never connected. Each wants a
+// decision (delete, or wire), not a blanket deletion.
+#![allow(dead_code)]
 
-pub mod bash_edit_diff;
 pub mod bash;
+pub mod bash_edit_diff;
 pub mod command_semantics;
 pub mod powershell;
 pub mod powershell_semantics;

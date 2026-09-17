@@ -745,7 +745,7 @@ mod tests {
     // --- `--with <components…>` scaffolds ---------------------------------
 
     fn with(vals: &[&str]) -> Vec<String> {
-        vals.iter().map(|s| s.to_string()).collect()
+        vals.iter().map(|s| (*s).to_string()).collect()
     }
 
     fn root(e: &Env, name: &str) -> PathBuf {

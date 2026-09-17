@@ -403,7 +403,7 @@ impl JournalFileFingerprint {
     fn same_leaf(&self, other: &Self) -> bool {
         #[cfg(unix)]
         {
-            return self.device == other.device && self.inode == other.inode;
+            self.device == other.device && self.inode == other.inode
         }
         #[cfg(windows)]
         {
@@ -716,7 +716,7 @@ impl DurableJournal {
                     {
                         if collect_entries {
                             state.entries.push(entry);
-                        } else if let Some(visitor) = visitor.as_deref_mut() {
+                        } else if let Some(visitor) = visitor {
                             visitor(entry);
                         }
                     }

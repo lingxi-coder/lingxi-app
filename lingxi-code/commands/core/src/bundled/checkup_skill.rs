@@ -145,12 +145,21 @@ mod tests {
 
     #[test]
     fn the_body_is_branded() {
-        for stale in ["Claude Code", "CLAUDE.md", "~/.claude", ".claude/", "claude doctor"] {
+        for stale in [
+            "Claude Code",
+            "CLAUDE.md",
+            "~/.claude",
+            ".claude/",
+            "claude doctor",
+        ] {
             assert!(
                 !CHECKUP_BODY.contains(stale),
                 "{stale:?} survived the rebrand"
             );
-            assert!(!CHECKUP_DESCRIPTION.contains(stale), "{stale:?} in description");
+            assert!(
+                !CHECKUP_DESCRIPTION.contains(stale),
+                "{stale:?} in description"
+            );
         }
         assert!(CHECKUP_BODY.contains("LINGXI.md"));
         assert!(CHECKUP_BODY.contains("~/.lingxi/projects"));
@@ -186,8 +195,12 @@ mod tests {
         // which contains neither "check 7" nor "Check 7". Match the NUMBER in
         // any check-listing context instead.
         for stale in [
-            "check 7", "Check 7", "checks 0-4 and 7", "0, 1, 2, 3, 4, 7",
-            "and 7:", "4 and 7",
+            "check 7",
+            "Check 7",
+            "checks 0-4 and 7",
+            "0, 1, 2, 3, 4, 7",
+            "and 7:",
+            "4 and 7",
         ] {
             assert!(
                 !CHECKUP_BODY.contains(stale),
@@ -218,7 +231,11 @@ mod tests {
     #[test]
     fn the_body_claims_no_network_access() {
         assert!(CHECKUP_BODY.contains("this checkup makes NO network requests"));
-        for endpoint in ["downloads.claude.ai", "registry.npmjs.org", "formulae.brew.sh"] {
+        for endpoint in [
+            "downloads.claude.ai",
+            "registry.npmjs.org",
+            "formulae.brew.sh",
+        ] {
             assert!(
                 !CHECKUP_BODY.contains(endpoint),
                 "{endpoint:?} is an Anthropic-distribution lookup that check 7 owned"

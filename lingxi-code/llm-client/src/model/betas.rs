@@ -498,26 +498,25 @@ pub fn apply_beta_header_with_auth_and_custom(
             endpoint,
             Endpoint::MessagesCreate | Endpoint::MessagesCreateStream
         )
+        && !custom_betas.is_empty()
     {
-        if !custom_betas.is_empty() {
-            let mut parts: Vec<String> = request
-                .headers
-                .get("anthropic-beta")
-                .into_iter()
-                .flat_map(|v| v.split(','))
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string)
-                .collect();
-            for beta in custom_betas.iter().map(String::as_str) {
-                if !parts.iter().any(|existing| existing == beta) {
-                    parts.push(beta.to_string());
-                }
+        let mut parts: Vec<String> = request
+            .headers
+            .get("anthropic-beta")
+            .into_iter()
+            .flat_map(|v| v.split(','))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .collect();
+        for beta in custom_betas.iter().map(String::as_str) {
+            if !parts.iter().any(|existing| existing == beta) {
+                parts.push(beta.to_string());
             }
-            request
-                .headers
-                .insert("anthropic-beta".to_string(), parts.join(","));
         }
+        request
+            .headers
+            .insert("anthropic-beta".to_string(), parts.join(","));
     }
 
     if is_oauth_subscriber {

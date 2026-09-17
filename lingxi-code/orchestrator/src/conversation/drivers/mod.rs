@@ -764,7 +764,7 @@ impl StreamingTurnDriver<'_> {
             &mut non_stream_snapshot,
             deferred_reminder,
             date_change_reminder,
-            &turn_reminders,
+            turn_reminders,
         )
         .await;
         let tools_for_fallback = wire_tools.to_vec();
@@ -1286,7 +1286,7 @@ impl StreamingTurnDriver<'_> {
             // last-usage snapshot) for the fixed-prefix overflow guard.
             orch.record_response_input_tokens(usage);
         }
-        if let (Some(ref usage), Some(cost_receipt)) = (pumped.usage.as_ref(), cost_receipt) {
+        if let (Some(usage), Some(cost_receipt)) = (pumped.usage.as_ref(), cost_receipt) {
             let cache_read = usage.billable_tokens.cache_read;
             let cache_create = usage.billable_tokens.cache_write;
             let model_ref =
@@ -2979,7 +2979,7 @@ impl ConversationOrchestrator {
                     self.output.emit_end_turn("end_turn", &cost).await;
                     return Ok(StreamingIterationDisposition::Complete(assistant_id));
                 }
-                return Ok(StreamingIterationDisposition::Continue);
+                Ok(StreamingIterationDisposition::Continue)
             }
             Some("end_turn") => {
                 // #78 thinking-only nudge (claude-code `bin/claude.exe`
@@ -3003,9 +3003,8 @@ impl ConversationOrchestrator {
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue);
                 }
-                return self
-                    .finish_natural_streaming_end(loop_state, assistant_id)
-                    .await;
+                self.finish_natural_streaming_end(loop_state, assistant_id)
+                    .await
             }
             // #77 malformed-tool-use retry (claude-code `bin/claude.exe`
             // offset ~202945837): `stop_reason == "tool_use"` but the
@@ -3057,7 +3056,7 @@ impl ConversationOrchestrator {
                 // escalation episode.
                 loop_state.recovery.reset_max_output_tokens_recovery();
                 loop_state.malformed_tool_use_retried = true;
-                return Ok(StreamingIterationDisposition::Continue);
+                Ok(StreamingIterationDisposition::Continue)
             }
             // A1: intercept `max_tokens` BEFORE the generic terminal arm.
             // While recovery is not exhausted, inject the byte-exact meta
@@ -3085,7 +3084,7 @@ impl ConversationOrchestrator {
                     .max_output_tokens_recovery_count
                     .saturating_add(1);
                 loop_state.recovery.max_output_tokens_override = None;
-                return Ok(StreamingIterationDisposition::Continue);
+                Ok(StreamingIterationDisposition::Continue)
             }
             // #78 thinking-only nudge for `stop_sequence` (claude-code
             // groups `end_turn` and `stop_sequence` under one guard). A
@@ -3100,7 +3099,7 @@ impl ConversationOrchestrator {
                 self.discard_retry_attempt(assistant_id).await;
                 self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                 loop_state.thinking_only_nudged = true;
-                return Ok(StreamingIterationDisposition::Continue);
+                Ok(StreamingIterationDisposition::Continue)
             }
             // Finding #80 (streaming twin): a `refusal` response swaps to the
             // configured `refusalFallbackModel` ONCE per session and retries.
@@ -3108,7 +3107,7 @@ impl ConversationOrchestrator {
             // is configured (or the latch is already set) it falls through to
             // the terminal `Some(other)` arm below, byte-identical to before.
             Some("refusal") if self.maybe_swap_to_refusal_fallback().await => {
-                return Ok(StreamingIterationDisposition::Continue);
+                Ok(StreamingIterationDisposition::Continue)
             }
             Some(other) => {
                 // max_tokens (recovery exhausted) / stop_sequence (visible
@@ -3170,9 +3169,9 @@ impl ConversationOrchestrator {
                 };
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn(other, &cost).await;
-                return Ok(StreamingIterationDisposition::Complete(
+                Ok(StreamingIterationDisposition::Complete(
                     surfaced_id.unwrap_or(assistant_id),
-                ));
+                ))
             }
             None => {
                 // Stream ended without a stop_reason — treat as
@@ -3191,9 +3190,8 @@ impl ConversationOrchestrator {
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue);
                 }
-                return self
-                    .finish_natural_streaming_end(loop_state, assistant_id)
-                    .await;
+                self.finish_natural_streaming_end(loop_state, assistant_id)
+                    .await
             }
         }
     }

@@ -75,8 +75,7 @@ mod tests {
     /// Loading the reference must not read as authorization to run a workflow.
     #[test]
     fn the_description_denies_that_loading_it_is_an_opt_in() {
-        assert!(WORKFLOW_AUTHORING_DESCRIPTION
-            .contains("it does not itself authorize running one"));
+        assert!(WORKFLOW_AUTHORING_DESCRIPTION.contains("it does not itself authorize running one"));
         assert!(WORKFLOW_AUTHORING_DESCRIPTION.contains("already opted into"));
     }
 }

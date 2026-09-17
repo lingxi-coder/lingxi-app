@@ -51,7 +51,8 @@ impl TurnSpanTally {
     pub fn note_assistant_response(&self, tool_uses: usize) {
         let calls = u32::try_from(tool_uses).unwrap_or(u32::MAX);
         self.tool_uses.fetch_add(calls, Ordering::Relaxed);
-        self.messages.fetch_add(calls.saturating_add(1), Ordering::Relaxed);
+        self.messages
+            .fetch_add(calls.saturating_add(1), Ordering::Relaxed);
     }
 
     /// Record one `toolDenialKind`. The oracle splits the same values two ways:

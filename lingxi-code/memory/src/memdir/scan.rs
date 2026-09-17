@@ -383,7 +383,8 @@ mod tests {
     fn scan_drops_entries_older_than_365_days() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi")
+        let memdir = home
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");
@@ -414,7 +415,8 @@ mod tests {
     fn user_tier_assigned_for_user_memdir() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi")
+        let memdir = home
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");
@@ -470,7 +472,8 @@ mod tests {
     fn scan_strips_frontmatter_and_redacts_secrets() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi")
+        let memdir = home
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");
@@ -508,7 +511,8 @@ mod tests {
     fn scan_caps_entries_and_total_bytes_in_deterministic_order() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi")
+        let memdir = home
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");
@@ -554,7 +558,8 @@ mod tests {
     fn scan_preserves_room_for_session_and_team_tiers() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let user_dir = home.join(".lingxi")
+        let user_dir = home
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");
@@ -601,7 +606,8 @@ mod tests {
     fn scan_skips_large_candidate_and_keeps_smaller_later_file() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi")
+        let memdir = home
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");
@@ -640,7 +646,8 @@ mod tests {
     fn scan_bounds_per_tier_candidates_deterministically() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".lingxi")
+        let memdir = home
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");

@@ -995,9 +995,9 @@ async fn assert_answer_reached_history(orchestrator: &ConversationOrchestrator, 
     let handle = orchestrator.session();
     let session = handle.lock().await;
     let found = session.history.iter().any(|message| match message {
-        ConversationMessage::Assistant { content, .. } => content.iter().any(|block| {
-            matches!(block, ContentBlock::Text { text: body } if body.contains(text))
-        }),
+        ConversationMessage::Assistant { content, .. } => content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text: body } if body.contains(text))),
         _ => false,
     });
     assert!(

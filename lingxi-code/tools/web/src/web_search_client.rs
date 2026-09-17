@@ -536,7 +536,7 @@ fn attr_value(s: &str, name: &str) -> Option<String> {
         let end = s[i + 1..].find(q)? + i + 1;
         Some(s[i + 1..end].to_string())
     } else {
-        let end = s[i..].find(|c: char| c == ' ' || c == '>')? + i;
+        let end = s[i..].find([' ', '>'])? + i;
         Some(s[i..end].to_string())
     }
 }

@@ -118,7 +118,10 @@ impl ApiClientHookPromptRunner {
             Some((_, profile)) => profile.map(str::to_owned),
             None => None,
         };
-        for var in ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
+        for var in [
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ] {
             if let Ok(m) = std::env::var(var) {
                 if !m.is_empty() {
                     return (m, profile);
@@ -186,7 +189,8 @@ fn strip_transcript_thinking(messages: &mut [ConversationMessage]) {
     let is_thinking = |block: &protocol::ContentBlock| {
         matches!(
             block,
-            protocol::ContentBlock::Thinking { .. } | protocol::ContentBlock::RedactedThinking { .. }
+            protocol::ContentBlock::Thinking { .. }
+                | protocol::ContentBlock::RedactedThinking { .. }
         )
     };
     for message in messages {
@@ -807,11 +811,17 @@ mod tests {
         // session's own profile so a connection keeps its key.
         assert_eq!(
             resolve("claude-opus-4-8", Some("anthropic")),
-            ("claude-haiku-4-5".to_string(), Some("anthropic".to_string()))
+            (
+                "claude-haiku-4-5".to_string(),
+                Some("anthropic".to_string())
+            )
         );
         assert_eq!(
             resolve("claude-opus-4-8", Some("anthropic:work#1")),
-            ("claude-haiku-4-5".to_string(), Some("anthropic:work#1".to_string()))
+            (
+                "claude-haiku-4-5".to_string(),
+                Some("anthropic:work#1".to_string())
+            )
         );
         assert_eq!(
             resolve("claude-opus-4-8", None),
@@ -825,16 +835,19 @@ mod tests {
         );
         assert_eq!(
             resolve("deepseek-flash", Some("deepseek:cn#1")),
-            ("deepseek-flash".to_string(), Some("deepseek:cn#1".to_string()))
+            (
+                "deepseek-flash".to_string(),
+                Some("deepseek:cn#1".to_string())
+            )
         );
-        assert_eq!(
-            resolve("kimi-k2", None),
-            ("kimi-k2".to_string(), None)
-        );
+        assert_eq!(resolve("kimi-k2", None), ("kimi-k2".to_string(), None));
         // A Claude id reached through another provider follows that provider.
         assert_eq!(
             resolve("claude-opus-4-8", Some("openrouter")),
-            ("claude-opus-4-8".to_string(), Some("openrouter".to_string()))
+            (
+                "claude-opus-4-8".to_string(),
+                Some("openrouter".to_string())
+            )
         );
     }
 
@@ -900,7 +913,11 @@ mod tests {
 
         let recorded = api.recorded.lock().unwrap();
         let sent = &recorded[0].3;
-        assert_eq!(sent.len(), 5, "4 transcript messages + the condition prompt");
+        assert_eq!(
+            sent.len(),
+            5,
+            "4 transcript messages + the condition prompt"
+        );
         let assistant_content = |index: usize| match &sent[index] {
             ConversationMessage::Assistant { content, .. } => content.clone(),
             other => panic!("expected assistant at {index}, got {other:?}"),

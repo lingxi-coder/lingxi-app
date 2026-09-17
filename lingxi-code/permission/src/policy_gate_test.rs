@@ -1794,7 +1794,7 @@ mod tests {
 
         let seen = inner.ctx.lock().unwrap().clone().expect("inner consulted");
         assert_eq!(seen.decision_reason_type.as_deref(), Some("rule"));
-        assert_eq!(seen.requires_user_interaction, true);
+        assert!(seen.requires_user_interaction);
         // A PLAIN ask-rule ask conveys the rule via `decision_reason_type: "rule"`
         // and carries NO `matched_ask_rule`: the 2.1.218 schema sets that field
         // ONLY in the substitution case (a rule forces the prompt but the ask
@@ -1886,7 +1886,7 @@ mod tests {
     fn clamp_layer(rules: &[&str]) -> Value {
         serde_json::json!({
             "kind": "bash_command_clamp",
-            "rules": rules.iter().copied().collect::<Vec<_>>(),
+            "rules": rules.to_vec(),
         })
     }
 
@@ -3848,17 +3848,18 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     // ---- MP-1: a slash command's / skill's `disallowed-tools` -------------
 
     fn gate_with_rules(raw: &str) -> PolicyPermissionGate {
-        let rules =
-            crate::loader::permission_rules_from_settings_json(raw, PermissionRuleSource::LocalSettings)
-                .expect("settings fixture parses");
+        let rules = crate::loader::permission_rules_from_settings_json(
+            raw,
+            PermissionRuleSource::LocalSettings,
+        )
+        .expect("settings fixture parses");
         let policy = Arc::new(
-            PermissionPolicy::from_rules_confined(PermissionMode::Default, rules, false).with_roots(
-                FsRoots {
+            PermissionPolicy::from_rules_confined(PermissionMode::Default, rules, false)
+                .with_roots(FsRoots {
                     cwd: PathBuf::from("/proj"),
                     home: Some(PathBuf::from("/home/u")),
                     lingxi_home: PathBuf::from("/home/u/.lingxi"),
-                },
-            ),
+                }),
         );
         PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow))
     }
@@ -3871,7 +3872,10 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     /// sends an ask to the inner transport instead — which allows here — so only
     /// a real deny survives.
     async fn denied(gate: &PolicyPermissionGate, tool: &str, input: &Value) -> bool {
-        matches!(gate.check(tool, input).await, PermissionDecision::Deny { .. })
+        matches!(
+            gate.check(tool, input).await,
+            PermissionDecision::Deny { .. }
+        )
     }
 
     #[tokio::test]

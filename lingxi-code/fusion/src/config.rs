@@ -514,9 +514,8 @@ mod tests {
             ..FusionSettingsJson::default()
         };
         settings.validate().expect("single-field file stays valid");
-        let err = FusionRuntimeConfig::from_settings(&settings).expect_err(
-            "merged min_successful_panels (3) exceeds min(quality=3, fast=2) = 2",
-        );
+        let err = FusionRuntimeConfig::from_settings(&settings)
+            .expect_err("merged min_successful_panels (3) exceeds min(quality=3, fast=2) = 2");
         match err {
             FusionError::InvalidConfiguration(msg) => {
                 assert!(

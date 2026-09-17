@@ -97,7 +97,7 @@ fn last_subcommand(command: &str) -> String {
 /// argument. Returns `None` when the segment is not a git command or has no
 /// subcommand.
 fn git_subcommand(segment: &str) -> Option<String> {
-    let toks: Vec<&str> = segment.trim().split_whitespace().collect();
+    let toks: Vec<&str> = segment.split_whitespace().collect();
     if toks.first().copied() != Some("git") {
         return None;
     }

@@ -7,8 +7,8 @@
 //! configs and resolves the active one from the `output_style` setting.
 
 use crate::builtin::{
-    CONCISE_PROMPT, CONCISE_TURN_REMINDER, EXPLANATORY_PROMPT, LEARNING_PROMPT,
-    PROACTIVE_PROMPT, PROACTIVE_TURN_REMINDER, PROACTIVE_WAITING_TURN_REMINDER,
+    CONCISE_PROMPT, CONCISE_TURN_REMINDER, EXPLANATORY_PROMPT, LEARNING_PROMPT, PROACTIVE_PROMPT,
+    PROACTIVE_TURN_REMINDER, PROACTIVE_WAITING_TURN_REMINDER,
 };
 use crate::disk::ResolvedOutputStyle;
 use crate::model::{OutputFormat, OutputStyle, OutputStyleFrontmatter, OutputStyleSource};
@@ -96,7 +96,8 @@ const LEARNING: BuiltinOutputStyle = BuiltinOutputStyle {
 /// port was first cut from, which is why it was missing here.
 const PROACTIVE: BuiltinOutputStyle = BuiltinOutputStyle {
     name: "Proactive",
-    description: "Claude executes immediately, minimizes interruptions, and prefers action over planning",
+    description:
+        "Claude executes immediately, minimizes interruptions, and prefers action over planning",
     prompt: PROACTIVE_PROMPT,
     keep_coding_instructions: true,
     turn_reminder: Some(PROACTIVE_TURN_REMINDER),
@@ -106,7 +107,8 @@ const PROACTIVE: BuiltinOutputStyle = BuiltinOutputStyle {
 /// Builtin `Concise` config.
 const CONCISE: BuiltinOutputStyle = BuiltinOutputStyle {
     name: "Concise",
-    description: "Claude responds tersely, leading with results and skipping preamble and narration",
+    description:
+        "Claude responds tersely, leading with results and skipping preamble and narration",
     prompt: CONCISE_PROMPT,
     keep_coding_instructions: true,
     turn_reminder: Some(CONCISE_TURN_REMINDER),
@@ -429,7 +431,9 @@ mod tests {
             "You are an interactive CLI tool that helps users with software engineering tasks. \
              You should work proactively and autonomously"
         ));
-        assert!(p.prompt.contains("\n\n# Proactive Style Active\nThe user chose continuous"));
+        assert!(p
+            .prompt
+            .contains("\n\n# Proactive Style Active\nThe user chose continuous"));
         // Chars AND bytes, like the `Learning` lock below: the six U+2014 em
         // dashes make the two numbers differ, and a mojibake re-extract that
         // replaced them with ASCII hyphens would keep the char count.
@@ -444,7 +448,9 @@ mod tests {
             "Claude responds tersely, leading with results and skipping preamble and narration"
         );
         assert!(c.keep_coding_instructions);
-        assert!(c.prompt.contains("\n\n# Concise Style Active\nThe user chose brevity"));
+        assert!(c
+            .prompt
+            .contains("\n\n# Concise Style Active\nThe user chose brevity"));
         assert_eq!(c.prompt.chars().count(), 1349);
         assert_eq!(c.prompt.len(), 1361);
         assert_eq!(c.prompt.matches('\u{2014}').count(), 6);

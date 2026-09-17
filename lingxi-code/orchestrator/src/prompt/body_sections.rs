@@ -768,12 +768,7 @@ mod tests {
 
     #[test]
     fn non_claude_models_always_keep_the_full_harness() {
-        for model in [
-            "gpt-5.5",
-            "deepseek-flash",
-            "gemini-3.5-flash",
-            "glm-5.1",
-        ] {
+        for model in ["gpt-5.5", "deepseek-flash", "gemini-3.5-flash", "glm-5.1"] {
             let prompt = format(
                 false,
                 true,

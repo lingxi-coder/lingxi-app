@@ -2833,14 +2833,14 @@ mod url_identity_tests {
     fn anything_other_than_order_still_separates() {
         let base = canonical_server_url("https://h.test/mcp?a=1&b=2");
         for other in [
-            "https://h.test/mcp?a=1&b=3",       // different value
-            "https://h.test/mcp?a=1&c=2",       // different key
-            "https://h.test/mcp?a=1",           // dropped param
-            "https://h.test/other?a=1&b=2",     // different path
-            "https://other.test/mcp?a=1&b=2",   // different host
-            "http://h.test/mcp?a=1&b=2",        // different scheme
-            "https://h.test:8443/mcp?a=1&b=2",  // different port
-            "https://h.test/mcp?a=1&b=2#frag",  // different fragment
+            "https://h.test/mcp?a=1&b=3",      // different value
+            "https://h.test/mcp?a=1&c=2",      // different key
+            "https://h.test/mcp?a=1",          // dropped param
+            "https://h.test/other?a=1&b=2",    // different path
+            "https://other.test/mcp?a=1&b=2",  // different host
+            "http://h.test/mcp?a=1&b=2",       // different scheme
+            "https://h.test:8443/mcp?a=1&b=2", // different port
+            "https://h.test/mcp?a=1&b=2#frag", // different fragment
         ] {
             assert_ne!(base, canonical_server_url(other), "{other} must differ");
         }

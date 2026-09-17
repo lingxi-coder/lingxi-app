@@ -1,6 +1,5 @@
 use super::*;
 use futures::poll;
-use std::task::Poll;
 
 #[tokio::test]
 async fn zero_capacity_disables_allocations_without_constructor_failure() {

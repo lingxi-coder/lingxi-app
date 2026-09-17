@@ -308,7 +308,14 @@ impl FileSystem for PosixFileSystem {
         Ok(platform_api::apply_line_window(content, offset, limit))
     }
 
-    async fn read_file_rooted_byte_window_pinned(&self, root: &Path, relative: &Path, expected: Option<&platform_api::rooted_fs::RootIdentity>, offset: u64, limit: u64) -> Result<Vec<u8>, FsError> {
+    async fn read_file_rooted_byte_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<u8>, FsError> {
         platform_api::rooted_fs::read_byte_window_pinned(root, relative, expected, offset, limit)
     }
 
@@ -460,7 +467,10 @@ mod tests {
         let victim = dir.path().join("victim");
         std::fs::write(&victim, "unchanged").unwrap();
         std::os::unix::fs::symlink(&victim, dir.path().join("output")).unwrap();
-        let error = fs_at(dir.path()).append_file_rooted_staged(dir.path(), Path::new("output"), "payload", None).await.unwrap_err();
+        let error = fs_at(dir.path())
+            .append_file_rooted_staged(dir.path(), Path::new("output"), "payload", None)
+            .await
+            .unwrap_err();
         assert_eq!(error.stage, platform_api::filesystem::FileAppendStage::Open);
         assert_eq!(std::fs::read_to_string(victim).unwrap(), "unchanged");
     }

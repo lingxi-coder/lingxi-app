@@ -1725,12 +1725,23 @@ struct WorkflowProcessObserver {
 
 #[async_trait]
 impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObserver {
-    async fn on_model_selected(&self, event: &platform_api::subagent_spawn::SubagentObservation, effort: Option<&str>) {
-        if let Some(inner) = &self.inner { inner.on_model_selected(event, effort).await; }
+    async fn on_model_selected(
+        &self,
+        event: &platform_api::subagent_spawn::SubagentObservation,
+        effort: Option<&str>,
+    ) {
+        if let Some(inner) = &self.inner {
+            inner.on_model_selected(event, effort).await;
+        }
     }
 
-    async fn before_start(&self, event: &platform_api::subagent_spawn::SubagentObservation) -> Result<(), SubagentSpawnError> {
-        if let Some(inner) = &self.inner { inner.before_start(event).await?; }
+    async fn before_start(
+        &self,
+        event: &platform_api::subagent_spawn::SubagentObservation,
+    ) -> Result<(), SubagentSpawnError> {
+        if let Some(inner) = &self.inner {
+            inner.before_start(event).await?;
+        }
         Ok(())
     }
     fn on_allocated(&self, event: &platform_api::subagent_spawn::SubagentObservation) {
@@ -4658,7 +4669,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                 .as_ref()
                                 .and_then(|snapshot| snapshot.state.as_deref())
                                 .is_some_and(|state| matches!(state, "done" | "error" | "cached"));
-                            if !observer_enabled || matches!(raw, Err(_)) || !observer_emitted_terminal
+                            if !observer_enabled || raw.is_err() || !observer_emitted_terminal
                             {
                                 let mut update = observer_state
                                     .unwrap_or_else(|| workflow_progress_update(&lifecycle_event));

@@ -172,7 +172,9 @@ mod tests {
     #[test]
     fn variants_construct_and_compare() {
         let a = MultiAgentEvent::TasksRefreshed(vec![TaskRow {
-            unread: false, model: None, effort: None,
+            unread: false,
+            model: None,
+            effort: None,
             awaiting_plan_approval: false,
             task_id: "b12345678".into(),
             task_type: "local_bash".into(),

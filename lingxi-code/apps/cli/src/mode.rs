@@ -71,8 +71,12 @@ struct TuiMsgQueueInput {
 
 #[async_trait::async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInput {
-    fn supports_goal_retries(&self) -> bool { true }
-    async fn has_queued_goal_work(&self) -> bool { self.queue.has_main_thread_commands().await }
+    fn supports_goal_retries(&self) -> bool {
+        true
+    }
+    async fn has_queued_goal_work(&self) -> bool {
+        self.queue.has_main_thread_commands().await
+    }
     async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
         self.queue.enqueue_goal_retry(id, body, cancel).await;
     }
@@ -113,9 +117,13 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                 .get(&command.uuid)
                 .is_some_and(|owner| owner.is_cancelled())
         });
-        if batch.iter().any(|c| c.source == msgqueue::QueueSource::PromptInput && !c.is_meta) {
+        if batch
+            .iter()
+            .any(|c| c.source == msgqueue::QueueSource::PromptInput && !c.is_meta)
+        {
             if let Some(host) = self.state.loop_host.get() {
-                host.state.veto_tick(engine_desktop::loop_tools::LoopFoldVeto::ForeignUserInput);
+                host.state
+                    .veto_tick(engine_desktop::loop_tools::LoopFoldVeto::ForeignUserInput);
                 host.state.invalidate_noop_streak();
             }
         }
@@ -394,7 +402,9 @@ async fn dequeue_after_slash_dispatch(
     state: &HostPromptQueueState,
 ) -> Option<(msgqueue::QueuedCommand, CancellationToken)> {
     loop {
-        if state.shutdown.is_cancelled() { return None; }
+        if state.shutdown.is_cancelled() {
+            return None;
+        }
         wait_for_earlier_enqueues(state).await;
         let command = queue
             .dequeue_filtered(|command| {
@@ -405,7 +415,8 @@ async fn dequeue_after_slash_dispatch(
         state.pause_consumer().await;
         state.order.lock().unwrap().queued.remove(&command.uuid);
         let owner = state.owners.lock().unwrap().get(&command.uuid).cloned();
-        let cancel = owner.map_or_else(|| state.shutdown.child_token(), |owner| owner.child_token());
+        let cancel =
+            owner.map_or_else(|| state.shutdown.child_token(), |owner| owner.child_token());
         if cancel.is_cancelled() {
             continue;
         }
@@ -426,18 +437,33 @@ async fn drain_teammate_prompts(
         if cancel.is_cancelled() {
             continue;
         }
-        if let Some(host) = pending_slashes.loop_host.get() { host.refresh_session().await; }
-        let resolved = match pending_slashes.loop_host.get().map(|host| {
-            if command.source == msgqueue::QueueSource::Cron && !command.uuid.starts_with("loop-wakeup-") {
-                return host.resolve_scheduled(text).map(Some);
-            }
-            host.begin(
-            (command.source == msgqueue::QueueSource::Cron && command.uuid.starts_with("loop-wakeup-")).then_some(text),
-            command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
-        )}).transpose() {
+        if let Some(host) = pending_slashes.loop_host.get() {
+            host.refresh_session().await;
+        }
+        let resolved = match pending_slashes
+            .loop_host
+            .get()
+            .map(|host| {
+                if command.source == msgqueue::QueueSource::Cron
+                    && !command.uuid.starts_with("loop-wakeup-")
+                {
+                    return host.resolve_scheduled(text).map(Some);
+                }
+                host.begin(
+                    (command.source == msgqueue::QueueSource::Cron
+                        && command.uuid.starts_with("loop-wakeup-"))
+                    .then_some(text),
+                    command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
+                )
+            })
+            .transpose()
+        {
             Ok(resolved) => resolved.flatten(),
             Err(error) => {
-                let _ = turn_tx.send(tui::TurnEvent::SystemNotice { body: error.to_string(), is_error: true });
+                let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
+                    body: error.to_string(),
+                    is_error: true,
+                });
                 continue;
             }
         };
@@ -445,22 +471,30 @@ async fn drain_teammate_prompts(
         let _ = turn_tx.send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()));
         queue.register_active_turn(cancel.clone()).await;
         let cancel_probe = cancel.clone();
-        let result = if let Some(host) = pending_slashes.loop_host.get()
-            .filter(|_| command.source == msgqueue::QueueSource::Cron || command.uuid.starts_with("goal-retry-")) {
+        let result = if let Some(host) = pending_slashes.loop_host.get().filter(|_| {
+            command.source == msgqueue::QueueSource::Cron || command.uuid.starts_with("goal-retry-")
+        }) {
             host.run_scheduled(text, &command, cancel).await
         } else {
-            orchestrator.run_queued_turn_streaming(
-                text, cancel, command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
-            ).await.map(|_| ()).map_err(|error| error.to_string())
+            orchestrator
+                .run_queued_turn_streaming(
+                    text,
+                    cancel,
+                    command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         };
-        if let Err(error) = result
-        {
+        if let Err(error) = result {
             let _ = turn_tx.send(tui::TurnEvent::TextDelta(error.to_string()));
             let _ = turn_tx.send(tui::TurnEvent::TurnEnded(
                 platform_api::TurnOutcome::EndTurn,
             ));
         }
-        if let Some(host) = pending_slashes.loop_host.get() { host.finish(&cancel_probe).await; }
+        if let Some(host) = pending_slashes.loop_host.get() {
+            host.finish(&cancel_probe).await;
+        }
         queue.clear_active_turn().await;
     }
 }
@@ -836,10 +870,8 @@ pub(crate) fn ensure_live_messaging(
                 );
             }
         }
-    } else {
-        if let Some(name) = user_name.filter(|s| !s.is_empty()) {
-            platform_api::live_sessions::set_process_name(name);
-        }
+    } else if let Some(name) = user_name.filter(|s| !s.is_empty()) {
+        platform_api::live_sessions::set_process_name(name);
     }
     let mut derived_name: Option<String> = None;
     if platform_api::live_sessions::process_name()
@@ -1472,8 +1504,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
     }
     let loop_host = crate::loop_wakeup::CliLoopHost::bind(
-        &tui_build.runtime, prompt_queue.clone(), web_turn_tx.clone(), queue_cancel_reason.clone(),
-    ).await;
+        &tui_build.runtime,
+        prompt_queue.clone(),
+        web_turn_tx.clone(),
+        queue_cancel_reason.clone(),
+    )
+    .await;
     let _ = pending_slashes.loop_host.set(loop_host.clone());
     let submit_pending_slashes = pending_slashes.clone();
     let submit_queue = prompt_queue.clone();
@@ -1504,7 +1540,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     return;
                 };
                 cancel_reason.reset();
-                if let Some(host) = pending_slashes.loop_host.get() { host.refresh_session().await; let _ = host.begin(None, true); }
+                if let Some(host) = pending_slashes.loop_host.get() {
+                    host.refresh_session().await;
+                    let _ = host.begin(None, true);
+                }
                 let cancel_probe = cancel.clone();
                 // Image-aware entry: with no images this is byte-identical to
                 // `run_turn_streaming_with_cancel`; with pasted/attached images
@@ -1526,7 +1565,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         platform_api::TurnOutcome::EndTurn,
                     ));
                 }
-                if let Some(host) = pending_slashes.loop_host.get() { host.finish(&cancel_probe).await; }
+                if let Some(host) = pending_slashes.loop_host.get() {
+                    host.finish(&cancel_probe).await;
+                }
                 queue.clear_active_turn().await;
                 drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
             });
@@ -1741,10 +1782,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 .summarize_at(&message.to_string(), context.as_deref(), direction, cancel)
                 .await
             {
-                Ok(_summary) => (
-                    "Summarized (ctrl+o to see full summary)".to_string(),
-                    false,
-                ),
+                Ok(_summary) => ("Summarized (ctrl+o to see full summary)".to_string(), false),
                 // `Vo`'s catch renders `Failed to summarize:\n${msg}`; the
                 // per-class compaction mapping supplies the sentence, so a hook
                 // block or a cancel still reads the way `/compact` does.
@@ -2035,7 +2073,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
                     return;
                 };
-                if let Some(host) = pending_slashes.loop_host.get() { host.refresh_session().await; }
+                if let Some(host) = pending_slashes.loop_host.get() {
+                    host.refresh_session().await;
+                }
                 let prompt = slash_model_prompt(result, &tx);
                 if prompt.is_none() {
                     drop(completion);
@@ -2064,7 +2104,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 };
                 let prompt = prompt.unwrap();
                 cancel_reason.reset();
-                if let Some(host) = pending_slashes.loop_host.get() { host.refresh_session().await; let _ = host.begin(None, true); }
+                if let Some(host) = pending_slashes.loop_host.get() {
+                    host.refresh_session().await;
+                    let _ = host.begin(None, true);
+                }
                 let cancel_probe = token.clone();
                 if let Err(e) = orch
                     .run_turn_streaming_with_images(&prompt, &[], token)
@@ -2075,7 +2118,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         platform_api::TurnOutcome::EndTurn,
                     ));
                 }
-                if let Some(host) = pending_slashes.loop_host.get() { host.finish(&cancel_probe).await; }
+                if let Some(host) = pending_slashes.loop_host.get() {
+                    host.finish(&cancel_probe).await;
+                }
                 queue.clear_active_turn().await;
                 drop(completion);
                 drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
@@ -2445,7 +2490,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
         tokio::spawn(async move {
             loop {
                 tokio::select! { _ = shutdown.cancelled() => break, _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
-                if let Ok(_guard) = gate.try_lock() { drain_teammate_prompts(&queue, orch.as_ref(), &tx, &state).await; }
+                if let Ok(_guard) = gate.try_lock() {
+                    drain_teammate_prompts(&queue, orch.as_ref(), &tx, &state).await;
+                }
             }
         })
     };
@@ -2490,7 +2537,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
         Arc::new(move || {
             let host = host.clone();
             runtime.spawn(async move {
-                engine_desktop::loop_tools::cancel_dynamic_loop_on_user_abort(&host.scheduler).await;
+                engine_desktop::loop_tools::cancel_dynamic_loop_on_user_abort(&host.scheduler)
+                    .await;
             });
         }) as Arc<dyn Fn() + Send + Sync>
     };
@@ -2572,7 +2620,6 @@ pub(crate) async fn run_ratatui_with_initial_state(
         )) | Ok(Err(_))
             | Err(_)
     ) {
-        use platform_api::task_registry::TaskRegistryHandle as _;
         if let Ok(tasks) = platform_api::task_registry::TaskRegistryHandle::list(
             exit_task_registry.as_ref(),
             platform_api::task_registry::TaskListFilter::default(),
@@ -3548,7 +3595,10 @@ fn run_fusion_setup_action(
             // is configured, and claiming success here would let the next run
             // dispatch straight into the engine's `NotConfigured` refusal.
             let _ = turn_tx.send(TurnEvent::SystemNotice {
-                body: format!("✗ Could not save Fusion models to {}: {error}", path.display()),
+                body: format!(
+                    "✗ Could not save Fusion models to {}: {error}",
+                    path.display()
+                ),
                 is_error: true,
             });
         }
@@ -4758,7 +4808,8 @@ mod tests {
             .split_once("\n#[cfg(test)]\nmod tests")
             .map_or(SRC, |(prod, _)| prod);
 
-        let call = ".summarize_a".to_string() + "t(&message.to_string(), context.as_deref(), direction, cancel)";
+        let call = ".summarize_a".to_string()
+            + "t(&message.to_string(), context.as_deref(), direction, cancel)";
         assert_eq!(
             production.matches(&call).count(),
             1,
@@ -4789,16 +4840,30 @@ mod tests {
     async fn loop_queue_is_meta_later_and_shutdown_cancels_its_turn_token() {
         let queue = Arc::new(msgqueue::MessageQueueManager::new());
         let state = Arc::new(HostPromptQueueState::default());
-        queue.enqueue(msgqueue::QueuedCommand {
-            scheduled_task_id: None,
-            scheduled_fire_id: None,
-            uuid: "loop-wakeup-test".into(),
-            content: msgqueue::QueuedCommandContent::UserInput { text: "<<loop-file-dynamic>>".into() },
-            priority: msgqueue::QueuePriority::Later, queued_at: std::time::SystemTime::now(),
-            source: msgqueue::QueueSource::Cron, agent_id: None, skip_slash_commands: true, is_meta: true,
-        }).await;
+        queue
+            .enqueue(msgqueue::QueuedCommand {
+                scheduled_task_id: None,
+                scheduled_fire_id: None,
+                uuid: "loop-wakeup-test".into(),
+                content: msgqueue::QueuedCommandContent::UserInput {
+                    text: "<<loop-file-dynamic>>".into(),
+                },
+                priority: msgqueue::QueuePriority::Later,
+                queued_at: std::time::SystemTime::now(),
+                source: msgqueue::QueueSource::Cron,
+                agent_id: None,
+                skip_slash_commands: true,
+                is_meta: true,
+            })
+            .await;
         use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
-        assert!(TuiMsgQueueInput { queue: queue.clone(), state: state.clone() }.take_mid_turn_input().await.is_none());
+        assert!(TuiMsgQueueInput {
+            queue: queue.clone(),
+            state: state.clone()
+        }
+        .take_mid_turn_input()
+        .await
+        .is_none());
         let (command, cancel) = dequeue_after_slash_dispatch(&queue, &state).await.unwrap();
         assert_eq!(command.text(), Some("<<loop-file-dynamic>>"));
         assert!(command.is_meta && command.skip_slash_commands);
@@ -4832,7 +4897,9 @@ mod tests {
             _profile: Option<&str>,
         ) -> Result<(), platform_api::HandleError> {
             if model == "blocked-model" {
-                return Err(platform_api::HandleError::ActionFailed("blocked by hook".into()));
+                return Err(platform_api::HandleError::ActionFailed(
+                    "blocked by hook".into(),
+                ));
             }
             self.0.lock().unwrap().push(model.to_string());
             Ok(())

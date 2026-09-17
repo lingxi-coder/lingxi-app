@@ -1988,10 +1988,7 @@ fn a_single_suffix_match_is_named() {
 /// Several matches are listed instead, with the oracle's em-dash.
 #[test]
 fn several_suffix_matches_are_listed() {
-    let names = vec![
-        "b-plugin:deploy".to_string(),
-        "a-plugin:deploy".to_string(),
-    ];
+    let names = vec!["b-plugin:deploy".to_string(), "a-plugin:deploy".to_string()];
     assert_eq!(
         super::unknown_skill_suffix_hint("deploy", &names).as_deref(),
         Some(" Several skills match that name: a-plugin:deploy, b-plugin:deploy \u{2014} invoke one by its full name.")

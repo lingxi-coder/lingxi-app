@@ -448,7 +448,6 @@ impl FusionRunIdentity {
             parent_operation_id,
         }
     }
-
 }
 
 /// Immutable request/inheritance handoff consumed by `prepare`.
@@ -3141,9 +3140,7 @@ mod tests {
                 crate::prepared_from_oneshot(
                     submission,
                     timeout,
-                    move |_request, _inherit, _progress| async move {
-                        unimplemented!()
-                    },
+                    move |_request, _inherit, _progress| async move { unimplemented!() },
                 )
             }
         }

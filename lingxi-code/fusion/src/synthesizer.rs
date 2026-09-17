@@ -8,7 +8,12 @@ use crate::packing::{self, PackingError};
 use crate::panel::PanelInternal;
 use platform_api::subagent_output_guard::sanitize_blocks;
 use platform_api::{FusionAnalysis, FusionRequest};
-use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+use sidequery::{SideQueryClient, SideQueryError, SideQueryResponse};
+// Used only by the tests below. Kept at file scope behind `cfg(test)` so the
+// lib target carries no unused import (which `clippy --fix` deletes) while the
+// test module still reaches it through `use super::*`.
+#[cfg(test)]
+use sidequery::SideQueryRequest;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -120,8 +125,7 @@ pub(crate) async fn synthesize_registered(
                 return Err((SynthError::Failed, usage));
             }
             let sanitized = sanitize_blocks(&[raw.replace('\0', "")]).content.join("");
-            if crate::citations::validate_merged_citations(&sanitized, &allowed_citations)
-                .is_err()
+            if crate::citations::validate_merged_citations(&sanitized, &allowed_citations).is_err()
             {
                 return Err((SynthError::InvalidCitations, usage));
             }

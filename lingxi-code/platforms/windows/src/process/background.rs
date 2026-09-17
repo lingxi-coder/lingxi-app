@@ -240,7 +240,9 @@ pub(super) async fn run(
     #[cfg(windows)]
     let gated = super::supervisor_gate::enabled();
     #[cfg(windows)]
-    if gated { command.creation_flags(0x0000_0004); } // CREATE_SUSPENDED
+    if gated {
+        command.creation_flags(0x0000_0004);
+    } // CREATE_SUSPENDED
     let mut child = command.spawn().map_err(io_error)?;
     let pid = child
         .id()
@@ -257,9 +259,14 @@ pub(super) async fn run(
                 return Err(error);
             }
         }
-    } else { None };
+    } else {
+        None
+    };
 
-    if let Some((binding, sink)) = cmd.background_task().and_then(|binding| binding.on_exit.as_ref().map(|sink| (binding, sink))) {
+    if let Some((binding, sink)) = cmd
+        .background_task()
+        .and_then(|binding| binding.on_exit.as_ref().map(|sink| (binding, sink)))
+    {
         if let Err(error) = sink.on_spawn(&binding.task_id, pid).await {
             let _ = super::kill_tree::kill_tree_windows(pid).await;
             let _ = child.kill().await;
@@ -425,7 +432,9 @@ mod tests {
     impl BackgroundExitSink for Sink {
         async fn on_spawn(&self, id: &str, pid: u32) -> Result<(), ProcessError> {
             self.spawned.lock().unwrap().push((id.to_string(), pid));
-            if self.reject_spawn.load(std::sync::atomic::Ordering::SeqCst) { return Err(ProcessError::Io("birth identity unavailable".into())); }
+            if self.reject_spawn.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ProcessError::Io("birth identity unavailable".into()));
+            }
             Ok(())
         }
         fn manages_output(&self) -> bool {
@@ -463,13 +472,36 @@ mod tests {
     async fn windows_spawn_identity_callback_precedes_handoff_and_rejection_reaps_child() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let cmd = command("sleep 0.1; printf done", 5000, dir.path(), sink.clone(), Arc::new(tokio::sync::Notify::new()));
+        let cmd = command(
+            "sleep 0.1; printf done",
+            5000,
+            dir.path(),
+            sink.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+        );
         let handle = WindowsProcess::new().spawn_background(&cmd).await.unwrap();
-        assert_eq!(*sink.spawned.lock().unwrap(), vec![(handle.task_id.clone(), handle.pid)]);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async { while sink.exits.lock().unwrap().is_empty() { tokio::time::sleep(std::time::Duration::from_millis(10)).await; } }).await.unwrap();
+        assert_eq!(
+            *sink.spawned.lock().unwrap(),
+            vec![(handle.task_id.clone(), handle.pid)]
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while sink.exits.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         let rejected = Arc::new(Sink::default());
-        rejected.reject_spawn.store(true, std::sync::atomic::Ordering::SeqCst);
-        let cmd = command("exec sleep 60", 5000, dir.path(), rejected.clone(), Arc::new(tokio::sync::Notify::new()));
+        rejected
+            .reject_spawn
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let cmd = command(
+            "exec sleep 60",
+            5000,
+            dir.path(),
+            rejected.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+        );
         assert!(WindowsProcess::new().spawn_background(&cmd).await.is_err());
         let pid = rejected.spawned.lock().unwrap()[0].1;
         assert!(platform_api::live_sessions::process_start_identity(pid).is_none());

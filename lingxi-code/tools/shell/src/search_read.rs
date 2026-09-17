@@ -70,7 +70,7 @@ pub fn is_search_or_read_bash_command(command: &str) -> ReadSearchKind {
             "||" | "&&" | "|" | ";" => continue,
             _ => {}
         }
-        let base = match part.trim().split_whitespace().next() {
+        let base = match part.split_whitespace().next() {
             Some(b) => b,
             None => continue,
         };

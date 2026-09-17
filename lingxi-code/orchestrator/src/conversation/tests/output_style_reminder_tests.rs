@@ -252,7 +252,12 @@ async fn a_style_with_its_own_turn_reminder_renders_it_instead_of_the_fallback()
 async fn a_style_without_one_keeps_the_generic_reminder() {
     let orch = orch_with(config_with_style("Explanatory"));
     assert_eq!(
-        text_of(&orch.output_style_reminder_message().await.expect("reminder")),
+        text_of(
+            &orch
+                .output_style_reminder_message()
+                .await
+                .expect("reminder")
+        ),
         EXPLANATORY_REMINDER
     );
 }

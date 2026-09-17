@@ -310,12 +310,7 @@ mod tests {
 
     #[test]
     fn non_claude_models_keep_long_tool_prompts() {
-        for model in [
-            "gpt-5.5",
-            "deepseek-flash",
-            "gemini-3.5-flash",
-            "glm-5.1",
-        ] {
+        for model in ["gpt-5.5", "deepseek-flash", "gemini-3.5-flash", "glm-5.1"] {
             assert!(
                 !dh_simple_system_prompt(Some(model)),
                 "{model} must keep the full harness/tool prompt"

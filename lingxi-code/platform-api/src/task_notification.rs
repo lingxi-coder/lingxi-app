@@ -900,7 +900,10 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> String {
                 _ if meta.status_message.is_some() => format!("Task cancelled: {detail}"),
                 _ => "Task was cancelled by the server.".to_string(),
             };
-            let hint = meta.saved_hint.as_deref().filter(|hint| !hint.is_empty())
+            let hint = meta
+                .saved_hint
+                .as_deref()
+                .filter(|hint| !hint.is_empty())
                 .map_or(String::new(), |hint| format!("\n\n{}", escape_xml(hint)));
             let budget = MCP_RESULT_BUDGET_UTF16.saturating_sub(utf16_len(&hint));
             format!(
@@ -1146,7 +1149,13 @@ mod tests {
         let rendered = render_one(&n);
         assert!(rendered.contains("(server/tool)"));
         assert!(rendered.contains("[saved to /tmp/a&lt;&amp;&gt;.txt]"));
-        let result = rendered.split("<result>\n").nth(1).unwrap().split("\n</result>").next().unwrap();
+        let result = rendered
+            .split("<result>\n")
+            .nth(1)
+            .unwrap()
+            .split("\n</result>")
+            .next()
+            .unwrap();
         assert!(utf16_len(result) <= 100_000);
         assert!(result.ends_with("[saved to /tmp/a&lt;&amp;&gt;.txt]"));
     }

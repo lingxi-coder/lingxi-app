@@ -152,7 +152,10 @@ fn the_snapshot_gate_matches_the_oracle_truth_table() {
 
     // Absent: `SESSION_KIND === "bg" || !CLAUDE_CODE_SIMPLE`.
     assert!(O::snapshot_gate(None, true, true), "bg wins over simple");
-    assert!(!O::snapshot_gate(None, false, true), "simple alone disables");
+    assert!(
+        !O::snapshot_gate(None, false, true),
+        "simple alone disables"
+    );
     assert!(
         O::snapshot_gate(None, false, false),
         "the DEFAULT is on: 2.1.270 has no rollout flag left to wait for"

@@ -423,7 +423,7 @@ fn redirect_is_risky(s: Node, src: &[u8]) -> bool {
 
 /// `o(node)`: the innermost command node (skipping expansion subtrees and
 /// redirect children), returning the LAST such command found.
-fn find_command<'a>(s: Node<'a>) -> Option<Node<'a>> {
+fn find_command(s: Node<'_>) -> Option<Node<'_>> {
     if in_set(Z6S, s.kind()) {
         return None;
     }

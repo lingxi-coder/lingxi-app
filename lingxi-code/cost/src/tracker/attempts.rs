@@ -292,6 +292,9 @@ impl CostTracker {
             turn.wait().await;
             let mutation = worker_slot.mutation.clone();
             let result = tokio::spawn(async move {
+                // Moves the guard into this scope so it drops at the END of it. The lint sees
+                // a `_`-binding with no side effect; the side effect is the Drop deadline.
+                #[allow(clippy::no_effect_underscore_binding)]
                 let _profile_permit = profile_permit;
                 tracker
                     .persist_attempt_owned(id, mutation, publication)

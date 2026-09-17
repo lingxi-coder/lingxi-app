@@ -2268,9 +2268,8 @@ mod tests {
 
     #[test]
     fn description_and_prompt_texts_are_206_byte_exact() {
-        assert_eq!(
+        assert!(
             ENTER_WORKTREE_PROMPT.contains(".lingxi/worktrees/"),
-            true,
             "prompt must use the rebranded path segment"
         );
         assert!(!ENTER_WORKTREE_PROMPT.contains(".claude/worktrees/"));

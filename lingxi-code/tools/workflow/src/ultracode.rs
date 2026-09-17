@@ -39,7 +39,7 @@ impl UltracodeGate<'_> {
 }
 
 /// Cadence/keyword configuration frozen for a session.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct UltracodeConfig {
     /// Statsig/feature-flag cadence, if configured.
     pub feature_flag_cadence: Option<u32>,
@@ -47,16 +47,6 @@ pub struct UltracodeConfig {
     pub product_default_cadence: Option<u32>,
     /// Whether a literal keyword emits the sibling request attachment.
     pub keyword_trigger_enabled: bool,
-}
-
-impl Default for UltracodeConfig {
-    fn default() -> Self {
-        Self {
-            feature_flag_cadence: None,
-            product_default_cadence: None,
-            keyword_trigger_enabled: false,
-        }
-    }
 }
 
 impl UltracodeConfig {

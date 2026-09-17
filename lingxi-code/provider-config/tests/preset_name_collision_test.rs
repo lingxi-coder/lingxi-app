@@ -6,8 +6,8 @@
 //! clients decide whether to emit a provider entry based on the answer.
 
 use provider_config::{assemble, AssembleInputs};
-use std::collections::BTreeMap;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 fn inputs() -> AssembleInputs {
     AssembleInputs {

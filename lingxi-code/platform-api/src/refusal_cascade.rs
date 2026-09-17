@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(got.skipped_stages, chain(&["first"]));
     }
 
-    fn inputs<'a>(chain: Option<&'a [String]>) -> RouteInputs<'a> {
+    fn inputs(chain: Option<&[String]>) -> RouteInputs<'_> {
         RouteInputs {
             chain,
             armed_fallback_model: Some("armed"),

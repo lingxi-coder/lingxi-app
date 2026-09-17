@@ -209,13 +209,10 @@ pub fn is_bare_mcp_server_matcher(matcher: &str) -> bool {
     if !is_simple_pattern(matcher, true) {
         return false;
     }
-    matcher
-        .split(|c| c == '|' || c == ',')
-        .map(str::trim)
-        .any(|seg| {
-            seg.strip_prefix("mcp__")
-                .is_some_and(|rest| !rest.contains("__"))
-        })
+    matcher.split(['|', ',']).map(str::trim).any(|seg| {
+        seg.strip_prefix("mcp__")
+            .is_some_and(|rest| !rest.contains("__"))
+    })
 }
 
 /// Returns `true` if a hook's `if`-condition `if_condition` (a permission-rule

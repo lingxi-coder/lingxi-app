@@ -569,7 +569,7 @@ fn git_remote_show_is_dangerous(args: &[&str]) -> bool {
         .iter()
         .copied()
         .filter(|a| *a != "-n")
-        .chain(post.into_iter())
+        .chain(post)
         .collect();
     if positional.len() != 1 {
         return true;

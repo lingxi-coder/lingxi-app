@@ -123,7 +123,7 @@ pub fn permission_mode_from_cli_string(s: &str) -> PermissionMode {
         "bypassPermissions" => PermissionMode::BypassPermissions,
         "dontAsk" => PermissionMode::DontAsk,
         "auto" => PermissionMode::Auto,
-        _ => return PermissionMode::Default,
+        _ => PermissionMode::Default,
     }
 }
 

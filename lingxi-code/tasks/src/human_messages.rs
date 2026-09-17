@@ -136,11 +136,10 @@ impl TaskRegistry {
         if result.is_err() {
             let mut rows = self.tasks.write().await;
             let mut inboxes = self.human_messages.lock().unwrap();
-            if inboxes.get(&id).is_some_and(|inbox| inbox.epoch == epoch) {
-                if rows.contains_key(&id) {
-                    if let Some(previous) = previous {
-                        rows.insert(id.clone(), previous);
-                    }
+            if inboxes.get(&id).is_some_and(|inbox| inbox.epoch == epoch) && rows.contains_key(&id)
+            {
+                if let Some(previous) = previous {
+                    rows.insert(id.clone(), previous);
                 }
             }
             // Remove only the failed epoch's work; a later user message remains independent.

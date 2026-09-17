@@ -9,9 +9,11 @@ use command_api::{
 };
 
 pub mod batch_skill;
+pub mod checkup_skill;
 pub mod code_review_skill;
 pub mod cron_skill;
 pub mod dataviz_skill;
+pub mod debug_skill;
 pub mod deep_research_skill;
 pub mod explain_usage_skill;
 pub mod fewer_permission_prompts_skill;
@@ -23,8 +25,6 @@ pub mod simplify_skill;
 pub mod update_config_skill;
 pub mod verify_skill;
 pub mod workflow_authoring_skill;
-pub mod checkup_skill;
-pub mod debug_skill;
 
 /// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
 /// `bundledSkills.ts`).
@@ -260,9 +260,7 @@ fn register_debug_skill(reg: &mut CommandRegistry) {
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter {
-                allowed_tools: Some(
-                    ["Read", "Grep", "Glob"].map(str::to_string).to_vec(),
-                ),
+                allowed_tools: Some(["Read", "Grep", "Glob"].map(str::to_string).to_vec()),
                 ..CommandFrontmatter::default()
             },
             prompt_fn: Some(Arc::new(debug_skill::DebugPromptFn)),
@@ -439,6 +437,75 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
         menu_description: Some(
             "Repeat a prompt or command on an interval (e.g. /loop 5m /foo)".into(),
         ),
+        ..SlashCommand::default()
+    });
+}
+
+/// Register the `/update-config` bundled skill (reference registrar `cn`).
+///
+/// `allowedTools:["Read"]` and `userInvocable:!0`, both verbatim. The skill is
+/// model-invocable — its whole purpose is to be reached when the user asks for
+/// an automated behaviour that only a hook can deliver.
+fn register_update_config_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "update-config".into(),
+        description: update_config_skill::UPDATE_CONFIG_DESCRIPTION.into(),
+        menu_description: Some("Change settings: hooks, permissions, environment variables".into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                allowed_tools: Some(vec!["Read".to_string()]),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(update_config_skill::UpdateConfigPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
+/// Register the `keybindings-help` bundled skill (reference registrar `$o`).
+///
+/// `userInvocable:!1` — model-invocable ONLY. The user-facing route is the
+/// `/keybindings` command; this exists so a request like "rebind ctrl+s"
+/// reaches the model with the live tables attached.
+fn register_keybindings_help_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "keybindings-help".into(),
+        description: keybindings_help_skill::KEYBINDINGS_HELP_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                allowed_tools: Some(vec!["Read".to_string()]),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(keybindings_help_skill::KeybindingsHelpPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(false),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
+/// Register the `/explain-usage` bundled skill (reference registrar `Mo`).
+fn register_explain_usage_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "explain-usage".into(),
+        description: explain_usage_skill::EXPLAIN_USAGE_DESCRIPTION.into(),
+        menu_description: Some(
+            "See where this session\u{2019}s tokens went, in plain words".into(),
+        ),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(explain_usage_skill::ExplainUsagePromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
         ..SlashCommand::default()
     });
 }
@@ -859,73 +926,4 @@ mod tests {
             other => panic!("expected Bundled kind, got {other:?}"),
         }
     }
-}
-
-/// Register the `/update-config` bundled skill (reference registrar `cn`).
-///
-/// `allowedTools:["Read"]` and `userInvocable:!0`, both verbatim. The skill is
-/// model-invocable — its whole purpose is to be reached when the user asks for
-/// an automated behaviour that only a hook can deliver.
-fn register_update_config_skill(reg: &mut CommandRegistry) {
-    reg.register_command(SlashCommand {
-        name: "update-config".into(),
-        description: update_config_skill::UPDATE_CONFIG_DESCRIPTION.into(),
-        menu_description: Some("Change settings: hooks, permissions, environment variables".into()),
-        source: CommandSource::Bundled,
-        kind: SlashCommandKind::Bundled {
-            frontmatter: CommandFrontmatter {
-                allowed_tools: Some(vec!["Read".to_string()]),
-                ..CommandFrontmatter::default()
-            },
-            prompt_fn: Some(Arc::new(update_config_skill::UpdateConfigPromptFn)),
-        },
-        loaded_from: Some("bundled".into()),
-        user_invocable: Some(true),
-        has_user_specified_description: true,
-        ..SlashCommand::default()
-    });
-}
-
-/// Register the `keybindings-help` bundled skill (reference registrar `$o`).
-///
-/// `userInvocable:!1` — model-invocable ONLY. The user-facing route is the
-/// `/keybindings` command; this exists so a request like "rebind ctrl+s"
-/// reaches the model with the live tables attached.
-fn register_keybindings_help_skill(reg: &mut CommandRegistry) {
-    reg.register_command(SlashCommand {
-        name: "keybindings-help".into(),
-        description: keybindings_help_skill::KEYBINDINGS_HELP_DESCRIPTION.into(),
-        source: CommandSource::Bundled,
-        kind: SlashCommandKind::Bundled {
-            frontmatter: CommandFrontmatter {
-                allowed_tools: Some(vec!["Read".to_string()]),
-                ..CommandFrontmatter::default()
-            },
-            prompt_fn: Some(Arc::new(keybindings_help_skill::KeybindingsHelpPromptFn)),
-        },
-        loaded_from: Some("bundled".into()),
-        user_invocable: Some(false),
-        has_user_specified_description: true,
-        ..SlashCommand::default()
-    });
-}
-
-/// Register the `/explain-usage` bundled skill (reference registrar `Mo`).
-fn register_explain_usage_skill(reg: &mut CommandRegistry) {
-    reg.register_command(SlashCommand {
-        name: "explain-usage".into(),
-        description: explain_usage_skill::EXPLAIN_USAGE_DESCRIPTION.into(),
-        menu_description: Some(
-            "See where this session\u{2019}s tokens went, in plain words".into(),
-        ),
-        source: CommandSource::Bundled,
-        kind: SlashCommandKind::Bundled {
-            frontmatter: CommandFrontmatter::default(),
-            prompt_fn: Some(Arc::new(explain_usage_skill::ExplainUsagePromptFn)),
-        },
-        loaded_from: Some("bundled".into()),
-        user_invocable: Some(true),
-        has_user_specified_description: true,
-        ..SlashCommand::default()
-    });
 }

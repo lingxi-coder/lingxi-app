@@ -1911,7 +1911,7 @@ impl AgentTool {
         // dashboard joining started -> terminal on `invocation_id` showed
         // the invocation running forever and per-type failure counts
         // under-reported exactly the invalid-request class.
-        let mut request = match fusion_request_from_agent(
+        let request = match fusion_request_from_agent(
             self.ctx.main_loop_model_profile_provider.as_ref(),
             &parsed,
             &ctx,

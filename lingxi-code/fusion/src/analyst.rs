@@ -11,9 +11,12 @@ use platform_api::{
     DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
 };
 use serde_json::Value;
-use sidequery::{
-    SideQueryClient, SideQueryError, StrictStructuredQueryRequest, StrictStructuredQueryResponse,
-};
+use sidequery::{SideQueryClient, SideQueryError, StrictStructuredQueryResponse};
+// Used only by the tests below. Kept at file scope behind `cfg(test)` so the
+// lib target carries no unused import (which `clippy --fix` deletes) while the
+// test module still reaches it through `use super::*`.
+#[cfg(test)]
+use sidequery::StrictStructuredQueryRequest;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;

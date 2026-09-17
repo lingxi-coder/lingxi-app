@@ -41,7 +41,7 @@ pub(crate) fn resolve_stop_target(
         } else {
             for record in records.iter().filter(|r| {
                 r.task_type == "in_process_teammate"
-                    && r.teammate_name.as_deref().is_some_and(&matches)
+                    && r.teammate_name.as_deref().is_some_and(matches)
             }) {
                 if let Some(existing) = teammates
                     .iter_mut()

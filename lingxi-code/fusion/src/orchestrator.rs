@@ -1,7 +1,7 @@
 //! Fusion state machine. Implements [`platform_api::FusionExecutor`].
 
 use crate::analyst::{AnalystError, AnalystUsage};
-use crate::budget::{self, CapturedPriceBook, FusionPriceBook, FusionQuote, ReservationLease};
+use crate::budget::{self, FusionPriceBook, FusionQuote, ReservationLease};
 use crate::config::{FusionConfigSource, FusionRuntimeConfig};
 use crate::decision::{interpret, panel_by_id, successful, HostDecision};
 use crate::model_resolver::{self, ModelSource, ResolvedPanel, ResolvedSet};
@@ -15,11 +15,16 @@ use platform_api::{
     normalize_dimensions, FusionActivation, FusionAgentSurface, FusionAnalysis, FusionDecision,
     FusionError, FusionExecutor, FusionInheritance, FusionNeedsParentReason, FusionOrigin,
     FusionPreparedSummary, FusionPreset, FusionProgress, FusionRequest, FusionResult,
-    FusionRunControl, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunOutcome,
-    FusionStage, FusionStatus, FusionSubmission, FusionTiming, FusionUsage, PanelOutcome,
-    PanelRunStatus, PreparedFusionRun, FUSION_MIN_PANEL,
+    FusionRunControl, FusionRunFactsRecorder, FusionRunIdentity, FusionRunOutcome, FusionStage,
+    FusionStatus, FusionSubmission, FusionTiming, FusionUsage, PanelOutcome, PanelRunStatus,
+    PreparedFusionRun, FUSION_MIN_PANEL,
 };
 use sidequery::SideQueryClient;
+// Used only by the tests below. Kept at file scope behind `cfg(test)` so the
+// lib target carries no unused import (which `clippy --fix` deletes) while the
+// test module still reaches it through `use super::*`.
+#[cfg(test)]
+use platform_api::FusionRunId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -184,7 +189,10 @@ impl FusionOrchestrator {
 
     /// Attach trusted prepare-time physical-attempt accounting.
     #[must_use]
-    pub fn with_attempt_registrar(mut self, registrar: Arc<dyn crate::FusionAttemptRegistrar>) -> Self {
+    pub fn with_attempt_registrar(
+        mut self,
+        registrar: Arc<dyn crate::FusionAttemptRegistrar>,
+    ) -> Self {
         self.attempt_registrar = Some(registrar);
         self
     }
@@ -680,7 +688,9 @@ impl FusionOrchestrator {
             admission,
         )
         .await;
-        if let Some(fence) = &self.panel_fence { fence.close(); }
+        if let Some(fence) = &self.panel_fence {
+            fence.close();
+        }
         // Wrapper cancellation can detach runtime cancellation. Do not start
         // the analyst until the actual producers and their durable receipts
         // have drained; these tickets do not retain physical pool permits.
@@ -823,24 +833,36 @@ impl FusionOrchestrator {
         // Queue before any profile permit or monetary/output hold. A lease
         // remains local until every original panel consumes exactly one slot.
         let admission = if self.panel_admission {
-            Some(self.spawner.reserve_fusion_panel_group(
-                resolved.panels.len(), operational_deadline, inherit.cancel.clone(),
-            ).await.map_err(|error| {
-                if inherit.cancel.is_cancelled() { FusionError::Cancelled }
-                else { FusionError::PanelAdmissionRejected(error.to_string()) }
-            })?)
-        } else { None };
+            Some(
+                self.spawner
+                    .reserve_fusion_panel_group(
+                        resolved.panels.len(),
+                        operational_deadline,
+                        inherit.cancel.clone(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        if inherit.cancel.is_cancelled() {
+                            FusionError::Cancelled
+                        } else {
+                            FusionError::PanelAdmissionRejected(error.to_string())
+                        }
+                    })?,
+            )
+        } else {
+            None
+        };
         if let Some(quote) = &quote {
-        self.reserve_resolved(
-            quote,
-            &inherit,
-            &progress,
-            operational_deadline,
-            &lease_cell,
-            &settlement,
-            &facts,
-        )
-        .await?;
+            self.reserve_resolved(
+                quote,
+                &inherit,
+                &progress,
+                operational_deadline,
+                &lease_cell,
+                &settlement,
+                &facts,
+            )
+            .await?;
         }
         facts.set_resolved_panels(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
         Self::ensure_operational_time(operational_deadline)?;
@@ -1129,35 +1151,35 @@ impl FusionOrchestrator {
         // after having already been settled elsewhere — treat that as
         // already handled rather than panicking or double-committing.
         if self.attempt_run.is_none() {
-        usage.reserved_max_nano_usd = lease_cell
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|lease| lease.quote().reserved_nano_usd))
-            .unwrap_or_default();
-        let (priced_nano_usd, priced_estimated) = price_realized_usage(
-            self.catalog.as_ref(),
-            self.prices.as_ref(),
-            panels,
-            &resolved.analyst,
-            priced_analyst.as_ref().map(|(u, calls)| (u, *calls)),
-            analyst_attempted,
-            &resolved.synthesizer.profile,
-            &resolved.synthesizer.model,
-            priced_synth.as_ref(),
-            synth_attempted,
-            &request.prompt,
-        );
-        usage.realized_nano_usd = priced_nano_usd;
-        // Round-3 review finding 10: `analyst_usage_incomplete` catches the
-        // case `price_realized_usage` cannot see on its own —
-        // `priced_analyst` carrying REAL, non-empty usage that is still
-        // known-short (a billed `InvalidResponse` attempt whose tokens
-        // could not be captured, or an earlier attempt priced in place of a
-        // discarded failure — see finding 8). Without this, `price_component`
-        // succeeds on the real-but-short figure and `priced_estimated` never
-        // fires, so the run would claim `estimated: false` over a number
-        // that is silently missing real, already-billed spend.
-        usage.estimated = usage.estimated || priced_estimated || analyst_usage_incomplete;
+            usage.reserved_max_nano_usd = lease_cell
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|lease| lease.quote().reserved_nano_usd))
+                .unwrap_or_default();
+            let (priced_nano_usd, priced_estimated) = price_realized_usage(
+                self.catalog.as_ref(),
+                self.prices.as_ref(),
+                panels,
+                &resolved.analyst,
+                priced_analyst.as_ref().map(|(u, calls)| (u, *calls)),
+                analyst_attempted,
+                &resolved.synthesizer.profile,
+                &resolved.synthesizer.model,
+                priced_synth.as_ref(),
+                synth_attempted,
+                &request.prompt,
+            );
+            usage.realized_nano_usd = priced_nano_usd;
+            // Round-3 review finding 10: `analyst_usage_incomplete` catches the
+            // case `price_realized_usage` cannot see on its own —
+            // `priced_analyst` carrying REAL, non-empty usage that is still
+            // known-short (a billed `InvalidResponse` attempt whose tokens
+            // could not be captured, or an earlier attempt priced in place of a
+            // discarded failure — see finding 8). Without this, `price_component`
+            // succeeds on the real-but-short figure and `priced_estimated` never
+            // fires, so the run would claim `estimated: false` over a number
+            // that is silently missing real, already-billed spend.
+            usage.estimated = usage.estimated || priced_estimated || analyst_usage_incomplete;
         }
         let facts = control.facts();
         if self.attempt_run.is_none() {
@@ -1171,9 +1193,7 @@ impl FusionOrchestrator {
         // intact instead of detaching settlement through Drop.
         let lease = lease_cell.lock().ok().and_then(|mut guard| guard.take());
         if let Some(lease) = lease {
-            if let Err(error) = lease.commit(usage.realized_nano_usd).await {
-                return Err(error);
-            }
+            lease.commit(usage.realized_nano_usd).await?
         }
 
         let timing = FusionTiming {
@@ -1196,17 +1216,24 @@ impl FusionOrchestrator {
             egress_profiles: egress,
         };
         if self.attempt_run.is_none() {
-        self.emit_completed(
-            request,
-            (panels.len(), successful(panels).len(), panels.iter().filter(|panel| panel.status != PanelRunStatus::Completed).count()),
-            &result.run_id,
-            &result.usage,
-            &result.egress_profiles,
-            &result.decision,
-            &result.timing,
-            control.deadline(),
-        )
-        .await;
+            self.emit_completed(
+                request,
+                (
+                    panels.len(),
+                    successful(panels).len(),
+                    panels
+                        .iter()
+                        .filter(|panel| panel.status != PanelRunStatus::Completed)
+                        .count(),
+                ),
+                &result.run_id,
+                &result.usage,
+                &result.egress_profiles,
+                &result.decision,
+                &result.timing,
+                control.deadline(),
+            )
+            .await;
         }
 
         Ok(result)
@@ -1234,7 +1261,11 @@ impl FusionOrchestrator {
         };
         let mut completion_md = fusion_event_metadata(request);
         completion_md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-        for (key, count) in [("panel_count", panel_counts.0), ("panel_success_count", panel_counts.1), ("panel_failed_count", panel_counts.2)] {
+        for (key, count) in [
+            ("panel_count", panel_counts.0),
+            ("panel_success_count", panel_counts.1),
+            ("panel_failed_count", panel_counts.2),
+        ] {
             completion_md.insert(key.into(), AnalyticsValue::Int(saturating_i64(count)));
         }
         add_usage_metadata(&mut completion_md, usage);
@@ -1611,7 +1642,7 @@ impl FusionOrchestrator {
         request: &FusionRequest,
         resolved: &ResolvedSet,
         panels: &[PanelInternal],
-        started: Instant,
+        _started: Instant,
         resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
         stage_settlement: &StageSettlement<'_>,
     ) -> (
@@ -1903,7 +1934,7 @@ impl FusionOrchestrator {
         panels: &[PanelInternal],
         progress: &Option<Sender<FusionProgress>>,
         run_id: &str,
-        started: Instant,
+        _started: Instant,
         usage: &mut FusionUsage,
         priced_synth: &mut Option<cost::Usage>,
         synth_attempted: &mut bool,
@@ -2197,10 +2228,19 @@ impl FusionOrchestrator {
         // cannot prove settlement or manufacture a replacement usage summary.
         let settled = CatchPanicFuture {
             inner: Box::pin(async move { finalizer.finish().wait().await }),
-        }.await;
+        }
+        .await;
         let (summary, status) = match settled {
-            Ok(Ok(summary)) => (summary, platform_api::FusionAttemptSettlementStatus::Settled),
-            Ok(Err(failure)) => (failure.summary, platform_api::FusionAttemptSettlementStatus::Failed { reason: failure.error.to_string() }),
+            Ok(Ok(summary)) => (
+                summary,
+                platform_api::FusionAttemptSettlementStatus::Settled,
+            ),
+            Ok(Err(failure)) => (
+                failure.summary,
+                platform_api::FusionAttemptSettlementStatus::Failed {
+                    reason: failure.error.to_string(),
+                },
+            ),
             Err(()) => {
                 facts.set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
                     reason: "attempt settlement owner panicked".into(),
@@ -2210,7 +2250,10 @@ impl FusionOrchestrator {
         };
         facts.replace_usage(summary.usage.clone(), summary.usage.estimated);
         facts.replace_attempts(Some(summary.usage.provider_requests));
-        facts.replace_egress(summary.confirmed_egress.clone(), summary.possible_egress.clone());
+        facts.replace_egress(
+            summary.confirmed_egress.clone(),
+            summary.possible_egress.clone(),
+        );
         facts.set_attempt_settlement(status);
         Some(summary)
     }
@@ -2328,40 +2371,57 @@ impl FusionOrchestrator {
         // JoinSet drain. It is now safe to seal the facts and settlement.
         if let Some(finalizer) = attempt_finalizer {
             if let Some(summary) = Self::settle_registered_attempts(finalizer, &facts).await {
-            if let Ok(result) = &mut outcome {
-                result.usage = summary.usage;
-                result.egress_profiles = summary.confirmed_egress;
-                result.egress_profiles.extend(summary.possible_egress);
-                result.egress_profiles.sort();
-                result.egress_profiles.dedup();
-                let stage = match result.status {
-                    FusionStatus::Completed => FusionStage::Completed,
-                    FusionStatus::NeedsParent => FusionStage::NeedsParent,
-                };
-                progress::emit(&progress, stage.clone(), None, stage.label());
-                let completed = result.panels.iter().filter(|panel| panel.status == PanelRunStatus::Completed).count();
-                self.emit_completed(&request, (result.panels.len(), completed, result.panels.len() - completed),
-                    &result.run_id, &result.usage, &result.egress_profiles, &result.decision, &result.timing, Some(deadline)).await;
-            }
+                if let Ok(result) = &mut outcome {
+                    result.usage = summary.usage;
+                    result.egress_profiles = summary.confirmed_egress;
+                    result.egress_profiles.extend(summary.possible_egress);
+                    result.egress_profiles.sort();
+                    result.egress_profiles.dedup();
+                    let stage = match result.status {
+                        FusionStatus::Completed => FusionStage::Completed,
+                        FusionStatus::NeedsParent => FusionStage::NeedsParent,
+                    };
+                    progress::emit(&progress, stage.clone(), None, stage.label());
+                    let completed = result
+                        .panels
+                        .iter()
+                        .filter(|panel| panel.status == PanelRunStatus::Completed)
+                        .count();
+                    self.emit_completed(
+                        &request,
+                        (
+                            result.panels.len(),
+                            completed,
+                            result.panels.len() - completed,
+                        ),
+                        &result.run_id,
+                        &result.usage,
+                        &result.egress_profiles,
+                        &result.decision,
+                        &result.timing,
+                        Some(deadline),
+                    )
+                    .await;
+                }
             }
         }
         if let Err(error) = &outcome {
             if self.attempt_run.is_none() {
-            let priced = settlement
-                .lock()
-                .ok()
-                .and_then(|guard| *guard)
-                .unwrap_or((0, false));
-            if let Some(lease) = lease_cell.lock().ok().and_then(|mut guard| guard.take()) {
-                let _ = lease.commit(priced.0).await;
-            }
-            let snapshot = facts.snapshot();
-            let mut usage = snapshot.usage.clone().unwrap_or_default();
-            usage.realized_nano_usd = priced.0;
-            let any_dispatch = snapshot.dispatched_panels.is_some_and(|count| count > 0);
-            usage.estimated |= priced.1 && any_dispatch;
-            let usage_incomplete = snapshot.usage_incomplete || usage.estimated;
-            facts.replace_usage(usage, usage_incomplete);
+                let priced = settlement
+                    .lock()
+                    .ok()
+                    .and_then(|guard| *guard)
+                    .unwrap_or((0, false));
+                if let Some(lease) = lease_cell.lock().ok().and_then(|mut guard| guard.take()) {
+                    let _ = lease.commit(priced.0).await;
+                }
+                let snapshot = facts.snapshot();
+                let mut usage = snapshot.usage.clone().unwrap_or_default();
+                usage.realized_nano_usd = priced.0;
+                let any_dispatch = snapshot.dispatched_panels.is_some_and(|count| count > 0);
+                usage.estimated |= priced.1 && any_dispatch;
+                let usage_incomplete = snapshot.usage_incomplete || usage.estimated;
+                facts.replace_usage(usage, usage_incomplete);
             }
             let snapshot = facts.snapshot();
             let mut timing = snapshot.timing;
@@ -2436,13 +2496,17 @@ impl FusionExecutor for FusionOrchestrator {
         let captured_prices = runtime_snapshot.prices.clone();
         // Quote during preparation so an invalid price/configuration fails
         // before TaskCreated. The actual reservation remains activation-only.
-        let quote = if self.attempt_registrar.is_none() { Some(budget::quote(
-            &config,
-            &resolved,
-            &catalog_snapshot,
-            &captured_prices,
-            inherit.budget().max_session_nano_usd().is_some(),
-        )?) } else { None };
+        let quote = if self.attempt_registrar.is_none() {
+            Some(budget::quote(
+                &config,
+                &resolved,
+                &catalog_snapshot,
+                &captured_prices,
+                inherit.budget().max_session_nano_usd().is_some(),
+            )?)
+        } else {
+            None
+        };
         let runtime_snapshot = Arc::new(runtime_snapshot);
         let duration_ms = inherit
             .effective_timeout_ms
@@ -2457,7 +2521,11 @@ impl FusionExecutor for FusionOrchestrator {
             duration_ms,
             inherit.cancel.clone(),
             FusionRunFactsRecorder::default(),
-            if self.attempt_registrar.is_some() { platform_api::ModelAttemptBillingMode::MeteredAttempts } else { platform_api::ModelAttemptBillingMode::LegacyAggregate },
+            if self.attempt_registrar.is_some() {
+                platform_api::ModelAttemptBillingMode::MeteredAttempts
+            } else {
+                platform_api::ModelAttemptBillingMode::LegacyAggregate
+            },
         );
         let facts = control.facts();
         facts.set_resolved_panels(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
@@ -2469,16 +2537,27 @@ impl FusionExecutor for FusionOrchestrator {
         let mut snapshot_orchestrator = (*self).clone();
         snapshot_orchestrator.catalog = Arc::new(catalog_snapshot);
         snapshot_orchestrator.prices = Arc::new(captured_prices);
-        let registration = self.attempt_registrar.as_ref().map(|registrar| {
-            registrar.register(crate::FusionAttemptRegistration {
-                control: control.clone(), inherit: inherit.clone(), request: request.clone(),
-                resolved: resolved.clone(), snapshot: runtime_snapshot.clone(),
-                live_policy: Arc::new(crate::attempts::CapturedLivePolicy {
-                    control: control.clone(), request: request.clone(), resolved: resolved.clone(),
-                    snapshot: runtime_snapshot.clone(), config: self.config_source.clone(), catalog: live_catalog.clone(),
-                }),
+        let registration = self
+            .attempt_registrar
+            .as_ref()
+            .map(|registrar| {
+                registrar.register(crate::FusionAttemptRegistration {
+                    control: control.clone(),
+                    inherit: inherit.clone(),
+                    request: request.clone(),
+                    resolved: resolved.clone(),
+                    snapshot: runtime_snapshot.clone(),
+                    live_policy: Arc::new(crate::attempts::CapturedLivePolicy {
+                        control: control.clone(),
+                        request: request.clone(),
+                        resolved: resolved.clone(),
+                        snapshot: runtime_snapshot.clone(),
+                        config: self.config_source.clone(),
+                        catalog: live_catalog.clone(),
+                    }),
+                })
             })
-        }).transpose()?;
+            .transpose()?;
         let attempt_finalizer = registration.map(|registered| {
             snapshot_orchestrator.panel_fence = registered.panel_fence;
             snapshot_orchestrator.attempt_run = Some(registered.run);
@@ -2614,62 +2693,61 @@ impl FusionExecutor for FusionOrchestrator {
 /// reached from outside the crate.
 #[cfg(test)]
 impl FusionOrchestrator {
-        pub(crate) async fn run(
-            &self,
-            request: FusionRequest,
-            inherit: FusionInheritance,
-            progress: Option<Sender<FusionProgress>>,
-        ) -> Result<FusionResult, FusionError> {
-            self.run_scoped(request, None, inherit, progress).await
-        }
+    pub(crate) async fn run(
+        &self,
+        request: FusionRequest,
+        inherit: FusionInheritance,
+        progress: Option<Sender<FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.run_scoped(request, None, inherit, progress).await
+    }
 
-        /// The same path bound to a session, for the tests that assert
-        /// scoped-ledger behaviour.
-        pub(crate) async fn run_scoped(
-            &self,
-            request: FusionRequest,
-            session_id: Option<protocol::SessionId>,
-            inherit: FusionInheritance,
-            progress: Option<Sender<FusionProgress>>,
-        ) -> Result<FusionResult, FusionError> {
-            // Routed through the same immutable preparation snapshot and owned
-            // supervisor every host uses.
-            let request_for_failure = request.clone();
-            let parent_operation_id = if request.origin == FusionOrigin::Workflow {
-                request.workflow_run_id.clone()
-            } else {
-                None
-            };
-            let identity = FusionRunIdentity::new(
-                FusionRunId::generated(),
-                session_id,
-                request.origin,
-                parent_operation_id,
-            );
-            let run_id = identity.run_id.to_string();
-            let submission = match FusionSubmission::new(request, inherit, identity) {
-                Ok(submission) => submission,
-                Err(error) => {
-                    self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
-                        .await;
-                    return Err(error);
-                }
-            };
-            let prepared = match Arc::new(self.clone()).prepare(submission) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
-                        .await;
-                    return Err(error);
-                }
-            };
-            prepared
-                .activate(FusionActivation::now(), progress)
-                .await
-                .result
-        }
+    /// The same path bound to a session, for the tests that assert
+    /// scoped-ledger behaviour.
+    pub(crate) async fn run_scoped(
+        &self,
+        request: FusionRequest,
+        session_id: Option<protocol::SessionId>,
+        inherit: FusionInheritance,
+        progress: Option<Sender<FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        // Routed through the same immutable preparation snapshot and owned
+        // supervisor every host uses.
+        let request_for_failure = request.clone();
+        let parent_operation_id = if request.origin == FusionOrigin::Workflow {
+            request.workflow_run_id.clone()
+        } else {
+            None
+        };
+        let identity = FusionRunIdentity::new(
+            FusionRunId::generated(),
+            session_id,
+            request.origin,
+            parent_operation_id,
+        );
+        let run_id = identity.run_id.to_string();
+        let submission = match FusionSubmission::new(request, inherit, identity) {
+            Ok(submission) => submission,
+            Err(error) => {
+                self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
+                    .await;
+                return Err(error);
+            }
+        };
+        let prepared = match Arc::new(self.clone()).prepare(submission) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
+                    .await;
+                return Err(error);
+            }
+        };
+        prepared
+            .activate(FusionActivation::now(), progress)
+            .await
+            .result
+    }
 }
-
 
 fn validate_request(mut request: FusionRequest) -> Result<FusionRequest, FusionError> {
     if request.prompt.trim().is_empty() {
@@ -2993,7 +3071,9 @@ impl StageSettlement<'_> {
         synth_attempted: bool,
         analyst_usage_incomplete: bool,
     ) {
-        if self.facts.snapshot().attempt_settlement.is_some() { return; }
+        if self.facts.snapshot().attempt_settlement.is_some() {
+            return;
+        }
         let mut output_tokens = aggregate_panel_usage(self.panels).output_tokens;
         if let Some((usage, _)) = analyst_usage {
             output_tokens = output_tokens.saturating_add(usage.tokens.output);

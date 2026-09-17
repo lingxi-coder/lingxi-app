@@ -908,12 +908,11 @@ present this turn, the skill is loaded — follow it directly rather than callin
             Ok(None) => {
                 // A bare name can be the tail of a plugin-qualified one, so the
                 // miss says which full name to use rather than just refusing.
-                let hint = unknown_skill_suffix_hint(
-                    &normalized,
-                    &self.loader.list_names().await,
-                )
-                .unwrap_or_default();
-                Err(ValidationError(format!("Unknown skill: {normalized}{hint}")))
+                let hint = unknown_skill_suffix_hint(&normalized, &self.loader.list_names().await)
+                    .unwrap_or_default();
+                Err(ValidationError(format!(
+                    "Unknown skill: {normalized}{hint}"
+                )))
             }
             // Loader I/O failure — surface verbatim; not one of the locked
             // contract strings.

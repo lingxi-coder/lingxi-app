@@ -310,8 +310,8 @@ pub fn estimate_keep_recent(
         .collect();
     let clear_set: HashSet<protocol::ToolUseId> = compactable_ids
         .iter()
+        .filter(|&id| !keep_set.contains(id))
         .cloned()
-        .filter(|id| !keep_set.contains(id))
         .collect();
 
     let mut cleared_count = 0usize;
@@ -467,18 +467,14 @@ impl Microcompactor {
                                     // `lCt`: a media-carrying result always
                                     // takes the plain placeholder, even when a
                                     // reference exists for it.
-                                    let replacement = if has_media_blocks(
-                                        media_blocks_of(&b).as_deref(),
-                                    ) {
-                                        TIME_BASED_MC_CLEARED_MESSAGE.to_string()
-                                    } else {
-                                        persisted
-                                            .get(tool_use_id)
-                                            .cloned()
-                                            .unwrap_or_else(|| {
-                                                TIME_BASED_MC_CLEARED_MESSAGE.to_string()
-                                            })
-                                    };
+                                    let replacement =
+                                        if has_media_blocks(media_blocks_of(&b).as_deref()) {
+                                            TIME_BASED_MC_CLEARED_MESSAGE.to_string()
+                                        } else {
+                                            persisted.get(tool_use_id).cloned().unwrap_or_else(
+                                                || TIME_BASED_MC_CLEARED_MESSAGE.to_string(),
+                                            )
+                                        };
                                     return ContentBlock::ToolResult {
                                         tool_use_id: tool_use_id.clone(),
                                         content: replacement,
@@ -902,7 +898,10 @@ mod tests {
         let mut msgs = Vec::new();
         for i in 0..6 {
             msgs.push(assistant_tool_use("Bash", ToolUseId::from(format!("t{i}"))));
-            msgs.push(user_tool_result(ToolUseId::from(format!("t{i}")), &format!("body-{i}")));
+            msgs.push(user_tool_result(
+                ToolUseId::from(format!("t{i}")),
+                &format!("body-{i}"),
+            ));
         }
         let got = keep_recent_persist_candidates(&msgs, 2);
         let ids: Vec<&str> = got.iter().map(|(id, _)| id.as_str()).collect();
@@ -934,11 +933,7 @@ mod tests {
                 ..TimeBasedMCConfig::default()
             },
         };
-        let out = compactor.compact_with_persisted(
-            msgs,
-            SystemTime::now(),
-            &persisted,
-        );
+        let out = compactor.compact_with_persisted(msgs, SystemTime::now(), &persisted);
         let cleared: Vec<String> = out
             .messages
             .iter()
@@ -977,7 +972,9 @@ mod tests {
         // a reference exists for them.
         let blocks = vec![serde_json::json!({"type": "image"})];
         assert!(has_media_blocks(Some(&blocks)));
-        assert!(!has_media_blocks(Some(&[serde_json::json!({"type": "text"})])));
+        assert!(!has_media_blocks(Some(&[
+            serde_json::json!({"type": "text"})
+        ])));
         assert!(!has_media_blocks(None));
 
         let mut msgs = Vec::new();

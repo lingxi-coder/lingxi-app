@@ -207,10 +207,19 @@ pub(crate) fn open_rooted_search_file(
     // A direct-file Grep has no relative components below its search root.
     // Pin its parent directory and open the approved leaf without following it.
     if candidate == search_root {
-        let parent = candidate.parent().ok_or(SearchResolutionError::SearchRootChanged)?;
-        let filename = candidate.file_name().ok_or(SearchResolutionError::SearchRootChanged)?;
-        return platform_api::rooted_fs::open_file_after_permission(parent, Path::new(filename), candidate, candidate)
-            .map_err(|_| SearchResolutionError::SearchRootChanged);
+        let parent = candidate
+            .parent()
+            .ok_or(SearchResolutionError::SearchRootChanged)?;
+        let filename = candidate
+            .file_name()
+            .ok_or(SearchResolutionError::SearchRootChanged)?;
+        return platform_api::rooted_fs::open_file_after_permission(
+            parent,
+            Path::new(filename),
+            candidate,
+            candidate,
+        )
+        .map_err(|_| SearchResolutionError::SearchRootChanged);
     }
     let relative = candidate
         .strip_prefix(search_root)
@@ -344,12 +353,73 @@ pub(crate) struct TaskOutputTestRegistry(pub std::path::PathBuf);
 #[cfg(test)]
 #[async_trait::async_trait]
 impl platform_api::task_registry::TaskRegistryHandle for TaskOutputTestRegistry {
-    async fn task_output_directory(&self) -> Option<String> { Some(self.0.to_string_lossy().into_owned()) }
-    async fn create(&self, _: platform_api::task_registry::TaskCreateInput) -> Result<platform_api::task_registry::TaskRecord, platform_api::task_registry::TaskRegistryError> { unreachable!() }
-    async fn get(&self, _: &str) -> Result<Option<platform_api::task_registry::TaskRecord>, platform_api::task_registry::TaskRegistryError> { Ok(None) }
-    async fn list(&self, _: platform_api::task_registry::TaskListFilter) -> Result<Vec<platform_api::task_registry::TaskRecord>, platform_api::task_registry::TaskRegistryError> { Ok(vec![]) }
-    async fn update(&self, _: &str, _: platform_api::task_registry::TaskUpdatePatch) -> Result<platform_api::task_registry::TaskRecord, platform_api::task_registry::TaskRegistryError> { unreachable!() }
-    async fn set_status(&self, _: &str, _: &str) -> Result<platform_api::task_registry::TaskRecord, platform_api::task_registry::TaskRegistryError> { unreachable!() }
-    async fn kill(&self, _: &str) -> Result<platform_api::task_registry::TaskRecord, platform_api::task_registry::TaskRegistryError> { unreachable!() }
-    async fn output(&self, _: &str, _: Option<u64>) -> Result<platform_api::task_registry::TaskOutputChunk, platform_api::task_registry::TaskRegistryError> { unreachable!() }
+    async fn task_output_directory(&self) -> Option<String> {
+        Some(self.0.to_string_lossy().into_owned())
+    }
+    async fn create(
+        &self,
+        _: platform_api::task_registry::TaskCreateInput,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn get(
+        &self,
+        _: &str,
+    ) -> Result<
+        Option<platform_api::task_registry::TaskRecord>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        Ok(None)
+    }
+    async fn list(
+        &self,
+        _: platform_api::task_registry::TaskListFilter,
+    ) -> Result<
+        Vec<platform_api::task_registry::TaskRecord>,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        Ok(vec![])
+    }
+    async fn update(
+        &self,
+        _: &str,
+        _: platform_api::task_registry::TaskUpdatePatch,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn set_status(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn kill(
+        &self,
+        _: &str,
+    ) -> Result<
+        platform_api::task_registry::TaskRecord,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
+    async fn output(
+        &self,
+        _: &str,
+        _: Option<u64>,
+    ) -> Result<
+        platform_api::task_registry::TaskOutputChunk,
+        platform_api::task_registry::TaskRegistryError,
+    > {
+        unreachable!()
+    }
 }

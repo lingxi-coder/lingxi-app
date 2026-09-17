@@ -99,10 +99,15 @@ fn natural_terminal_receipt(state: &TaskState, status: &str) -> Value {
     // uln passes the final text (or description fallback); MRe passes the
     // failure text. Other state variants have no stored terminal summary.
     let summary = match state {
-        TaskState::LocalAgent(agent) if status == "completed" => agent.outcome.result.as_deref().filter(|text| !text.is_empty()),
+        TaskState::LocalAgent(agent) if status == "completed" => agent
+            .outcome
+            .result
+            .as_deref()
+            .filter(|text| !text.is_empty()),
         TaskState::LocalAgent(agent) if status == "failed" => agent.error.as_deref(),
         _ => None,
-    }.unwrap_or(&base.description);
+    }
+    .unwrap_or(&base.description);
     let mut event = json!({
         "type": "system", "subtype": "task_notification", "task_id": base.id,
         "status": status, "summary": summary,
@@ -207,7 +212,14 @@ impl TaskWriteGuard<'_> {
     pub(crate) fn checkpoint(&mut self) {
         self.emit_changes();
         if self.before.is_some() {
-            self.before = Some(self.rows.iter().filter_map(|(id, state)| project(state, false).map(|projection| (id.clone(), projection))).collect());
+            self.before = Some(
+                self.rows
+                    .iter()
+                    .filter_map(|(id, state)| {
+                        project(state, false).map(|projection| (id.clone(), projection))
+                    })
+                    .collect(),
+            );
         }
     }
 
@@ -283,5 +295,7 @@ impl TaskWriteGuard<'_> {
 }
 
 impl Drop for TaskWriteGuard<'_> {
-    fn drop(&mut self) { self.emit_changes(); }
+    fn drop(&mut self) {
+        self.emit_changes();
+    }
 }

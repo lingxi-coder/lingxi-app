@@ -236,6 +236,12 @@ pub fn classify_api_error_interruption(
     }
 }
 
+/// X7n/eps model-facing retry prompt.
+pub fn retry_body(condition: &str, cause: RetryCause) -> String {
+    let goal = super::sanitize::escape_reminder_html(condition);
+    format!("Goal check-in: «{goal}» is still active. The last turn ended before the goal could be evaluated: {}. Continue toward the goal.", cause.text())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,10 +457,4 @@ mod tests {
             );
         }
     }
-}
-
-/// X7n/eps model-facing retry prompt.
-pub fn retry_body(condition: &str, cause: RetryCause) -> String {
-    let goal = super::sanitize::escape_reminder_html(condition);
-    format!("Goal check-in: «{goal}» is still active. The last turn ended before the goal could be evaluated: {}. Continue toward the goal.", cause.text())
 }

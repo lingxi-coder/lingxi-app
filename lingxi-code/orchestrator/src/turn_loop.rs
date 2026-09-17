@@ -2028,13 +2028,8 @@ pub(crate) fn goal_cleared_after_error_message(label: &str, condition: &str) -> 
 /// Reached only from the `else` arm of `goal_clear_bucket`, so the clear tier
 /// keeps its existing behaviour untouched.
 ///
-async fn announce_goal_interruption(
-    orch: &ConversationOrchestrator,
-    reason: GoalClearReason<'_>,
-) {
-    use crate::prompt::goal_interruption::{
-        classify_api_error_interruption,
-    };
+async fn announce_goal_interruption(orch: &ConversationOrchestrator, reason: GoalClearReason<'_>) {
+    use crate::prompt::goal_interruption::classify_api_error_interruption;
     let GoalClearReason::ApiError {
         error_kind,
         is_transient,
@@ -4085,7 +4080,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             event = orch_events::HOOK_PRE_STARTED,
             tool_name = %name,
         );
-        telemetry::otel::emit_hook_lifecycle("pre", "started", &name, None);
+        telemetry::otel::emit_hook_lifecycle("pre", "started", name, None);
         let pre_agg = orch.hooks.execute(pre_event, hook_ctx.clone()).await;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
@@ -4106,7 +4101,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // byte-faithful to claude-code's reject message). On ACCEPT the
         // validated string is emitted through the output bridge to the active
         // TUI terminal (`BEo`). No-op when no hook set it.
-        apply_terminal_sequence(orch, &name, pre_agg.terminal_sequence.as_deref()).await;
+        apply_terminal_sequence(orch, name, pre_agg.terminal_sequence.as_deref()).await;
         // HOOK.1: a PreToolUse hook's `additionalContext` (NOT `systemMessage`)
         // becomes its OWN meta message, not folded into the tool_result — claude
         // pushes it to `resultingMessages` (`toolExecution.ts:845`). Shape:
@@ -4394,7 +4389,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             },
             duration_ms = pre_dur_ms,
         );
-        telemetry::otel::emit_hook_lifecycle("pre", "completed", &name, Some(pre_dur_ms));
+        telemetry::otel::emit_hook_lifecycle("pre", "completed", name, Some(pre_dur_ms));
 
         // HOOK.3: a PreToolUse hook's permissionDecision "allow" (legacy
         // `decision: "approve"`) bypasses the permission gate for this tool call
@@ -4527,9 +4522,17 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                         // The current call was explicitly approved, but never
                         // claim Auto mode when the atomic live-mode write fails.
                         tracing::warn!(%error, "permission prompt approved Auto mode but mode switch failed");
-                    } else {
-                        decision_otel_source = "user_temporary";
                     }
+                    // ⚠️ This arm used to set `decision_otel_source =
+                    // "user_temporary"` here, which could never be observed: the
+                    // assignment below this `match` is unconditional and
+                    // overwrites it on every path. `AllowAuto` sets no
+                    // `hook_decision_classification`, so an Auto-mode approval
+                    // reports its OTEL source as "hook" — a user's temporary
+                    // approval labelled as a hook decision. Removed rather than
+                    // repaired because repairing it changes a telemetry label on
+                    // a permission path, which wants adjudicating against the
+                    // oracle's `ZX_`, not deciding in a lint sweep.
                     PermissionDecision::Allow
                 }
                 platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
@@ -4619,12 +4622,21 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     },
                 ) => tool_permission_deny_resolution(name, reason, explanation.as_deref()),
                 (
-                    PermissionResolution::Allow { rule_source, classifier_approved },
+                    PermissionResolution::Allow {
+                        rule_source,
+                        classifier_approved,
+                    },
                     permission::PermissionResult::Ask { reason, .. },
                 ) if tool_ask_is_protected
-                    || (rule_source.is_none() && (!bypass_mode || requires_user_interaction)
-                        && !(*classifier_approved && name == "Monitor" && effective_input.get("ws").is_some()
-                            && matches!(reason, permission::PermissionDecisionReason::Other { .. }))) =>
+                    || (rule_source.is_none()
+                        && (!bypass_mode || requires_user_interaction)
+                        && !(*classifier_approved
+                            && name == "Monitor"
+                            && effective_input.get("ws").is_some()
+                            && matches!(
+                                reason,
+                                permission::PermissionDecisionReason::Other { .. }
+                            ))) =>
                 {
                     let (rt, rtext) = tool_ask_reason_context(reason);
                     tool_ask_reason = Some(reason.clone());
@@ -5548,14 +5560,13 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             event = orch_events::HOOK_POST_STARTED,
             tool_name = %name,
         );
-        telemetry::otel::emit_hook_lifecycle("post", "started", &name, None);
+        telemetry::otel::emit_hook_lifecycle("post", "started", name, None);
         let post_agg = orch.hooks.execute(post_event, hook_ctx.clone()).await;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
         let mut post_additional_contexts = post_agg.additional_contexts.clone();
-        if let Some(notice) = memdir_index_notice_for_tool(orch, &name, &effective_input, is_error)
-        {
+        if let Some(notice) = memdir_index_notice_for_tool(orch, name, &effective_input, is_error) {
             if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
                 let mut metadata = telemetry::LogEventMetadata::new();
                 metadata.insert(
@@ -5572,7 +5583,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // `szn` runs per hook result, all event types). Same as the PreToolUse
         // side: validate, warn on rejection, and write accepted bytes through
         // the active terminal bridge.
-        apply_terminal_sequence(orch, &name, post_agg.terminal_sequence.as_deref()).await;
+        apply_terminal_sequence(orch, name, post_agg.terminal_sequence.as_deref()).await;
 
         // FIX C (hook_stopped_continuation, PostToolUse twin): a PostToolUse
         // hook's `continue:false` (preventContinuation) becomes its OWN meta
@@ -5804,7 +5815,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             duration_ms = post_dur_ms,
             mutated_response = mutated,
         );
-        telemetry::otel::emit_hook_lifecycle("post", "completed", &name, Some(post_dur_ms));
+        telemetry::otel::emit_hook_lifecycle("post", "completed", name, Some(post_dur_ms));
 
         // Worktree-creation hook (parity with claude-code `executeWorktreeCreateHook`,
         // `utils/hooks.ts:4928`). claude-code fires `WorktreeCreate` from the
@@ -6013,8 +6024,8 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         };
         let persistence = apply_tool_result_persistence_with_process_output(
             orch,
-            &name,
-            &tool_use_id,
+            name,
+            tool_use_id,
             tool_handle.persistence_threshold().map(|raw| {
                 crate::tool_result_persistence::resolve_threshold(
                     raw,
@@ -8568,7 +8579,7 @@ mod tool_result_persistence_wiring_tests {
             }],
         };
         orch.persist_message_to_jsonl(&assistant).await;
-        let (results, ..) = dispatch_tool_uses_tracked(&orch, &vec![call], None)
+        let (results, ..) = dispatch_tool_uses_tracked(&orch, &[call], None)
             .await
             .unwrap();
         let mut user = ConversationMessage::user(MessageId::new(), String::new());
@@ -8957,53 +8968,124 @@ mod tool_hook_wiring_tests {
         struct Model(AtomicUsize);
         #[async_trait]
         impl LoopPermissionClassifier for Model {
-            async fn classify(&self, _: &str, _: &Value, _: &[permission::host_context::HostContextRecord], _: &[String]) -> AutoModeClassifierVerdict {
+            async fn classify(
+                &self,
+                _: &str,
+                _: &Value,
+                _: &[permission::host_context::HostContextRecord],
+                _: &[String],
+            ) -> AutoModeClassifierVerdict {
                 self.0.fetch_add(1, Ordering::SeqCst);
-                AutoModeClassifierVerdict::Allow { score: 1.0, reason: "Allowed by fast classifier".into() }
+                AutoModeClassifierVerdict::Allow {
+                    score: 1.0,
+                    reason: "Allowed by fast classifier".into(),
+                }
             }
         }
         struct NoPrompt;
         #[async_trait]
         impl PermissionGate for NoPrompt {
-            async fn check(&self, _: &str, _: &Value) -> PermissionDecision { panic!("approved websocket must not ask twice") }
+            async fn check(&self, _: &str, _: &Value) -> PermissionDecision {
+                panic!("approved websocket must not ask twice")
+            }
         }
         struct Monitor(Arc<AtomicUsize>);
         #[async_trait]
         impl Tool for Monitor {
-            fn name(&self) -> &str { "Monitor" }
+            fn name(&self) -> &str {
+                "Monitor"
+            }
             fn input_schema(&self) -> &Value {
-                static SCHEMA: once_cell::sync::Lazy<Value> = once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+                static SCHEMA: once_cell::sync::Lazy<Value> =
+                    once_cell::sync::Lazy::new(|| json!({"type":"object"}));
                 &SCHEMA
             }
-            fn is_enabled(&self, _: &ToolStaticContext) -> bool { true }
-            fn max_result_size_chars(&self) -> usize { 1024 }
-            fn is_concurrency_safe(&self, _: &Value) -> bool { true }
-            fn is_read_only(&self, _: &Value) -> bool { false }
-            async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> Result<(), ValidationError> { Ok(()) }
-            async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> permission::PermissionResult {
+            fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+                true
+            }
+            fn max_result_size_chars(&self) -> usize {
+                1024
+            }
+            fn is_concurrency_safe(&self, _: &Value) -> bool {
+                true
+            }
+            fn is_read_only(&self, _: &Value) -> bool {
+                false
+            }
+            async fn validate_input(
+                &self,
+                _: &Value,
+                _: &ToolUseContext,
+            ) -> Result<(), ValidationError> {
+                Ok(())
+            }
+            async fn check_permissions(
+                &self,
+                _: &Value,
+                _: &ToolUseContext,
+            ) -> permission::PermissionResult {
                 permission::PermissionResult::Ask {
-                    reason: permission::PermissionDecisionReason::Other { reason: "Monitor will open a WebSocket".into() },
-                    prompt: permission::result::PermissionPrompt { title: "Monitor".into(), message: "Monitor will open a WebSocket".into(), options: vec![] },
+                    reason: permission::PermissionDecisionReason::Other {
+                        reason: "Monitor will open a WebSocket".into(),
+                    },
+                    prompt: permission::result::PermissionPrompt {
+                        title: "Monitor".into(),
+                        message: "Monitor will open a WebSocket".into(),
+                        options: vec![],
+                    },
                     pending_classifier_check: None,
                     metadata: permission::result::PermissionMetadata::default(),
                 }
             }
-            async fn description(&self, _: &Value, _: &DescriptionOptions) -> String { String::new() }
-            async fn prompt(&self, _: &PromptOptions) -> String { String::new() }
-            async fn call(&self, _: Value, _: ToolUseContext, _: ToolProgressSender) -> Result<ToolCallResult, ToolError> {
+            async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+                String::new()
+            }
+            async fn prompt(&self, _: &PromptOptions) -> String {
+                String::new()
+            }
+            async fn call(
+                &self,
+                _: Value,
+                _: ToolUseContext,
+                _: ToolProgressSender,
+            ) -> Result<ToolCallResult, ToolError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(ToolCallResult::from_data(json!({"content":"ran"})))
             }
         }
         let classifier = Arc::new(Model(AtomicUsize::new(0)));
-        let gate = permission::PolicyPermissionGate::new(Arc::new(permission::PermissionPolicy::new(permission::PermissionMode::Auto)), Arc::new(NoPrompt));
-        assert!(gate.loop_classifier_handle().set(classifier.clone()).is_ok());
+        let gate = permission::PolicyPermissionGate::new(
+            Arc::new(permission::PermissionPolicy::new(
+                permission::PermissionMode::Auto,
+            )),
+            Arc::new(NoPrompt),
+        );
+        assert!(gate
+            .loop_classifier_handle()
+            .set(classifier.clone())
+            .is_ok());
         let called = Arc::new(AtomicUsize::new(0));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(Monitor(called.clone())) as Arc<dyn Tool>);
-        let orch = ConversationOrchestrator::new(OrchestratorConfig::default(), Arc::new(MockApiClient::new(vec![])), Arc::new(registry), noop_hook_executor(), Arc::new(gate), Arc::new(MockOutputStream::new()), Arc::new(StaticMemoryProvider::empty()), PathBuf::from("/tmp"));
-        let uses = vec![(ToolUseId::new(), "Monitor".into(), json!({"ws":{"url":"wss://events.example.com"}}), None)];
-        dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(gate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(
+            ToolUseId::new(),
+            "Monitor".into(),
+            json!({"ws":{"url":"wss://events.example.com"}}),
+            None,
+        )];
+        dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
         assert_eq!(classifier.0.load(Ordering::SeqCst), 1);
         assert_eq!(called.load(Ordering::SeqCst), 1);
     }

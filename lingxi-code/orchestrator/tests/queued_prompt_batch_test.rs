@@ -50,7 +50,7 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             .iter()
             .enumerate()
             .map(|(i, is_meta)| QueuedPromptInput {
-                    goal_retry_id: None,
+                goal_retry_id: None,
                 text: format!("queued text {i}"),
                 is_meta: *is_meta,
                 message_id: Some(ids[i]),

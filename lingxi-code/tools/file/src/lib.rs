@@ -20,6 +20,21 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 6 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
+// Dead code kept visible, not swept: this crate had 2 item(s) rustc could
+// reach from nothing when the workspace was measured (2026-09-16). The lint
+// stays `warn` at the workspace level so a NEW crate still inherits it; this
+// allow is scoped here so the count is per crate and repayable by deleting this
+// line. This is the category where "named, computed, never wired" hides — some
+// of these read like features that were built and never connected. Each wants a
+// decision (delete, or wire), not a blanket deletion.
+#![allow(dead_code)]
 
 /// Suffix claude-code appends to a successful Edit/Write result (binary
 /// const `Pyn`, with a U+2014 em-dash), telling the model it already holds the
@@ -772,7 +787,7 @@ mod staleness_guard_tests {
             "a notebook never qualifies, whatever the model or the policy says"
         );
         assert!(
-            !read_requirement_waived(Some("CLAUDE-OPUS-4-8.IPYNB".into()), &notebook),
+            !read_requirement_waived(Some("CLAUDE-OPUS-4-8.IPYNB"), &notebook),
             "the extension check is case-insensitive"
         );
         assert!(
@@ -781,7 +796,6 @@ mod staleness_guard_tests {
         );
         assert!(!read_requirement_waived(None, &PathBuf::from("/w/a.rs")));
     }
-
 
     /// The waiver is scoped to the NEVER-READ case (`!F`) and nothing else.
     ///

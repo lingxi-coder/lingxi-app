@@ -255,7 +255,7 @@ pub(crate) async fn sync_document_text(
                 let owner = if server_name == client.name() {
                     Some(connection.clone())
                 } else {
-                    tracker.connection_for_server(&server_name).await
+                    tracker.connection_for_server(server_name).await
                 };
                 if let Some(owner) = owner {
                     if let Err(error) = owner.notify(

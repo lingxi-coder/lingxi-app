@@ -544,7 +544,6 @@ mod tests {
     /// pointed at Vertex).
     #[test]
     fn vertex_codec_base_url_end_to_end_composition() {
-        let model = "claude-opus-4-6";
         // Pin present for 4-6-opus.
         let region = vertex_region_for_model(Some("us-east5"), None);
         let host = vertex_base_host_url(None, &region);

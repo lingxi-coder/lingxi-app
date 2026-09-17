@@ -79,6 +79,12 @@ struct RuntimeLinkState<T> {
     value: Option<T>,
 }
 
+impl<T> Default for RuntimeLink<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> RuntimeLink<T> {
     /// Construct an empty, permanently set-once link.
     #[must_use]
@@ -836,7 +842,7 @@ impl PoolSubagentSpawner {
     /// Set-once seam for the spawn-time bypass clamps (see
     /// [`Self::spawn_bypass_gates`]). Grab this BEFORE boxing the spawner and
     /// fill it once the boot permission tiers exist.
-    #[must_use]
+
     pub fn spawn_bypass_gates_handle(
         &self,
     ) -> Arc<std::sync::OnceLock<crate::permission_mode::SpawnBypassGates>> {
@@ -2161,7 +2167,7 @@ impl PoolSubagentSpawner {
             &request.prompt,
             request.fork_context_messages.clone(),
             request.fork_parent_system_prompt.clone(),
-            restored_agent_id.unwrap_or_else(AgentId::new),
+            restored_agent_id.unwrap_or_default(),
         );
         ctx.session_interactive = self.session_interactive;
         ctx.origin_session_id = origin_session_id;
@@ -2987,7 +2993,10 @@ impl Drop for SpawnDeallocGuard {
                 // regression introduced while fixing finding 17, which put
                 // the cleanup await before this emit].
                 observer_events.emit_terminal(match startup_error {
-                    Some(error) => SubagentObservation::Failed { agent_id: id, error },
+                    Some(error) => SubagentObservation::Failed {
+                        agent_id: id,
+                        error,
+                    },
                     None => SubagentObservation::Killed { agent_id: id },
                 });
                 // §24b: mirror the normal terminal path's
@@ -3065,19 +3074,25 @@ impl SubagentSpawner for PoolSubagentSpawner {
             .try_with(|permit| permit.borrow_mut().take())
             .ok()
             .flatten();
-        let observer_spec = request
-            .observer
-            .clone()
-            .filter(|_| crate::observer::observer_agents_enabled());
-        let observed_agent_type = request.subagent_type.clone();
-        let observer_inherit = inherit.clone();
+        // ⚠️ Observer AGENTS are built but never launched. `observer_spec` /
+        // `observed_agent_type` / `observer_inherit` used to be captured here —
+        // cloned before `inherit` moves into `build_subagent_context` below,
+        // which is exactly the shape of a call site that was planned and never
+        // written. Removed because they were dead, not because the gap is
+        // closed: `crate::observer::build_observer_launch` and
+        // `ObserverLaunchPlan` have NO production caller (verified 2026-09-16 —
+        // the only call is `observer.rs:389`, inside that module's own
+        // `#[cfg(test)]`). What DOES work is the observer as an event sink:
+        // `activity_observer` below is wired and joins `observers`. So a spec
+        // on a request today gets its events forwarded, but no observer agent
+        // is ever spawned to receive them.
         let activity_observer = self.activity_observer(&request, &inherit).await;
         let request_name = request.name.clone().or_else(|| request.description.clone());
         let observers: Vec<Arc<dyn SubagentSpawnObserver>> = self
             .spawn_observer
             .iter()
             .cloned()
-            .chain(observer.into_iter())
+            .chain(observer)
             .chain(activity_observer)
             .collect();
         // Resolve the REAL definition for this subagent_type (file catalog
@@ -4635,13 +4650,21 @@ mod tests {
         struct RejectStartup;
         #[async_trait]
         impl SubagentSpawnObserver for RejectStartup {
-            async fn before_start(&self, _: &SubagentObservation) -> Result<(), SubagentSpawnError> {
-                Err(SubagentSpawnError::Internal("control binding failed".into()))
+            async fn before_start(
+                &self,
+                _: &SubagentObservation,
+            ) -> Result<(), SubagentSpawnError> {
+                Err(SubagentSpawnError::Internal(
+                    "control binding failed".into(),
+                ))
             }
             async fn on_event(&self, _: SubagentObservation) {}
         }
         for persistent in [false, true] {
-            let pool = Arc::new(StateMachinePool::new(Arc::new(CountingRuntimeSpawner::default()), 4));
+            let pool = Arc::new(StateMachinePool::new(
+                Arc::new(CountingRuntimeSpawner::default()),
+                4,
+            ));
             let api = Arc::new(QueueApi {
                 responses: Mutex::new(VecDeque::new()),
                 calls: AtomicUsize::new(0),
@@ -4651,25 +4674,42 @@ mod tests {
                 .with_api_client(api.clone())
                 .with_spawn_observer(observer.clone());
             let result = if persistent {
-                spawner.spawn_persistent_with_observer(
-                    minimal_spawn_request("plan"), dummy_inherit(), Arc::new(RejectStartup),
-                ).await.map(|_| ())
+                spawner
+                    .spawn_persistent_with_observer(
+                        minimal_spawn_request("plan"),
+                        dummy_inherit(),
+                        Arc::new(RejectStartup),
+                    )
+                    .await
+                    .map(|_| ())
             } else {
-                spawner.spawn_with_observer(
-                    minimal_spawn_request("plan"), dummy_inherit(), None, Some(Arc::new(RejectStartup)),
-                ).await.map(|_| ())
+                spawner
+                    .spawn_with_observer(
+                        minimal_spawn_request("plan"),
+                        dummy_inherit(),
+                        None,
+                        Some(Arc::new(RejectStartup)),
+                    )
+                    .await
+                    .map(|_| ())
             };
             assert!(result.is_err());
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 loop {
-                    if !observer.events.lock().unwrap().is_empty() { break; }
+                    if !observer.events.lock().unwrap().is_empty() {
+                        break;
+                    }
                     tokio::task::yield_now().await;
                 }
-            }).await.expect("startup cleanup reports a terminal event");
+            })
+            .await
+            .expect("startup cleanup reports a terminal event");
             let events = observer.events.lock().unwrap();
             assert_eq!(events.len(), 1);
-            assert!(matches!(&events[0], SubagentObservation::Failed { error, .. }
-                if error.contains("control binding failed")));
+            assert!(
+                matches!(&events[0], SubagentObservation::Failed { error, .. }
+                if error.contains("control binding failed"))
+            );
             assert_eq!(api.calls.load(Ordering::SeqCst), 0);
         }
     }
@@ -9845,7 +9885,7 @@ pub(crate) fn apply_spawn_rewrite(
 #[cfg(test)]
 mod agent_spawn_hook_tests {
     use super::apply_spawn_rewrite;
-    use async_trait::async_trait;
+
     use platform_api::subagent_spawn::SubagentSpawnRequest;
     use serde_json::json;
 

@@ -45,21 +45,49 @@ pub struct RootIdentity {
 }
 
 /// Identity of this opened file, without following its current pathname.
-pub fn opened_file_identity(file:&std::fs::File)->Result<RootIdentity,FsError>{
-    #[cfg(unix)] {use std::os::unix::fs::MetadataExt;let meta=file.metadata().map_err(|e|FsError::Io(e.to_string()))?;Ok(RootIdentity{volume:meta.dev(),file:meta.ino()})}
-    #[cfg(windows)] {imp::root_identity_from_file(file,Path::new("<opened file>"))}
-    #[cfg(all(not(unix),not(windows)))] {let _=file;Err(FsError::Io("file identity unsupported".into()))}
+pub fn opened_file_identity(file: &std::fs::File) -> Result<RootIdentity, FsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata().map_err(|e| FsError::Io(e.to_string()))?;
+        Ok(RootIdentity {
+            volume: meta.dev(),
+            file: meta.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        imp::root_identity_from_file(file, Path::new("<opened file>"))
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        let _ = file;
+        Err(FsError::Io("file identity unsupported".into()))
+    }
 }
 /// Open an existing regular file for recovery, binding both root and file.
 /// This never creates, replaces, follows links, or chmods the target.
-pub fn open_recovery_file(root:&Path,relative:&Path,expected_root:&RootIdentity,expected_file:&RootIdentity)->Result<std::fs::File,FsError>{
-    let file=imp::open_recovery_file(root,relative,expected_root)?;
-    if opened_file_identity(&file)?!=*expected_file{return Err(FsError::OutsideWorkspace(relative.display().to_string()));}
+pub fn open_recovery_file(
+    root: &Path,
+    relative: &Path,
+    expected_root: &RootIdentity,
+    expected_file: &RootIdentity,
+) -> Result<std::fs::File, FsError> {
+    let file = imp::open_recovery_file(root, relative, expected_root)?;
+    if opened_file_identity(&file)? != *expected_file {
+        return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+    }
     Ok(file)
 }
 /// Atomically publish metadata only under the originally opened directory.
-pub fn atomic_write_pinned(root:&Path,relative:&Path,bytes:&[u8],options:AtomicWriteOptions,expected:&RootIdentity)->Result<(),FsError>{
-    imp::atomic_write_pinned(root,relative,bytes,options,expected)
+pub fn atomic_write_pinned(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    options: AtomicWriteOptions,
+    expected: &RootIdentity,
+) -> Result<(), FsError> {
+    imp::atomic_write_pinned(root, relative, bytes, options, expected)
 }
 
 fn read_opened_tail_bytes(
@@ -535,7 +563,10 @@ mod imp {
         Ok(file_information(file)?.number_of_links)
     }
 
-    pub(super) fn root_identity_from_file(file: &std::fs::File, path: &Path) -> Result<RootIdentity, FsError> {
+    pub(super) fn root_identity_from_file(
+        file: &std::fs::File,
+        path: &Path,
+    ) -> Result<RootIdentity, FsError> {
         let information = file_information(file).map_err(|error| map_io(path, error))?;
         Ok(RootIdentity {
             volume: u64::from(information.volume_serial_number),
@@ -713,8 +744,21 @@ mod imp {
         (value + alignment - 1) & !(alignment - 1)
     }
 
-    fn rename_relative(source: &std::fs::File, parent: &std::fs::File, file_name: &OsStr, relative: &Path, overwrite: bool) -> Result<(), FsError> {
-        set_name_information(source, parent, file_name, relative, overwrite, FILE_RENAME_INFORMATION)
+    fn rename_relative(
+        source: &std::fs::File,
+        parent: &std::fs::File,
+        file_name: &OsStr,
+        relative: &Path,
+        overwrite: bool,
+    ) -> Result<(), FsError> {
+        set_name_information(
+            source,
+            parent,
+            file_name,
+            relative,
+            overwrite,
+            FILE_RENAME_INFORMATION,
+        )
     }
 
     fn set_name_information(
@@ -937,8 +981,11 @@ mod imp {
         root.push(std::path::MAIN_SEPARATOR.to_string());
         let mut relative = PathBuf::new();
         for component in components {
-            if let Component::Normal(name) = component { relative.push(name); }
-            else { return Err(FsError::OutsideWorkspace(target.display().to_string())); }
+            if let Component::Normal(name) = component {
+                relative.push(name);
+            } else {
+                return Err(FsError::OutsideWorkspace(target.display().to_string()));
+            }
         }
         Ok((root, relative))
     }
@@ -946,7 +993,15 @@ mod imp {
     fn open_task_link_source(target: &Path) -> Result<std::fs::File, FsError> {
         let (root, relative) = split_local_task_path(target)?;
         let (parent, name) = open_parent_checked(&root, &relative, false, None)?;
-        open_regular(&parent, &name, target, GENERIC_READ | SYNCHRONIZE, SHARE_ALL, FILE_OPEN, FILE_ATTRIBUTE_NORMAL)
+        open_regular(
+            &parent,
+            &name,
+            target,
+            GENERIC_READ | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )
     }
 
     fn same_task_file(a: &std::fs::File, b: &std::fs::File, path: &Path) -> Result<bool, FsError> {
@@ -955,13 +1010,31 @@ mod imp {
         Ok(root_identity_from_file(a, path)? == root_identity_from_file(b, path)?)
     }
 
-    fn install_task_output_link(root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path, replace: bool) -> Result<std::fs::File, FsError> {
+    fn install_task_output_link(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        target: &Path,
+        replace: bool,
+    ) -> Result<std::fs::File, FsError> {
         let source = open_task_link_source(target)?;
         let (parent, name) = open_parent_checked(root, relative, false, expected)?;
-        let open_destination = || open_regular(&parent, &name, relative, GENERIC_READ | SYNCHRONIZE, SHARE_ALL, FILE_OPEN, FILE_ATTRIBUTE_NORMAL);
+        let open_destination = || {
+            open_regular(
+                &parent,
+                &name,
+                relative,
+                GENERIC_READ | SYNCHRONIZE,
+                SHARE_ALL,
+                FILE_OPEN,
+                FILE_ATTRIBUTE_NORMAL,
+            )
+        };
         match open_destination() {
             Ok(current) if same_task_file(&source, &current, relative)? => return Ok(source),
-            Ok(_) if !replace => return Err(FsError::AlreadyExists(relative.display().to_string())),
+            Ok(_) if !replace => {
+                return Err(FsError::AlreadyExists(relative.display().to_string()))
+            }
             Ok(_) => (),
             Err(FsError::NotFound(_)) => (),
             Err(error) => return Err(error),
@@ -972,18 +1045,27 @@ mod imp {
         if let Err(error) = set_name_information(&source, &parent, &name, relative, replace, 11) {
             // A competing retry may already have installed this exact object.
             if let Ok(current) = open_destination() {
-                if same_task_file(&source, &current, relative)? { return Ok(source); }
+                if same_task_file(&source, &current, relative)? {
+                    return Ok(source);
+                }
             }
             return Err(error);
         }
         let installed = open_destination()?;
         if !same_task_file(&source, &installed, relative)? {
-            return Err(FsError::OutsideWorkspace("installed task output identity changed".into()));
+            return Err(FsError::OutsideWorkspace(
+                "installed task output identity changed".into(),
+            ));
         }
         Ok(source)
     }
 
-    pub(super) fn adopt_task_output_link(root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path) -> Result<std::fs::File, FsError> {
+    pub(super) fn adopt_task_output_link(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        target: &Path,
+    ) -> Result<std::fs::File, FsError> {
         install_task_output_link(root, relative, expected, target, false)
     }
     /// Freeze every parent against rename while invoking Win32's symlink API,
@@ -994,36 +1076,64 @@ mod imp {
             .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(&root).map_err(|error| map_io(path, error))?;
+            .open(&root)
+            .map_err(|error| map_io(path, error))?;
         ensure_directory(&root_file, path)?;
         let mut parents = vec![root_file];
         for component in relative.parent().unwrap_or(Path::new("")).components() {
             let std::path::Component::Normal(name) = component else {
                 return Err(FsError::OutsideWorkspace(path.display().to_string()));
             };
-            let child = nt_create_relative(parents.last().expect("drive root held"), name, path,
+            let child = nt_create_relative(
+                parents.last().expect("drive root held"),
+                name,
+                path,
                 FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN, FILE_DIRECTORY_FILE,
-                FILE_ATTRIBUTE_DIRECTORY, std::ptr::null_mut())?;
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE,
+                FILE_ATTRIBUTE_DIRECTORY,
+                std::ptr::null_mut(),
+            )?;
             ensure_directory(&child, path)?;
             parents.push(child);
         }
         Ok(parents)
     }
 
-    pub(super) fn link_task_transcript(root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path) -> Result<std::fs::File, FsError> {
-        link_task_transcript_with_create(root, relative, expected, target, |source, link| std::os::windows::fs::symlink_file(source, link))
+    pub(super) fn link_task_transcript(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        target: &Path,
+    ) -> Result<std::fs::File, FsError> {
+        link_task_transcript_with_create(root, relative, expected, target, |source, link| {
+            std::os::windows::fs::symlink_file(source, link)
+        })
     }
 
-    pub(super) fn link_task_transcript_with_create<F>(root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path, create: F) -> Result<std::fs::File, FsError>
-    where F: FnOnce(&Path, &Path) -> std::io::Result<()> {
+    pub(super) fn link_task_transcript_with_create<F>(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        target: &Path,
+        create: F,
+    ) -> Result<std::fs::File, FsError>
+    where
+        F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    {
         let source = open_task_link_source(target)?;
         let destination = checked_join(root, relative)?;
         let _path_pins = pin_task_path_parents(&destination)?;
         let (parent, name) = open_parent_checked(root, relative, false, expected)?;
         if let Ok(advertised) = std::fs::read_link(&destination) {
-            return if advertised == target { Ok(source) }
-                else { Err(FsError::OutsideWorkspace("task transcript link points elsewhere".into())) };
+            return if advertised == target {
+                Ok(source)
+            } else {
+                Err(FsError::OutsideWorkspace(
+                    "task transcript link points elsewhere".into(),
+                ))
+            };
         }
         validate_optional_regular(&parent, &name, relative)?;
         let temporary = destination.with_file_name(temp_name(&name));
@@ -1032,26 +1142,43 @@ mod imp {
         create(target, &temporary).map_err(|error| map_io(relative, error))?;
         let link = match std::fs::OpenOptions::new()
             .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
-            .share_mode(SHARE_ALL).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(SHARE_ALL)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&temporary)
         {
             Ok(file) => file,
-            Err(error) => { let _ = std::fs::remove_file(&temporary); return Err(map_io(relative, error)); }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(map_io(relative, error));
+            }
         };
         let result = (|| {
             let metadata = link.metadata().map_err(|error| map_io(relative, error))?;
-            if !metadata.file_type().is_symlink() || std::fs::read_link(&temporary).map_err(|error| map_io(relative, error))? != target {
-                return Err(FsError::OutsideWorkspace("temporary transcript link identity changed".into()));
+            if !metadata.file_type().is_symlink()
+                || std::fs::read_link(&temporary).map_err(|error| map_io(relative, error))?
+                    != target
+            {
+                return Err(FsError::OutsideWorkspace(
+                    "temporary transcript link identity changed".into(),
+                ));
             }
             validate_optional_regular(&parent, &name, relative)?;
             rename_relative(&link, &parent, &name, relative, true)
         })();
-        if result.is_err() { let _ = mark_delete(&link, relative); }
+        if result.is_err() {
+            let _ = mark_delete(&link, relative);
+        }
         result?;
         Ok(source)
     }
 
-    pub(super) fn validate_task_output_link(root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path, pinned: &std::fs::File) -> Result<(), FsError> {
+    pub(super) fn validate_task_output_link(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        target: &Path,
+        pinned: &std::fs::File,
+    ) -> Result<(), FsError> {
         let source = open_task_link_source(target)?;
         let path = checked_join(root, relative)?;
         let _path_pins = pin_task_path_parents(&path)?;
@@ -1059,12 +1186,32 @@ mod imp {
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| map_io(relative, error))?;
         if metadata.file_type().is_symlink() {
             let advertised = std::fs::read_link(&path).map_err(|error| map_io(relative, error))?;
-            return if advertised == target && same_task_file(pinned, &source, target)? { Ok(()) }
-                else { Err(FsError::OutsideWorkspace("task transcript link identity changed".into())) };
+            return if advertised == target && same_task_file(pinned, &source, target)? {
+                Ok(())
+            } else {
+                Err(FsError::OutsideWorkspace(
+                    "task transcript link identity changed".into(),
+                ))
+            };
         }
-        let destination = open_regular(&parent, &name, relative, GENERIC_READ | SYNCHRONIZE, SHARE_ALL, FILE_OPEN, FILE_ATTRIBUTE_NORMAL)?;
-        if same_task_file(pinned, &source, target)? && same_task_file(pinned, &destination, relative)? { Ok(()) }
-        else { Err(FsError::OutsideWorkspace("task output link identity changed".into())) }
+        let destination = open_regular(
+            &parent,
+            &name,
+            relative,
+            GENERIC_READ | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        if same_task_file(pinned, &source, target)?
+            && same_task_file(pinned, &destination, relative)?
+        {
+            Ok(())
+        } else {
+            Err(FsError::OutsideWorkspace(
+                "task output link identity changed".into(),
+            ))
+        }
     }
 
     pub(super) fn create_new_file(root: &Path, relative: &Path) -> Result<(), FsError> {
@@ -1188,7 +1335,8 @@ mod imp {
     where
         F: FnOnce(),
     {
-        let (parent, file_name) = open_parent_checked(root, relative, options.create_parents, expected)?;
+        let (parent, file_name) =
+            open_parent_checked(root, relative, options.create_parents, expected)?;
         after_parent_open();
         validate_optional_regular(&parent, &file_name, relative)?;
         let mut temp = create_temp(&parent, &file_name, relative)?;
@@ -1205,12 +1353,30 @@ mod imp {
         result
     }
 
-    pub(super) fn open_recovery_file(root:&Path,relative:&Path,expected:&RootIdentity)->Result<std::fs::File,FsError>{
-        let (parent,name)=open_parent_checked(root,relative,false,Some(expected))?;
-        open_regular(&parent,&name,relative,GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,FILE_SHARE_READ | FILE_SHARE_WRITE,FILE_OPEN,FILE_ATTRIBUTE_NORMAL)
+    pub(super) fn open_recovery_file(
+        root: &Path,
+        relative: &Path,
+        expected: &RootIdentity,
+    ) -> Result<std::fs::File, FsError> {
+        let (parent, name) = open_parent_checked(root, relative, false, Some(expected))?;
+        open_regular(
+            &parent,
+            &name,
+            relative,
+            GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )
     }
-    pub(super) fn atomic_write_pinned(root:&Path,relative:&Path,bytes:&[u8],options:AtomicWriteOptions,expected:&RootIdentity)->Result<(),FsError>{
-        atomic_write_inner(root,relative,bytes,options,Some(expected),||{})
+    pub(super) fn atomic_write_pinned(
+        root: &Path,
+        relative: &Path,
+        bytes: &[u8],
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+    ) -> Result<(), FsError> {
+        atomic_write_inner(root, relative, bytes, options, Some(expected), || {})
     }
 
     pub(super) fn atomic_write(
@@ -1712,7 +1878,10 @@ pub fn open_create_new_file_pinned(
 /// its leaf. The returned handle is the exact transcript inode authorized here.
 #[cfg(any(unix, windows))]
 pub fn link_task_transcript(
-    root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path,
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+    target: &Path,
 ) -> Result<std::fs::File, FsError> {
     // A relative source is opened against the process cwd, but symlinkat
     // would resolve it against the output directory. Require one absolute
@@ -1726,20 +1895,39 @@ pub fn link_task_transcript(
 /// Install an adopted output without an intermediate empty spool. An existing
 /// leaf is accepted only when it is already the exact authorized source link.
 #[cfg(any(unix, windows))]
-pub fn adopt_task_output_link(root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path) -> Result<std::fs::File, FsError> {
-    if !target.is_absolute() { return Err(FsError::OutsideWorkspace(target.display().to_string())); }
+pub fn adopt_task_output_link(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+    target: &Path,
+) -> Result<std::fs::File, FsError> {
+    if !target.is_absolute() {
+        return Err(FsError::OutsideWorkspace(target.display().to_string()));
+    }
     imp::adopt_task_output_link(root, relative, expected, target)
 }
 
 /// Verify that both Windows hard-link names still address the held source file.
 #[cfg(windows)]
-pub fn validate_task_output_link(root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path, pinned: &std::fs::File) -> Result<(), FsError> {
+pub fn validate_task_output_link(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+    target: &Path,
+    pinned: &std::fs::File,
+) -> Result<(), FsError> {
     imp::validate_task_output_link(root, relative, expected, target, pinned)
 }
 
 /// Bounded byte window for incremental task output. Offsets count file bytes.
 #[cfg(unix)]
-pub fn read_byte_window_pinned(root: &Path, relative: &Path, expected: Option<&RootIdentity>, offset: u64, limit: u64) -> Result<Vec<u8>, FsError> {
+pub fn read_byte_window_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+    offset: u64,
+    limit: u64,
+) -> Result<Vec<u8>, FsError> {
     imp::read_byte_window_pinned(root, relative, expected, offset, limit)
 }
 
@@ -1784,11 +1972,16 @@ pub fn append_file_staged(
 ) -> Result<(), crate::filesystem::FileAppendError> {
     use crate::filesystem::{FileAppendError, FileAppendStage};
     use std::io::Write;
-    let mut file = open_append_file_pinned(root, relative, expected)
-        .map_err(|error| FileAppendError { stage: FileAppendStage::Open, error })?;
-    file.write_all(content.as_bytes()).map_err(|error| FileAppendError {
-        stage: FileAppendStage::Write, error: FsError::Io(error.to_string()),
-    })
+    let mut file =
+        open_append_file_pinned(root, relative, expected).map_err(|error| FileAppendError {
+            stage: FileAppendStage::Open,
+            error,
+        })?;
+    file.write_all(content.as_bytes())
+        .map_err(|error| FileAppendError {
+            stage: FileAppendStage::Write,
+            error: FsError::Io(error.to_string()),
+        })
 }
 
 /// Read UTF-8 only if the opened root still has `expected` identity.
@@ -1901,7 +2094,6 @@ fn map_io(path: &Path, error: std::io::Error) -> FsError {
     }
 }
 
-
 /// Acquire an exclusive lock below a root whose already-opened identity must
 /// still match `expected`. The lock and its parent chain are opened without
 /// following symlinks.
@@ -1984,7 +2176,7 @@ mod imp {
     fn mode(bits: u32, path: &Path) -> Result<Mode, FsError> {
         let bits = u16::try_from(bits)
             .map_err(|_| FsError::Io(format!("{}: invalid unix mode {bits:o}", path.display())))?;
-        Ok(Mode::from_bits_retain(bits.into()))
+        Ok(Mode::from_bits_retain(bits))
     }
 
     fn identity_from_fd(fd: &OwnedFd, path: &Path) -> Result<RootIdentity, FsError> {
@@ -2325,30 +2517,68 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn read_byte_window_pinned(root: &Path, relative: &Path, expected: Option<&RootIdentity>, offset: u64, limit: u64) -> Result<Vec<u8>, FsError> {
-        let (parent, filename) = open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
-        let fd = fs::openat(&parent, &filename, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).map_err(|e| map_unix_io(relative, e))?;
+    pub(super) fn read_byte_window_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        let (parent, filename) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let fd = fs::openat(
+            &parent,
+            &filename,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| map_unix_io(relative, e))?;
         ensure_opened_regular(&fd, relative)?;
         let mut file = std::fs::File::from(fd);
-        file.seek(SeekFrom::Start(offset)).map_err(|e| map_io(relative, e))?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| map_io(relative, e))?;
         let mut bytes = Vec::new();
-        file.take(limit).read_to_end(&mut bytes).map_err(|e| map_io(relative, e))?;
+        file.take(limit)
+            .read_to_end(&mut bytes)
+            .map_err(|e| map_io(relative, e))?;
         Ok(bytes)
     }
 
-    pub(super) fn adopt_task_output_link(root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path) -> Result<std::fs::File, FsError> {
+    pub(super) fn adopt_task_output_link(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        target: &Path,
+    ) -> Result<std::fs::File, FsError> {
         use std::os::unix::ffi::OsStrExt;
-        let target_root = target.parent().ok_or_else(|| FsError::Io("output has no parent".into()))?;
-        let target_name = Path::new(target.file_name().ok_or_else(|| FsError::Io("output has no name".into()))?);
-        let (source_parent, source_name) = open_parent(target_root, target_name, false, PRIVATE_DIR_MODE)?;
-        let source = fs::openat(&source_parent, &source_name, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).map_err(|error| map_unix_io(target, error))?;
+        let target_root = target
+            .parent()
+            .ok_or_else(|| FsError::Io("output has no parent".into()))?;
+        let target_name = Path::new(
+            target
+                .file_name()
+                .ok_or_else(|| FsError::Io("output has no name".into()))?,
+        );
+        let (source_parent, source_name) =
+            open_parent(target_root, target_name, false, PRIVATE_DIR_MODE)?;
+        let source = fs::openat(
+            &source_parent,
+            &source_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(target, error))?;
         ensure_opened_regular(&source, target)?;
-        let (parent, filename) = open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let (parent, filename) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
         match fs::symlinkat(target, &parent, &filename) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(error) if error == rustix::io::Errno::EXIST => {
-                let prior = fs::readlinkat(&parent, &filename, Vec::new()).map_err(|error| map_unix_io(relative, error))?;
-                if prior.as_bytes() != target.as_os_str().as_bytes() { return Err(FsError::OutsideWorkspace(relative.display().to_string())); }
+                let prior = fs::readlinkat(&parent, &filename, Vec::new())
+                    .map_err(|error| map_unix_io(relative, error))?;
+                if prior.as_bytes() != target.as_os_str().as_bytes() {
+                    return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+                }
             }
             Err(error) => return Err(map_unix_io(relative, error)),
         }
@@ -2356,15 +2586,31 @@ mod imp {
     }
 
     pub(super) fn link_task_transcript(
-        root: &Path, relative: &Path, expected: Option<&RootIdentity>, target: &Path,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+        target: &Path,
     ) -> Result<std::fs::File, FsError> {
-        let target_root = target.parent().ok_or_else(|| FsError::Io("transcript has no parent".into()))?;
-        let target_name = Path::new(target.file_name().ok_or_else(|| FsError::Io("transcript has no name".into()))?);
-        let (source_parent, source_name) = open_parent(target_root, target_name, false, PRIVATE_DIR_MODE)?;
-        let source = fs::openat(&source_parent, &source_name, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
-            .map_err(|e| map_unix_io(target, e))?;
+        let target_root = target
+            .parent()
+            .ok_or_else(|| FsError::Io("transcript has no parent".into()))?;
+        let target_name = Path::new(
+            target
+                .file_name()
+                .ok_or_else(|| FsError::Io("transcript has no name".into()))?,
+        );
+        let (source_parent, source_name) =
+            open_parent(target_root, target_name, false, PRIVATE_DIR_MODE)?;
+        let source = fs::openat(
+            &source_parent,
+            &source_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| map_unix_io(target, e))?;
         ensure_opened_regular(&source, target)?;
-        let (parent, filename) = open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let (parent, filename) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
         let temporary = format!(".task-link-{}", uuid::Uuid::new_v4());
         fs::symlinkat(target, &parent, temporary.as_str()).map_err(|e| map_unix_io(relative, e))?;
         if let Err(error) = fs::renameat(&parent, temporary.as_str(), &parent, &filename) {
@@ -2487,13 +2733,40 @@ mod imp {
         name
     }
 
-    pub(super) fn open_recovery_file(root:&Path,relative:&Path,expected:&RootIdentity)->Result<std::fs::File,FsError>{
-        let (parent,name)=open_parent_checked(root,relative,false,PRIVATE_DIR_MODE,Some(expected))?;
-        let fd=fs::openat(&parent,&name,OFlags::RDWR|OFlags::APPEND|OFlags::NOFOLLOW|OFlags::CLOEXEC|OFlags::NONBLOCK,Mode::empty()).map_err(|e|map_unix_io(relative,e))?;
-        ensure_opened_regular(&fd,relative)?;Ok(std::fs::File::from(fd))
+    pub(super) fn open_recovery_file(
+        root: &Path,
+        relative: &Path,
+        expected: &RootIdentity,
+    ) -> Result<std::fs::File, FsError> {
+        let (parent, name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, Some(expected))?;
+        let fd = fs::openat(
+            &parent,
+            &name,
+            OFlags::RDWR | OFlags::APPEND | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|e| map_unix_io(relative, e))?;
+        ensure_opened_regular(&fd, relative)?;
+        Ok(std::fs::File::from(fd))
     }
-    pub(super) fn atomic_write(root:&Path,relative:&Path,bytes:&[u8],options:AtomicWriteOptions)->Result<(),FsError>{atomic_write_checked(root,relative,bytes,options,None)}
-    pub(super) fn atomic_write_pinned(root:&Path,relative:&Path,bytes:&[u8],options:AtomicWriteOptions,expected:&RootIdentity)->Result<(),FsError>{atomic_write_checked(root,relative,bytes,options,Some(expected))}
+    pub(super) fn atomic_write(
+        root: &Path,
+        relative: &Path,
+        bytes: &[u8],
+        options: AtomicWriteOptions,
+    ) -> Result<(), FsError> {
+        atomic_write_checked(root, relative, bytes, options, None)
+    }
+    pub(super) fn atomic_write_pinned(
+        root: &Path,
+        relative: &Path,
+        bytes: &[u8],
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+    ) -> Result<(), FsError> {
+        atomic_write_checked(root, relative, bytes, options, Some(expected))
+    }
     fn atomic_write_checked(
         root: &Path,
         relative: &Path,
@@ -2501,8 +2774,13 @@ mod imp {
         options: AtomicWriteOptions,
         expected: Option<&RootIdentity>,
     ) -> Result<(), FsError> {
-        let (parent, file_name) =
-            open_parent_checked(root, relative, options.create_parents, options.dir_mode, expected)?;
+        let (parent, file_name) = open_parent_checked(
+            root,
+            relative,
+            options.create_parents,
+            options.dir_mode,
+            expected,
+        )?;
         validate_optional_regular(&parent, &file_name, relative)?;
         let temp_name = temp_name(&file_name);
         let temp_fd = fs::openat(
@@ -2794,8 +3072,7 @@ mod imp {
         file_mode: u32,
         expected: Option<&RootIdentity>,
     ) -> Result<RootedFileLock, FsError> {
-        let (parent, file_name) =
-            open_parent_checked(root, relative, true, dir_mode, expected)?;
+        let (parent, file_name) = open_parent_checked(root, relative, true, dir_mode, expected)?;
         let fd = fs::openat(
             &parent,
             &file_name,
@@ -2876,7 +3153,8 @@ mod imp {
         length: u64,
         expected: Option<&RootIdentity>,
     ) -> Result<(), FsError> {
-        let (parent, file_name) = open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
         let fd = fs::openat(
             &parent,
             &file_name,
@@ -2973,8 +3251,22 @@ mod imp {
         Err(unsupported())
     }
 
-    pub(super) fn open_recovery_file(_root:&Path,_relative:&Path,_expected:&RootIdentity)->Result<std::fs::File,FsError>{Err(unsupported())}
-    pub(super) fn atomic_write_pinned(_root:&Path,_relative:&Path,_bytes:&[u8],_options:AtomicWriteOptions,_expected:&RootIdentity)->Result<(),FsError>{Err(unsupported())}
+    pub(super) fn open_recovery_file(
+        _root: &Path,
+        _relative: &Path,
+        _expected: &RootIdentity,
+    ) -> Result<std::fs::File, FsError> {
+        Err(unsupported())
+    }
+    pub(super) fn atomic_write_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _bytes: &[u8],
+        _options: AtomicWriteOptions,
+        _expected: &RootIdentity,
+    ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
     pub(super) fn atomic_write(
         _root: &Path,
         _relative: &Path,
@@ -3125,15 +3417,26 @@ mod tests {
         std::fs::write(root.join(name), "ordinary spool").unwrap();
         let pin = root_identity(&root).unwrap();
         let mut attempted = false;
-        let result = imp::link_task_transcript_with_create(&root, name, Some(&pin), &target, |_, _| {
-            attempted = true;
-            Err(std::io::Error::from_raw_os_error(1314))
-        });
+        let result =
+            imp::link_task_transcript_with_create(&root, name, Some(&pin), &target, |_, _| {
+                attempted = true;
+                Err(std::io::Error::from_raw_os_error(1314))
+            });
         assert!(attempted);
         assert!(result.is_err());
-        assert!(std::fs::symlink_metadata(root.join(name)).unwrap().file_type().is_file());
-        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), "ordinary spool");
-        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "failed creation leaves no temporary link");
+        assert!(std::fs::symlink_metadata(root.join(name))
+            .unwrap()
+            .file_type()
+            .is_file());
+        assert_eq!(
+            std::fs::read_to_string(root.join(name)).unwrap(),
+            "ordinary spool"
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "failed creation leaves no temporary link"
+        );
     }
 
     #[cfg(windows)]
@@ -3144,12 +3447,19 @@ mod tests {
         let root = directory.path().join("tasks");
         std::fs::create_dir(&root).unwrap();
         let target = directory.path().join("live.output");
-        let mut writer = std::fs::OpenOptions::new().create_new(true).write(true).open(&target).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&target)
+            .unwrap();
         writer.write_all(b"before").unwrap();
         let pin = root_identity(&root).unwrap();
         let name = Path::new("blive.output");
         let mut held = adopt_task_output_link(&root, name, Some(&pin), &target).unwrap();
-        assert!(!std::fs::symlink_metadata(root.join(name)).unwrap().file_type().is_symlink());
+        assert!(!std::fs::symlink_metadata(root.join(name))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(file_link_count(&held).unwrap(), 2);
         writer.write_all(b" after").unwrap();
         writer.flush().unwrap();
@@ -3160,7 +3470,8 @@ mod tests {
         drop(held);
         let mut restored = adopt_task_output_link(&root, name, Some(&pin), &target).unwrap();
         restored.seek(SeekFrom::Start(0)).unwrap();
-        text.clear(); restored.read_to_string(&mut text).unwrap();
+        text.clear();
+        restored.read_to_string(&mut text).unwrap();
         assert_eq!(text, "before after");
         let other = directory.path().join("other.output");
         std::fs::write(&other, "other").unwrap();
@@ -3168,7 +3479,10 @@ mod tests {
         let collision = Path::new("bcollision.output");
         std::fs::write(root.join(collision), "keep").unwrap();
         assert!(adopt_task_output_link(&root, collision, Some(&pin), &target).is_err());
-        assert_eq!(std::fs::read_to_string(root.join(collision)).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(root.join(collision)).unwrap(),
+            "keep"
+        );
         std::fs::rename(&target, directory.path().join("old.output")).unwrap();
         std::fs::write(&target, "replacement").unwrap();
         assert!(validate_task_output_link(&root, name, Some(&pin), &target, &restored).is_err());
@@ -3189,7 +3503,11 @@ mod tests {
         // failed-create preservation separately below; do not substitute a hard link.
         let probe = root.join("symlink-privilege-probe");
         if let Err(error) = std::os::windows::fs::symlink_file(&target, &probe) {
-            assert_eq!(error.raw_os_error(), Some(1314), "unexpected symlink probe error: {error}");
+            assert_eq!(
+                error.raw_os_error(),
+                Some(1314),
+                "unexpected symlink probe error: {error}"
+            );
             assert!(link_task_transcript(&root, name, Some(&pin), &target).is_err());
             assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), "spool");
             eprintln!("Windows symlink privilege unavailable: success branch requires Developer Mode or symlink privilege");
@@ -3197,21 +3515,45 @@ mod tests {
         }
         std::fs::remove_file(probe).unwrap();
         let held = link_task_transcript(&root, name, Some(&pin), &target).unwrap();
-        assert!(std::fs::symlink_metadata(root.join(name)).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), "transcript");
+        assert!(std::fs::symlink_metadata(root.join(name))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(root.join(name)).unwrap(),
+            "transcript"
+        );
         {
             use std::io::Write;
-            let mut writer = std::fs::OpenOptions::new().append(true).open(&target).unwrap();
+            let mut writer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&target)
+                .unwrap();
             writer.write_all(b" later").unwrap();
         }
-        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), "transcript later");
+        assert_eq!(
+            std::fs::read_to_string(root.join(name)).unwrap(),
+            "transcript later"
+        );
         validate_task_output_link(&root, name, Some(&pin), &target, &held).unwrap();
         std::fs::remove_file(root.join(name)).unwrap();
         std::fs::write(root.join(name), "replacement").unwrap();
         assert!(validate_task_output_link(&root, name, Some(&pin), &target, &held).is_err());
-        assert!(adopt_task_output_link(&root, Path::new("brelative.output"), Some(&pin), Path::new("relative.output")).is_err());
+        assert!(adopt_task_output_link(
+            &root,
+            Path::new("brelative.output"),
+            Some(&pin),
+            Path::new("relative.output")
+        )
+        .is_err());
         let wrong_pin = root_identity(directory.path()).unwrap();
-        assert!(adopt_task_output_link(&root, Path::new("bwrongroot.output"), Some(&wrong_pin), &target).is_err());
+        assert!(adopt_task_output_link(
+            &root,
+            Path::new("bwrongroot.output"),
+            Some(&wrong_pin),
+            &target
+        )
+        .is_err());
     }
 
     use super::*;
@@ -3233,13 +3575,27 @@ mod tests {
         let output = root.path().join("atestlink.output");
         std::fs::write(&output, "allocated spool").unwrap();
         let identity = root_identity(root.path()).unwrap();
-        let result = link_task_transcript(root.path(), Path::new("atestlink.output"), Some(&identity), relative_target);
+        let result = link_task_transcript(
+            root.path(),
+            Path::new("atestlink.output"),
+            Some(&identity),
+            relative_target,
+        );
         assert!(matches!(result, Err(FsError::OutsideWorkspace(_))));
         assert!(!output.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&output).unwrap(), "allocated spool");
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "trusted transcript");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "trusted transcript"
+        );
 
-        let mut pinned = link_task_transcript(root.path(), Path::new("atestlink.output"), Some(&identity), &target).unwrap();
+        let mut pinned = link_task_transcript(
+            root.path(),
+            Path::new("atestlink.output"),
+            Some(&identity),
+            &target,
+        )
+        .unwrap();
         assert_eq!(std::fs::read_link(&output).unwrap(), target);
         let mut content = String::new();
         pinned.read_to_string(&mut content).unwrap();
@@ -3271,8 +3627,17 @@ mod tests {
         let collision = Path::new("bcollision.output");
         std::fs::write(root.join(collision), "preserve collision").unwrap();
         assert!(adopt_task_output_link(&root, collision, Some(&pin), &target).is_err());
-        assert_eq!(std::fs::read_to_string(root.join(collision)).unwrap(), "preserve collision");
-        assert!(adopt_task_output_link(&root, Path::new("brelative.output"), Some(&pin), Path::new("source.output")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join(collision)).unwrap(),
+            "preserve collision"
+        );
+        assert!(adopt_task_output_link(
+            &root,
+            Path::new("brelative.output"),
+            Some(&pin),
+            Path::new("source.output")
+        )
+        .is_err());
         assert!(!root.join("brelative.output").exists());
     }
 

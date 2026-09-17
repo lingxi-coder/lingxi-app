@@ -107,7 +107,10 @@ impl std::fmt::Display for FunctionHookError {
             Self::TimedOut => write!(f, "function hook exceeded its time budget"),
             Self::OutOfMemory => write!(f, "function hook exceeded its memory limit"),
             Self::NotSerialisable(message) => {
-                write!(f, "function hook returned a non-serialisable value: {message}")
+                write!(
+                    f,
+                    "function hook returned a non-serialisable value: {message}"
+                )
             }
             Self::EngineUnavailable(message) => {
                 write!(f, "function hook engine unavailable: {message}")
@@ -275,11 +278,26 @@ mod tests {
     #[test]
     fn no_host_capability_is_reachable_from_a_hook() {
         for name in [
-            "require", "process", "globalThis.process", "Deno", "Bun",
-            "fetch", "XMLHttpRequest", "WebSocket", "navigator",
-            "fs", "readFile", "open", "child_process", "spawn",
-            "setTimeout", "setInterval", "queueMicrotask",
-            "importScripts", "postMessage", "self",
+            "require",
+            "process",
+            "globalThis.process",
+            "Deno",
+            "Bun",
+            "fetch",
+            "XMLHttpRequest",
+            "WebSocket",
+            "navigator",
+            "fs",
+            "readFile",
+            "open",
+            "child_process",
+            "spawn",
+            "setTimeout",
+            "setInterval",
+            "queueMicrotask",
+            "importScripts",
+            "postMessage",
+            "self",
         ] {
             let out = run(&format!("return typeof {name};")).expect(name);
             assert_eq!(
@@ -431,7 +449,10 @@ mod tests {
     #[test]
     fn the_payload_arrives_and_the_result_comes_back() {
         let out = Sandbox::default()
-            .eval("return {seen: input.tool, ok: true};", &json!({"tool": "Bash"}))
+            .eval(
+                "return {seen: input.tool, ok: true};",
+                &json!({"tool": "Bash"}),
+            )
             .unwrap();
         assert_eq!(out, json!({"seen": "Bash", "ok": true}));
     }
@@ -466,13 +487,20 @@ mod tests {
     #[test]
     fn a_line_separator_in_the_payload_survives() {
         let out = Sandbox::default()
-            .eval("return input.text.length;", &json!({"text": "a\u{2028}b\u{2029}c"}))
+            .eval(
+                "return input.text.length;",
+                &json!({"text": "a\u{2028}b\u{2029}c"}),
+            )
             .unwrap();
         assert_eq!(out, json!(5));
         let round_tripped = Sandbox::default()
             .eval("return input.text;", &json!({"text": "a\u{2028}b"}))
             .unwrap();
-        assert_eq!(round_tripped, json!("a\u{2028}b"), "the separator must survive verbatim");
+        assert_eq!(
+            round_tripped,
+            json!("a\u{2028}b"),
+            "the separator must survive verbatim"
+        );
     }
 
     /// A payload that looks like source must not become source.

@@ -962,7 +962,10 @@ pub enum ClientCommand {
         task_id: String,
         message: String,
     },
-    CronRunStarted { run_id: String, session_id: String },
+    CronRunStarted {
+        run_id: String,
+        session_id: String,
+    },
     ScheduledRunTurn {
         run_id: String,
         prompt: String,

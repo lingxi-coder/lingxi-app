@@ -165,15 +165,15 @@ mod tests {
     /// published only once per test binary; this one reads a switch the test flips,
     /// which is how a single end-to-end test can exercise BOTH answers.
     static KQ_ANSWER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    
+
     struct SwitchableReadAutoAllow;
-    
+
     impl platform_api::read_auto_allow::ReadAutoAllow for SwitchableReadAutoAllow {
         fn read_auto_allowed(&self, _path: &str) -> bool {
             KQ_ANSWER.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
-    
+
     fn set_kq_answer(allowed: bool) {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
@@ -183,7 +183,7 @@ mod tests {
         });
         KQ_ANSWER.store(allowed, std::sync::atomic::Ordering::SeqCst);
     }
-    
+
     #[tokio::test]
     async fn stale_recovery_end_to_end_depends_on_kq() {
         for read_auto_allowed in [false, true] {
@@ -217,8 +217,7 @@ mod tests {
                 .await;
 
             if read_auto_allowed {
-                let result =
-                    outcome.expect("a readable path whose edit applies must recover");
+                let result = outcome.expect("a readable path whose edit applies must recover");
                 // Applied against the CURRENT content.
                 assert_eq!(
                     std::fs::read_to_string(&target).unwrap(),
@@ -737,7 +736,7 @@ that bypasses Perforce tracking."
         let target = tmp.path().join("created.txt");
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileEditTool::new(ctx);
-        let result = tool
+        let _result = tool
             .call(
                 json!({
                     "file_path": target.to_str().unwrap(),
@@ -1470,7 +1469,7 @@ that bypasses Perforce tracking."
         // Touch: bump mtime forward WITHOUT changing content.
         set_file_mtime(&target, FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
         let tool = FileEditTool::new(ctx);
-        let result = tool
+        let _result = tool
             .call(
                 json!({
                     "file_path": target.to_str().unwrap(),
@@ -1508,7 +1507,7 @@ that bypasses Perforce tracking."
         .unwrap();
         // No re-seed: the post-write map.set from the first edit must satisfy
         // the guard for the second edit.
-        let result = tool
+        let _result = tool
             .call(
                 json!({
                     "file_path": target.to_str().unwrap(),

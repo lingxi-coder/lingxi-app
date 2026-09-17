@@ -8,14 +8,8 @@
 //! `parity_prompt_byte_locks.rs` under a name that cannot go stale.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 
-use orchestrator::prompt::{
-    assemble_system_prompt, assemble_system_prompt_with_style, env_meta, ActiveOutputStyle,
-    FileTree, SystemPromptContext,
-};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 const BACKLOG_CONTRACTS: &str =
     include_str!("../src/parity/fixtures/claude_2_1_220_backlog_contracts.json");

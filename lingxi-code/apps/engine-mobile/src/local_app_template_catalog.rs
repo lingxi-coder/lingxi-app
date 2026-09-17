@@ -398,10 +398,8 @@ pub(crate) fn resolve(
     workflow_run_id: &str,
     handle: &str,
 ) -> Result<Value, String> {
-    Ok(
-        serde_json::to_value(resolve_typed(root, app_id, workflow_run_id, handle)?)
-            .map_err(|error| format!("serialize selection: {error}"))?,
-    )
+    serde_json::to_value(resolve_typed(root, app_id, workflow_run_id, handle)?)
+        .map_err(|error| format!("serialize selection: {error}"))
 }
 
 pub(crate) fn resolve_typed(

@@ -127,17 +127,14 @@ async fn main() -> anyhow::Result<()> {
     let session_lifecycle = bound.session_lifecycle();
 
     // (3) Start the loopback WebSocket endpoint on an ephemeral port.
-    let endpoint = match McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection))
-        .await
-    {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            drain_session_lifecycle(&session_lifecycle).await;
-            return Err(anyhow::anyhow!(
-                "failed to bind loopback endpoint: {error}"
-            ));
-        }
-    };
+    let endpoint =
+        match McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection)).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                drain_session_lifecycle(&session_lifecycle).await;
+                return Err(anyhow::anyhow!("failed to bind loopback endpoint: {error}"));
+            }
+        };
     let port = endpoint.port();
 
     // (4) Write the F2-04 discovery lockfile and enforce its token on the

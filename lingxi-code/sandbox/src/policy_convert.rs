@@ -317,14 +317,12 @@ pub fn convert_settings_to_runtime_config(
         // spelling reach the same file the user meant.
         if let Some(v) = &s.credentials {
             let resolved = crate::credentials::resolve(v);
-            cfg.filesystem
-                .deny_read
-                .extend(
-                    resolved
-                        .deny_read_paths
-                        .iter()
-                        .map(|p| resolve_sandbox_filesystem_path(p, &settings_dir)),
-                );
+            cfg.filesystem.deny_read.extend(
+                resolved
+                    .deny_read_paths
+                    .iter()
+                    .map(|p| resolve_sandbox_filesystem_path(p, &settings_dir)),
+            );
             for name in resolved.deny_env_vars {
                 if !cfg.credential_deny_env.contains(&name) {
                     cfg.credential_deny_env.push(name);
@@ -987,8 +985,7 @@ mod deny_merge_tests {
             }
         }))
         .expect("settings parse");
-        let cfg =
-            convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
+        let cfg = convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
 
         let has = |v: &[String], needle: &str| v.iter().any(|p| p.contains(needle));
         // From the permission rules.
@@ -1034,8 +1031,7 @@ mod deny_merge_tests {
             "sandbox": { "enabled": true }
         }))
         .expect("settings parse");
-        let cfg =
-            convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
+        let cfg = convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
         assert!(
             !cfg.filesystem.allow_read.iter().any(|p| p.contains("etc")),
             "a Read allow rule must not reach allow_read: {:?}",

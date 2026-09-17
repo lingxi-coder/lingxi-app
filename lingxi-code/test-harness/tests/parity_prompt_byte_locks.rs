@@ -13,7 +13,6 @@
 use std::path::{Path, PathBuf};
 
 use orchestrator::prompt::{
-
     assemble_system_prompt, assemble_system_prompt_with_style, env_meta, ActiveOutputStyle,
     FileTree, SystemPromptContext,
 };

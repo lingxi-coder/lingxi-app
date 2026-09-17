@@ -110,7 +110,9 @@ fn resolution_returns_the_remaining_connections_as_the_failover_chain() {
 fn group_qualified_ref_resolves_through_the_group() {
     let registry = ModelRegistry::from_config(two_connection_group()).expect("registry");
 
-    let route = registry.resolve("deepseek/deepseek-flash").expect("resolve");
+    let route = registry
+        .resolve("deepseek/deepseek-flash")
+        .expect("resolve");
 
     assert_eq!(route.profile_name, "deepseek:intl");
 }
@@ -156,7 +158,11 @@ fn a_session_scoped_to_a_connection_can_still_fail_over() {
         .expect("resolve");
 
     assert_eq!(route.profile_name, "deepseek:intl");
-    assert_eq!(route.connection_chain.len(), 1, "failover must be reachable");
+    assert_eq!(
+        route.connection_chain.len(),
+        1,
+        "failover must be reachable"
+    );
     assert_eq!(route.connection_chain[0].profile_name, "deepseek:cn");
 }
 
@@ -231,9 +237,7 @@ fn hidden_connections_are_not_listed() {
 
 // ── Desugaring `settings.providers` into connections ───────────────────────
 
-use llm_client::{
-    parse_provider_profiles_lenient, ProviderCredentialMode, ProviderParseOptions,
-};
+use llm_client::{parse_provider_profiles_lenient, ProviderCredentialMode, ProviderParseOptions};
 use std::collections::BTreeMap;
 
 fn parse(json: serde_json::Value) -> (Vec<ProviderProfile>, Vec<String>) {
@@ -338,7 +342,11 @@ fn a_connection_overrides_provider_level_defaults() {
 
     let api = &profiles[0];
     assert_eq!(api.protocol, ProtocolFamily::OpenAiChat);
-    assert_eq!(api.models.len(), 2, "inherits the provider-level model list");
+    assert_eq!(
+        api.models.len(),
+        2,
+        "inherits the provider-level model list"
+    );
 
     let coding = &profiles[1];
     assert_eq!(
@@ -399,8 +407,10 @@ fn a_connection_with_credential_ids_overrides_the_inherited_one() {
             ]
         }
     }));
-    let by_name: std::collections::BTreeMap<_, _> =
-        profiles.iter().map(|p| (p.profile_name.as_str(), p)).collect();
+    let by_name: std::collections::BTreeMap<_, _> = profiles
+        .iter()
+        .map(|p| (p.profile_name.as_str(), p))
+        .collect();
     assert_eq!(
         by_name["deepseek:intl"].credential,
         CredentialConfig::Static {
@@ -499,7 +509,10 @@ fn duplicate_connection_ids_are_rejected() {
     }));
     assert!(profiles.is_empty());
     assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("duplicate connection id"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("duplicate connection id"),
+        "{warnings:?}"
+    );
 }
 
 /// A provider may publish one model on both a subscription endpoint and a

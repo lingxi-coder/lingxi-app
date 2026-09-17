@@ -16,7 +16,10 @@ impl platform_api::PermissionGate for LivePermissionGate {
     }
 
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
-        if !matches!(mode, "default" | "plan" | "acceptEdits" | "bypassPermissions") {
+        if !matches!(
+            mode,
+            "default" | "plan" | "acceptEdits" | "bypassPermissions"
+        ) {
             return Err("invalid permission mode".into());
         }
         *self.0.write().unwrap() = mode.to_owned();

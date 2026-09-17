@@ -273,7 +273,7 @@ impl ModelCallPreparer for VisionModelCallPreparer {
             Ok(analyzed) => analyzed,
             Err(OrchestratorError::ApiCall(LlmError::MediaDelegationPartial {
                 message,
-                accounting,
+                accounting: _,
             })) => {
                 return Err(OrchestratorError::ApiCall(
                     LlmError::MediaDelegationUnavailable { message },

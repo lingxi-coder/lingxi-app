@@ -794,7 +794,10 @@ mod connection_label_tests {
 
     #[test]
     fn a_plain_provider_is_unchanged() {
-        assert_eq!(split_connection_profile("deepseek"), ("deepseek", None, None));
+        assert_eq!(
+            split_connection_profile("deepseek"),
+            ("deepseek", None, None)
+        );
         assert_eq!(connect_display_meta("deepseek").label, "DeepSeek");
         assert_eq!(connect_display_meta("groq").label, "Groq");
     }
@@ -825,10 +828,7 @@ mod connection_label_tests {
 
     #[test]
     fn an_unknown_vendor_still_title_cases_its_group() {
-        assert_eq!(
-            connect_display_meta("my-proxy:eu").label,
-            "My Proxy · eu"
-        );
+        assert_eq!(connect_display_meta("my-proxy:eu").label, "My Proxy · eu");
     }
 
     /// `#` is only a slot marker when what follows is a number, so a provider

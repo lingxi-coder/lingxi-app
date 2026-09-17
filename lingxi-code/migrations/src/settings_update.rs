@@ -356,7 +356,7 @@ fn eligible_for_in_place_fallback(error: &io::Error) -> bool {
         // EXDEV, EPERM, EEXIST, EBUSY. Check raw errno values so EACCES,
         // which Rust also classifies as PermissionDenied, is not widened into
         // the upstream fallback set.
-        return matches!(error.raw_os_error(), Some(18 | 1 | 17 | 16));
+        matches!(error.raw_os_error(), Some(18 | 1 | 17 | 16))
     }
     #[cfg(windows)]
     {

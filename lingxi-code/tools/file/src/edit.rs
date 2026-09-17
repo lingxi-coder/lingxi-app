@@ -686,10 +686,7 @@ impl Tool for FileEditTool {
                     &canon,
                     guard_mtime_ms,
                     &guard_raw_content,
-                    crate::read_requirement_waived(
-                        Some(&ctx.options.main_loop_model),
-                        &canon,
-                    ),
+                    crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon),
                 ) {
                     // Stale-recovery (claude `xTg`'s `TEu(ZVi(...))` branch,
                     // flag-gated `tengu_cedar_sundial`, default-OFF): only the

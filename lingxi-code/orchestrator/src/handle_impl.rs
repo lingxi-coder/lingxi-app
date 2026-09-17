@@ -2618,7 +2618,10 @@ mod tests {
             .expect("prepare next request");
         assert_ne!(prepared_before.model, "live-model");
         assert_eq!(prepared_after.model, "live-model");
-        assert_eq!(prepared_after.model_profile.as_deref(), Some("live-provider"));
+        assert_eq!(
+            prepared_after.model_profile.as_deref(),
+            Some("live-provider")
+        );
     }
 
     /// A transcript can carry a PROVIDER-QUALIFIED model reference with no
@@ -3312,7 +3315,7 @@ mod tests {
 
     #[test]
     fn apply_mcp_disabled_adds_removes_and_is_idempotent() {
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
 
         // Disable adds absent targets (dedup) and reports them affected.
         let (list, aff) = apply_mcp_disabled(s(&["a"]), &s(&["b", "c"]), true);

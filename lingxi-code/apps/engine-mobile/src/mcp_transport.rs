@@ -302,7 +302,7 @@ mod tests {
             let id = body
                 .split("\"id\":")
                 .nth(1)
-                .and_then(|value| value.split(|c| c == ',' || c == '}').next())
+                .and_then(|value| value.split([',', '}']).next())
                 .unwrap_or("1");
             let response_body =
                 format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"capabilities\":{{}}}}}}");

@@ -466,13 +466,13 @@ pub async fn secure_storage_for_policy(
             return Ok(Arc::new(InMemorySecureStorage::new()));
         }
         let default_dir = default_lingxi_dir();
-        return super::macos::MacOsKeychainStorage::new(
+        super::macos::MacOsKeychainStorage::new(
             user.clone(),
             config_dir.clone(),
             default_dir,
             String::new(),
         )
-        .map(|keychain| Arc::new(keychain) as Arc<dyn SecureStorage>);
+        .map(|keychain| Arc::new(keychain) as Arc<dyn SecureStorage>)
     }
     #[cfg(not(target_os = "macos"))]
     let fallback: Arc<dyn SecureStorage> = match policy {

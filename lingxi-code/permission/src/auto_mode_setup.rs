@@ -977,7 +977,7 @@ pub fn validate_notes(notes: &[String]) -> Option<String> {
 
 /// Read a JSON string array as `Vec<&str>`, or `None` when the value is not an
 /// array of strings.
-fn string_array<'a>(v: Option<&'a Value>) -> Option<Vec<&'a str>> {
+fn string_array(v: Option<&Value>) -> Option<Vec<&str>> {
     v?.as_array()?.iter().map(Value::as_str).collect()
 }
 
@@ -1280,7 +1280,7 @@ pub fn read_proposal_file_capped(path: &std::path::Path, cap: usize) -> Proposal
         Ok(_) => std::fs::File::open(path),
         Err(_) => return ProposalRead::Failed,
     };
-    let Ok(mut file) = opened else {
+    let Ok(file) = opened else {
         return ProposalRead::Failed; // ELOOP (symlink) / ENOENT / EACCES / …
     };
     let Ok(meta) = file.metadata() else {

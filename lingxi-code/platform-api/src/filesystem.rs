@@ -120,7 +120,11 @@ pub trait FileSystem: Send + Sync {
         expected: Option<&crate::rooted_fs::RootIdentity>,
     ) -> Result<(), FileAppendError> {
         self.append_file_rooted_no_follow_pinned(root, relative, content, expected)
-            .await.map_err(|error| FileAppendError { stage: FileAppendStage::Write, error })
+            .await
+            .map_err(|error| FileAppendError {
+                stage: FileAppendStage::Write,
+                error,
+            })
     }
 
     /// Append `content` to `path`, creating the file if it does not exist.
@@ -293,10 +297,24 @@ pub trait FileSystem: Send + Sync {
 
     /// Read a bounded byte window for task-output deltas. Physical platforms
     /// override this with seek/read; virtual filesystems preserve their backend.
-    async fn read_file_rooted_byte_window_pinned(&self, root: &Path, relative: &Path, expected: Option<&crate::rooted_fs::RootIdentity>, offset: u64, limit: u64) -> Result<Vec<u8>, FsError> {
-        let content = self.read_file_rooted_no_follow_window_pinned(root, relative, None, None, expected).await?.content;
-        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(content.len());
-        let end = start.saturating_add(usize::try_from(limit).unwrap_or(usize::MAX)).min(content.len());
+    async fn read_file_rooted_byte_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&crate::rooted_fs::RootIdentity>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        let content = self
+            .read_file_rooted_no_follow_window_pinned(root, relative, None, None, expected)
+            .await?
+            .content;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(content.len());
+        let end = start
+            .saturating_add(usize::try_from(limit).unwrap_or(usize::MAX))
+            .min(content.len());
         Ok(content.as_bytes()[start..end].to_vec())
     }
 

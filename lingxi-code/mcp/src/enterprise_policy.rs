@@ -2864,7 +2864,7 @@ mod tests {
     fn stdio_spec(command: &str, args: &[&str]) -> McpTransportSpec {
         McpTransportSpec::Stdio {
             command: command.to_string(),
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(|s| (*s).to_string()).collect(),
             env: Default::default(),
         }
     }

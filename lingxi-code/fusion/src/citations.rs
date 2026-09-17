@@ -107,7 +107,9 @@ fn scan_reference(bytes: &[u8], start: usize) -> Option<usize> {
     index += 1;
     let id_start = index;
     while index - id_start < MAX_EVIDENCE_ID_BYTES
-        && bytes.get(index).is_some_and(|byte| is_evidence_id_byte(*byte))
+        && bytes
+            .get(index)
+            .is_some_and(|byte| is_evidence_id_byte(*byte))
     {
         index += 1;
     }
@@ -252,9 +254,7 @@ mod tests {
 
     #[test]
     fn cjk_byte_offsets_and_later_invalid_marker_are_preserved() {
-        let prefix = format!(
-            "\u{7ed3}\u{8bba}\u{1f9ea}[evidence:{A}] \u{63a5}\u{7740}\u{ff1a}"
-        );
+        let prefix = format!("\u{7ed3}\u{8bba}\u{1f9ea}[evidence:{A}] \u{63a5}\u{7740}\u{ff1a}");
         let text = format!("{prefix}[evidence:{B}]");
         assert_eq!(
             validate_merged_citations(&text, &allow(&[A])),

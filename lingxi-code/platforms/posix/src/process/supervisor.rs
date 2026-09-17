@@ -641,7 +641,6 @@ mod tests {
             .await
             .unwrap();
         assert!(status.success());
-        use std::os::unix::fs::PermissionsExt as _;
         assert_eq!(
             std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
             0o700,

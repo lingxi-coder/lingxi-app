@@ -79,6 +79,10 @@ macro_rules! lazy_re {
         // (walker / semantic clusters); they are defined here so all const
         // patterns live together.
         #[allow(dead_code)]
+        // Several of these are named after the bash flag SET they match
+        // (`declare_niaAEF_re` ⇒ `-…[niaAEF]`). The case is the meaning, so
+        // snake-casing them would delete what the name says.
+        #[allow(non_snake_case)]
         fn $name() -> &'static Regex {
             static RE: OnceLock<Regex> = OnceLock::new();
             RE.get_or_init(|| Regex::new($pat).expect("valid pre-check regex"))
@@ -4016,16 +4020,16 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                 // Combined short flags (`-rv name[…]`): inspect the NEXT arg.
                 if l.len() > 2 && lb[0] == b'-' && lb[1] != b'-' && !l.contains('[') {
                     for u in flags {
-                        if u.len() == 2 && l.contains(&u[1..2]) {
-                            if a.get(ai + 1)
+                        if u.len() == 2
+                            && l.contains(&u[1..2])
+                            && a.get(ai + 1)
                                 .map_or(false, |d| d.contains('[') || contains_any_placeholder(d))
-                            {
-                                return SemanticCheckResult::Deny {
-                                    reason: format!(
-                                        "'{o} {u}' (combined in '{l}') operand contains array subscript \u{2014} bash evaluates $(cmd) in subscripts"
-                                    ),
-                                };
-                            }
+                        {
+                            return SemanticCheckResult::Deny {
+                                reason: format!(
+                                    "'{o} {u}' (combined in '{l}') operand contains array subscript \u{2014} bash evaluates $(cmd) in subscripts"
+                                ),
+                            };
                         }
                     }
                 }
@@ -5516,11 +5520,8 @@ EOF
             "echo `id`",
             "cd $(echo /etc)",
         ] {
-            match parse_for_security(cmd) {
-                ParseForSecurityResult::Simple { .. } => {
-                    panic!("DANGEROUS command wrongly Simple: {cmd:?}")
-                }
-                _ => {}
+            if let ParseForSecurityResult::Simple { .. } = parse_for_security(cmd) {
+                panic!("DANGEROUS command wrongly Simple: {cmd:?}")
             }
         }
     }
@@ -5530,11 +5531,8 @@ EOF
         // 2.1.211: the PS4 battery also applies to PROMPT4 (zsh alias for PS4).
         // A cmdsub-derived value must be TooComplex, not Simple.
         for cmd in ["PS4='$(id)' set -x", "PROMPT4='$(id)' set -x"] {
-            match parse_for_security(cmd) {
-                ParseForSecurityResult::Simple { .. } => {
-                    panic!("cmdsub-derived trace-prompt var wrongly Simple: {cmd:?}")
-                }
-                _ => {}
+            if let ParseForSecurityResult::Simple { .. } = parse_for_security(cmd) {
+                panic!("cmdsub-derived trace-prompt var wrongly Simple: {cmd:?}")
             }
         }
     }

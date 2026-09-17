@@ -255,10 +255,15 @@ pub enum SandboxedTag {
 impl SandboxedCommand {
     /// Attribute this OS process group to the subagent that launched it.
     #[must_use]
-    pub fn with_process_owner(mut self, owner: Option<String>) -> Self { self.process_owner = owner; self }
+    pub fn with_process_owner(mut self, owner: Option<String>) -> Self {
+        self.process_owner = owner;
+        self
+    }
     /// The subagent owning this command's process group.
     #[must_use]
-    pub fn process_owner(&self) -> Option<&str> { self.process_owner.as_deref() }
+    pub fn process_owner(&self) -> Option<&str> {
+        self.process_owner.as_deref()
+    }
 
     /// INTERNAL constructor for [`Sandbox`] implementations.
     ///

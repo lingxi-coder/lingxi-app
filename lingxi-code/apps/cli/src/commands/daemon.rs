@@ -1024,7 +1024,7 @@ fn terminate_observed_worker<PP: ProcProbe, ST: StallTerminator>(
             }) {
                 terminator.signal_pty_tree(runtime, probe, false);
             }
-            if wait_for_stall_termination(probe, terminator, &worker, pty_runtime_ref) {
+            if wait_for_stall_termination(probe, terminator, worker, pty_runtime_ref) {
                 crate::background_launch::remove_pty_runtime(runtime_dir, short);
                 return true;
             }
@@ -1049,7 +1049,7 @@ fn terminate_observed_worker<PP: ProcProbe, ST: StallTerminator>(
         }
     }
 
-    let stopped = wait_for_stall_termination(probe, terminator, &worker, pty_runtime_ref);
+    let stopped = wait_for_stall_termination(probe, terminator, worker, pty_runtime_ref);
     if stopped {
         crate::background_launch::remove_pty_runtime(runtime_dir, short);
     }

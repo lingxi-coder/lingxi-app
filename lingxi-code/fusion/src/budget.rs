@@ -431,27 +431,24 @@ impl ReservationLease {
     /// implementations that return no receipt retain the prior behavior: the
     /// task owns the armed lease and releases it if their commit fails.
     pub async fn commit(mut self, actual_nano_usd: u64) -> Result<(), FusionError> {
-        match self
+        if let Some(receipt) = self
             .budget
             .begin_commit_reservation(self.id, actual_nano_usd)
             .map_err(|error| map_budget_err(&error))?
         {
-            Some(receipt) => {
-                // Ownership crossed into the durable settlement receipt before
-                // the first await. From here, neither a failed acknowledgement
-                // nor cancellation may release/re-arm the already-billed hold.
-                self.disarmed = true;
-                let worker = tokio::spawn(async move {
-                    receipt
-                        .finish()
-                        .await
-                        .map_err(|error| map_budget_err(&error))
-                });
-                return worker
+            // Ownership crossed into the durable settlement receipt before
+            // the first await. From here, neither a failed acknowledgement
+            // nor cancellation may release/re-arm the already-billed hold.
+            self.disarmed = true;
+            let worker = tokio::spawn(async move {
+                receipt
+                    .finish()
                     .await
-                    .map_err(|_| FusionError::BudgetReservationUnavailable)?;
-            }
-            None => {}
+                    .map_err(|error| map_budget_err(&error))
+            });
+            return worker
+                .await
+                .map_err(|_| FusionError::BudgetReservationUnavailable)?;
         }
         let worker = tokio::spawn(async move {
             let mut lease = self;
@@ -493,7 +490,7 @@ impl Drop for ReservationLease {
 pub async fn acquire(
     config: &FusionRuntimeConfig,
     resolved: &ResolvedSet,
-    request: &FusionRequest,
+    _request: &FusionRequest,
     catalog: &dyn ModelSource,
     prices: &dyn FusionPriceBook,
     budget: Arc<dyn BudgetEnforcerHandle>,
@@ -680,8 +677,7 @@ comparator, not dead API surface and not a production fallback"
             hinted("openai", "terra", false),
             hinted("deepseek", "pro", false),
         ];
-        let q = quote(&config, &resolved_three(), &catalog, &unit_prices(), true)
-        .unwrap();
+        let q = quote(&config, &resolved_three(), &catalog, &unit_prices(), true).unwrap();
         let wrong_input = mistaken_byte_input_tokens(3, config.panel_max_turns);
         assert_eq!(
             q.reserved_input_tokens,
@@ -1043,8 +1039,7 @@ comparator, not dead API surface and not a production fallback"
             hinted("deepseek", "pro", false),
         ];
         let config = FusionRuntimeConfig::defaults();
-        let q = quote(&config, &resolved_three(), &catalog, &unit_prices(), true)
-        .unwrap();
+        let q = quote(&config, &resolved_three(), &catalog, &unit_prices(), true).unwrap();
         let budget = RecordingBudget::capped(q.reserved_nano_usd.saturating_mul(3) / 2);
         let a = acquire(
             &config,

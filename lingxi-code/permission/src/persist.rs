@@ -1173,6 +1173,9 @@ mod tests {
     }
 
     #[test]
+    // `uEh` is the oracle's own symbol name; lower-casing it would stop the
+    // test naming what it pins.
+    #[allow(non_snake_case)]
     fn excludes_path_resolution_matches_uEh_fallbacks() {
         use super::excludes_path_from;
         // `git config` gave an absolute path → used verbatim.

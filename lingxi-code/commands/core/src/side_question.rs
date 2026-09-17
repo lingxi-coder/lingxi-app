@@ -56,10 +56,9 @@ const FABRICATED_TOOL_CALL_NOTICE: &str = "_/btw can't run tools: any tool calls
 /// dependency to this crate; the alternatives are few and fixed.
 fn writes_tool_calls_as_text(answer: &str) -> bool {
     // `<`, optional `<prefix>:`, then the opening forms.
-    let opens = |rest: &str| rest.starts_with("function_calls>") || rest.starts_with("invoke name=");
-    let closes = |rest: &str| {
-        rest.starts_with("function_calls>") || rest.starts_with("invoke>")
-    };
+    let opens =
+        |rest: &str| rest.starts_with("function_calls>") || rest.starts_with("invoke name=");
+    let closes = |rest: &str| rest.starts_with("function_calls>") || rest.starts_with("invoke>");
     let mut rest = answer;
     while let Some(i) = rest.find('<') {
         let after = &rest[i + 1..];
@@ -72,7 +71,9 @@ fn writes_tool_calls_as_text(answer: &str) -> bool {
             Some((ns, tail))
                 if !ns.is_empty()
                     && ns.len() <= 32
-                    && ns.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
+                    && ns
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
             {
                 tail
             }
@@ -237,10 +238,7 @@ mod fabricated_tool_call_tests {
             "</invoke>",
             "<invoke name=\"Read\">",
         ] {
-            assert!(
-                writes_tool_calls_as_text(answer),
-                "must flag: {answer:?}"
-            );
+            assert!(writes_tool_calls_as_text(answer), "must flag: {answer:?}");
         }
     }
 

@@ -78,7 +78,9 @@ impl ProcessRunner for WindowsProcess {
     async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
         let owned = platform_api::agent_processes::snapshot_entries(owner);
         for entry in &owned {
-            if platform_api::shell_supervisor::kill_owned_registration(owner, *entry).await.is_none()
+            if platform_api::shell_supervisor::kill_owned_registration(owner, *entry)
+                .await
+                .is_none()
                 && platform_api::agent_processes::is_current(owner, *entry)
             {
                 let _ = super::kill_tree::kill_tree_windows(entry.pid).await;
@@ -95,7 +97,8 @@ impl ProcessRunner for WindowsProcess {
             .stderr(Stdio::piped());
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
-        let _agent_registration = platform_api::agent_processes::register(cmd.process_owner(), child.id());
+        let _agent_registration =
+            platform_api::agent_processes::register(cmd.process_owner(), child.id());
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
@@ -132,7 +135,8 @@ impl ProcessRunner for WindowsProcess {
             .kill_on_drop(true);
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
-        let _agent_registration = platform_api::agent_processes::register(cmd.process_owner(), child.id());
+        let _agent_registration =
+            platform_api::agent_processes::register(cmd.process_owner(), child.id());
         let pid = child
             .id()
             .ok_or_else(|| ProcessError::Io("streaming child has no pid".into()))?;
@@ -232,17 +236,34 @@ impl ProcessRunner for WindowsProcess {
         }
     }
 
-    fn supports_foreground_backgrounding(&self) -> bool { true }
-
-    async fn run_foreground(&self, cmd: &SandboxedCommand) -> Result<platform_api::ForegroundOutcome, ProcessError> {
-        Ok(self.run_foreground_with_output_limit(cmd, None).await?.outcome)
+    fn supports_foreground_backgrounding(&self) -> bool {
+        true
     }
-    async fn run_foreground_with_output_limit(&self, cmd: &SandboxedCommand, limit: Option<usize>) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+
+    async fn run_foreground(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<platform_api::ForegroundOutcome, ProcessError> {
+        Ok(self
+            .run_foreground_with_output_limit(cmd, None)
+            .await?
+            .outcome)
+    }
+    async fn run_foreground_with_output_limit(
+        &self,
+        cmd: &SandboxedCommand,
+        limit: Option<usize>,
+    ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
         #[cfg(windows)]
-        if super::supervisor::enabled(cmd) { return super::supervisor::execute(cmd, limit, false).await; }
+        if super::supervisor::enabled(cmd) {
+            return super::supervisor::execute(cmd, limit, false).await;
+        }
         super::background::run(cmd, limit, false).await
     }
-    async fn spawn_background(&self, cmd: &SandboxedCommand) -> Result<ProcessHandle, ProcessError> {
+    async fn spawn_background(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<ProcessHandle, ProcessError> {
         #[cfg(windows)]
         if super::supervisor::enabled(cmd) {
             return match super::supervisor::execute(cmd, None, true).await?.outcome {
@@ -252,23 +273,51 @@ impl ProcessRunner for WindowsProcess {
         }
         match super::background::run(cmd, Some(8192), true).await?.outcome {
             platform_api::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
-            platform_api::ForegroundOutcome::Completed(_) => unreachable!("explicit background path always hands off its spawned child"),
+            platform_api::ForegroundOutcome::Completed(_) => {
+                unreachable!("explicit background path always hands off its spawned child")
+            }
         }
     }
 
     #[cfg(windows)]
-    async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> { platform_api::shell_supervisor::acknowledge(handle).await }
+    async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+        platform_api::shell_supervisor::acknowledge(handle).await
+    }
     #[cfg(windows)]
-    async fn export_shell(&self, handle: &ProcessHandle) -> Result<platform_api::process::ShellProcessHandoff, ProcessError> { self.acknowledge_shell(handle).await?; super::supervisor::export(handle) }
+    async fn export_shell(
+        &self,
+        handle: &ProcessHandle,
+    ) -> Result<platform_api::process::ShellProcessHandoff, ProcessError> {
+        self.acknowledge_shell(handle).await?;
+        super::supervisor::export(handle)
+    }
     #[cfg(windows)]
-    async fn validate_shell(&self, handoff: &platform_api::process::ShellProcessHandoff) -> Result<(), ProcessError> { super::supervisor::validate(handoff).await }
+    async fn validate_shell(
+        &self,
+        handoff: &platform_api::process::ShellProcessHandoff,
+    ) -> Result<(), ProcessError> {
+        super::supervisor::validate(handoff).await
+    }
     #[cfg(windows)]
-    async fn adopt_shell(&self, handoff: &platform_api::process::ShellProcessHandoff, sink: std::sync::Arc<dyn platform_api::BackgroundExitSink>) -> Result<ProcessHandle, ProcessError> { super::supervisor::adopt(handoff,sink).await }
+    async fn adopt_shell(
+        &self,
+        handoff: &platform_api::process::ShellProcessHandoff,
+        sink: std::sync::Arc<dyn platform_api::BackgroundExitSink>,
+    ) -> Result<ProcessHandle, ProcessError> {
+        super::supervisor::adopt(handoff, sink).await
+    }
     #[cfg(windows)]
-    async fn release_shell(&self, handoff: &platform_api::process::ShellProcessHandoff) -> Result<(), ProcessError> { super::supervisor::release(handoff).await }
+    async fn release_shell(
+        &self,
+        handoff: &platform_api::process::ShellProcessHandoff,
+    ) -> Result<(), ProcessError> {
+        super::supervisor::release(handoff).await
+    }
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
         #[cfg(windows)]
-        if let Some(result) = super::supervisor::kill(handle).await { return result; }
+        if let Some(result) = super::supervisor::kill(handle).await {
+            return result;
+        }
         super::kill_tree::kill_tree_windows(handle.pid).await
     }
 

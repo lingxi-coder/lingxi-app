@@ -51,8 +51,9 @@ use crate::todo_store::{TodoStore, TodoTask};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, CoercedInput, ValidationError,};
+    CoercedInput, DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult,
+    ToolError, ToolStaticContext, ValidationError,
+};
 use tool_api::BuiltinToolContext;
 
 /// Tool name `'TaskCreate'` (claude-code `TASK_CREATE_TOOL_NAME`).
@@ -256,7 +257,9 @@ async fn not_found_rosters(
             let id = agent_id.to_string();
             match registry.get(&id).await {
                 Ok(Some(record)) => {
-                    if record.task_type == "local_agent" && (record.status == "running" || record.is_parked) {
+                    if record.task_type == "local_agent"
+                        && (record.status == "running" || record.is_parked)
+                    {
                         named_agents.push(name);
                     }
                     named_ids.push(record.task_id);
@@ -910,7 +913,9 @@ static TASK_CREATE_SCHEMA: Lazy<Value> = Lazy::new(|| {
 
 /// `OR(e)` — a string with non-whitespace content.
 fn is_filled_string(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty())
 }
 
 /// `AOe(e)` — carries a batch parameter TaskCreate does not have.
@@ -2400,7 +2405,12 @@ impl Tool for TaskStopTool {
         };
 
         let named_agents = match self.ctx.agent_name_registry.as_ref() {
-            Some(names) => names.list().await.into_iter().map(|(name, id)| (name, id.to_string())).collect(),
+            Some(names) => names
+                .list()
+                .await
+                .into_iter()
+                .map(|(name, id)| (name, id.to_string()))
+                .collect(),
             None => Vec::new(),
         };
         let record = match registry.resolve_stop_target(&task_id, &named_agents).await {
@@ -2409,30 +2419,59 @@ impl Tool for TaskStopTool {
                 return Err(ToolError::InvalidInput(message));
             }
             Ok(platform_api::task_registry::TaskStopResolution::NotFound { suggestion }) => {
-                emit_failed(&bus, TASK_STOP_FAILED, &invocation_id, "not_found", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(task_stop_not_found_message(
-                    &self.ctx, &registry, &task_id, suggestion.as_deref(), caller_agent_id.as_deref(),
-                ).await));
+                emit_failed(
+                    &bus,
+                    TASK_STOP_FAILED,
+                    &invocation_id,
+                    "not_found",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(
+                    task_stop_not_found_message(
+                        &self.ctx,
+                        &registry,
+                        &task_id,
+                        suggestion.as_deref(),
+                        caller_agent_id.as_deref(),
+                    )
+                    .await,
+                ));
             }
             Err(error) => return Err(registry_err_to_tool_err("TaskStop", error)),
         };
-        let display_id = if record.task_id == task_id { task_id.clone() } else {
-            format!("{} ({})", platform_api::display::sanitize_display(&task_id), record.task_id)
+        let display_id = if record.task_id == task_id {
+            task_id.clone()
+        } else {
+            format!(
+                "{} ({})",
+                platform_api::display::sanitize_display(&task_id),
+                record.task_id
+            )
         };
         let task_id = record.task_id.clone();
-        let may_stop = caller_may_stop(caller_agent_id.as_deref(), record.owner_agent_id.as_deref());
-        let owner_refusal = || ToolError::InvalidInput(format!(
-            "Task {display_id} is owned by {}; agent {} cannot stop it.",
-            platform_api::display::sanitize_display(record.owner_agent_id.as_deref().unwrap_or(NO_OWNER_DISPLAY)),
-            platform_api::display::sanitize_display(caller_agent_id.as_deref().unwrap_or_default()),
-        ));
+        let may_stop =
+            caller_may_stop(caller_agent_id.as_deref(), record.owner_agent_id.as_deref());
+        let owner_refusal = || {
+            ToolError::InvalidInput(format!(
+                "Task {display_id} is owned by {}; agent {} cannot stop it.",
+                platform_api::display::sanitize_display(
+                    record.owner_agent_id.as_deref().unwrap_or(NO_OWNER_DISPLAY)
+                ),
+                platform_api::display::sanitize_display(
+                    caller_agent_id.as_deref().unwrap_or_default()
+                ),
+            ))
+        };
         // `td` observers check self-stop and ownership BEFORE status. An
         // observer cannot shut off its own observation loop through TaskStop.
         if record.is_observer {
             if caller_agent_id.is_some() && caller_agent_id == record.owner_agent_id {
                 return Err(ToolError::InvalidInput(format!("Observer {display_id} cannot stop itself; use the task UI or a main-session TaskStop.")));
             }
-            if !may_stop { return Err(owner_refusal()); }
+            if !may_stop {
+                return Err(owner_refusal());
+            }
         }
         // ORDER IS THE ORACLE'S: not-running first, ownership second
         // (`src_160988549.js` @3597258 —
@@ -2469,7 +2508,14 @@ impl Tool for TaskStopTool {
         // other agent's background work — the `_ctx` that carries the caller's
         // identity was resolved and then ignored.
         if !record.is_observer && !may_stop {
-            emit_failed(&bus, TASK_STOP_FAILED, &invocation_id, "not_owner", started.elapsed().as_millis() as u64).await;
+            emit_failed(
+                &bus,
+                TASK_STOP_FAILED,
+                &invocation_id,
+                "not_owner",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
             return Err(owner_refusal());
         }
 
@@ -2496,9 +2542,18 @@ impl Tool for TaskStopTool {
                 groups.extend(self.ctx.process.kill_owner_processes(&owner).await);
             }
             groups.len()
-        } else { 0 };
-        let already_idle_observer = record.is_observer && record.status != "running" && !record.is_parked && !ended_with_live_loop;
-        let stopped = if already_idle_observer { Ok(record.clone()) } else { registry.kill_with_reason(&task_id, "parent").await };
+        } else {
+            0
+        };
+        let already_idle_observer = record.is_observer
+            && record.status != "running"
+            && !record.is_parked
+            && !ended_with_live_loop;
+        let stopped = if already_idle_observer {
+            Ok(record.clone())
+        } else {
+            registry.kill_with_reason(&task_id, "parent").await
+        };
         if let Err(e) = stopped {
             emit_failed(
                 &bus,
@@ -2852,8 +2907,12 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
                 )
                 .sanitized
             };
-            let head = t.harness_head.as_deref().filter(|s| !s.is_empty())
-                .map(|s| format!("{}\n\n", s.trim_end())).unwrap_or_default();
+            let head = t
+                .harness_head
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("{}\n\n", s.trim_end()))
+                .unwrap_or_default();
             parts.push(format!("<output>\n{head}{body}\n</output>"));
         }
         // `<error>` AFTER `<output>` (TS `mapToolResultToToolResultBlockParam`
@@ -2880,10 +2939,7 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
 ///   return s.length>B?`${oe(s,B)}\u2026 [truncated]`:s}
 /// ```
 fn normalize_mcp_status_message(raw: Option<&str>) -> Option<String> {
-    let collapsed = raw?
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed = raw?.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
         return None;
     }
@@ -3319,22 +3375,21 @@ impl Tool for TaskOutputTool {
         let mcp_block = chunk.mcp.as_ref().map(|meta| {
             render_mcp_task_output(
                 meta,
-                chunk
-                    .status
-                    .as_deref()
-                    .unwrap_or_else(|| record.status.as_str()),
+                chunk.status.as_deref().unwrap_or(record.status.as_str()),
             )
         });
         let clean_result = chunk.result.clone().filter(|r| !r.is_empty()).or_else(|| {
-            chunk.harness_head.as_ref().filter(|head| !head.is_empty())
+            chunk
+                .harness_head
+                .as_ref()
+                .filter(|head| !head.is_empty())
                 .map(|_| "[The agent produced no report text.]".to_string())
         });
         // claude `isRawTranscript: !ue` — true exactly when the clean report was
         // empty and the body fell back to the transcript. Set ONLY in the
         // oracle's `local_agent` branch; every other type leaves it undefined,
         // so `prependMarker: !isRawTranscript` is `true` for them.
-        let is_raw_transcript =
-            record.task_type == "local_agent" && clean_result.is_none();
+        let is_raw_transcript = record.task_type == "local_agent" && clean_result.is_none();
         let omit_output_path = mcp_block.is_some();
         let output = mcp_block
             .or(clean_result)

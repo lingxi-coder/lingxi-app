@@ -793,7 +793,7 @@ impl AppMcpProposal {
             candidate.title = tool.title.clone();
             candidate.description = tool.description.clone();
             candidate.output_schema = tool.output_schema.clone();
-            validate_generated_mcp_catalog(&[candidate]).map_err(|issues| issues)?;
+            validate_generated_mcp_catalog(&[candidate])?;
         }
         Ok(())
     }

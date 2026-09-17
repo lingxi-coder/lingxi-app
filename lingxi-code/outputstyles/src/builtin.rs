@@ -137,7 +137,8 @@ Where these rules conflict with more general communication or formatting guidanc
 
 /// `Proactive`'s per-turn reminder (upstream `turnReminder`). Replaces the
 /// generic "Remember to follow the specific guidelines for this style."
-pub(crate) const PROACTIVE_TURN_REMINDER: &str = r#"Execute autonomously, minimize interruptions, prefer action over planning."#;
+pub(crate) const PROACTIVE_TURN_REMINDER: &str =
+    r#"Execute autonomously, minimize interruptions, prefer action over planning."#;
 
 /// `Proactive`'s reminder for a turn where the only work left is waiting on a
 /// background task or monitor (upstream `waitingTurnReminder`).

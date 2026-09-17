@@ -260,11 +260,18 @@ impl MessageQueueManager {
     /// Enqueue a passive goal retry through the ordinary host turn lifecycle.
     pub async fn enqueue_goal_retry(&self, uuid: String, body: String, cancel: CancellationToken) {
         self.enqueue(QueuedCommand {
-            uuid: uuid.clone(), content: QueuedCommandContent::UserInput { text: body },
-            priority: QueuePriority::Later, queued_at: SystemTime::now(), source: QueueSource::Hook,
-            agent_id: None, skip_slash_commands: true, is_meta: true,
-            scheduled_task_id: None, scheduled_fire_id: None,
-        }).await;
+            uuid: uuid.clone(),
+            content: QueuedCommandContent::UserInput { text: body },
+            priority: QueuePriority::Later,
+            queued_at: SystemTime::now(),
+            source: QueueSource::Hook,
+            agent_id: None,
+            skip_slash_commands: true,
+            is_meta: true,
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
+        })
+        .await;
         let queue = self.clone();
         tokio::spawn(async move {
             cancel.cancelled().await;
@@ -706,15 +713,21 @@ mod tests {
     async fn goal_retry_uses_host_queue_and_cancellation_removes_it() {
         let queue = MessageQueueManager::new();
         let cancel = CancellationToken::new();
-        queue.enqueue_goal_retry("goal-retry-test".into(), "continue".into(), cancel.clone()).await;
+        queue
+            .enqueue_goal_retry("goal-retry-test".into(), "continue".into(), cancel.clone())
+            .await;
         let queued = queue.snapshot().await;
         assert_eq!(queued.len(), 1);
         assert!(queued[0].is_meta);
         assert_eq!(queued[0].priority, QueuePriority::Later);
         cancel.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !queue.snapshot().await.is_empty() { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while !queue.snapshot().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

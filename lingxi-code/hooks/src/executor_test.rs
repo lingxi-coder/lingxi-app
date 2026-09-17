@@ -773,7 +773,7 @@ mod command_arm_tests {
         assert_eq!(agg.modified_input, Some(json!({"command": "printf safe"})));
         assert_eq!(agg.permission_updates.len(), 1);
         assert_eq!(agg.permission_updates[0]["destination"], "session");
-        assert!(agg.interrupt == false);
+        assert!(!agg.interrupt);
     }
 
     #[tokio::test]

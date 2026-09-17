@@ -1552,7 +1552,7 @@ fn match_null_redirect(b: &[u8], p: usize) -> Option<usize> {
 fn first_statement_is_sleep(command: &str) -> bool {
     permission::shell_command::split_command(command)
         .first()
-        .and_then(|segment| segment.trim().split_whitespace().next().map(str::to_string))
+        .and_then(|segment| segment.split_whitespace().next().map(str::to_string))
         .is_some_and(|word| word == "sleep")
 }
 
@@ -1704,8 +1704,15 @@ impl platform_api::BackgroundExitSink for BackgroundBashExitSink {
             .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
     }
 
-    async fn finalize_persisted_output(&self, task_id: &str, max_bytes: u64) -> Result<Option<u64>, platform_api::ProcessError> {
-        self.registry.finalize_persisted_output(task_id, max_bytes).await.map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+    async fn finalize_persisted_output(
+        &self,
+        task_id: &str,
+        max_bytes: u64,
+    ) -> Result<Option<u64>, platform_api::ProcessError> {
+        self.registry
+            .finalize_persisted_output(task_id, max_bytes)
+            .await
+            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
     }
 
     async fn flush_output(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
@@ -1952,9 +1959,11 @@ impl BashTool {
             cwd: Some(cwd.display().to_string()),
             // The launching agent owns the task; `None` means the main session
             // does (claude-code stamps the record's `agentId` the same way).
-            creator_agent_id: ctx.agent_id.clone(),
+            creator_agent_id: ctx.agent_id,
         };
-        registry.register_background_bash(task_id, registration).await
+        registry
+            .register_background_bash(task_id, registration)
+            .await
             .map_err(|error| ToolError::Io(format!("could not register background shell: {error}")))
     }
 
@@ -1986,7 +1995,7 @@ impl BashTool {
                 .to_string(),
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             cwd: Some(self.shell_cwd.lock().unwrap().display().to_string()),
-            creator_agent_id: ctx.agent_id.clone(),
+            creator_agent_id: ctx.agent_id,
         };
         let auto_background_armed =
             !crate::prompt::background_tasks_disabled() && !first_statement_is_sleep(command);
@@ -2069,7 +2078,11 @@ impl BashTool {
     /// `task_id` is the id the REGISTRY knows; `handle` is what the runner needs
     /// to signal the process, and the two differ when the runner ignored the
     /// binding.
-    async fn bind_background_task(&self, task_id: &str, handle: &platform_api::ProcessHandle) -> Result<(), ToolError> {
+    async fn bind_background_task(
+        &self,
+        task_id: &str,
+        handle: &platform_api::ProcessHandle,
+    ) -> Result<(), ToolError> {
         let Some(registry) = self.ctx.task_registry.as_ref() else {
             return Ok(());
         };
@@ -2077,23 +2090,39 @@ impl BashTool {
             process: self.ctx.process.clone(),
             handle: handle.clone(),
         }) as std::sync::Arc<dyn platform_api::task_registry::TaskKiller>;
-        registry.bind_background_process(task_id, handle.pid, killer).await
+        registry
+            .bind_background_process(task_id, handle.pid, killer)
+            .await
             .map_err(|error| ToolError::Io(format!("could not bind background shell: {error}")))
     }
 
     /// Registration is the receipt that permits a supervisor to outlive this host.
     #[allow(clippy::too_many_arguments)]
     async fn acknowledge_background_task(
-        &self, ctx: &ToolUseContext, bound: Option<&(String, String)>, command: &str,
-        description: Option<&str>, cwd: &std::path::Path, handle: &platform_api::ProcessHandle,
+        &self,
+        ctx: &ToolUseContext,
+        bound: Option<&(String, String)>,
+        command: &str,
+        description: Option<&str>,
+        cwd: &std::path::Path,
+        handle: &platform_api::ProcessHandle,
     ) -> Result<String, ToolError> {
         let task_id = bound.map_or_else(|| handle.task_id.clone(), |(id, _)| id.clone());
         let result = async {
-            self.register_background_task(ctx, bound, command, description, cwd).await?;
-            if bound.is_some() { self.bind_background_task(&task_id, handle).await?; }
-            self.ctx.process.acknowledge_shell(handle).await
-                .map_err(|error| ToolError::Io(format!("could not acknowledge background shell: {error}")))
-        }.await;
+            self.register_background_task(ctx, bound, command, description, cwd)
+                .await?;
+            if bound.is_some() {
+                self.bind_background_task(&task_id, handle).await?;
+            }
+            self.ctx
+                .process
+                .acknowledge_shell(handle)
+                .await
+                .map_err(|error| {
+                    ToolError::Io(format!("could not acknowledge background shell: {error}"))
+                })
+        }
+        .await;
         if let Err(error) = result {
             let _ = self.ctx.process.kill(handle).await;
             if let (Some(registry), Some((id, _))) = (self.ctx.task_registry.as_ref(), bound) {
@@ -2953,10 +2982,16 @@ impl Tool for BashTool {
                     // its own file, so the registry must not advertise a path
                     // nothing writes to.
                     let bound = self.take_honoured_identity(bound, &handle).await;
-                    let task_id = self.acknowledge_background_task(
-                        &ctx, bound.as_ref(), &cmd_str,
-                        input.get("description").and_then(Value::as_str), &cwd, &handle,
-                    ).await?;
+                    let task_id = self
+                        .acknowledge_background_task(
+                            &ctx,
+                            bound.as_ref(),
+                            &cmd_str,
+                            input.get("description").and_then(Value::as_str),
+                            &cwd,
+                            &handle,
+                        )
+                        .await?;
                     let out_path = match bound.as_ref() {
                         Some((_, path)) => path.clone(),
                         None => task_output_path(&handle.task_id).display().to_string(),
@@ -3225,10 +3260,16 @@ impl Tool for BashTool {
                 // `<task-notification>` (claude-code `wn` → `Xne` on the
                 // timeout path).
                 let fg_bound = self.take_honoured_identity(fg_bound, &handle).await;
-                let task_id = self.acknowledge_background_task(
-                    &ctx, fg_bound.as_ref(), &cmd_str,
-                    input.get("description").and_then(Value::as_str), &cwd, &handle,
-                ).await?;
+                let task_id = self
+                    .acknowledge_background_task(
+                        &ctx,
+                        fg_bound.as_ref(),
+                        &cmd_str,
+                        input.get("description").and_then(Value::as_str),
+                        &cwd,
+                        &handle,
+                    )
+                    .await?;
                 let out_path = match fg_bound.as_ref() {
                     Some((_, path)) => path.clone(),
                     None => task_output_path(&handle.task_id).display().to_string(),
@@ -5899,7 +5940,11 @@ mod tests {
             task_id: &str,
             registration: platform_api::task_registry::BackgroundBashRegistration,
         ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
-            if self.fail_register { return Err(platform_api::task_registry::TaskRegistryError::Internal("registration failed".into())); }
+            if self.fail_register {
+                return Err(platform_api::task_registry::TaskRegistryError::Internal(
+                    "registration failed".into(),
+                ));
+            }
             self.registered
                 .lock()
                 .unwrap()
@@ -5909,8 +5954,17 @@ mod tests {
         async fn discard_bash_output(&self, task_id: &str) {
             self.discarded.lock().unwrap().push(task_id.to_string());
         }
-        async fn bind_background_process(&self, id: &str, pid: u32, killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>) -> Result<(), platform_api::task_registry::TaskRegistryError> {
-            if self.fail_bind { return Err(platform_api::task_registry::TaskRegistryError::Internal("binding failed".into())); }
+        async fn bind_background_process(
+            &self,
+            id: &str,
+            pid: u32,
+            killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            if self.fail_bind {
+                return Err(platform_api::task_registry::TaskRegistryError::Internal(
+                    "binding failed".into(),
+                ));
+            }
             self.bound_pids.lock().unwrap().push(pid);
             self.bind_background_killer(id, killer).await
         }
@@ -6102,27 +6156,74 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl ProcessRunner for AckRunner {
-            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> { unreachable!() }
-            async fn spawn_background(&self, cmd: &SandboxedCommand) -> Result<ProcessHandle, ProcessError> { BindingAwareBgStub.spawn_background(cmd).await }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn spawn_background(
+                &self,
+                cmd: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                BindingAwareBgStub.spawn_background(cmd).await
+            }
             async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
-                assert_eq!(self.registry.registered.lock().unwrap()[0].0, handle.task_id);
+                assert_eq!(
+                    self.registry.registered.lock().unwrap()[0].0,
+                    handle.task_id
+                );
                 assert_eq!(*self.registry.bound_pids.lock().unwrap(), vec![handle.pid]);
                 self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if self.fail_ack { Err(ProcessError::Io("ack failed".into())) } else { Ok(()) }
+                if self.fail_ack {
+                    Err(ProcessError::Io("ack failed".into()))
+                } else {
+                    Ok(())
+                }
             }
-            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> { self.kills.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Ok(()) }
-            fn is_available(&self) -> bool { true }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.kills.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
         }
         for failure in ["none", "register", "bind", "ack"] {
-            let registry = Arc::new(RecordingRegistry { fail_register: failure == "register", fail_bind: failure == "bind", ..Default::default() });
-            let runner = Arc::new(AckRunner { registry: registry.clone(), acks: Default::default(), kills: Default::default(), fail_ack: failure == "ack" });
-            let mut ctx = shell_test_ctx(ProcessOutput { stdout: String::new(), stderr: String::new(), exit_code: 0, timed_out: false });
+            let registry = Arc::new(RecordingRegistry {
+                fail_register: failure == "register",
+                fail_bind: failure == "bind",
+                ..Default::default()
+            });
+            let runner = Arc::new(AckRunner {
+                registry: registry.clone(),
+                acks: Default::default(),
+                kills: Default::default(),
+                fail_ack: failure == "ack",
+            });
+            let mut ctx = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
             ctx.process = runner.clone();
             ctx.task_registry = Some(registry);
-            let result = BashTool::new(ctx).call(json!({"command":"sleep 5", "run_in_background":true}), use_ctx(), fresh_tx()).await;
+            let result = BashTool::new(ctx)
+                .call(
+                    json!({"command":"sleep 5", "run_in_background":true}),
+                    use_ctx(),
+                    fresh_tx(),
+                )
+                .await;
             assert_eq!(result.is_ok(), failure == "none", "{failure}");
-            assert_eq!(runner.acks.load(std::sync::atomic::Ordering::SeqCst), usize::from(matches!(failure, "none" | "ack")), "{failure}");
-            assert_eq!(runner.kills.load(std::sync::atomic::Ordering::SeqCst), usize::from(failure != "none"), "{failure}");
+            assert_eq!(
+                runner.acks.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(matches!(failure, "none" | "ack")),
+                "{failure}"
+            );
+            assert_eq!(
+                runner.kills.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(failure != "none"),
+                "{failure}"
+            );
         }
     }
 
@@ -6533,7 +6634,8 @@ mod tests {
     /// concurrently with anything else that writes it.
     fn bash_output_setting_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     // Capturing runner that records the argv handed to the process runner so we
@@ -7450,7 +7552,8 @@ mod tests {
         async fn run(
             &self,
             _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessOutput, platform_api::process::ProcessError> {
+        ) -> Result<platform_api::process::ProcessOutput, platform_api::process::ProcessError>
+        {
             std::fs::write(&self.write, "written by the command\n").unwrap();
             Ok(platform_api::process::ProcessOutput {
                 stdout: "done\n".into(),
@@ -7560,7 +7663,11 @@ mod tests {
 
         let tool = BashTool::new(bctx);
         let _ = tool
-            .call(json!({"command": "printenv AWS_SECRET_ACCESS_KEY"}), use_ctx(), fresh_tx())
+            .call(
+                json!({"command": "printenv AWS_SECRET_ACCESS_KEY"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await;
 
         let seen = recorder.commands.lock().unwrap().join("\n");
@@ -7581,7 +7688,8 @@ mod tests {
         async fn run(
             &self,
             cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessOutput, platform_api::process::ProcessError> {
+        ) -> Result<platform_api::process::ProcessOutput, platform_api::process::ProcessError>
+        {
             self.commands.lock().unwrap().push(format!("{cmd:?}"));
             Ok(platform_api::process::ProcessOutput {
                 stdout: String::new(),
@@ -7594,7 +7702,8 @@ mod tests {
         async fn spawn_background(
             &self,
             _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
+        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
+        {
             Err(platform_api::process::ProcessError::Unsupported)
         }
 
@@ -7616,7 +7725,11 @@ mod tests {
     async fn a_command_that_changed_a_file_reports_the_diff() {
         let (_path, _tmp, tool, ctx) = edit_diff_fixture();
         let res = tool
-            .call(json!({"command": "sh -c 'touch touched.txt'"}), ctx, fresh_tx())
+            .call(
+                json!({"command": "sh -c 'touch touched.txt'"}),
+                ctx,
+                fresh_tx(),
+            )
             .await
             .expect("call");
         let text = rendered(&res);
@@ -7668,7 +7781,11 @@ mod tests {
         let (_path2, _tmp2, tool2, ctx2) = edit_diff_fixture();
         let shadow2 = shadow_of(&tool2);
         let _ = tool2
-            .call(json!({"command": "sh -c 'touch touched.txt'"}), ctx2, fresh_tx())
+            .call(
+                json!({"command": "sh -c 'touch touched.txt'"}),
+                ctx2,
+                fresh_tx(),
+            )
             .await
             .expect("call");
         assert!(
@@ -7723,7 +7840,11 @@ mod tests {
         let (_path, _tmp, mut tool, ctx) = edit_diff_fixture();
         tool.ctx.bash_edit_diff = None;
         let res = tool
-            .call(json!({"command": "sh -c 'touch touched.txt'"}), ctx, fresh_tx())
+            .call(
+                json!({"command": "sh -c 'touch touched.txt'"}),
+                ctx,
+                fresh_tx(),
+            )
             .await
             .expect("call");
         assert!(!rendered(&res).contains("Files changed by this command:"));

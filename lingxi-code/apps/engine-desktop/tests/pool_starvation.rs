@@ -371,7 +371,10 @@ async fn fusion_group_never_refuses_an_agent_tool_spawn() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     // Three free slots, and a Fusion group that wants four: unsatisfiable, so
     // it waits. Nothing about that may reach ordinary admission.
-    let pool = Arc::new(StateMachinePool::new(runtime.clone(), TEAMMATE_POOL_CAP + 3));
+    let pool = Arc::new(StateMachinePool::new(
+        runtime.clone(),
+        TEAMMATE_POOL_CAP + 3,
+    ));
     fill_with_parked_teammates(&pool).await;
 
     let api = ScriptedApiClient::new();

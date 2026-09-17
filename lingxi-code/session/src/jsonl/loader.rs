@@ -915,17 +915,18 @@ fn first_line_hides_session(line1: &str, current_is_sdk_entrypoint: bool) -> boo
     if extract_json_string_field(line1, "teamName").is_some_and(|s| !s.is_empty()) {
         return true;
     }
-    match extract_json_string_field(line1, SESSION_KIND_KEY).as_deref() {
-        Some("daemon" | "daemon-worker") => return true,
-        _ => {}
+    if let Some("daemon" | "daemon-worker") =
+        extract_json_string_field(line1, SESSION_KIND_KEY).as_deref()
+    {
+        return true;
     }
-    if !current_is_sdk_entrypoint {
-        if matches!(
+    if !current_is_sdk_entrypoint
+        && matches!(
             extract_json_string_field(line1, "entrypoint").as_deref(),
             Some("sdk-cli" | "sdk-ts" | "sdk-py")
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
     false
 }
@@ -1237,7 +1238,7 @@ async fn list_recent_sessions_inner_with_diagnostics(
     let cache_identity = fs.cache_identity();
     let mut rows: Vec<SessionMetadata> = Vec::new();
     for candidate in candidates {
-        match enrich_candidate(
+        if let Some(row) = enrich_candidate(
             candidate,
             fs,
             cache_identity.as_ref(),
@@ -1247,8 +1248,7 @@ async fn list_recent_sessions_inner_with_diagnostics(
         )
         .await?
         {
-            Some(row) => rows.push(row),
-            None => {}
+            rows.push(row)
         }
     }
     if worktree_paths.len() > 1 {

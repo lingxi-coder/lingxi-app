@@ -52,7 +52,10 @@ fn drop_group_other_write(path: &Path) -> std::io::Result<()> {
     if mode & GROUP_OTHER_WRITE == 0 {
         return Ok(());
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & !GROUP_OTHER_WRITE))
+    std::fs::set_permissions(
+        path,
+        std::fs::Permissions::from_mode(mode & !GROUP_OTHER_WRITE),
+    )
 }
 
 #[cfg(not(unix))]
@@ -636,7 +639,10 @@ mod tests {
         let dest = scratch("perms-dir");
         prepare_extract_dir(&dest).unwrap();
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "extraction root must be owner-only, got {mode:o}");
+        assert_eq!(
+            mode, 0o700,
+            "extraction root must be owner-only, got {mode:o}"
+        );
     }
 
     /// `fs::write` PRESERVES an existing file's mode, so unpacking over a
@@ -708,7 +714,10 @@ mod tests {
             "the symlink target tree must be untouched"
         );
         assert!(
-            !std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink(),
+            !std::fs::symlink_metadata(&dest)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "dest is now a real directory"
         );
     }

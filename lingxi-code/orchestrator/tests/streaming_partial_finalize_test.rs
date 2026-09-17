@@ -28,7 +28,7 @@ use telemetry::{AnalyticsBus, AnalyticsValue, InMemorySink};
 use tool_api::registry::ToolRegistry;
 
 /// `AnalyticsValue` has no `PartialEq`, so pull typed values out by hand.
-fn meta_str<'a>(v: Option<&'a AnalyticsValue>) -> Option<&'a str> {
+fn meta_str(v: Option<&AnalyticsValue>) -> Option<&str> {
     match v {
         Some(AnalyticsValue::String(s)) => Some(s.as_str()),
         _ => None,

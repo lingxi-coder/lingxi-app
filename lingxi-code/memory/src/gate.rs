@@ -159,6 +159,9 @@ mod tests {
     #[test]
     fn an_unrecognised_killswitch_value_falls_through() {
         assert!(auto_memory_enabled(&env(Some("maybe"), false), None));
-        assert!(!auto_memory_enabled(&env(Some("maybe"), false), Some(false)));
+        assert!(!auto_memory_enabled(
+            &env(Some("maybe"), false),
+            Some(false)
+        ));
     }
 }

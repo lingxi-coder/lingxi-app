@@ -4,6 +4,9 @@
 //! Lock: serialize via `serde_json::to_string` (no whitespace, no indent),
 //! terminate every line with a single `\n`, file mode `0o600`, dir mode `0o700`.
 
+use crate::jsonl::durable_writer::{
+    DurableTranscriptWriter, TranscriptAppendOutcome, TranscriptWriterError,
+};
 use crate::jsonl::re_append::{
     plan_re_append, read_tail, SessionMetadataState, METADATA_REAPPEND_BACKSTOP_BYTES,
 };
@@ -11,9 +14,6 @@ use crate::jsonl::schema::{session_kind, JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::transcript_compact::{
     local_gc_enabled, next_backstop, perform_compact_transcript, CompactOutcome, CompactStats,
     COMPACT_BACKSTOP_BYTES,
-};
-use crate::jsonl::durable_writer::{
-    DurableTranscriptWriter, TranscriptAppendOutcome, TranscriptWriterError,
 };
 use platform_api::{FileSystem, FsError};
 use protocol::SessionId;
@@ -94,11 +94,7 @@ pub struct JsonlWriter {
     /// The ordinary writer follows the active target; a Fusion recorder keeps
     /// its originating session id and resolves this map under the same writer
     /// mutex, so A→B cannot redirect a late A append into B's transcript.
-    session_targets: Arc<
-        std::sync::RwLock<
-            HashMap<SessionId, DurableTranscriptTarget>,
-        >,
-    >,
+    session_targets: Arc<std::sync::RwLock<HashMap<SessionId, DurableTranscriptTarget>>>,
     lock: Mutex<()>,
     /// Bytes appended to the active transcript since the last metadata
     /// re-append — the oracle's `bytesSinceMetadataReAppend` (increment site
@@ -538,7 +534,9 @@ impl JsonlWriter {
             None
         } else {
             Some(relocation_root(&old_path, &path).map_err(|error| {
-                WriterError::Fs(FsError::Io(format!("unsafe transcript relocation path: {error}")))
+                WriterError::Fs(FsError::Io(format!(
+                    "unsafe transcript relocation path: {error}"
+                )))
             })?)
         };
 
@@ -590,12 +588,17 @@ impl JsonlWriter {
                     let root = operation_root
                         .as_deref()
                         .expect("different transcript paths have a shared root");
-                    validate_relocation_parents(root, &operation_old_path, &operation_path, old_exists)
-                        .map_err(|error| {
-                            TranscriptWriterError::Fs(FsError::Io(format!(
-                                "unsafe transcript relocation parent: {error}"
-                            )))
-                        })?;
+                    validate_relocation_parents(
+                        root,
+                        &operation_old_path,
+                        &operation_path,
+                        old_exists,
+                    )
+                    .map_err(|error| {
+                        TranscriptWriterError::Fs(FsError::Io(format!(
+                            "unsafe transcript relocation parent: {error}"
+                        )))
+                    })?;
                     let target_exists = match std::fs::symlink_metadata(&operation_path) {
                         Ok(_) => true,
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -629,10 +632,9 @@ impl JsonlWriter {
                                 operation_path.display()
                             ))));
                         }
-                    } else if let Err(error) = move_file_with_cross_device_fallback(
-                        &operation_old_path,
-                        &operation_path,
-                    ) {
+                    } else if let Err(error) =
+                        move_file_with_cross_device_fallback(&operation_old_path, &operation_path)
+                    {
                         if let Some(superseded) = superseded.as_ref() {
                             let _ = std::fs::rename(superseded, &operation_path);
                         }
@@ -666,11 +668,15 @@ impl JsonlWriter {
                         ))
                     })?;
                     let identity = platform_api::rooted_fs::root_identity(parent)?;
-                    let relative = operation_path.file_name().map(PathBuf::from).ok_or_else(|| {
-                        TranscriptWriterError::Fs(FsError::Io(
-                            "transcript destination has no file name".into(),
-                        ))
-                    })?;
+                    let relative =
+                        operation_path
+                            .file_name()
+                            .map(PathBuf::from)
+                            .ok_or_else(|| {
+                                TranscriptWriterError::Fs(FsError::Io(
+                                    "transcript destination has no file name".into(),
+                                ))
+                            })?;
                     if let Err(error) = transaction.append_raw_json_at(
                         parent,
                         &identity,
@@ -714,7 +720,8 @@ impl JsonlWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = path.clone();
         metadata_state.relocated_cwd = Some(relocated_cwd);
         if !same_path {
-            self.bytes_since_metadata_re_append.store(0, Ordering::Relaxed);
+            self.bytes_since_metadata_re_append
+                .store(0, Ordering::Relaxed);
             self.bytes_since_compact.store(0, Ordering::Relaxed);
         }
         drop(_writer_guard);
@@ -1031,13 +1038,8 @@ impl JsonlWriter {
                 "durable transcript target is not bound for session {session_id}"
             )))
         })?;
-        self.append_json_once_durable_locked(
-            target.path,
-            target.writer,
-            delivery_id,
-            payload,
-        )
-        .await
+        self.append_json_once_durable_locked(target.path, target.writer, delivery_id, payload)
+            .await
     }
 
     /// Append an ordinary transcript record under the active durable
@@ -1092,9 +1094,8 @@ impl JsonlWriter {
                         "active transcript path has no parent".into(),
                     ))
                 })?;
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    TranscriptWriterError::Fs(FsError::Io(error.to_string()))
-                })?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| TranscriptWriterError::Fs(FsError::Io(error.to_string())))?;
                 let identity = platform_api::rooted_fs::root_identity(parent)?;
                 let relative = active_path.file_name().map(PathBuf::from).ok_or_else(|| {
                     TranscriptWriterError::Fs(FsError::Io(
@@ -1123,9 +1124,8 @@ impl JsonlWriter {
                         "active transcript path has no parent".into(),
                     ))
                 })?;
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    TranscriptWriterError::Fs(FsError::Io(error.to_string()))
-                })?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| TranscriptWriterError::Fs(FsError::Io(error.to_string())))?;
                 let identity = platform_api::rooted_fs::root_identity(parent)?;
                 let relative = active_path.file_name().map(PathBuf::from).ok_or_else(|| {
                     TranscriptWriterError::Fs(FsError::Io(
@@ -1162,7 +1162,8 @@ impl JsonlWriter {
             })?;
             let stamped = stamp_session_kind(msg);
             let payload = serde_json::to_value(stamped.as_ref().unwrap_or(msg))?;
-            self.append_json_durable_for_session(session_id, payload).await?;
+            self.append_json_durable_for_session(session_id, payload)
+                .await?;
             return Ok(());
         }
 
@@ -1842,14 +1843,13 @@ mod tests {
         let (dir, path, _) = temp_writer("durable-ordinary-last-write");
         let state_root = dir.join("session-state");
         std::fs::create_dir_all(&state_root).expect("create state root");
-        let durable = Arc::new(
-            DurableTranscriptWriter::open(&state_root).expect("open durable transaction"),
-        );
+        let durable =
+            Arc::new(DurableTranscriptWriter::open(&state_root).expect("open durable transaction"));
         let fs: Arc<dyn FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
         let writer = JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone());
-        let session_id = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555")
-            .expect("session id");
+        let session_id =
+            SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555").expect("session id");
         writer
             .activate_session_target(session_id, path.clone(), dir.clone())
             .expect("activate target");
@@ -1868,14 +1868,21 @@ mod tests {
             }))
             .expect("message")
         };
-        writer.append(&message("first")).await.expect("first append");
+        writer
+            .append(&message("first"))
+            .await
+            .expect("first append");
         writer
             .append(&message("updated"))
             .await
             .expect("updated append");
 
         let raw = std::fs::read_to_string(&path).expect("read transcript");
-        assert_eq!(raw.lines().count(), 2, "ordinary updates remain append-only");
+        assert_eq!(
+            raw.lines().count(),
+            2,
+            "ordinary updates remain append-only"
+        );
         assert!(!raw.contains("deliveryId"));
         assert_eq!(
             durable.duplicate_scan_count_for_test(),
@@ -1909,10 +1916,8 @@ mod tests {
         let fs: Arc<dyn FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
         let writer = JsonlWriter::new(path_a.clone(), fs).with_durable_lock(durable_a);
-        let session_a = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555")
-            .unwrap();
-        let session_b = SessionId::parse_prefixed("22222222-3333-4444-8555-666666666666")
-            .unwrap();
+        let session_a = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555").unwrap();
+        let session_b = SessionId::parse_prefixed("22222222-3333-4444-8555-666666666666").unwrap();
         writer
             .activate_session_target(session_a, path_a.clone(), dir.join("project-a"))
             .unwrap();
@@ -1974,9 +1979,12 @@ mod tests {
         assert!(a.contains("late ordinary A"));
         assert!(a.contains("late Fusion A"));
         assert!(!a.contains("active B"));
-        let fusion_row: serde_json::Value = serde_json::from_str(a.lines().last().unwrap()).unwrap();
+        let fusion_row: serde_json::Value =
+            serde_json::from_str(a.lines().last().unwrap()).unwrap();
         assert_eq!(
-            fusion_row.get("parentUuid").and_then(serde_json::Value::as_str),
+            fusion_row
+                .get("parentUuid")
+                .and_then(serde_json::Value::as_str),
             Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
             "origin-session parent resolution happens under A's transaction"
         );

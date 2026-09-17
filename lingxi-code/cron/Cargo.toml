@@ -36,12 +36,5 @@ windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_S
 # This crate uses platform FFI (libc::kill on Unix, OpenProcess on Windows) for
 # PID-liveness checks. The unsafe is isolated to `pid_alive_check`; we override
 # the workspace `unsafe_code = "forbid"` lint locally.
-[lints.rust]
-unsafe_code = "allow"
-missing_docs = "warn"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-module_name_repetitions = "allow"
+[lints]
+workspace = true

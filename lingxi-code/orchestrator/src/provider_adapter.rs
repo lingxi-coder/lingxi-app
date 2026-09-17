@@ -116,16 +116,15 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
             }
             serde_json::Value::Array(values) => values
                 .iter()
-                .filter_map(|block| {
-                    (block.get("type").and_then(serde_json::Value::as_str) == Some("text")).then(
-                        || protocol::ContentBlock::Text {
-                            text: block
-                                .get("text")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_string(),
-                        },
-                    )
+                .filter(|&block| {
+                    block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                })
+                .map(|block| protocol::ContentBlock::Text {
+                    text: block
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                 })
                 .collect(),
             _ => return Ok(None),
@@ -173,11 +172,23 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
-            return self.service.messages_create_side_query_with_thinking(
-                &settings.model, Some(&settings.provider), system, msgs, tools,
-                None, None, Vec::new(), Some(settings.thinking), settings.effort,
-                None, Some("scheduled_task"),
-            ).await;
+            return self
+                .service
+                .messages_create_side_query_with_thinking(
+                    &settings.model,
+                    Some(&settings.provider),
+                    system,
+                    msgs,
+                    tools,
+                    None,
+                    None,
+                    Vec::new(),
+                    Some(settings.thinking),
+                    settings.effort,
+                    None,
+                    Some("scheduled_task"),
+                )
+                .await;
         }
         self.service
             .messages_create(model, profile, system, msgs, tools)
@@ -238,9 +249,18 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let mut request = self.service.build_side_query_request_with_thinking(
-                &settings.model, Some(&settings.provider), system, msgs, tools,
-                None, None, Vec::new(), Some(settings.thinking), settings.effort,
-                None, Some("scheduled_task"),
+                &settings.model,
+                Some(&settings.provider),
+                system,
+                msgs,
+                tools,
+                None,
+                None,
+                Vec::new(),
+                Some(settings.thinking),
+                settings.effort,
+                None,
+                Some("scheduled_task"),
             )?;
             request.context_hint = context_hint;
             return self.service.execute_side_query_request(request).await;
@@ -261,9 +281,18 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.service.build_side_query_request_with_thinking(
-                &settings.model, Some(&settings.provider), system, msgs, tools,
-                Some(max_tokens), None, Vec::new(), Some(settings.thinking), settings.effort,
-                None, Some("scheduled_task"),
+                &settings.model,
+                Some(&settings.provider),
+                system,
+                msgs,
+                tools,
+                Some(max_tokens),
+                None,
+                Vec::new(),
+                Some(settings.thinking),
+                settings.effort,
+                None,
+                Some("scheduled_task"),
             )?;
 
             return self.service.execute_side_query_request(request).await;
@@ -286,9 +315,18 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.service.build_side_query_request_with_thinking(
-                &settings.model, Some(&settings.provider), system, msgs, tools,
-                None, None, Vec::new(), Some(settings.thinking), settings.effort,
-                None, Some("scheduled_task"),
+                &settings.model,
+                Some(&settings.provider),
+                system,
+                msgs,
+                tools,
+                None,
+                None,
+                Vec::new(),
+                Some(settings.thinking),
+                settings.effort,
+                None,
+                Some("scheduled_task"),
             )?;
 
             return self.service.execute_side_query_request(request).await;
@@ -318,9 +356,18 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.service.build_side_query_request_with_thinking(
-                &settings.model, Some(&settings.provider), system, msgs, tools,
-                None, None, Vec::new(), Some(settings.thinking), settings.effort,
-                None, Some("scheduled_task"),
+                &settings.model,
+                Some(&settings.provider),
+                system,
+                msgs,
+                tools,
+                None,
+                None,
+                Vec::new(),
+                Some(settings.thinking),
+                settings.effort,
+                None,
+                Some("scheduled_task"),
             )?;
 
             return self.service.execute_side_query_request(request).await;
@@ -1001,9 +1048,18 @@ impl StreamingApiClient for ProviderApiAdapter {
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.service.build_side_query_request_with_thinking(
-                &settings.model, Some(&settings.provider), system, messages, tools,
-                None, None, Vec::new(), Some(settings.thinking), settings.effort,
-                None, Some("scheduled_task"),
+                &settings.model,
+                Some(&settings.provider),
+                system,
+                messages,
+                tools,
+                None,
+                None,
+                Vec::new(),
+                Some(settings.thinking),
+                settings.effort,
+                None,
+                Some("scheduled_task"),
             )?;
             return self.service.stream_request(request).await;
         }
@@ -1190,15 +1246,34 @@ mod tests {
 
     #[tokio::test]
     async fn scheduled_settings_reach_wire_without_changing_adapter_defaults() {
-        let transport = FakeTransport::always(ProviderResponse {status: 200, headers: BTreeMap::new(), body_json: ok_response_json(), request_id: None});
-        let adapter = make_adapter(transport.clone()).with_initial_effort(Some(serde_json::json!("low")));
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let adapter =
+            make_adapter(transport.clone()).with_initial_effort(Some(serde_json::json!("low")));
         let settings = crate::scheduled_turn::ScheduledSettings {
-            model: "claude-sonnet-4-20250514".into(), provider: "anthropic".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            provider: "anthropic".into(),
             reasoning: platform_api::ReasoningSelection::Disabled,
             thinking: llm_client::model::thinking::ThinkingConfig::Disabled,
             effort: None,
         };
-        let _ = crate::scheduled_turn::SETTINGS.scope(settings, StreamingApiClient::stream(&adapter, "ignored/default", None, None, Vec::new(), Vec::new())).await;
+        let _ = crate::scheduled_turn::SETTINGS
+            .scope(
+                settings,
+                StreamingApiClient::stream(
+                    &adapter,
+                    "ignored/default",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            )
+            .await;
         let request = transport.seen.lock().unwrap()[0].body_json.clone();
         assert_eq!(request["model"], "claude-sonnet-4-20250514");
         assert!(request["output_config"]["effort"].is_null());

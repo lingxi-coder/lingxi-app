@@ -77,9 +77,18 @@ pub fn save_session_cost(
     let _ = migrations::global_config::save_project_config(config_path, &key, |mut p| {
         p.insert(LAST_COST.to_string(), serde_json::json!(total_usd));
         p.insert(LAST_SESSION_ID.to_string(), serde_json::json!(session_id));
-        p.insert(LAST_API_DURATION.to_string(), serde_json::json!(api_duration_ms));
-        p.insert(LAST_TOTAL_INPUT_TOKENS.to_string(), serde_json::json!(input_tokens));
-        p.insert(LAST_TOTAL_OUTPUT_TOKENS.to_string(), serde_json::json!(output_tokens));
+        p.insert(
+            LAST_API_DURATION.to_string(),
+            serde_json::json!(api_duration_ms),
+        );
+        p.insert(
+            LAST_TOTAL_INPUT_TOKENS.to_string(),
+            serde_json::json!(input_tokens),
+        );
+        p.insert(
+            LAST_TOTAL_OUTPUT_TOKENS.to_string(),
+            serde_json::json!(output_tokens),
+        );
         p.insert(
             LAST_TOTAL_CACHE_CREATION_INPUT_TOKENS.to_string(),
             serde_json::json!(cache_creation),
@@ -144,9 +153,13 @@ mod tests {
         let cwd = Path::new("/proj/alpha");
         save_session_cost(&cfg, cwd, "sess-1", &snapshot(0.0175));
         let proj = project(&cfg, cwd);
-        assert_eq!(proj.get(LAST_COST).and_then(serde_json::Value::as_f64), Some(0.0175));
         assert_eq!(
-            proj.get(LAST_SESSION_ID).and_then(serde_json::Value::as_str),
+            proj.get(LAST_COST).and_then(serde_json::Value::as_f64),
+            Some(0.0175)
+        );
+        assert_eq!(
+            proj.get(LAST_SESSION_ID)
+                .and_then(serde_json::Value::as_str),
             Some("sess-1")
         );
     }
@@ -168,9 +181,13 @@ mod tests {
         save_session_cost(&cfg, cwd, "sess-2", &snapshot(0.05));
         // One slot per project, matching claude-code's single `lastSessionId`.
         let proj = project(&cfg, cwd);
-        assert_eq!(proj.get(LAST_COST).and_then(serde_json::Value::as_f64), Some(0.05));
         assert_eq!(
-            proj.get(LAST_SESSION_ID).and_then(serde_json::Value::as_str),
+            proj.get(LAST_COST).and_then(serde_json::Value::as_f64),
+            Some(0.05)
+        );
+        assert_eq!(
+            proj.get(LAST_SESSION_ID)
+                .and_then(serde_json::Value::as_str),
             Some("sess-2")
         );
     }
@@ -187,15 +204,18 @@ mod tests {
         let proj = project(&cfg, cwd);
 
         assert_eq!(
-            proj.get(LAST_API_DURATION).and_then(serde_json::Value::as_u64),
+            proj.get(LAST_API_DURATION)
+                .and_then(serde_json::Value::as_u64),
             Some(1234)
         );
         assert_eq!(
-            proj.get(LAST_TOTAL_INPUT_TOKENS).and_then(serde_json::Value::as_u64),
+            proj.get(LAST_TOTAL_INPUT_TOKENS)
+                .and_then(serde_json::Value::as_u64),
             Some(100)
         );
         assert_eq!(
-            proj.get(LAST_TOTAL_OUTPUT_TOKENS).and_then(serde_json::Value::as_u64),
+            proj.get(LAST_TOTAL_OUTPUT_TOKENS)
+                .and_then(serde_json::Value::as_u64),
             Some(40)
         );
         assert_eq!(
@@ -227,19 +247,32 @@ mod tests {
             .get("claude-opus-5")
             .and_then(serde_json::Value::as_object)
             .expect("the model row");
-        assert_eq!(row.get("inputTokens").and_then(serde_json::Value::as_u64), Some(100));
-        assert_eq!(row.get("outputTokens").and_then(serde_json::Value::as_u64), Some(40));
         assert_eq!(
-            row.get("cacheReadInputTokens").and_then(serde_json::Value::as_u64),
+            row.get("inputTokens").and_then(serde_json::Value::as_u64),
+            Some(100)
+        );
+        assert_eq!(
+            row.get("outputTokens").and_then(serde_json::Value::as_u64),
+            Some(40)
+        );
+        assert_eq!(
+            row.get("cacheReadInputTokens")
+                .and_then(serde_json::Value::as_u64),
             Some(25)
         );
         assert_eq!(
-            row.get("cacheCreationInputTokens").and_then(serde_json::Value::as_u64),
+            row.get("cacheCreationInputTokens")
+                .and_then(serde_json::Value::as_u64),
             Some(10)
         );
         // 17_500_000 nano-USD = 0.0175 USD.
-        let cost = row.get("costUSD").and_then(serde_json::Value::as_f64).expect("costUSD");
-        assert!((cost - 0.0175).abs() < 1e-9, "costUSD must be USD, got {cost}");
+        let cost = row
+            .get("costUSD")
+            .and_then(serde_json::Value::as_f64)
+            .expect("costUSD");
+        assert!(
+            (cost - 0.0175).abs() < 1e-9,
+            "costUSD must be USD, got {cost}"
+        );
     }
-
 }

@@ -470,9 +470,7 @@ impl DurableTranscriptWriter {
         // only after the UUID duplicate check, while the same transaction is
         // held, so a retry can keep the original parent even after later
         // messages were appended.
-        let needs_parent = payload
-            .get("parentUuid")
-            .is_none_or(Value::is_null);
+        let needs_parent = payload.get("parentUuid").is_none_or(Value::is_null);
         if needs_parent {
             if let Value::Object(object) = &mut payload {
                 object.insert(
@@ -609,7 +607,8 @@ impl DurableTranscriptWriter {
             content_bytes = content_bytes.checked_add(content_len as u64).ok_or(
                 TranscriptWriterError::ScanTooLarge {
                     limit: self.max_record_bytes,
-                })?;
+                },
+            )?;
             if content_bytes + u64::from(newline.is_some()) <= self.max_record_bytes as u64 {
                 line.extend_from_slice(&available[..content_len]);
             } else {
@@ -812,8 +811,8 @@ impl DurableTranscriptTransaction<'_> {
         transcript_relative: &Path,
         payload: Value,
     ) -> Result<(), TranscriptWriterError> {
-        let mut line = serde_json::to_vec(&payload)
-            .map_err(|error| FsError::Io(error.to_string()))?;
+        let mut line =
+            serde_json::to_vec(&payload).map_err(|error| FsError::Io(error.to_string()))?;
         line.push(b'\n');
         // Ordinary transcript rows do not buy durability, and never did: the
         // non-durable writer this path replaced only flushed. They travel
@@ -824,12 +823,10 @@ impl DurableTranscriptTransaction<'_> {
         //
         // The directory entry is a different matter: creating the file is
         // worth one parent sync, so a crash cannot lose the transcript itself.
-        let file_present = platform_api::rooted_fs::checked_join(
-            transcript_root,
-            transcript_relative,
-        )
-        .map(|path| path.exists())
-        .unwrap_or(false);
+        let file_present =
+            platform_api::rooted_fs::checked_join(transcript_root, transcript_relative)
+                .map(|path| path.exists())
+                .unwrap_or(false);
         let mut file = open_append_file_pinned(
             transcript_root,
             transcript_relative,

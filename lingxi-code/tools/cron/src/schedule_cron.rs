@@ -421,15 +421,13 @@ fn schedulable_job_count(doc: &cron::ScheduledTasks) -> usize {
 /// excluding completed tasks. A missing/garbage file counts as zero. Backs the
 /// `MAX_JOBS = 50` limit (CronCreateTool.ts:25).
 async fn count_existing_jobs(ctx: &tool_api::BuiltinToolContext) -> usize {
-    let durable = match cron::tasks_file::read_tasks_body(
-        ctx.fs.as_ref(),
-        &ctx.session_cwd.project_root(),
-    )
-    .await
-    {
-        Ok(body) => schedulable_job_count(&cron::tasks_file::parse_tasks(&body)),
-        Err(_) => 0,
-    };
+    let durable =
+        match cron::tasks_file::read_tasks_body(ctx.fs.as_ref(), &ctx.session_cwd.project_root())
+            .await
+        {
+            Ok(body) => schedulable_job_count(&cron::tasks_file::parse_tasks(&body)),
+            Err(_) => 0,
+        };
     let session = match &ctx.task_registry {
         Some(registry) => cron::session_jobs(registry)
             .await
@@ -1143,7 +1141,7 @@ mod tests {
         let tool = CronCreateTool::new(ctx);
         let mut call_ctx = fresh_ctx();
         let owner = protocol::SessionId::new();
-        call_ctx.origin_session_id = Some(owner.clone());
+        call_ctx.origin_session_id = Some(owner);
         let out = tool
             .call(
                 json!({"cron": "*/5 9-17 * * 1-5", "prompt": "echo hi", "durable": true}),

@@ -109,20 +109,49 @@ struct AgentIdentityObserver {
 
 #[async_trait]
 impl platform_api::subagent_spawn::SubagentSpawnObserver for AgentIdentityObserver {
-    async fn on_model_selected(&self, event: &platform_api::subagent_spawn::SubagentObservation, effort: Option<&str>) {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated {model, ..} = event {
-            self.sink.set_agent_display(&self.task_id, model.clone(), effort.map(str::to_string)).await;
+    async fn on_model_selected(
+        &self,
+        event: &platform_api::subagent_spawn::SubagentObservation,
+        effort: Option<&str>,
+    ) {
+        if let platform_api::subagent_spawn::SubagentObservation::Allocated { model, .. } = event {
+            self.sink
+                .set_agent_display(&self.task_id, model.clone(), effort.map(str::to_string))
+                .await;
         }
     }
 
-    async fn before_start(&self, event: &platform_api::subagent_spawn::SubagentObservation) -> Result<(), platform_api::SubagentSpawnError> {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated { agent_id, model, .. } = event {
+    async fn before_start(
+        &self,
+        event: &platform_api::subagent_spawn::SubagentObservation,
+    ) -> Result<(), platform_api::SubagentSpawnError> {
+        if let platform_api::subagent_spawn::SubagentObservation::Allocated {
+            agent_id,
+            model,
+            ..
+        } = event
+        {
             if let Some(epoch) = self.human_epoch {
-                self.sink.task_registry().ok_or_else(|| platform_api::SubagentSpawnError::Runtime("human resume registry unavailable".into()))?
-                    .begin_human_task_resume(&self.task_id, epoch).await.map_err(|error| platform_api::SubagentSpawnError::Runtime(error.to_string()))?;
+                self.sink
+                    .task_registry()
+                    .ok_or_else(|| {
+                        platform_api::SubagentSpawnError::Runtime(
+                            "human resume registry unavailable".into(),
+                        )
+                    })?
+                    .begin_human_task_resume(&self.task_id, epoch)
+                    .await
+                    .map_err(|error| {
+                        platform_api::SubagentSpawnError::Runtime(error.to_string())
+                    })?;
             }
-            self.sink.bind_agent_id(&self.task_id, *agent_id).await.map_err(platform_api::SubagentSpawnError::Runtime)?;
-            self.sink.set_agent_display(&self.task_id, model.clone(), self.effort.clone()).await;
+            self.sink
+                .bind_agent_id(&self.task_id, *agent_id)
+                .await
+                .map_err(platform_api::SubagentSpawnError::Runtime)?;
+            self.sink
+                .set_agent_display(&self.task_id, model.clone(), self.effort.clone())
+                .await;
         }
         Ok(())
     }
@@ -326,7 +355,12 @@ impl LocalAgentHandler {
         for (task_id, generation) in pending {
             let rec = {
                 let mut workers = self.workers.lock().await;
-                if !workers.get(&task_id).is_some_and(|worker| worker.handle.task_id == generation) { continue; }
+                if !workers
+                    .get(&task_id)
+                    .is_some_and(|worker| worker.handle.task_id == generation)
+                {
+                    continue;
+                }
                 workers.remove(&task_id).expect("generation checked")
             };
             let _ = rec.runtime.cancel(&rec.handle).await;
@@ -431,19 +465,40 @@ impl Task for LocalAgentHandler {
         TaskType::LocalAgent
     }
 
-    async fn spawn(&self, input: TaskSpawnInput, ctx: TaskContext) -> Result<TaskHandle, TaskError> {
+    async fn spawn(
+        &self,
+        input: TaskSpawnInput,
+        ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
         self.spawn_inner(input, ctx, None).await
     }
 
-    fn forget_resume_recipe(&self, task_id: &str) { self.resume_recipes.lock().unwrap().remove(task_id); }
+    fn forget_resume_recipe(&self, task_id: &str) {
+        self.resume_recipes.lock().unwrap().remove(task_id);
+    }
 
-    async fn register_resume_recipe(&self, task_id: &str, request: SubagentSpawnRequest, inheritance: SubagentInheritance) -> Result<(), TaskError> {
-        self.resume_recipes.lock().unwrap().insert(task_id.to_owned(), (request, inheritance));
+    async fn register_resume_recipe(
+        &self,
+        task_id: &str,
+        request: SubagentSpawnRequest,
+        inheritance: SubagentInheritance,
+    ) -> Result<(), TaskError> {
+        self.resume_recipes
+            .lock()
+            .unwrap()
+            .insert(task_id.to_owned(), (request, inheritance));
         Ok(())
     }
 
-    async fn prepare_human_resume(&self, task_id: &str, agent_id: AgentId, epoch: u64, ctx: TaskContext) -> Result<crate::task_trait::HumanResumePrepared, TaskError> {
-        self.prepare_human_restore(task_id, agent_id, epoch, ctx).await
+    async fn prepare_human_resume(
+        &self,
+        task_id: &str,
+        agent_id: AgentId,
+        epoch: u64,
+        ctx: TaskContext,
+    ) -> Result<crate::task_trait::HumanResumePrepared, TaskError> {
+        self.prepare_human_restore(task_id, agent_id, epoch, ctx)
+            .await
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
@@ -599,11 +654,15 @@ impl LocalAgentHandler {
         // one-shot subagent's local run mechanics are otherwise identical.
 
         // 2. Generate the task id (prefix 'a') and allocate its spool file.
-        let task_id = restoring.as_ref().map(|restore| restore.task_id.clone())
+        let task_id = restoring
+            .as_ref()
+            .map(|restore| restore.task_id.clone())
             .unwrap_or_else(|| crate::id::generate_task_id(TaskType::LocalAgent));
         let spool_path = if restoring.is_some() {
             self.output_manager.path_for(&task_id)
-        } else { self.output_manager.allocate(&task_id).await }
+        } else {
+            self.output_manager.allocate(&task_id).await
+        }
         .map_err(|e| TaskError::Io(e.to_string()))?;
         // Validate UTF-8 once up front (the output manager's `append` assumes a
         // UTF-8 spool path); spool paths under the manager's dir always are.
@@ -677,7 +736,10 @@ impl LocalAgentHandler {
         });
 
         if restoring.is_none() {
-            self.resume_recipes.lock().unwrap().insert(task_id.clone(), (request.clone(), inherit.clone()));
+            self.resume_recipes
+                .lock()
+                .unwrap()
+                .insert(task_id.clone(), (request.clone(), inherit.clone()));
         }
         let human_epoch = restoring.as_ref().map(|restore| restore.epoch);
         let mut human_ready = restoring.take().map(|restore| restore.ready);
@@ -764,48 +826,81 @@ impl LocalAgentHandler {
                     status_sink
                         .set_status(&worker_task_id, TaskStatus::Running)
                         .await;
-                    let display_effort = request.effort.as_ref().and_then(|value| value.as_str()).map(str::to_string);
-                    let observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver> = Arc::new(AgentIdentityObserver { effort: display_effort, task_id: worker_task_id.clone(), sink: status_sink.clone(), human_epoch });
+                    let display_effort = request
+                        .effort
+                        .as_ref()
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    let observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver> =
+                        Arc::new(AgentIdentityObserver {
+                            effort: display_effort,
+                            task_id: worker_task_id.clone(),
+                            sink: status_sink.clone(),
+                            human_epoch,
+                        });
                     let started = if request.resumed_history.is_some() {
-                        streaming.restore_persistent_with_observer(requested_agent_id, request, inherit, observer).await
+                        streaming
+                            .restore_persistent_with_observer(
+                                requested_agent_id,
+                                request,
+                                inherit,
+                                observer,
+                            )
+                            .await
                     } else {
                         // The registry allocates the public agent id before
                         // entering this handler. Preserve it in the inner
                         // runner so its transcript path, observer events,
                         // task row, and mailbox all address the same agent.
-                        streaming.spawn_persistent_with_observer_for_id(requested_agent_id, request, inherit, observer).await
+                        streaming
+                            .spawn_persistent_with_observer_for_id(
+                                requested_agent_id,
+                                request,
+                                inherit,
+                                observer,
+                            )
+                            .await
                     };
                     let (agent_id, mut rx) = match started {
-                            Ok(v) => v,
-                            Err(e) => {
-                                let ready = human_ready.take();
-                                if human_epoch.is_none() {
-                                    let _ = output_manager.append(&worker_spool_path, &e.to_string()).await;
-                                    status_sink.set_status(&worker_task_id, TaskStatus::Failed).await;
-                                }
-                                // Terminal (spawn never ran): judge the carried
-                                // isolation worktree so it never leaks.
-                                if let (Some(mgr), Some(handle)) =
-                                    (&worktree_manager, &agent_worktree)
-                                {
-                                    let _ = platform_api::worktree::agent_worktree_result(
-                                        mgr.as_ref(),
-                                        handle,
-                                    )
+                        Ok(v) => v,
+                        Err(e) => {
+                            let ready = human_ready.take();
+                            if human_epoch.is_none() {
+                                let _ = output_manager
+                                    .append(&worker_spool_path, &e.to_string())
                                     .await;
-                                }
-                                workers.lock().await.remove(&worker_task_id);
-                                if let Some(ready) = ready { let _ = ready.send(Err(TaskError::Internal(e.to_string()))); }
-                                return;
+                                status_sink
+                                    .set_status(&worker_task_id, TaskStatus::Failed)
+                                    .await;
                             }
-                        };
-                    if let Some(ready) = human_ready.take() { let _ = ready.send(Ok(())); }
+                            // Terminal (spawn never ran): judge the carried
+                            // isolation worktree so it never leaks.
+                            if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
+                            {
+                                let _ = platform_api::worktree::agent_worktree_result(
+                                    mgr.as_ref(),
+                                    handle,
+                                )
+                                .await;
+                            }
+                            workers.lock().await.remove(&worker_task_id);
+                            if let Some(ready) = ready {
+                                let _ = ready.send(Err(TaskError::Internal(e.to_string())));
+                            }
+                            return;
+                        }
+                    };
+                    if let Some(ready) = human_ready.take() {
+                        let _ = ready.send(Ok(()));
+                    }
                     *worker_persistent_agent_id.lock().unwrap() = Some(agent_id);
                     let transcript_path = streaming.transcript_path(agent_id);
                     if let Some(target) = &transcript_path {
                         // The writer may still be creating its first message;
                         // retry at completion after its transcript flush.
-                        let _ = output_manager.link_transcript(&worker_spool_path, target).await;
+                        let _ = output_manager
+                            .link_transcript(&worker_spool_path, target)
+                            .await;
                     }
                     // Register the live agent id so `send_message` can resume it.
                     agent_ids
@@ -844,7 +939,9 @@ impl LocalAgentHandler {
                                 ..
                             }) => {
                                 if let Some(target) = &transcript_path {
-                                    let _ = output_manager.link_transcript(&worker_spool_path, target).await;
+                                    let _ = output_manager
+                                        .link_transcript(&worker_spool_path, target)
+                                        .await;
                                 }
                                 let body = serde_json::to_string_pretty(&result)
                                     .unwrap_or_else(|_| result.to_string());
@@ -1172,13 +1269,14 @@ impl LocalAgentHandler {
             None => handle,
         })
     }
-
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    mod human_resume_test { include!("human_resume_test.rs"); }
+    mod human_resume_test {
+        include!("human_resume_test.rs");
+    }
     use super::*;
     use crate::state::TaskStatus;
     use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
@@ -1235,7 +1333,15 @@ mod tests {
             })
         }
         async fn write_file(&self, path: &str, body: &str) -> Result<(), FsError> {
-            let body = if path.ends_with(".observer.json") && self.corrupt_observer_markers.load(std::sync::atomic::Ordering::SeqCst) { "{}" } else { body };
+            let body = if path.ends_with(".observer.json")
+                && self
+                    .corrupt_observer_markers
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                "{}"
+            } else {
+                body
+            };
             self.files
                 .lock()
                 .await
@@ -1741,12 +1847,21 @@ mod tests {
     #[async_trait]
     impl StreamingSubagentSpawner for MockStreamingSpawner {
         async fn spawn_persistent_with_observer(
-            &self, request: SubagentSpawnRequest, _inherit: SubagentInheritance,
+            &self,
+            request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
             observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>,
-        ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
+        ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError>
+        {
             let id = AgentId::new();
             let event = platform_api::subagent_spawn::SubagentObservation::Allocated {
-                agent_id: id, agent_type: request.subagent_type.clone(), name: request.name.clone(), model: "mock".into(), model_profile: None, persistent: true, initial_message_index: 0,
+                agent_id: id,
+                agent_type: request.subagent_type.clone(),
+                name: request.name.clone(),
+                model: "mock".into(),
+                model_profile: None,
+                persistent: true,
+                initial_message_index: 0,
                 origin_session_id: None,
             };
             observer.on_allocated(&event);
@@ -1757,7 +1872,9 @@ mod tests {
             *self.tx_slot.lock().unwrap() = Some(tx);
             Ok((id, rx))
         }
-        fn transcript_path(&self, _agent_id: AgentId) -> Option<PathBuf> { self.transcript.lock().unwrap().clone() }
+        fn transcript_path(&self, _agent_id: AgentId) -> Option<PathBuf> {
+            self.transcript.lock().unwrap().clone()
+        }
         async fn spawn_persistent(
             &self,
             request: SubagentSpawnRequest,
@@ -1839,7 +1956,12 @@ mod tests {
         #[async_trait]
         impl SubagentSpawnObserver for Allocations {
             fn on_allocated(&self, event: &SubagentObservation) {
-                if let SubagentObservation::Allocated { agent_id, name: Some(name), .. } = event {
+                if let SubagentObservation::Allocated {
+                    agent_id,
+                    name: Some(name),
+                    ..
+                } = event
+                {
                     self.0.lock().unwrap().insert(name.clone(), *agent_id);
                 }
             }
@@ -1855,44 +1977,112 @@ mod tests {
             child_task: StdMutex<Option<String>>,
         }
         fn request(prompt: &str, description: &str) -> SubagentSpawnRequest {
-            SubagentSpawnRequest { subagent_type: "general-purpose".into(), prompt: prompt.into(), description: Some(description.into()), run_in_background: true, ..Default::default() }
+            SubagentSpawnRequest {
+                subagent_type: "general-purpose".into(),
+                prompt: prompt.into(),
+                description: Some(description.into()),
+                run_in_background: true,
+                ..Default::default()
+            }
         }
         fn input(request: SubagentSpawnRequest, creator: Option<AgentId>) -> TaskSpawnInput {
-            TaskSpawnInput::LocalAgent { agent_id: AgentId::new(), subagent_type: request.subagent_type.clone(), prompt: request.prompt.clone(), is_backgrounded: true, tool_use_id: None, creator_teammate_name: None, creator_team_name: None, creator_agent_id: creator, spawn_request: Some(request), inheritance: None }
+            TaskSpawnInput::LocalAgent {
+                agent_id: AgentId::new(),
+                subagent_type: request.subagent_type.clone(),
+                prompt: request.prompt.clone(),
+                is_backgrounded: true,
+                tool_use_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: creator,
+                spawn_request: Some(request),
+                inheritance: None,
+            }
         }
         #[async_trait]
         impl agent::SubagentApiClient for Api {
-            async fn messages_create(&self, _: &str, _: Option<&str>, messages: Vec<protocol::ConversationMessage>, _: Vec<serde_json::Value>) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+            async fn messages_create(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                messages: Vec<protocol::ConversationMessage>,
+                _: Vec<serde_json::Value>,
+            ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
                 let registry = self.registry.get().unwrap().upgrade().unwrap();
                 let history = serde_json::to_string(&messages).unwrap();
                 let child = history.contains("nested child prompt");
                 let label = if child { "nested child" } else { "real parent" };
-                let actual = *self.allocations.0.lock().unwrap().get(label).expect("allocation precedes model");
-                assert!(self.mcp_ids.lock().unwrap().contains(&actual), "MCP builder must see the actual owner ID before the first model request");
-                let row = registry.get(&actual.to_string()).await.expect("actual pool id must resolve before the first model request");
-                assert!(matches!(row, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == actual));
+                let actual = *self
+                    .allocations
+                    .0
+                    .lock()
+                    .unwrap()
+                    .get(label)
+                    .expect("allocation precedes model");
+                assert!(
+                    self.mcp_ids.lock().unwrap().contains(&actual),
+                    "MCP builder must see the actual owner ID before the first model request"
+                );
+                let row = registry
+                    .get(&actual.to_string())
+                    .await
+                    .expect("actual pool id must resolve before the first model request");
+                assert!(
+                    matches!(row, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == actual)
+                );
                 if !child {
                     if let Some(expected) = self.expected_restored_id {
                         assert_eq!(actual, expected, "restore must allocate the persisted runner ID, not merely add an alias");
-                        let old = registry.get("arestoredold").await.expect("old task alias must resolve before the first model request");
-                        assert!(matches!(old, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == expected));
+                        let old = registry
+                            .get("arestoredold")
+                            .await
+                            .expect("old task alias must resolve before the first model request");
+                        assert!(
+                            matches!(old, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == expected)
+                        );
                         assert!(!history.contains("original prompt must not replay"));
                     }
                 }
                 let text = if child {
                     self.release_child.notified().await;
                     "nested child answer"
-                } else if self.parent_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                } else if self
+                    .parent_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    == 0
+                {
                     let mut req = request("nested child prompt", "nested child");
                     req.creator_agent_id = Some(actual);
-                    let id = registry.spawn(TaskType::LocalAgent, input(req, Some(actual)), "nested child".into()).await.unwrap();
+                    let id = registry
+                        .spawn(
+                            TaskType::LocalAgent,
+                            input(req, Some(actual)),
+                            "nested child".into(),
+                        )
+                        .await
+                        .unwrap();
                     *self.child_task.lock().unwrap() = Some(id);
                     "waiting for child"
                 } else {
-                    assert!(history.contains("nested child answer"), "the real owner's resumed model must receive its child's result");
+                    assert!(
+                        history.contains("nested child answer"),
+                        "the real owner's resumed model must receive its child's result"
+                    );
                     "parent folded child"
                 };
-                Ok(llm_client::LlmResponse { id: "response".into(), model: "mock".into(), content: vec![llm_client::ContentBlock::Text { text: text.into(), cache_control: None }], stop_reason: Some("end_turn".into()), stop_details: None, usage: llm_client::Usage::default(), cost: None, provider_metadata: serde_json::Value::Null })
+                Ok(llm_client::LlmResponse {
+                    id: "response".into(),
+                    model: "mock".into(),
+                    content: vec![llm_client::ContentBlock::Text {
+                        text: text.into(),
+                        cache_control: None,
+                    }],
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                    usage: llm_client::Usage::default(),
+                    cost: None,
+                    provider_metadata: serde_json::Value::Null,
+                })
             }
         }
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -1903,22 +2093,52 @@ mod tests {
         let mcp_cleanup_ids = Arc::new(StdMutex::new(Vec::new()));
         let seen_mcp = mcp_ids.clone();
         let cleaned_mcp = mcp_cleanup_ids.clone();
-        let mcp_builder: agent::agent_mcp_tools::AgentMcpToolBuilder = Arc::new(move |id, _, _lease| {
-            seen_mcp.lock().unwrap().push(id);
-            let cleaned = cleaned_mcp.clone();
-            Box::pin(async move {
-                agent::agent_mcp_tools::AgentMcpToolSet { tools: vec![], cleanups: vec![agent::agent_mcp_tools::AgentMcpCleanupHandle {
-                    server_name: "owner-identity".into(),
-                    run: Arc::new(move || { let cleaned = cleaned.clone(); Box::pin(async move { cleaned.lock().unwrap().push(id); Ok(()) }) }),
-                }] }
-            })
-        });
+        let mcp_builder: agent::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |id, _, _lease| {
+                seen_mcp.lock().unwrap().push(id);
+                let cleaned = cleaned_mcp.clone();
+                Box::pin(async move {
+                    agent::agent_mcp_tools::AgentMcpToolSet {
+                        tools: vec![],
+                        cleanups: vec![agent::agent_mcp_tools::AgentMcpCleanupHandle {
+                            server_name: "owner-identity".into(),
+                            run: Arc::new(move || {
+                                let cleaned = cleaned.clone();
+                                Box::pin(async move {
+                                    cleaned.lock().unwrap().push(id);
+                                    Ok(())
+                                })
+                            }),
+                        }],
+                    }
+                })
+            });
         let restored_id = restored.then(AgentId::new);
-        let api = Arc::new(Api { mcp_ids: mcp_ids.clone(), expected_restored_id: restored_id, registry: std::sync::OnceLock::new(), allocations: allocations.clone(), parent_calls: std::sync::atomic::AtomicUsize::new(0), release_child: tokio::sync::Notify::new(), child_task: StdMutex::new(None) });
+        let api = Arc::new(Api {
+            mcp_ids: mcp_ids.clone(),
+            expected_restored_id: restored_id,
+            registry: std::sync::OnceLock::new(),
+            allocations: allocations.clone(),
+            parent_calls: std::sync::atomic::AtomicUsize::new(0),
+            release_child: tokio::sync::Notify::new(),
+            child_task: StdMutex::new(None),
+        });
         let pool = Arc::new(agent::StateMachinePool::new(runtime.clone(), 4));
-        let spawner = Arc::new(agent::PoolSubagentSpawner::new(pool).with_api_client(api.clone()).with_spawn_observer(allocations).with_mcp_tool_builder(mcp_builder));
+        let spawner = Arc::new(
+            agent::PoolSubagentSpawner::new(pool)
+                .with_api_client(api.clone())
+                .with_spawn_observer(allocations)
+                .with_mcp_tool_builder(mcp_builder),
+        );
         let sink = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
-        let handler = LocalAgentHandler::new(spawner.clone(), Arc::new(MockInvoker), Arc::new(MockBudget), mgr.clone()).with_status_sink(sink.clone()).with_streaming_spawner(spawner.clone());
+        let handler = LocalAgentHandler::new(
+            spawner.clone(),
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            mgr.clone(),
+        )
+        .with_status_sink(sink.clone())
+        .with_streaming_spawner(spawner.clone());
         let mut registry = crate::registry::TaskRegistry::new(runtime, fs, mgr);
         registry.register_handler(TaskType::LocalAgent, Arc::new(handler));
         let registry = Arc::new(registry);
@@ -1927,45 +2147,124 @@ mod tests {
         api.registry.set(Arc::downgrade(&registry)).ok().unwrap();
         let mut parent_request = request("original prompt must not replay", "real parent");
         if restored {
-            parent_request.resumed_history = Some(vec![protocol::ConversationMessage::user(protocol::MessageId::new(), "recovered parent history".into())]);
+            parent_request.resumed_history = Some(vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "recovered parent history".into(),
+            )]);
         }
         let mut parent_input = input(parent_request, None);
-        if let (Some(old), TaskSpawnInput::LocalAgent { agent_id, .. }) = (restored_id, &mut parent_input) { *agent_id = old; }
-        let aliases = if restored { vec!["arestoredold".to_string()] } else { Vec::new() };
-        let parent = registry.spawn_with_aliases(TaskType::LocalAgent, parent_input, "real parent".into(), &aliases).await.unwrap();
+        if let (Some(old), TaskSpawnInput::LocalAgent { agent_id, .. }) =
+            (restored_id, &mut parent_input)
+        {
+            *agent_id = old;
+        }
+        let aliases = if restored {
+            vec!["arestoredold".to_string()]
+        } else {
+            Vec::new()
+        };
+        let parent = registry
+            .spawn_with_aliases(
+                TaskType::LocalAgent,
+                parent_input,
+                "real parent".into(),
+                &aliases,
+            )
+            .await
+            .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop { if registry.get(&parent).await.unwrap().is_parked() { break; } tokio::task::yield_now().await; }
-        }).await.expect("parent parks while its child is in flight");
-        assert!(registry.take_pending_task_notifications().await.is_empty(), "main cannot steal the child's result or the deferred parent rest");
+            loop {
+                if registry.get(&parent).await.unwrap().is_parked() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("parent parks while its child is in flight");
+        assert!(
+            registry.take_pending_task_notifications().await.is_empty(),
+            "main cannot steal the child's result or the deferred parent rest"
+        );
         if let Some(old) = restored_id {
             let mut duplicate = request("", "duplicate restore");
-            duplicate.resumed_history = Some(vec![protocol::ConversationMessage::user(protocol::MessageId::new(), "duplicate history".into())]);
+            duplicate.resumed_history = Some(vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "duplicate history".into(),
+            )]);
             let mut duplicate_input = input(duplicate, None);
-            if let TaskSpawnInput::LocalAgent { agent_id, .. } = &mut duplicate_input { *agent_id = old; }
-            assert!(registry.spawn_with_aliases(TaskType::LocalAgent, duplicate_input, "duplicate restore".into(), &["aduplicaterestore".into()]).await.is_err());
-            assert_eq!(registry.resolve_task_id(&old.to_string()).await.as_deref(), Some(parent.as_str()), "rejected restore cannot steal the live agent alias");
-            assert_eq!(registry.resolve_task_id("arestoredold").await.as_deref(), Some(parent.as_str()));
+            if let TaskSpawnInput::LocalAgent { agent_id, .. } = &mut duplicate_input {
+                *agent_id = old;
+            }
+            assert!(registry
+                .spawn_with_aliases(
+                    TaskType::LocalAgent,
+                    duplicate_input,
+                    "duplicate restore".into(),
+                    &["aduplicaterestore".into()]
+                )
+                .await
+                .is_err());
+            assert_eq!(
+                registry.resolve_task_id(&old.to_string()).await.as_deref(),
+                Some(parent.as_str()),
+                "rejected restore cannot steal the live agent alias"
+            );
+            assert_eq!(
+                registry.resolve_task_id("arestoredold").await.as_deref(),
+                Some(parent.as_str())
+            );
         }
         api.release_child.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Some(crate::state::TaskState::LocalAgent(agent)) = registry.get(&parent).await {
-                    if agent.is_parked && agent.outcome.result.as_deref() == Some("parent folded child") { break; }
+                if let Some(crate::state::TaskState::LocalAgent(agent)) =
+                    registry.get(&parent).await
+                {
+                    if agent.is_parked
+                        && agent.outcome.result.as_deref() == Some("parent folded child")
+                    {
+                        break;
+                    }
                 }
                 tokio::task::yield_now().await;
             }
-        }).await.expect("nested completion wakes and reaches the actual allocated parent");
-        assert_eq!(api.parent_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        })
+        .await
+        .expect("nested completion wakes and reaches the actual allocated parent");
+        assert_eq!(
+            api.parent_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
         let notifications = registry.take_pending_task_notifications().await;
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].task_id, parent);
-        assert_eq!(notifications[0].result.as_deref(), Some("parent folded child"));
+        assert_eq!(
+            notifications[0].result.as_deref(),
+            Some("parent folded child")
+        );
         registry.kill_with_reason(&parent, "user").await.unwrap();
         let child = api.child_task.lock().unwrap().clone().unwrap();
         registry.kill_with_reason(&child, "user").await.unwrap();
         if let Some(old) = restored_id {
-            assert_eq!(mcp_ids.lock().unwrap().iter().filter(|id| **id == old).count(), 1);
-            assert_eq!(mcp_cleanup_ids.lock().unwrap().iter().filter(|id| **id == old).count(), 1);
+            assert_eq!(
+                mcp_ids
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|id| **id == old)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                mcp_cleanup_ids
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|id| **id == old)
+                    .count(),
+                1
+            );
         }
     }
 
@@ -1979,53 +2278,143 @@ mod tests {
         let tx_slot = Arc::new(StdMutex::new(None));
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let streaming = MockStreamingSpawner::new(tx_slot.clone(), count.clone());
-        let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr.clone(), sink.clone()).with_streaming_spawner(streaming.clone());
-        let mut registry = crate::registry::TaskRegistry::new(Arc::new(MockRuntimeSpawner::default()), fs.clone(), mgr);
+        let handler = make_handler(
+            MockSpawner::new(CannedResult::Pending),
+            mgr.clone(),
+            sink.clone(),
+        )
+        .with_streaming_spawner(streaming.clone());
+        let mut registry = crate::registry::TaskRegistry::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            fs.clone(),
+            mgr,
+        );
         registry.register_handler(TaskType::LocalAgent, Arc::new(handler));
         let registry = Arc::new(registry);
         sink.bind(registry.clone());
-        let request = SubagentSpawnRequest { subagent_type: "reviewer".into(), prompt: "Observe material issues".into(), ..Default::default() };
-        let inherit = SubagentInheritance { tool_invoker: Arc::new(MockInvoker), budget: Arc::new(MockBudget) };
+        let request = SubagentSpawnRequest {
+            subagent_type: "reviewer".into(),
+            prompt: "Observe material issues".into(),
+            ..Default::default()
+        };
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(MockInvoker),
+            budget: Arc::new(MockBudget),
+        };
         let observed = AgentId::new();
-        TaskRegistryHandle::observe_agent_activity(registry.as_ref(), request.clone(), inherit.clone(), observed, "first digest".into()).await.unwrap();
+        TaskRegistryHandle::observe_agent_activity(
+            registry.as_ref(),
+            request.clone(),
+            inherit.clone(),
+            observed,
+            "first digest".into(),
+        )
+        .await
+        .unwrap();
         let tx = loop {
-            if let Some(tx) = tx_slot.lock().unwrap().clone() { break tx; }
+            if let Some(tx) = tx_slot.lock().unwrap().clone() {
+                break tx;
+            }
             tokio::task::yield_now().await;
         };
         let rows = registry.list().await;
         assert_eq!(rows.len(), 1, "one independent task per observed agent");
         let row = &rows[0];
         assert!(matches!(row, crate::state::TaskState::LocalAgent(a) if a.is_observer));
-        assert!(matches!(row, crate::state::TaskState::LocalAgent(a) if Some(a.agent_id) == *streaming.spawned_id.lock().unwrap()), "registry identity must be the actual allocated runner, not the task input placeholder");
-        assert!(matches!(row, crate::state::TaskState::LocalAgent(a) if a.observed_agent_id == Some(observed)));
-        assert!(row.base().creator_agent_id.is_none(), "observer pairing must not create a cascade-stop ownership edge");
+        assert!(
+            matches!(row, crate::state::TaskState::LocalAgent(a) if Some(a.agent_id) == *streaming.spawned_id.lock().unwrap()),
+            "registry identity must be the actual allocated runner, not the task input placeholder"
+        );
+        assert!(
+            matches!(row, crate::state::TaskState::LocalAgent(a) if a.observed_agent_id == Some(observed))
+        );
+        assert!(
+            row.base().creator_agent_id.is_none(),
+            "observer pairing must not create a cascade-stop ownership edge"
+        );
         let id = row.base().id.clone();
         let marker = row.base().output_file.with_extension("observer.json");
-        assert!(fs.read_file(&marker.to_string_lossy(), None, None).await.unwrap().content.contains("\"isObserver\":true"));
-        assert!(streaming.requests.lock().unwrap()[0].prompt.contains("first digest"));
-        TaskRegistryHandle::observe_agent_activity(registry.as_ref(), request.clone(), inherit.clone(), observed, "second digest".into()).await.unwrap();
-        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0, "activity never resumes/cancels a running model request");
+        assert!(fs
+            .read_file(&marker.to_string_lossy(), None, None)
+            .await
+            .unwrap()
+            .content
+            .contains("\"isObserver\":true"));
+        assert!(streaming.requests.lock().unwrap()[0]
+            .prompt
+            .contains("first digest"));
+        TaskRegistryHandle::observe_agent_activity(
+            registry.as_ref(),
+            request.clone(),
+            inherit.clone(),
+            observed,
+            "second digest".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "activity never resumes/cancels a running model request"
+        );
         tx.send(completed_event("rest-one")).await.unwrap();
         for _ in 0..400 {
-            if count.load(std::sync::atomic::Ordering::SeqCst) == 1 { break; }
+            if count.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-        assert_eq!(streaming.delivered.lock().unwrap().as_slice(), &["second digest"]);
+        assert_eq!(
+            streaming.delivered.lock().unwrap().as_slice(),
+            &["second digest"]
+        );
         assert!(registry.take_pending_task_notifications().await.is_empty());
         tx.send(completed_event("rest-two")).await.unwrap();
         for _ in 0..400 {
-            if registry.get(&id).await.unwrap().is_parked() { break; }
+            if registry.get(&id).await.unwrap().is_parked() {
+                break;
+            }
             tokio::task::yield_now().await;
         }
         assert!(registry.get(&id).await.unwrap().is_parked());
         assert!(registry.take_pending_task_notifications().await.is_empty());
         registry.kill_with_reason(&id, "user").await.unwrap();
-        assert!(TaskRegistryHandle::observe_agent_activity(registry.as_ref(), request.clone(), inherit.clone(), observed, "after stop".into()).await.is_err());
-        assert_eq!(streaming.requests.lock().unwrap().len(), 1, "a stopped observer is not recreated");
-        memory_fs.corrupt_observer_markers.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert!(TaskRegistryHandle::observe_agent_activity(registry.as_ref(), request, inherit, AgentId::new(), "corrupt marker".into()).await.is_err());
-        assert_eq!(streaming.requests.lock().unwrap().len(), 1, "bad marker must fail before starting an observer model");
-        assert_eq!(registry.list().await.len(), 1, "failed publication leaves no new observer row");
+        assert!(TaskRegistryHandle::observe_agent_activity(
+            registry.as_ref(),
+            request.clone(),
+            inherit.clone(),
+            observed,
+            "after stop".into()
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            streaming.requests.lock().unwrap().len(),
+            1,
+            "a stopped observer is not recreated"
+        );
+        memory_fs
+            .corrupt_observer_markers
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(TaskRegistryHandle::observe_agent_activity(
+            registry.as_ref(),
+            request,
+            inherit,
+            AgentId::new(),
+            "corrupt marker".into()
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            streaming.requests.lock().unwrap().len(),
+            1,
+            "bad marker must fail before starting an observer model"
+        );
+        assert_eq!(
+            registry.list().await.len(),
+            1,
+            "failed publication leaves no new observer row"
+        );
     }
 
     #[cfg(unix)]
@@ -2037,24 +2426,49 @@ mod tests {
         std::fs::write(&target, "transcript line\n").unwrap();
         let sink = Arc::new(RecordingSink::default());
         let tx_slot = Arc::new(StdMutex::new(None));
-        let streaming = MockStreamingSpawner::new(tx_slot.clone(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let streaming = MockStreamingSpawner::new(
+            tx_slot.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
         *streaming.transcript.lock().unwrap() = Some(target.clone());
-        let handler = make_handler(MockSpawner::new(CannedResult::Pending), manager.clone(), sink.clone()).with_streaming_spawner(streaming);
+        let handler = make_handler(
+            MockSpawner::new(CannedResult::Pending),
+            manager.clone(),
+            sink.clone(),
+        )
+        .with_streaming_spawner(streaming);
         let ctx = make_ctx(fs);
-        let handle = handler.spawn(local_agent_input("start"), ctx.clone()).await.unwrap();
+        let handle = handler
+            .spawn(local_agent_input("start"), ctx.clone())
+            .await
+            .unwrap();
         let output = manager.path_for(&handle.task_id).unwrap();
         let tx = loop {
-            if let Some(tx) = tx_slot.lock().unwrap().clone() { break tx; }
+            if let Some(tx) = tx_slot.lock().unwrap().clone() {
+                break tx;
+            }
             tokio::task::yield_now().await;
         };
         tx.send(completed_event("clean report")).await.unwrap();
         for _ in 0..200 {
-            if std::fs::read_link(&output).is_ok() && *sink.parked.lock().unwrap() { break; }
+            if std::fs::read_link(&output).is_ok() && *sink.parked.lock().unwrap() {
+                break;
+            }
             tokio::task::yield_now().await;
         }
         assert_eq!(std::fs::read_link(&output).unwrap(), target);
-        assert_eq!(std::fs::read_to_string(&output).unwrap(), "transcript line\n");
-        assert_eq!(manager.read(&output, crate::output_manager::OutputOptions::default()).await.unwrap().content, "transcript line\n");
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            "transcript line\n"
+        );
+        assert_eq!(
+            manager
+                .read(&output, crate::output_manager::OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "transcript line\n"
+        );
         handler.kill(&handle.task_id, ctx).await.unwrap();
     }
 

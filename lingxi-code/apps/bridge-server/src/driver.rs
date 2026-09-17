@@ -97,8 +97,12 @@ impl MsgQueueMidTurnInput {
 
 #[async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTurnInput {
-    fn supports_goal_retries(&self) -> bool { true }
-    async fn has_queued_goal_work(&self) -> bool { self.queue.has_main_thread_commands().await }
+    fn supports_goal_retries(&self) -> bool {
+        true
+    }
+    async fn has_queued_goal_work(&self) -> bool {
+        self.queue.has_main_thread_commands().await
+    }
     async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
         self.queue.enqueue_goal_retry(id, body, cancel).await;
     }
@@ -361,7 +365,10 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
             })
             .collect();
         if !stranded.is_empty() {
-            let ids: Vec<_> = stranded.iter().map(|command| command.uuid.clone()).collect();
+            let ids: Vec<_> = stranded
+                .iter()
+                .map(|command| command.uuid.clone())
+                .collect();
             self.queue.remove(&ids, "dynamic loop cancelled").await;
             for command in stranded {
                 if let Some(text) = command.text() {
@@ -388,46 +395,85 @@ impl cron::scheduler::SessionCronDelivery for MsgQueueWakeupScheduler {
     }
 
     async fn clear_queued(&self) {
-        let ids: Vec<_> = self.queue.snapshot().await.into_iter()
-            .filter(|command| command.source == msgqueue::QueueSource::Cron && command.uuid.starts_with("cron-fire-"))
-            .map(|command| command.uuid).collect();
+        let ids: Vec<_> = self
+            .queue
+            .snapshot()
+            .await
+            .into_iter()
+            .filter(|command| {
+                command.source == msgqueue::QueueSource::Cron
+                    && command.uuid.starts_with("cron-fire-")
+            })
+            .map(|command| command.uuid)
+            .collect();
         self.queue.remove(&ids, "session changed").await;
     }
-    async fn is_loading(&self) -> bool { self.queue.has_active_turn().await }
+    async fn is_loading(&self) -> bool {
+        self.queue.has_active_turn().await
+    }
     async fn enqueue(&self, fire: cron::scheduler::SessionCronFire) -> Result<(), String> {
         if fire.cron.is_empty() {
-            self.queue.enqueue(msgqueue::QueuedCommand {
-                scheduled_task_id: None,
-                scheduled_fire_id: None,
-                uuid: format!("cron-fire-{}", fire.id),
-                content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
-                priority: msgqueue::QueuePriority::Later,
-                queued_at: std::time::SystemTime::now(), source: msgqueue::QueueSource::Cron,
-                agent_id: None, skip_slash_commands: true, is_meta: true,
-            }).await;
+            self.queue
+                .enqueue(msgqueue::QueuedCommand {
+                    scheduled_task_id: None,
+                    scheduled_fire_id: None,
+                    uuid: format!("cron-fire-{}", fire.id),
+                    content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
+                    priority: msgqueue::QueuePriority::Later,
+                    queued_at: std::time::SystemTime::now(),
+                    source: msgqueue::QueueSource::Cron,
+                    agent_id: None,
+                    skip_slash_commands: true,
+                    is_meta: true,
+                })
+                .await;
             return Ok(());
         }
         let task = tool_cron::WakeupTask::scheduled(&fire);
         let now = std::time::SystemTime::now();
-        let now_ms = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let now_ms = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         let (message, _) = task.lines(now_ms, None);
-        if let Some(orch) = self.orchestrator.as_ref().and_then(std::sync::Weak::upgrade) {
-            orch.append_scheduled_loop_wakeup(message.clone(), None, 0, 0,
-                orchestrator::ScheduledLoopFire { fire_id: task.fire_id, task_id: task.task_id.clone(), cron: task.cron.clone(),
-                    prompt: task.display_prompt.clone(), task_kind_loop: false }).await.map_err(|e| e.to_string())?;
+        if let Some(orch) = self
+            .orchestrator
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            orch.append_scheduled_loop_wakeup(
+                message.clone(),
+                None,
+                0,
+                0,
+                orchestrator::ScheduledLoopFire {
+                    fire_id: task.fire_id,
+                    task_id: task.task_id.clone(),
+                    cron: task.cron.clone(),
+                    prompt: task.display_prompt.clone(),
+                    task_kind_loop: false,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         }
         if let Some(sink) = &self.events {
             sink.emit(ClientEvent::ScheduledTaskFire { message }).await;
         }
-        self.queue.enqueue(msgqueue::QueuedCommand {
-            scheduled_task_id: Some(task.task_id.clone()),
-            scheduled_fire_id: Some(task.fire_id.as_uuid().to_string()),
-            uuid: task.command_id(),
-            content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
-            priority: msgqueue::QueuePriority::Later, queued_at: now,
-            source: msgqueue::QueueSource::Cron, agent_id: None,
-            skip_slash_commands: true, is_meta: true,
-        }).await;
+        self.queue
+            .enqueue(msgqueue::QueuedCommand {
+                scheduled_task_id: Some(task.task_id.clone()),
+                scheduled_fire_id: Some(task.fire_id.as_uuid().to_string()),
+                uuid: task.command_id(),
+                content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
+                priority: msgqueue::QueuePriority::Later,
+                queued_at: now,
+                source: msgqueue::QueueSource::Cron,
+                agent_id: None,
+                skip_slash_commands: true,
+                is_meta: true,
+            })
+            .await;
         Ok(())
     }
 }
@@ -645,7 +691,15 @@ impl OrchestratorTurnDriver {
         notification_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
         in_human_turn: bool,
     ) {
-        self.drive_turn_with_inputs(prompt, sources, cancel, notification_registry, in_human_turn, None).await;
+        self.drive_turn_with_inputs(
+            prompt,
+            sources,
+            cancel,
+            notification_registry,
+            in_human_turn,
+            None,
+        )
+        .await;
     }
 
     async fn drive_turn_with_inputs(
@@ -685,7 +739,9 @@ impl OrchestratorTurnDriver {
                 .run_task_notification_rewake(registry.as_ref(), cancel)
                 .await
         } else if let Some(inputs) = inputs {
-            self.orchestrator.run_queued_prompt_batch(inputs, cancel).await
+            self.orchestrator
+                .run_queued_prompt_batch(inputs, cancel)
+                .await
         } else {
             self.orchestrator
                 .run_turn_streaming_with_origin(&prompt, sources, cancel, None, in_human_turn)
@@ -826,12 +882,19 @@ impl TurnDriver for OrchestratorTurnDriver {
     fn resolve_loop_prompt(&self, prompt: &str) -> std::io::Result<String> {
         let fallback = tool_cron::LoopRuntime::default();
         let runtime = self.loop_runtime.as_deref().unwrap_or(&fallback);
-        runtime.try_resolve_loop_default_fire(prompt, &self.orchestrator.project_root(), &self.orchestrator.current_cwd())
+        runtime.try_resolve_loop_default_fire(
+            prompt,
+            &self.orchestrator.project_root(),
+            &self.orchestrator.current_cwd(),
+        )
     }
 
     async fn loop_prompt_failed(&self, error: std::io::Error) {
         if let Some(sink) = &self.error_sink {
-            sink.emit(Self::error_event(&orchestrator::OrchestratorError::Internal(error.to_string()))).await;
+            sink.emit(Self::error_event(
+                &orchestrator::OrchestratorError::Internal(error.to_string()),
+            ))
+            .await;
         } else {
             tracing::warn!(%error, "could not read scheduled loop instructions");
         }
@@ -883,7 +946,7 @@ impl TurnDriver for OrchestratorTurnDriver {
                     })
                     .await;
                 }
-                return Err(error.into());
+                return Err(error);
             }
         };
         match result {
@@ -903,10 +966,15 @@ impl TurnDriver for OrchestratorTurnDriver {
         }
     }
 
-    async fn run_queued_batch(&self, inputs: Vec<orchestrator::QueuedPromptInput>, cancel: CancellationToken) {
+    async fn run_queued_batch(
+        &self,
+        inputs: Vec<orchestrator::QueuedPromptInput>,
+        cancel: CancellationToken,
+    ) {
         let human = inputs.iter().any(|input| !input.is_meta);
         self.announce_engine_initiated_turn().await;
-        self.drive_turn_with_inputs(String::new(), Vec::new(), cancel, None, human, Some(inputs)).await;
+        self.drive_turn_with_inputs(String::new(), Vec::new(), cancel, None, human, Some(inputs))
+            .await;
     }
 
     async fn run_queued_turn(
@@ -1042,11 +1110,13 @@ mod tests {
             )));
         let driver = OrchestratorTurnDriver::new(Arc::new(orchestrator));
         assert!(driver
-            .resolve_loop_prompt("<<loop.md-dynamic>>").unwrap()
+            .resolve_loop_prompt("<<loop.md-dynamic>>")
+            .unwrap()
             .contains("First session task"));
         std::fs::write(directory.path().join("loop.md"), "Updated session task").unwrap();
         assert!(driver
-            .resolve_loop_prompt("<<loop.md-dynamic>>").unwrap()
+            .resolve_loop_prompt("<<loop.md-dynamic>>")
+            .unwrap()
             .contains("Updated session task"));
         tool_cron::reset_autonomous_loop_delivered();
     }
@@ -1233,7 +1303,11 @@ mod tests {
         let (driver, sink) = build_driver_with_sink(streaming_one_turn());
 
         driver
-            .run_queued_turn("drained from the queue".to_string(), false, CancellationToken::new())
+            .run_queued_turn(
+                "drained from the queue".to_string(),
+                false,
+                CancellationToken::new(),
+            )
             .await;
 
         let events = sink.events().await;
@@ -1254,7 +1328,7 @@ mod tests {
             .run_queued_batch(
                 vec![
                     orchestrator::QueuedPromptInput {
-                    goal_retry_id: None,
+                        goal_retry_id: None,
                         text: "first".to_string(),
                         is_meta: false,
                         message_id: None,
@@ -1263,7 +1337,7 @@ mod tests {
                         scheduled_fire_id: None,
                     },
                     orchestrator::QueuedPromptInput {
-                    goal_retry_id: None,
+                        goal_retry_id: None,
                         text: "second".to_string(),
                         is_meta: false,
                         message_id: None,
@@ -1285,7 +1359,10 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, client_protocol::events::ClientEvent::TurnStarted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    client_protocol::events::ClientEvent::TurnStarted { .. }
+                ))
                 .count(),
             1,
             "one turn announces once, however many commands were folded into it",
@@ -1518,8 +1595,13 @@ mod tests {
         assert!(cmd.skip_slash_commands);
         assert_eq!(cmd.source, msgqueue::QueueSource::Cron);
         assert_eq!(cmd.scheduled_task_id.as_deref().unwrap().len(), 8);
-        assert!(protocol::MessageId::parse_prefixed(cmd.scheduled_fire_id.as_deref().unwrap()).is_some());
-        assert!(cmd.uuid.ends_with(cmd.scheduled_fire_id.as_deref().unwrap()));
+        assert!(
+            protocol::MessageId::parse_prefixed(cmd.scheduled_fire_id.as_deref().unwrap())
+                .is_some()
+        );
+        assert!(cmd
+            .uuid
+            .ends_with(cmd.scheduled_fire_id.as_deref().unwrap()));
         let text = cmd.text().expect("user-input text");
         assert_eq!(
             text, "<<autonomous-loop-dynamic>>",

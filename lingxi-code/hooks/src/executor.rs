@@ -1051,10 +1051,8 @@ impl HookExecutorImpl {
                 Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
                 // #45(b): no early break on first `Block` — see `execute`. All
                 // matched hooks dispatch; `merge` keeps `Block` sticky.
-            } else {
-                if let Some(attachment) = self.background_hook(hook, &event, &ctx).await {
-                    agg.hook_attachments.push(attachment);
-                }
+            } else if let Some(attachment) = self.background_hook(hook, &event, &ctx).await {
+                agg.hook_attachments.push(attachment);
             }
         }
         agg
@@ -1133,10 +1131,8 @@ impl HookExecutorImpl {
                 Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
                 // #45(b): no early break on first `Block` — see `execute`. All
                 // matched hooks dispatch; `merge` keeps `Block` sticky.
-            } else {
-                if let Some(attachment) = self.background_hook(hook, &event, &ctx).await {
-                    agg.hook_attachments.push(attachment);
-                }
+            } else if let Some(attachment) = self.background_hook(hook, &event, &ctx).await {
+                agg.hook_attachments.push(attachment);
             }
         }
         agg
@@ -4184,6 +4180,20 @@ fn emit_prompt_signal(hook: &HookDefinition, signal: &PromptExecutionSignal, tim
 #[path = "executor_test.rs"]
 mod executor_test;
 
+/// PARITY 2.1.263 `YYe()` — `process.env.CLAUDE_CODE_EVAL_CONFINED === true`.
+///
+/// A confined eval-harness run takes its permission grants ONLY from the
+/// command line: hook allows are dropped ([`run_hooks`]'s `H_n` fold) and the
+/// rule loader drops every `allow`-behavior rule (`OG(e)` — NOT yet ported; see
+/// `docs/permission-byte-alignment-2.1.263-2026-09-07.md`).
+///
+/// The binary compares against the literal `true`, so `1`/`yes` do NOT arm it;
+/// the port keeps that exact spelling rather than the usual truthy allowlist.
+#[must_use]
+pub fn eval_confined_session() -> bool {
+    platform_api::env::is_eval_confined_session()
+}
+
 // Hook-run transcript attachments (`hook_success` / `hook_non_blocking_error` /
 // `hook_cancelled`). Kept in this file rather than the `executor_test.rs`
 // sibling per the repo's concurrent-edit convention.
@@ -4738,18 +4748,4 @@ mod attachment_wiring_tests {
             "lowercase hex uuid: {tuid}"
         );
     }
-}
-
-/// PARITY 2.1.263 `YYe()` — `process.env.CLAUDE_CODE_EVAL_CONFINED === true`.
-///
-/// A confined eval-harness run takes its permission grants ONLY from the
-/// command line: hook allows are dropped ([`run_hooks`]'s `H_n` fold) and the
-/// rule loader drops every `allow`-behavior rule (`OG(e)` — NOT yet ported; see
-/// `docs/permission-byte-alignment-2.1.263-2026-09-07.md`).
-///
-/// The binary compares against the literal `true`, so `1`/`yes` do NOT arm it;
-/// the port keeps that exact spelling rather than the usual truthy allowlist.
-#[must_use]
-pub fn eval_confined_session() -> bool {
-    platform_api::env::is_eval_confined_session()
 }

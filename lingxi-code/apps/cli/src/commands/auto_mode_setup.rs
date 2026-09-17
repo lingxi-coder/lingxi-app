@@ -30,10 +30,15 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use permission::PermissionPaths;
+// Used only by the tests below. Kept at file scope behind `cfg(test)` so the
+// lib target carries no unused import (which `clippy --fix` deletes) while the
+// test module still reaches them through `use super::*`.
+#[cfg(test)]
 use permission::auto_mode_setup as pipeline;
-use permission::{
-    persist_auto_mode_save, PermissionPaths, PermissionUpdateDestination, PersistError,
-};
+#[cfg(test)]
+use permission::PermissionUpdateDestination;
+#[cfg(test)]
 use serde_json::Value;
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};

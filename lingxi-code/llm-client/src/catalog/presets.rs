@@ -379,10 +379,7 @@ mod tests {
         // Assembling the catalog registers each model's real limits.
         let _ = builtin_presets();
         // DeepSeek V4: real 1,000,000 / 384,000 — NOT the Claude 200k / 32k.
-        assert_eq!(
-            context_window_for_model("deepseek-flash", &[]),
-            1_000_000
-        );
+        assert_eq!(context_window_for_model("deepseek-flash", &[]), 1_000_000);
         assert_eq!(max_output_tokens_for_model("deepseek-flash"), 384_000);
         // gpt-4.1: real 1,047,576 / 32,768.
         assert_eq!(context_window_for_model("gpt-4.1", &[]), 1_047_576);

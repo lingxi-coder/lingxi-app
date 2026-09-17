@@ -443,22 +443,12 @@ struct LocalAppResourceHandle {
     resource_sha256: String,
 }
 
+#[derive(Default)]
 struct LocalAppCallState {
     inflight_by_scope: HashMap<(String, String), usize>,
     inflight_total_by_conversation: HashMap<String, usize>,
     read_calls: HashMap<(String, String), VecDeque<Instant>>,
     mutation_calls: HashMap<(String, String, String), VecDeque<Instant>>,
-}
-
-impl Default for LocalAppCallState {
-    fn default() -> Self {
-        Self {
-            inflight_by_scope: HashMap::new(),
-            inflight_total_by_conversation: HashMap::new(),
-            read_calls: HashMap::new(),
-            mutation_calls: HashMap::new(),
-        }
-    }
 }
 
 struct LocalAppCallGuard {

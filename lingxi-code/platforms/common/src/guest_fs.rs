@@ -28,9 +28,7 @@
 use async_trait::async_trait;
 use futures::Stream;
 use platform_api::mobile_linux::guest_paths;
-use platform_api::{
-    FileContent, FileEvent, FileSystem, FlockGuard, FsError, MobileLinuxRuntime, MountSpec,
-};
+use platform_api::{FileContent, FileEvent, FileSystem, FlockGuard, FsError, MobileLinuxRuntime};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -152,13 +150,21 @@ impl FileSystem for GuestPathFileSystem {
     }
 
     async fn append_file_rooted_staged(
-        &self, root: &Path, relative: &Path, content: &str,
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
         expected: Option<&platform_api::rooted_fs::RootIdentity>,
     ) -> Result<(), platform_api::filesystem::FileAppendError> {
-        let root = self.resolve_root(root, true).map_err(|error| platform_api::filesystem::FileAppendError {
-            stage: platform_api::filesystem::FileAppendStage::Open, error,
+        let root = self.resolve_root(root, true).map_err(|error| {
+            platform_api::filesystem::FileAppendError {
+                stage: platform_api::filesystem::FileAppendStage::Open,
+                error,
+            }
         })?;
-        self.inner.append_file_rooted_staged(&root, relative, content, expected).await
+        self.inner
+            .append_file_rooted_staged(&root, relative, content, expected)
+            .await
     }
 
     async fn append_file_with_mode(
@@ -263,8 +269,8 @@ mod tests {
     use super::*;
     use platform_api::{
         LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
-        MobileLinuxError, MobileLinuxRuntimeMode, MountPurpose, PtyOpenRequest, PtySessionHandle,
-        RootfsStatus, SandboxBackend,
+        MobileLinuxError, MobileLinuxRuntimeMode, MountPurpose, MountSpec, PtyOpenRequest,
+        PtySessionHandle, RootfsStatus, SandboxBackend,
     };
     use std::sync::Mutex;
 

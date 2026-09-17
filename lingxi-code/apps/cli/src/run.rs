@@ -78,7 +78,6 @@ async fn wind_down_print_tasks(
     shutdown: tokio_util::sync::CancellationToken,
     control_plane: Option<&Arc<StdioControlPlane>>,
 ) -> Result<(), orchestrator::OrchestratorError> {
-    use platform_api::task_registry::TaskRegistryHandle as _;
     loop {
         if shutdown.is_cancelled() {
             break;
@@ -152,7 +151,6 @@ async fn stop_print_tasks(runtime: &Runtime) {
 }
 
 async fn stop_print_tasks_matching(runtime: &Runtime, subscriptions_only: bool) {
-    use platform_api::task_registry::TaskRegistryHandle as _;
     if let Ok(records) = platform_api::task_registry::TaskRegistryHandle::list(
         runtime.task_registry.as_ref(),
         platform_api::task_registry::TaskListFilter::default(),
@@ -330,11 +328,7 @@ where
     run_print_owned_with_cleanup(runtime, operation, futures::future::ready(())).await
 }
 
-async fn run_print_owned_with_cleanup<F, C>(
-    runtime: &Runtime,
-    operation: F,
-    cleanup: C,
-) -> i32
+async fn run_print_owned_with_cleanup<F, C>(runtime: &Runtime, operation: F, cleanup: C) -> i32
 where
     F: std::future::Future<Output = i32>,
     C: std::future::Future<Output = ()>,
@@ -455,15 +449,12 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     if command == "/tasks" {
         if let Some(parsed) = platform_api::human_task_message::parse(args) {
             let result = match parsed {
-                Ok((task_id, message)) if runtime.orchestrator.workspace_trusted().await => {
-                    use platform_api::task_registry::TaskRegistryHandle as _;
-                    runtime
-                        .task_registry
-                        .send_human_task_message(task_id, message)
-                        .await
-                        .map(|()| format!("Message accepted for task {task_id}"))
-                        .map_err(|error| error.to_string())
-                }
+                Ok((task_id, message)) if runtime.orchestrator.workspace_trusted().await => runtime
+                    .task_registry
+                    .send_human_task_message(task_id, message)
+                    .await
+                    .map(|()| format!("Message accepted for task {task_id}"))
+                    .map_err(|error| error.to_string()),
                 Ok(_) => Err("Trust this workspace before messaging a task".into()),
                 Err(error) => Err(error.into()),
             };
@@ -3388,8 +3379,7 @@ fn fusion_result_ready(state: &tasks::state::TaskState) -> bool {
         return false;
     }
     if fusion.base.status != tasks::state::TaskStatus::Completed
-        && !(fusion.base.status == tasks::state::TaskStatus::Failed
-            && fusion.final_text.is_some())
+        && !(fusion.base.status == tasks::state::TaskStatus::Failed && fusion.final_text.is_some())
     {
         // Computation failures/kills have no answer to publish. Accounting
         // failures do retain an answer and must await its publication tail.
@@ -3436,9 +3426,15 @@ fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOu
             }
         }
         tasks::state::TaskStatus::Failed => {
-            let reason = fusion.error.clone().unwrap_or_else(|| "fusion run failed".to_string());
+            let reason = fusion
+                .error
+                .clone()
+                .unwrap_or_else(|| "fusion run failed".to_string());
             match &fusion.final_text {
-                Some(answer) => FusionPrintOutcome::FailedWithAnswer { answer: answer.clone(), reason },
+                Some(answer) => FusionPrintOutcome::FailedWithAnswer {
+                    answer: answer.clone(),
+                    reason,
+                },
                 None => FusionPrintOutcome::Failed(reason),
             }
         }
@@ -3586,8 +3582,10 @@ where
                     )
                     .await;
                 }
-                Some(FusionPrintOutcome::PublicationFailed { answer, reason }
-                    | FusionPrintOutcome::FailedWithAnswer { answer, reason }) => {
+                Some(
+                    FusionPrintOutcome::PublicationFailed { answer, reason }
+                    | FusionPrintOutcome::FailedWithAnswer { answer, reason },
+                ) => {
                     // Preserve the computational answer for the caller even
                     // though publication or accounting failed independently.
                     sink.command_output("fusion", answer).await;
@@ -4833,10 +4831,7 @@ async fn drive_tui_switch_loop_inner(
                     .await
                     {
                         Ok(outcome) => {
-                            eprintln!(
-                                "lingxi-cli: rewound {} file(s)",
-                                outcome.changed.len()
-                            );
+                            eprintln!("lingxi-cli: rewound {} file(s)", outcome.changed.len());
                             if outcome.skipped_links > 0 {
                                 let noun = if outcome.skipped_links == 1 {
                                     "path was"
@@ -7864,12 +7859,31 @@ mod tests {
         let lookup = ScriptedLookup::new(vec![Some(pending), Some(published)]);
         let sink = RecordingFusionSink::default();
         let outcome = await_local_fusion_result_bounded(
-            "ftest0001", &lookup, &sink,
-            std::time::Duration::from_millis(1), std::time::Duration::from_secs(1),
-        ).await;
-        assert_eq!(fusion_result_exit_code(outcome.as_ref()), exit_codes::RUNTIME_ERROR);
-        assert_eq!(sink.outputs.lock().await.as_slice(), &[("fusion".to_string(), "computed despite accounting failure".to_string())]);
-        assert_eq!(sink.errors.lock().await.as_slice(), &[("fusion".to_string(), "Fusion accounting failed: durable receipt rejected".to_string())]);
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            fusion_result_exit_code(outcome.as_ref()),
+            exit_codes::RUNTIME_ERROR
+        );
+        assert_eq!(
+            sink.outputs.lock().await.as_slice(),
+            &[(
+                "fusion".to_string(),
+                "computed despite accounting failure".to_string()
+            )]
+        );
+        assert_eq!(
+            sink.errors.lock().await.as_slice(),
+            &[(
+                "fusion".to_string(),
+                "Fusion accounting failed: durable receipt rejected".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -7961,14 +7975,20 @@ mod tests {
             outcome,
             Some(FusionPrintOutcome::Queued("queued answer".to_string()))
         );
-        assert_eq!(fusion_result_exit_code(outcome.as_ref()), exit_codes::SUCCESS);
+        assert_eq!(
+            fusion_result_exit_code(outcome.as_ref()),
+            exit_codes::SUCCESS
+        );
         assert_eq!(
             sink.outputs.lock().await.as_slice(),
             &[("fusion".to_string(), "queued answer".to_string())]
         );
-        assert!(sink.errors.lock().await.iter().any(|(_, message)| {
-            message.contains("durably queued")
-        }));
+        assert!(sink
+            .errors
+            .lock()
+            .await
+            .iter()
+            .any(|(_, message)| { message.contains("durably queued") }));
     }
 
     #[tokio::test]

@@ -295,7 +295,6 @@ mod tests {
     use super::*;
     use crate::prompt::goal_interruption::RetryCause;
     use crate::test_support::*;
-    use std::time::SystemTime;
 
     #[derive(Default)]
     struct Queue(std::sync::Mutex<Vec<(String, String, CancellationToken)>>);

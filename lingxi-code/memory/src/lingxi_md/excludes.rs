@@ -90,7 +90,7 @@ fn resolve_exclude_patterns(patterns: &[String]) -> Vec<String> {
             continue;
         }
         let glob_start = normalized
-            .find(|c| matches!(c, '*' | '?' | '{' | '['))
+            .find(['*', '?', '{', '['])
             .unwrap_or(normalized.len());
         let static_prefix = &normalized[..glob_start];
         let dirname = node_dirname(static_prefix);

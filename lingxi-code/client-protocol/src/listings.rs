@@ -762,7 +762,6 @@ pub struct TaskRowDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub effort: Option<String>,
-
 }
 
 /// Task status — the lowered `tasks::TaskStatus` (`tasks/src/state.rs:11`), the

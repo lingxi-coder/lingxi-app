@@ -308,7 +308,13 @@ mod tests {
 
         // …and with no credentials configured the command is untouched.
         let plain = runner
-            .wrap("echo hi", &cfg_with_domains(&["github.com"]), Platform::Mac, Some("bash"), Some(&cwd))
+            .wrap(
+                "echo hi",
+                &cfg_with_domains(&["github.com"]),
+                Platform::Mac,
+                Some("bash"),
+                Some(&cwd),
+            )
             .await
             .expect("wrap should succeed");
         assert!(
@@ -323,7 +329,9 @@ mod tests {
     fn decode_wrapped(wrapped: &str) -> String {
         use base64::Engine as _;
         let mut out = wrapped.to_string();
-        for token in wrapped.split(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')) {
+        for token in wrapped
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='))
+        {
             if token.len() < 8 {
                 continue;
             }

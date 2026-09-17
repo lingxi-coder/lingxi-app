@@ -162,7 +162,7 @@ pub fn is_valid_skill_name(name: &str) -> bool {
     // `chars().count()` would count it as one and accept a name the oracle
     // rejects, letting an over-long name reach the sidecar.
     let len = name.encode_utf16().count();
-    len >= 1 && len <= SKILL_NAME_MAX_LEN && !name.contains(['\r', '\n'])
+    (1..=SKILL_NAME_MAX_LEN).contains(&len) && !name.contains(['\r', '\n'])
 }
 
 /// The two sidecar paths for a session transcript (claude `qon`).

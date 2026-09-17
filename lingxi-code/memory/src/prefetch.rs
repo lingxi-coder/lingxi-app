@@ -407,7 +407,9 @@ mod tests {
     #[tokio::test]
     async fn real_path_scans_selects_and_surfaces() {
         let home = tempfile::tempdir().expect("tmp home");
-        let memdir = home.path().join(".lingxi")
+        let memdir = home
+            .path()
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");
@@ -469,7 +471,9 @@ mod tests {
     #[tokio::test]
     async fn selector_receives_redacted_memdir_frontmatter_description() {
         let home = tempfile::tempdir().expect("tmp home");
-        let memdir = home.path().join(".lingxi")
+        let memdir = home
+            .path()
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");
@@ -640,7 +644,9 @@ mod tests {
         );
 
         let home = tempfile::tempdir().expect("tmp home");
-        let memdir = home.path().join(".lingxi")
+        let memdir = home
+            .path()
+            .join(".lingxi")
             .join("projects")
             .join("-proj")
             .join("memdir");

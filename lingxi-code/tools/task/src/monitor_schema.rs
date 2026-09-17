@@ -210,7 +210,10 @@ mod has_command_tests {
         assert!(has_command(Some(&json!(" "))), "whitespace is truthy in JS");
 
         assert!(!has_command(None), "absent");
-        assert!(!has_command(Some(&json!(""))), "empty string is falsy in JS");
+        assert!(
+            !has_command(Some(&json!(""))),
+            "empty string is falsy in JS"
+        );
         // A non-string never reaches the refinement upstream — the type check
         // rejects it first — and must not be mistaken for a command here.
         assert!(!has_command(Some(&json!(null))));

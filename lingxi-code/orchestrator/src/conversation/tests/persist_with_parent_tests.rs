@@ -2330,21 +2330,54 @@ async fn loop_wakeup_survives_jsonl_resume_without_entering_model_context() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("loop.jsonl");
     let orch = orch_with_writer(dir.path(), path.clone());
-    orch.append_scheduled_loop_wakeup("fire one".into(), None, 0, 0, crate::ScheduledLoopFire { fire_id: protocol::MessageId::new(), task_id: "first".into(), cron: "0 9 * * *".into(), prompt: "/loop".into(), task_kind_loop: true }).await.unwrap();
-    orch.append_scheduled_loop_wakeup("fire two".into(), Some("healthy".into()), 1, 123, crate::ScheduledLoopFire { fire_id: protocol::MessageId::new(), task_id: "second".into(), cron: "1 9 * * *".into(), prompt: "/loop".into(), task_kind_loop: true }).await.unwrap();
+    orch.append_scheduled_loop_wakeup(
+        "fire one".into(),
+        None,
+        0,
+        0,
+        crate::ScheduledLoopFire {
+            fire_id: protocol::MessageId::new(),
+            task_id: "first".into(),
+            cron: "0 9 * * *".into(),
+            prompt: "/loop".into(),
+            task_kind_loop: true,
+        },
+    )
+    .await
+    .unwrap();
+    orch.append_scheduled_loop_wakeup(
+        "fire two".into(),
+        Some("healthy".into()),
+        1,
+        123,
+        crate::ScheduledLoopFire {
+            fire_id: protocol::MessageId::new(),
+            task_id: "second".into(),
+            cron: "1 9 * * *".into(),
+            prompt: "/loop".into(),
+            task_kind_loop: true,
+        },
+    )
+    .await
+    .unwrap();
     let rows = read_jsonl(&path);
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[1].parent_uuid.as_deref(), Some(rows[0].uuid.as_str()));
     assert_eq!(rows[1].extra["subtype"], "scheduled_task_fire");
     assert_eq!(rows[1].extra["noOpStreak"], 1);
-    assert_eq!(rows[1].extra["foldedUuids"], serde_json::json!([rows[0].uuid]));
+    assert_eq!(
+        rows[1].extra["foldedUuids"],
+        serde_json::json!([rows[0].uuid])
+    );
     assert!(rows[1].extra.get("loopWakeup").is_none());
     assert!(rows[1].extra.get("isModelContextExcluded").is_none());
     assert_eq!(rows[2].extra["turnCompanion"], true);
     let restored = crate::resume::state_from_messages(Uuid::new_v4(), &rows);
     assert_eq!(restored.history.len(), 3);
     assert_eq!(restored.model_context_excluded_messages.len(), 2);
-    assert!(!restored.model_context_excluded_messages.contains(&restored.history[2].id()));
+    assert!(!restored
+        .model_context_excluded_messages
+        .contains(&restored.history[2].id()));
 }
 
 #[tokio::test]
@@ -2352,17 +2385,37 @@ async fn fixed_scheduled_fire_omits_loop_only_fields() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fixed.jsonl");
     let orch = orch_with_writer(dir.path(), path.clone());
-    orch.append_scheduled_loop_wakeup("Running scheduled task".into(), None, 0, 0,
-        crate::ScheduledLoopFire { fire_id: protocol::MessageId::new(), task_id: "fixed".into(), cron: "*/5 * * * *".into(),
-            prompt: "check".into(), task_kind_loop: false }).await.unwrap();
+    orch.append_scheduled_loop_wakeup(
+        "Running scheduled task".into(),
+        None,
+        0,
+        0,
+        crate::ScheduledLoopFire {
+            fire_id: protocol::MessageId::new(),
+            task_id: "fixed".into(),
+            cron: "*/5 * * * *".into(),
+            prompt: "check".into(),
+            task_kind_loop: false,
+        },
+    )
+    .await
+    .unwrap();
     let rows = read_jsonl(&path);
-    for field in ["taskKind", "cronKind", "noOpStreak", "streakStartedAt", "foldedUuids"] {
+    for field in [
+        "taskKind",
+        "cronKind",
+        "noOpStreak",
+        "streakStartedAt",
+        "foldedUuids",
+    ] {
         assert!(!rows[0].extra.contains_key(field), "{field} is loop-only");
     }
     let restored = crate::resume::state_from_messages(Uuid::new_v4(), &rows);
     assert_eq!(restored.history.len(), 1);
-    assert!(matches!(&restored.history[0], ConversationMessage::System { content, .. }
-        if content == "Running scheduled task"));
+    assert!(
+        matches!(&restored.history[0], ConversationMessage::System { content, .. }
+        if content == "Running scheduled task")
+    );
 }
 
 #[tokio::test]
@@ -2371,9 +2424,21 @@ async fn scheduled_fire_producer_matches_oracle_envelope() {
     let path = dir.path().join("oracle.jsonl");
     let orch = orch_with_writer(dir.path(), path.clone());
     let fire_id = protocol::MessageId::new();
-    orch.append_scheduled_loop_wakeup("fire".into(), None, 0, 0,
-        crate::ScheduledLoopFire { fire_id, task_id: "task-1".into(), cron: "1 9 * * *".into(),
-            prompt: "/loop".into(), task_kind_loop: true }).await.unwrap();
+    orch.append_scheduled_loop_wakeup(
+        "fire".into(),
+        None,
+        0,
+        0,
+        crate::ScheduledLoopFire {
+            fire_id,
+            task_id: "task-1".into(),
+            cron: "1 9 * * *".into(),
+            prompt: "/loop".into(),
+            task_kind_loop: true,
+        },
+    )
+    .await
+    .unwrap();
     let mut row = read_jsonl(&path).remove(0);
     assert_eq!(row.uuid, fire_id.as_uuid().to_string());
     // Pin only nondeterministic host/session fields; all fire fields and their
@@ -2385,43 +2450,83 @@ async fn scheduled_fire_producer_matches_oracle_envelope() {
     row.version = "0.12.0".into();
     row.entrypoint = Some("cli".into());
     row.git_branch = None;
-    let expected = include_str!("../../../../session/tests/fixtures/loop-2.1.270/scheduled_fire.jsonl")
-        .lines().nth(1).unwrap();
+    let expected =
+        include_str!("../../../../session/tests/fixtures/loop-2.1.270/scheduled_fire.jsonl")
+            .lines()
+            .nth(1)
+            .unwrap();
     assert_eq!(serde_json::to_string(&row).unwrap(), expected);
 }
 
 #[tokio::test]
 async fn scheduled_streaming_turn_preserves_meta_origin_in_jsonl_and_history() {
-    use crate::test_support_stream::{MockStreamingApiClient, message_start, content_block_start_text,
-        text_delta, content_block_stop, message_delta_stop, message_stop};
+    use crate::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
+    };
     for in_human_turn in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("origin.jsonl");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(dir.path().into()));
+        let fs: Arc<dyn platform_api::FileSystem> =
+            Arc::new(PosixFileSystem::new(dir.path().into()));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
         let api = Arc::new(MockStreamingApiClient::with_turns(vec![crate::scripted![
-            message_start("msg_origin", "claude-opus-4-7"), content_block_start_text(0),
-            text_delta(0, "done"), content_block_stop(0), message_delta_stop("end_turn"), message_stop(),
+            message_start("msg_origin", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "done"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
         ]]));
         let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(), Arc::new(MockApiClient::new(vec![])), api.clone(), Arc::new(ToolRegistry::new()),
-            noop_hook_executor(), Arc::new(NoOpPermissionGate), Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()), dir.path().into(),
-        ).with_jsonl_writer(writer);
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().into(),
+        )
+        .with_jsonl_writer(writer);
         let prompt_id = protocol::MessageId::new();
-        orch.run_turn_streaming_with_origin("scheduled origin fixture", Vec::new(),
-            tokio_util::sync::CancellationToken::new(), Some(prompt_id), in_human_turn).await.unwrap();
+        orch.run_turn_streaming_with_origin(
+            "scheduled origin fixture",
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+            Some(prompt_id),
+            in_human_turn,
+        )
+        .await
+        .unwrap();
         let rows = read_jsonl(&path);
-        let input = rows.iter().find(|row| row.uuid == prompt_id.as_uuid().to_string()).unwrap();
-        assert_eq!(input.extra.get("isMeta").and_then(serde_json::Value::as_bool).unwrap_or(false), !in_human_turn);
+        let input = rows
+            .iter()
+            .find(|row| row.uuid == prompt_id.as_uuid().to_string())
+            .unwrap();
+        assert_eq!(
+            input
+                .extra
+                .get("isMeta")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            !in_human_turn
+        );
         let session = orch.session.lock().await;
-        let input = session.history.iter().find(|message| message.id() == prompt_id).unwrap();
+        let input = session
+            .history
+            .iter()
+            .find(|message| message.id() == prompt_id)
+            .unwrap();
         assert_eq!(input.is_meta(), !in_human_turn);
         drop(session);
         let sent = api.captured_calls().await;
         assert_eq!(sent.len(), 1);
         // Provider conversion does not retain internal UUID/meta attributes;
         // those are asserted on the committed classifier history above.
-        assert!(serde_json::to_string(&sent[0].messages).unwrap().contains("scheduled origin fixture"));
+        assert!(serde_json::to_string(&sent[0].messages)
+            .unwrap()
+            .contains("scheduled origin fixture"));
     }
 }

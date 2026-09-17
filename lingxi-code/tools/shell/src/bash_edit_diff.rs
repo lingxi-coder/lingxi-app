@@ -52,14 +52,12 @@ pub const FAILURE_THRESHOLD: u32 = 2;
 /// "deleted an empty file"; both render with no hunks because there is no
 /// content to show.
 const EMPTY_BLOB_SHA1: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
-const EMPTY_BLOB_SHA256: &str =
-    "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813";
+const EMPTY_BLOB_SHA256: &str = "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813";
 
 /// Is `sha` (possibly abbreviated) the empty blob?
 #[must_use]
 pub fn is_empty_blob(sha: &str) -> bool {
-    !sha.is_empty()
-        && (EMPTY_BLOB_SHA1.starts_with(sha) || EMPTY_BLOB_SHA256.starts_with(sha))
+    !sha.is_empty() && (EMPTY_BLOB_SHA1.starts_with(sha) || EMPTY_BLOB_SHA256.starts_with(sha))
 }
 
 /// The git subcommands that move the worktree wholesale — the alternation
@@ -191,7 +189,11 @@ pub fn parse_status_v2(stdout: &str) -> StatusScan {
     for record in stdout.split('\0') {
         if let Some(rest) = record.strip_prefix("? ") {
             let is_dir = rest.ends_with('/');
-            let bare = if is_dir { &rest[..rest.len() - 1] } else { rest };
+            let bare = if is_dir {
+                &rest[..rest.len() - 1]
+            } else {
+                rest
+            };
             if is_safe_relative_path(bare) {
                 if is_dir {
                     scan.untracked_directories.push(rest.to_string());
@@ -405,13 +407,8 @@ impl ShadowRepo {
 
         // Untracked directories become their files.
         for batch in pathspec_batches(&scan.untracked_directories) {
-            let mut args: Vec<&str> = vec![
-                "ls-files",
-                "-z",
-                "--others",
-                "--exclude-standard",
-                "--",
-            ];
+            let mut args: Vec<&str> =
+                vec!["ls-files", "-z", "--others", "--exclude-standard", "--"];
             args.extend(batch.iter().map(String::as_str));
             let (code, stdout) = self.git(&args, None).await?;
             if code != 0 {
@@ -734,11 +731,7 @@ fn path_from_diff_header(header: &str) -> Option<String> {
 #[must_use]
 pub fn within_hunk_caps(hunks: &[Vec<String>]) -> bool {
     let lines: usize = hunks.iter().map(Vec::len).sum();
-    let chars: usize = hunks
-        .iter()
-        .flat_map(|h| h.iter())
-        .map(String::len)
-        .sum();
+    let chars: usize = hunks.iter().flat_map(|h| h.iter()).map(String::len).sum();
     lines <= MAX_FILE_HUNK_LINES && chars <= MAX_FILE_HUNK_CHARS
 }
 
@@ -785,8 +778,7 @@ pub fn shadow_dir_for(shadow_root: &Path, work_tree: &Path) -> PathBuf {
 /// Keyed by the WORK TREE rather than the shadow, so a repo that is retried
 /// under a different shadow root still counts as the same repo. Only reached
 /// on the failure paths and once per Bash call otherwise.
-static REPO_FAILURES: std::sync::Mutex<Option<HashMap<PathBuf, u32>>> =
-    std::sync::Mutex::new(None);
+static REPO_FAILURES: std::sync::Mutex<Option<HashMap<PathBuf, u32>>> = std::sync::Mutex::new(None);
 
 fn with_failures<T>(f: impl FnOnce(&mut HashMap<PathBuf, u32>) -> T) -> T {
     let mut guard = REPO_FAILURES.lock().unwrap_or_else(|e| e.into_inner());
@@ -838,10 +830,14 @@ pub async fn snapshot_before(shadow_root: &Path, cwd: &Path) -> Option<(ShadowRe
     if repo_given_up(&work_tree) {
         return None;
     }
-    let shadow = ShadowRepo::prepare(&work_tree, &git_dir, &shadow_dir_for(shadow_root, &work_tree))
-        .await
-        .map_err(|error| tracing::debug!(%error, "bashEditDiff: shadow unavailable"))
-        .ok();
+    let shadow = ShadowRepo::prepare(
+        &work_tree,
+        &git_dir,
+        &shadow_dir_for(shadow_root, &work_tree),
+    )
+    .await
+    .map_err(|error| tracing::debug!(%error, "bashEditDiff: shadow unavailable"))
+    .ok();
     let Some(shadow) = shadow else {
         note_failure(&work_tree);
         return None;
@@ -917,7 +913,11 @@ pub fn render(diff: &BashEditDiff) -> String {
         out.push_str(&format!(
             "… and {} more changed {}\n",
             diff.more_files,
-            if diff.more_files == 1 { "file" } else { "files" }
+            if diff.more_files == 1 {
+                "file"
+            } else {
+                "files"
+            }
         ));
     }
     out
@@ -1144,7 +1144,10 @@ mod tests {
         std::fs::create_dir_all(wt.join("build")).unwrap();
         std::fs::write(wt.join("build").join("out.o"), "junk\n").unwrap();
         let (after, _) = shadow.snapshot().await.expect("after");
-        assert_eq!(before, after, "an ignored artefact must not show as a change");
+        assert_eq!(
+            before, after,
+            "an ignored artefact must not show as a change"
+        );
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -1303,7 +1306,11 @@ mod tests {
     async fn the_shadow_directory_is_private_to_this_user() {
         use std::os::unix::fs::PermissionsExt;
         let (_path, _tmp, _wt, shadow) = repo().await;
-        let mode = std::fs::metadata(&shadow.git_dir).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&shadow.git_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(
             mode, 0o700,
             "the shadow git directory must be 0700, not {mode:o}"

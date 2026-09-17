@@ -2292,7 +2292,7 @@ mod user_config_tests {
             if_condition: None,
             executor: HookExecutor::Command {
                 command: command.to_string(),
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(|s| (*s).to_string()).collect(),
                 env: HashMap::new(),
                 cwd: None,
                 shell: None,

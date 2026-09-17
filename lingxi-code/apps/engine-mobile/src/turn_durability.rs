@@ -117,7 +117,7 @@ impl DurableTurnCheckpoint {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id,
             prompt: self.prompt.clone(),
-            prompt_mode: self.prompt_mode.clone(),
+            prompt_mode: self.prompt_mode,
             images: self.images.clone(),
             revision: self.revision,
             state: self.state.clone(),

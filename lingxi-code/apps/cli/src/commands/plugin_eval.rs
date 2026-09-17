@@ -1192,9 +1192,9 @@ async fn run_evaluation(
         }
         let baseline = by_label.first().map(|(_, runs)| run_average(runs));
         let baseline_pass = by_label.first().map(|(_, runs)| run_pass_rate(runs));
-        let (score, pass_rate) = by_label
-            .last()
-            .map_or((0.0, 0.0), |(_, runs)| (run_average(runs), run_pass_rate(runs)));
+        let (score, pass_rate) = by_label.last().map_or((0.0, 0.0), |(_, runs)| {
+            (run_average(runs), run_pass_rate(runs))
+        });
         let paired = plan.len() > 1;
         let per_arm = if case.arms.is_empty() {
             Vec::new()
@@ -3292,7 +3292,9 @@ fn parse_yaml_arms(map: &Mapping, case_name: &str) -> Result<Vec<EvalArm>, Strin
             .ok_or_else(|| format!("eval case {case_name:?}: each arm needs a label"))?;
         let label = label.trim().to_string();
         if label.is_empty() {
-            return Err(format!("eval case {case_name:?}: an arm label cannot be blank"));
+            return Err(format!(
+                "eval case {case_name:?}: an arm label cannot be blank"
+            ));
         }
         if RESERVED_ARM_LABELS.contains(&label.as_str()) {
             return Err(format!(
@@ -4080,7 +4082,7 @@ fn emit_outputs(cli: &Cli, result: &AggregateResult, cwd: &Path) -> Result<(), S
         results_base
             .join(&results_root)
             .join("results")
-            .join(result.started_at.replace(':', "-").replace('.', "-"))
+            .join(result.started_at.replace([':', '.'], "-"))
     });
     fs::create_dir_all(&output_dir)
         .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
@@ -5378,23 +5380,20 @@ arms:
         let single = case_with_arms("name: c\nprompt: p\narms:\n  - label: only\n").unwrap_err();
         assert!(single.contains("at least two entries"), "got: {single}");
 
-        let dup = case_with_arms("name: c\nprompt: p\narms:\n  - label: a\n  - label: a\n")
-            .unwrap_err();
+        let dup =
+            case_with_arms("name: c\nprompt: p\narms:\n  - label: a\n  - label: a\n").unwrap_err();
         assert!(dup.contains("both labelled"), "got: {dup}");
 
-        let reserved =
-            case_with_arms("name: c\nprompt: p\narms:\n  - label: with\n  - label: b\n")
-                .unwrap_err();
+        let reserved = case_with_arms("name: c\nprompt: p\narms:\n  - label: with\n  - label: b\n")
+            .unwrap_err();
         assert!(reserved.contains("reserved"), "got: {reserved}");
 
-        let blank =
-            case_with_arms("name: c\nprompt: p\narms:\n  - label: \"  \"\n  - label: b\n")
-                .unwrap_err();
+        let blank = case_with_arms("name: c\nprompt: p\narms:\n  - label: \"  \"\n  - label: b\n")
+            .unwrap_err();
         assert!(blank.contains("cannot be blank"), "got: {blank}");
 
         let unlabelled =
-            case_with_arms("name: c\nprompt: p\narms:\n  - prompt: x\n  - label: b\n")
-                .unwrap_err();
+            case_with_arms("name: c\nprompt: p\narms:\n  - prompt: x\n  - label: b\n").unwrap_err();
         assert!(unlabelled.contains("needs a label"), "got: {unlabelled}");
 
         let scalar_settings = case_with_arms(
@@ -5410,10 +5409,7 @@ arms:
             "name: c\nprompt: p\narms:\n  - label: a\n    prompt: \"  \"\n  - label: b\n",
         )
         .unwrap_err();
-        assert!(
-            empty_prompt.contains("omit the key"),
-            "got: {empty_prompt}"
-        );
+        assert!(empty_prompt.contains("omit the key"), "got: {empty_prompt}");
     }
 
     fn bare_case(prompt: &str) -> EvalCase {
@@ -5498,9 +5494,10 @@ arms:
             if !dir.is_dir() {
                 continue;
             }
-            cases.push(parse_case_yaml(&dir.join("case.yaml")).unwrap_or_else(|error| {
-                panic!("{} does not parse: {error}", dir.display())
-            }));
+            cases.push(
+                parse_case_yaml(&dir.join("case.yaml"))
+                    .unwrap_or_else(|error| panic!("{} does not parse: {error}", dir.display())),
+            );
         }
         assert_eq!(cases.len(), 24, "the corpus is 24 cases");
 

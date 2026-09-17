@@ -262,13 +262,7 @@ pub async fn apply_operation(
         }
         "disable" => {
             let plugin = required_string(&payload, "plugin")?;
-            crate::plugin_settings::run_disable(
-                Some(plugin),
-                Some(&scope),
-                false,
-                &home,
-                &cwd,
-            )
+            crate::plugin_settings::run_disable(Some(plugin), Some(&scope), false, &home, &cwd)
         }
         "install" => {
             let plugin = required_string(&payload, "plugin")?.to_string();
@@ -323,13 +317,7 @@ pub async fn apply_operation(
         "update" => {
             let plugin = required_string(&payload, "plugin")?.to_string();
             tokio::task::spawn_blocking(move || {
-                crate::plugin_install::run_update(
-                    &plugin,
-                    &scope,
-                    &plugins_dir,
-                    &home,
-                    &cwd,
-                )
+                crate::plugin_install::run_update(&plugin, &scope, &plugins_dir, &home, &cwd)
             })
             .await
             .map_err(|error| format!("plugin update task failed: {error}"))?

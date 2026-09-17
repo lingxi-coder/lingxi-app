@@ -830,27 +830,80 @@ pub enum TaskRegistryError {
 #[async_trait]
 pub trait TaskRegistryHandle: Send + Sync {
     /// Trusted host input only. Model tools must keep using their guarded message path.
-    async fn send_human_task_message(&self, _task_id: &str, _message: &str) -> Result<(), TaskRegistryError> {
-        Err(TaskRegistryError::Internal("human task messages unavailable".into()))
+    async fn send_human_task_message(
+        &self,
+        _task_id: &str,
+        _message: &str,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "human task messages unavailable".into(),
+        ))
     }
     /// Runtime boundary drain; the registry checks current stop epochs.
-    async fn take_human_task_messages_for(&self, _agent_id: protocol::AgentId) -> Vec<String> { Vec::new() }
+    async fn take_human_task_messages_for(&self, _agent_id: protocol::AgentId) -> Vec<String> {
+        Vec::new()
+    }
     /// Last startup check for a trusted stopped-agent restoration.
-    async fn begin_human_task_resume(&self, _task_id: &str, _epoch: u64) -> Result<(), TaskRegistryError> {
-        Err(TaskRegistryError::Internal("human task resume unavailable".into()))
+    async fn begin_human_task_resume(
+        &self,
+        _task_id: &str,
+        _epoch: u64,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "human task resume unavailable".into(),
+        ))
     }
     /// Preserve a foreground launch's exact configuration for explicit human resume.
-    async fn register_agent_resume_recipe(&self, _task_id: &str, _request: crate::SubagentSpawnRequest, _inheritance: crate::SubagentInheritance) -> Result<(), TaskRegistryError> { Ok(()) }
+    async fn register_agent_resume_recipe(
+        &self,
+        _task_id: &str,
+        _request: crate::SubagentSpawnRequest,
+        _inheritance: crate::SubagentInheritance,
+    ) -> Result<(), TaskRegistryError> {
+        Ok(())
+    }
 
-    async fn export_shell_handoff(&self) -> Result<Vec<crate::shell_handoff::ShellTaskHandoff>, TaskRegistryError> { Ok(Vec::new()) }
-    async fn prepare_shell_handoff(&self, records: &[crate::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> {
-        if records.is_empty() { Ok(()) } else { Err(TaskRegistryError::Internal("shell adoption unsupported".into())) }
+    async fn export_shell_handoff(
+        &self,
+    ) -> Result<Vec<crate::shell_handoff::ShellTaskHandoff>, TaskRegistryError> {
+        Ok(Vec::new())
     }
-    async fn commit_shell_handoff(&self, _ids: &[String]) -> Result<Vec<String>, TaskRegistryError> { Ok(Vec::new()) }
-    async fn adopt_shell_handoff(&self, records: &[crate::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> {
-        if records.is_empty() { Ok(()) } else { Err(TaskRegistryError::Internal("shell adoption unsupported".into())) }
+    async fn prepare_shell_handoff(
+        &self,
+        records: &[crate::shell_handoff::ShellTaskHandoff],
+    ) -> Result<(), TaskRegistryError> {
+        if records.is_empty() {
+            Ok(())
+        } else {
+            Err(TaskRegistryError::Internal(
+                "shell adoption unsupported".into(),
+            ))
+        }
     }
-    async fn rollback_shell_handoff(&self, records: &[crate::shell_handoff::ShellTaskHandoff]) -> Result<(), TaskRegistryError> { self.adopt_shell_handoff(records).await }
+    async fn commit_shell_handoff(
+        &self,
+        _ids: &[String],
+    ) -> Result<Vec<String>, TaskRegistryError> {
+        Ok(Vec::new())
+    }
+    async fn adopt_shell_handoff(
+        &self,
+        records: &[crate::shell_handoff::ShellTaskHandoff],
+    ) -> Result<(), TaskRegistryError> {
+        if records.is_empty() {
+            Ok(())
+        } else {
+            Err(TaskRegistryError::Internal(
+                "shell adoption unsupported".into(),
+            ))
+        }
+    }
+    async fn rollback_shell_handoff(
+        &self,
+        records: &[crate::shell_handoff::ShellTaskHandoff],
+    ) -> Result<(), TaskRegistryError> {
+        self.adopt_shell_handoff(records).await
+    }
 
     /// Add actual permission prompt wait time to an attributed task.
     fn add_permission_paused_ms(&self, _agent_id: protocol::AgentId, _milliseconds: u64) {}
@@ -893,7 +946,9 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Agent identities whose live OS process groups belong to this task loop.
     async fn process_owners_for_task(&self, id: &str) -> Vec<String> {
         match self.get(id).await {
-            Ok(Some(record)) if record.task_type == "local_agent" => record.owner_agent_id.into_iter().collect(),
+            Ok(Some(record)) if record.task_type == "local_agent" => {
+                record.owner_agent_id.into_iter().collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -1140,7 +1195,13 @@ pub trait TaskRegistryHandle: Send + Sync {
 
     /// Settle with the receipt from persisting a truncated MCP result. The hint
     /// and terminal status must become visible atomically.
-    async fn settle_mcp_task_with_hint(&self, id: &str, text: &str, failed: bool, _saved_hint: Option<&str>) -> Result<bool, TaskRegistryError> {
+    async fn settle_mcp_task_with_hint(
+        &self,
+        id: &str,
+        text: &str,
+        failed: bool,
+        _saved_hint: Option<&str>,
+    ) -> Result<bool, TaskRegistryError> {
         self.settle_mcp_task(id, text, failed).await
     }
 
@@ -1223,8 +1284,14 @@ pub trait TaskRegistryHandle: Send + Sync {
     }
 
     /// Bind messaging for a foreground runner the registry did not spawn.
-    async fn bind_agent_message_receiver(&self, _id: &str, _receiver: std::sync::Arc<dyn TaskMessageReceiver>) -> Result<(), TaskRegistryError> {
-        Err(TaskRegistryError::Internal("external agent messaging unwired".into()))
+    async fn bind_agent_message_receiver(
+        &self,
+        _id: &str,
+        _receiver: std::sync::Arc<dyn TaskMessageReceiver>,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "external agent messaging unwired".into(),
+        ))
     }
 
     async fn set_agent_display(&self, _id: &str, _model: String, _effort: Option<String>) {}
@@ -1332,7 +1399,12 @@ pub trait TaskRegistryHandle: Send + Sync {
     }
 
     /// Bind the actual OS identity together with the stop capability.
-    async fn bind_background_process(&self, id: &str, _pid: u32, killer: std::sync::Arc<dyn TaskKiller>) -> Result<(), TaskRegistryError> {
+    async fn bind_background_process(
+        &self,
+        id: &str,
+        _pid: u32,
+        killer: std::sync::Arc<dyn TaskKiller>,
+    ) -> Result<(), TaskRegistryError> {
         self.bind_background_killer(id, killer).await
     }
 
@@ -1358,15 +1430,29 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// # Errors
     /// Returns [`TaskRegistryError`] when the id is unknown.
     /// Append captured shell output through the registry's bounded writer.
-    async fn append_bash_output(&self, _task_id: &str, _content: &str) -> Result<(), TaskRegistryError> {
-        Err(TaskRegistryError::Internal("background output writer unwired".into()))
+    async fn append_bash_output(
+        &self,
+        _task_id: &str,
+        _content: &str,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "background output writer unwired".into(),
+        ))
     }
 
     /// Wait for an existing shell-output drain; do not restart a failed drain.
     /// Finalize a completed output copy, returning its pre-truncation size.
-    async fn finalize_persisted_output(&self, _id: &str, _max_bytes: u64) -> Result<Option<u64>, TaskRegistryError> { Ok(None) }
+    async fn finalize_persisted_output(
+        &self,
+        _id: &str,
+        _max_bytes: u64,
+    ) -> Result<Option<u64>, TaskRegistryError> {
+        Ok(None)
+    }
 
-    async fn flush_bash_output(&self, _task_id: &str) -> Result<(), TaskRegistryError> { Ok(()) }
+    async fn flush_bash_output(&self, _task_id: &str) -> Result<(), TaskRegistryError> {
+        Ok(())
+    }
 
     /// Session-scoped SDK lifecycle events, emitted at each task mutation.
     fn subscribe_task_lifecycle(
@@ -1466,11 +1552,19 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Keep a foreground runner alive after Ctrl+B or while its owned tasks
     /// still owe work/results. A true result means the caller must park rather
     /// than publish its final Completed event and deallocate the runner.
-    async fn park_foreground_agent(&self, _agent_id: protocol::AgentId, _outcome: AgentTerminalOutcome) -> bool { false }
+    async fn park_foreground_agent(
+        &self,
+        _agent_id: protocol::AgentId,
+        _outcome: AgentTerminalOutcome,
+    ) -> bool {
+        false
+    }
 
     /// Whether the handler has acknowledged the runner's completed turn-set.
     /// A taskless/mock runner has no asynchronous lifecycle acknowledgement.
-    async fn can_wake_agent_for_task_notification(&self, _agent_id: protocol::AgentId) -> bool { true }
+    async fn can_wake_agent_for_task_notification(&self, _agent_id: protocol::AgentId) -> bool {
+        true
+    }
 
     /// Reactivate a parked owner before a notification starts its next turn.
     async fn activate_agent_for_task_notification(&self, agent_id: protocol::AgentId) {

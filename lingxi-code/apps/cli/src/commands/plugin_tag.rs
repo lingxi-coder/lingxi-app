@@ -483,9 +483,7 @@ fn is_kebab_case(s: &str) -> bool {
 /// requires strict `MAJOR.MINOR.PATCH` (no leading zeros) with optional
 /// `-prerelease` and `+build`.
 fn is_valid_semver(raw: &str) -> bool {
-    let s = raw
-        .trim()
-        .trim_start_matches(|c| c == 'v' || c == '=' || c == ' ' || c == '\t');
+    let s = raw.trim().trim_start_matches(['v', '=', ' ', '\t']);
     let (main_pre, build) = match s.split_once('+') {
         Some((a, b)) => (a, Some(b)),
         None => (s, None),

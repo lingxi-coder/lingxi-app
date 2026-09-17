@@ -276,7 +276,11 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
             .await
             .expect("the turn must terminate without backoff")
         {
-            Frame::Event(ClientEvent::CostUpdate { api_calls, total_usd, .. }) => {
+            Frame::Event(ClientEvent::CostUpdate {
+                api_calls,
+                total_usd,
+                ..
+            }) => {
                 assert_eq!(api_calls, 0, "no provider request may be issued");
                 assert_eq!(total_usd, 0.0, "a rejected turn must not be charged");
             }

@@ -8,12 +8,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use llm_client::model::user_agent::UserAgentEnv;
 use llm_client::{
     ApiService, AuthStrategy, Capabilities, ClientConfig, ConnectionSpec, CredentialConfig,
     DefaultLlmClient, FailoverTriggers, LlmError, ModelProfile, PricingConfig, ProtocolFamily,
     ProviderId, ProviderProfile, SubscriberState, Transport,
 };
-use llm_client::model::user_agent::UserAgentEnv;
 use llm_client::{BoxFuture, ProviderRequest, ProviderResponse, StreamingResponse};
 
 const INTL: &str = "https://intl.example.com/v1";
@@ -207,7 +207,13 @@ async fn a_request_scoped_to_a_connection_still_fails_over() {
     let api = service(transport.clone());
 
     let _ = api
-        .messages_create("shared-model", Some("grouped:intl"), None, Vec::new(), Vec::new())
+        .messages_create(
+            "shared-model",
+            Some("grouped:intl"),
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
         .await;
 
     assert_eq!(
@@ -225,7 +231,15 @@ async fn the_streaming_connect_phase_also_fails_over() {
     let api = service(transport.clone());
 
     let _ = api
-        .stream("shared-model", None, None, Vec::new(), Vec::new(), None, None)
+        .stream(
+            "shared-model",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
         .await;
 
     assert_eq!(

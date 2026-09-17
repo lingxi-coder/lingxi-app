@@ -79,6 +79,41 @@ KEEP_CLAUDE_ENV = {
     "CLAUDE_CODE_EXTRA_BODY",
     "CLAUDE_CODE_EXTRA_METADATA",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    # 下面十七个是 2026-09-16 逐个回 oracle 2.1.274 核过的。判据不是「二进制里
+    # 出现了这个字符串」——那只证明它被写下过——而是**它被当成环境变量读出来**。
+    # 上游有一张带类型的 env 注册表，键就是环境变量名，值是该名字的 schema
+    # （`O.bool()` / `O.triBool()` / `O.str()` / `O.int()` / `O.enum([...])`），
+    # 读取发生在一个按键取值的惰性 getter 里：
+    #
+    #     for(let[E,r] of Object.entries(t)){
+    #       Object.defineProperty(_,E,{get:()=>{let n=process.env[E];
+    #         if(n!==s)e=r.parse(n),s=n;return e}})}
+    #
+    # 所以「名字出现在这张表里」就等于「process.env 里的这个名字会被读」。
+    # 十六个在表里（各自的 schema 记在下面），CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS
+    # 不在表里而是直接 `process.env.<NAME>` 读——两种都是被读取。
+    #
+    # 它们因此属于上面说的「第三方进程写入的入站契约」：从 claude-code 迁过来
+    # 的用户会设这些名字，端口读同名才是对的，改名等于单方面断掉一条上游协议面。
+    # ⛔ 往这里加名字前必须先在 oracle 里确认它真的被读，不要凭 `CLAUDE_` 前缀
+    # 就放行——这份清单的价值全在于它是被核过的。
+    "CLAUDE_CODE_BASH_EDIT_DIFF",                          # O.triBool()
+    "CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS",                 # process.env.<NAME>
+    "CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL",  # O.bool()
+    "CLAUDE_CODE_DISABLE_CRON",                            # O.bool()
+    "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP",             # O.bool()
+    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS",             # O.bool()
+    "CLAUDE_CODE_EVAL_CONFINED",                           # O.bool()
+    "CLAUDE_CODE_LOOP_KEEPALIVE",                          # O.triBool()
+    "CLAUDE_CODE_LOOP_PERSISTENT",                         # O.bool()
+    "CLAUDE_CODE_PLUGIN_DIR_WATCH",                        # O.triBool()
+    "CLAUDE_CODE_SAFE_MODE",                               # O.bool()
+    "CLAUDE_CODE_SESSION_KIND",                            # O.str()
+    "CLAUDE_CODE_SIMPLE",                                  # O.bool()
+    "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",                     # O.int()
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",                    # O.bool()
+    "CLAUDE_CODE_THRIFTY_SONIC",                           # O.triBool()
+    "CLAUDE_JOB_DIR",                                      # O.str()
 }
 
 # L1 常量的当前值。G3 断言它们不出现在 branding 之外。

@@ -43,14 +43,17 @@ impl TaskNotificationWake for ReplTaskWake {
             .map_err(|error| error.to_string())
     }
     async fn user_interrupt(&self) {
-        engine_desktop::loop_tools::cancel_dynamic_loop_on_user_abort(&self.loop_host.scheduler).await;
+        engine_desktop::loop_tools::cancel_dynamic_loop_on_user_abort(&self.loop_host.scheduler)
+            .await;
     }
     async fn wait(&self) {
         // Subscribe before checking; a completion already pending at prompt
         // entry must wake just as reliably as a later revision.
         let mut revision = self.registry.subscribe_task_notifications();
         loop {
-            if self.queue.has_main_thread_commands().await || self.registry.has_pending_task_notifications_for(None).await {
+            if self.queue.has_main_thread_commands().await
+                || self.registry.has_pending_task_notifications_for(None).await
+            {
                 return;
             }
             if let Some(watch) = &mut revision {
@@ -66,32 +69,53 @@ impl TaskNotificationWake for ReplTaskWake {
     async fn run(&self, cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError> {
         self.loop_host.refresh_session().await;
         self.queue.register_active_turn(cancel.clone()).await;
-        let result = if let Some(command) = self.queue.dequeue_filtered(|c| c.source == msgqueue::QueueSource::Cron || c.uuid.starts_with("goal-retry-")).await {
+        let result = if let Some(command) = self
+            .queue
+            .dequeue_filtered(|c| {
+                c.source == msgqueue::QueueSource::Cron || c.uuid.starts_with("goal-retry-")
+            })
+            .await
+        {
             let raw = command.text().unwrap_or_default();
             let resolved = if command.uuid.starts_with("goal-retry-") {
                 Ok(Some(raw.to_owned()))
             } else if command.uuid.starts_with("loop-wakeup-") {
                 self.loop_host.begin(Some(raw), false)
-            } else { self.loop_host.resolve_scheduled(raw).map(Some) };
+            } else {
+                self.loop_host.resolve_scheduled(raw).map(Some)
+            };
             match resolved {
-                Ok(prompt) => self.orchestrator.run_queued_prompt_batch(vec![orchestrator::QueuedPromptInput {
-                    goal_retry_id: command.uuid.starts_with("goal-retry-").then(|| command.uuid.clone()),
-                    text: prompt.unwrap_or_else(|| raw.to_owned()), is_meta: true,
-                    message_id: None, queue_priority: Some("later".into()),
-                    scheduled_task_id: command.scheduled_task_id.clone(),
-                    scheduled_fire_id: command.scheduled_fire_id.clone(),
-                }], cancel.clone()).await,
+                Ok(prompt) => {
+                    self.orchestrator
+                        .run_queued_prompt_batch(
+                            vec![orchestrator::QueuedPromptInput {
+                                goal_retry_id: command
+                                    .uuid
+                                    .starts_with("goal-retry-")
+                                    .then(|| command.uuid.clone()),
+                                text: prompt.unwrap_or_else(|| raw.to_owned()),
+                                is_meta: true,
+                                message_id: None,
+                                queue_priority: Some("later".into()),
+                                scheduled_task_id: command.scheduled_task_id.clone(),
+                                scheduled_fire_id: command.scheduled_fire_id.clone(),
+                            }],
+                            cancel.clone(),
+                        )
+                        .await
+                }
                 Err(error) => Err(OrchestratorError::Internal(error.to_string())),
             }
         } else {
             let _ = self.loop_host.begin(None, false);
-            self.orchestrator.run_task_notification_rewake(self.registry.as_ref(), cancel.clone()).await
+            self.orchestrator
+                .run_task_notification_rewake(self.registry.as_ref(), cancel.clone())
+                .await
         };
         self.loop_host.finish(&cancel).await;
         self.queue.clear_active_turn().await;
         result
     }
-
 }
 
 /// Return false only when an interactive user explicitly stays or a handoff
@@ -282,10 +306,7 @@ async fn trust_gate(
     let mut line = String::new();
     let n = {
         let mut guard = reader.lock().await;
-        match guard.read_line(&mut line).await {
-            Ok(n) => n,
-            Err(_) => 0,
-        }
+        (guard.read_line(&mut line).await).unwrap_or_default()
     };
     if n == 0 {
         // EOF / read error ⇒ decline (claude-code "No, exit" default).
@@ -460,8 +481,13 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             }
         }
     });
-    let loop_host = crate::loop_wakeup::CliLoopHost::bind(&runtime, loop_queue.clone(), loop_tx,
-        orchestrator::prompt::mid_turn_input::CancelReasonFlag::new()).await;
+    let loop_host = crate::loop_wakeup::CliLoopHost::bind(
+        &runtime,
+        loop_queue.clone(),
+        loop_tx,
+        orchestrator::prompt::mid_turn_input::CancelReasonFlag::new(),
+    )
+    .await;
     orch.set_mid_turn_input(Arc::new(ReplGoalQueue(loop_queue.clone())));
     let task_wake = ReplTaskWake {
         loop_host: loop_host.clone(),
@@ -572,6 +598,23 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     );
 
     exit_code
+}
+
+struct ReplGoalQueue(Arc<msgqueue::MessageQueueManager>);
+#[async_trait::async_trait]
+impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for ReplGoalQueue {
+    fn supports_goal_retries(&self) -> bool {
+        true
+    }
+    async fn has_queued_goal_work(&self) -> bool {
+        self.0.has_main_thread_commands().await
+    }
+    async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
+        self.0.enqueue_goal_retry(id, body, cancel).await;
+    }
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -889,15 +932,4 @@ mod tests {
         );
         assert_eq!(*registry.killed.lock().unwrap(), vec!["b1"]);
     }
-}
-
-struct ReplGoalQueue(Arc<msgqueue::MessageQueueManager>);
-#[async_trait::async_trait]
-impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for ReplGoalQueue {
-    fn supports_goal_retries(&self) -> bool { true }
-    async fn has_queued_goal_work(&self) -> bool { self.0.has_main_thread_commands().await }
-    async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
-        self.0.enqueue_goal_retry(id, body, cancel).await;
-    }
-    async fn take_mid_turn_input(&self) -> Option<String> { None }
 }

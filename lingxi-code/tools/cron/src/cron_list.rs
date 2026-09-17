@@ -100,7 +100,7 @@ async fn read_durable_jobs(fs: &dyn platform_api::FileSystem, project_root: &Pat
     };
     let doc = cron::tasks_file::parse_tasks(&body);
 
-    let mut jobs: Vec<Value> = doc
+    let jobs: Vec<Value> = doc
         .tasks
         .into_iter()
         .map(|t| {

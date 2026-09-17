@@ -235,7 +235,8 @@ pub fn tool_icon(tool: &str, input: &Value) -> ToolIcon {
             "Task" | "Agent" | "Workflow" => ToolIcon::Workflow,
             "TodoWrite" | "ListChecks" => ToolIcon::ListChecks,
             "Skill" | "Sparkles" => ToolIcon::Sparkles,
-            "TaskOutput" | "AgentOutput" | "AgentOutputTool" | "BashOutput" | "BashOutputTool" | "Output" => ToolIcon::Output,
+            "TaskOutput" | "AgentOutput" | "AgentOutputTool" | "BashOutput" | "BashOutputTool"
+            | "Output" => ToolIcon::Output,
             "TaskStop" | "KillShell" | "KillBash" | "Stop" => ToolIcon::Stop,
             "Plug" => ToolIcon::Plug,
             // First-party local-app host operations. They used to be spelled
@@ -369,7 +370,9 @@ pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
             header.verb = ToolVerb::Output;
             header.primary =
                 first_str(input, &["bash_id", "shell_id", "task_id"]).map(str::to_string);
-            if input.get("block").is_some_and(|value| value == &Value::Bool(false) || value.as_str() == Some("false")) {
+            if input.get("block").is_some_and(|value| {
+                value == &Value::Bool(false) || value.as_str() == Some("false")
+            }) {
                 header.qualifier = Some(" (non-blocking)".into());
             }
         }
@@ -430,7 +433,11 @@ pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
 pub fn tool_header_with_result(tool: &str, input: &Value, result: &Value) -> ToolHeader {
     let mut header = tool_header(tool, input);
     if tool == "Read" {
-        if let Some(id) = result.get("file").and_then(|f| f.get("taskId")).and_then(Value::as_str) {
+        if let Some(id) = result
+            .get("file")
+            .and_then(|f| f.get("taskId"))
+            .and_then(Value::as_str)
+        {
             header.label = "Read agent output".into();
             header.primary = Some(id.into());
         }
@@ -476,7 +483,11 @@ mod tests {
         let input = serde_json::json!({"file_path":"/tmp/session/tasks/b12345678.output"});
         let plain = tool_header_with_result("Read", &input, &serde_json::json!({"file":{}}));
         assert_eq!(plain.label, "Read");
-        let task = tool_header_with_result("Read", &input, &serde_json::json!({"file":{"taskId":"b12345678"}}));
+        let task = tool_header_with_result(
+            "Read",
+            &input,
+            &serde_json::json!({"file":{"taskId":"b12345678"}}),
+        );
         assert_eq!(task.label, "Read agent output");
         assert_eq!(task.primary.as_deref(), Some("b12345678"));
     }
@@ -601,12 +612,23 @@ mod tests {
 
     #[test]
     fn task_output_nonblocking_annotation_honors_coerced_input() {
-        for tool in ["TaskOutput", "AgentOutput", "AgentOutputTool", "BashOutput", "BashOutputTool"] {
+        for tool in [
+            "TaskOutput",
+            "AgentOutput",
+            "AgentOutputTool",
+            "BashOutput",
+            "BashOutputTool",
+        ] {
             for block in [json!(false), json!("false")] {
-                assert_eq!(tool_header(tool, &json!({"task_id": "b12345678", "block": block})).title(),
-                    "Output(b12345678) (non-blocking)");
+                assert_eq!(
+                    tool_header(tool, &json!({"task_id": "b12345678", "block": block})).title(),
+                    "Output(b12345678) (non-blocking)"
+                );
             }
-            assert_eq!(tool_header(tool, &json!({"task_id": "b12345678", "block": true})).title(), "Output(b12345678)");
+            assert_eq!(
+                tool_header(tool, &json!({"task_id": "b12345678", "block": true})).title(),
+                "Output(b12345678)"
+            );
         }
     }
 

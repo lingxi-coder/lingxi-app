@@ -470,7 +470,10 @@ mod tests {
         assert_eq!(denied.deny_read_paths, masked.deny_read_paths);
         assert_eq!(denied.deny_env_vars, masked.deny_env_vars);
         // …and only the NOTICE differs.
-        assert!(denied.degraded.is_empty(), "a plain deny is not a degradation");
+        assert!(
+            denied.degraded.is_empty(),
+            "a plain deny is not a degradation"
+        );
         assert_eq!(masked.degraded.len(), 2, "both mask entries are reported");
         assert!(masked.degraded[0].contains("/home/u/.aws/credentials"));
         assert!(masked.degraded[1].contains("AWS_SECRET_ACCESS_KEY"));
@@ -535,10 +538,15 @@ mod tests {
         assert_eq!(files[0].on_extract_no_match, Some(OnExtractNoMatch::Deny));
         let vars = parsed.env_vars.as_ref().unwrap();
         assert_eq!(vars[0].decode, Some(CredentialDecode::Jwt));
-        assert_eq!(vars[0].mask_claims.as_deref(), Some(&["sub".to_string()][..]));
+        assert_eq!(
+            vars[0].mask_claims.as_deref(),
+            Some(&["sub".to_string()][..])
+        );
         assert_eq!(parsed.allow_plaintext_inject, Some(false));
         assert_eq!(
-            parsed.aws_pairs.as_ref().unwrap()[0].session_token_var.as_deref(),
+            parsed.aws_pairs.as_ref().unwrap()[0]
+                .session_token_var
+                .as_deref(),
             Some("C")
         );
         let sigv4 = parsed.sigv4.as_ref().unwrap();
@@ -622,7 +630,10 @@ mod tests {
         ] {
             let parsed: SandboxCredentials = serde_json::from_str(raw)
                 .unwrap_or_else(|e| panic!("{raw} must not abort the tier: {e}"));
-            assert_eq!(parsed.env_vars.as_ref().unwrap()[0].mode, CredentialMode::Deny);
+            assert_eq!(
+                parsed.env_vars.as_ref().unwrap()[0].mode,
+                CredentialMode::Deny
+            );
             assert_eq!(
                 resolve(&parsed).deny_env_vars,
                 vec!["AWS_SECRET_ACCESS_KEY"],
@@ -650,7 +661,11 @@ mod tests {
                 resolved.deny_env_vars.is_empty(),
                 "{hostile:?} must not be reported as withheld when it cannot be"
             );
-            assert_eq!(resolved.degraded.len(), 1, "…and the user must be told once");
+            assert_eq!(
+                resolved.degraded.len(),
+                1,
+                "…and the user must be told once"
+            );
             assert!(
                 resolved.degraded[0].contains(hostile) && resolved.degraded[0].contains("CANNOT"),
                 "the notice must name the variable and say it is not enforced: {:?}",
@@ -692,7 +707,11 @@ mod tests {
             "unset AWS_SECRET_ACCESS_KEY GH_TOKEN\n"
         );
         assert_eq!(unset_prefix_for_shell(&names, None), unset_prefix(&names));
-        for pwsh in ["pwsh", "/opt/homebrew/bin/pwsh", "C:\\Program Files\\PowerShell\\pwsh.exe"] {
+        for pwsh in [
+            "pwsh",
+            "/opt/homebrew/bin/pwsh",
+            "C:\\Program Files\\PowerShell\\pwsh.exe",
+        ] {
             assert_eq!(
                 unset_prefix_for_shell(&names, Some(pwsh)),
                 "Remove-Item -Path Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue; \

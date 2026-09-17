@@ -25,6 +25,21 @@
 //! trait (P10) lands; see the design doc §6.4.
 
 #![forbid(unsafe_code)]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 13 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
+// Dead code kept visible, not swept: this crate had 5 item(s) rustc could
+// reach from nothing when the workspace was measured (2026-09-16). The lint
+// stays `warn` at the workspace level so a NEW crate still inherits it; this
+// allow is scoped here so the count is per crate and repayable by deleting this
+// line. This is the category where "named, computed, never wired" hides — some
+// of these read like features that were built and never connected. Each wants a
+// decision (delete, or wire), not a blanket deletion.
+#![allow(dead_code)]
 
 pub mod agent_restore;
 mod agent_skill_loader;
@@ -585,7 +600,7 @@ mod mcp_transport_wiring_tests {
     fn desktop_mcp_transport_is_target_specific_and_dual_wired() {
         let transport = new_desktop_mcp_transport();
         #[cfg(unix)]
-        let _: &platform_posix::PosixMcpTransport = &*transport;
+        let _: &platform_posix::PosixMcpTransport = &transport;
         #[cfg(windows)]
         let _: &platform_windows::WindowsMcpTransport = &*transport;
 
@@ -1717,7 +1732,7 @@ fn fold_managed_otel_env_overrides(tiers: &[String]) -> std::collections::BTreeM
 
     let mut out = std::collections::BTreeMap::new();
     for raw in tiers {
-        let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw)
         else {
             continue;
         };
@@ -9044,6 +9059,9 @@ impl Drop for AgentMcpConnectLoopGuard {
         let agent_type = std::mem::take(&mut self.agent_type);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
+                // Moves the guard into this scope so it drops at the END of it. The lint sees
+                // a `_`-binding with no side effect; the side effect is the Drop deadline.
+                #[allow(clippy::no_effect_underscore_binding)]
                 let _lease = lease;
                 agent::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &agent_type).await;
             });
@@ -9960,8 +9978,7 @@ pub fn session_read_allowances_for_boot(
             permission::PROJECT_TEMP_READ_ALLOW_REASON,
         ),
     ];
-    if let Some(job_tmp) =
-        permission::job_tmp_session_allowance(lingxi_home, session_kind, job_dir)
+    if let Some(job_tmp) = permission::job_tmp_session_allowance(lingxi_home, session_kind, job_dir)
     {
         allowances.push(job_tmp);
     }
@@ -11566,7 +11583,7 @@ fn capture_legacy_opening_balance(
 ) -> Option<(protocol::SessionId, u64)> {
     let config_path = config_path?;
     let project_key = migrations::global_config::project_path_for_config(cwd);
-    let project = migrations::global_config::get_project_config(&config_path, &project_key).ok()?;
+    let project = migrations::global_config::get_project_config(config_path, &project_key).ok()?;
     let session = project
         .get("lastSessionId")
         .and_then(serde_json::Value::as_str)?;
@@ -11799,7 +11816,7 @@ pub async fn build_with_credential_stack(
         .session_id_override
         .as_deref()
         .and_then(protocol::SessionId::parse_prefixed)
-        .unwrap_or_else(protocol::SessionId::new);
+        .unwrap_or_default();
     let main_session_uuid = main_session_id.as_uuid().to_string();
     // (/rewind) One shared file-history checkpoint store: cloned into the
     // orchestrator (per-turn snapshots + pre-edit tool backups) AND the
@@ -13196,7 +13213,7 @@ pub async fn build_with_credential_stack(
             classify_all_shell,
             mut additional_working_dirs,
             block_reads_outside_working_directories,
-            mut raw_tiers,
+            raw_tiers,
             allow_managed_permission_rules_only,
         } = load_boot_permission_tiers_with_flag(
             &cfg.lingxi_home,
@@ -15153,7 +15170,7 @@ pub async fn build_with_credential_stack(
     let dynamic_workflows_gate;
     let workflow_size_guideline_state;
     #[cfg(test)]
-    let mut wired_workflow_tool: Option<Arc<tool_workflow::WorkflowTool>> = None;
+    let wired_workflow_tool: Option<Arc<tool_workflow::WorkflowTool>>;
     {
         let workflow_launcher: Arc<dyn tool_workflow::WorkflowLauncher> =
             Arc::new(TaskRegistryWorkflowLauncher {
@@ -15542,11 +15559,6 @@ pub async fn build_with_credential_stack(
     // Clone `cwd` for the settings watcher before it is moved into the
     // orchestrator constructor below.
     let watch_cwd = cwd.clone();
-    // Keep a clone for the settings watcher before `perms` is moved into the
-    // orchestrator. The watcher must remain live even without ConfigChange
-    // hooks because managed `disableAutoMode` is a safety policy, not an
-    // optional notification hook.
-    let settings_permission_gate = perms.clone();
     // Snapshot the FileChanged hook matchers under ONE registry read before
     // `hook_registry` is moved into the orchestrator. A `FileChanged` hook's group `matcher`
     // (`HookDefinition::matcher()`) is the pipe-separated filename list
@@ -15639,6 +15651,10 @@ pub async fn build_with_credential_stack(
     } else {
         load_merged_hooks_restricted(&cwd)
     };
+    // Keep a clone for the settings watcher before `perms` is moved into the
+    // orchestrator. The watcher must remain live even without ConfigChange
+    // hooks because managed `disableAutoMode` is a safety policy, not an
+    // optional notification hook.
     let settings_permission_gate = perms.clone();
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
@@ -16858,19 +16874,17 @@ pub async fn build_with_credential_stack(
         .or_insert_with(|| "api_key".to_string());
 
     if let (Some(scheduler), Some((config, permissions))) = (&cron_scheduler, native_cron_seed) {
-        if orch.workspace_trusted().await {
-            if cron::scheduled_tasks_path(&config.cwd).exists() {
-                cron::automation::recover_orphaned_automation_runs(
-                    &PosixFileSystem::new(config.cwd.clone()),
-                    &config.cwd,
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                )
-                .await
-                .map_err(BuildError::DurableSession)?;
-            }
+        if orch.workspace_trusted().await && cron::scheduled_tasks_path(&config.cwd).exists() {
+            cron::automation::recover_orphaned_automation_runs(
+                &PosixFileSystem::new(config.cwd.clone()),
+                &config.cwd,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            )
+            .await
+            .map_err(BuildError::DurableSession)?;
         }
         scheduler
             .set_automation_firer(Arc::new(cron_native::NativeCronFirer::new(
@@ -19288,7 +19302,7 @@ route and resurrects the stale `true`"
         const VAR: &str = "LINGXI_TEST_ISOLATED_REFRESHER_ONLY_VAR";
         std::env::set_var(VAR, "present");
 
-        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage);
         let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
         let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
         let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
@@ -26132,13 +26146,8 @@ must be filtered out: got {after:?}"
         let home = std::path::Path::new("/home/u/.lingxi");
         let cwd = std::path::Path::new("/w/p");
         let job = std::path::Path::new("/home/u/.lingxi/jobs/j1");
-        let with_job = super::session_read_allowances_for_boot(
-            home,
-            cwd,
-            "sid",
-            Some("bg"),
-            Some(job),
-        );
+        let with_job =
+            super::session_read_allowances_for_boot(home, cwd, "sid", Some("bg"), Some(job));
         assert!(
             with_job.iter().any(|a| {
                 a.path == std::path::PathBuf::from("/home/u/.lingxi/jobs/j1/tmp")
@@ -28713,8 +28722,14 @@ mod read_auto_allow_wiring_tests {
     #[test]
     fn the_strip_removes_comment_lines_and_keeps_code() {
         let stripped = code_only("    // set_x(1);\n    set_x(2);\n/// set_x(3);\n");
-        assert!(!stripped.contains("set_x(1)"), "a `//` line must be stripped");
-        assert!(!stripped.contains("set_x(3)"), "a `///` line must be stripped");
+        assert!(
+            !stripped.contains("set_x(1)"),
+            "a `//` line must be stripped"
+        );
+        assert!(
+            !stripped.contains("set_x(3)"),
+            "a `///` line must be stripped"
+        );
         assert!(stripped.contains("set_x(2)"), "real code must survive");
     }
 

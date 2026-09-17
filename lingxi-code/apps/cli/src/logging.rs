@@ -26,16 +26,12 @@ struct FileSink(Arc<Mutex<File>>);
 
 impl std::io::Write for FileSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().map_or(Ok(buf.len()), |mut file| {
-            use std::io::Write as _;
-            file.write(buf)
-        })
+        self.0
+            .lock()
+            .map_or(Ok(buf.len()), |mut file| file.write(buf))
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.0.lock().map_or(Ok(()), |mut file| {
-            use std::io::Write as _;
-            file.flush()
-        })
+        self.0.lock().map_or(Ok(()), |mut file| file.flush())
     }
 }
 
@@ -78,11 +74,7 @@ fn open_debug_log_in(dir: &std::path::Path) -> Option<FileSink> {
         .map(|d| d.as_secs())
         .unwrap_or_default();
     let path = dir.join(format!("{stamp}-{}.log", std::process::id()));
-    let file = File::options()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .ok()?;
+    let file = File::options().create(true).append(true).open(&path).ok()?;
     // `latest` is the name `memory::retention` preserves, so it is the stable
     // entry point for "the log for the run I am in".
     let latest = dir.join(LATEST);
@@ -113,7 +105,11 @@ fn init_with_sink(
     // and callee is what let the first version of the wiring test catch a
     // resolver being consulted with `--debug` off.
     let file_layer_for = |resolve: &dyn Fn() -> Option<FileSink>| {
-        if debug { resolve() } else { None }
+        if debug {
+            resolve()
+        } else {
+            None
+        }
     };
     // The fullscreen TUI reconciler owns the terminal, so routing tracing to
     // stderr corrupts the rendered frame (stray WARN lines drawn over the input
@@ -132,7 +128,8 @@ fn init_with_sink(
                 .with_target(true)
         });
         let filter = if debug {
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("lingxi=debug,info"))
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("lingxi=debug,info"))
         } else {
             EnvFilter::new("off")
         };

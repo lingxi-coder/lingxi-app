@@ -231,10 +231,6 @@ pub fn assemble_description(skill_reachable: bool, model_forced: bool) -> String
     if skill_reachable {
         format!("{}\n\n{}", *DESCRIPTION, AUTHORING_SKILL_POINTER)
     } else {
-        format!(
-            "{}\n\n{}",
-            *DESCRIPTION,
-            authoring_skill_body(model_forced)
-        )
+        format!("{}\n\n{}", *DESCRIPTION, authoring_skill_body(model_forced))
     }
 }

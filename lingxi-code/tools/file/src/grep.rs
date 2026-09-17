@@ -1069,12 +1069,16 @@ impl Tool for GrepTool {
             if let Some(directory) = registry.task_output_directory().await {
                 // Single-file Grep is an explicit read, not a directory traversal.
                 if !canon_base.is_file() {
-                    let exclusions = platform_api::task_output::search_exclusions(Path::new(&directory), &canon_base);
+                    let exclusions = platform_api::task_output::search_exclusions(
+                        Path::new(&directory),
+                        &canon_base,
+                    );
                     if exclusions.iter().any(|p| p == "!**") {
                         return Err(ToolError::InvalidInput("Task output files are read individually: Grep (or Read) a specific task's output path rather than the tasks directory.".into()));
                     }
                     for exclusion in exclusions {
-                        ob.add(&exclusion).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+                        ob.add(&exclusion)
+                            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
                     }
                 }
             }
@@ -1666,14 +1670,39 @@ mod tests {
         std::fs::write(output.join("b12345678.output"), "needle secret\n").unwrap();
         std::fs::write(tmp.path().join("public.txt"), "needle public\n").unwrap();
         let (mut context, _) = make_ctx(&tmp);
-        context.task_registry = Some(std::sync::Arc::new(crate::shared::TaskOutputTestRegistry(output.clone())));
+        context.task_registry = Some(std::sync::Arc::new(crate::shared::TaskOutputTestRegistry(
+            output.clone(),
+        )));
         let tool = GrepTool::new(context);
-        let result = tool.call(json!({"pattern":"needle", "glob":"**/*"}), fresh_ctx(), fresh_tx()).await.unwrap();
+        let result = tool
+            .call(
+                json!({"pattern":"needle", "glob":"**/*"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
         assert_eq!(result.data["numFiles"], 1);
         assert!(content_str(&result).contains("public.txt"));
-        let error = tool.call(json!({"pattern":"needle","path":output}), fresh_ctx(), fresh_tx()).await.unwrap_err();
-        assert!(error.to_string().contains("Task output files are read individually"));
-        let result = tool.call(json!({"pattern":"needle","path":output.join("b12345678.output")}), fresh_ctx(), fresh_tx()).await.unwrap();
+        let error = tool
+            .call(
+                json!({"pattern":"needle","path":output}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Task output files are read individually"));
+        let result = tool
+            .call(
+                json!({"pattern":"needle","path":output.join("b12345678.output")}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
         assert_eq!(result.data["numFiles"], 1);
     }
 

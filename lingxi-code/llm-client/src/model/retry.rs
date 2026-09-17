@@ -211,7 +211,7 @@ pub const JITTER_FRACTION: f64 = 0.25;
 pub fn jittered_delay(base_ms: u64) -> Duration {
     // Binary `sle`: o = r + Math.random() * 0.25 * r. `gen_range(0.0..0.25)`
     // mirrors `Math.random() * 0.25` (half-open `[0, 0.25)`).
-    let frac: f64 = rand::thread_rng().gen_range(0.0..JITTER_FRACTION);
+    let frac: f64 = rand::rng().random_range(0.0..JITTER_FRACTION);
     // Add in f64, cast back to u64 ms. Rounding direction does not matter
     // (we're in milliseconds; sub-ms accuracy is irrelevant to network timing).
     let ms = ((base_ms as f64) + (base_ms as f64) * frac) as u64;

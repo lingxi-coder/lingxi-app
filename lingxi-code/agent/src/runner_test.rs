@@ -6038,7 +6038,7 @@ async fn a_refusal_with_no_chain_configured_still_ends_the_run() {
 
     let (event_tx, event_rx) = mpsc::channel(1);
     drop(event_tx);
-    let (out_tx, out_rx) = mpsc::channel(32);
+    let (out_tx, _out_rx) = mpsc::channel(32);
     run_subagent(ctx, event_rx, out_tx).await;
 
     assert_eq!(
@@ -6063,7 +6063,7 @@ async fn a_subagent_cascade_stops_when_the_chain_is_exhausted() {
 
     let (event_tx, event_rx) = mpsc::channel(1);
     drop(event_tx);
-    let (out_tx, out_rx) = mpsc::channel(32);
+    let (out_tx, _out_rx) = mpsc::channel(32);
     run_subagent(ctx, event_rx, out_tx).await;
 
     assert_eq!(

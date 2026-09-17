@@ -141,7 +141,7 @@ impl Read for TimedStdin {
             Ok(0) | Err(_) => return Ok(0), // timeout or poll error → behave like EOF
             Ok(_) => {}
         }
-        rustix::io::read(&fd, buf).map_err(std::io::Error::from)
+        rustix::io::read(fd, buf).map_err(std::io::Error::from)
     }
 }
 

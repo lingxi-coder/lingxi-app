@@ -283,10 +283,9 @@ fn parse_credential_ids(
     }
     let mut keys = Vec::with_capacity(arr.len());
     for item in arr {
-        let key = item
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| format!("{label}: \"credentialIds\" entries must be non-empty strings"))?;
+        let key = item.as_str().filter(|s| !s.is_empty()).ok_or_else(|| {
+            format!("{label}: \"credentialIds\" entries must be non-empty strings")
+        })?;
         if keys.iter().any(|existing| existing == key) {
             return Err(format!("{label}: duplicate credentialIds entry {key:?}"));
         }
@@ -315,9 +314,9 @@ fn parse_failover(obj: &Map<String, Value>, name: &str) -> Result<FailoverTrigge
         .ok_or_else(|| format!("provider {name:?}: \"fallback.on\" must be an array"))?;
     let mut triggers = FailoverTriggers::NONE;
     for item in list {
-        let token = item.as_str().ok_or_else(|| {
-            format!("provider {name:?}: \"fallback.on\" entries must be strings")
-        })?;
+        let token = item
+            .as_str()
+            .ok_or_else(|| format!("provider {name:?}: \"fallback.on\" entries must be strings"))?;
         // Name the bad token rather than silently dropping it: a typo here
         // disables failover, which is invisible until the day it is needed.
         triggers.apply_name(token).ok_or_else(|| {
@@ -334,7 +333,10 @@ fn parse_failover(obj: &Map<String, Value>, name: &str) -> Result<FailoverTrigge
 /// No `connections` and no `credentialIds` reproduces the historical single flat
 /// profile exactly, identity included, so every pre-existing config and every
 /// built-in preset is untouched.
-fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<ExpandedConnection>, String> {
+fn expand_connections(
+    name: &str,
+    obj: &Map<String, Value>,
+) -> Result<Vec<ExpandedConnection>, String> {
     let provider_keys = parse_credential_ids(obj, &format!("provider {name:?}"))?;
     let failover = parse_failover(obj, name)?;
 
@@ -343,7 +345,9 @@ fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<Expand
         let mut out = Vec::new();
         let mut order = 0;
         match provider_keys {
-            Some(keys) => expand_key_slots(name, &entry, name, "default", &keys, failover, &mut order, &mut out),
+            Some(keys) => expand_key_slots(
+                name, &entry, name, "default", &keys, failover, &mut order, &mut out,
+            ),
             // No connections and no credentialIds: the historical single profile.
             // Its chain is always empty, so it never fails over regardless.
             None => out.push(ExpandedConnection {
@@ -369,9 +373,9 @@ fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<Expand
     let mut order = 0;
     let mut seen: Vec<String> = Vec::new();
     for (index, item) in list.iter().enumerate() {
-        let conn = item.as_object().ok_or_else(|| {
-            format!("provider {name:?}: connections[{index}] is not an object")
-        })?;
+        let conn = item
+            .as_object()
+            .ok_or_else(|| format!("provider {name:?}: connections[{index}] is not an object"))?;
         let id = conn
             .get("id")
             .and_then(Value::as_str)
@@ -385,9 +389,7 @@ fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<Expand
             ));
         }
         if seen.iter().any(|existing| existing == id) {
-            return Err(format!(
-                "provider {name:?}: duplicate connection id {id:?}"
-            ));
+            return Err(format!("provider {name:?}: duplicate connection id {id:?}"));
         }
         seen.push(id.to_string());
 
@@ -400,7 +402,16 @@ fn expand_connections(name: &str, obj: &Map<String, Value>) -> Result<Vec<Expand
         };
         match keys {
             Some(keys) => {
-                expand_key_slots(&profile_name, &entry, name, id, &keys, failover, &mut order, &mut out);
+                expand_key_slots(
+                    &profile_name,
+                    &entry,
+                    name,
+                    id,
+                    &keys,
+                    failover,
+                    &mut order,
+                    &mut out,
+                );
             }
             None => {
                 out.push(ExpandedConnection {

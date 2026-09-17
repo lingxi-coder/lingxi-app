@@ -44,7 +44,7 @@ fn media_analysis_messages(messages: &[ConversationMessage]) -> Vec<Conversation
                     .cloned()
                     .collect::<Vec<_>>();
                 (!analysis_blocks.is_empty()).then(|| ConversationMessage::User {
-                    id: id.clone(),
+                    id: *id,
                     content: analysis_blocks,
                     is_meta: *is_meta,
                     is_compact_summary: *is_compact_summary,

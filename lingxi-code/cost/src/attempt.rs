@@ -636,6 +636,276 @@ fn validate_intent(intent: &AttemptIntent, session_id: SessionId) -> Result<(), 
     Ok(())
 }
 
+/// Checked calculation using only the already pinned price; no speed/catalog
+/// resolution occurs here. Missing nonzero classes and overflow fail closed.
+pub fn calculate_pinned_attempt_cost(
+    usage: &Usage,
+    pricing: &ModelPricing,
+) -> Result<u64, AttemptFoldError> {
+    let mut total = 0_u64;
+    for class in [
+        TokenClass::Input,
+        TokenClass::Output,
+        TokenClass::CacheWrite,
+        TokenClass::CacheRead,
+        TokenClass::ReasoningOutput,
+        TokenClass::CacheWrite1h,
+    ] {
+        let count = usage.tokens_for(class);
+        if count != 0 {
+            let rate = pricing
+                .token_rates
+                .get(&class)
+                .ok_or(AttemptFoldError::MissingPrice)?;
+            total = total
+                .checked_add(
+                    count
+                        .checked_mul(rate.nano_usd_per_token)
+                        .ok_or(AttemptFoldError::Arithmetic)?,
+                )
+                .ok_or(AttemptFoldError::Arithmetic)?;
+        }
+    }
+    let search = usage
+        .server_tool_use
+        .map_or(0, |tools| tools.web_search_requests);
+    if search != 0 {
+        let rate = pricing
+            .non_token_rates_nano_usd
+            .get(&NonTokenBillableUnit::WebSearchRequest)
+            .ok_or(AttemptFoldError::MissingPrice)?;
+        total = total
+            .checked_add(
+                u64::from(search)
+                    .checked_mul(*rate)
+                    .ok_or(AttemptFoldError::Arithmetic)?,
+            )
+            .ok_or(AttemptFoldError::Arithmetic)?;
+    }
+    Ok(total)
+}
+
+fn receipt_contribution(
+    intent: &AttemptIntent,
+    receipt: &AttemptReceipt,
+) -> Result<AttemptContribution, AttemptFoldError> {
+    if intent.usage_contract == AttemptUsageContract::StandardDisjointTokensV1
+        && (receipt.usage.tokens.cache_write != 0
+            || receipt.usage.tokens.cache_write_1h != 0
+            || receipt.cache_creation_input_tokens != 0)
+    {
+        return Err(AttemptFoldError::Invalid(
+            "receipt carries cache creation outside pinned usage contract",
+        ));
+    }
+    if receipt.api_duration_without_retries_ms > receipt.api_duration_ms {
+        return Err(AttemptFoldError::Invalid(
+            "non-retry duration exceeds duration",
+        ));
+    }
+    if matches!(
+        receipt.disposition,
+        AttemptDisposition::ProvenNotSent | AttemptDisposition::NoProviderResponse
+    ) {
+        if receipt.usage != Usage::default()
+            || receipt.cache_read_input_tokens != 0
+            || receipt.cache_creation_input_tokens != 0
+        {
+            return Err(AttemptFoldError::Invalid("not-sent receipt carries usage"));
+        }
+        if receipt.disposition == AttemptDisposition::ProvenNotSent {
+            if receipt.api_duration_ms != 0 {
+                return Err(AttemptFoldError::Invalid("not-sent receipt carries usage"));
+            }
+            return Ok(AttemptContribution::default());
+        }
+        // A physical send was attempted and nothing came back. No output
+        // tokens can exist, so occupancy stays zero, but the attempt is real
+        // and its whole authorization is unaccounted for.
+        return Ok(AttemptContribution {
+            unverified_nano_usd: intent.authorized_nano_usd,
+            request_count: 1,
+            unknown_count: 1,
+            api_duration_ms: receipt.api_duration_ms,
+            api_duration_without_retries_ms: receipt.api_duration_without_retries_ms,
+            ..AttemptContribution::default()
+        });
+    }
+    let exact_cost = calculate_pinned_attempt_cost(&receipt.usage, &intent.pricing)?;
+    let output_tokens = receipt
+        .usage
+        .tokens
+        .output
+        .checked_add(receipt.usage.tokens.reasoning_output)
+        .ok_or(AttemptFoldError::Arithmetic)?;
+    let unknown = receipt.disposition == AttemptDisposition::Unknown;
+    Ok(AttemptContribution {
+        usage: receipt.usage,
+        cache_read_input_tokens: receipt.cache_read_input_tokens,
+        cache_creation_input_tokens: receipt.cache_creation_input_tokens,
+        // Only what the provider actually reported reaches the realized total.
+        // An authorization is a ceiling on what the run may spend, never
+        // evidence that it was spent, so an incomplete usage report discloses
+        // the unverified remainder on its own channel instead of inflating the
+        // number `/cost` shows.
+        nano_usd: exact_cost,
+        unverified_nano_usd: if unknown {
+            intent.authorized_nano_usd.saturating_sub(exact_cost)
+        } else {
+            0
+        },
+        request_count: 1,
+        output_occupancy: if unknown {
+            output_tokens.max(intent.authorized_output_tokens)
+        } else {
+            output_tokens
+        },
+        unknown_count: u64::from(unknown),
+        api_duration_ms: receipt.api_duration_ms,
+        api_duration_without_retries_ms: receipt.api_duration_without_retries_ms,
+    })
+}
+
+fn replace(value: u64, old: u64, new: u64) -> Result<u64, AttemptFoldError> {
+    value
+        .checked_sub(old)
+        .and_then(|base| base.checked_add(new))
+        .ok_or(AttemptFoldError::Arithmetic)
+}
+
+fn replace_usage(value: &mut Usage, old: &Usage, new: &Usage) -> Result<(), AttemptFoldError> {
+    macro_rules! token {
+        ($field:ident) => {
+            value.tokens.$field =
+                replace(value.tokens.$field, old.tokens.$field, new.tokens.$field)?;
+        };
+    }
+    token!(input);
+    token!(output);
+    token!(cache_write);
+    token!(cache_read);
+    token!(reasoning_output);
+    token!(cache_write_1h);
+    let search = replace(
+        u64::from(value.server_tool_use.map_or(0, |x| x.web_search_requests)),
+        u64::from(old.server_tool_use.map_or(0, |x| x.web_search_requests)),
+        u64::from(new.server_tool_use.map_or(0, |x| x.web_search_requests)),
+    )?;
+    let search = u32::try_from(search).map_err(|_| AttemptFoldError::Arithmetic)?;
+    if value.server_tool_use.is_some() || new.server_tool_use.is_some() {
+        value.server_tool_use = Some(crate::ServerToolUsage {
+            web_search_requests: search,
+        });
+    }
+    Ok(())
+}
+
+fn replace_contribution(
+    value: &mut AttemptContribution,
+    old: &AttemptContribution,
+    new: &AttemptContribution,
+) -> Result<(), AttemptFoldError> {
+    replace_usage(&mut value.usage, &old.usage, &new.usage)?;
+    macro_rules! counter {
+        ($field:ident) => {
+            value.$field = replace(value.$field, old.$field, new.$field)?;
+        };
+    }
+    counter!(nano_usd);
+    counter!(unverified_nano_usd);
+    counter!(request_count);
+    counter!(output_occupancy);
+    counter!(unknown_count);
+    counter!(cache_read_input_tokens);
+    counter!(cache_creation_input_tokens);
+    counter!(api_duration_ms);
+    counter!(api_duration_without_retries_ms);
+    Ok(())
+}
+
+fn replace_vector(
+    state: &mut CostStateVector,
+    model: &ModelRef,
+    old: &AttemptContribution,
+    new: &AttemptContribution,
+) -> Result<(), AttemptFoldError> {
+    state.total_nano_usd = replace(state.total_nano_usd, old.nano_usd, new.nano_usd)?;
+    state.unverified_nano_usd = replace(
+        state.unverified_nano_usd,
+        old.unverified_nano_usd,
+        new.unverified_nano_usd,
+    )?;
+    state.total_api_duration_ms = replace(
+        state.total_api_duration_ms,
+        old.api_duration_ms,
+        new.api_duration_ms,
+    )?;
+    state.total_api_duration_without_retries_ms = replace(
+        state.total_api_duration_without_retries_ms,
+        old.api_duration_without_retries_ms,
+        new.api_duration_without_retries_ms,
+    )?;
+    state.total_web_search_requests = u32::try_from(replace(
+        u64::from(state.total_web_search_requests),
+        u64::from(
+            old.usage
+                .server_tool_use
+                .map_or(0, |x| x.web_search_requests),
+        ),
+        u64::from(
+            new.usage
+                .server_tool_use
+                .map_or(0, |x| x.web_search_requests),
+        ),
+    )?)
+    .map_err(|_| AttemptFoldError::Arithmetic)?;
+    let positions = state
+        .per_model_usage
+        .iter()
+        .enumerate()
+        .filter_map(|(index, usage)| (&usage.model_ref == model).then_some(index))
+        .collect::<Vec<_>>();
+    if positions.len() > 1 {
+        return Err(AttemptFoldError::Invalid("duplicate model vector rows"));
+    }
+    if old.request_count == 0 && new.request_count == 0 {
+        return Ok(());
+    }
+    let index = if let Some(index) = positions.first() {
+        *index
+    } else {
+        if old.request_count != 0 {
+            return Err(AttemptFoldError::Invalid(
+                "missing previous model contribution",
+            ));
+        }
+        state.per_model_usage.push(ModelUsage {
+            model_ref: model.clone(),
+            usage: Usage::default(),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cost_nano_usd: 0,
+        });
+        state.per_model_usage.len() - 1
+    };
+    let row = &mut state.per_model_usage[index];
+    replace_usage(&mut row.usage, &old.usage, &new.usage)?;
+    row.cost_nano_usd = replace(row.cost_nano_usd, old.nano_usd, new.nano_usd)?;
+    row.cache_read_input_tokens = replace(
+        row.cache_read_input_tokens,
+        old.cache_read_input_tokens,
+        new.cache_read_input_tokens,
+    )?;
+    row.cache_creation_input_tokens = replace(
+        row.cache_creation_input_tokens,
+        old.cache_creation_input_tokens,
+        new.cache_creation_input_tokens,
+    )?;
+    // Every attempt is explicitly priced. Preserve legacy unpriced membership:
+    // an unrelated ordinary unpriced response cannot be erased by this fold.
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1406,274 +1676,4 @@ mod tests {
         assert_eq!(replayed, ledger);
         assert_eq!(replayed_state, state);
     }
-}
-
-/// Checked calculation using only the already pinned price; no speed/catalog
-/// resolution occurs here. Missing nonzero classes and overflow fail closed.
-pub fn calculate_pinned_attempt_cost(
-    usage: &Usage,
-    pricing: &ModelPricing,
-) -> Result<u64, AttemptFoldError> {
-    let mut total = 0_u64;
-    for class in [
-        TokenClass::Input,
-        TokenClass::Output,
-        TokenClass::CacheWrite,
-        TokenClass::CacheRead,
-        TokenClass::ReasoningOutput,
-        TokenClass::CacheWrite1h,
-    ] {
-        let count = usage.tokens_for(class);
-        if count != 0 {
-            let rate = pricing
-                .token_rates
-                .get(&class)
-                .ok_or(AttemptFoldError::MissingPrice)?;
-            total = total
-                .checked_add(
-                    count
-                        .checked_mul(rate.nano_usd_per_token)
-                        .ok_or(AttemptFoldError::Arithmetic)?,
-                )
-                .ok_or(AttemptFoldError::Arithmetic)?;
-        }
-    }
-    let search = usage
-        .server_tool_use
-        .map_or(0, |tools| tools.web_search_requests);
-    if search != 0 {
-        let rate = pricing
-            .non_token_rates_nano_usd
-            .get(&NonTokenBillableUnit::WebSearchRequest)
-            .ok_or(AttemptFoldError::MissingPrice)?;
-        total = total
-            .checked_add(
-                u64::from(search)
-                    .checked_mul(*rate)
-                    .ok_or(AttemptFoldError::Arithmetic)?,
-            )
-            .ok_or(AttemptFoldError::Arithmetic)?;
-    }
-    Ok(total)
-}
-
-fn receipt_contribution(
-    intent: &AttemptIntent,
-    receipt: &AttemptReceipt,
-) -> Result<AttemptContribution, AttemptFoldError> {
-    if intent.usage_contract == AttemptUsageContract::StandardDisjointTokensV1
-        && (receipt.usage.tokens.cache_write != 0
-            || receipt.usage.tokens.cache_write_1h != 0
-            || receipt.cache_creation_input_tokens != 0)
-    {
-        return Err(AttemptFoldError::Invalid(
-            "receipt carries cache creation outside pinned usage contract",
-        ));
-    }
-    if receipt.api_duration_without_retries_ms > receipt.api_duration_ms {
-        return Err(AttemptFoldError::Invalid(
-            "non-retry duration exceeds duration",
-        ));
-    }
-    if matches!(
-        receipt.disposition,
-        AttemptDisposition::ProvenNotSent | AttemptDisposition::NoProviderResponse
-    ) {
-        if receipt.usage != Usage::default()
-            || receipt.cache_read_input_tokens != 0
-            || receipt.cache_creation_input_tokens != 0
-        {
-            return Err(AttemptFoldError::Invalid("not-sent receipt carries usage"));
-        }
-        if receipt.disposition == AttemptDisposition::ProvenNotSent {
-            if receipt.api_duration_ms != 0 {
-                return Err(AttemptFoldError::Invalid("not-sent receipt carries usage"));
-            }
-            return Ok(AttemptContribution::default());
-        }
-        // A physical send was attempted and nothing came back. No output
-        // tokens can exist, so occupancy stays zero, but the attempt is real
-        // and its whole authorization is unaccounted for.
-        return Ok(AttemptContribution {
-            unverified_nano_usd: intent.authorized_nano_usd,
-            request_count: 1,
-            unknown_count: 1,
-            api_duration_ms: receipt.api_duration_ms,
-            api_duration_without_retries_ms: receipt.api_duration_without_retries_ms,
-            ..AttemptContribution::default()
-        });
-    }
-    let exact_cost = calculate_pinned_attempt_cost(&receipt.usage, &intent.pricing)?;
-    let output_tokens = receipt
-        .usage
-        .tokens
-        .output
-        .checked_add(receipt.usage.tokens.reasoning_output)
-        .ok_or(AttemptFoldError::Arithmetic)?;
-    let unknown = receipt.disposition == AttemptDisposition::Unknown;
-    Ok(AttemptContribution {
-        usage: receipt.usage,
-        cache_read_input_tokens: receipt.cache_read_input_tokens,
-        cache_creation_input_tokens: receipt.cache_creation_input_tokens,
-        // Only what the provider actually reported reaches the realized total.
-        // An authorization is a ceiling on what the run may spend, never
-        // evidence that it was spent, so an incomplete usage report discloses
-        // the unverified remainder on its own channel instead of inflating the
-        // number `/cost` shows.
-        nano_usd: exact_cost,
-        unverified_nano_usd: if unknown {
-            intent.authorized_nano_usd.saturating_sub(exact_cost)
-        } else {
-            0
-        },
-        request_count: 1,
-        output_occupancy: if unknown {
-            output_tokens.max(intent.authorized_output_tokens)
-        } else {
-            output_tokens
-        },
-        unknown_count: u64::from(unknown),
-        api_duration_ms: receipt.api_duration_ms,
-        api_duration_without_retries_ms: receipt.api_duration_without_retries_ms,
-    })
-}
-
-fn replace(value: u64, old: u64, new: u64) -> Result<u64, AttemptFoldError> {
-    value
-        .checked_sub(old)
-        .and_then(|base| base.checked_add(new))
-        .ok_or(AttemptFoldError::Arithmetic)
-}
-
-fn replace_usage(value: &mut Usage, old: &Usage, new: &Usage) -> Result<(), AttemptFoldError> {
-    macro_rules! token {
-        ($field:ident) => {
-            value.tokens.$field =
-                replace(value.tokens.$field, old.tokens.$field, new.tokens.$field)?;
-        };
-    }
-    token!(input);
-    token!(output);
-    token!(cache_write);
-    token!(cache_read);
-    token!(reasoning_output);
-    token!(cache_write_1h);
-    let search = replace(
-        u64::from(value.server_tool_use.map_or(0, |x| x.web_search_requests)),
-        u64::from(old.server_tool_use.map_or(0, |x| x.web_search_requests)),
-        u64::from(new.server_tool_use.map_or(0, |x| x.web_search_requests)),
-    )?;
-    let search = u32::try_from(search).map_err(|_| AttemptFoldError::Arithmetic)?;
-    if value.server_tool_use.is_some() || new.server_tool_use.is_some() {
-        value.server_tool_use = Some(crate::ServerToolUsage {
-            web_search_requests: search,
-        });
-    }
-    Ok(())
-}
-
-fn replace_contribution(
-    value: &mut AttemptContribution,
-    old: &AttemptContribution,
-    new: &AttemptContribution,
-) -> Result<(), AttemptFoldError> {
-    replace_usage(&mut value.usage, &old.usage, &new.usage)?;
-    macro_rules! counter {
-        ($field:ident) => {
-            value.$field = replace(value.$field, old.$field, new.$field)?;
-        };
-    }
-    counter!(nano_usd);
-    counter!(unverified_nano_usd);
-    counter!(request_count);
-    counter!(output_occupancy);
-    counter!(unknown_count);
-    counter!(cache_read_input_tokens);
-    counter!(cache_creation_input_tokens);
-    counter!(api_duration_ms);
-    counter!(api_duration_without_retries_ms);
-    Ok(())
-}
-
-fn replace_vector(
-    state: &mut CostStateVector,
-    model: &ModelRef,
-    old: &AttemptContribution,
-    new: &AttemptContribution,
-) -> Result<(), AttemptFoldError> {
-    state.total_nano_usd = replace(state.total_nano_usd, old.nano_usd, new.nano_usd)?;
-    state.unverified_nano_usd = replace(
-        state.unverified_nano_usd,
-        old.unverified_nano_usd,
-        new.unverified_nano_usd,
-    )?;
-    state.total_api_duration_ms = replace(
-        state.total_api_duration_ms,
-        old.api_duration_ms,
-        new.api_duration_ms,
-    )?;
-    state.total_api_duration_without_retries_ms = replace(
-        state.total_api_duration_without_retries_ms,
-        old.api_duration_without_retries_ms,
-        new.api_duration_without_retries_ms,
-    )?;
-    state.total_web_search_requests = u32::try_from(replace(
-        u64::from(state.total_web_search_requests),
-        u64::from(
-            old.usage
-                .server_tool_use
-                .map_or(0, |x| x.web_search_requests),
-        ),
-        u64::from(
-            new.usage
-                .server_tool_use
-                .map_or(0, |x| x.web_search_requests),
-        ),
-    )?)
-    .map_err(|_| AttemptFoldError::Arithmetic)?;
-    let positions = state
-        .per_model_usage
-        .iter()
-        .enumerate()
-        .filter_map(|(index, usage)| (&usage.model_ref == model).then_some(index))
-        .collect::<Vec<_>>();
-    if positions.len() > 1 {
-        return Err(AttemptFoldError::Invalid("duplicate model vector rows"));
-    }
-    if old.request_count == 0 && new.request_count == 0 {
-        return Ok(());
-    }
-    let index = if let Some(index) = positions.first() {
-        *index
-    } else {
-        if old.request_count != 0 {
-            return Err(AttemptFoldError::Invalid(
-                "missing previous model contribution",
-            ));
-        }
-        state.per_model_usage.push(ModelUsage {
-            model_ref: model.clone(),
-            usage: Usage::default(),
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cost_nano_usd: 0,
-        });
-        state.per_model_usage.len() - 1
-    };
-    let row = &mut state.per_model_usage[index];
-    replace_usage(&mut row.usage, &old.usage, &new.usage)?;
-    row.cost_nano_usd = replace(row.cost_nano_usd, old.nano_usd, new.nano_usd)?;
-    row.cache_read_input_tokens = replace(
-        row.cache_read_input_tokens,
-        old.cache_read_input_tokens,
-        new.cache_read_input_tokens,
-    )?;
-    row.cache_creation_input_tokens = replace(
-        row.cache_creation_input_tokens,
-        old.cache_creation_input_tokens,
-        new.cache_creation_input_tokens,
-    )?;
-    // Every attempt is explicitly priced. Preserve legacy unpriced membership:
-    // an unrelated ordinary unpriced response cannot be erased by this fold.
-    Ok(())
 }

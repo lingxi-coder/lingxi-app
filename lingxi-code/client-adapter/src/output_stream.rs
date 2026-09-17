@@ -217,7 +217,11 @@ impl AdapterOutputStream {
 #[async_trait]
 impl OutputStream for AdapterOutputStream {
     async fn emit_task_lifecycle(&self, event: &serde_json::Value) {
-        self.sink.emit(ClientEvent::TaskLifecycle { event_json: event.to_string() }).await;
+        self.sink
+            .emit(ClientEvent::TaskLifecycle {
+                event_json: event.to_string(),
+            })
+            .await;
     }
 
     /// Announce a turn the CLIENT did not submit — claude-code enqueues a
@@ -579,7 +583,12 @@ mod tests {
         let stream = AdapterOutputStream::new(sink.clone());
         let event = serde_json::json!({"type":"system", "subtype":"task_updated", "task_id":"b12345678", "patch":{"status":"completed"}});
         stream.emit_task_lifecycle(&event).await;
-        assert_eq!(sink.events().await, vec![ClientEvent::TaskLifecycle { event_json: event.to_string() }]);
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::TaskLifecycle {
+                event_json: event.to_string()
+            }]
+        );
     }
 
     /// `emit_turn_started` must reach the sink as a real `TurnStarted`.

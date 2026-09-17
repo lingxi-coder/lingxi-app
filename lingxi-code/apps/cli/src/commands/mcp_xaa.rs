@@ -202,7 +202,7 @@ pub(crate) fn check_setup(
     let port = match callback_port {
         None => None,
         Some(raw) => match raw.trim().parse::<u32>() {
-            Ok(n) if n >= 1 && n <= 65_535 => Some(n as u16),
+            Ok(n) if (1..=65_535).contains(&n) => Some(n as u16),
             _ => {
                 return SetupCheck::Err(
                     "Error: --callback-port must be an integer in [1, 65535]".to_string(),
@@ -359,7 +359,7 @@ async fn run_login(a: &LoginArgs) -> i32 {
         }
     }
 
-    print!("Opening browser for IdP login at {}\u{2026}\n", cfg.issuer);
+    println!("Opening browser for IdP login at {}\u{2026}", cfg.issuer);
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let http = match http_transport() {

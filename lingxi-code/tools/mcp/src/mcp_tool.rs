@@ -4982,9 +4982,17 @@ mod auto_background_race_tests {
             *self.captured_cancel.lock().unwrap() = Some(cancel);
             Ok("ktest0001".to_string())
         }
-        async fn settle_mcp_task_with_hint(&self, id: &str, text: &str, failed: bool, hint: Option<&str>) -> Result<bool, TaskRegistryError> {
-            if let Some(hint) = hint { self.saved_hints.lock().unwrap().push(hint.to_string()); }
-            self.settle_mcp_task(id,text,failed).await
+        async fn settle_mcp_task_with_hint(
+            &self,
+            id: &str,
+            text: &str,
+            failed: bool,
+            hint: Option<&str>,
+        ) -> Result<bool, TaskRegistryError> {
+            if let Some(hint) = hint {
+                self.saved_hints.lock().unwrap().push(hint.to_string());
+            }
+            self.settle_mcp_task(id, text, failed).await
         }
 
         async fn settle_mcp_task(
@@ -5500,26 +5508,47 @@ mod auto_background_race_tests {
     #[tokio::test(start_paused = true)]
     async fn backgrounded_call_produces_saved_hint_from_raw_persisted_result() {
         let (conn, peer_tx, mut peer_rx) = paired_with_timeout(std::time::Duration::from_secs(600));
-        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
         registry.register_client("slow", client).await;
         let recorder = Arc::new(RecordingRegistry::default());
-        let ctx = ctx_with(registry,Some(recorder.clone()));
+        let ctx = ctx_with(registry, Some(recorder.clone()));
         let output_dir = ctx.tool_results_dir();
         let tool = MCPTool::new(ctx);
         let mut use_ctx = tool_api::test_support::fresh_ctx();
         use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-saved"));
-        tool.call(call_input(),use_ctx,tool_api::test_support::fresh_tx()).await.unwrap();
+        tool.call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .unwrap();
         let raw = "&".repeat(30_000); // Under generic token threshold; over escaped notification budget.
-        answer_call(&mut peer_rx,&peer_tx,json!({"result":{"content":[{"type":"text","text":raw}],"isError":false}})).await;
-        for _ in 0..200 { if !recorder.settled.lock().unwrap().is_empty() { break; } tokio::task::yield_now().await; }
+        answer_call(
+            &mut peer_rx,
+            &peer_tx,
+            json!({"result":{"content":[{"type":"text","text":raw}],"isError":false}}),
+        )
+        .await;
+        for _ in 0..200 {
+            if !recorder.settled.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         let hints = recorder.saved_hints.lock().unwrap();
-        assert_eq!(hints.len(),1);
+        assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("complete 30000-character output was saved"));
-        let path = hints[0].split("output was saved to ").nth(1).unwrap().split(';').next().unwrap();
+        let path = hints[0]
+            .split("output was saved to ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
         assert!(std::path::Path::new(path).starts_with(&output_dir));
-        assert_eq!(std::fs::read_to_string(path).unwrap(),raw);
-        assert!(recorder.settled.lock().unwrap()[0].1.ends_with("… [truncated]"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+        assert!(recorder.settled.lock().unwrap()[0]
+            .1
+            .ends_with("… [truncated]"));
         std::fs::remove_file(path).unwrap();
     }
 

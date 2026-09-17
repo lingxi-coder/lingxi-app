@@ -172,7 +172,9 @@ struct WriterQueue {
 
 impl OutputWriter {
     fn queue(&self) -> std::sync::MutexGuard<'_, WriterQueue> {
-        self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -184,7 +186,9 @@ struct DrainGuard {
 }
 impl Drop for DrainGuard {
     fn drop(&mut self) {
-        if self.finished { return; }
+        if self.finished {
+            return;
+        }
         let mut state = self.writer.queue();
         if state.in_flight {
             state.chunks.push_front(OUTPUT_OMITTED_MARKER.into());
@@ -286,7 +290,11 @@ pub struct TaskOutput {
 
 impl TaskOutputManager {
     /// N7e/Ibt returns the original stat size even after truncating the file.
-    pub async fn finalize_persisted_output(&self, path: &Path, max_bytes: u64) -> Result<u64, OutputError> {
+    pub async fn finalize_persisted_output(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<u64, OutputError> {
         self.flush_writer(path).await?;
         let relative = self.relative_path_for(path)?;
         let lock = self.write_lock_for(path).await;
@@ -295,16 +303,35 @@ impl TaskOutputManager {
         if let Some(identity) = identity {
             // Truncate the same no-follow inode we stat, never a second path
             // lookup that could follow a swapped output into another file.
-            let file = platform_api::rooted_fs::open_append_file_pinned(&self.output_dir, &relative, Some(&identity))
-                .map_err(|error| OutputError::Io(error.to_string()))?;
-            let size = file.metadata().map_err(|error| OutputError::Io(error.to_string()))?.len();
-            if size > max_bytes { file.set_len(max_bytes).map_err(|error| OutputError::Io(error.to_string()))?; }
+            let file = platform_api::rooted_fs::open_append_file_pinned(
+                &self.output_dir,
+                &relative,
+                Some(&identity),
+            )
+            .map_err(|error| OutputError::Io(error.to_string()))?;
+            let size = file
+                .metadata()
+                .map_err(|error| OutputError::Io(error.to_string()))?
+                .len();
+            if size > max_bytes {
+                file.set_len(max_bytes)
+                    .map_err(|error| OutputError::Io(error.to_string()))?;
+            }
             return Ok(size);
         }
         // Virtual filesystems without native inode identities implement their
         // own path policy; preserve the injected filesystem seam for them.
-        let size = self.fs.file_size(&path.to_string_lossy()).await.map_err(|error| OutputError::Io(error.to_string()))?;
-        if size > max_bytes { self.fs.truncate(&path.to_string_lossy(), max_bytes).await.map_err(|error| OutputError::Io(error.to_string()))?; }
+        let size = self
+            .fs
+            .file_size(&path.to_string_lossy())
+            .await
+            .map_err(|error| OutputError::Io(error.to_string()))?;
+        if size > max_bytes {
+            self.fs
+                .truncate(&path.to_string_lossy(), max_bytes)
+                .await
+                .map_err(|error| OutputError::Io(error.to_string()))?;
+        }
         Ok(size)
     }
 
@@ -328,51 +355,101 @@ impl TaskOutputManager {
     /// No allocated empty-file stage exists, so a crash is safely retryable.
     #[cfg(any(unix, windows))]
     pub async fn adopt_output(&self, output_file: &Path, target: &Path) -> Result<(), OutputError> {
-        if !target.is_absolute() { return Err(OutputError::PathEscape(target.display().to_string())); }
+        if !target.is_absolute() {
+            return Err(OutputError::PathEscape(target.display().to_string()));
+        }
         let relative = self.relative_path_for(output_file)?;
         let lock = self.write_lock_for(output_file).await;
         let _guard = lock.lock().await;
         if let Some((prior, _)) = self.linked_transcripts.lock().await.get(output_file) {
-            if prior != target { return Err(OutputError::PathEscape(target.display().to_string())); }
+            if prior != target {
+                return Err(OutputError::PathEscape(target.display().to_string()));
+            }
             #[cfg(unix)]
             return Ok(());
         }
         let root = self.check_output_root().await?;
-        let file = platform_api::rooted_fs::adopt_task_output_link(&self.output_dir, &relative, root.as_ref(), target).map_err(|error| OutputError::Io(error.to_string()))?;
-        self.linked_transcripts.lock().await.insert(output_file.to_owned(), (target.to_owned(), file));
+        let file = platform_api::rooted_fs::adopt_task_output_link(
+            &self.output_dir,
+            &relative,
+            root.as_ref(),
+            target,
+        )
+        .map_err(|error| OutputError::Io(error.to_string()))?;
+        self.linked_transcripts
+            .lock()
+            .await
+            .insert(output_file.to_owned(), (target.to_owned(), file));
         Ok(())
     }
 
     #[cfg(not(any(unix, windows)))]
-    pub async fn adopt_output(&self, _output_file: &Path, _target: &Path) -> Result<(), OutputError> {
-        Err(OutputError::Io("adopted shell output links unsupported on this platform".into()))
+    pub async fn adopt_output(
+        &self,
+        _output_file: &Path,
+        _target: &Path,
+    ) -> Result<(), OutputError> {
+        Err(OutputError::Io(
+            "adopted shell output links unsupported on this platform".into(),
+        ))
     }
 
     /// Register a transcript-backed output. Only the trusted spawner supplies
     /// targets; arbitrary symlinks remain refused by normal spool reads.
     #[cfg(any(unix, windows))]
-    pub async fn link_transcript(&self, output_file: &Path, target: &Path) -> Result<(), OutputError> {
-        if !target.is_absolute() { return Err(OutputError::PathEscape(target.display().to_string())); }
+    pub async fn link_transcript(
+        &self,
+        output_file: &Path,
+        target: &Path,
+    ) -> Result<(), OutputError> {
+        if !target.is_absolute() {
+            return Err(OutputError::PathEscape(target.display().to_string()));
+        }
         let relative = self.relative_path_for(output_file)?;
         let lock = self.write_lock_for(output_file).await;
         let _guard = lock.lock().await;
         #[cfg(unix)]
-        if self.linked_transcripts.lock().await.contains_key(output_file) { return Ok(()); }
+        if self
+            .linked_transcripts
+            .lock()
+            .await
+            .contains_key(output_file)
+        {
+            return Ok(());
+        }
         let root = self.check_output_root().await?;
-        let file = platform_api::rooted_fs::link_task_transcript(&self.output_dir, &relative, root.as_ref(), target)
-            .map_err(|e| OutputError::Io(e.to_string()))?;
-        self.linked_transcripts.lock().await.insert(output_file.to_owned(), (target.to_owned(), file));
+        let file = platform_api::rooted_fs::link_task_transcript(
+            &self.output_dir,
+            &relative,
+            root.as_ref(),
+            target,
+        )
+        .map_err(|e| OutputError::Io(e.to_string()))?;
+        self.linked_transcripts
+            .lock()
+            .await
+            .insert(output_file.to_owned(), (target.to_owned(), file));
         Ok(())
     }
 
     /// Hosts without a native link backend retain their existing spool.
     #[cfg(not(any(unix, windows)))]
-    pub async fn link_transcript(&self, _output_file: &Path, _target: &Path) -> Result<(), OutputError> {
-        Err(OutputError::Io("transcript links unsupported on this host".into()))
+    pub async fn link_transcript(
+        &self,
+        _output_file: &Path,
+        _target: &Path,
+    ) -> Result<(), OutputError> {
+        Err(OutputError::Io(
+            "transcript links unsupported on this host".into(),
+        ))
     }
 
     /// `BSn`: offsets count bytes and advance only when bytes were read.
-    pub async fn read_delta(&self, output_file: &Path, offset: u64) -> Result<(String, u64), OutputError> {
+    pub async fn read_delta(
+        &self,
+        output_file: &Path,
+        offset: u64,
+    ) -> Result<(String, u64), OutputError> {
         let relative = self.relative_path_for(output_file)?;
         let identity = self.check_output_root().await?;
         #[cfg(any(unix, windows))]
@@ -382,38 +459,76 @@ impl TaskOutputManager {
             use std::os::unix::fs::MetadataExt;
             let mut links = self.linked_transcripts.lock().await;
             if let Some((target, file)) = links.get_mut(output_file) {
-                let pinned = file.metadata().map_err(|e| OutputError::Io(e.to_string()))?;
+                let pinned = file
+                    .metadata()
+                    .map_err(|e| OutputError::Io(e.to_string()))?;
                 #[cfg(unix)]
                 {
-                    let advertised = std::fs::read_link(output_file).map_err(|e| OutputError::Io(e.to_string()))?;
-                    let current = std::fs::symlink_metadata(&*target).map_err(|e| OutputError::Io(e.to_string()))?;
-                    if advertised != *target || !current.is_file() || current.ino() != pinned.ino() || current.dev() != pinned.dev() {
-                        return Err(OutputError::SwapRefused("task output link identity changed".into()));
+                    let advertised = std::fs::read_link(output_file)
+                        .map_err(|e| OutputError::Io(e.to_string()))?;
+                    let current = std::fs::symlink_metadata(&*target)
+                        .map_err(|e| OutputError::Io(e.to_string()))?;
+                    if advertised != *target
+                        || !current.is_file()
+                        || current.ino() != pinned.ino()
+                        || current.dev() != pinned.dev()
+                    {
+                        return Err(OutputError::SwapRefused(
+                            "task output link identity changed".into(),
+                        ));
                     }
                 }
                 #[cfg(windows)]
                 {
                     let pin = self.check_output_root().await?;
-                    platform_api::rooted_fs::validate_task_output_link(&self.output_dir, &relative, pin.as_ref(), target, file)
-                        .map_err(|error| OutputError::SwapRefused(error.to_string()))?;
+                    platform_api::rooted_fs::validate_task_output_link(
+                        &self.output_dir,
+                        &relative,
+                        pin.as_ref(),
+                        target,
+                        file,
+                    )
+                    .map_err(|error| OutputError::SwapRefused(error.to_string()))?;
                 }
-                file.seek(SeekFrom::Start(offset)).map_err(|e| OutputError::Io(e.to_string()))?;
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|e| OutputError::Io(e.to_string()))?;
                 let mut bytes = Vec::new();
-                file.take(MAX_TASK_OUTPUT_READ_BYTES).read_to_end(&mut bytes).map_err(|e| OutputError::Io(e.to_string()))?;
+                file.take(MAX_TASK_OUTPUT_READ_BYTES)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| OutputError::Io(e.to_string()))?;
                 let complete = complete_utf8_prefix(&bytes);
-                return Ok((String::from_utf8_lossy(&bytes[..complete]).into_owned(), offset.saturating_add(complete as u64)));
+                return Ok((
+                    String::from_utf8_lossy(&bytes[..complete]).into_owned(),
+                    offset.saturating_add(complete as u64),
+                ));
             }
         }
-        let bytes = self.fs.read_file_rooted_byte_window_pinned(&self.output_dir, &relative, identity.as_ref(), offset, MAX_TASK_OUTPUT_READ_BYTES).await.map_err(|e| OutputError::Io(e.to_string()))?;
+        let bytes = self
+            .fs
+            .read_file_rooted_byte_window_pinned(
+                &self.output_dir,
+                &relative,
+                identity.as_ref(),
+                offset,
+                MAX_TASK_OUTPUT_READ_BYTES,
+            )
+            .await
+            .map_err(|e| OutputError::Io(e.to_string()))?;
         let complete = complete_utf8_prefix(&bytes);
         let end = offset.saturating_add(complete as u64);
-        Ok((String::from_utf8_lossy(&bytes[..complete]).into_owned(), end))
+        Ok((
+            String::from_utf8_lossy(&bytes[..complete]).into_owned(),
+            end,
+        ))
     }
 
     /// A separate supervisor owns this shell's terminal trailer, including
     /// stops initiated before its task row has been registered.
     pub(crate) async fn mark_supervised_terminal(&self, output: &Path) {
-        self.supervised_terminals.lock().await.insert(output.to_path_buf());
+        self.supervised_terminals
+            .lock()
+            .await
+            .insert(output.to_path_buf());
     }
 
     pub(crate) async fn shell_terminal_is_supervised(&self, output: &Path) -> bool {
@@ -516,7 +631,10 @@ impl TaskOutputManager {
                 // own pin is refused; it logs the cause separately rather than
                 // folding it into the message, which is why the errno-carrying
                 // `lstat refused a swapped path (${a})` family is per-FILE.
-                tracing::warn!("task output: pin of {} refused: {error}", self.output_dir.display());
+                tracing::warn!(
+                    "task output: pin of {} refused: {error}",
+                    self.output_dir.display()
+                );
                 return Err(self.swap_refused_dir_moved());
             }
             Err(error) => return Err(self.map_rooted_error(error)),
@@ -548,8 +666,12 @@ impl TaskOutputManager {
     }
 
     async fn writer_for(&self, output_file: &Path) -> Arc<OutputWriter> {
-        self.writers.lock().await.entry(output_file.to_path_buf())
-            .or_insert_with(|| Arc::new(OutputWriter::default())).clone()
+        self.writers
+            .lock()
+            .await
+            .entry(output_file.to_path_buf())
+            .or_insert_with(|| Arc::new(OutputWriter::default()))
+            .clone()
     }
 
     async fn write_lock_for(&self, output_file: &Path) -> Arc<Mutex<()>> {
@@ -563,7 +685,9 @@ impl TaskOutputManager {
 
     /// Wait for a currently accepted generation without reopening a failed one.
     pub async fn flush_writer(&self, output_file: &Path) -> Result<(), OutputError> {
-        let Some(writer) = self.writers.lock().await.get(output_file).cloned() else { return Ok(()); };
+        let Some(writer) = self.writers.lock().await.get(output_file).cloned() else {
+            return Ok(());
+        };
         let _serial = writer.serial.lock().await;
         let error = writer.queue().last_error.clone();
         error.map_or(Ok(()), Err)
@@ -572,19 +696,27 @@ impl TaskOutputManager {
     /// Finish the current generation and evict its writer, without restarting
     /// an exhausted retry. The spool remains readable (`Sd` keeps its file).
     pub async fn evict_writer(&self, output_file: &Path) {
-        let Some(writer) = self.writers.lock().await.get(output_file).cloned() else { return; };
+        let Some(writer) = self.writers.lock().await.get(output_file).cloned() else {
+            return;
+        };
         let _serial = writer.serial.lock().await;
         {
             let mut queue = writer.queue();
             if queue.last_error.is_some() && queue.chars > 0 {
-                tracing::error!(unwritten_chars = queue.chars, "Task output writer evicted while failing; discarded unwritten output");
+                tracing::error!(
+                    unwritten_chars = queue.chars,
+                    "Task output writer evicted while failing; discarded unwritten output"
+                );
             }
             queue.retired = true;
             queue.chunks.clear();
             queue.chars = 0;
         }
         let mut writers = self.writers.lock().await;
-        if writers.get(output_file).is_some_and(|current| Arc::ptr_eq(current, &writer)) {
+        if writers
+            .get(output_file)
+            .is_some_and(|current| Arc::ptr_eq(current, &writer))
+        {
             writers.remove(output_file);
         }
         self.caps.lock().await.remove(output_file);
@@ -673,20 +805,33 @@ impl TaskOutputManager {
     /// path from inside the sandbox cannot redirect it (T18).
     pub async fn append(&self, output_file: &Path, content: &str) -> Result<(), OutputError> {
         let relative = self.relative_path_for(output_file)?;
-        if self.linked_transcripts.lock().await.contains_key(output_file)
-            || self.terminal.lock().await.contains(output_file) { return Ok(()); }
+        if self
+            .linked_transcripts
+            .lock()
+            .await
+            .contains_key(output_file)
+            || self.terminal.lock().await.contains(output_file)
+        {
+            return Ok(());
+        }
         let writer = self.writer_for(output_file).await;
         let generation = {
             let mut caps = self.caps.lock().await;
             let mut queue = writer.queue();
-            if queue.retired { return Ok(()); }
+            if queue.retired {
+                return Ok(());
+            }
             let state = caps.entry(output_file.to_path_buf()).or_default();
-            if state.capped { return Ok(()); }
+            if state.capped {
+                return Ok(());
+            }
             state.bytes_written = state.bytes_written.saturating_add(utf16_units(content));
             let to_write = if state.bytes_written > MAX_TASK_OUTPUT_BYTES {
                 state.capped = true;
                 format!("\n[output truncated: exceeded {MAX_TASK_OUTPUT_BYTES_DISPLAY} disk cap]\n")
-            } else { content.to_string() };
+            } else {
+                content.to_string()
+            };
             queue.chars += utf16_units(&to_write);
             queue.chunks.push_back(to_write);
             queue.generation
@@ -695,19 +840,29 @@ impl TaskOutputManager {
         // unwritten output while an open/write future is pending.
         let _serial = writer.serial.lock().await;
         let ignored = self.terminal.lock().await.contains(output_file)
-            || self.linked_transcripts.lock().await.contains_key(output_file);
+            || self
+                .linked_transcripts
+                .lock()
+                .await
+                .contains_key(output_file);
         {
             let mut queue = writer.queue();
-            if queue.retired { return Ok(()); }
+            if queue.retired {
+                return Ok(());
+            }
             if queue.generation != generation {
                 return queue.last_error.clone().map_or(Ok(()), Err);
             }
             if ignored {
-                queue.chunks.clear(); queue.chars = 0;
+                queue.chunks.clear();
+                queue.chars = 0;
                 return Ok(());
             }
         }
-        let mut guard = DrainGuard { writer: writer.clone(), finished: false };
+        let mut guard = DrainGuard {
+            writer: writer.clone(),
+            finished: false,
+        };
         let mut failures = 0;
         loop {
             let (body, chars) = {
@@ -724,7 +879,16 @@ impl TaskOutputManager {
                 (body, chars)
             };
             let result = match self.check_output_root().await {
-                Ok(identity) => self.fs.append_file_rooted_staged(&self.output_dir, &relative, &body, identity.as_ref()).await,
+                Ok(identity) => {
+                    self.fs
+                        .append_file_rooted_staged(
+                            &self.output_dir,
+                            &relative,
+                            &body,
+                            identity.as_ref(),
+                        )
+                        .await
+                }
                 Err(error) => {
                     let mut queue = writer.queue();
                     queue.in_flight = false;
@@ -737,10 +901,13 @@ impl TaskOutputManager {
                 }
             };
             match result {
-                Ok(()) => { writer.queue().in_flight = false; }
+                Ok(()) => {
+                    writer.queue().in_flight = false;
+                }
                 Err(failure) => {
                     let error = self.map_rooted_error(failure.error);
-                    let is_write = failure.stage == platform_api::filesystem::FileAppendStage::Write;
+                    let is_write =
+                        failure.stage == platform_api::filesystem::FileAppendStage::Write;
                     {
                         let mut queue = writer.queue();
                         queue.in_flight = false;
@@ -756,7 +923,12 @@ impl TaskOutputManager {
                         }
                     }
                     if is_write {
-                        self.caps.lock().await.entry(output_file.to_path_buf()).or_default().lost_output = true;
+                        self.caps
+                            .lock()
+                            .await
+                            .entry(output_file.to_path_buf())
+                            .or_default()
+                            .lost_output = true;
                     }
                     failures += 1;
                     if failures == 1 {
@@ -765,7 +937,10 @@ impl TaskOutputManager {
                     }
                     let mut queue = writer.queue();
                     if queue.chars > MAX_UNWRITTEN_CHARS {
-                        tracing::error!(unwritten_chars = queue.chars, "Task output still cannot be written; dropped unwritten output");
+                        tracing::error!(
+                            unwritten_chars = queue.chars,
+                            "Task output still cannot be written; dropped unwritten output"
+                        );
                         queue.chunks.clear();
                         queue.chunks.push_back(OUTPUT_OMITTED_MARKER.into());
                         queue.chars = utf16_units(OUTPUT_OMITTED_MARKER);
@@ -789,7 +964,13 @@ impl TaskOutputManager {
     /// be incomplete — a surface this port does not have yet, which is why this
     /// accessor currently has no production caller.
     pub async fn lost_output(&self, output_file: &Path) -> bool {
-        if self.writers.lock().await.get(output_file).is_some_and(|writer| writer.queue().lost_output) {
+        if self
+            .writers
+            .lock()
+            .await
+            .get(output_file)
+            .is_some_and(|writer| writer.queue().lost_output)
+        {
             return true;
         }
         self.caps
@@ -1006,51 +1187,97 @@ impl TaskOutputManager {
             let mut links = self.linked_transcripts.lock().await;
             if let Some((target, file)) = links.get_mut(output_file) {
                 self.check_output_root().await?;
-                let pinned = file.metadata().map_err(|e| OutputError::Io(e.to_string()))?;
+                let pinned = file
+                    .metadata()
+                    .map_err(|e| OutputError::Io(e.to_string()))?;
                 #[cfg(unix)]
                 {
-                    let advertised = std::fs::read_link(output_file).map_err(|e| OutputError::Io(e.to_string()))?;
-                    let current = std::fs::symlink_metadata(&*target).map_err(|e| OutputError::Io(e.to_string()))?;
-                    if advertised != *target || !current.is_file() || current.ino() != pinned.ino() || current.dev() != pinned.dev() {
-                        return Err(OutputError::SwapRefused("task output link identity changed".into()));
+                    let advertised = std::fs::read_link(output_file)
+                        .map_err(|e| OutputError::Io(e.to_string()))?;
+                    let current = std::fs::symlink_metadata(&*target)
+                        .map_err(|e| OutputError::Io(e.to_string()))?;
+                    if advertised != *target
+                        || !current.is_file()
+                        || current.ino() != pinned.ino()
+                        || current.dev() != pinned.dev()
+                    {
+                        return Err(OutputError::SwapRefused(
+                            "task output link identity changed".into(),
+                        ));
                     }
                 }
                 #[cfg(windows)]
                 {
                     let pin = self.check_output_root().await?;
-                    platform_api::rooted_fs::validate_task_output_link(&self.output_dir, &relative, pin.as_ref(), target, file)
-                        .map_err(|error| OutputError::SwapRefused(error.to_string()))?;
+                    platform_api::rooted_fs::validate_task_output_link(
+                        &self.output_dir,
+                        &relative,
+                        pin.as_ref(),
+                        target,
+                        file,
+                    )
+                    .map_err(|error| OutputError::SwapRefused(error.to_string()))?;
                 }
                 if opts.offset.is_some() || opts.limit.is_some() {
                     use std::io::BufRead;
-                    file.seek(SeekFrom::Start(0)).map_err(|e| OutputError::Io(e.to_string()))?;
+                    file.seek(SeekFrom::Start(0))
+                        .map_err(|e| OutputError::Io(e.to_string()))?;
                     let reader = std::io::BufReader::new(&mut *file);
                     let mut content = String::new();
                     let mut total_lines = 0u64;
                     let mut taken = 0u64;
                     for line in reader.lines() {
                         let line = line.map_err(|e| OutputError::Io(e.to_string()))?;
-                        if total_lines >= opts.offset.unwrap_or(0) && taken < opts.limit.unwrap_or(u64::MAX) {
-                            if taken > 0 { content.push('\n'); }
+                        if total_lines >= opts.offset.unwrap_or(0)
+                            && taken < opts.limit.unwrap_or(u64::MAX)
+                        {
+                            if taken > 0 {
+                                content.push('\n');
+                            }
                             content.push_str(&line);
                             taken += 1;
                         }
                         total_lines += 1;
                     }
-                    return Ok(TaskOutput { content, total_lines, truncated: false, physical_spool_authoritative: true });
+                    return Ok(TaskOutput {
+                        content,
+                        total_lines,
+                        truncated: false,
+                        physical_spool_authoritative: true,
+                    });
                 }
                 let start = pinned.len().saturating_sub(MAX_TASK_OUTPUT_READ_BYTES);
-                file.seek(SeekFrom::Start(start)).map_err(|e| OutputError::Io(e.to_string()))?;
+                file.seek(SeekFrom::Start(start))
+                    .map_err(|e| OutputError::Io(e.to_string()))?;
                 let mut bytes = Vec::new();
-                file.take(MAX_TASK_OUTPUT_READ_BYTES).read_to_end(&mut bytes).map_err(|e| OutputError::Io(e.to_string()))?;
-                let skip = if start > 0 { bytes.iter().take_while(|byte| **byte & 0xc0 == 0x80).count() } else { 0 };
+                file.take(MAX_TASK_OUTPUT_READ_BYTES)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| OutputError::Io(e.to_string()))?;
+                let skip = if start > 0 {
+                    bytes
+                        .iter()
+                        .take_while(|byte| **byte & 0xc0 == 0x80)
+                        .count()
+                } else {
+                    0
+                };
                 let content = String::from_utf8_lossy(&bytes[skip..]).into_owned();
                 let omitted = start.saturating_add(skip as u64);
                 let content = if omitted > 0 && opts.offset.is_none() && opts.limit.is_none() {
-                    format!("[{}KB of earlier output omitted]\n{content}", ((omitted as f64) / 1024.0).round() as u64)
-                } else { content };
+                    format!(
+                        "[{}KB of earlier output omitted]\n{content}",
+                        ((omitted as f64) / 1024.0).round() as u64
+                    )
+                } else {
+                    content
+                };
                 let fc = platform_api::apply_line_window(content, opts.offset, opts.limit);
-                return Ok(TaskOutput { content: fc.content, total_lines: fc.total_lines, truncated: fc.truncated || start > 0, physical_spool_authoritative: true });
+                return Ok(TaskOutput {
+                    content: fc.content,
+                    total_lines: fc.total_lines,
+                    truncated: fc.truncated || start > 0,
+                    physical_spool_authoritative: true,
+                });
             }
         }
         let root_identity = self.check_output_root().await?;
@@ -1085,6 +1312,104 @@ fn cap_full_read(content: String, opts: &OutputOptions) -> String {
         return content;
     }
     apply_read_tail_cap(content)
+}
+
+/// Framed-output owner used by an independent native shell supervisor. The
+/// supervisor has no session registry; its receipt carries completion instead.
+pub struct TaskOutputSink {
+    manager: Arc<TaskOutputManager>,
+    path: PathBuf,
+    terminal: Mutex<bool>,
+}
+
+impl TaskOutputSink {
+    #[must_use]
+    pub fn new(manager: Arc<TaskOutputManager>, path: PathBuf) -> Self {
+        Self {
+            manager,
+            path,
+            terminal: Mutex::new(false),
+        }
+    }
+
+    fn validate(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
+        if self
+            .manager
+            .path_for(task_id)
+            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))?
+            != self.path
+        {
+            return Err(platform_api::ProcessError::Io(
+                "supervisor task output identity mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl platform_api::BackgroundExitSink for TaskOutputSink {
+    fn manages_output(&self) -> bool {
+        true
+    }
+    async fn append_output(
+        &self,
+        task_id: &str,
+        content: &str,
+    ) -> Result<(), platform_api::ProcessError> {
+        self.validate(task_id)?;
+        self.manager
+            .append(&self.path, content)
+            .await
+            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+    }
+    async fn flush_output(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
+        self.validate(task_id)?;
+        self.manager
+            .flush_writer(&self.path)
+            .await
+            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+    }
+    async fn finalize_persisted_output(
+        &self,
+        task_id: &str,
+        max_bytes: u64,
+    ) -> Result<Option<u64>, platform_api::ProcessError> {
+        self.validate(task_id)?;
+        self.manager
+            .finalize_persisted_output(&self.path, max_bytes)
+            .await
+            .map(Some)
+            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+    }
+    async fn on_exit(&self, task_id: &str, exit_code: Option<i32>) {
+        self.on_exit_with_status(task_id, exit_code, false).await;
+    }
+    async fn on_exit_with_status(&self, task_id: &str, exit_code: Option<i32>, killed: bool) {
+        if self.validate(task_id).is_err() {
+            return;
+        }
+        let mut terminal = self.terminal.lock().await;
+        if *terminal {
+            return;
+        }
+        let trailer = if killed {
+            "\n[killed]\n".to_string()
+        } else {
+            format!(
+                "\n[exited with code {}]\n",
+                exit_code.map_or_else(|| "unknown".into(), |code| code.to_string())
+            )
+        };
+        if let Err(error) = self.manager.append(&self.path, &trailer).await {
+            tracing::error!(%error, "supervisor terminal output append failed");
+        }
+        if let Err(error) = self.manager.flush_writer(&self.path).await {
+            tracing::error!(%error, "supervisor terminal output flush failed");
+        }
+        self.manager.evict_writer(&self.path).await;
+        *terminal = true;
+    }
 }
 
 #[cfg(test)]
@@ -1199,7 +1524,10 @@ mod tests {
             Err(FsError::Io("not supported".into()))
         }
         async fn append_file_rooted_staged(
-            &self, root: &Path, relative: &Path, content: &str,
+            &self,
+            root: &Path,
+            relative: &Path,
+            content: &str,
             expected: Option<&platform_api::rooted_fs::RootIdentity>,
         ) -> Result<(), platform_api::filesystem::FileAppendError> {
             use platform_api::filesystem::{FileAppendError, FileAppendStage};
@@ -1208,20 +1536,31 @@ mod tests {
                 self.stage_entered.notify_one();
                 self.stage_resume.notified().await;
             }
-            if self.fail_opens.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| count.checked_sub(1)).is_ok() {
-                return Err(FileAppendError { stage: FileAppendStage::Open, error: FsError::Io("injected open exhaustion".into()) });
+            if self
+                .fail_opens
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    count.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(FileAppendError {
+                    stage: FileAppendStage::Open,
+                    error: FsError::Io("injected open exhaustion".into()),
+                });
             }
-            self.append_file_rooted_no_follow_pinned(root, relative, content, expected).await
-                .map_err(|error| FileAppendError { stage: FileAppendStage::Write, error })
+            self.append_file_rooted_no_follow_pinned(root, relative, content, expected)
+                .await
+                .map_err(|error| FileAppendError {
+                    stage: FileAppendStage::Write,
+                    error,
+                })
         }
 
         async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
             self.append_bodies.lock().await.push(body.to_string());
             if self
                 .fail_appends
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                    n.checked_sub(1)
-                })
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok()
             {
                 return Err(FsError::Io("no space left on device".into()));
@@ -1272,14 +1611,23 @@ mod tests {
         let mgr = TaskOutputManager::new(dir.path().into(), fs.clone());
         let path = mgr.allocate("bopenfail").await.unwrap();
         fs.fail_opens.store(2, Ordering::SeqCst);
-        assert!(mgr.append(&path, &"x".repeat(16 * 1024 * 1024 + 1)).await.is_err());
+        assert!(mgr
+            .append(&path, &"x".repeat(16 * 1024 * 1024 + 1))
+            .await
+            .is_err());
         assert_eq!(fs.staged_attempts.load(Ordering::SeqCst), 2);
-        assert!(fs.append_bodies.lock().await.is_empty(), "no payload write was attempted");
+        assert!(
+            fs.append_bodies.lock().await.is_empty(),
+            "no payload write was attempted"
+        );
         let writer = mgr.writer_for(&path).await;
         assert_eq!(writer.queue().chars, utf16_units(OUTPUT_OMITTED_MARKER));
         assert!(mgr.lost_output(&path).await);
         mgr.append(&path, "recovered").await.unwrap();
-        assert_eq!(fs.append_bodies.lock().await.as_slice(), [format!("{OUTPUT_OMITTED_MARKER}recovered")]);
+        assert_eq!(
+            fs.append_bodies.lock().await.as_slice(),
+            [format!("{OUTPUT_OMITTED_MARKER}recovered")]
+        );
     }
 
     #[tokio::test]
@@ -1292,7 +1640,10 @@ mod tests {
         assert!(mgr.append(&path, "not consumed").await.is_err());
         assert!(!mgr.lost_output(&path).await);
         mgr.append(&path, " + next").await.unwrap();
-        assert_eq!(fs.append_bodies.lock().await.as_slice(), ["not consumed + next"]);
+        assert_eq!(
+            fs.append_bodies.lock().await.as_slice(),
+            ["not consumed + next"]
+        );
     }
 
     #[tokio::test]
@@ -1309,12 +1660,19 @@ mod tests {
         let second = tokio::spawn(async move { second_mgr.append(&second_path, "second").await });
         let writer = mgr.writer_for(&path).await;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while writer.queue().chars != 6 { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while writer.queue().chars != 6 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         fs.stage_resume.notify_one();
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
-        assert_eq!(fs.append_bodies.lock().await.as_slice(), ["first", "second"]);
+        assert_eq!(
+            fs.append_bodies.lock().await.as_slice(),
+            ["first", "second"]
+        );
         assert_eq!(mgr.caps.lock().await.get(&path).unwrap().bytes_written, 11);
         assert!(!mgr.lost_output(&path).await);
     }
@@ -1331,19 +1689,38 @@ mod tests {
         let first = tokio::spawn(async move { first_mgr.append(&first_path, "first").await });
         fs.stage_entered.notified().await;
         let (second_mgr, second_path) = (mgr.clone(), path.clone());
-        let second = tokio::spawn(async move { second_mgr.append(&second_path, &"x".repeat(16 * 1024 * 1024 + 1)).await });
+        let second = tokio::spawn(async move {
+            second_mgr
+                .append(&second_path, &"x".repeat(16 * 1024 * 1024 + 1))
+                .await
+        });
         let writer = mgr.writer_for(&path).await;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while writer.queue().chars <= 16 * 1024 * 1024 { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while writer.queue().chars <= 16 * 1024 * 1024 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         fs.stage_resume.notify_one();
         assert!(first.await.unwrap().is_err());
-        assert!(second.await.unwrap().is_err(), "coalesced caller observes same failed generation");
-        assert_eq!(fs.staged_attempts.load(Ordering::SeqCst), 2, "waiting append must not silently start another retry");
+        assert!(
+            second.await.unwrap().is_err(),
+            "coalesced caller observes same failed generation"
+        );
+        assert_eq!(
+            fs.staged_attempts.load(Ordering::SeqCst),
+            2,
+            "waiting append must not silently start another retry"
+        );
         assert_eq!(writer.queue().chars, utf16_units(OUTPUT_OMITTED_MARKER));
         mgr.evict_writer(&path).await;
         assert!(!mgr.writers.lock().await.contains_key(&path));
-        assert_eq!(fs.staged_attempts.load(Ordering::SeqCst), 2, "eviction flush does not retry a failed writer");
+        assert_eq!(
+            fs.staged_attempts.load(Ordering::SeqCst),
+            2,
+            "eviction flush does not retry a failed writer"
+        );
     }
 
     #[tokio::test]
@@ -1366,9 +1743,15 @@ mod tests {
         let (content, offset) = manager.read_delta(&output, 0).await.unwrap();
         assert_eq!(content, "你好\n");
         assert_eq!(offset, 7);
-        assert_eq!(manager.read_delta(&output, offset).await.unwrap(), (String::new(), offset));
+        assert_eq!(
+            manager.read_delta(&output, offset).await.unwrap(),
+            (String::new(), offset)
+        );
         manager.append(&output, "next").await.unwrap();
-        assert_eq!(manager.read_delta(&output, offset).await.unwrap(), ("next".into(), 11));
+        assert_eq!(
+            manager.read_delta(&output, offset).await.unwrap(),
+            ("next".into(), 11)
+        );
     }
 
     #[cfg(unix)]
@@ -1384,16 +1767,45 @@ mod tests {
         let output = manager.allocate("alink0001").await.unwrap();
         manager.link_transcript(&output, &target).await.unwrap();
         assert_eq!(std::fs::read_link(&output).unwrap(), target);
-        manager.append(&output, "must not contaminate transcript").await.unwrap();
-        let mut writer = std::fs::OpenOptions::new().append(true).open(&target).unwrap();
+        manager
+            .append(&output, "must not contaminate transcript")
+            .await
+            .unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&target)
+            .unwrap();
         writer.write_all(b"second\n").unwrap();
-        assert_eq!(manager.read(&output, OutputOptions::default()).await.unwrap().content, "first\nsecond\n");
-        assert_eq!(manager.read(&output, OutputOptions { offset: Some(1), limit: Some(1) }).await.unwrap().content, "second");
+        assert_eq!(
+            manager
+                .read(&output, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "first\nsecond\n"
+        );
+        assert_eq!(
+            manager
+                .read(
+                    &output,
+                    OutputOptions {
+                        offset: Some(1),
+                        limit: Some(1)
+                    }
+                )
+                .await
+                .unwrap()
+                .content,
+            "second"
+        );
         let other = directory.path().join("other.jsonl");
         std::fs::write(&other, "secret").unwrap();
         std::fs::remove_file(&output).unwrap();
         std::os::unix::fs::symlink(&other, &output).unwrap();
-        assert!(matches!(manager.read(&output, OutputOptions::default()).await, Err(OutputError::SwapRefused(_))));
+        assert!(matches!(
+            manager.read(&output, OutputOptions::default()).await,
+            Err(OutputError::SwapRefused(_))
+        ));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "first\nsecond\n");
         // Final registry eviction releases the retained descriptor, but never
         // deletes the historical file or follows the now-retargeted link.
@@ -1414,12 +1826,26 @@ mod tests {
         let manager = TaskOutputManager::new(root.clone(), ExclusiveFs::new());
         let output = manager.path_for("badopt001").unwrap();
         manager.adopt_output(&output, &target).await.unwrap();
-        assert_eq!(manager.read(&output, OutputOptions::default()).await.unwrap().content, "before restart\n");
+        assert_eq!(
+            manager
+                .read(&output, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "before restart\n"
+        );
         drop(manager);
         std::fs::write(&target, "before restart\nafter restart\n").unwrap();
         let restored = TaskOutputManager::new(root, ExclusiveFs::new());
         restored.adopt_output(&output, &target).await.unwrap();
-        assert_eq!(restored.read(&output, OutputOptions::default()).await.unwrap().content, "before restart\nafter restart\n");
+        assert_eq!(
+            restored
+                .read(&output, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "before restart\nafter restart\n"
+        );
     }
 
     #[cfg(unix)]
@@ -1433,52 +1859,106 @@ mod tests {
         struct RealTranscriptFs;
         #[async_trait]
         impl FileSystem for RealTranscriptFs {
-            async fn root_identity_no_follow(&self, root: &Path) -> Result<Option<platform_api::rooted_fs::RootIdentity>, FsError> {
+            async fn root_identity_no_follow(
+                &self,
+                root: &Path,
+            ) -> Result<Option<platform_api::rooted_fs::RootIdentity>, FsError> {
                 platform_api::rooted_fs::root_identity(root).map(Some)
             }
-            async fn read_file(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> Result<FileContent, FsError> {
-                let content = std::fs::read_to_string(path).map_err(|error| FsError::Io(error.to_string()))?;
+            async fn read_file(
+                &self,
+                path: &str,
+                offset: Option<u64>,
+                limit: Option<u64>,
+            ) -> Result<FileContent, FsError> {
+                let content = std::fs::read_to_string(path)
+                    .map_err(|error| FsError::Io(error.to_string()))?;
                 Ok(platform_api::apply_line_window(content, offset, limit))
             }
             async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError> {
                 std::fs::write(path, content).map_err(|error| FsError::Io(error.to_string()))
             }
             async fn create_new_file(&self, path: &str) -> Result<(), FsError> {
-                std::fs::OpenOptions::new().write(true).create_new(true).open(path).map(|_| ()).map_err(|error| FsError::Io(error.to_string()))
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map(|_| ())
+                    .map_err(|error| FsError::Io(error.to_string()))
             }
-            async fn create_new_file_rooted_no_follow_pinned(&self, root: &Path, relative: &Path, expected: Option<&platform_api::rooted_fs::RootIdentity>) -> Result<(), FsError> {
+            async fn create_new_file_rooted_no_follow_pinned(
+                &self,
+                root: &Path,
+                relative: &Path,
+                expected: Option<&platform_api::rooted_fs::RootIdentity>,
+            ) -> Result<(), FsError> {
                 platform_api::rooted_fs::create_new_file_pinned(root, relative, expected)
             }
             async fn append_file(&self, path: &str, content: &str) -> Result<(), FsError> {
-                std::fs::OpenOptions::new().append(true).open(path).and_then(|mut file| file.write_all(content.as_bytes())).map_err(|error| FsError::Io(error.to_string()))
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut file| file.write_all(content.as_bytes()))
+                    .map_err(|error| FsError::Io(error.to_string()))
             }
-            async fn append_file_rooted_no_follow_pinned(&self, root: &Path, relative: &Path, content: &str, expected: Option<&platform_api::rooted_fs::RootIdentity>) -> Result<(), FsError> {
+            async fn append_file_rooted_no_follow_pinned(
+                &self,
+                root: &Path,
+                relative: &Path,
+                content: &str,
+                expected: Option<&platform_api::rooted_fs::RootIdentity>,
+            ) -> Result<(), FsError> {
                 platform_api::rooted_fs::append_file_pinned(root, relative, content, expected)
             }
             async fn delete_file(&self, path: &str) -> Result<(), FsError> {
                 std::fs::remove_file(path).map_err(|error| FsError::Io(error.to_string()))
             }
-            async fn delete_file_rooted_no_follow(&self, root: &Path, relative: &Path) -> Result<(), FsError> {
+            async fn delete_file_rooted_no_follow(
+                &self,
+                root: &Path,
+                relative: &Path,
+            ) -> Result<(), FsError> {
                 platform_api::rooted_fs::remove_file(root, relative)
             }
             async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
-                std::fs::OpenOptions::new().write(true).open(path).and_then(|file| file.set_len(len)).map_err(|error| FsError::Io(error.to_string()))
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .and_then(|file| file.set_len(len))
+                    .map_err(|error| FsError::Io(error.to_string()))
             }
             async fn file_mtime(&self, path: &str) -> Result<std::time::SystemTime, FsError> {
-                std::fs::metadata(path).and_then(|metadata| metadata.modified()).map_err(|error| FsError::Io(error.to_string()))
+                std::fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| FsError::Io(error.to_string()))
             }
             async fn file_size(&self, path: &str) -> Result<u64, FsError> {
-                std::fs::metadata(path).map(|metadata| metadata.len()).map_err(|error| FsError::Io(error.to_string()))
+                std::fs::metadata(path)
+                    .map(|metadata| metadata.len())
+                    .map_err(|error| FsError::Io(error.to_string()))
             }
             async fn symlink(&self, target: &str, link: &str) -> Result<(), FsError> {
-                std::os::unix::fs::symlink(target, link).map_err(|error| FsError::Io(error.to_string()))
+                std::os::unix::fs::symlink(target, link)
+                    .map_err(|error| FsError::Io(error.to_string()))
             }
             async fn fsync(&self, path: &str) -> Result<(), FsError> {
-                std::fs::File::open(path).and_then(|file| file.sync_all()).map_err(|error| FsError::Io(error.to_string()))
+                std::fs::File::open(path)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| FsError::Io(error.to_string()))
             }
-            fn is_within_workspace(&self, _: &str) -> bool { true }
-            async fn watch(&self, _: &str) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError> { Err(FsError::Io("unused by test".into())) }
-            async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> { Err(FsError::Io("unused by test".into())) }
+            fn is_within_workspace(&self, _: &str) -> bool {
+                true
+            }
+            async fn watch(
+                &self,
+                _: &str,
+            ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
+            {
+                Err(FsError::Io("unused by test".into()))
+            }
+            async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> {
+                Err(FsError::Io("unused by test".into()))
+            }
         }
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("tasks");
@@ -1491,32 +1971,106 @@ mod tests {
         let output = manager.allocate("areuse001").await.unwrap();
         manager.append(&output, "original spool\n").await.unwrap();
         manager.link_transcript(&output, &old_target).await.unwrap();
-        assert_eq!(manager.read(&output, OutputOptions::default()).await.unwrap().content, "old transcript\n");
+        assert_eq!(
+            manager
+                .read(&output, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "old transcript\n"
+        );
         let old_writer = {
             let writers = manager.writers.lock().await;
             Arc::downgrade(writers.get(&output).unwrap())
         };
-        let old_inode = manager.linked_transcripts.lock().await.get(&output).unwrap().1.metadata().unwrap().ino();
+        let old_inode = manager
+            .linked_transcripts
+            .lock()
+            .await
+            .get(&output)
+            .unwrap()
+            .1
+            .metadata()
+            .unwrap()
+            .ino();
 
         manager.discard(&output).await.unwrap();
         assert!(output.symlink_metadata().is_err());
-        assert!(!manager.linked_transcripts.lock().await.contains_key(&output));
-        assert!(old_writer.upgrade().is_none(), "discard releases the writer generation, not just its bytes");
-        assert_eq!(std::fs::read_to_string(&old_target).unwrap(), "old transcript\n");
+        assert!(!manager
+            .linked_transcripts
+            .lock()
+            .await
+            .contains_key(&output));
+        assert!(
+            old_writer.upgrade().is_none(),
+            "discard releases the writer generation, not just its bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&old_target).unwrap(),
+            "old transcript\n"
+        );
 
         let reused = manager.allocate("areuse001").await.unwrap();
         assert_eq!(reused, output);
-        assert_eq!(manager.read(&reused, OutputOptions::default()).await.unwrap().content, "");
-        manager.append(&reused, "new spool generation\n").await.unwrap();
-        assert_eq!(manager.read(&reused, OutputOptions::default()).await.unwrap().content, "new spool generation\n");
+        assert_eq!(
+            manager
+                .read(&reused, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            ""
+        );
+        manager
+            .append(&reused, "new spool generation\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            manager
+                .read(&reused, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "new spool generation\n"
+        );
         manager.link_transcript(&reused, &new_target).await.unwrap();
         assert_eq!(std::fs::read_link(&reused).unwrap(), new_target);
-        let new_inode = manager.linked_transcripts.lock().await.get(&reused).unwrap().1.metadata().unwrap().ino();
+        let new_inode = manager
+            .linked_transcripts
+            .lock()
+            .await
+            .get(&reused)
+            .unwrap()
+            .1
+            .metadata()
+            .unwrap()
+            .ino();
         assert_ne!(new_inode, old_inode);
-        assert_eq!(manager.read(&reused, OutputOptions::default()).await.unwrap().content, "new transcript\n");
-        std::fs::OpenOptions::new().append(true).open(&new_target).unwrap().write_all(b"new tail\n").unwrap();
-        assert_eq!(manager.read(&reused, OutputOptions::default()).await.unwrap().content, "new transcript\nnew tail\n");
-        assert_eq!(std::fs::read_to_string(&old_target).unwrap(), "old transcript\n");
+        assert_eq!(
+            manager
+                .read(&reused, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "new transcript\n"
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&new_target)
+            .unwrap()
+            .write_all(b"new tail\n")
+            .unwrap();
+        assert_eq!(
+            manager
+                .read(&reused, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "new transcript\nnew tail\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&old_target).unwrap(),
+            "old transcript\n"
+        );
     }
 
     #[tokio::test]
@@ -1567,9 +2121,15 @@ mod tests {
     fn path_for_rejects_parent_and_nested_task_ids() {
         let (_, manager) = manager();
         for id in ["../outside", "nested/task", "/absolute", "./task"] {
-            assert!(matches!(manager.path_for(id), Err(OutputError::PathEscape(_))), "{id}");
+            assert!(
+                matches!(manager.path_for(id), Err(OutputError::PathEscape(_))),
+                "{id}"
+            );
         }
-        assert_eq!(manager.path_for("b12345678").unwrap(), PathBuf::from("/spool/b12345678.output"));
+        assert_eq!(
+            manager.path_for("b12345678").unwrap(),
+            PathBuf::from("/spool/b12345678.output")
+        );
     }
 
     #[tokio::test]
@@ -1687,7 +2247,10 @@ mod tests {
 
         let attempts = fs.append_bodies().await;
         assert_eq!(attempts.len(), 2, "one failure, one retry: {attempts:?}");
-        assert_eq!(attempts[0], "the chunk that is lost\n", "the chunk is tried first");
+        assert_eq!(
+            attempts[0], "the chunk that is lost\n",
+            "the chunk is tried first"
+        );
         assert_eq!(
             attempts[1], "\n[output omitted: it could not be written to disk]\n",
             "the RETRY carries the marker, not the chunk"
@@ -1695,8 +2258,14 @@ mod tests {
 
         // What actually landed is the marker alone — the chunk is gone.
         let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
-        assert_eq!(read.content, "\n[output omitted: it could not be written to disk]\n");
-        assert!(mgr.lost_output(&path).await, "the spool is known-incomplete");
+        assert_eq!(
+            read.content,
+            "\n[output omitted: it could not be written to disk]\n"
+        );
+        assert!(
+            mgr.lost_output(&path).await,
+            "the spool is known-incomplete"
+        );
     }
 
     /// `lostOutput` is SET-ONCE: the oracle stamps it in the drain's inner catch
@@ -1717,7 +2286,11 @@ mod tests {
             "a good write does not un-lose earlier output"
         );
         let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
-        assert!(read.content.ends_with("this one lands\n"), "got: {:?}", read.content);
+        assert!(
+            read.content.ends_with("this one lands\n"),
+            "got: {:?}",
+            read.content
+        );
     }
 
     /// A spool that never failed reports nothing lost — the flag must not be a
@@ -1755,12 +2328,16 @@ mod tests {
         let path = mgr.allocate("btail0001").await.unwrap();
         // 8 MiB + 2 KiB, with a marker at each end.
         let over = 2 * 1024;
-        let filler = "A".repeat(MAX_TASK_OUTPUT_READ_BYTES as usize + over - "HEAD".len() - "TAIL".len());
-        mgr.append(&path, &format!("HEAD{filler}TAIL")).await.unwrap();
+        let filler =
+            "A".repeat(MAX_TASK_OUTPUT_READ_BYTES as usize + over - "HEAD".len() - "TAIL".len());
+        mgr.append(&path, &format!("HEAD{filler}TAIL"))
+            .await
+            .unwrap();
 
         let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
         assert!(
-            read.content.starts_with("[2KB of earlier output omitted]\n"),
+            read.content
+                .starts_with("[2KB of earlier output omitted]\n"),
             "got: {:?}",
             &read.content[..60.min(read.content.len())]
         );
@@ -1969,118 +2546,51 @@ mod tests {
     async fn supervisor_sink_preserves_framed_bytes_and_rejects_wrong_task_identity() {
         use platform_api::BackgroundExitSink;
         let root = tempfile::tempdir().unwrap();
-        let manager = Arc::new(TaskOutputManager::new(root.path().into(), ExclusiveFs::new()));
+        let manager = Arc::new(TaskOutputManager::new(
+            root.path().into(),
+            ExclusiveFs::new(),
+        ));
         let path = manager.allocate("bsuper001").await.unwrap();
         let sink = TaskOutputSink::new(manager.clone(), path.clone());
         assert!(sink.manages_output());
-        assert!(sink.append_output("bother001", "must not be written").await.is_err());
-        sink.append_output("bsuper001", "stdout\n[stderr] problem\n").await.unwrap();
+        assert!(sink
+            .append_output("bother001", "must not be written")
+            .await
+            .is_err());
+        sink.append_output("bsuper001", "stdout\n[stderr] problem\n")
+            .await
+            .unwrap();
         sink.flush_output("bsuper001").await.unwrap();
-        assert_eq!(manager.read(&path, OutputOptions::default()).await.unwrap().content, "stdout\n[stderr] problem\n");
+        assert_eq!(
+            manager
+                .read(&path, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "stdout\n[stderr] problem\n"
+        );
         sink.on_exit("bsuper001", Some(0)).await;
         sink.on_exit("bsuper001", Some(0)).await;
-        assert_eq!(manager.read(&path, OutputOptions::default()).await.unwrap().content.matches("[exited with code 0]").count(), 1);
+        assert_eq!(
+            manager
+                .read(&path, OutputOptions::default())
+                .await
+                .unwrap()
+                .content
+                .matches("[exited with code 0]")
+                .count(),
+            1
+        );
         let killed_path = manager.allocate("bsuper002").await.unwrap();
         let killed = TaskOutputSink::new(manager.clone(), killed_path.clone());
         killed.on_exit_with_status("bsuper002", None, true).await;
-        assert_eq!(manager.read(&killed_path, OutputOptions::default()).await.unwrap().content, "\n[killed]\n");
-    }
-}
-
-/// Framed-output owner used by an independent native shell supervisor. The
-/// supervisor has no session registry; its receipt carries completion instead.
-pub struct TaskOutputSink {
-    manager: Arc<TaskOutputManager>,
-    path: PathBuf,
-    terminal: Mutex<bool>,
-}
-
-impl TaskOutputSink {
-    #[must_use]
-    pub fn new(manager: Arc<TaskOutputManager>, path: PathBuf) -> Self {
-        Self {
-            manager,
-            path,
-            terminal: Mutex::new(false),
-        }
-    }
-
-    fn validate(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
-        if self
-            .manager
-            .path_for(task_id)
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))?
-            != self.path
-        {
-            return Err(platform_api::ProcessError::Io(
-                "supervisor task output identity mismatch".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl platform_api::BackgroundExitSink for TaskOutputSink {
-    fn manages_output(&self) -> bool {
-        true
-    }
-    async fn append_output(
-        &self,
-        task_id: &str,
-        content: &str,
-    ) -> Result<(), platform_api::ProcessError> {
-        self.validate(task_id)?;
-        self.manager
-            .append(&self.path, content)
-            .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
-    }
-    async fn flush_output(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
-        self.validate(task_id)?;
-        self.manager
-            .flush_writer(&self.path)
-            .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
-    }
-    async fn finalize_persisted_output(
-        &self,
-        task_id: &str,
-        max_bytes: u64,
-    ) -> Result<Option<u64>, platform_api::ProcessError> {
-        self.validate(task_id)?;
-        self.manager
-            .finalize_persisted_output(&self.path, max_bytes)
-            .await
-            .map(Some)
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
-    }
-    async fn on_exit(&self, task_id: &str, exit_code: Option<i32>) {
-        self.on_exit_with_status(task_id, exit_code, false).await;
-    }
-    async fn on_exit_with_status(&self, task_id: &str, exit_code: Option<i32>, killed: bool) {
-        if self.validate(task_id).is_err() {
-            return;
-        }
-        let mut terminal = self.terminal.lock().await;
-        if *terminal {
-            return;
-        }
-        let trailer = if killed {
-            "\n[killed]\n".to_string()
-        } else {
-            format!(
-                "\n[exited with code {}]\n",
-                exit_code.map_or_else(|| "unknown".into(), |code| code.to_string())
-            )
-        };
-        if let Err(error) = self.manager.append(&self.path, &trailer).await {
-            tracing::error!(%error, "supervisor terminal output append failed");
-        }
-        if let Err(error) = self.manager.flush_writer(&self.path).await {
-            tracing::error!(%error, "supervisor terminal output flush failed");
-        }
-        self.manager.evict_writer(&self.path).await;
-        *terminal = true;
+        assert_eq!(
+            manager
+                .read(&killed_path, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "\n[killed]\n"
+        );
     }
 }

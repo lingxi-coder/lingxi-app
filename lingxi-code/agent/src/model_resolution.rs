@@ -325,12 +325,9 @@ fn extract_model_id_from_arn(model_id: &str) -> &str {
 /// - `"claude-sonnet-4-5-20250929"` → `None` (first-party format)
 fn get_bedrock_region_prefix(model_id: &str) -> Option<&'static str> {
     let effective_model_id = extract_model_id_from_arn(model_id);
-    for prefix in BEDROCK_REGION_PREFIXES {
-        if effective_model_id.starts_with(&format!("{prefix}.anthropic.")) {
-            return Some(prefix);
-        }
-    }
-    None
+    BEDROCK_REGION_PREFIXES
+        .into_iter()
+        .find(|&prefix| effective_model_id.starts_with(&format!("{prefix}.anthropic.")))
 }
 
 /// `true` if a model id is a foundation model (e.g.

@@ -80,9 +80,9 @@ impl ConversationOrchestrator {
         // A DISK or PLUGIN style still renders the fallback: `turnReminder` is
         // not a frontmatter key upstream, so a file cannot supply one — see
         // `ResolvedOutputStyle::turn_reminder`.
-        let reminder = resolved.turn_reminder.unwrap_or(
-            "Remember to follow the specific guidelines for this style.",
-        );
+        let reminder = resolved
+            .turn_reminder
+            .unwrap_or("Remember to follow the specific guidelines for this style.");
         let content = format!(
             "<system-reminder>\n{} output style is active. {reminder}\n</system-reminder>",
             crate::prompt::sanitize::escape_reminder_text(name)
@@ -278,9 +278,7 @@ impl ConversationOrchestrator {
     pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.prompt_runtime.skill_listing.as_ref()?;
         // Gate on the Skill tool being available this turn (attachments.ts:2668).
-        if self.find_dispatchable_tool("Skill").is_none() {
-            return None;
-        }
+        self.find_dispatchable_tool("Skill")?;
         let entries = provider.skill_entries().await;
 
         // DELTA: keep only skills not yet sent this session, then record them as
@@ -628,9 +626,7 @@ impl ConversationOrchestrator {
         match mode {
             tool_task::reminder::ReminderMode::V1Todo => {
                 // (3) TodoWrite must be present this turn.
-                if self.find_dispatchable_tool("TodoWrite").is_none() {
-                    return None;
-                }
+                self.find_dispatchable_tool("TodoWrite")?;
                 let items: Vec<(lingxi_core::TodoState, String)> = s
                     .todos
                     .iter()
@@ -649,9 +645,7 @@ impl ConversationOrchestrator {
             }
             tool_task::reminder::ReminderMode::V2Task => {
                 // (3) TaskUpdate must be present this turn.
-                if self.find_dispatchable_tool("TaskUpdate").is_none() {
-                    return None;
-                }
+                self.find_dispatchable_tool("TaskUpdate")?;
                 let session_id = s.session_id;
                 s.turns_since_last_reminder = 0;
                 drop(s);
@@ -1021,9 +1015,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         // Dispatch lookup also matches the legacy `Task` alias. This is the ONLY
         // structural gate in the binary's `aLe` — it does NOT gate on a wired
         // DISK catalog (see below).
-        if self.find_dispatchable_tool("Agent").is_none() {
-            return None;
-        }
+        self.find_dispatchable_tool("Agent")?;
 
         // Merge BUILT-INS first, then the wired DISK catalog (if any) on top.
         // Built-ins are ALWAYS part of the listing — the binary's `aLe` builds

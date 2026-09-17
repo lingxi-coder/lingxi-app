@@ -44,9 +44,8 @@ pub mod test_support;
 pub use anthropic_request::{AnthropicRequestBuilder, McpTokenCounter};
 pub use builtin_context::{
     AndroidGitSecret, AndroidGitToolCtx, AndroidShellToolCtx, BashEditDiffSetup,
-    BuiltinToolContext,
-    GitCredentialProvider, LiveCwdCell, MainLoopModelProfileProvider, MobileGitSecret,
-    MobileGitToolCtx, MobileShellToolCtx, TaskLifecycleHookFirer,
+    BuiltinToolContext, GitCredentialProvider, LiveCwdCell, MainLoopModelProfileProvider,
+    MobileGitSecret, MobileGitToolCtx, MobileShellToolCtx, TaskLifecycleHookFirer,
 };
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};

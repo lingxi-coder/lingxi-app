@@ -1450,10 +1450,8 @@ async fn run_subagent_loop(
 
     // A restored human-owned turn drains its typed inbox before the first API
     // request. The persisted-history watermark above excludes these new inputs.
-    if ctx.resumed_history.is_some() {
-        if fold_task_notifications(&ctx, history).await {
-            flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
-        }
+    if ctx.resumed_history.is_some() && fold_task_notifications(&ctx, history).await {
+        flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
     }
 
     let max_turns = ctx.agent_definition.max_turns;
@@ -1604,7 +1602,7 @@ async fn run_subagent_loop(
                     emit_failed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                         error.to_string(),
@@ -1766,7 +1764,7 @@ async fn run_subagent_loop(
                             ev = event_rx.recv(), if event_channel_open => {
                                 match ev {
                                     Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
-                                        emit_killed(&out_tx, transcript.as_ref(), &history,
+                                        emit_killed(&out_tx, transcript.as_ref(), history,
                                             &mut transcript_written, agent_id).await;
                                         return;
                                     }
@@ -2284,7 +2282,7 @@ async fn run_subagent_loop(
                     }
                 }
 
-                let mut tool_results_msg = ConversationMessage::User {
+                let tool_results_msg = ConversationMessage::User {
                     id: MessageId::new(),
                     content: tool_results,
                     is_meta: false,

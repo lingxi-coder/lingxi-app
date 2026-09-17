@@ -49,6 +49,21 @@
 //! the Android-local exports) so the symbols land in the final library.
 
 #![forbid(unsafe_code)]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 201 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
+// Dead code kept visible, not swept: this crate had 6 item(s) rustc could
+// reach from nothing when the workspace was measured (2026-09-16). The lint
+// stays `warn` at the workspace level so a NEW crate still inherits it; this
+// allow is scoped here so the count is per crate and repayable by deleting this
+// line. This is the category where "named, computed, never wired" hides — some
+// of these read like features that were built and never connected. Each wants a
+// decision (delete, or wire), not a blanket deletion.
+#![allow(dead_code)]
 
 #[cfg(feature = "uniffi")]
 use platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
@@ -1674,7 +1689,7 @@ fn android_mobile_linux_capability_from_config(
                 rootfs_integrity: false,
             }
         }
-        Some(cfg) => MobileLinuxCapabilityFfi {
+        Some(_cfg) => MobileLinuxCapabilityFfi {
             available: false,
             backend: "android-proot".to_string(),
             mode: MobileLinuxRuntimeModeFfi::MobileLinux,
@@ -3915,15 +3930,15 @@ pub fn build_android_engine_with_mobile_linux(
         api_base,
         api_key,
         model,
-        session_mode,
-        vision_delegation_enabled,
+        session_mode: _,
+        vision_delegation_enabled: _,
         app_files_root,
         project_cwd,
         provider_config,
         mobile_linux,
-        local_apps_full_runtime,
-        local_apps_runtime_root,
-        physical_memory_bytes,
+        local_apps_full_runtime: _,
+        local_apps_runtime_root: _,
+        physical_memory_bytes: _,
         host_environment,
     } = config;
     let listener: Arc<dyn ClientEventListener> =

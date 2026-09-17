@@ -127,7 +127,10 @@ mod tests {
         let expected = session::jsonl::path::project_dir_name(cwd);
         assert_eq!(
             roots.user_memdir,
-            PathBuf::from("/cfg").join("projects").join(&expected).join("memdir")
+            PathBuf::from("/cfg")
+                .join("projects")
+                .join(&expected)
+                .join("memdir")
         );
     }
 

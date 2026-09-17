@@ -52,9 +52,7 @@ pub const TOOL_NAME: &str = "Workflow";
 
 const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
-use workflow::description::{
-    assemble_description, subagent_model_forced, DESCRIPTION,
-};
+use workflow::description::{assemble_description, subagent_model_forced};
 
 /// The input schema (claude-code v2.1.245 `inputSchema`), reproduced from the
 /// zod `strictObject` definition (source-order properties, `additionalProperties:
@@ -1671,9 +1669,9 @@ mod tests {
     // The oracle texts and their register moved to the workflow runtime
     // crate (§8.1: a command crate may not depend on a tool crate, and the
     // `workflow-authoring` skill reads the same texts).
-    use workflow::description::*;
     use super::*;
     use std::sync::Mutex as StdMutex;
+    use workflow::description::*;
 
     struct MockLauncher {
         task_id: String,
@@ -1893,21 +1891,21 @@ mod tests {
             script_path: Some("/abs/wf.js".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_script(&spec, &read).unwrap(), "FROM_PATH");
+        assert_eq!(resolve_script(&spec, read).unwrap(), "FROM_PATH");
 
         // inline script when there is no scriptPath.
         let spec = WorkflowLaunchSpec {
             script: Some("INLINE".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_script(&spec, &read).unwrap(), "INLINE");
+        assert_eq!(resolve_script(&spec, read).unwrap(), "INLINE");
 
         // name → .lingxi/workflows/<name>.js.
         let spec = WorkflowLaunchSpec {
             name: Some("review".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_script(&spec, &read).unwrap(), "FROM_NAME");
+        assert_eq!(resolve_script(&spec, read).unwrap(), "FROM_NAME");
 
         // A named workflow resolves first, while an explicit body overrides
         // the resolved source. An unknown name must not fall through to the
@@ -1917,21 +1915,21 @@ mod tests {
             script: Some("NAMED_OVERRIDE".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_script(&spec, &read).unwrap(), "NAMED_OVERRIDE");
+        assert_eq!(resolve_script(&spec, read).unwrap(), "NAMED_OVERRIDE");
         let spec = WorkflowLaunchSpec {
             name: Some("missing".into()),
             script: Some("DO_NOT_FALL_THROUGH".into()),
             ..Default::default()
         };
-        assert!(resolve_script(&spec, &read).is_err());
+        assert!(resolve_script(&spec, read).is_err());
 
         // unknown name + nothing-provided → errors.
         let spec = WorkflowLaunchSpec {
             name: Some("missing".into()),
             ..Default::default()
         };
-        assert!(resolve_script(&spec, &read).is_err());
-        assert!(resolve_script(&WorkflowLaunchSpec::default(), &read).is_err());
+        assert!(resolve_script(&spec, read).is_err());
+        assert!(resolve_script(&WorkflowLaunchSpec::default(), read).is_err());
     }
 
     #[test]
@@ -1986,7 +1984,7 @@ mod tests {
                     name: Some("review".into()),
                     ..Default::default()
                 },
-                &read,
+                read,
             )
         })
         .unwrap();
@@ -2016,8 +2014,7 @@ mod tests {
         assert!(ORACLE_DESCRIPTION.starts_with(
             "Execute a workflow script that orchestrates multiple subagents deterministically."
         ));
-        assert!(ORACLE_DESCRIPTION
-            .ends_with("No wasted wall-clock."));
+        assert!(ORACLE_DESCRIPTION.ends_with("No wasted wall-clock."));
         assert!(ORACLE_DESCRIPTION.contains("Use the Agent tool (if available)"));
 
         // ── The on-demand reference (`wpn()`), unforced rendering ──
@@ -2156,7 +2153,11 @@ mod tests {
                 "authoring reference",
             ),
         ] {
-            let entries = || DESCRIPTION_DIVERGENCES.iter().filter(|d| d.target == target);
+            let entries = || {
+                DESCRIPTION_DIVERGENCES
+                    .iter()
+                    .filter(|d| d.target == target)
+            };
             let registered: usize = entries().map(|d| d.text.len()).sum();
             assert_eq!(
                 shipped.len(),
@@ -2217,13 +2218,18 @@ mod tests {
         set_gate(true, true);
         let pointed = tool.prompt(&opts).await;
         assert!(
-            pointed.contains("`workflow-authoring`") && !pointed.contains("- fusion(prompt: string"),
+            pointed.contains("`workflow-authoring`")
+                && !pointed.contains("- fusion(prompt: string"),
             "with the skill registered and the Skill tool advertised, the description must point"
         );
 
         for (registered, skill_tool, why) in [
             (false, true, "the skill is not registered"),
-            (true, false, "this request does not advertise the Skill tool"),
+            (
+                true,
+                false,
+                "this request does not advertise the Skill tool",
+            ),
             (false, false, "neither holds"),
         ] {
             set_gate(registered, skill_tool);
@@ -2342,8 +2348,9 @@ mod tests {
             anchor: "this sentence is not in the Workflow tool description".into(),
             text: "unreachable".into(),
         }];
-        let error = compose_description(&ORACLE_DESCRIPTION, &drifted, DivergenceTarget::Description)
-            .expect_err("a missing anchor must not compose silently");
+        let error =
+            compose_description(&ORACLE_DESCRIPTION, &drifted, DivergenceTarget::Description)
+                .expect_err("a missing anchor must not compose silently");
         assert!(
             error.contains("planted-anchor-drift"),
             "the failure must NAME the divergence; got: {error}"
@@ -2357,8 +2364,12 @@ mod tests {
             anchor: "the".into(),
             text: "unreachable".into(),
         }];
-        let error = compose_description(&ORACLE_DESCRIPTION, &ambiguous, DivergenceTarget::Description)
-            .expect_err("an anchor with many matches must not compose");
+        let error = compose_description(
+            &ORACLE_DESCRIPTION,
+            &ambiguous,
+            DivergenceTarget::Description,
+        )
+        .expect_err("an anchor with many matches must not compose");
         assert!(
             error.contains("planted-ambiguous-anchor") && error.contains("ambiguous"),
             "the failure must name the divergence and say why; got: {error}"
@@ -2686,11 +2697,7 @@ mod tests {
         let _ = platform_api::session_flags::set_workflow_size_guideline("small", false);
         assert_eq!(
             live.prompt(&opts).await,
-            format!(
-                "{}{}",
-                base,
-                WorkflowSizeGuideline::Small.prompt_appendix()
-            )
+            format!("{}{}", base, WorkflowSizeGuideline::Small.prompt_appendix())
         );
         let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
 
@@ -2703,11 +2710,7 @@ mod tests {
         let _ = platform_api::session_flags::set_workflow_size_guideline("small", false);
         assert_eq!(
             session_owned.prompt(&opts).await,
-            format!(
-                "{}{}",
-                base,
-                WorkflowSizeGuideline::Large.prompt_appendix()
-            ),
+            format!("{}{}", base, WorkflowSizeGuideline::Large.prompt_appendix()),
             "session-owned state must win over the process-global compatibility snapshot"
         );
         let _ = session_state.set("medium", false);

@@ -181,9 +181,8 @@ async fn resolve_server(registry: &mcp::McpRegistry, requested: &str) -> Result<
     let conns = registry.connections.read().await;
     let mut names: Vec<String> = conns
         .iter()
-        .filter_map(|(table_key, state)| {
-            is_shared_registry_entry(table_key, state).then(|| state.name().to_string())
-        })
+        .filter(|&(table_key, state)| is_shared_registry_entry(table_key, state))
+        .map(|(_table_key, state)| state.name().to_string())
         .collect();
     names.sort();
 

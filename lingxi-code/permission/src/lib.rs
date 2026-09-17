@@ -4,6 +4,13 @@
 //! shadow detection.
 
 #![forbid(unsafe_code)]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 20 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
 
 pub mod allow_suggestion;
 pub mod auto_edit_safety;
@@ -29,7 +36,6 @@ pub mod bash_security;
 pub mod bash_tree_sitter;
 pub mod bypass_guard;
 pub mod classifier;
-pub mod loop_llm;
 pub mod cli_mode;
 pub mod command_path_containment;
 pub mod dangerous_patterns;
@@ -45,6 +51,7 @@ pub mod host_context;
 pub mod internal_writes;
 pub mod layers;
 pub mod loader;
+pub mod loop_llm;
 pub mod mcp_policy;
 pub mod mode;
 pub mod mode_policy;
@@ -64,12 +71,12 @@ pub mod plan_files {
     };
 }
 pub mod persist;
-pub mod read_auto_allow;
 pub mod policy;
 pub mod policy_gate;
 pub mod powershell_containment;
 pub mod powershell_parse;
 pub mod prompting_gate;
+pub mod read_auto_allow;
 pub mod read_block;
 pub mod read_deny_globs;
 pub mod read_only_command;

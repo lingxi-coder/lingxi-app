@@ -1099,7 +1099,7 @@ impl LspRegistry {
                 }
             }
             for key in &keys_to_remove {
-                self.open_files.clear_server(&key).await;
+                self.open_files.clear_server(key).await;
             }
             // Keep in-flight start claims until their owning guards finish.
             // The starter observes that its server entry was removed and
@@ -1276,6 +1276,67 @@ impl LspRegistry {
         }
         self.has_registered_servers.store(false, Ordering::Release);
     }
+}
+
+/// The file's lowercased extension WITH a leading dot (e.g. `.rs`), matching
+/// the keys of [`LspServerConfig::extension_to_language`]. `None` for an
+/// extensionless file.
+fn file_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
+}
+
+const INSTANCE_KEY_SEPARATOR: char = '\u{1f}';
+
+fn effective_workspace_root(
+    config: &LspServerConfig,
+    workspace_cwd: &Path,
+    path_mapper: &dyn LspPathMapper,
+) -> Result<PathBuf, LspError> {
+    config.workspace_folder.as_deref().map_or_else(
+        || path_mapper.workspace_root_for(workspace_cwd),
+        |workspace_folder| {
+            let path = PathBuf::from(workspace_folder);
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                Ok(workspace_cwd.join(path))
+            }
+        },
+    )
+}
+
+fn instance_key(name: &str, workspace_root: &Path) -> String {
+    format!(
+        "{name}{INSTANCE_KEY_SEPARATOR}{}",
+        workspace_root.to_string_lossy()
+    )
+}
+
+/// Extract the manifest/server name from a workspace-scoped instance key.
+fn server_name_for_instance_key(key: &str) -> &str {
+    key.split_once(INSTANCE_KEY_SEPARATOR)
+        .map_or(key, |(name, _)| name)
+}
+
+fn workspace_root_for_instance_key(key: &str) -> Option<&Path> {
+    key.split_once(INSTANCE_KEY_SEPARATOR)
+        .map(|(_, workspace_root)| Path::new(workspace_root))
+}
+
+fn workspace_root_uri(
+    workspace_root: &Path,
+    path_mapper: &dyn LspPathMapper,
+) -> Result<String, LspError> {
+    path_mapper
+        .uri_for_host_path(workspace_root)
+        .map(|uri| uri.to_string())
+}
+
+fn startup_config_for_root(config: &LspServerConfig, workspace_root: &Path) -> LspServerConfig {
+    let mut startup = config.clone();
+    startup.workspace_folder = Some(workspace_root.to_string_lossy().into_owned());
+    startup
 }
 
 #[cfg(test)]
@@ -2222,65 +2283,4 @@ mod routing_tests {
         );
         assert!(reg.servers.read().await.is_empty());
     }
-}
-
-/// The file's lowercased extension WITH a leading dot (e.g. `.rs`), matching
-/// the keys of [`LspServerConfig::extension_to_language`]. `None` for an
-/// extensionless file.
-fn file_extension(path: &Path) -> Option<String> {
-    path.extension()
-        .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
-}
-
-const INSTANCE_KEY_SEPARATOR: char = '\u{1f}';
-
-fn effective_workspace_root(
-    config: &LspServerConfig,
-    workspace_cwd: &Path,
-    path_mapper: &dyn LspPathMapper,
-) -> Result<PathBuf, LspError> {
-    config.workspace_folder.as_deref().map_or_else(
-        || path_mapper.workspace_root_for(workspace_cwd),
-        |workspace_folder| {
-            let path = PathBuf::from(workspace_folder);
-            if path.is_absolute() {
-                Ok(path)
-            } else {
-                Ok(workspace_cwd.join(path))
-            }
-        },
-    )
-}
-
-fn instance_key(name: &str, workspace_root: &Path) -> String {
-    format!(
-        "{name}{INSTANCE_KEY_SEPARATOR}{}",
-        workspace_root.to_string_lossy()
-    )
-}
-
-/// Extract the manifest/server name from a workspace-scoped instance key.
-fn server_name_for_instance_key(key: &str) -> &str {
-    key.split_once(INSTANCE_KEY_SEPARATOR)
-        .map_or(key, |(name, _)| name)
-}
-
-fn workspace_root_for_instance_key(key: &str) -> Option<&Path> {
-    key.split_once(INSTANCE_KEY_SEPARATOR)
-        .map(|(_, workspace_root)| Path::new(workspace_root))
-}
-
-fn workspace_root_uri(
-    workspace_root: &Path,
-    path_mapper: &dyn LspPathMapper,
-) -> Result<String, LspError> {
-    path_mapper
-        .uri_for_host_path(workspace_root)
-        .map(|uri| uri.to_string())
-}
-
-fn startup_config_for_root(config: &LspServerConfig, workspace_root: &Path) -> LspServerConfig {
-    let mut startup = config.clone();
-    startup.workspace_folder = Some(workspace_root.to_string_lossy().into_owned());
-    startup
 }

@@ -76,7 +76,7 @@ fn robocopy_semantics(exit_code: i32) -> CommandInterpretation {
         None
     };
     CommandInterpretation {
-        is_error: exit_code < 0 || exit_code >= 8,
+        is_error: !(0..8).contains(&exit_code),
         message,
     }
 }

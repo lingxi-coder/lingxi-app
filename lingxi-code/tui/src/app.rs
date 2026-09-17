@@ -907,7 +907,9 @@ pub fn run_app(
             on_rewake_peer: Box::new(on_rewake_peer),
         },
     );
-    if let Some(callback) = loop_interrupt { app.chat_widget.set_loop_interrupt(callback); }
+    if let Some(callback) = loop_interrupt {
+        app.chat_widget.set_loop_interrupt(callback);
+    }
     if let Some(provider) = hyperlink_cwd_provider {
         app.chat_widget.set_hyperlink_cwd_provider(provider);
     }

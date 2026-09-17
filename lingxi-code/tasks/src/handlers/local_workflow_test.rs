@@ -6,8 +6,8 @@ use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, F
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use platform_api::{
     BudgetError, FusionAgentSurface, FusionDecision, FusionError, FusionExecutor,
-    FusionInheritance, FusionNeedsParentReason, FusionRequest, FusionResult, FusionStatus,
-    FusionTiming, FusionUsage, PanelRunStatus, SubagentUsage,
+    FusionNeedsParentReason, FusionRequest, FusionResult, FusionStatus, FusionTiming, FusionUsage,
+    PanelRunStatus, SubagentUsage,
 };
 use serde_json::json;
 use std::any::Any;
@@ -6511,10 +6511,7 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
         Some(agent_id_string.as_str())
     );
     assert_eq!(allocated.agent_type.as_deref(), Some("designer"));
-    assert_eq!(
-        allocated.model.as_deref(),
-        Some("deepseek/deepseek-flash")
-    );
+    assert_eq!(allocated.model.as_deref(), Some("deepseek/deepseek-flash"));
 
     platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
@@ -7046,16 +7043,16 @@ fn an_in_range_override_is_taken_verbatim() {
 #[test]
 fn an_unusable_override_falls_back_rather_than_clamping_or_failing() {
     for raw in [
-        "0",     // below min:1
-        "-1",    // passes the regex, rejected by min
-        "257",   // above max:256
-        "1000",  // far above max
-        "8.5",   // not digitsOnly
-        "1e3",   // not digitsOnly
-        "abc",   // not a number at all
-        "",      // empty
-        "   ",   // whitespace only
-        "+",     // sign with no digits
+        "0",                       // below min:1
+        "-1",                      // passes the regex, rejected by min
+        "257",                     // above max:256
+        "1000",                    // far above max
+        "8.5",                     // not digitsOnly
+        "1e3",                     // not digitsOnly
+        "abc",                     // not a number at all
+        "",                        // empty
+        "   ",                     // whitespace only
+        "+",                       // sign with no digits
         "99999999999999999999999", // finite in JS, still above max
     ] {
         assert_eq!(
@@ -7071,7 +7068,11 @@ fn an_unusable_override_falls_back_rather_than_clamping_or_failing() {
 /// default.
 #[test]
 fn an_accepted_override_replaces_the_cpu_default() {
-    assert_eq!(concurrency_cap_default(8), 6, "premise: 8 cores default to 6");
+    assert_eq!(
+        concurrency_cap_default(8),
+        6,
+        "premise: 8 cores default to 6"
+    );
     assert_eq!(
         resolve_concurrency_cap(Some("64"), 8),
         64,

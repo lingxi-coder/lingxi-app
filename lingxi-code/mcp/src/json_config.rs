@@ -1232,8 +1232,10 @@ pub fn load_mcp_json_with_precedence(
     // guard (`crate::config_diagnostics::read_mcp_config_file`) — a missing
     // file is routine and stays silent (matching oracle); a shape/size
     // rejection or other read error is already logged inside that call.
-    match crate::config_diagnostics::read_mcp_config_file(project_path, ConfigScope::Project) {
-        Ok(raw) => match parse_mcp_json_string(&raw, ConfigScope::Project) {
+    if let Ok(raw) =
+        crate::config_diagnostics::read_mcp_config_file(project_path, ConfigScope::Project)
+    {
+        match parse_mcp_json_string(&raw, ConfigScope::Project) {
             Ok(cfgs) => {
                 for c in cfgs {
                     by_name.insert(c.name.clone(), c);
@@ -1244,8 +1246,7 @@ pub fn load_mcp_json_with_precedence(
                 path = %project_path.display(),
                 "skipping malformed project .mcp.json"
             ),
-        },
-        Err(_) => {}
+        }
     }
 
     let mut out: Vec<McpServerConfig> = by_name.into_values().collect();
@@ -1320,8 +1321,10 @@ pub fn load_mcp_servers(
     // PROJECT (middle): `<cwd>/.mcp.json` (bare-map fallback allowed). Byte-
     // faithful `Iqe` shape/size guard — see the sibling call in
     // [`load_mcp_json_with_precedence`] for the rationale.
-    match crate::config_diagnostics::read_mcp_config_file(project_mcp_path, ConfigScope::Project) {
-        Ok(raw) => match parse_mcp_json_string(&raw, ConfigScope::Project) {
+    if let Ok(raw) =
+        crate::config_diagnostics::read_mcp_config_file(project_mcp_path, ConfigScope::Project)
+    {
+        match parse_mcp_json_string(&raw, ConfigScope::Project) {
             Ok(cfgs) => {
                 // Approval is evaluated before precedence. A pending/rejected
                 // project entry remains visible when it is the only candidate,
@@ -1350,8 +1353,7 @@ pub fn load_mcp_servers(
                 path = %project_mcp_path.display(),
                 "skipping malformed project .mcp.json"
             ),
-        },
-        Err(_) => {}
+        }
     }
 
     // LOCAL (highest): global config `projects.<cwd_key>.mcpServers`.

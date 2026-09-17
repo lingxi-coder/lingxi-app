@@ -780,8 +780,8 @@ mod tests {
     #[test]
     fn deferred_delta_groups_mcp_names_on_readd() {
         let d = DeferralState::new(ToolSearchMode::Enabled, false);
-        d.compute_deferred_delta(&["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]);
-        d.compute_deferred_delta(&[]); // both removed
+        let _ = d.compute_deferred_delta(&["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]);
+        let _ = d.compute_deferred_delta(&[]); // both removed
         let delta =
             d.compute_deferred_delta(&["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]);
         assert_eq!(
@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn deferred_delta_discovered_tool_is_not_reported_removed() {
         let d = DeferralState::new(ToolSearchMode::Enabled, false);
-        d.compute_deferred_delta(&["Alpha".to_string(), "Beta".to_string()]);
+        let _ = d.compute_deferred_delta(&["Alpha".to_string(), "Beta".to_string()]);
         d.mark_loaded(["Beta"]);
         // Beta is now loaded, so the currently-deferred set is just Alpha.
         let delta = d.compute_deferred_delta(&["Alpha".to_string()]);

@@ -617,7 +617,10 @@ fn task_output_root_is_protected_even_when_temp_root_is_writable() {
     context.lingxi_temp_dir = Some("/tmp/claude-1/".into());
     context.task_output_dir = Some("/tmp/claude-1/project/session/tasks".into());
     let config = convert_settings_to_runtime_config(&SettingsJson::default(), &context);
-    assert!(config.filesystem.deny_write.contains(&"/tmp/claude-1/project/session/tasks".into()));
+    assert!(config
+        .filesystem
+        .deny_write
+        .contains(&"/tmp/claude-1/project/session/tasks".into()));
 }
 
 // ===== HP-6: `sandbox.credentials` ==========================================
@@ -629,7 +632,9 @@ fn task_output_root_is_protected_even_when_temp_root_is_writable() {
 /// replaces.
 #[test]
 fn credentials_reach_the_runtime_config_the_sandbox_is_built_from() {
-    use sandbox::credentials::{CredentialEnvVar, CredentialFile, CredentialMode, SandboxCredentials};
+    use sandbox::credentials::{
+        CredentialEnvVar, CredentialFile, CredentialMode, SandboxCredentials,
+    };
     use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
 
     let mut s = SettingsJson::default();

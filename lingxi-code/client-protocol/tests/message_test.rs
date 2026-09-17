@@ -163,9 +163,15 @@ fn tool_result_diff_fields_skip_when_none() {
 fn loop_wakeup_metadata_is_additive_and_round_trips() {
     let old: MessageDto = serde_json::from_str(r#"{"role":"assistant","blocks":[]}"#).unwrap();
     assert!(old.loop_wakeup.is_none());
-    let dto = MessageDto { role: "system".into(), blocks: vec![], images: vec![],
+    let dto = MessageDto {
+        role: "system".into(),
+        blocks: vec![],
+        images: vec![],
         loop_wakeup: Some(client_protocol::message::LoopWakeupDto {
-            message: "fire".into(), companion: Some("healthy".into()), streak: 1, since_ms: 42,
+            message: "fire".into(),
+            companion: Some("healthy".into()),
+            streak: 1,
+            since_ms: 42,
         }),
     };
     let bytes = serde_json::to_string(&dto).unwrap();

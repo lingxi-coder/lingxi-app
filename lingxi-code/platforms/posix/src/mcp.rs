@@ -21,9 +21,9 @@ use platform_api::{
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
 use platform_common::mcp_remote::{
-    capabilities_from_wire, directory_read_capability, initialize_params_for_version, modern_meta,
-    modern_probe_params, modern_request_requires_meta, validate_modern_envelope,
-    MCP_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION,
+    capabilities_from_wire, initialize_params_for_version, modern_meta, modern_probe_params,
+    modern_request_requires_meta, validate_modern_envelope, MCP_PROTOCOL_VERSION,
+    MODERN_PROTOCOL_VERSION,
 };
 use platform_common::mcp_stdio::{StderrRing, StdioConfig};
 use platform_common::RemoteMcpTransport;
@@ -1481,6 +1481,10 @@ mod initialize_params_tests {
     //! MCP `initialize` request payload parity with claude-code
     //! `services/mcp/client.ts:985-1002`.
     use super::{initialize_params, CLIENT_DESCRIPTION, MCP_PROTOCOL_VERSION};
+    // Imported here, not at file scope: the lib target has no other user, so a
+    // file-level `use` reads as an unused import and gets deleted — which then
+    // breaks these tests, since they reached it through `super::`.
+    use platform_common::mcp_remote::directory_read_capability;
 
     #[test]
     fn capabilities_advertise_bare_empty_roots_and_elicitation() {
@@ -1561,20 +1565,16 @@ mod initialize_params_tests {
 
     #[test]
     fn directory_read_capability_decodes_none_absent_false_and_true() {
-        assert!(!super::directory_read_capability(None));
-        assert!(!super::directory_read_capability(Some(&serde_json::json!(
-            {}
-        ))));
-        assert!(!super::directory_read_capability(Some(
-            &serde_json::json!({
-                "extensions": {
-                    "io.modelcontextprotocol/skills": {
-                        "directoryRead": false
-                    }
+        assert!(!directory_read_capability(None));
+        assert!(!directory_read_capability(Some(&serde_json::json!({}))));
+        assert!(!directory_read_capability(Some(&serde_json::json!({
+            "extensions": {
+                "io.modelcontextprotocol/skills": {
+                    "directoryRead": false
                 }
-            })
-        )));
-        assert!(super::directory_read_capability(Some(&serde_json::json!({
+            }
+        }))));
+        assert!(directory_read_capability(Some(&serde_json::json!({
             "extensions": {
                 "io.modelcontextprotocol/skills": {
                     "directoryRead": true

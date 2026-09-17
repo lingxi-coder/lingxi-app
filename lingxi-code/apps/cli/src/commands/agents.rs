@@ -725,19 +725,17 @@ where
 {
     match attach(home, session_id).map_err(|e| e.to_string())? {
         crate::commands::attach::AttachDisposition::Attached => {
-            return Ok(OpenSessionDisposition::Attached);
+            Ok(OpenSessionDisposition::Attached)
         }
         crate::commands::attach::AttachDisposition::LiveEndpointUnavailable {
             short,
             session_id,
-        } => {
-            return Ok(OpenSessionDisposition::LiveEndpointUnavailable { short, session_id });
-        }
+        } => Ok(OpenSessionDisposition::LiveEndpointUnavailable { short, session_id }),
         crate::commands::attach::AttachDisposition::NotFound => {
-            return Ok(OpenSessionDisposition::ForegroundResume);
+            Ok(OpenSessionDisposition::ForegroundResume)
         }
         crate::commands::attach::AttachDisposition::NotRunning { short, session_id } => {
-            return Ok(OpenSessionDisposition::NotRunning { short, session_id });
+            Ok(OpenSessionDisposition::NotRunning { short, session_id })
         }
     }
 }
@@ -865,7 +863,7 @@ async fn run_agents_connect_flow(cli: &Cli) -> Result<(), String> {
     let outcome = widget.open_connect_picker();
     debug_assert!(matches!(outcome, tui::chat_widget::ChatOutcome::Continue));
 
-    let mut session = tui::terminal::TerminalSession::new_fullscreen()
+    let session = tui::terminal::TerminalSession::new_fullscreen()
         .map_err(|error| format!("terminal setup failed: {error}"))?;
     let backend = tui::CrosstermBackend::new(std::io::stdout());
     let mut terminal = tui::terminal::Terminal::with_options_at_origin(backend)

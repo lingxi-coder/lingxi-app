@@ -273,7 +273,13 @@ mod tests {
     fn the_description_frontmatter_line_uses_the_2_1_267_comma() {
         for (label, rendered) in [
             ("compact", render("/m")),
-            ("full", render_for_profile("/m", platform_api::model_capabilities::PromptProfile::FullHarness)),
+            (
+                "full",
+                render_for_profile(
+                    "/m",
+                    platform_api::model_capabilities::PromptProfile::FullHarness,
+                ),
+            ),
         ] {
             assert!(
                 rendered.contains("one-line summary, used to decide relevance"),

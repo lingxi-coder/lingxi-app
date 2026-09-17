@@ -520,8 +520,10 @@ mod tests {
         ));
 
         // Off by default, and the 4-arg wrapper never turns it on.
-        assert!(!get_compact_user_summary_message("<summary>S</summary>", false, None, false)
-            .contains("earliest part of the conversation"));
+        assert!(
+            !get_compact_user_summary_message("<summary>S</summary>", false, None, false)
+                .contains("earliest part of the conversation")
+        );
         assert_eq!(
             get_compact_user_summary_message("<summary>S</summary>", true, Some("/t.jsonl"), true),
             get_compact_user_summary_message_with(
@@ -547,7 +549,9 @@ mod tests {
             true,
             true,
         );
-        let transcript = all.find("read the full transcript at:").expect("transcript arm");
+        let transcript = all
+            .find("read the full transcript at:")
+            .expect("transcript arm");
         let preserved = all
             .find("Recent messages are preserved verbatim.")
             .expect("preserved arm");
@@ -583,8 +587,9 @@ mod tests {
         // messages and every other test still passes.
         assert!(SUMMARIZE_UP_TO_PROMPT
             .contains("This summary will be placed at the start of a continuing session"));
-        assert!(SUMMARIZE_FROM_PROMPT
-            .contains("The earlier messages are being kept intact and do NOT need to be summarized"));
+        assert!(SUMMARIZE_FROM_PROMPT.contains(
+            "The earlier messages are being kept intact and do NOT need to be summarized"
+        ));
 
         // The anti-spoof rule rides in both, exactly as in the base prompt.
         for body in [SUMMARIZE_UP_TO_PROMPT, SUMMARIZE_FROM_PROMPT] {
@@ -615,7 +620,8 @@ mod tests {
         assert_ne!(up_to, get_compact_prompt(None));
         assert_ne!(from, get_compact_prompt(None));
 
-        let with_context = get_summarize_prompt(Some("focus on the parser"), SummarizeDirection::From);
+        let with_context =
+            get_summarize_prompt(Some("focus on the parser"), SummarizeDirection::From);
         assert!(with_context.contains("\n\nAdditional Instructions:\nfocus on the parser"));
         assert!(with_context.ends_with(NO_TOOLS_TRAILER));
         // Blank context is dropped, exactly as `get_compact_prompt` drops it.

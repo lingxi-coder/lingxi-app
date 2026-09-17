@@ -169,9 +169,7 @@ impl FusionSetupView {
             FusionSetupStep::Analyst | FusionSetupStep::Synthesizer => {
                 "type to filter · Enter pick & next · ← back · Esc cancel".to_string()
             }
-            FusionSetupStep::Confirm => {
-                "Enter save · e toggle · ← back · Esc cancel".to_string()
-            }
+            FusionSetupStep::Confirm => "Enter save · e toggle · ← back · Esc cancel".to_string(),
         }
     }
 
@@ -421,7 +419,14 @@ mod tests {
     #[test]
     fn a_roster_longer_than_the_viewport_scrolls_with_the_highlight() {
         let candidates: Vec<_> = (0..24)
-            .map(|index| candidate("openrouter", &format!("m-{index}"), &format!("Model {index}"), true))
+            .map(|index| {
+                candidate(
+                    "openrouter",
+                    &format!("m-{index}"),
+                    &format!("Model {index}"),
+                    true,
+                )
+            })
             .collect();
         let mut view = FusionSetupView::new(FusionSetupSnapshot {
             candidates,
@@ -432,7 +437,10 @@ mod tests {
             view.handle_key(key(KeyCode::Down));
         }
         let text = render_text(&view);
-        assert!(text.contains("Model 23"), "the highlight must stay visible:\n{text}");
+        assert!(
+            text.contains("Model 23"),
+            "the highlight must stay visible:\n{text}"
+        );
         assert!(
             !text.contains("Model 0 "),
             "the viewport must have scrolled past the top of a 24-row list"

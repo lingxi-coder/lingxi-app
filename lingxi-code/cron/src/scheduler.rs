@@ -695,8 +695,7 @@ impl ClaimedCronJob {
 }
 
 fn is_dynamic_loop_prompt(prompt: &str) -> bool {
-    prompt == crate::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL
-        || prompt == crate::LOOP_FILE_DYNAMIC_SENTINEL
+    prompt == crate::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL || prompt == crate::LOOP_FILE_DYNAMIC_SENTINEL
 }
 
 #[async_trait::async_trait]
@@ -3115,7 +3114,10 @@ mod scheduler_tick_tests {
     /// the next wakeup would fold its notice out of sight.
     #[tokio::test]
     async fn a_fixed_task_firing_into_the_loop_span_vetoes_the_fold() {
-        async fn fire_once(prompt: &str, tick_in_flight: bool) -> crate::autonomous_loop::LoopFoldOutcome {
+        async fn fire_once(
+            prompt: &str,
+            tick_in_flight: bool,
+        ) -> crate::autonomous_loop::LoopFoldOutcome {
             let fs = MemFs::with(TASKS_PATH, "{\"tasks\":[]}");
             let clock = FixedClock::at_secs(NOW);
             let scheduler = CronScheduler::new(

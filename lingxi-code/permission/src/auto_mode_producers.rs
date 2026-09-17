@@ -576,7 +576,7 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
         repo_path
     };
 
-    let parts = vec![
+    let parts = [
         format!("Repo path: {shown_path}"),
         format!("{}{tracked}", facts::REPO_TRACKED_FILE_COUNT_PREFIX),
         format!("{}{default_branch}", facts::REPO_DEFAULT_BRANCH_PREFIX),
@@ -2294,7 +2294,7 @@ pub fn extract_command_words(lines: &[String], format: HistoryFormat) -> Vec<Str
     let mut out = Vec::new();
     for line in lines {
         let (mut first, second) = if format == HistoryFormat::PsReadline {
-            let mut w = line.trim_start().split_whitespace();
+            let mut w = line.split_whitespace();
             (w.next(), w.next())
         } else {
             posix_head_words(line)
@@ -2693,7 +2693,7 @@ pub fn project_usage_section(source: &dyn ProjectUsageSource) -> String {
         String::new()
     };
 
-    vec![
+    [
         format!(
             "{}{}{skipped_note}{}{}",
             facts::TRANSCRIPTS_SCANNED_PREFIX,
@@ -3196,7 +3196,7 @@ pub fn config_scans_section(source: &dyn ConfigScanSource) -> String {
 
     // NOTE the first heading carries no leading newline while the rest do --
     // the constants hold that difference, so they are used as-is.
-    vec![
+    [
         section(
             sections::HEADING_PACKAGE_REGISTRY_HOSTS,
             bullets(&registries),

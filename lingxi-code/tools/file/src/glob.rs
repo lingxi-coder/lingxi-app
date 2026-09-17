@@ -409,9 +409,13 @@ impl Tool for GlobTool {
             if let Some(directory) = registry.task_output_directory().await {
                 // Keep session task outputs out of directory listings.
                 if !canon_base.is_file() {
-                    let exclusions = platform_api::task_output::search_exclusions(Path::new(&directory), &canon_base);
+                    let exclusions = platform_api::task_output::search_exclusions(
+                        Path::new(&directory),
+                        &canon_base,
+                    );
                     for exclusion in exclusions {
-                        ob.add(&exclusion).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+                        ob.add(&exclusion)
+                            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
                     }
                 }
             }
@@ -677,7 +681,11 @@ mod tests {
         assert!(result.data.to_string().contains("public.txt"));
         assert!(!result.data.to_string().contains("b12345678.output"));
         let result = tool
-            .call(json!({"pattern":"**/*", "path":output}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"pattern":"**/*", "path":output}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
         assert!(!result.data.to_string().contains("b12345678.output"));
@@ -808,7 +816,6 @@ mod tests {
     }
 
     #[test]
-        #[test]
     fn max_matches_byte_locked() {
         assert_eq!(MAX_GLOB_MATCHES, 100);
     }
@@ -1597,9 +1604,12 @@ mod tests {
         // TL-4: the probe moved from `validate_input` (pre-permission) into
         // `call` (post-permission), so this exercises `call`.
         assert!(
-            tool.validate_input(&json!({ "pattern": "*", "path": "no_such_dir" }), &fresh_ctx())
-                .await
-                .is_ok(),
+            tool.validate_input(
+                &json!({ "pattern": "*", "path": "no_such_dir" }),
+                &fresh_ctx()
+            )
+            .await
+            .is_ok(),
             "validate_input must no longer touch disk"
         );
         let err = tool

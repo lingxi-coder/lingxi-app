@@ -570,7 +570,7 @@ mod tests {
             .state
             .journal
             .append_once(
-                &receipt_id(&observed),
+                receipt_id(&observed),
                 &encode_session_event(&SessionEvent::AttemptReceipt(observed, fake)).unwrap(),
             )
             .unwrap();

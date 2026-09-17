@@ -33,7 +33,6 @@ use crate::{
 use futures::stream::BoxStream;
 use protocol::{is_nested_media_value, ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -312,7 +311,7 @@ fn openrouter_free_rate_limit_message(body: Option<&serde_json::Value>) -> Strin
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|message| !message.is_empty())
-        .map(|message| message.trim_end_matches(|c: char| matches!(c, '.' | '!' | '?')));
+        .map(|message| message.trim_end_matches(['.', '!', '?']));
 
     match detail {
         Some(detail) => format!(
@@ -4913,9 +4912,9 @@ fn apply_cache_editing(
 fn new_request_id() -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..16)
-        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
         .collect()
 }
 

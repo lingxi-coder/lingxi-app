@@ -761,7 +761,6 @@ mod load_tests {
     #[test]
     fn load_with_layers_gives_managed_precedence_without_dropping_project_provider_extensions() {
         use serde_json::json;
-        use std::collections::BTreeMap as Map;
 
         let _guard = HOME_LOCK
             .lock()
@@ -834,7 +833,7 @@ mod load_tests {
             Some(&tracer::Source::Managed)
         );
 
-        let providers = eff.settings.providers.unwrap_or_else(Map::new);
+        let providers = eff.settings.providers.unwrap_or_default();
         assert!(providers.contains_key("userOnly"));
         assert!(providers.contains_key("projectOnly"));
         assert!(providers.contains_key("localOnly"));

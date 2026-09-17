@@ -1299,6 +1299,12 @@ fn isolate_test_runtime_config(
 /// Shared engine assembly: build the runtime from an already-resolved
 /// [`DesktopConfig`] + output sink. Lets the TUI path inject a permission gate
 /// derived from the SAME `cfg` without resolving config twice.
+// Under `cfg(test)` the body immediately shadows `cfg` with its own `mut cfg`,
+// so the parameter's `mut` really is unused THERE — but it is load-bearing
+// everywhere else (the session-id / writer-lease overrides below assign into
+// it). Scoping the allow to `test` keeps the lint honest in the shipping build
+// instead of deleting a `mut` the lib cannot compile without.
+#[cfg_attr(test, allow(unused_mut))]
 pub async fn build_runtime_from_config(
     mut cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
@@ -1319,7 +1325,7 @@ pub async fn build_runtime_from_config(
             .session_id_override
             .as_deref()
             .and_then(protocol::SessionId::parse_prefixed)
-            .unwrap_or_else(protocol::SessionId::new);
+            .unwrap_or_default();
         cfg.session_id_override = Some(session_id.as_uuid().to_string());
         let lease =
             platform_api::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"))

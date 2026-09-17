@@ -458,7 +458,10 @@ mod tests {
             let mut v = view(vec![row("a")]);
             tab_to(&mut v, scope);
             assert!(
-                matches!(v.handle_key(press(KeyCode::Enter)), ViewOutcome::Rewind { .. }),
+                matches!(
+                    v.handle_key(press(KeyCode::Enter)),
+                    ViewOutcome::Rewind { .. }
+                ),
                 "{scope:?} must still restore"
             );
         }

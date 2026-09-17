@@ -3398,9 +3398,7 @@ fn redact_url_for_display(raw: &str) -> String {
     let rest = &raw[scheme_end + 3..];
 
     // Authority ends at the first `/`, `?`, or `#`.
-    let authority_end = rest
-        .find(|c| c == '/' || c == '?' || c == '#')
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     let after_authority = &rest[authority_end..];
 
@@ -3414,7 +3412,7 @@ fn redact_url_for_display(raw: &str) -> String {
     // Path = everything after the authority up to `?`/`#`; query (`?…`) and
     // fragment (`#…`) are dropped.
     let path_end = after_authority
-        .find(|c| c == '?' || c == '#')
+        .find(['?', '#'])
         .unwrap_or(after_authority.len());
     let mut path = &after_authority[..path_end];
 

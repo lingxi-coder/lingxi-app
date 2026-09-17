@@ -92,9 +92,17 @@ pub trait TaskStatusSink: Send + Sync {
     async fn set_agent_display(&self, _id: &str, _model: String, _effort: Option<String>) {}
 
     /// Bind a prepared task to the real pool identity before its first model call.
-    async fn bind_agent_id(&self, _task_id: &str, _agent_id: protocol::AgentId) -> Result<(), String> { Ok(()) }
+    async fn bind_agent_id(
+        &self,
+        _task_id: &str,
+        _agent_id: protocol::AgentId,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Shared registry for recipient-scoped child notifications.
-    fn task_registry(&self) -> Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>> { None }
+    fn task_registry(&self) -> Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>> {
+        None
+    }
     /// Whether handler workers must remain prepared-but-paused until their
     /// returned [`TaskHandle`](crate::task_trait::TaskHandle) is activated by
     /// the owning registry. Registry-backed sinks opt in; standalone/test sinks
@@ -452,7 +460,10 @@ impl Task for LocalBashHandler {
         ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
         // 1. Only the LocalBash variant is accepted; reject the other six.
-        let TaskSpawnInput::LocalBash { command, timeout, .. } = input else {
+        let TaskSpawnInput::LocalBash {
+            command, timeout, ..
+        } = input
+        else {
             return Err(TaskError::Internal(
                 "local_bash handler received a non-LocalBash spawn input".into(),
             ));

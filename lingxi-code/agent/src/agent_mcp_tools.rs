@@ -78,7 +78,11 @@ pub type AgentMcpConstructionLease = Arc<dyn Send + Sync>;
 /// `hook_executor`/`skill_loader` — see that field's doc in `handle.rs`).
 #[allow(clippy::type_complexity)]
 pub type AgentMcpToolBuilder = Arc<
-    dyn Fn(AgentId, AgentDefinition, Option<AgentMcpConstructionLease>) -> Pin<Box<dyn Future<Output = AgentMcpToolSet> + Send>>
+    dyn Fn(
+            AgentId,
+            AgentDefinition,
+            Option<AgentMcpConstructionLease>,
+        ) -> Pin<Box<dyn Future<Output = AgentMcpToolSet> + Send>>
         + Send
         + Sync,
 >;

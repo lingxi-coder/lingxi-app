@@ -20,10 +20,10 @@
 //! `tracing::warn!`). The exposed [`parse_agent_markdown`] returns a
 //! typed error so unit tests can assert on the failure mode.
 
-use crate::definition::{AgentCacheTtl, 
-    parse_effort_value, AgentDefinition, AgentEffort, AgentIsolation, AgentMcpServerSpec,
-    AgentMemoryScope, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy, ObserverSpec,
-    EFFORT_LEVELS,
+use crate::definition::{
+    parse_effort_value, AgentCacheTtl, AgentDefinition, AgentEffort, AgentIsolation,
+    AgentMcpServerSpec, AgentMemoryScope, AgentModel, AgentPermissionMode, AgentSource,
+    AgentToolPolicy, ObserverSpec, EFFORT_LEVELS,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -421,7 +421,7 @@ pub fn parse_agent_markdown(
     let system_prompt = body.trim().to_string();
 
     Ok(AgentDefinition {
-                agent_type,
+        agent_type,
         when_to_use,
         tools: tools_policy,
         max_turns,
@@ -643,10 +643,7 @@ fn parse_agent_tools_from_frontmatter(value: Option<&serde_yaml::Value>) -> Opti
         None => {
             // For agents: undefined = all tools (None); null = no tools ([]).
             // (`value === undefined ? undefined : []`)
-            match value {
-                None => None,
-                Some(_) => Some(Vec::new()),
-            }
+            value.map(|_| Vec::new())
         }
         Some(parsed) => {
             if parsed.iter().any(|t| t == "*") {
@@ -2487,7 +2484,10 @@ mod tests {
         let keeper = agents.iter().find(|a| a.agent_type == "keeper").unwrap();
         assert_eq!(keeper.when_to_use, "POLICY");
         assert_eq!(keeper.source, AgentSource::PolicySettings);
-        assert_eq!(agents[1].agent_type, "other", "untouched entries keep order");
+        assert_eq!(
+            agents[1].agent_type, "other",
+            "untouched entries keep order"
+        );
     }
 
     #[test]

@@ -2005,8 +2005,6 @@ impl ConversationOrchestrator {
                 Some(std::time::SystemTime::now());
         }
     }
-
-
 }
 
 /// Claude 2.1.270 `npe`: strip ANSI, normalize whitespace, remove invisible

@@ -161,7 +161,9 @@ where
             InputEvent::Read(Ok(_)) => break,
             InputEvent::Read(Err(_)) => return StepOutcome::Continue,
             InputEvent::Signal => {
-                if let Some(wake) = notifications { wake.user_interrupt().await; }
+                if let Some(wake) = notifications {
+                    wake.user_interrupt().await;
+                }
                 if sigint.take_idle_armed() {
                     return StepOutcome::DoubleSigintExit;
                 }
@@ -317,17 +319,13 @@ mod tests {
         assert_ne!(StepOutcome::Continue, StepOutcome::Eof);
         assert_ne!(
             StepOutcome::DoubleSigintExit,
-            StepOutcome::ExitCommand {
-                undispatched: None
-            }
+            StepOutcome::ExitCommand { undispatched: None }
         );
         // The two exit shapes are NOT interchangeable: one still owes the
         // locked "Exiting." literal and the other has already printed its own
         // output. An `==` here would let a `/stop` be re-announced as `/exit`.
         assert_ne!(
-            StepOutcome::ExitCommand {
-                undispatched: None
-            },
+            StepOutcome::ExitCommand { undispatched: None },
             StepOutcome::ExitCommand {
                 undispatched: Some("/exit".to_string())
             }
@@ -341,9 +339,7 @@ mod tests {
             StepOutcome::Continue,
             StepOutcome::Eof,
             StepOutcome::DoubleSigintExit,
-            StepOutcome::ExitCommand {
-                undispatched: None,
-            },
+            StepOutcome::ExitCommand { undispatched: None },
             StepOutcome::ExitCommand {
                 undispatched: Some("/quit".to_string()),
             },

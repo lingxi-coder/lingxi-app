@@ -244,7 +244,7 @@ impl ResponsesWebSocketTransportSession for ScriptedWsSession {
         })
     }
 
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), LlmError>> {
+    fn close(&mut self) -> BoxFuture<'_, Result<(), LlmError>> {
         *self.close_count.lock().expect("close_count") += 1;
         Box::pin(async { Ok(()) })
     }

@@ -154,7 +154,8 @@ mod tests {
     use super::*;
 
     fn temp_home(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lingxi-debugskill-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lingxi-debugskill-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("debug")).unwrap();
         dir
@@ -163,8 +164,11 @@ mod tests {
     fn seed_log(home: &Path, body: &str) -> PathBuf {
         let log = home.join("debug").join("run.log");
         std::fs::write(&log, body).unwrap();
-        std::fs::write(home.join("debug").join("latest"), log.to_string_lossy().as_bytes())
-            .unwrap();
+        std::fs::write(
+            home.join("debug").join("latest"),
+            log.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
         log
     }
 
@@ -175,9 +179,18 @@ mod tests {
         let home = temp_home("has-log");
         let log = seed_log(&home, "[INFO] boot\n[ERROR] something broke\n");
         let out = render(&home, "it crashed", Path::new("/repo"));
-        assert!(out.contains(&log.display().to_string()), "must name the log path");
-        assert!(out.contains("[ERROR] something broke"), "must inline the tail");
-        assert!(out.contains("it crashed"), "must carry the user's description");
+        assert!(
+            out.contains(&log.display().to_string()),
+            "must name the log path"
+        );
+        assert!(
+            out.contains("[ERROR] something broke"),
+            "must inline the tail"
+        );
+        assert!(
+            out.contains("it crashed"),
+            "must carry the user's description"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -205,7 +218,10 @@ mod tests {
         let home = temp_home("stale");
         std::fs::write(
             home.join("debug").join("latest"),
-            home.join("debug").join("gone.log").to_string_lossy().as_bytes(),
+            home.join("debug")
+                .join("gone.log")
+                .to_string_lossy()
+                .as_bytes(),
         )
         .unwrap();
         let out = render(&home, "", Path::new("/repo"));

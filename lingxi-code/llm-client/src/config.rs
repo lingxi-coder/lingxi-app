@@ -275,7 +275,10 @@ impl ProviderProfile {
     /// standalone profile).
     #[must_use]
     pub fn connection_id(&self) -> &str {
-        self.connection.connection_id.as_deref().unwrap_or("default")
+        self.connection
+            .connection_id
+            .as_deref()
+            .unwrap_or("default")
     }
 
     /// Sort key giving a total, stable order over one group's connections.

@@ -253,7 +253,7 @@ fn parse_autocompact_window(value: &str) -> Result<AutocompactWindow, String> {
             bare
         }
     };
-    if !tokens.is_finite() || tokens < 100_000.0 || tokens > 1_000_000.0 {
+    if !tokens.is_finite() || !(100_000.0..=1_000_000.0).contains(&tokens) {
         return Err(INVALID.to_string());
     }
     // `Math.round(r)`: `r` is positive here (anything below 1e5 was rejected),
@@ -1118,7 +1118,6 @@ pub struct Argv {
     #[arg(long = "permission-prompts", value_name = "target")]
     pub permission_prompts: Option<String>,
 
-
     /// (CLI-2) `--system-prompt-snapshot <on|off>` — record the system prompt
     /// once per conversation and reuse it verbatim on every request and resume.
     ///
@@ -1415,13 +1414,11 @@ impl Argv {
                 return Err("--input-format=stream-json requires --print.".to_string());
             }
         }
-        if self.replay_user_messages {
-            if !self.is_stream_json_input() || !self.is_stream_json() {
-                return Err(
-                    "--replay-user-messages requires both --input-format=stream-json and --output-format=stream-json."
-                        .to_string(),
-                );
-            }
+        if self.replay_user_messages && (!self.is_stream_json_input() || !self.is_stream_json()) {
+            return Err(
+                "--replay-user-messages requires both --input-format=stream-json and --output-format=stream-json."
+                    .to_string(),
+            );
         }
         Ok(())
     }

@@ -198,7 +198,12 @@ mod tests {
     }
 
     fn convo() -> Vec<ConversationMessage> {
-        vec![user("one"), assistant("two"), user("three"), assistant("four")]
+        vec![
+            user("one"),
+            assistant("two"),
+            user("three"),
+            assistant("four"),
+        ]
     }
 
     /// 🚨 The property that decides whether this feature does the right thing

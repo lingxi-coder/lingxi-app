@@ -278,7 +278,7 @@ impl PromptingGate for InteractivePromptingGate {
             // 2. Read one line from stdin.
             let line = {
                 let mut buf = String::new();
-                let n = (&mut *in_guard)
+                let n = (*in_guard)
                     .read_line(&mut buf)
                     .await
                     .map_err(|e| PromptError::Io(e.to_string()))?;

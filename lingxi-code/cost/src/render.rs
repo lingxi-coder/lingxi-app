@@ -287,7 +287,11 @@ pub fn prompt_cache_line(
         parts.push(format!(
             "{} {} (last {} ago{}, {} tokens re-cached)",
             summary.misses,
-            if summary.misses == 1 { "miss" } else { "misses" },
+            if summary.misses == 1 {
+                "miss"
+            } else {
+                "misses"
+            },
             format_duration_ms(since),
             miss_cause_clause(summary.last_miss_attribution.as_ref()),
             format_cache_token_count(
@@ -336,9 +340,7 @@ pub fn prompt_cache_line(
 /// diagnosed, so the miss segment reads the same as it did before attribution
 /// existed.
 #[must_use]
-fn miss_cause_clause(
-    attribution: Option<&crate::prompt_cache_ledger::MissAttribution>,
-) -> String {
+fn miss_cause_clause(attribution: Option<&crate::prompt_cache_ledger::MissAttribution>) -> String {
     let Some(attribution) = attribution else {
         return String::new();
     };
@@ -649,8 +651,8 @@ mod tests {
             system_char_delta: None,
         });
         ledger.record(facts(60_000, 100, 1_000, 49_000));
-        let line = prompt_cache_line(&ledger.summary(120_000), Some(50_100), 120_000)
-            .expect("line");
+        let line =
+            prompt_cache_line(&ledger.summary(120_000), Some(50_100), 120_000).expect("line");
         assert!(
             line.contains(
                 "1 miss (last 1m 0s ago \u{2014} likely cause: tool definitions changed (+2/-1), \
@@ -725,7 +727,10 @@ mod tests {
         ledger.record(facts(0, 5_000, 0, 0));
         ledger.record(facts(1_000, 9_000, 0, 0));
         let line = prompt_cache_line(&ledger.summary(2_000), Some(9_000), 2_000).expect("line");
-        assert!(line.contains("no prompt caching reported by the API"), "{line}");
+        assert!(
+            line.contains("no prompt caching reported by the API"),
+            "{line}"
+        );
         assert!(!line.contains("cold"), "{line}");
         assert!(!line.contains("warm"), "{line}");
     }

@@ -116,7 +116,10 @@ impl ReqwestHttp {
 
     /// Inject the host's existing HTTP(S) CONNECT policy for Monitor sockets.
     #[must_use]
-    pub fn with_monitor_proxy(mut self, proxy: Arc<dyn platform_api::http::MonitorWebSocketProxy>) -> Self {
+    pub fn with_monitor_proxy(
+        mut self,
+        proxy: Arc<dyn platform_api::http::MonitorWebSocketProxy>,
+    ) -> Self {
         self.monitor_proxy = Some(proxy);
         self
     }
@@ -756,8 +759,11 @@ impl HttpTransport for ReqwestHttp {
         url: String,
         protocols: Vec<String>,
     ) -> Result<platform_api::http::MonitorWebSocketReceiver, HttpError> {
-        let tls = self.websocket_tls.as_ref()
-            .map_err(|error| HttpError::InvalidRequest(error.clone()))?.clone();
+        let tls = self
+            .websocket_tls
+            .as_ref()
+            .map_err(|error| HttpError::InvalidRequest(error.clone()))?
+            .clone();
         crate::monitor_websocket::connect(url, protocols, tls, self.monitor_proxy.clone()).await
     }
 

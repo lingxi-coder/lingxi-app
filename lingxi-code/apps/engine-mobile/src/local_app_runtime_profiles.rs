@@ -968,7 +968,8 @@ mod tests {
 
     #[test]
     fn unpublished_profiles_are_listed_but_not_scaffoldable() {
-        for family in [AppRuntimeProfile::Babylon3d] {
+        {
+            let family = AppRuntimeProfile::Babylon3d;
             assert!(current_binding_for_family(family).is_err());
         }
         let listed = list_runtime_profiles();

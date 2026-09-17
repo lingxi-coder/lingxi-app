@@ -1414,7 +1414,10 @@ fn current_contract_index() -> ContractIndex {
         "Vec<ModelDetailsDto>",
     );
     put("ProviderModelCatalogEntryDto.group", "Option<String>");
-    put("ProviderModelCatalogEntryDto.connection_id", "Option<String>");
+    put(
+        "ProviderModelCatalogEntryDto.connection_id",
+        "Option<String>",
+    );
 
     put("PermissionModeOptionDto.mode", "String");
     put("PermissionModeOptionDto.available", "bool");

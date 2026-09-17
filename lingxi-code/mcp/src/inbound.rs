@@ -168,11 +168,7 @@ impl ElicitationCreateHandler {
         server_name: impl Into<String>,
         dispatcher: Option<Arc<dyn HookDispatcher>>,
     ) -> Self {
-        Self::with_dispatcher_and_counter(
-            server_name,
-            dispatcher,
-            Arc::new(AtomicUsize::new(0)),
-        )
+        Self::with_dispatcher_and_counter(server_name, dispatcher, Arc::new(AtomicUsize::new(0)))
     }
 
     /// As [`Self::with_dispatcher`], but SHARING the open-elicitation counter
@@ -311,7 +307,7 @@ struct CapturedElicitationTelemetryEvent {
 std::thread_local! {
     static TEST_ELICITATION_TELEMETRY_EVENTS:
         std::cell::RefCell<Vec<CapturedElicitationTelemetryEvent>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]

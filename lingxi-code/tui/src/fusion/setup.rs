@@ -407,10 +407,7 @@ impl FusionSetupState {
 /// `Enter` on a list step picks the highlighted row when nothing is picked yet
 /// and otherwise advances — so the common path (arrow to a model, Enter) works
 /// without learning that Space is the toggle.
-pub fn handle_fusion_setup_key(
-    state: &mut FusionSetupState,
-    code: KeyCode,
-) -> FusionSetupOutcome {
+pub fn handle_fusion_setup_key(state: &mut FusionSetupState, code: KeyCode) -> FusionSetupOutcome {
     match code {
         KeyCode::Esc => return FusionSetupOutcome::Cancel,
         KeyCode::Up => {
@@ -626,7 +623,11 @@ mod tests {
             ],
         );
         assert_eq!(state.panels.len(), 2);
-        assert!(state.notice.as_deref().unwrap().contains("fusion.maxPanel is 2"));
+        assert!(state
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("fusion.maxPanel is 2"));
     }
 
     #[test]
@@ -647,7 +648,10 @@ mod tests {
             state.analyst,
             Some(FusionModelChoice::new("anthropic", "claude-opus-5"))
         );
-        assert!(state.enable, "the switch seeds from settings, not from `false`");
+        assert!(
+            state.enable,
+            "the switch seeds from settings, not from `false`"
+        );
     }
 
     /// A configured model the current machine cannot reach (provider not

@@ -561,17 +561,28 @@ pub fn lower_conversation_message_with(
                 .collect(),
             images: Vec::new(),
         },
-        ConversationMessage::System { content, subtype, .. }
-            if subtype.as_deref() == Some("scheduled_task_fire") => {
-                let payload: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-                if payload.get("taskKindLoop") == Some(&serde_json::json!(false)) {
-                    MessageDto { role: "system".into(), images: Vec::new(), loop_wakeup: None,
-                        blocks: vec![MessageBlockDto::Text { text: payload["message"].as_str().unwrap_or_default().into() }] }
-                } else {
-                    MessageDto { role: "system".into(), blocks: Vec::new(), images: Vec::new(),
-                        loop_wakeup: serde_json::from_value(payload).ok() }
+        ConversationMessage::System {
+            content, subtype, ..
+        } if subtype.as_deref() == Some("scheduled_task_fire") => {
+            let payload: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
+            if payload.get("taskKindLoop") == Some(&serde_json::json!(false)) {
+                MessageDto {
+                    role: "system".into(),
+                    images: Vec::new(),
+                    loop_wakeup: None,
+                    blocks: vec![MessageBlockDto::Text {
+                        text: payload["message"].as_str().unwrap_or_default().into(),
+                    }],
                 }
-            },
+            } else {
+                MessageDto {
+                    role: "system".into(),
+                    blocks: Vec::new(),
+                    images: Vec::new(),
+                    loop_wakeup: serde_json::from_value(payload).ok(),
+                }
+            }
+        }
         ConversationMessage::System {
             subtype,
             compact_metadata,
@@ -712,16 +723,32 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
     let mut pending_loop_companion: Option<String> = None;
     for message in history {
         if let Some(expected) = pending_loop_companion.take() {
-            if let ConversationMessage::User { content, is_meta: true, .. } = message {
-                let text = content.iter().filter_map(|block| match block {
-                    protocol::ContentBlock::Text { text } => Some(text.as_str()), _ => None,
-                }).collect::<Vec<_>>().join("");
-                if text == expected { continue; }
+            if let ConversationMessage::User {
+                content,
+                is_meta: true,
+                ..
+            } = message
+            {
+                let text = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if text == expected {
+                    continue;
+                }
             }
         }
-        if let ConversationMessage::System { content, subtype, .. } = message {
+        if let ConversationMessage::System {
+            content, subtype, ..
+        } = message
+        {
             if subtype.as_deref() == Some("scheduled_task_fire") {
-                pending_loop_companion = serde_json::from_str::<serde_json::Value>(content).ok()
+                pending_loop_companion = serde_json::from_str::<serde_json::Value>(content)
+                    .ok()
                     .and_then(|value| value["companion"].as_str().map(str::to_owned));
             }
         }
@@ -760,13 +787,20 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 is_visible_in_transcript_only: true,
                 ..
             } => {}
-            ConversationMessage::User { content, is_meta: true, .. } => {
+            ConversationMessage::User {
+                content,
+                is_meta: true,
+                ..
+            } => {
                 // Scheduled inputs and other internal meta text are model context,
                 // not user-authored scrollback. Tool results still belong to their
                 // visible calls and must retain the shared transcript index.
-                let blocks: Vec<_> = content.iter()
+                let blocks: Vec<_> = content
+                    .iter()
                     .filter(|block| matches!(block, protocol::ContentBlock::ToolResult { .. }))
-                    .filter_map(|block| crate::turn::lower_content_block_with(block, &mut tool_uses))
+                    .filter_map(|block| {
+                        crate::turn::lower_content_block_with(block, &mut tool_uses)
+                    })
                     .collect();
                 if !blocks.is_empty() {
                     transcript.push(MessageDto {
@@ -1589,8 +1623,11 @@ mod tests {
         let tick = "Internal scheduled tick".to_string();
         let tool_id = ToolUseId::new();
         let meta = |content| ConversationMessage::User {
-            id: MessageId::new(), content, is_meta: true,
-            is_compact_summary: false, is_visible_in_transcript_only: false,
+            id: MessageId::new(),
+            content,
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let history = vec![
             meta(vec![ContentBlock::Text { text: tick.clone() }]),
@@ -1598,24 +1635,36 @@ mod tests {
             ConversationMessage::Assistant {
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
-                    id: tool_id.clone(), name: "Bash".to_string(),
-                    input: serde_json::json!({"command": "pwd"}), provider_id: None,
+                    id: tool_id.clone(),
+                    name: "Bash".to_string(),
+                    input: serde_json::json!({"command": "pwd"}),
+                    provider_id: None,
                 }],
                 stop_reason: Some("tool_use".to_string()),
             },
             meta(vec![
-                ContentBlock::Text { text: "Internal result context".to_string() },
+                ContentBlock::Text {
+                    text: "Internal result context".to_string(),
+                },
                 ContentBlock::ToolResult {
-                    tool_use_id: tool_id, content: "/tmp".to_string(), is_error: false,
-                    provider_tool_use_id: None, content_blocks: None,
+                    tool_use_id: tool_id,
+                    content: "/tmp".to_string(),
+                    is_error: false,
+                    provider_tool_use_id: None,
+                    content_blocks: None,
                 },
             ]),
         ];
         let transcript = lower_transcript(&history);
         assert_eq!(transcript.len(), 3);
-        assert_eq!(transcript[0].blocks, vec![MessageBlockDto::Text { text: tick }]);
+        assert_eq!(
+            transcript[0].blocks,
+            vec![MessageBlockDto::Text { text: tick }]
+        );
         assert_eq!(transcript[2].blocks.len(), 1);
-        assert!(matches!(&transcript[2].blocks[0], MessageBlockDto::ToolResult { tool, .. } if tool == "Bash"));
+        assert!(
+            matches!(&transcript[2].blocks[0], MessageBlockDto::ToolResult { tool, .. } if tool == "Bash")
+        );
     }
 
     #[test]
@@ -1725,7 +1774,11 @@ fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
     assert_eq!(fire.message, "任意文案");
     assert_eq!(fire.streak, 2);
     assert_eq!(fire.since_ms, 123);
-    let companion = ConversationMessage::user_meta(protocol::MessageId::new(), "healthy".to_string());
-    assert_eq!(lower_transcript(&[message, companion]).len(), 1,
-        "the model companion is rendered once through fire metadata");
+    let companion =
+        ConversationMessage::user_meta(protocol::MessageId::new(), "healthy".to_string());
+    assert_eq!(
+        lower_transcript(&[message, companion]).len(),
+        1,
+        "the model companion is rendered once through fire metadata"
+    );
 }

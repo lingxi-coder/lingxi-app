@@ -12,6 +12,22 @@
 //! `OpenProcess` on Windows) to detect stale lockholders. The unsafe block is
 //! isolated to that single function.
 
+// The workspace sets `unsafe_code = "deny"` rather than `forbid` precisely so a
+// crate with audited platform FFI can opt out here, the way `platform-posix`
+// does for `libc::setsid()`. Taken as a crate-level allow instead of a private
+// copy of the whole workspace lint table: that copy is why this crate silently
+// stopped tracking workspace lint decisions and accumulated findings the rest
+// of the tree had already ruled on, and carried `unsafe_code = "allow"` where
+// the workspace says deny.
+#![allow(unsafe_code)]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 42 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
+
 pub mod autonomous_loop;
 pub mod lock;
 pub mod run_due;

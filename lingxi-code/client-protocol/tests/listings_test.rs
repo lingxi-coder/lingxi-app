@@ -268,7 +268,8 @@ fn provider_model_catalog_round_trips() {
             provider_id: "anthropic".into(),
             provider_label: "Anthropic".into(),
             models: vec![detail],
-            group: None, connection_id: None,
+            group: None,
+            connection_id: None,
         }],
     };
     let value = serde_json::to_value(&event).unwrap();
@@ -802,12 +803,23 @@ fn check_status_variants_round_trip() {
 fn task_row_old_payload_defaults_new_display_fields_and_nondefaults_round_trip() {
     let old = serde_json::json!({"task_id":"a12345678", "task_type":"local_agent", "status":{"type":"completed"}, "description":"review"});
     let mut row: TaskRowDto = serde_json::from_value(old).unwrap();
-    assert!(!row.unread); assert_eq!(row.model, None); assert_eq!(row.effort, None);
+    assert!(!row.unread);
+    assert_eq!(row.model, None);
+    assert_eq!(row.effort, None);
     let encoded = serde_json::to_value(&row).unwrap();
-    for field in ["unread", "model", "effort"] { assert!(encoded.get(field).is_none(), "default {field} must remain wire-additive"); }
-    row.unread = true; row.model = Some("resolved-model".into()); row.effort = Some("high".into());
+    for field in ["unread", "model", "effort"] {
+        assert!(
+            encoded.get(field).is_none(),
+            "default {field} must remain wire-additive"
+        );
+    }
+    row.unread = true;
+    row.model = Some("resolved-model".into());
+    row.effort = Some("high".into());
     let encoded = serde_json::to_value(&row).unwrap();
-    assert_eq!(encoded["unread"], true); assert_eq!(encoded["model"], "resolved-model"); assert_eq!(encoded["effort"], "high");
+    assert_eq!(encoded["unread"], true);
+    assert_eq!(encoded["model"], "resolved-model");
+    assert_eq!(encoded["effort"], "high");
     assert_eq!(serde_json::from_value::<TaskRowDto>(encoded).unwrap(), row);
 }
 
@@ -815,7 +827,9 @@ fn task_row_old_payload_defaults_new_display_fields_and_nondefaults_round_trip()
 fn task_row_round_trips() {
     let ev = ClientEvent::TaskRow {
         task: TaskRowDto {
-            unread: false, model: None, effort: None,
+            unread: false,
+            model: None,
+            effort: None,
             kind: None,
             awaiting_plan_approval: false,
             task_id: "b1234abcd".to_string(),

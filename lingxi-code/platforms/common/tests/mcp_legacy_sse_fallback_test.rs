@@ -19,7 +19,6 @@ use platform_api::{McpConnectOptions, McpTransport, McpTransportSpec};
 use platform_common::mcp_remote::RemoteMcpTransport;
 use serde_json::{json, Value};
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 

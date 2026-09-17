@@ -365,7 +365,7 @@ impl crate::ResponsesWebSocketTransportSession for BridgeResponsesWebSocketSessi
         })
     }
 
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), LlmError>> {
+    fn close(&mut self) -> BoxFuture<'_, Result<(), LlmError>> {
         Box::pin(async move {
             self.connection
                 .close()

@@ -11,6 +11,21 @@
 // handle-relative open/rename API, so that module wraps a small audited set of
 // `ntdll` calls. Keeping this at `deny` lets the exception remain item-scoped.
 #![deny(unsafe_code)]
+// Documentation debt, not a decision that docs do not matter: this crate had
+// 151 undocumented public item(s) when `missing_docs` was measured across the
+// workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
+// crate still inherits the requirement; this allow is scoped here so the debt
+// is visible per crate and can be repaid one crate at a time by deleting this
+// line.
+#![allow(missing_docs)]
+// Dead code kept visible, not swept: this crate had 6 item(s) rustc could
+// reach from nothing when the workspace was measured (2026-09-16). The lint
+// stays `warn` at the workspace level so a NEW crate still inherits it; this
+// allow is scoped here so the count is per crate and repayable by deleting this
+// line. This is the category where "named, computed, never wired" hides — some
+// of these read like features that were built and never connected. Each wants a
+// decision (delete, or wire), not a blanket deletion.
+#![allow(dead_code)]
 
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
@@ -78,6 +93,7 @@
 pub const CLAUDE_CODE_VERSION: &str = "2.1.267";
 
 pub mod agent_name_registry;
+pub mod agent_processes;
 pub mod agent_view;
 pub mod android_ui;
 pub mod auth;
@@ -121,14 +137,13 @@ pub mod notification;
 pub mod orchestrator;
 pub mod panel_pool;
 pub mod parked_agent_store;
-pub mod read_auto_allow;
 pub mod permission_gate;
 pub mod plan_files;
 pub mod plan_slug;
 pub mod platform;
-pub mod agent_processes;
 pub mod process;
 pub mod prompting_gate;
+pub mod read_auto_allow;
 pub mod repo_root_reload;
 #[cfg_attr(windows, allow(unsafe_code))]
 pub mod rooted_fs;
@@ -145,8 +160,8 @@ pub mod subagent_output_guard;
 pub mod subagent_spawn;
 pub mod subscription;
 pub mod swarm;
-pub mod task_registry;
 pub mod task_activity;
+pub mod task_registry;
 pub mod team_registry;
 pub mod team_spawn;
 pub mod teammate_worker;
@@ -198,12 +213,11 @@ pub use filesystem::{
 };
 pub use fusion::{
     normalize_dimensions, panel_never_dispatched, parse_fusion_model_ref, parse_fusion_models,
-    prepared_from_oneshot,
-    validate_panel_report, DurableFusionOutboxRecord, DurableFusionTerminalRecord, EvidenceKind,
-    FusionActivation, FusionAgentSurface, FusionAnalysis, FusionAttemptSettlementStatus, FusionCompletionSink,
-    FusionContradiction, FusionCostClass, FusionDecision, FusionError, FusionExecutor,
-    FusionInheritance, FusionLatencyClass, FusionModelChoice, FusionModelHints, FusionModelRef,
-    FusionModelRole,
+    prepared_from_oneshot, validate_panel_report, DurableFusionOutboxRecord,
+    DurableFusionTerminalRecord, EvidenceKind, FusionActivation, FusionAgentSurface,
+    FusionAnalysis, FusionAttemptSettlementStatus, FusionCompletionSink, FusionContradiction,
+    FusionCostClass, FusionDecision, FusionError, FusionExecutor, FusionInheritance,
+    FusionLatencyClass, FusionModelChoice, FusionModelHints, FusionModelRef, FusionModelRole,
     FusionNeedsParentReason, FusionOrigin, FusionPreparedSummary, FusionPreset, FusionProgress,
     FusionPublicationReceipt, FusionPublicationState, FusionPublicationStatus,
     FusionRecommendation, FusionRequest, FusionResult, FusionRunControl, FusionRunFacts,
@@ -213,8 +227,8 @@ pub use fusion::{
     NoopFusionCompletionSink, PanelClaim, PanelEvidence, PanelOutcome, PanelPosition, PanelReport,
     PanelRisk, PanelRunStatus, PreparedFusionRun, RiskSeverity, DEFAULT_FUSION_DIMENSIONS,
     DEFAULT_FUSION_DIMENSION_DESCRIPTIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
-    FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE,
-    FUSION_SCHEMA_VERSION, FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT,
+    FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
+    FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT,
 };
 pub use haptics::{HapticError, HapticService, HapticStyle};
 pub use http::{
@@ -254,21 +268,21 @@ pub use orchestrator::{
     curated_model_listings, curated_model_names, curated_model_refs, is_curated_model,
     parse_model_ref, provider_default_model, provider_fallback_order, provider_has_curated_list,
     provider_model_catalog, provider_model_catalog_listings, qualified_model_ref,
-    reasoning_control_spec_for_model, validated_reasoning_selection_for_model, ActiveGoalSnapshot,
-    AgentInfo, AttachmentKind, CheckStatus, CompactionSummary, ContextPressureBanner,
-    ContextPressureLevel, ContextUsageCategory, ContextUsageCategoryKind, ContextUsageSnapshot,
-    ConversationControls, CostSnapshot, CurrentUsageSnapshot, DeferredToolReplay, SummarizeDirection,
-    DirectoryAddedHookSummary, DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome,
-    split_connection_profile, ConnectionRef, GoalClearedReason, GoalStatusAttachment, GoalStatusKind, HandleError, HookInfo,
-    LoopUsageProvider, LoopUsageRow, McpActionState,
+    reasoning_control_spec_for_model, split_connection_profile,
+    validated_reasoning_selection_for_model, ActiveGoalSnapshot, AgentInfo, AttachmentKind,
+    CheckStatus, CompactionSummary, ConnectionRef, ContextPressureBanner, ContextPressureLevel,
+    ContextUsageCategory, ContextUsageCategoryKind, ContextUsageSnapshot, ConversationControls,
+    CostSnapshot, CurrentUsageSnapshot, DeferredToolReplay, DirectoryAddedHookSummary, DoctorCheck,
+    DoctorReport, DoctorSummary, ForkOutcome, GoalClearedReason, GoalStatusAttachment,
+    GoalStatusKind, HandleError, HookInfo, LoopUsageProvider, LoopUsageRow, McpActionState,
     McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelBillingMode,
     ModelCapabilities, ModelListing, ModelMetadata, ModelPricing, ModelPricingTier,
     ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent, OutputStream,
-    OutputStyleListing,
-    PermissionControlState, PermissionModeAvailability, PlanSnapshot, PromptSnapshot,
-    PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec,
-    ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome, RegisterRepoRootRequest,
-    ResumeRuntimeSnapshot, RewindRowData, SkillInfo, StatusSnapshot, TurnOutcome,
+    OutputStyleListing, PermissionControlState, PermissionModeAvailability, PlanSnapshot,
+    PromptSnapshot, PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange,
+    ReasoningControlSpec, ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome,
+    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, SkillInfo, StatusSnapshot,
+    SummarizeDirection, TurnOutcome,
 };
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{
@@ -289,8 +303,6 @@ pub use rooted_fs::{
     truncate_file_pinned, AtomicWriteOptions, RootIdentity, RootedFileLock,
 };
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
-/// Shared cancellation handle for host-initiated interactive turns.
-pub use tokio_util::sync::CancellationToken;
 pub use sandbox::{
     BackendPlanHandle, NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend,
     SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand,
@@ -315,6 +327,8 @@ pub use task_registry::{
 };
 pub use team_registry::{TeamRegistryHandle, WorkerInfo};
 pub use team_spawn::{TeamSpawnError, TeamSpawnSeam};
+/// Shared cancellation handle for host-initiated interactive turns.
+pub use tokio_util::sync::CancellationToken;
 pub use tool_invoker::{
     SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker, ToolInvokerError,
 };

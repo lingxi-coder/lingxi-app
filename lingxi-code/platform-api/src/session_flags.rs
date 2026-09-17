@@ -10,8 +10,8 @@
 //! session mode, read by builders such as the `AgentTool` fork gate.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::RwLock;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 /// `getIsNonInteractiveSession()` analog. Defaults `false` (interactive); set by
 /// [`ConversationOrchestrator::new`](../../orchestrator) from the session's

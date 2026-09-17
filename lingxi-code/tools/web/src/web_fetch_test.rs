@@ -369,6 +369,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// Statsig gates flipped on, both the SHORT and LONG variants gain the
     /// byte-exact exception wording; with them off (the default) they do not.
     #[tokio::test]
+    // `dY` is the oracle's own symbol name.
+    #[allow(non_snake_case)]
     async fn prompt_artifact_exception_gated_on_dY() {
         let _cache_guard = crate::testsupport::web_globals_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;

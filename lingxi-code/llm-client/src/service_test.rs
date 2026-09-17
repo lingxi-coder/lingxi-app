@@ -296,7 +296,7 @@ mod tests {
             })
         }
 
-        fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), LlmError>> {
+        fn close(&mut self) -> BoxFuture<'_, Result<(), LlmError>> {
             Box::pin(async { Ok(()) })
         }
     }

@@ -34,9 +34,9 @@
 //! `Cargo.toml`, so this module never names a device crate.
 
 mod configuration_admin;
-mod settings_commands;
-mod permission_preference;
 mod model_preference;
+mod permission_preference;
+mod settings_commands;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -3391,8 +3391,11 @@ async fn build_mobile_inner_with_ask(
     // we reuse `request_model` / the profile name for both fields.
     let default_listings = model_listings(&assembled.client_config.providers);
     let interactive_launch = mobile_launch_is_interactive(cfg.host_environment.as_ref());
-    let saved_model = interactive_launch.then(|| model_preference::load(&cfg.lingxi_home)).flatten();
-    let (default_model_id, default_model_profile) = saved_model.as_deref()
+    let saved_model = interactive_launch
+        .then(|| model_preference::load(&cfg.lingxi_home))
+        .flatten();
+    let (default_model_id, default_model_profile) = saved_model
+        .as_deref()
         .and_then(|model| model_preference::resolve(model, &default_listings))
         .unwrap_or_else(|| resolve_default_model_ref(&cfg.default_model, &default_listings));
     let profile_auto_mode_provider: std::collections::BTreeMap<String, String> = assembled
@@ -3694,7 +3697,7 @@ async fn build_mobile_inner_with_ask(
     // `<cwd>/.claude`, so a colliding path is read once to avoid doubling rules).
     // Read(deny) → Grep/Glob search-exclude globs, resolved from the policy below
     // (empty when no Read-deny rule ⇒ unchanged default).
-    let mut read_deny_exclude_globs: Vec<String> = Vec::new();
+    let read_deny_exclude_globs: Vec<String>;
     // (P2-14) `settings.skipWebFetchPreflight` → WebFetch skips the domain-blocklist
     // preflight. Mobile has no `lingxi_core::settings::Settings::load` seam (no `engine`
     // dep), so it reads the key directly from the SAME settings.json tiers the perms
@@ -3733,19 +3736,17 @@ async fn build_mobile_inner_with_ask(
     // consumed by `PolicyPermissionGate::new`, so `tool_ctx.permission_policy`
     // shares the SAME base policy the model-facing gate enforces (the prompt
     // shell-expansion provider reads it as the base for embedded `!`cmd`` bodies).
-    let mut boot_permission_policy: Option<Arc<permission::PermissionPolicy>> = None;
+    let boot_permission_policy: Option<Arc<permission::PermissionPolicy>>;
     // H-CHG-02: capture the enforcing gate's set-once LIVE-model cell (cycle-break),
     // filled once the orchestrator (owner of the live `session.model`) exists, so
     // the live `set_permission_mode` auto gate evaluates `dUe(wi())` against the
     // CURRENT model — mirrors the desktop composition root.
-    let mut loop_classifier_cell = None;
-    let mut live_model_provider_cell: Option<
-        Arc<std::sync::OnceLock<permission::LiveModelProvider>>,
-    > = None;
+    let loop_classifier_cell;
+    let live_model_provider_cell: Option<Arc<std::sync::OnceLock<permission::LiveModelProvider>>>;
     // Published after settings + the auto availability gate resolve.  The
     // value is reused by subagent/workflow composition and the tool context
     // so every surface reports the same effective mode.
-    let mut resolved_permission_mode = PermissionMode::Auto;
+    let resolved_permission_mode;
     // (2.1.263 `bs(Rn)`) Spawn-time bypass clamps for subagent definitions,
     // published from the settings fold below like `resolved_permission_mode`.
     // `restricted` is always false on mobile: there is no `--restricted` flag.
@@ -3756,7 +3757,7 @@ async fn build_mobile_inner_with_ask(
         bypass_disabled: false,
         restricted: false,
     };
-    let mut requested_permission_mode = PermissionMode::Auto.wire_str().to_string();
+    let mut requested_permission_mode;
     let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
     // ONE derivation of the (host, guest) workspace pairing. `model_cwd` below
     // is rebuilt from THIS binding rather than re-scanning the mount table —
@@ -4814,10 +4815,13 @@ async fn build_mobile_inner_with_ask(
     // slash dispatcher and listing provider use. The registry is filled below
     // once the orchestrator handle is available, and later `/reload-skills`
     // mutations stay visible to all three surfaces.
-    let live_skill_loader = Arc::new(crate::skill_loader::MobileDiskSkillLoader::for_mode(
-        shared_command_registry.clone(),
-        cfg.session_mode,
-    ).with_prompt_cwd(session_cwd.clone()));
+    let live_skill_loader = Arc::new(
+        crate::skill_loader::MobileDiskSkillLoader::for_mode(
+            shared_command_registry.clone(),
+            cfg.session_mode,
+        )
+        .with_prompt_cwd(session_cwd.clone()),
+    );
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = live_skill_loader.clone();
     let agent_skill_loader: Arc<dyn platform_api::skill_loader::SkillLoader> = live_skill_loader;
     // D1 (P-1.5 review): bind the per-turn skill-listing provider HERE, in the
@@ -5311,7 +5315,12 @@ async fn build_mobile_inner_with_ask(
     // (`dUe(wi())` — claude-code `Nle`). Non-blocking `try_lock`; a contended read
     // returns `None` and the model check is skipped (fail-open). Desktop mirror.
     if let Some(cell) = loop_classifier_cell {
-        let _ = cell.set(Arc::new(orchestrator::loop_permission_classifier::SessionLoopClassifier::new(&orch, api_service.clone())));
+        let _ = cell.set(Arc::new(
+            orchestrator::loop_permission_classifier::SessionLoopClassifier::new(
+                &orch,
+                api_service.clone(),
+            ),
+        ));
     }
     if let Some(cell) = live_model_provider_cell.as_ref() {
         let session = orch.session();
@@ -5458,7 +5467,10 @@ async fn build_mobile_inner_with_ask(
     let prompt_paths_orch = orch.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_prompt_paths(Arc::new(move || {
-            (prompt_paths_orch.project_root(), prompt_paths_orch.current_cwd())
+            (
+                prompt_paths_orch.project_root(),
+                prompt_paths_orch.current_cwd(),
+            )
         }))
         .with_skill_usage_home(cfg.lingxi_home.clone());
     let dispatcher = if cfg.session_mode == session::jsonl::SessionMode::Code {
@@ -5525,12 +5537,21 @@ async fn build_mobile_inner_with_ask(
     orch.fire_instructions_loaded().await;
     if interactive_launch {
         if let Some(preference) = permission_preference::load(&cfg.lingxi_home) {
-            match permission_policy_gate.restore_session_permission_mode(preference.wire_str()).await {
+            match permission_policy_gate
+                .restore_session_permission_mode(preference.wire_str())
+                .await
+            {
                 Ok(()) => {
-                    let _ = platform_api::OrchestratorHandle::set_plan_mode(orch.as_ref(), preference == PermissionMode::Plan).await;
+                    let _ = platform_api::OrchestratorHandle::set_plan_mode(
+                        orch.as_ref(),
+                        preference == PermissionMode::Plan,
+                    )
+                    .await;
                     requested_permission_mode = preference.wire_str().to_string();
                 }
-                Err(error) => tracing::warn!(%error, "saved mobile permission mode rejected by current policy"),
+                Err(error) => {
+                    tracing::warn!(%error, "saved mobile permission mode rejected by current policy")
+                }
             }
         }
     }
@@ -5850,11 +5871,14 @@ impl Drop for MobileEngineHandle {
         let runtime_handle = self.runtime.handle().clone();
         match std::thread::Builder::new()
             .name("lingxi-mobile-lsp-shutdown".into())
-            .spawn(move || runtime_handle.block_on(async move {
-                if let Some(scheduler) = session_cron { let _ = scheduler.stop().await; }
-                lsp_registry.shutdown_all().await;
-            }))
-        {
+            .spawn(move || {
+                runtime_handle.block_on(async move {
+                    if let Some(scheduler) = session_cron {
+                        let _ = scheduler.stop().await;
+                    }
+                    lsp_registry.shutdown_all().await;
+                })
+            }) {
             Ok(join) => {
                 if join.join().is_err() {
                     tracing::warn!("mobile LSP shutdown thread panicked");
@@ -6477,23 +6501,38 @@ fn parse_session_agent_messages(raw: &[u8]) -> Vec<protocol::ConversationMessage
 #[async_trait]
 impl cron::scheduler::SessionCronDelivery for MobileWakeupDelivery {
     async fn clear_queued(&self) {
-        let ids: Vec<_> = self.queue.snapshot().await.into_iter()
-            .filter(|command| command.source == msgqueue::QueueSource::Cron && command.uuid.starts_with("cron-fire-"))
-            .map(|command| command.uuid).collect();
+        let ids: Vec<_> = self
+            .queue
+            .snapshot()
+            .await
+            .into_iter()
+            .filter(|command| {
+                command.source == msgqueue::QueueSource::Cron
+                    && command.uuid.starts_with("cron-fire-")
+            })
+            .map(|command| command.uuid)
+            .collect();
         self.queue.remove(&ids, "session changed").await;
     }
-    async fn is_loading(&self) -> bool { self.queue.has_active_turn().await }
+    async fn is_loading(&self) -> bool {
+        self.queue.has_active_turn().await
+    }
     async fn enqueue(&self, fire: cron::scheduler::SessionCronFire) -> Result<(), String> {
         if fire.cron.is_empty() {
-            self.queue.enqueue(msgqueue::QueuedCommand {
-                scheduled_task_id: None,
-                scheduled_fire_id: None,
-                uuid: format!("cron-fire-{}", fire.id),
-                content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
-                priority: msgqueue::QueuePriority::Later,
-                queued_at: std::time::SystemTime::now(), source: msgqueue::QueueSource::Cron,
-                agent_id: None, skip_slash_commands: true, is_meta: true,
-            }).await;
+            self.queue
+                .enqueue(msgqueue::QueuedCommand {
+                    scheduled_task_id: None,
+                    scheduled_fire_id: None,
+                    uuid: format!("cron-fire-{}", fire.id),
+                    content: msgqueue::QueuedCommandContent::UserInput { text: fire.prompt },
+                    priority: msgqueue::QueuePriority::Later,
+                    queued_at: std::time::SystemTime::now(),
+                    source: msgqueue::QueueSource::Cron,
+                    agent_id: None,
+                    skip_slash_commands: true,
+                    is_meta: true,
+                })
+                .await;
             return Ok(());
         }
         let task = tool_cron::WakeupTask::scheduled(&fire);
@@ -6540,7 +6579,13 @@ struct MobileWakeupDelivery {
 
 #[async_trait]
 impl tool_cron::WakeupDelivery for MobileWakeupDelivery {
-    async fn deliver(&self, command_id: &str, prompt: String, _reason: String, task: tool_cron::WakeupTask) {
+    async fn deliver(
+        &self,
+        command_id: &str,
+        prompt: String,
+        _reason: String,
+        task: tool_cron::WakeupTask,
+    ) {
         let _transition = loop {
             let guard = self.transition.lock().await;
             if !self.queue.has_active_turn().await {
@@ -6555,7 +6600,10 @@ impl tool_cron::WakeupDelivery for MobileWakeupDelivery {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_millis() as u64);
-        let streak = task.task_kind_loop.then(|| self.state.noop_streak()).flatten();
+        let streak = task
+            .task_kind_loop
+            .then(|| self.state.noop_streak())
+            .flatten();
         let (message, companion) = task.lines(now_ms, streak);
         let since_ms = streak.map_or(0, |(_, since)| {
             since
@@ -6564,15 +6612,35 @@ impl tool_cron::WakeupDelivery for MobileWakeupDelivery {
         });
         let count = streak.map_or(0, |(count, _)| count);
         if let Err(error) = orchestrator
-            .append_scheduled_loop_wakeup(message.clone(), companion.clone(), count, since_ms,
-                orchestrator::ScheduledLoopFire { fire_id: task.fire_id, task_id: task.task_id.clone(), cron: task.cron.clone(), prompt: task.display_prompt.clone(), task_kind_loop: task.task_kind_loop })
+            .append_scheduled_loop_wakeup(
+                message.clone(),
+                companion.clone(),
+                count,
+                since_ms,
+                orchestrator::ScheduledLoopFire {
+                    fire_id: task.fire_id,
+                    task_id: task.task_id.clone(),
+                    cron: task.cron.clone(),
+                    prompt: task.display_prompt.clone(),
+                    task_kind_loop: task.task_kind_loop,
+                },
+            )
             .await
         {
             tracing::warn!(%error, "mobile: could not persist /loop wakeup boundary");
         }
-        self.events.emit(if task.task_kind_loop {
-            ClientEvent::LoopWakeup { message, companion, streak: count, since_ms }
-        } else { ClientEvent::ScheduledTaskFire { message } }).await;
+        self.events
+            .emit(if task.task_kind_loop {
+                ClientEvent::LoopWakeup {
+                    message,
+                    companion,
+                    streak: count,
+                    since_ms,
+                }
+            } else {
+                ClientEvent::ScheduledTaskFire { message }
+            })
+            .await;
         self.queue
             .enqueue(msgqueue::QueuedCommand {
                 scheduled_task_id: Some(task.task_id.clone()),
@@ -6662,8 +6730,12 @@ struct MobileMsgQueueInput {
 
 #[async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueueInput {
-    fn supports_goal_retries(&self) -> bool { true }
-    async fn has_queued_goal_work(&self) -> bool { self.queue.has_main_thread_commands().await }
+    fn supports_goal_retries(&self) -> bool {
+        true
+    }
+    async fn has_queued_goal_work(&self) -> bool {
+        self.queue.has_main_thread_commands().await
+    }
     async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
         self.queue.enqueue_goal_retry(id, body, cancel).await;
     }
@@ -7520,9 +7592,12 @@ impl MobileEngineHandle {
                         .clone()
                         .unwrap_or_else(|| self.inner.session_default_permission_mode.clone())
                 };
-                let target_permission_mode = self.restore_preferred_permission_mode(&fallback_permission_mode)
+                let target_permission_mode = self
+                    .restore_preferred_permission_mode(&fallback_permission_mode)
                     .await?;
-                let resume_runtime = self.resume_runtime_with_model_preference(replayed.handle_runtime_snapshot()).await;
+                let resume_runtime = self
+                    .resume_runtime_with_model_preference(replayed.handle_runtime_snapshot())
+                    .await;
                 if let Err(error) = handle
                     .resume_session(
                         protocol::SessionId::from_uuid(uuid),
@@ -7549,7 +7624,8 @@ impl MobileEngineHandle {
                     });
                 }
                 {
-                    if let Err(error) = handle.set_plan_mode(target_permission_mode == "plan").await {
+                    if let Err(error) = handle.set_plan_mode(target_permission_mode == "plan").await
+                    {
                         let _ = self
                             .restore_session_permission_mode(&previous_permission_mode)
                             .await;
@@ -7559,7 +7635,9 @@ impl MobileEngineHandle {
                     }
                 }
                 let current_model = handle.get_status_snapshot().await;
-                self.inner.local_apps_llm.set_model(current_model.model, current_model.model_profile);
+                self.inner
+                    .local_apps_llm
+                    .set_model(current_model.model, current_model.model_profile);
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
@@ -7620,9 +7698,11 @@ impl MobileEngineHandle {
                     .permission_mode()
                     .await
                     .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
-                let fallback_permission_mode = recorded_permission_mode.clone()
+                let fallback_permission_mode = recorded_permission_mode
+                    .clone()
                     .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
-                let target_permission_mode = self.restore_preferred_permission_mode(&fallback_permission_mode)
+                let target_permission_mode = self
+                    .restore_preferred_permission_mode(&fallback_permission_mode)
                     .await?;
                 if let Err(resume_error) = handle
                     .resume_session(
@@ -7630,7 +7710,10 @@ impl MobileEngineHandle {
                         Vec::new(),
                         None,
                         None,
-                        self.resume_runtime_with_model_preference(platform_api::ResumeRuntimeSnapshot::default()).await,
+                        self.resume_runtime_with_model_preference(
+                            platform_api::ResumeRuntimeSnapshot::default(),
+                        )
+                        .await,
                     )
                     .await
                 {
@@ -7641,12 +7724,16 @@ impl MobileEngineHandle {
                         message: format!("resume empty session failed: {resume_error}"),
                     });
                 }
-                handle.set_plan_mode(target_permission_mode == "plan").await
+                handle
+                    .set_plan_mode(target_permission_mode == "plan")
+                    .await
                     .map_err(|error| ClientError::Internal {
                         message: format!("resume empty session plan mode failed: {error}"),
                     })?;
                 let current_model = handle.get_status_snapshot().await;
-                self.inner.local_apps_llm.set_model(current_model.model, current_model.model_profile);
+                self.inner
+                    .local_apps_llm
+                    .set_model(current_model.model, current_model.model_profile);
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
@@ -9123,7 +9210,7 @@ impl MobileEngineHandle {
     async fn submit_impl(&self, command: ClientCommand) -> Result<(), ClientError> {
         // Serialize session mutation and turn reservation with wakeup publication.
         let _transition = self.loop_transition.lock().await;
-        if matches!(
+        if (matches!(
             &command,
             ClientCommand::ClearSession
                 | ClientCommand::NewSession { .. }
@@ -9132,12 +9219,11 @@ impl MobileEngineHandle {
                 | ClientCommand::RequestExit
         ) || self
             .scheduled_reload
-            .load(std::sync::atomic::Ordering::Acquire)
+            .load(std::sync::atomic::Ordering::Acquire))
+            && self.active_cancel.lock().await.is_none()
         {
-            if self.active_cancel.lock().await.is_none() {
-                if let Some(scheduler) = self.inner.wakeup_scheduler.get() {
-                    tool_cron::stop_dynamic_loop(Some(scheduler)).await;
-                }
+            if let Some(scheduler) = self.inner.wakeup_scheduler.get() {
+                tool_cron::stop_dynamic_loop(Some(scheduler)).await;
             }
         }
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
@@ -9344,8 +9430,12 @@ impl MobileEngineHandle {
 
             ClientCommand::SetPermissionMode { mode } => {
                 let requested_mode = mode.clone();
-                let previous_requested = self.inner.requested_permission_mode.lock()
-                    .ok().map(|value| value.clone());
+                let previous_requested = self
+                    .inner
+                    .requested_permission_mode
+                    .lock()
+                    .ok()
+                    .map(|value| value.clone());
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 let previous_mode = handle
                     .permission_mode()
@@ -9361,7 +9451,8 @@ impl MobileEngineHandle {
                 if let Err(error) = self.persist_session_permission_mode(&active).await {
                     let _ = self.restore_session_permission_mode(&previous_mode).await;
                     if let (Some(previous), Ok(mut requested)) = (
-                        previous_requested.as_ref(), self.inner.requested_permission_mode.lock(),
+                        previous_requested.as_ref(),
+                        self.inner.requested_permission_mode.lock(),
                     ) {
                         *requested = previous.clone();
                     }
@@ -9374,7 +9465,8 @@ impl MobileEngineHandle {
                 } {
                     let _ = self.restore_session_permission_mode(&previous_mode).await;
                     if let (Some(previous), Ok(mut requested)) = (
-                        previous_requested.as_ref(), self.inner.requested_permission_mode.lock(),
+                        previous_requested.as_ref(),
+                        self.inner.requested_permission_mode.lock(),
                     ) {
                         *requested = previous.clone();
                     }
@@ -9453,9 +9545,11 @@ impl MobileEngineHandle {
                         )
                     })
                     .unwrap_or((platform_api::ReasoningSelection::Automatic, true));
-                let persisted_default = persistable
-                    .then_some(effective)
-                    .unwrap_or(platform_api::ReasoningSelection::Automatic);
+                let persisted_default = if persistable {
+                    effective
+                } else {
+                    platform_api::ReasoningSelection::Automatic
+                };
                 if let Err(error) = command_core::effort::persist_reasoning_default_selection_at(
                     &settings_path,
                     Some(&persisted_default),
@@ -9613,7 +9707,9 @@ impl MobileEngineHandle {
             ClientCommand::SetModel { model } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 let (model_id, profile) = self.resolve_routable_model(&model).await?;
-                let selected = self.switch_model_and_remember(&model_id, profile.as_deref(), "sdk").await?;
+                let selected = self
+                    .switch_model_and_remember(&model_id, profile.as_deref(), "sdk")
+                    .await?;
                 if let Some(controls) = handle.conversation_controls().await {
                     if !matches!(
                         controls.requested_reasoning_selection,
@@ -9667,26 +9763,47 @@ impl MobileEngineHandle {
                 if let Some(parsed) = command_api::parse_slash_command(&raw) {
                     let is_builtin_model = parsed.name == "model"
                         && !parsed.raw_args.trim().is_empty()
-                        && self.inner.slash_registry.read().await.resolve(&parsed.name)
-                            .is_some_and(|command| command.source == command_api::model::CommandSource::Builtin);
+                        && self
+                            .inner
+                            .slash_registry
+                            .read()
+                            .await
+                            .resolve(&parsed.name)
+                            .is_some_and(|command| {
+                                command.source == command_api::model::CommandSource::Builtin
+                            });
                     if is_builtin_model {
                         let result = async {
-                            let (model, profile) = self.resolve_routable_model(parsed.raw_args.trim()).await?;
-                            let selected = self.switch_model_and_remember(&model, profile.as_deref(), "command").await?;
+                            let (model, profile) =
+                                self.resolve_routable_model(parsed.raw_args.trim()).await?;
+                            let selected = self
+                                .switch_model_and_remember(&model, profile.as_deref(), "command")
+                                .await?;
                             Ok::<_, ClientError>((model, selected))
-                        }.await;
+                        }
+                        .await;
                         match result {
                             Ok((model, selected)) => {
-                                self.event_sink.emit(ClientEvent::SlashCommandResult {
-                                    turn_id, display: format!("Switched to model: {model}"), is_error: false,
-                                }).await;
-                                self.event_sink.emit(ClientEvent::ModelChanged { model: selected }).await;
+                                self.event_sink
+                                    .emit(ClientEvent::SlashCommandResult {
+                                        turn_id,
+                                        display: format!("Switched to model: {model}"),
+                                        is_error: false,
+                                    })
+                                    .await;
+                                self.event_sink
+                                    .emit(ClientEvent::ModelChanged { model: selected })
+                                    .await;
                                 self.emit_controls_snapshot().await;
                             }
                             Err(error) => {
-                                self.event_sink.emit(ClientEvent::SlashCommandResult {
-                                    turn_id, display: format!("Could not switch model: {error}"), is_error: true,
-                                }).await;
+                                self.event_sink
+                                    .emit(ClientEvent::SlashCommandResult {
+                                        turn_id,
+                                        display: format!("Could not switch model: {error}"),
+                                        is_error: true,
+                                    })
+                                    .await;
                             }
                         }
                         return Ok(());
@@ -10061,9 +10178,9 @@ impl MobileEngineHandle {
                     .permission_mode()
                     .await
                     .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
-                let new_session_permission_mode = self.restore_preferred_permission_mode(
-                    &self.inner.session_default_permission_mode,
-                ).await?;
+                let new_session_permission_mode = self
+                    .restore_preferred_permission_mode(&self.inner.session_default_permission_mode)
+                    .await?;
                 if let Err(error) = handle.clear_session().await {
                     let _ = self
                         .restore_session_permission_mode(&previous_permission_mode)
@@ -10072,8 +10189,12 @@ impl MobileEngineHandle {
                         message: format!("new session (clear_session) failed: {error}"),
                     });
                 }
-                handle.set_plan_mode(new_session_permission_mode == "plan").await
-                    .map_err(|error| ClientError::Internal { message: error.to_string() })?;
+                handle
+                    .set_plan_mode(new_session_permission_mode == "plan")
+                    .await
+                    .map_err(|error| ClientError::Internal {
+                        message: error.to_string(),
+                    })?;
                 let new_session_id = handle.current_session_id().await;
                 self.retarget_session_writer(new_session_id, &self.session_cwd)
                     .await;
@@ -10094,7 +10215,8 @@ impl MobileEngineHandle {
                 self.persist_session_permission_mode(&new_session_permission_mode)
                     .await?;
                 if let Some((model_id, profile)) = requested_model {
-                    self.switch_model_and_remember(&model_id, profile.as_deref(), "sdk").await?;
+                    self.switch_model_and_remember(&model_id, profile.as_deref(), "sdk")
+                        .await?;
                 }
                 // Mobile clients persist this value as the resumable catalog key.
                 // `SessionId::Display` is presentation-oriented (`sess:<uuid>`),
@@ -12610,15 +12732,15 @@ impl MobileTurnFirer {
                     .and_then(cron_legacy_turn_outcome)
             }
         };
-        let result = match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
+
+        match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
             Ok(Ok(_outcome)) => Ok(cron::AutomationRunResult {
                 session_id,
                 summary: captured.lock().await.clone(),
             }),
             Ok(Err(e)) => Err(e.to_string()),
             Err(_) => Err("cron turn timed out".to_string()),
-        };
-        result
+        }
     }
 }
 
@@ -12890,13 +13012,14 @@ impl MobileCronStoreHandle {
                 Err(platform_api::FsError::NotFound(_)) => None,
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
             };
-        let old_body = match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), root).await {
-            Ok(body) => body,
-            Err(platform_api::FsError::NotFound(_)) => {
-                cron::serialize_tasks(&cron::ScheduledTasks::default())
-            }
-            Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
-        };
+        let old_body =
+            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), root).await {
+                Ok(body) => body,
+                Err(platform_api::FsError::NotFound(_)) => {
+                    cron::serialize_tasks(&cron::ScheduledTasks::default())
+                }
+                Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
+            };
         let mut legacy = cron::tasks_file::parse_automation_tasks_strict(&old_body)
             .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
         let snapshot = if let Some(marker) = marker
@@ -12928,21 +13051,28 @@ impl MobileCronStoreHandle {
         // Old /loop records belong to their original session, not task-center
         // automations. Exclude before computing removal IDs so they stay intact
         // in the old document without being revived in the destination.
-        source.tasks.retain(|task| !cron::is_loop_default_sentinel(&task.prompt));
+        source
+            .tasks
+            .retain(|task| !cron::is_loop_default_sentinel(&task.prompt));
         // Suppress the old scheduler before publishing any destination tasks.
         // The durable source snapshot recovers a crash after this write.
         let migrated_ids: std::collections::HashSet<_> =
             source.tasks.iter().map(|task| task.id.clone()).collect();
         legacy.tasks.retain(|task| !migrated_ids.contains(&task.id));
-        cron::tasks_file::write_automation_tasks_body(self.fs.as_ref(), root, &cron::serialize_tasks(&legacy))
-            .await
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let mut destination = match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
-            Ok(body) => cron::tasks_file::parse_automation_tasks_strict(&body)
-                .map_err(|e| MobileEngineError::Internal(e.to_string()))?,
-            Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
-            Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
-        };
+        cron::tasks_file::write_automation_tasks_body(
+            self.fs.as_ref(),
+            root,
+            &cron::serialize_tasks(&legacy),
+        )
+        .await
+        .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
+        let mut destination =
+            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
+                Ok(body) => cron::tasks_file::parse_automation_tasks_strict(&body)
+                    .map_err(|e| MobileEngineError::Internal(e.to_string()))?,
+                Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
+                Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
+            };
         for mut task in source.tasks {
             if destination
                 .tasks
@@ -13007,11 +13137,12 @@ impl MobileCronStoreHandle {
         let _file = cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd)
             .await
             .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let body = match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
-            Ok(body) => body,
-            Err(platform_api::FsError::NotFound(_)) => return Ok(()),
-            Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
-        };
+        let body =
+            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
+                Ok(body) => body,
+                Err(platform_api::FsError::NotFound(_)) => return Ok(()),
+                Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
+            };
         let mut document = cron::tasks_file::parse_automation_tasks_strict(&body)
             .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
         let now = self
@@ -13127,15 +13258,16 @@ impl MobileCronStoreHandle {
         // symlink rejection) is not evidence that there are no tasks, and
         // starting from `default()` would write the new task over every
         // existing one.
-        let mut document = match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
-            Ok(body) => cron::tasks_file::parse_automation_tasks(&body),
-            Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
-            Err(error) => {
-                return Err(MobileEngineError::Internal(format!(
-                    "read scheduled_tasks.json: {error}"
-                )))
-            }
-        };
+        let mut document =
+            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
+                Ok(body) => cron::tasks_file::parse_automation_tasks(&body),
+                Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
+                Err(error) => {
+                    return Err(MobileEngineError::Internal(format!(
+                        "read scheduled_tasks.json: {error}"
+                    )))
+                }
+            };
         let now = self.clock.now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -13302,7 +13434,9 @@ impl MobileCronStoreHandle {
 
     pub async fn delete(&self, id: String) -> bool {
         let _process_guard = cron::lock_cron_file().await;
-        let Ok(_file_guard) = cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd).await else {
+        let Ok(_file_guard) =
+            cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd).await
+        else {
             return false;
         };
         let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
@@ -13349,7 +13483,9 @@ impl MobileCronStoreHandle {
     /// durable schedule bookkeeping.
     pub async fn acknowledge_occurrence(&self, task_id: String, scheduled_at_ms: u64) -> bool {
         let _process_guard = cron::lock_cron_file().await;
-        let Ok(_file_guard) = cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd).await else {
+        let Ok(_file_guard) =
+            cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd).await
+        else {
             return false;
         };
         let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
@@ -13361,7 +13497,7 @@ impl MobileCronStoreHandle {
         let Some(task) = document.tasks.iter().find(|task| task.id == task_id) else {
             return false;
         };
-        if !cron_task_active(&task) {
+        if !cron_task_active(task) {
             return false;
         }
         let expected = cron::next_fire_epoch_ms_for_persisted_task(task, now);
@@ -13491,7 +13627,8 @@ impl MobileEngineHandle {
     pub async fn acknowledge_cron_occurrence(&self, task_id: String, scheduled_at_ms: u64) -> bool {
         let fs = self.firer_platform.filesystem();
         let _process_guard = cron::lock_cron_file().await;
-        let Ok(_file_guard) = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &self.firer_cfg.cwd).await
+        let Ok(_file_guard) =
+            cron::tasks_file::lock_automation_tasks(fs.as_ref(), &self.firer_cfg.cwd).await
         else {
             return false;
         };
@@ -14254,27 +14391,39 @@ pub fn build_mobile_engine_inner(
     let loop_transition = Arc::new(Mutex::new(()));
     let loop_state = Arc::new(tool_cron::LoopRuntime::default());
     let loop_delivery = Arc::new(MobileWakeupDelivery {
-        transition: loop_transition.clone(), queue: message_queue.clone(),
-        orchestrator: Arc::downgrade(&inner.orchestrator), events: connection_sink.clone(),
+        transition: loop_transition.clone(),
+        queue: message_queue.clone(),
+        orchestrator: Arc::downgrade(&inner.orchestrator),
+        events: connection_sink.clone(),
         state: loop_state.clone(),
     });
     let loop_scheduler: Arc<dyn tool_cron::WakeupScheduler> =
         Arc::new(tool_cron::RuntimeWakeupScheduler::new(
             Arc::new(platform_posix_minimal::runtime::PosixRuntime::new()),
-            loop_state.clone(), loop_delivery.clone(),
+            loop_state.clone(),
+            loop_delivery.clone(),
         ));
     let session_cron = if tool_cron::cron_tools_enabled() {
-        let scheduler = Arc::new(cron::CronScheduler::new(
-            inner.task_registry.clone(), fs.clone(), firer_platform.clock(),
-            Arc::new(platform_posix_minimal::runtime::PosixRuntime::new()),
-            cron::tasks_file::session_scheduled_tasks_path(&firer_cfg.cwd),
-        ).with_session_id(initial_session_key.clone()));
-        runtime.block_on(async {
-            scheduler.set_session_delivery(loop_delivery).await;
-            scheduler.clone().start().await
-        }).map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        let scheduler = Arc::new(
+            cron::CronScheduler::new(
+                inner.task_registry.clone(),
+                fs.clone(),
+                firer_platform.clock(),
+                Arc::new(platform_posix_minimal::runtime::PosixRuntime::new()),
+                cron::tasks_file::session_scheduled_tasks_path(&firer_cfg.cwd),
+            )
+            .with_session_id(initial_session_key.clone()),
+        );
+        runtime
+            .block_on(async {
+                scheduler.set_session_delivery(loop_delivery).await;
+                scheduler.clone().start().await
+            })
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         Some(scheduler)
-    } else { None };
+    } else {
+        None
+    };
     let _ = inner.wakeup_scheduler.set(loop_scheduler.clone());
     inner
         .orchestrator
@@ -14553,11 +14702,12 @@ pub fn build_mobile_engine_inner(
                     let queued = message_queue
                         .get_by_max_priority(msgqueue::QueuePriority::Later, |command| {
                             command.is_main_thread()
-                                && (command.uuid.starts_with("goal-retry-") || matches!(
-                                    command.source,
-                                    msgqueue::QueueSource::Cron
-                                        | msgqueue::QueueSource::PromptInput
-                                ))
+                                && (command.uuid.starts_with("goal-retry-")
+                                    || matches!(
+                                        command.source,
+                                        msgqueue::QueueSource::Cron
+                                            | msgqueue::QueueSource::PromptInput
+                                    ))
                         })
                         .await;
                     if !notifications && queued.is_empty() {
@@ -14574,11 +14724,12 @@ pub fn build_mobile_engine_inner(
                         message_queue
                             .dequeue_filtered(|command| {
                                 command.is_main_thread()
-                                    && (command.uuid.starts_with("goal-retry-") || matches!(
-                                        command.source,
-                                        msgqueue::QueueSource::Cron
-                                            | msgqueue::QueueSource::PromptInput
-                                    ))
+                                    && (command.uuid.starts_with("goal-retry-")
+                                        || matches!(
+                                            command.source,
+                                            msgqueue::QueueSource::Cron
+                                                | msgqueue::QueueSource::PromptInput
+                                        ))
                             })
                             .await
                     };
@@ -14598,35 +14749,55 @@ pub fn build_mobile_engine_inner(
                         .await;
                     message_output.reset_message_buffer().await;
                     orch.turn_span().reset();
-                    let scheduled_task_id = scheduled.as_ref().and_then(|command| command.scheduled_task_id.clone());
-                    let scheduled_fire_id = scheduled.as_ref().and_then(|command| command.scheduled_fire_id.clone());
-                    let goal_retry_id = scheduled.as_ref().filter(|c| c.uuid.starts_with("goal-retry-")).map(|c| c.uuid.clone());
-                    let is_scheduled = scheduled.as_ref().is_some_and(|command| command.source == msgqueue::QueueSource::Cron);
+                    let scheduled_task_id = scheduled
+                        .as_ref()
+                        .and_then(|command| command.scheduled_task_id.clone());
+                    let scheduled_fire_id = scheduled
+                        .as_ref()
+                        .and_then(|command| command.scheduled_fire_id.clone());
+                    let goal_retry_id = scheduled
+                        .as_ref()
+                        .filter(|c| c.uuid.starts_with("goal-retry-"))
+                        .map(|c| c.uuid.clone());
+                    let is_scheduled = scheduled
+                        .as_ref()
+                        .is_some_and(|command| command.source == msgqueue::QueueSource::Cron);
                     let human = scheduled.as_ref().is_some_and(|command| {
                         command.source == msgqueue::QueueSource::PromptInput && !command.is_meta
                     });
-                    let prompt = scheduled.as_ref().and_then(|command| {
-                        command.text().map(|raw| {
-                            if command.source == msgqueue::QueueSource::Cron {
-                                if let Some(state) = loop_scheduler.loop_runtime() {
-                                    state.try_resolve_loop_default_fire(raw, &orch.project_root(), &orch.current_cwd())
-                                        .map(|prompt| {
-                                            if command.uuid.starts_with("loop-wakeup-") { state.begin_tick(raw.into()); }
-                                            else { state.take_in_flight_prompt(); state.invalidate_noop_streak(); }
-                                            prompt
-                                        })
+                    let prompt = scheduled
+                        .as_ref()
+                        .and_then(|command| {
+                            command.text().map(|raw| {
+                                if command.source == msgqueue::QueueSource::Cron {
+                                    if let Some(state) = loop_scheduler.loop_runtime() {
+                                        state
+                                            .try_resolve_loop_default_fire(
+                                                raw,
+                                                &orch.project_root(),
+                                                &orch.current_cwd(),
+                                            )
+                                            .inspect(|_prompt| {
+                                                if command.uuid.starts_with("loop-wakeup-") {
+                                                    state.begin_tick(raw.into());
+                                                } else {
+                                                    state.take_in_flight_prompt();
+                                                    state.invalidate_noop_streak();
+                                                }
+                                            })
+                                    } else {
+                                        Ok(raw.to_string())
+                                    }
                                 } else {
+                                    if let Some(state) = loop_scheduler.loop_runtime() {
+                                        state.take_in_flight_prompt();
+                                        state.invalidate_noop_streak();
+                                    }
                                     Ok(raw.to_string())
                                 }
-                            } else {
-                                if let Some(state) = loop_scheduler.loop_runtime() {
-                                    state.take_in_flight_prompt();
-                                    state.invalidate_noop_streak();
-                                }
-                                Ok(raw.to_string())
-                            }
+                            })
                         })
-                    }).transpose();
+                        .transpose();
                     if matches!(&prompt, Ok(None)) {
                         if let Some(state) = loop_scheduler.loop_runtime() {
                             state.take_in_flight_prompt();
@@ -14657,24 +14828,41 @@ pub fn build_mobile_engine_inner(
                     let reason = cancel_reason.clone();
                     let task = tokio::spawn(async move {
                         let result = match prompt {
-                            Err(error) => Err(orchestrator::OrchestratorError::Internal(error.to_string())),
-                            Ok(Some(prompt)) if is_scheduled || goal_retry_id.is_some() => orch.run_queued_prompt_batch(vec![orchestrator::QueuedPromptInput {
-                    goal_retry_id,
-                                text: prompt, is_meta: true, message_id: None, queue_priority: Some("later".into()),
-                                scheduled_task_id, scheduled_fire_id,
-                            }], task_turn.cancel.clone()).await,
-                            Ok(Some(prompt)) => orch.run_turn_streaming_with_origin(
-                                &prompt,
-                                Vec::new(),
-                                task_turn.cancel.clone(),
-                                None,
-                                human,
-                            )
-                            .await,
-                            Ok(None) => orch.run_task_notification_rewake(
-                                registry.as_ref(),
-                                task_turn.cancel.clone(),
-                            ).await,
+                            Err(error) => {
+                                Err(orchestrator::OrchestratorError::Internal(error.to_string()))
+                            }
+                            Ok(Some(prompt)) if is_scheduled || goal_retry_id.is_some() => {
+                                orch.run_queued_prompt_batch(
+                                    vec![orchestrator::QueuedPromptInput {
+                                        goal_retry_id,
+                                        text: prompt,
+                                        is_meta: true,
+                                        message_id: None,
+                                        queue_priority: Some("later".into()),
+                                        scheduled_task_id,
+                                        scheduled_fire_id,
+                                    }],
+                                    task_turn.cancel.clone(),
+                                )
+                                .await
+                            }
+                            Ok(Some(prompt)) => {
+                                orch.run_turn_streaming_with_origin(
+                                    &prompt,
+                                    Vec::new(),
+                                    task_turn.cancel.clone(),
+                                    None,
+                                    human,
+                                )
+                                .await
+                            }
+                            Ok(None) => {
+                                orch.run_task_notification_rewake(
+                                    registry.as_ref(),
+                                    task_turn.cancel.clone(),
+                                )
+                                .await
+                            }
                         };
                         if let Err(error) = result {
                             message_output.reset_message_buffer().await;
@@ -18674,7 +18862,7 @@ mod tests {
             assert!(matches!(
                 registry.connections.read().await.get("remote"),
                 Some(mcp::connection::McpConnectionState::Disconnected { config, .. })
-                    if mobile_mcp_config_unchanged(&config, &config_a)
+                    if mobile_mcp_config_unchanged(config, &config_a)
             ));
         });
     }
@@ -18726,7 +18914,7 @@ mod tests {
             assert!(matches!(
                 registry.connections.read().await.get("remote"),
                 Some(mcp::connection::McpConnectionState::Disconnected { config, .. })
-                    if mobile_mcp_config_unchanged(&config, &config_a)
+                    if mobile_mcp_config_unchanged(config, &config_a)
             ));
         });
     }
@@ -21026,56 +21214,97 @@ mod tests {
             listener.clone(),
             Arc::new(RecordingPermissionSink::default()),
             Some(streaming.clone()),
-        ).unwrap();
+        )
+        .unwrap();
         handle.runtime().block_on(async {
-            assert!(handle.session_cron.is_some(), "mobile construction binds a real session cron scheduler");
-            let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> = handle.inner.task_registry.clone();
+            assert!(
+                handle.session_cron.is_some(),
+                "mobile construction binds a real session cron scheduler"
+            );
+            let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
+                handle.inner.task_registry.clone();
             assert!(!handle.message_queue.has_main_thread_commands().await);
-            assert!(!handle.inner.task_registry.has_pending_task_notifications_for(None).await);
+            assert!(
+                !handle
+                    .inner
+                    .task_registry
+                    .has_pending_task_notifications_for(None)
+                    .await
+            );
             // Keep the real consumer from taking the first fire until its queue
             // metadata is inspected; the actual delivery producer stays live.
             let watcher_gate = handle.active_cancel.lock().await;
-            cron::register_live_job(&registry, cron::SessionCronTask {
-                id: "00000000".into(),
-                cron: "* * * * *".into(),
-                prompt: "mobile fixed loop owned task".into(),
-                created_at: std::time::SystemTime::now() - std::time::Duration::from_secs(120),
-                last_fired_at: None,
-                recurring: false,
-                owner: None,
-            }, false).await.unwrap();
+            cron::register_live_job(
+                &registry,
+                cron::SessionCronTask {
+                    id: "00000000".into(),
+                    cron: "* * * * *".into(),
+                    prompt: "mobile fixed loop owned task".into(),
+                    created_at: std::time::SystemTime::now() - std::time::Duration::from_secs(120),
+                    last_fired_at: None,
+                    recurring: false,
+                    owner: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
             let queued = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
-                    let commands = handle.message_queue.get_by_max_priority(
-                        msgqueue::QueuePriority::Later,
-                        |command| command.scheduled_task_id.as_deref() == Some("00000000"),
-                    ).await;
-                    if !commands.is_empty() { break commands; }
+                    let commands = handle
+                        .message_queue
+                        .get_by_max_priority(msgqueue::QueuePriority::Later, |command| {
+                            command.scheduled_task_id.as_deref() == Some("00000000")
+                        })
+                        .await;
+                    if !commands.is_empty() {
+                        break commands;
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
-            }).await.expect("the real cron tick must enqueue the fixed fire");
+            })
+            .await
+            .expect("the real cron tick must enqueue the fixed fire");
             assert_eq!(queued.len(), 1);
             assert_eq!(queued[0].source, msgqueue::QueueSource::Cron);
             assert_eq!(queued[0].priority, msgqueue::QueuePriority::Later);
             assert!(queued[0].is_meta);
             assert!(queued[0].skip_slash_commands);
             assert_eq!(queued[0].text(), Some("mobile fixed loop owned task"));
-            assert!(cron::session_jobs(&registry).await.unwrap().is_empty(), "one-shot is claimed once");
+            assert!(
+                cron::session_jobs(&registry).await.unwrap().is_empty(),
+                "one-shot is claimed once"
+            );
             drop(watcher_gate);
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
                     if !streaming.captured_calls().await.is_empty()
-                        && handle.active_cancel.lock().await.is_none() { break; }
+                        && handle.active_cancel.lock().await.is_none()
+                    {
+                        break;
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
-            }).await.expect("the production mobile consumer must complete the main turn");
+            })
+            .await
+            .expect("the production mobile consumer must complete the main turn");
             let calls = streaming.captured_calls().await;
             assert_eq!(calls.len(), 1);
-            assert!(serde_json::to_string(&calls[0].messages).unwrap()
+            assert!(serde_json::to_string(&calls[0].messages)
+                .unwrap()
                 .contains("mobile fixed loop owned task"));
-            assert!(!handle.inner.task_registry.list().await.iter()
+            assert!(!handle
+                .inner
+                .task_registry
+                .list()
+                .await
+                .iter()
                 .any(|task| matches!(task, tasks::state::TaskState::Dream(_))));
-            assert!(!listener.received.lock().await.iter()
+            assert!(!listener
+                .received
+                .lock()
+                .await
+                .iter()
                 .any(|event| matches!(event, Ev::LoopWakeup { .. })));
             assert!(!handle.message_queue.has_active_turn().await);
         });
@@ -23426,8 +23655,8 @@ mod tests {
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
             let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
-            let app_id = record.id;
-            app_id
+
+            record.id
         });
         // The store lives at the per-profile data root (`<root>/apps/…`) —
         // `test_config` roots `lingxi_home` under the temp dir, so its parent
@@ -24722,9 +24951,13 @@ mod cron_automation_tests {
         recurring.recurring = Some(true);
         let mut doc = cron::ScheduledTasks::default();
         doc.tasks.push(recurring);
-        cron::tasks_file::write_automation_tasks_body(fs.as_ref(), temp.path(), &cron::serialize_tasks(&doc))
-            .await
-            .unwrap();
+        cron::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            temp.path(),
+            &cron::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
         let request = cron::claim_automation_run_now(
             fs.as_ref(),
             temp.path(),
@@ -24886,9 +25119,12 @@ mod cron_automation_tests {
                 move |request| async move {
                     {
                         let _guard = cron::lock_cron_file().await;
-                        let _file = cron::tasks_file::lock_automation_tasks(execute_fs.as_ref(), &execute_root)
-                            .await
-                            .unwrap();
+                        let _file = cron::tasks_file::lock_automation_tasks(
+                            execute_fs.as_ref(),
+                            &execute_root,
+                        )
+                        .await
+                        .unwrap();
                         let mut document =
                             read_cron_tasks(execute_fs.as_ref(), &execute_root).await;
                         if expired {
@@ -24942,9 +25178,10 @@ mod cron_automation_tests {
             std::future::ready(Some(request)),
             move |request| async move {
                 let _guard = cron::lock_cron_file().await;
-                let _file = cron::tasks_file::lock_automation_tasks(execute_fs.as_ref(), &execute_root)
-                    .await
-                    .unwrap();
+                let _file =
+                    cron::tasks_file::lock_automation_tasks(execute_fs.as_ref(), &execute_root)
+                        .await
+                        .unwrap();
                 let mut document = read_cron_tasks(execute_fs.as_ref(), &execute_root).await;
                 let run = &mut document.tasks[0].automation.as_mut().unwrap().runs[0];
                 run.claim_generation = Some(request.claim_generation + 1);
@@ -24981,9 +25218,13 @@ mod cron_automation_tests {
         let mut recurring = task("active");
         recurring.recurring = Some(true);
         document.tasks.push(recurring);
-        cron::tasks_file::write_automation_tasks_body(fs.as_ref(), temp.path(), &cron::serialize_tasks(&document))
-            .await
-            .unwrap();
+        cron::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            temp.path(),
+            &cron::serialize_tasks(&document),
+        )
+        .await
+        .unwrap();
         let first =
             cron::claim_automation_run_now_at(fs.as_ref(), temp.path(), "d12345678", now, token)
                 .await
@@ -25165,9 +25406,13 @@ mod cron_automation_tests {
         let (temp, fs, _) = claimed_test_run().await;
         let mut doc = read_cron_tasks(fs.as_ref(), temp.path()).await;
         doc.tasks[0].automation.as_mut().unwrap().runs.clear();
-        cron::tasks_file::write_automation_tasks_body(fs.as_ref(), temp.path(), &cron::serialize_tasks(&doc))
-            .await
-            .unwrap();
+        cron::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            temp.path(),
+            &cron::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
         let root = temp.path().to_path_buf();
         let claim_root = root.clone();
         let claim_fs = fs.clone();
@@ -25443,8 +25688,10 @@ mod cron_automation_tests {
             if pending_marker {
                 std::fs::write(
                     root.join(".lingxi/cron-v2-migration.json"),
-                    serde_json::json!({"version":2,"completed":false,"source":snapshot}).to_string(),
-                ).unwrap();
+                    serde_json::json!({"version":2,"completed":false,"source":snapshot})
+                        .to_string(),
+                )
+                .unwrap();
             }
             let store = MobileCronStoreHandle::new(
                 cwd.clone(),
@@ -25468,7 +25715,10 @@ mod cron_automation_tests {
             assert_eq!(destination.tasks.len(), 1);
             assert_eq!(destination.tasks[0].id, "d12345678");
             assert_eq!(destination.tasks[0].prompt, "brief");
-            assert_eq!(destination.tasks[0].automation.as_ref().unwrap().status, cron::AutomationStatus::Paused);
+            assert_eq!(
+                destination.tasks[0].automation.as_ref().unwrap().status,
+                cron::AutomationStatus::Paused
+            );
         }
     }
 
@@ -25570,8 +25820,14 @@ mod read_auto_allow_wiring_tests {
     #[test]
     fn the_strip_removes_comment_lines_and_keeps_code() {
         let stripped = code_only("    // set_x(1);\n    set_x(2);\n/// set_x(3);\n");
-        assert!(!stripped.contains("set_x(1)"), "a `//` line must be stripped");
-        assert!(!stripped.contains("set_x(3)"), "a `///` line must be stripped");
+        assert!(
+            !stripped.contains("set_x(1)"),
+            "a `//` line must be stripped"
+        );
+        assert!(
+            !stripped.contains("set_x(3)"),
+            "a `///` line must be stripped"
+        );
         assert!(stripped.contains("set_x(2)"), "real code must survive");
     }
 

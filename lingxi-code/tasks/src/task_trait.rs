@@ -18,7 +18,9 @@ pub struct WebSocketMonitorInput {
 }
 impl std::fmt::Debug for WebSocketMonitorInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WebSocketMonitorInput").field("registration", &self.registration).finish_non_exhaustive()
+        f.debug_struct("WebSocketMonitorInput")
+            .field("registration", &self.registration)
+            .finish_non_exhaustive()
     }
 }
 
@@ -43,13 +45,32 @@ pub trait Task: Send + Sync {
         Ok(())
     }
     /// Whether the task's execution loop still has a cancellable worker.
-    async fn has_live_worker(&self, _task_id: &str) -> bool { false }
+    async fn has_live_worker(&self, _task_id: &str) -> bool {
+        false
+    }
     /// Real child agent identities whose processes belong to this task.
-    async fn process_owner_ids(&self, _task_id: &str) -> Vec<protocol::AgentId> { Vec::new() }
+    async fn process_owner_ids(&self, _task_id: &str) -> Vec<protocol::AgentId> {
+        Vec::new()
+    }
 
     fn forget_resume_recipe(&self, _task_id: &str) {}
-    async fn register_resume_recipe(&self, _task_id: &str, _request: SubagentSpawnRequest, _inheritance: SubagentInheritance) -> Result<(), TaskError> { Err(TaskError::Unsupported) }
-    async fn prepare_human_resume(&self, _task_id: &str, _agent_id: protocol::AgentId, _epoch: u64, _ctx: TaskContext) -> Result<HumanResumePrepared, TaskError> { Err(TaskError::Unsupported) }
+    async fn register_resume_recipe(
+        &self,
+        _task_id: &str,
+        _request: SubagentSpawnRequest,
+        _inheritance: SubagentInheritance,
+    ) -> Result<(), TaskError> {
+        Err(TaskError::Unsupported)
+    }
+    async fn prepare_human_resume(
+        &self,
+        _task_id: &str,
+        _agent_id: protocol::AgentId,
+        _epoch: u64,
+        _ctx: TaskContext,
+    ) -> Result<HumanResumePrepared, TaskError> {
+        Err(TaskError::Unsupported)
+    }
 
     /// Whether this task type supports inbound messages.
     fn supports_messages(&self) -> bool {

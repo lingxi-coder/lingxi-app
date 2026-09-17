@@ -2569,7 +2569,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             spec.script_path
                 .as_deref()
                 .filter(|path| !path.is_empty())
-                .map(|path| abs(path)),
+                .map(abs),
         ) {
             (Some(run_id), Some(script_path)) => local_app_resume_resolution_for_launch(
                 &self.checkpoints,
@@ -2997,7 +2997,7 @@ fn enrich_persisted_plugin_workflow_context(
     resumed_workflow_id: Option<&str>,
 ) -> Result<(), tool_workflow::WorkflowLaunchError> {
     let name = verified_plugin_workflow
-        .then(|| spec.name.as_deref())
+        .then_some(spec.name.as_deref())
         .flatten()
         .or(resumed_workflow_id);
     let Some(name) = name else {

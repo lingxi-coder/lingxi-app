@@ -353,7 +353,7 @@ fn parse_history_frame(frame: &Value) -> Option<HistoryInput> {
         .get("uuid")
         .and_then(Value::as_str)
         .and_then(MessageId::parse_prefixed)
-        .unwrap_or_else(MessageId::new);
+        .unwrap_or_default();
 
     match frame_type {
         "assistant" => {

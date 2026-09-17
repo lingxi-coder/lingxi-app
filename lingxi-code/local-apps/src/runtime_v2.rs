@@ -1176,10 +1176,7 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(ids, sorted);
         assert_eq!(ids.len(), CapabilityId::ALL.len());
-        assert_eq!(
-            registry.resolve("llm.stream").unwrap().supports_stream,
-            true
-        );
+        assert!(registry.resolve("llm.stream").unwrap().supports_stream);
         assert!(registry
             .to_json()
             .unwrap()

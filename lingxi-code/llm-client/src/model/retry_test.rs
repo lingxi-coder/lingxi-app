@@ -1005,8 +1005,7 @@ mod next_step_tests {
             );
         }
         assert_eq!(
-            u32::from(state.attempt),
-            DEFAULT_MAX_RETRIES,
+            state.attempt, DEFAULT_MAX_RETRIES,
             "after 10 RetryAfter steps the attempt counter equals the budget"
         );
         // 11th invocation: budget exhausted → Terminal.

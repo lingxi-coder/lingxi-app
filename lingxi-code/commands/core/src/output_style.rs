@@ -29,19 +29,8 @@ use std::sync::Arc;
 /// `u1` (`["list","show","display","current","view","get","check","describe",
 /// "print","version","about","status","?"]`).
 const LISTING_ARGS: [&str; 13] = [
-    "list",
-    "show",
-    "display",
-    "current",
-    "view",
-    "get",
-    "check",
-    "describe",
-    "print",
-    "version",
-    "about",
-    "status",
-    "?",
+    "list", "show", "display", "current", "view", "get", "check", "describe", "print", "version",
+    "about", "status", "?",
 ];
 
 /// Arguments that ask for help — upstream `Zw` (`["help","-h","--help"]`).
@@ -277,7 +266,9 @@ mod tests {
         // into the SAME no-match arm. Treating them as style names would give
         // `Unknown output style "help"`, which reads like a broken command.
         let (h, _) = handler("default");
-        for word in ["list", "show", "current", "?", "help", "-h", "--help", "STATUS"] {
+        for word in [
+            "list", "show", "current", "?", "help", "-h", "--help", "STATUS",
+        ] {
             assert!(
                 display(&h, word).await.starts_with("Output style: default"),
                 "{word:?} must render the listing"
@@ -303,7 +294,10 @@ mod tests {
         assert!(display(&h, "explanatory")
             .await
             .starts_with("Output style set to Explanatory"));
-        assert_eq!(mock.output_style_switches(), vec!["Explanatory".to_string()]);
+        assert_eq!(
+            mock.output_style_switches(),
+            vec!["Explanatory".to_string()]
+        );
     }
 
     #[tokio::test]

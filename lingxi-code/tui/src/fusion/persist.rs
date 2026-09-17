@@ -146,9 +146,8 @@ mod tests {
 
     #[test]
     fn a_file_that_was_never_written_reads_as_nothing_configured() {
-        let (roles, enabled) = load_fusion_settings_from(std::path::Path::new(
-            "/nonexistent/lingxi/settings.json",
-        ));
+        let (roles, enabled) =
+            load_fusion_settings_from(std::path::Path::new("/nonexistent/lingxi/settings.json"));
         assert!(roles.is_untouched());
         assert!(!enabled);
     }

@@ -123,23 +123,20 @@ impl ReservationBook {
                 ));
             }
             let generation = item.scope.generation_id;
-            if !scopes.contains_key(&generation) {
+            if let std::collections::hash_map::Entry::Vacant(e) = scopes.entry(generation) {
                 order = order.checked_add(1).ok_or_else(|| {
                     BudgetError::Internal("output generation sequence exhausted".into())
                 })?;
-                scopes.insert(
-                    generation,
-                    OutputScopeState {
-                        binding_id: MessageId::new(),
-                        spent: 0,
-                        max_output_tokens: item.scope.max_output_tokens,
-                        generation_order: order,
-                        legacy_events: HashMap::new(),
-                        snapshot: Arc::new(AtomicU64::new(0)),
-                        owner: Weak::new(),
-                        attempts: HashMap::new(),
-                    },
-                );
+                e.insert(OutputScopeState {
+                    binding_id: MessageId::new(),
+                    spent: 0,
+                    max_output_tokens: item.scope.max_output_tokens,
+                    generation_order: order,
+                    legacy_events: HashMap::new(),
+                    snapshot: Arc::new(AtomicU64::new(0)),
+                    owner: Weak::new(),
+                    attempts: HashMap::new(),
+                });
             }
             let scope = scopes.get_mut(&generation).expect("recovery scope staged");
             if scope.max_output_tokens != item.scope.max_output_tokens {

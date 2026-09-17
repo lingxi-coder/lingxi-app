@@ -1399,7 +1399,7 @@ pub fn run_update(
         }
         let is_dir = registry
             .get(name)
-            .map(|e| source_of(e))
+            .map(source_of)
             .map(|s| str_field(&s, "source") == "directory")
             .unwrap_or(false);
         if let Some(entry) = registry.get_mut(name).and_then(Value::as_object_mut) {
@@ -1974,20 +1974,32 @@ mod tests {
     #[test]
     fn classify_gitlab_project_urls_as_git() {
         for (input, expected) in [
-            ("https://gitlab.com/group/project", "https://gitlab.com/group/project.git"),
+            (
+                "https://gitlab.com/group/project",
+                "https://gitlab.com/group/project.git",
+            ),
             // Nested subgroups — GitLab's shape, and why `owner/repo` is only a floor.
             (
                 "https://gitlab.com/group/subgroup/project",
                 "https://gitlab.com/group/subgroup/project.git",
             ),
             // Self-hosted.
-            ("https://gitlab.acme.com/g/p", "https://gitlab.acme.com/g/p.git"),
+            (
+                "https://gitlab.acme.com/g/p",
+                "https://gitlab.acme.com/g/p.git",
+            ),
             // Trailing slash trimmed before `.git` is appended.
-            ("https://gitlab.com/group/project/", "https://gitlab.com/group/project.git"),
+            (
+                "https://gitlab.com/group/project/",
+                "https://gitlab.com/group/project.git",
+            ),
         ] {
             assert_eq!(
                 classify_source(input).unwrap(),
-                Source::Git { url: expected.to_string(), git_ref: None },
+                Source::Git {
+                    url: expected.to_string(),
+                    git_ref: None
+                },
                 "{input}"
             );
         }

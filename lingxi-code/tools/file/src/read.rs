@@ -2177,13 +2177,12 @@ impl Tool for FileReadTool {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
+            && size > crate::notebook_read::MAX_NOTEBOOK_READ_SIZE
         {
-            if size > crate::notebook_read::MAX_NOTEBOOK_READ_SIZE {
-                self.emit_failed(&invocation_id, "notebook_too_large").await;
-                return Err(ToolError::Io(
-                    crate::notebook_read::notebook_too_large_message(),
-                ));
-            }
+            self.emit_failed(&invocation_id, "notebook_too_large").await;
+            return Err(ToolError::Io(
+                crate::notebook_read::notebook_too_large_message(),
+            ));
         }
 
         // TS applies the byte cap ONLY when no `limit` is supplied

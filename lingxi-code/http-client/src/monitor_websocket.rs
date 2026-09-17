@@ -294,7 +294,11 @@ mod tests {
             dropped: Option<tokio::sync::oneshot::Sender<()>>,
         }
         impl AsyncRead for BackpressuredSocket {
-            fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 if let Some(ping) = self.ping.take() {
                     buf.put_slice(&ping);
                     Poll::Ready(Ok(()))
@@ -304,20 +308,29 @@ mod tests {
             }
         }
         impl AsyncWrite for BackpressuredSocket {
-            fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<std::io::Result<usize>> {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
                 self.writing.notify_one();
                 Poll::Pending
             }
             fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
                 Poll::Pending
             }
-            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 Poll::Pending
             }
         }
         impl Drop for BackpressuredSocket {
             fn drop(&mut self) {
-                if let Some(dropped) = self.dropped.take() { let _ = dropped.send(()); }
+                if let Some(dropped) = self.dropped.take() {
+                    let _ = dropped.send(());
+                }
             }
         }
         let writing = Arc::new(tokio::sync::Notify::new());
@@ -331,12 +344,15 @@ mod tests {
             },
             tokio_tungstenite::tungstenite::protocol::Role::Client,
             None,
-        ).await;
+        )
+        .await;
         let receiver = receive(socket);
-        tokio::time::timeout(Duration::from_secs(1), writing.notified()).await
+        tokio::time::timeout(Duration::from_secs(1), writing.notified())
+            .await
             .expect("real pump must attempt its Pong before cancellation");
         drop(receiver);
-        tokio::time::timeout(Duration::from_secs(1), released).await
+        tokio::time::timeout(Duration::from_secs(1), released)
+            .await
             .expect("TaskStop must release a socket even while its Pong write is pending")
             .expect("underlying socket was dropped");
     }

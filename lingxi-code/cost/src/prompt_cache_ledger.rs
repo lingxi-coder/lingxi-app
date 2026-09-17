@@ -339,7 +339,8 @@ impl PromptCacheLedger {
                 let comparable = prev_total.min(now_total);
                 let unread = comparable.saturating_sub(facts.cache_read_tokens);
                 #[allow(clippy::cast_precision_loss)]
-                let covered = (facts.cache_read_tokens as f64) >= (comparable as f64) * HIT_COVERAGE;
+                let covered =
+                    (facts.cache_read_tokens as f64) >= (comparable as f64) * HIT_COVERAGE;
                 if covered || unread < MISS_TOKEN_THRESHOLD {
                     CacheOutcome::Hit
                 } else if drop_within_ttl {
@@ -427,7 +428,9 @@ impl PromptCacheLedger {
             last_miss_attribution: self.last_miss_attribution.clone(),
             miss_causes: self.miss_causes.clone(),
             caching_observed,
-            expires_at: last_activity.filter(|_| last_wrote_or_read).map(|a| a + window),
+            expires_at: last_activity
+                .filter(|_| last_wrote_or_read)
+                .map(|a| a + window),
             warm: last_wrote_or_read
                 && last_activity.is_some_and(|a| now_ms.saturating_sub(a) < window),
             last_activity_at: last_activity.filter(|_| last.is_some()),
@@ -475,7 +478,10 @@ mod tests {
     #[test]
     fn the_first_request_is_cold_and_a_reused_prefix_is_a_hit() {
         let mut l = PromptCacheLedger::new();
-        assert_eq!(l.record(facts(0, 100, 0, 10_000)).outcome, CacheOutcome::Cold);
+        assert_eq!(
+            l.record(facts(0, 100, 0, 10_000)).outcome,
+            CacheOutcome::Cold
+        );
         // Reads back essentially the whole prefix ⇒ hit.
         assert_eq!(
             l.record(facts(1_000, 50, 10_000, 0)).outcome,
@@ -655,7 +661,10 @@ mod tests {
 
     #[test]
     fn the_cause_names_and_labels_are_the_oracle_set() {
-        assert_eq!(MissCause::SystemPromptChanged.wire(), "system_prompt_changed");
+        assert_eq!(
+            MissCause::SystemPromptChanged.wire(),
+            "system_prompt_changed"
+        );
         assert_eq!(MissCause::LikelySeverSide.wire(), "likely_server_side");
         assert_eq!(MissCause::ToolsChanged.label(), "tool definitions changed");
         assert_eq!(MissCause::TtlExpired1h.label(), "idle past the 1h TTL");

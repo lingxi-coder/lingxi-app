@@ -27,7 +27,11 @@ use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use telemetry::pii::Verified;
-use telemetry::tengu::mcp::{CommandInlinePayload, COMMAND_INLINE};
+use telemetry::tengu::mcp::CommandInlinePayload;
+// Only the `cfg(test)` recorder below names this constant. Imported behind
+// `cfg(test)` so the lib target carries no unused import for it.
+#[cfg(test)]
+use telemetry::tengu::mcp::COMMAND_INLINE;
 use tokio_util::sync::CancellationToken;
 use tool_workflow::{UltracodeGate, WorkflowSizeGuideline};
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;

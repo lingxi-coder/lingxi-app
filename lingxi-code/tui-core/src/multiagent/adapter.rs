@@ -56,7 +56,9 @@ mod tests {
     #[tokio::test]
     async fn pump_once_forwards_fixture_events_to_channel() {
         let feed = FixtureFeed::new(vec![vec![MultiAgentEvent::TasksRefreshed(vec![TaskRow {
-            unread: false, model: None, effort: None,
+            unread: false,
+            model: None,
+            effort: None,
             awaiting_plan_approval: false,
             task_id: "b00000001".into(),
             task_type: "local_bash".into(),

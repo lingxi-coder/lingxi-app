@@ -683,8 +683,9 @@ fn resolve_external_plugin_source(
     source: &plugin::marketplace::MarketplaceExternalSource,
     work: &Path,
 ) -> Result<PathBuf, String> {
-    current_thread_runtime()
-        .block_on(resolve_external_plugin_source_with_bus(source, work, None, false))
+    current_thread_runtime().block_on(resolve_external_plugin_source_with_bus(
+        source, work, None, false,
+    ))
 }
 
 async fn resolve_external_plugin_source_with_bus(
@@ -842,8 +843,7 @@ async fn materialize_external_plugin_source_with_bus(
     std::fs::create_dir_all(&work)
         .map_err(|error| format!("failed to create plugin source staging: {error}"))?;
 
-    let resolved =
-        resolve_external_plugin_source_with_bus(source, &work, analytics_bus, yes).await;
+    let resolved = resolve_external_plugin_source_with_bus(source, &work, analytics_bus, yes).await;
     let result = (|| -> Result<(), String> {
         let resolved = resolved?;
         copy_dir(&resolved, &payload).map_err(|error| error.to_string())?;
@@ -880,7 +880,12 @@ fn resolve_plugin_source(
     arg: &str,
     plugins_dir: &Path,
 ) -> Result<Option<(String, String, PathBuf)>, String> {
-    current_thread_runtime().block_on(resolve_plugin_source_with_bus(arg, plugins_dir, None, false))
+    current_thread_runtime().block_on(resolve_plugin_source_with_bus(
+        arg,
+        plugins_dir,
+        None,
+        false,
+    ))
 }
 
 async fn resolve_plugin_source_with_bus(
@@ -2257,10 +2262,8 @@ where
     .await;
     if result.is_err() {
         rollback_plugin_secrets(&credentials, &plugin_key, &previous).await;
-    } else {
-        if let Some(bus) = analytics_bus {
-            emit_installed_event(bus, arg, plugins_dir).await;
-        }
+    } else if let Some(bus) = analytics_bus {
+        emit_installed_event(bus, arg, plugins_dir).await;
     }
     result
 }
@@ -2522,7 +2525,7 @@ where
         }
         for key in &sensitive_keys {
             if let Err(error) = stack.delete_plugin_secret(&plugin_key, key).await {
-                rollback_plugin_secrets(&stack, &plugin_key, &previous_secrets).await;
+                rollback_plugin_secrets(stack, &plugin_key, &previous_secrets).await;
                 return Err(format!("Failed to delete plugin secret {key}: {error}"));
             }
         }
@@ -2543,7 +2546,7 @@ where
         Ok(message) => message,
         Err(error) => {
             if let Some(stack) = &credential_stack {
-                rollback_plugin_secrets(&stack, &plugin_key, &previous_secrets).await;
+                rollback_plugin_secrets(stack, &plugin_key, &previous_secrets).await;
             }
             return Err(error);
         }
@@ -2631,18 +2634,16 @@ async fn resolve_source_with_bus(
     let Some(root) = install_location(entry) else {
         return Ok(None);
     };
-    Ok(
-        marketplace_entry_source_path_with_bus(
-            &root,
-            market,
-            name,
-            plugins_dir,
-            analytics_bus,
-            false,
-        )
-            .await?
-            .map(|source| (market.to_string(), source)),
+    Ok(marketplace_entry_source_path_with_bus(
+        &root,
+        market,
+        name,
+        plugins_dir,
+        analytics_bus,
+        false,
     )
+    .await?
+    .map(|source| (market.to_string(), source)))
 }
 
 /// The version string from a plugin's own manifest (`unknown` when absent).
@@ -5071,10 +5072,7 @@ mod tests {
         let (e, _) = command_source_env();
         let err = run_install("fromcmd@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
             .expect_err("must not install an unreviewed command source");
-        assert!(
-            err.contains("has not been reviewed yet"),
-            "got: {err}"
-        );
+        assert!(err.contains("has not been reviewed yet"), "got: {err}");
         assert!(
             !installed_path(&e.plugins).exists()
                 || installed_db(&e)

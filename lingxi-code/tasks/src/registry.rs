@@ -38,6 +38,11 @@ pub struct TaskRegistry {
     /// registry in `Arc`.  Cancellation-sensitive task transactions use it to
     /// outlive the caller's future without creating a reference cycle.
     self_ref: std::sync::OnceLock<std::sync::Weak<TaskRegistry>>,
+    /// The session's observer pairing table, installed by the composition root.
+    /// Shared with `ToolUseContext::observer_pairings` so `ObserverReport` and
+    /// the spawn site below agree on the same pairings — an observer spawned
+    /// here must be resolvable by the tool it reports through.
+    observer_pairings: std::sync::OnceLock<Arc<platform_api::observer_pairing::ObserverPairings>>,
     human_messages: std::sync::Mutex<HashMap<String, human_messages::HumanInbox>>,
     shell_adoption_gate: Arc<tokio::sync::Mutex<()>>,
     shell_transfer_mutation: tokio::sync::Mutex<()>,
@@ -334,6 +339,23 @@ impl Drop for WorkflowRunReservation {
 }
 
 impl TaskRegistry {
+    /// Install the session's observer pairing table. Idempotent; a second call
+    /// is ignored, like the other `OnceLock` seams here.
+    pub fn set_observer_pairings(
+        &self,
+        table: Arc<platform_api::observer_pairing::ObserverPairings>,
+    ) {
+        let _ = self.observer_pairings.set(table);
+    }
+
+    /// The session's observer pairing table, when the host wired one.
+    #[must_use]
+    pub fn observer_pairings(
+        &self,
+    ) -> Option<&Arc<platform_api::observer_pairing::ObserverPairings>> {
+        self.observer_pairings.get()
+    }
+
     /// Install the weak self-reference used by cancellation-safe transactions.
     /// This is deliberately set-once, matching the deferred status sink.
     pub(crate) fn bind_self(&self, registry: &Arc<TaskRegistry>) {
@@ -377,6 +399,7 @@ impl TaskRegistry {
     ) -> Self {
         Self {
             self_ref: std::sync::OnceLock::new(),
+            observer_pairings: std::sync::OnceLock::new(),
             shell_adoption_gate: Arc::new(tokio::sync::Mutex::new(())),
             shell_transfer_mutation: tokio::sync::Mutex::new(()),
             shell_transfer_fences: Arc::new(std::sync::Mutex::new(HashSet::new())),

@@ -93,6 +93,15 @@ test('the layer switcher appears only on layered pages', async () => {
   assert.equal(customProviders.hasLayerSwitcher, true, 'custom-providers is outside 编码 but IS layered');
 });
 
+test('settings exposes a titlebar drag strip and flush right scroll track', async () => {
+  const result = await runScenario('window-chrome');
+  assert.equal(result.hasDragRegion, true);
+  assert.equal(result.dragRegionMode, 'drag');
+  assert.equal(result.dragRegionHeight, '18px');
+  assert.equal(result.scrollPaddingTop, '0px');
+  assert.equal(result.scrollPaddingBottom, '0px');
+});
+
 test('the four configuration managers render without horizontal dialog overflow', async () => {
   const result = await runScenario('visual-admin');
   assert.deepEqual(result.pages, ['skills', 'mcp', 'plugins', 'hooks']);

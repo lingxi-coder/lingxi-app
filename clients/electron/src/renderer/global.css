@@ -1684,6 +1684,14 @@ textarea, input { font-family: inherit; }
 }
 .drag-region { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
+.settings-window-drag-region {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  left: 88px;
+  height: 18px;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .desktop-empty-state { animation: none; }

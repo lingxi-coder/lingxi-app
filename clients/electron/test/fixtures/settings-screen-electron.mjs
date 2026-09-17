@@ -196,6 +196,22 @@ async function runPageContentScenario(webContents) {
   return { placeholderKinds, afterHooksEscapeHatch, hasFiles, fileActions };
 }
 
+async function runWindowChromeScenario(webContents) {
+  return webContents.executeJavaScript(`(() => {
+    const dragRegion = document.querySelector('.settings-window-drag-region');
+    const contentScroll = document.querySelector('.settings-content-scroll');
+    const dragStyle = dragRegion && getComputedStyle(dragRegion);
+    const scrollStyle = contentScroll && getComputedStyle(contentScroll);
+    return {
+      hasDragRegion: Boolean(dragRegion),
+      dragRegionMode: dragStyle?.webkitAppRegion ?? null,
+      dragRegionHeight: dragStyle?.height ?? null,
+      scrollPaddingTop: scrollStyle?.paddingTop ?? null,
+      scrollPaddingBottom: scrollStyle?.paddingBottom ?? null,
+    };
+  })()`);
+}
+
 async function runLayerReseedScenario(webContents) {
   // Task 18 fix round 1, Critical: `ToolsAgent`'s `enabledTools`/`outputStyle`
   // text fields and `Plugins`' per-plugin `pluginConfigs` textarea are both
@@ -676,6 +692,7 @@ async function main() {
       : scenario === 'focus-trap' ? await runFocusTrapScenario(webContents)
       : scenario === 'back-click' ? await runBackClickScenario(webContents)
       : scenario === 'page-content' ? await runPageContentScenario(webContents)
+      : scenario === 'window-chrome' ? await runWindowChromeScenario(webContents)
       : scenario === 'layer-reseed' ? await runLayerReseedScenario(webContents)
       : scenario === 'permission-rule-dispatch' ? await runPermissionRuleDispatchScenario(webContents)
       : scenario === 'remount-on-layer-switch' ? await runRemountOnLayerSwitchScenario(webContents)

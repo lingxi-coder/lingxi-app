@@ -656,6 +656,7 @@ export function SettingsScreen({
         background: t.windowBg, color: t.text,
       }}
     >
+      <div className="settings-window-drag-region drag-region" aria-hidden="true" />
       {snapshotError && (
         <div data-testid="settings-snapshot-error" role="alert" style={{
           padding: '10px 18px', background: t.danger, color: '#fff', fontSize: 12.5, flexShrink: 0,
@@ -734,17 +735,19 @@ export function SettingsScreen({
           </div>
         </nav>
 
-        <div style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '20px 32px 40px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
-            <div style={{ fontSize: 18, fontWeight: 600 }}>{activePage.label}</div>
+        <div className="settings-content-scroll" style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: 0 }}>
+          <div style={{ padding: '20px 32px 40px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+              <div style={{ fontSize: 18, fontWeight: 600 }}>{activePage.label}</div>
+              {showLayerSwitcher && (
+                <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
+              )}
+            </div>
             {showLayerSwitcher && (
-              <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
+              <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
             )}
+            {body}
           </div>
-          {showLayerSwitcher && (
-            <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
-          )}
-          {body}
         </div>
 
 

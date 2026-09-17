@@ -4592,6 +4592,13 @@ async fn build_mobile_inner_with_ask(
         ),
     );
     let task_registry = Arc::new(task_registry_inner);
+    // ONE observer pairing table per session, shared with the orchestrator
+    // below (desktop parity). The registry files a pairing when it spawns an
+    // observer; `ObserverReport` resolves against this same `Arc`. A second
+    // `ObserverPairings::new()` anywhere would compile, look wired, and answer
+    // "not armed" forever.
+    let observer_pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
+    task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     local_agent_status_sink.bind(task_registry.clone());
     let tool_ctx = BuiltinToolContext {
@@ -5175,6 +5182,7 @@ async fn build_mobile_inner_with_ask(
     // events ride the same sink as the ApiService + tools) + the session
     // CostTracker (desktop parity; accumulates the running session cost total).
     .with_analytics_bus(analytics_bus)
+    .with_observer_pairings(observer_pairings.clone())
     .with_cost_tracker(cost_tracker)
     .with_api_calls_counter(api_calls_recorded)
     .with_new_diagnostics_source(lsp_diagnostics.diagnostics_source(

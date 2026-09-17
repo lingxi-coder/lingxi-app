@@ -3937,6 +3937,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             cwd: None,
             depth: 0,
             observer: None,
+            observer_pairings: None,
             // (/rewind) Hand each write tool the file-history sink (a trait view
             // of the shared checkpoint store) so pre-edit content is backed up.
             file_history: orch

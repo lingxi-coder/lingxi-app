@@ -134,6 +134,7 @@ pub mod mobile_runtime_environment;
 pub mod model_attempt;
 pub mod model_capabilities;
 pub mod notification;
+pub mod observer_pairing;
 pub mod orchestrator;
 pub mod panel_pool;
 pub mod parked_agent_store;

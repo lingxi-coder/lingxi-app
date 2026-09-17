@@ -1131,6 +1131,7 @@ mod tests {
             agent_id: None,
             agent_name: None,
             observer: None,
+            observer_pairings: None,
             team_name: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,

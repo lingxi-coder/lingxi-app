@@ -290,6 +290,7 @@ impl ToolInvoker for RegistryToolInvoker {
             cwd: ctx.cwd.clone(),
             depth: ctx.depth,
             observer: ctx.observer.clone(),
+            observer_pairings: None,
             file_history: None,
         };
         if tool.native_input_validation() {

@@ -20,6 +20,7 @@ pub mod artifact;
 pub mod ask_user_question;
 pub mod brief;
 pub mod list_agents;
+pub mod observer_report;
 pub mod push_notification;
 pub mod report_findings;
 pub mod send_message;

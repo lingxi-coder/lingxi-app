@@ -198,6 +198,7 @@
     <string name="chat_status_resuming_session">Resuming session…</string>
     <string name="chat_status_running">Running</string>
     <string name="chat_status_timed_out">Timed Out</string>
+    <string name="chat_status_unknown">Unknown</string>
     <string name="chat_stopping">Stopping…</string>
     <string name="chat_task_failed_reason_fmt">Background task %1$s failed: %2$s</string>
     <string name="chat_tasks_collapse_hint">Hide the task list</string>

@@ -230,6 +230,7 @@
   "chat_status_resuming_session": "会話を再開しています…",
   "chat_status_running": "実行中",
   "chat_status_timed_out": "タイムアウト",
+  "chat_status_unknown": "不明",
   "chat_stopping": "停止中…",
   "chat_switch_model_failed %@": "モデルの切り替えに失敗しました：%@",
   "chat_task_cancelled %@": "バックグラウンドタスク %@ がキャンセルされました",

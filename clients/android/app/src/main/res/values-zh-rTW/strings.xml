@@ -198,6 +198,7 @@
     <string name="chat_status_resuming_session">正在恢復會話…</string>
     <string name="chat_status_running">執行中</string>
     <string name="chat_status_timed_out">逾時</string>
+    <string name="chat_status_unknown">未知</string>
     <string name="chat_stopping">正在停止…</string>
     <string name="chat_task_failed_reason_fmt">背景任務 %1$s 已失敗：%2$s</string>
     <string name="chat_tasks_collapse_hint">收合任務清單</string>

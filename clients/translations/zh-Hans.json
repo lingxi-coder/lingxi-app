@@ -230,6 +230,7 @@
   "chat_status_resuming_session": "正在恢复会话…",
   "chat_status_running": "运行中",
   "chat_status_timed_out": "超时",
+  "chat_status_unknown": "未知",
   "chat_stopping": "正在停止…",
   "chat_switch_model_failed %@": "切换模型失败：%@",
   "chat_task_cancelled %@": "后台任务 %@ 已取消",

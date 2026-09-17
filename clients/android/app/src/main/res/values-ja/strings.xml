@@ -198,6 +198,7 @@
     <string name="chat_status_resuming_session">会話を再開しています…</string>
     <string name="chat_status_running">実行中</string>
     <string name="chat_status_timed_out">タイムアウト</string>
+    <string name="chat_status_unknown">不明</string>
     <string name="chat_stopping">停止中…</string>
     <string name="chat_task_failed_reason_fmt">バックグラウンドタスク %1$s が失敗しました: %2$s</string>
     <string name="chat_tasks_collapse_hint">タスク一覧を隠す</string>

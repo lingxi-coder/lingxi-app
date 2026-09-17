@@ -1,23 +1,23 @@
 {
-  "totalKeys": 2114,
-  "androidIllegal": 114,
-  "androidIllegalUnpaired": 106,
+  "totalKeys": 2293,
+  "androidIllegal": 119,
+  "androidIllegalUnpaired": 107,
   "iosSourceOrphans": 0,
   "androidSourceOrphans": 0,
   "androidCompanionLocaleGapsTotal": 0,
   "empty": {
     "zh-Hans": 0,
-    "zh-Hant": 26,
-    "en": 20,
-    "ja": 26,
-    "ko": 26
+    "zh-Hant": 0,
+    "en": 0,
+    "ja": 0,
+    "ko": 0
   },
   "identicalToBase": {
     "zh-Hans": 0,
-    "zh-Hant": 238,
-    "en": 24,
-    "ja": 46,
-    "ko": 19
+    "zh-Hant": 248,
+    "en": 25,
+    "ja": 47,
+    "ko": 20
   },
   "unpairedKeys": [
     "chat_active_agents %u",
@@ -107,6 +107,7 @@
     "settings_mcp_connections_count %lld",
     "settings_notifs_enabled_count %lld",
     "settings_provider_backoff_range %lld %lld",
+    "settings_provider_official_url_hint %@",
     "settings_provider_retry_range %lld %lld",
     "settings_provider_routing_footer %lld %lld %lld %lld",
     "settings_provider_section_added_count %lld",

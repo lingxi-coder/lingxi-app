@@ -854,7 +854,7 @@ enum ConversationToolStatus: Equatable {
         case .completed: return String(localized: "chat_status_completed")
         case .failed: return String(localized: "chat_status_failed")
         case .cancelled: return String(localized: "chat_status_cancelled")
-        case .unknown: return String(localized: "Unknown")
+        case .unknown: return String(localized: "chat_status_unknown")
         }
     }
 }

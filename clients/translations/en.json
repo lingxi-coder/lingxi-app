@@ -230,6 +230,7 @@
   "chat_status_resuming_session": "Resuming session…",
   "chat_status_running": "Running",
   "chat_status_timed_out": "Timed Out",
+  "chat_status_unknown": "Unknown",
   "chat_stopping": "Stopping…",
   "chat_switch_model_failed %@": "Failed to switch model: %@",
   "chat_task_cancelled %@": "Background task %@ cancelled",

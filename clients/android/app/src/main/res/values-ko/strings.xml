@@ -198,6 +198,7 @@
     <string name="chat_status_resuming_session">세션을 복원하는 중…</string>
     <string name="chat_status_running">실행 중</string>
     <string name="chat_status_timed_out">시간 초과</string>
+    <string name="chat_status_unknown">알 수 없음</string>
     <string name="chat_stopping">중지하는 중…</string>
     <string name="chat_task_failed_reason_fmt">백그라운드 작업 %1$s이(가) 실패했습니다: %2$s</string>
     <string name="chat_tasks_collapse_hint">작업 목록 접기</string>

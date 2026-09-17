@@ -421,12 +421,26 @@ test('opening a session preserves its cached renderer runtime until the host res
 test('session menus are hidden and closed while the active session is loading', () => {
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
 
+  const useBridgeSource = readFileSync(join(process.cwd(), 'src/renderer/bridge/useBridge.ts'), 'utf8');
+
   assert.match(source, /\{ready && permissionOpen && \(/);
-  assert.match(source, /\{ready && modelOpen && \(/);
+  assert.match(source, /if \(ready\) return;\s+setPermissionOpen\(false\);/);
+
+  // The model control is NOT on `ready` — `ready` also demands a configured
+  // provider, and this control is the way to configure one. It still must not
+  // outlive the session it commands, and `bridge.connected` is what carries
+  // that: `useBridge` defines it to exclude a session that is still loading, so
+  // the last assertion is the half of the chain this file cannot see.
   assert.match(
     source,
-    /if \(ready\) return;\s+setPermissionOpen\(false\);\s+setModelOpen\(false\);\s+setModelSubmenu\(null\);/,
+    /const modelControlReady = Boolean\(bridge\.hosted && !bridge\.loading && bridge\.connected && activeSessionId\);/,
   );
+  assert.match(source, /\{modelControlReady && modelOpen && \(/);
+  assert.match(
+    source,
+    /if \(modelControlReady\) return;\s+setModelOpen\(false\);\s+setModelSubmenu\(null\);/,
+  );
+  assert.match(useBridgeSource, /connected: !sessionLoading && connection\.status === 'connected',/);
 });
 
 test('session rows expose deterministic relative activity metadata', () => {

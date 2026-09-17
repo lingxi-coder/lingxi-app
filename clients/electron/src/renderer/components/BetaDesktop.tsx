@@ -1353,12 +1353,35 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
   const fileMenuOpen = Boolean(filePicker && ready);
 
+  /**
+   * The model control is deliberately NOT gated on `ready`.
+   *
+   * `ready` is the gate for SENDING, and it also demands a trusted workspace
+   * and a CONFIGURED PROVIDER. The model control is how the user reaches those:
+   * its rows offer "Connect in Settings" for a provider that has none. Gating
+   * it on `ready` made the way out of a state unavailable inside that state —
+   * and a turn in flight, or a catalog that has not arrived, are not reasons to
+   * refuse it either.
+   *
+   * What is left is the one refusal that is not a lie: nothing is up to take
+   * the change. Before the bootstrap there is no session id, while a session is
+   * being opened `useBridge`'s `command()` drops whatever is sent, and a
+   * disconnected engine rejects it — a pill that looked live and then lost the
+   * choice would be worse than a disabled one. So: enabled exactly when a
+   * switch would actually land.
+   */
+  const modelControlReady = Boolean(bridge.hosted && !bridge.loading && bridge.connected && activeSessionId);
+
   useEffect(() => {
     if (ready) return;
     setPermissionOpen(false);
+  }, [ready]);
+
+  useEffect(() => {
+    if (modelControlReady) return;
     setModelOpen(false);
     setModelSubmenu(null);
-  }, [ready]);
+  }, [modelControlReady]);
 
   useEffect(() => {
     if (!modelOpen) return;
@@ -1415,6 +1438,16 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     if (!slashMenuOpen) return;
     void bridge.refreshSlashCommands().catch(() => undefined);
   }, [bridge.refreshSlashCommands, slashMenuOpen]);
+
+  // The same self-healing the slash menu has, over everything this picker
+  // shows. The catalog and the reasoning controls are otherwise asked for
+  // exactly once per connection, so a reply lost to a restart (Codex activation
+  // restarts the engine mid-connection) left the picker empty, and its Effort
+  // row dead, with nothing able to ask again.
+  useEffect(() => {
+    if (!modelOpen) return;
+    void bridge.refreshModelPicker().catch(() => undefined);
+  }, [bridge.refreshModelPicker, modelOpen]);
 
   useEffect(() => {
     if (!slashMenuOpen) return;
@@ -2562,7 +2595,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             <button
               ref={modelTrigger}
               type="button"
-              disabled={!ready || bridge.desktop.models.length === 0}
+              // NOT disabled on an empty catalog. Empty means "the list has not
+              // arrived", not "there is nothing to pick" — the engine always
+              // lists at least the current model — and disabling on it turned a
+              // lost reply into a control the user could never reach again. The
+              // menu below asks for the catalog when it opens, so the empty case
+              // is a panel that fills in rather than a dead pill.
+              disabled={!modelControlReady}
               aria-haspopup="menu"
               aria-expanded={modelOpen}
               aria-label={`${fastModeAvailable && bridge.desktop.fastMode ? 'Fast mode, ' : ''}Model: ${modelLabel(bridge.desktop.currentModel)}, reasoning ${reasoningSelectionLabel(selectedReasoning)}`}
@@ -2578,7 +2617,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               <span style={{ color: t.text3, fontSize: 11.5 }}>{reasoningSelectionLabel(selectedReasoning)}</span>
               <Icon name="chevron" size={14} color={t.text3} />
             </button>
-            {ready && modelOpen && (
+            {modelControlReady && modelOpen && (
               <>
               <div
                 style={{
@@ -2738,11 +2777,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               {modelSubmenu === 'speed' && fastModeAvailable && (
                 <div style={{ ...modelPickerSubmenuStyle(t, optionListPlacement), maxHeight: 'min(300px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Speed">
                   {modelPickerSubmenuHeading(t, 'Speed', '5px 10px 8px', optionListPlacement, () => setModelSubmenu(null))}
-                  <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !ready)}>
+                  <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!modelControlReady} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !modelControlReady)}>
                     <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Standard</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>Default speed</span></span>
                     {(!bridge.desktop.fastMode || !fastModeAvailable) && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
                   </button>
-                  {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!ready} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !ready)}>
+                  {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!modelControlReady} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !modelControlReady)}>
                     <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Fast</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>1.5x speed, more usage</span></span>
                     {bridge.desktop.fastMode && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
                   </button>}

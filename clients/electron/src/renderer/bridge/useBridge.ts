@@ -351,6 +351,15 @@ export interface UseBridge {
   refreshDoctor(): Promise<void>;
   /** Re-pulls the live engine slash-command registry for completion and the command palette. */
   refreshSlashCommands(): Promise<void>;
+  /**
+   * Re-pulls everything the model picker shows: the catalog (`ModelList` +
+   * `ProviderModelCatalog`) and the reasoning controls.
+   *
+   * The once-per-connection listing batch is the only other thing that asks for
+   * either, so without this a single lost reply left the picker with nothing to
+   * offer — and its Effort row dead — until the app was restarted.
+   */
+  refreshModelPicker(): Promise<void>;
   refreshSessionAgents(): Promise<void>;
   loadSessionAgentTranscript(agentId: string): Promise<void>;
   openRuntimeItem(item: RuntimeCenterItemRef): void;
@@ -2285,6 +2294,12 @@ export function useBridge(): UseBridge {
     () => command({ type: 'refresh_listings', which: [{ type: 'slash_commands' }] }),
     [command],
   );
+  const refreshModelPicker = useCallback(async () => {
+    await Promise.all([
+      command({ type: 'list_models' }),
+      command({ type: 'get_conversation_controls' }),
+    ]);
+  }, [command]);
   const refreshSessionAgents = useCallback(async () => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
@@ -2622,6 +2637,7 @@ export function useBridge(): UseBridge {
     refreshStatus,
     refreshDoctor,
     refreshSlashCommands,
+    refreshModelPicker,
     refreshSessionAgents,
     loadSessionAgentTranscript,
     openRuntimeItem,

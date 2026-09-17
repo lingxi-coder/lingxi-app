@@ -2542,6 +2542,70 @@ test('switching to Codex restarts with private OAuth then restores history befor
   assert.equal((runtime as any).launchOAuthOverride, undefined);
 });
 
+test('a listing that races Codex activation reaches the engine that replaces it', async () => {
+  // The restart behind Codex activation tells the renderer it is `connected`
+  // BEFORE the activation finishes, and the renderer answers that word with its
+  // once-per-connection listing batch. Refusing those commands lost the model
+  // catalog for the life of the connection — `desktop.models` stayed empty and
+  // the composer's model pill, disabled on an empty catalog, never came back.
+  const entered = deferred();
+  const gate = deferred();
+  const sent: string[] = [];
+  const session = { access_token: 'private-access', expires_at: 123, fedramp: false };
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveOpenAiOAuth: async () => { entered.resolve(); return session; },
+  });
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  client.sendCommand = (command: any) => {
+    sent.push(command.type);
+    if (command.type === 'set_model') queueMicrotask(() => client.emit('event', { type: 'model_changed', model: command.model }));
+  };
+  runtime.restart = async () => { await gate.promise; };
+  runtime.restoreOwnedSessionIfNeeded = async () => undefined;
+
+  const switching = runtime.dispatchCommand({ type: 'set_model', model: 'openai-chatgpt/gpt-5.6-sol' });
+  await entered.promise;
+  const listing = runtime.dispatchCommand({ type: 'list_models' });
+  // Nothing may reach the engine while it is being replaced.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, []);
+  gate.resolve();
+  await switching;
+  await listing;
+  assert.deepEqual(sent, ['set_model', 'list_models']);
+});
+
+test('a failed Codex activation fails only the switch that started it', async () => {
+  const entered = deferred();
+  const gate = deferred();
+  const sent: string[] = [];
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveOpenAiOAuth: async () => { entered.resolve(); return { access_token: 'private-access', expires_at: 123, fedramp: false }; },
+  });
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  client.sendCommand = (command: any) => { sent.push(command.type); };
+  runtime.restart = async () => { await gate.promise; throw new Error('engine restart failed'); };
+  runtime.restoreOwnedSessionIfNeeded = async () => undefined;
+
+  const switching = runtime.dispatchCommand({ type: 'set_model', model: 'openai-chatgpt/gpt-5.6-sol' });
+  await entered.promise;
+  const listing = runtime.dispatchCommand({ type: 'list_models' });
+  gate.resolve();
+  await assert.rejects(switching, /engine restart failed/);
+  await listing;
+  assert.deepEqual(sent, ['list_models']);
+});
+
 test('Codex credential mutation holds ownership until broker I/O completes', async () => {
   const manager = new SessionRuntimeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   const gate = deferred();

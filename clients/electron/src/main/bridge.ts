@@ -706,6 +706,21 @@ export class SessionRuntime {
   private activeTurn = false;
   private openAiOAuthActive = false;
   private preparingOpenAiOAuth = false;
+  /**
+   * The Codex (ChatGPT OAuth) activation currently in flight, or null.
+   *
+   * Activation RESTARTS the engine, and `restart()` resolves only after the new
+   * runtime has already told the renderer it is `connected`. The renderer reacts
+   * to that word by firing its once-per-connection listing batch — `list_models`,
+   * `get_conversation_controls`, `list_sessions`, the `refresh_listings` sweep.
+   * While `preparingOpenAiOAuth` was merely a boolean that made `dispatchCommand`
+   * THROW, that batch landed inside the refusal window and was rejected whole,
+   * with nothing to retry it: `desktop.models` stayed `[]` for the rest of the
+   * connection and the composer's model pill — `disabled` on an empty catalog —
+   * was dead until the app was restarted. So a command now WAITS for the
+   * activation and runs against the engine that replaces it.
+   */
+  private openAiOAuthPreparation: Promise<void> | null = null;
   private launchOAuthOverride: OpenAiOAuthSession | undefined;
   private launchOAuthModel: string | undefined;
   private oauthPersistence: Promise<void> = Promise.resolve();
@@ -2320,7 +2335,22 @@ export class SessionRuntime {
    */
   async dispatchCommand(command: unknown): Promise<void> {
     if (this.archiving) throw new Error('This chat is being archived.');
-    if (this.preparingOpenAiOAuth) throw new Error('Codex authentication is being prepared.');
+    // Queue behind an in-flight Codex activation instead of refusing (see
+    // `openAiOAuthPreparation`). Its failure belongs to the `set_model` that
+    // started it, not to whoever happened to arrive during it, so it is only
+    // waited on here. The archive check is repeated because the wait is long
+    // enough for the chat to have been archived meanwhile.
+    //
+    // Deliberately NOT extended to `restartChain`/`startPromise`: an ordinary
+    // restart does not claim to be connected while it refuses commands, and
+    // waiting on it would invert the contract that a restart INTERRUPTS an
+    // in-flight model switch. A restart is visible to the renderer as
+    // `connected: false`, which is what the model control gates on.
+    const preparation = this.openAiOAuthPreparation;
+    if (preparation) {
+      await preparation.catch(() => undefined);
+      if (this.archiving) throw new Error('This chat is being archived.');
+    }
     const validated = validateClientCommand(command, this.activeWorkspace);
     if (validated.type === 'cron_manage') {
       await this.sendCronCommand(validated);
@@ -2349,19 +2379,27 @@ export class SessionRuntime {
       if (validated.model.startsWith('openai-chatgpt/') && !this.openAiOAuthActive && this.opts.resolveOpenAiOAuth) {
         if (this.activeTurn) throw new Error('Cancel the active turn before activating Codex authentication; this requires restarting the session engine.');
         this.preparingOpenAiOAuth = true;
-        try {
-          const session = await this.opts.resolveOpenAiOAuth();
-          if (session) {
-            this.launchOAuthOverride = session;
-            this.launchOAuthModel = validated.model;
-            await this.restart();
-            await this.restoreOwnedSessionIfNeeded();
+        // Published BEFORE the first await so a command that arrives during the
+        // restart finds something to wait on rather than a closed door.
+        let preparation!: Promise<void>;
+        preparation = (async () => {
+          try {
+            const session = await this.opts.resolveOpenAiOAuth!();
+            if (session) {
+              this.launchOAuthOverride = session;
+              this.launchOAuthModel = validated.model;
+              await this.restart();
+              await this.restoreOwnedSessionIfNeeded();
+            }
+          } finally {
+            this.launchOAuthOverride = undefined;
+            this.launchOAuthModel = undefined;
+            this.preparingOpenAiOAuth = false;
+            if (this.openAiOAuthPreparation === preparation) this.openAiOAuthPreparation = null;
           }
-        } finally {
-          this.launchOAuthOverride = undefined;
-          this.launchOAuthModel = undefined;
-          this.preparingOpenAiOAuth = false;
-        }
+        })();
+        this.openAiOAuthPreparation = preparation;
+        await preparation;
       }
       return this.switchModel(validated.model);
     }

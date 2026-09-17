@@ -17,7 +17,16 @@ let resolvePendingSend: (() => void) | undefined;
 let sendPending = false;
 let lastSentPrompt = '';
 let cancelCount = 0;
+let modelRefreshCount = 0;
 const audioRequests: NativeAudioCommand[] = [];
+
+/** The catalog the engine's `model_list` normally fills in. */
+const ALL_MODELS = [
+  'openrouter/openrouter/auto',
+  'openrouter/~anthropic/claude-opus-latest',
+  'openrouter/openrouter/free',
+  'openrouter/inclusionai/ling-3.0-flash-fin:free',
+];
 
 function audioResponse(command: NativeAudioCommand): NativeAudioResponse {
   const idleSnapshot = defaultNativeAudioSnapshot();
@@ -66,8 +75,14 @@ if (!window.lingxi) (window as unknown as { lingxi: { audio: unknown } }).lingxi
   },
 };
 
-function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: string | undefined, isCancelling: boolean) {
+function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: string | undefined, isCancelling: boolean, models: string[], connected: boolean) {
   return {
+    // Whether anything is up to take a command — all the model control is
+    // gated on, and independent of the `ready` that gates SENDING.
+    hosted: true,
+    loading: false,
+    connected,
+    sessionLoading: false,
     activeSession: { projectPath, sessionId },
     bootstrap: {
       revision: 1,
@@ -92,12 +107,7 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
     desktop: {
       sessions: [],
       activeSessionId: sessionId,
-      models: [
-        'openrouter/openrouter/auto',
-        'openrouter/~anthropic/claude-opus-latest',
-        'openrouter/openrouter/free',
-        'openrouter/inclusionai/ling-3.0-flash-fin:free',
-      ],
+      models,
       modelDetails: [
         { reference: 'openrouter/openrouter/auto', display_name: 'OpenRouter Auto', pricing: { billing_mode: 'per_token' } },
         { reference: 'openrouter/~anthropic/claude-opus-latest', display_name: 'Anthropic: Claude Opus Latest', pricing: { billing_mode: 'per_token' } },
@@ -123,6 +133,8 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
       } : {},
     },
     searchWorkspaceFiles: async () => ({ files: [], truncated: false }),
+    refreshModelPicker: async () => { modelRefreshCount += 1; },
+    refreshSlashCommands: async () => undefined,
     setModel: async () => undefined,
     setReasoningSelection: async () => undefined,
     setFastMode: async () => undefined,
@@ -149,6 +161,9 @@ function Fixture() {
   const [backgroundStatuses, setBackgroundStatuses] = useState<Record<string, string | undefined>>({});
   const [cancellingSessions, setCancellingSessions] = useState<Record<string, boolean>>({});
   const [sidebarWidth, setSidebarWidth] = useState(0);
+  const [models, setModels] = useState<string[]>(ALL_MODELS);
+  const [ready, setReady] = useState(true);
+  const [connected, setConnected] = useState(true);
 
   useEffect(() => {
     window.__composerDraftTest = {
@@ -163,6 +178,10 @@ function Fixture() {
       resolveSend: () => resolvePendingSend?.(),
       clearAudioRequests: () => { audioRequests.length = 0; },
       audioRequestTypes: () => audioRequests.map((request) => request.type),
+      setModels: (next) => setModels(next === 'all' ? ALL_MODELS : next),
+      modelRefreshCount: () => modelRefreshCount,
+      setReady,
+      setConnected,
     };
     return () => { delete window.__composerDraftTest; };
   }, []);
@@ -180,8 +199,8 @@ function Fixture() {
         <aside data-testid="fixture-sidebar" style={{ width: sidebarWidth, flexShrink: 0, background: '#101014' }} />
         <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
           <BetaComposer
-            bridge={bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false) as never}
-            ready
+            bridge={bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false, models, connected) as never}
+            ready={ready}
             onOpenSettings={() => undefined}
             onOpenSettingsPage={() => undefined}
             onSetTheme={() => undefined}
@@ -207,6 +226,10 @@ declare global {
       resolveSend(): void;
       clearAudioRequests(): void;
       audioRequestTypes(): string[];
+      setModels(models: string[] | 'all'): void;
+      modelRefreshCount(): number;
+      setReady(ready: boolean): void;
+      setConnected(connected: boolean): void;
     };
   }
 }

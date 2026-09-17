@@ -129,21 +129,21 @@ pub struct SubagentStatusLineConfig {
 }
 
 /// Provenance of a configured status-line command.
+///
+/// `Unknown` is a sentinel, not a rung: the parser cannot attribute a command
+/// it read in isolation, and the composition root must replace it. It is kept
+/// as its own variant rather than folded into `Option` or into
+/// [`protocol::Provenance`] because [`StatusLineExecutionPolicy::allows`] gates
+/// child-process creation on this value, and an unattributed command must never
+/// compare equal to a managed one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StatusLineSource {
     /// Parser-only/default provenance. Composition roots must replace this.
     #[default]
     Unknown,
-    /// User settings.
-    User,
-    /// Shared project settings.
-    Project,
-    /// Local project settings.
-    Local,
-    /// `--settings` flag input.
-    Flag,
-    /// Enterprise-managed settings.
-    Managed,
+    /// Attributed to a settings rung — `User`, `Project`, `Local`, `Flag` or
+    /// `Managed` in practice.
+    Known(protocol::Scope),
 }
 
 /// Spawn-time policy for status-line commands.
@@ -173,7 +173,7 @@ impl StatusLineExecutionPolicy {
     pub fn allows(self, source: StatusLineSource) -> bool {
         self.workspace_trusted
             && !self.disable_all_hooks
-            && (!self.managed_hooks_only || source == StatusLineSource::Managed)
+            && (!self.managed_hooks_only || source == StatusLineSource::Known(protocol::Scope::Managed))
     }
 }
 

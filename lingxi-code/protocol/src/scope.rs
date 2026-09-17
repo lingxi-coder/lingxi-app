@@ -12,10 +12,9 @@
 //!
 //! 1. [`Scope`] — **which store** the thing lives in (`~/.lingxi/`, the project
 //!    tree, the binary, this session's memory, …).
-//! 2. [`Origin`] — **what delivered it** (a plugin, an MCP server, an agent's
-//!    front-matter, …). Orthogonal to the rung: a project-level plugin's hook
-//!    is `(Scope::Project, Origin::Plugin(id))`, a sentence the old enums could
-//!    not express because both facts fought for the same variant.
+//! 2. [`Provenance`] — **where it came from**: a store at some rung, or a
+//!    plugin / MCP server / agent front-matter / skill bundle, which a rung
+//!    does not describe. See its docs for why that is a sum and not a pair.
 //! 3. Resolved locations (`repo_root`, `team_dir`, …) — deliberately NOT here.
 //!    Those belong to whichever crate resolved them, next to a [`Scope`] field.
 //!
@@ -43,7 +42,6 @@
 //! a test pinning the pairs it depends on. The `scope_is_not_ordered` test
 //! below keeps a comparison trait from being derived here.
 
-use crate::ids::{AgentId, McpConnectionId, PluginId};
 use serde::{Deserialize, Serialize};
 
 /// Which store a piece of configuration lives in.
@@ -321,62 +319,71 @@ pub mod snake_case {
     }
 }
 
-/// What delivered a piece of configuration to its [`Scope`].
+/// Where a piece of configuration came from.
 ///
-/// A variant earns a place here only when **more than one subsystem** produces
-/// it. Producers specific to a single subsystem stay in that subsystem —
-/// `permission`'s `ToolsNarrowing`, `mcp`'s `ClaudeAi` — because hoisting them
-/// would hand every unrelated `match` an arm it can never see, which is how the
-/// twenty-four enums grew in the first place.
+/// This replaces the enums that spent one variant list on a rung *and* a
+/// deliverer — `HookSource`, `CommandSource`, `SkillSource`, `AgentSource`,
+/// `OutputStyleSource`, … — each of which had its own spelling of the same
+/// five answers.
+///
+/// # Why this is a sum and not a pair
+///
+/// A plugin-delivered hook really does sit at a rung: the plugin is enabled in
+/// somebody's `enabledPlugins`, at `user`, `project` or `local`. `plugin`'s
+/// manager even knows which — it reports `plugin_scope` to telemetry. But it
+/// does not propagate that rung to the things a plugin delivers: an
+/// `OutputStyle` has nowhere to put it, and the hook registry keys plugin hooks
+/// by `PluginId` alone.
+///
+/// So a `{ scope, origin }` pair would force every plugin call site to supply a
+/// rung the code does not have — inventing one, or spelling it `Option<Scope>`
+/// and giving "no rung" a second meaning alongside "not applicable". Neither is
+/// honest. The rung is carried where it is actually known, by [`Self::Store`],
+/// and the other variants say plainly that this came from somewhere a rung does
+/// not describe.
+///
+/// If the rung is ever threaded through to plugin-delivered artifacts, this
+/// becomes `Plugin(Scope)` and every call site is a compile error until it
+/// supplies one — which is the right way to find out who needs updating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Origin {
-    /// The scope's own store: the settings file at that rung, or — at
-    /// [`Scope::Builtin`] — the binary itself.
-    Store,
+pub enum Provenance {
+    /// Read from the store at this rung — a settings file, the environment,
+    /// the session, or (at [`Scope::Builtin`]) the binary itself.
+    Store(Scope),
     /// Supplied by an installed plugin.
-    Plugin(PluginId),
+    Plugin,
     /// Derived from an MCP server's tools or prompts.
-    Mcp(McpConnectionId),
+    Mcp,
     /// Declared in an agent file's front-matter.
-    Frontmatter(AgentId),
+    Frontmatter,
     /// Packaged inside a skill bundle.
     Skill,
 }
 
-/// Where a piece of configuration came from: its rung and its deliverer.
-///
-/// This replaces the mixed enums (`HookSource`, `CommandSource`, `SkillSource`,
-/// `AgentSource`, `ConfigScope`, …) that spent one variant list on two
-/// independent questions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Provenance {
-    /// Which store it lives in.
-    pub scope: Scope,
-    /// What delivered it there.
-    pub origin: Origin,
-}
-
 impl Provenance {
-    /// Configuration read straight from the store at `scope`.
+    /// The rung this came from, when it came from a store.
+    ///
+    /// `None` means "this did not come from a store", never "unknown rung" —
+    /// the distinction the sum type exists to keep.
     #[must_use]
-    pub const fn store(scope: Scope) -> Self {
-        Self {
-            scope,
-            origin: Origin::Store,
+    pub const fn scope(self) -> Option<Scope> {
+        match self {
+            Self::Store(scope) => Some(scope),
+            Self::Plugin | Self::Mcp | Self::Frontmatter | Self::Skill => None,
         }
     }
+}
 
-    /// Configuration delivered to `scope` by `origin`.
-    #[must_use]
-    pub const fn new(scope: Scope, origin: Origin) -> Self {
-        Self { scope, origin }
+impl From<Scope> for Provenance {
+    fn from(value: Scope) -> Self {
+        Self::Store(value)
     }
 }
+
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryEntryTier, Origin, Provenance, Scope, SettingsScope, WritableScope};
-    use crate::ids::PluginId;
+    use super::{MemoryEntryTier, Provenance, Scope, SettingsScope, WritableScope};
 
     /// Both sides of the narrowing, because only pinning the accepted side
     /// would let the gate widen silently — and it widens in the permissive
@@ -485,18 +492,28 @@ mod tests {
         assert!(serde_json::from_str::<Scope>("\"Managed\"").is_ok());
     }
 
-    /// The pairing the old enums could not express: a plugin installed at the
-    /// project rung. `HookSource` had to choose between `Project` and `Plugin`
-    /// and lost the other fact whichever it picked.
+    /// `scope()` answers "which rung" only for store-backed provenance, and
+    /// says `None` for the rest. That `None` must mean "a rung does not
+    /// describe this", never "unknown rung" — if it ever came to mean both,
+    /// a caller could not tell a plugin-delivered hook from one whose rung was
+    /// simply not recorded.
     #[test]
-    fn a_rung_and_a_deliverer_are_independently_representable() {
-        let id = PluginId::new();
-        let p = Provenance::new(Scope::Project, Origin::Plugin(id));
+    fn only_store_backed_provenance_names_a_rung() {
+        for scope in [Scope::User, Scope::Project, Scope::Local, Scope::Managed] {
+            assert_eq!(Provenance::Store(scope).scope(), Some(scope));
+            assert_eq!(Provenance::from(scope), Provenance::Store(scope));
+        }
+        for delivered in [
+            Provenance::Plugin,
+            Provenance::Mcp,
+            Provenance::Frontmatter,
+            Provenance::Skill,
+        ] {
+            assert_eq!(delivered.scope(), None, "{delivered:?}");
+        }
 
-        assert_eq!(p.scope, Scope::Project);
-        assert_eq!(p.origin, Origin::Plugin(id));
-        assert_ne!(p, Provenance::new(Scope::User, Origin::Plugin(id)));
-        assert_ne!(p, Provenance::store(Scope::Project));
+        assert_ne!(Provenance::Store(Scope::Project), Provenance::Store(Scope::User));
+        assert_ne!(Provenance::Store(Scope::Project), Provenance::Plugin);
     }
 
     /// `MemoryEntry.tier` has always serialized PascalCase. Pinned on both the

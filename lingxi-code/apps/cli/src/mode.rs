@@ -4468,19 +4468,19 @@ fn read_status_line_configs_from(
         (
             source_scope.0,
             lingxi_home.join("settings.json"),
-            StatusLineSource::User,
+            StatusLineSource::Known(protocol::Scope::User),
         ),
         (
             source_scope.1,
             project_dir.join(branding::DOT_DIR).join("settings.json"),
-            StatusLineSource::Project,
+            StatusLineSource::Known(protocol::Scope::Project),
         ),
         (
             source_scope.2,
             project_dir
                 .join(branding::DOT_DIR)
                 .join("settings.local.json"),
-            StatusLineSource::Local,
+            StatusLineSource::Known(protocol::Scope::Local),
         ),
     ];
     for (enabled, path, source) in file_layers {
@@ -4510,10 +4510,10 @@ fn read_status_line_configs_from(
     }
     if let Some(flag) = flag_settings {
         if let Some(value) = flag.status_line.as_ref() {
-            status_line = Some((value.clone(), StatusLineSource::Flag));
+            status_line = Some((value.clone(), StatusLineSource::Known(protocol::Scope::Flag)));
         }
         if let Some(value) = flag.subagent_status_line.as_ref() {
-            subagent_status_line = Some((value.clone(), StatusLineSource::Flag));
+            subagent_status_line = Some((value.clone(), StatusLineSource::Known(protocol::Scope::Flag)));
         }
         if let Some(value) = flag.disable_all_hooks {
             disable_all_hooks = value;
@@ -4528,10 +4528,10 @@ fn read_status_line_configs_from(
             continue;
         };
         if let Some(value) = map.get("statusLine") {
-            status_line = Some((value.clone(), StatusLineSource::Managed));
+            status_line = Some((value.clone(), StatusLineSource::Known(protocol::Scope::Managed)));
         }
         if let Some(value) = map.get("subagentStatusLine") {
-            subagent_status_line = Some((value.clone(), StatusLineSource::Managed));
+            subagent_status_line = Some((value.clone(), StatusLineSource::Known(protocol::Scope::Managed)));
         }
         if let Some(value) = map
             .get("disableAllHooks")
@@ -6366,9 +6366,9 @@ detached catalog refresh"
 
         let configs =
             read_status_line_configs_from(&home, &project, &[], true, None, (true, true, true));
-        assert_eq!(configs.main.unwrap().source, StatusLineSource::User);
+        assert_eq!(configs.main.unwrap().source, StatusLineSource::Known(protocol::Scope::User));
         let subagent = configs.subagent.unwrap();
-        assert_eq!(subagent.source, StatusLineSource::Local);
+        assert_eq!(subagent.source, StatusLineSource::Known(protocol::Scope::Local));
         assert_eq!(subagent.command, "local-agent");
         assert!(subagent.should_run(true));
 
@@ -6384,7 +6384,7 @@ detached catalog refresh"
             (true, true, true),
         );
         let subagent = configs.subagent.unwrap();
-        assert_eq!(subagent.source, StatusLineSource::Managed);
+        assert_eq!(subagent.source, StatusLineSource::Known(protocol::Scope::Managed));
         assert!(subagent.should_run(true));
         assert!(
             !configs.main.unwrap().should_run(true),
@@ -6411,7 +6411,7 @@ detached catalog refresh"
             (false, false, false),
         );
         let main = configs.main.unwrap();
-        assert_eq!(main.source, StatusLineSource::Flag);
+        assert_eq!(main.source, StatusLineSource::Known(protocol::Scope::Flag));
         assert_eq!(main.command, "flag-main");
         assert!(
             configs.subagent.is_none(),

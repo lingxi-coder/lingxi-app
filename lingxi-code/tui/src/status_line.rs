@@ -266,7 +266,7 @@ mod tests {
         )
         .unwrap()
         .with_execution_policy(
-            StatusLineSource::Project,
+            StatusLineSource::Known(protocol::Scope::Project),
             StatusLineExecutionPolicy {
                 workspace_trusted: false,
                 disable_all_hooks: false,
@@ -281,7 +281,7 @@ mod tests {
         )
         .unwrap()
         .with_execution_policy(
-            StatusLineSource::User,
+            StatusLineSource::Known(protocol::Scope::User),
             StatusLineExecutionPolicy {
                 workspace_trusted: true,
                 disable_all_hooks: false,

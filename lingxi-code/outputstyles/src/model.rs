@@ -83,16 +83,4 @@ pub enum OutputFormat {
 }
 
 /// Where the style came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OutputStyleSource {
-    /// Compiled-in default.
-    Builtin,
-    /// User-level configuration directory.
-    User,
-    /// Project-local configuration directory.
-    Project,
-    /// Loaded by an installed plugin.
-    Plugin,
-    /// Loaded from a managed (admin-controlled) source.
-    Managed,
-}
+pub use protocol::Provenance as OutputStyleSource;

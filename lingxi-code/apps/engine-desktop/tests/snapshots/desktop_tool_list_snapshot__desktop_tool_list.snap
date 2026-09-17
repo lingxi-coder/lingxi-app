@@ -23,6 +23,7 @@ expression: names
 - McpAuth
 - Monitor
 - NotebookEdit
+- ObserverReport
 - PowerShell
 - PushNotification
 - Read

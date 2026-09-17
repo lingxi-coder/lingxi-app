@@ -14261,6 +14261,13 @@ pub async fn build_with_credential_stack(
     );
 
     let task_registry = Arc::new(task_registry_inner);
+    // ONE observer pairing table per session. The registry files a pairing when
+    // it spawns an observer; `ObserverReport` resolves against the same `Arc`
+    // via the orchestrator below. Two tables would look wired and answer
+    // "not armed" forever, so this is created once and shared, never cloned
+    // from a second `ObserverPairings::new()`.
+    let observer_pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
+    task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     teammate_registry_status_sink.bind(task_registry.clone());
 
@@ -15710,6 +15717,7 @@ pub async fn build_with_credential_stack(
         // subagent spawner's subagents dir — one consistent session id end-to-end.
         .with_session_id(main_session_id)
         .with_cost_tracker(cost_tracker.clone())
+        .with_observer_pairings(observer_pairings.clone())
         .with_loop_usage_opt(
             cron_scheduler
                 .clone()

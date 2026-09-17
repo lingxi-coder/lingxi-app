@@ -14,6 +14,7 @@ expression: names
 - Grep
 - ListAgents
 - NotebookEdit
+- ObserverReport
 - PushNotification
 - Read
 - RemoteTrigger

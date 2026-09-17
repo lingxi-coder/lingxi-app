@@ -16,6 +16,7 @@ expression: names
 - LSP
 - ListAgents
 - NotebookEdit
+- ObserverReport
 - PushNotification
 - Read
 - RemoteTrigger

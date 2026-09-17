@@ -3919,6 +3919,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
             content_replacement_state: None,
             session: Some(orch.session.clone()),
+            observer_pairings: orch.model_runtime.observer_pairings.clone(),
             subagent_registry: Some(orch.tools.clone()),
             // PHASE-2: hand each tool a clone of the sibling cancel token (the
             // streaming executor passes a per-tool child; every other caller
@@ -3937,7 +3938,6 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             cwd: None,
             depth: 0,
             observer: None,
-            observer_pairings: None,
             // (/rewind) Hand each write tool the file-history sink (a trait view
             // of the shared checkpoint store) so pre-edit content is backed up.
             file_history: orch

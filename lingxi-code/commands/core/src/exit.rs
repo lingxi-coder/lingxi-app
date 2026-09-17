@@ -11,6 +11,15 @@ use platform_api::OrchestratorHandle;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 
+/// The locked confirmation literal `/exit` and `/quit` render.
+///
+/// Exported because the CLI REPL renders it from a second place: `/exit` is
+/// recognised and short-circuited BEFORE dispatch so the host can offer
+/// stay/stop/handoff while the one-way `should_exit` flag is still unset, so
+/// on that path this handler never runs. One `const` rather than two string
+/// literals keeps the two renderers from drifting apart.
+pub const EXIT_DISPLAY: &str = "Exiting.";
+
 /// `/exit` handler — calls
 /// [`OrchestratorHandle::request_exit`](platform_api::OrchestratorHandle::request_exit)
 /// and renders `"Exiting."`.
@@ -37,7 +46,7 @@ impl BuiltinCommandHandler for ExitHandler {
         self.handle.request_exit().await;
         telemetry::emit_command_completed(cmd_evt::EXIT_COMPLETED, "");
         CommandResult::Done {
-            display: Some("Exiting.".to_string()),
+            display: Some(EXIT_DISPLAY.to_string()),
         }
     }
 

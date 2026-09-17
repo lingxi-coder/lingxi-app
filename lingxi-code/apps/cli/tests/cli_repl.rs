@@ -9,16 +9,27 @@ use predicates::prelude::*;
 
 /// Convenience: build a `Command` that runs the binary in REPL mode
 /// (no positional prompt, fake API key so runtime construction succeeds).
-fn repl_cmd() -> Command {
+///
+/// The returned `TempDir` is the run's `$LINGXI_CONFIG_DIR` and must stay bound
+/// for as long as the command runs. Rooting the config home in the OS temp
+/// directory is what keeps this spawned binary off the machine's native
+/// credential store: the engine reads the root and picks the plaintext store
+/// for a throwaway home (`credential_root_is_ephemeral`). Without it the REPL
+/// boots against the real login keychain, which on macOS means the credential
+/// broker refuses an unpackaged process and every test here dies at startup
+/// with "secure storage init failed" before it can script a single line.
+fn repl_cmd() -> (Command, tempfile::TempDir) {
+    let home = tempfile::tempdir().unwrap();
     let mut c = Command::cargo_bin("lingxi-cli").unwrap();
-    c.env("ANTHROPIC_API_KEY", "sk-ant-test-repl-fake");
-    c
+    c.env("ANTHROPIC_API_KEY", "sk-ant-test-repl-fake")
+        .env("LINGXI_CONFIG_DIR", home.path());
+    (c, home)
 }
 
 #[test]
 fn exit_command_terminates_repl_with_code_0() {
-    repl_cmd()
-        .write_stdin("/exit\n")
+    let (mut cmd, _home) = repl_cmd();
+    cmd.write_stdin("/exit\n")
         .assert()
         .code(0)
         .stdout(predicate::str::contains("Exiting."));
@@ -27,13 +38,14 @@ fn exit_command_terminates_repl_with_code_0() {
 #[test]
 fn eof_terminates_repl_with_code_0() {
     // Empty stdin → immediate EOF → REPL exits 0.
-    repl_cmd().write_stdin("").assert().code(0);
+    let (mut cmd, _home) = repl_cmd();
+    cmd.write_stdin("").assert().code(0);
 }
 
 #[test]
 fn version_command_in_repl_prints_version_then_eof_exits_0() {
-    repl_cmd()
-        .write_stdin("/version\n")
+    let (mut cmd, _home) = repl_cmd();
+    cmd.write_stdin("/version\n")
         .assert()
         .code(0)
         .stdout(predicate::str::contains("lingxi-cli "));
@@ -41,8 +53,8 @@ fn version_command_in_repl_prints_version_then_eof_exits_0() {
 
 #[test]
 fn unknown_slash_command_prints_unknown_then_exit_works() {
-    repl_cmd()
-        .write_stdin("/zzz-not-a-command\n/exit\n")
+    let (mut cmd, _home) = repl_cmd();
+    cmd.write_stdin("/zzz-not-a-command\n/exit\n")
         .assert()
         .code(0)
         .stdout(predicate::str::contains(
@@ -53,7 +65,8 @@ fn unknown_slash_command_prints_unknown_then_exit_works() {
 
 #[test]
 fn empty_lines_just_loop_then_exit() {
-    repl_cmd().write_stdin("\n\n/exit\n").assert().code(0);
+    let (mut cmd, _home) = repl_cmd();
+    cmd.write_stdin("\n\n/exit\n").assert().code(0);
 }
 
 #[test]
@@ -61,8 +74,10 @@ fn prompt_appears_on_stderr_not_stdout() {
     use std::io::Write;
     use std::process::Stdio;
 
+    let home = tempfile::tempdir().unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lingxi-cli"))
         .env("ANTHROPIC_API_KEY", "sk-ant-test-repl-fake")
+        .env("LINGXI_CONFIG_DIR", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -87,7 +102,8 @@ fn prompt_appears_on_stderr_not_stdout() {
 
 #[test]
 fn multiple_slash_commands_then_exit() {
-    let output = repl_cmd()
+    let (mut cmd, _home) = repl_cmd();
+    let output = cmd
         .write_stdin("/version\n/version\n/exit\n")
         .output()
         .unwrap();

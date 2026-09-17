@@ -10286,6 +10286,32 @@ pub async fn build_shared_credential_stack(
     .await
 }
 
+/// Is this credential root a throwaway directory rather than a real profile?
+///
+/// A `lingxi_home` under the OS temporary directory is, by construction, not a
+/// durable user profile: it is a fixture, a sandbox, or a scratch session, and
+/// it is gone when the run is. Reaching into the machine login keychain for one
+/// would be wrong in both directions — it lets an ephemeral session read the
+/// real user's saved credentials, and it writes native entries keyed to the OS
+/// user that a temporary home can never clean up again.
+///
+/// So the storage choice keys off the credential ROOT, not only off the
+/// caller's `isolated_credential_storage` flag. This deliberately does NOT
+/// widen that flag: it also suppresses ambient provider credentials (see
+/// `compute_availability_with_isolation`) and pins the Fusion catalog
+/// refresher's isolation, and "the home is scratch" is no reason to stop
+/// honouring an `ANTHROPIC_API_KEY` the caller put in the environment on
+/// purpose.
+///
+/// `/tmp` and `/private/tmp` are named alongside `temp_dir()` because macOS
+/// resolves one to the other through a symlink and a caller may hand us either
+/// spelling.
+fn credential_root_is_ephemeral(lingxi_home: &std::path::Path) -> bool {
+    lingxi_home.starts_with(std::env::temp_dir())
+        || lingxi_home.starts_with(std::path::Path::new("/tmp"))
+        || lingxi_home.starts_with(std::path::Path::new("/private/tmp"))
+}
+
 /// Build the shared desktop credential stack with an explicit fallback policy.
 ///
 /// Production CLI/TUI use [`CredentialStoragePolicy::NativePreferred`];
@@ -10303,7 +10329,16 @@ pub async fn build_shared_credential_stack_with_policy(
     );
     let clock = Arc::new(PosixClock::new());
     let credentials_path = lingxi_home.join(".credentials.json");
-    let storage = if isolated_credential_storage {
+    // Only `NativePreferred` takes the ephemeral shortcut. `NativeOrMemory` is
+    // the packaged-desktop policy whose whole point is that a missing native
+    // vault falls back to process memory and never to plaintext on disk, and
+    // `PlainTextFixture` already reaches the plaintext store through the
+    // factory — neither wants this decided for it here.
+    let ephemeral_root = matches!(
+        credential_storage_policy,
+        CredentialStoragePolicy::NativePreferred
+    ) && credential_root_is_ephemeral(lingxi_home);
+    let storage = if isolated_credential_storage || ephemeral_root {
         build_platform_plaintext_secure_storage(credentials_path).await
     } else {
         build_platform_secure_storage(

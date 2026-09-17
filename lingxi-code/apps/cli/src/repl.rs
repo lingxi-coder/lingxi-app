@@ -532,7 +532,17 @@ pub async fn run_repl(argv: &Argv) -> i32 {
                 exit_code = exit_codes::SIGINT;
                 break;
             }
-            StepOutcome::ExitCommand => {
+            StepOutcome::ExitCommand { undispatched } => {
+                // `/exit` and `/quit` are recognised before dispatch so the
+                // host can be offered stay/stop/handoff while `should_exit` is
+                // still unset, which means the handler never ran and its locked
+                // literal was never printed. Print it here — after the
+                // confirmation, because a user who chooses "Stay" has not
+                // exited and must not be told they did.
+                if let Some(input) = undispatched {
+                    sink.command_output(&input, command_core::exit::EXIT_DISPLAY)
+                        .await;
+                }
                 ended_via = "exit_command";
                 exit_code = exit_codes::SUCCESS;
                 break;

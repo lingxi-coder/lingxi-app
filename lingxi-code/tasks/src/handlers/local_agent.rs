@@ -2216,6 +2216,7 @@ mod tests {
         }
     }
 
+    #[tokio::test]
     async fn send_message_requires_seam_and_live_agent() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let dir = tempdir().unwrap();

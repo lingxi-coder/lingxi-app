@@ -63,9 +63,11 @@ fn cwd_to_nonexistent_path_exits_1() {
 /// The `"> "` prompt appears on stderr; stdout gets the EOF newline.
 #[test]
 fn empty_prompt_with_no_resume_enters_repl_and_exits_0_on_eof() {
+    let home = tempfile::tempdir().unwrap();
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-ant-test-fake")
+        .env("LINGXI_CONFIG_DIR", home.path())
         .write_stdin("") // immediate EOF
         .assert()
         .code(0)
@@ -149,9 +151,11 @@ fn prompt_suggestions_without_stream_json_exits_1() {
     // presets "true" (the following `-p` is dash-prefixed, so neither
     // commander nor clap binds it as the optional value); text output trips
     // the gate.
+    let home = tempfile::tempdir().unwrap();
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .env("LINGXI_CONFIG_DIR", home.path())
         .args([
             "--prompt-suggestions",
             "-p",
@@ -168,6 +172,7 @@ fn prompt_suggestions_without_stream_json_exits_1() {
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .env("LINGXI_CONFIG_DIR", home.path())
         .args(["--prompt-suggestions", "false"])
         .write_stdin("")
         .assert()
@@ -196,9 +201,11 @@ fn prompt_suggestions_invalid_choice_matches_commander() {
 /// continues (here into the REPL, exit 0 on EOF) instead of erroring.
 #[test]
 fn effort_unknown_value_warns_and_continues() {
+    let home = tempfile::tempdir().unwrap();
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .env("LINGXI_CONFIG_DIR", home.path())
         .args(["--effort", "banana"])
         .write_stdin("")
         .assert()

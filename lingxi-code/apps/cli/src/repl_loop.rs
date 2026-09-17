@@ -24,7 +24,18 @@ pub enum StepOutcome {
     /// Second Ctrl+C at the idle prompt within 2 seconds: exit 130.
     DoubleSigintExit,
     /// The orchestrator's `should_exit` flag was set (e.g. `/exit`): exit 0.
-    ExitCommand,
+    ExitCommand {
+        /// The raw input, when `/exit` / `/quit` short-circuited BEFORE
+        /// dispatch so the host could be offered stay/stop/handoff while the
+        /// one-way exit flag was still unset. On that path the handler never
+        /// ran and its locked literal was never rendered, so the caller owes
+        /// the output once the exit is actually confirmed.
+        ///
+        /// `None` when an already-dispatched command printed its own output
+        /// and merely left `should_exit` set — `/stop` does exactly that, and
+        /// must not be re-announced as `/exit`.
+        undispatched: Option<String>,
+    },
 }
 
 /// Host adapter for completion delivery while the prompt is idle.
@@ -217,7 +228,9 @@ where
 
     // Let the host choose stay/stop/handoff before the one-way exit flag is set.
     if notifications.is_some() && matches!(input.trim(), "/exit" | "/quit") {
-        return StepOutcome::ExitCommand;
+        return StepOutcome::ExitCommand {
+            undispatched: Some(input.trim().to_string()),
+        };
     }
 
     // 3. Dispatch: slash command vs plain text.
@@ -261,7 +274,7 @@ where
             }
         }
         if handle.current_should_exit().await {
-            return StepOutcome::ExitCommand;
+            return StepOutcome::ExitCommand { undispatched: None };
         }
         return StepOutcome::Continue;
     }
@@ -302,7 +315,23 @@ mod tests {
     fn step_outcome_eq_works() {
         assert_eq!(StepOutcome::Continue, StepOutcome::Continue);
         assert_ne!(StepOutcome::Continue, StepOutcome::Eof);
-        assert_ne!(StepOutcome::DoubleSigintExit, StepOutcome::ExitCommand);
+        assert_ne!(
+            StepOutcome::DoubleSigintExit,
+            StepOutcome::ExitCommand {
+                undispatched: None
+            }
+        );
+        // The two exit shapes are NOT interchangeable: one still owes the
+        // locked "Exiting." literal and the other has already printed its own
+        // output. An `==` here would let a `/stop` be re-announced as `/exit`.
+        assert_ne!(
+            StepOutcome::ExitCommand {
+                undispatched: None
+            },
+            StepOutcome::ExitCommand {
+                undispatched: Some("/exit".to_string())
+            }
+        );
     }
 
     /// Verify all four variants are reachable and `Clone` works.
@@ -312,7 +341,12 @@ mod tests {
             StepOutcome::Continue,
             StepOutcome::Eof,
             StepOutcome::DoubleSigintExit,
-            StepOutcome::ExitCommand,
+            StepOutcome::ExitCommand {
+                undispatched: None,
+            },
+            StepOutcome::ExitCommand {
+                undispatched: Some("/quit".to_string()),
+            },
         ];
         for v in &variants {
             assert_eq!(v, &v.clone());

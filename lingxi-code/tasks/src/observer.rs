@@ -142,6 +142,15 @@ impl TaskRegistry {
         if let Some((id, digest)) = resume {
             return self.deliver_observer_digest(&id, digest).await;
         }
+        // Arm BEFORE the request is stripped for the spawn. The next few lines
+        // clear `observer` and `creator_agent_id`, and arming reads BOTH — the
+        // declaration to arm at all, and the creator to decide whether this is a
+        // coordinator's worker (report goes UP) or a plain pairing. Arming after
+        // the strip silently armed nothing, and made the coordinator branch
+        // unreachable; the per-crate unit test could not see it because it calls
+        // `arm_pairing` with an intact request.
+        let observer_task_id = AgentId::new();
+        self.arm_observer_pairing(&request, observed_agent_id, observer_task_id);
         request.observer = None;
         request.run_in_background = true;
         request.query_source_label =
@@ -152,8 +161,6 @@ impl TaskRegistry {
             .description
             .clone()
             .unwrap_or_else(|| format!("Observer {}", request.subagent_type));
-        let observer_task_id = AgentId::new();
-        self.arm_observer_pairing(&request, observed_agent_id, observer_task_id);
         let input = TaskSpawnInput::LocalAgent {
             agent_id: observer_task_id,
             subagent_type: request.subagent_type.clone(),

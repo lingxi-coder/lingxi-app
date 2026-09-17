@@ -14,6 +14,9 @@
 // line. This is the category where "named, computed, never wired" hides — some
 // of these read like features that were built and never connected. Each wants a
 // decision (delete, or wire), not a blanket deletion.
+// ⚠️ The count above is ONE macOS, lib-target measurement. It is not a list of
+// deletable items — see docs/HANDOFF-dead-code-adjudication-2026-09-17.md,
+// which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
 pub mod config_admin;

@@ -3729,9 +3729,13 @@ pub(crate) fn agent_source_to_claude_str(source: AgentSource) -> &'static str {
     match source {
         AgentSource::BuiltIn => "built-in",
         AgentSource::Plugin => "plugin",
-        AgentSource::UserDefined => "userSettings",
-        AgentSource::Project => "projectSettings",
-        AgentSource::PolicySettings => "policySettings",
+        AgentSource::Settings(protocol::SettingsScope::User) => "userSettings",
+        AgentSource::Settings(protocol::SettingsScope::Project) => "projectSettings",
+        AgentSource::Settings(protocol::SettingsScope::Managed) => "policySettings",
+        // No loader produces a local-tier agent today. Named rather than caught
+        // by `_` so that adding one is a decision here; the token is the
+        // reference's own `SettingSource` spelling, already used by permission.
+        AgentSource::Settings(protocol::SettingsScope::Local) => "localSettings",
         AgentSource::Flag => "flagSettings",
         AgentSource::AdditionalDirectory => "additionalDirectory",
     }
@@ -6903,7 +6907,7 @@ mod tests {
         let custom = AgentDefinition {
             agent_type: "Explore".to_string(),
             model: AgentModel::Alias("haiku".to_string()),
-            source: AgentSource::UserDefined,
+            source: AgentSource::Settings(protocol::SettingsScope::User),
             ..base
         };
         let catalog = Arc::new(RwLock::new(vec![custom]));
@@ -7928,7 +7932,7 @@ mod tests {
         defs.push(AgentDefinition {
             agent_type: "Explore".to_string(),
             when_to_use: "CATALOG OVERRIDE".to_string(),
-            source: AgentSource::Project,
+            source: AgentSource::Settings(protocol::SettingsScope::Project),
             ..agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]))
         });
         let entries = crate::agent_listing_entries(&defs);
@@ -7998,7 +8002,7 @@ mod tests {
         );
         // `r.source!=="built-in"` — a user agent is never withheld.
         let user = AgentDefinition {
-            source: AgentSource::UserDefined,
+            source: AgentSource::Settings(protocol::SettingsScope::User),
             ..named(
                 "user-agent",
                 AgentToolPolicy::Explicit(vec!["Read".into(), "Edit".into()]),
@@ -9269,15 +9273,15 @@ mod tests {
         assert_eq!(agent_source_to_claude_str(AgentSource::BuiltIn), "built-in");
         assert_eq!(agent_source_to_claude_str(AgentSource::Plugin), "plugin");
         assert_eq!(
-            agent_source_to_claude_str(AgentSource::UserDefined),
+            agent_source_to_claude_str(AgentSource::Settings(protocol::SettingsScope::User)),
             "userSettings"
         );
         assert_eq!(
-            agent_source_to_claude_str(AgentSource::Project),
+            agent_source_to_claude_str(AgentSource::Settings(protocol::SettingsScope::Project)),
             "projectSettings"
         );
         assert_eq!(
-            agent_source_to_claude_str(AgentSource::PolicySettings),
+            agent_source_to_claude_str(AgentSource::Settings(protocol::SettingsScope::Managed)),
             "policySettings"
         );
         assert_eq!(
@@ -9300,17 +9304,17 @@ mod tests {
             ),
             (AgentSource::Plugin, mcp::McpAgentSource::Plugin, "plugin"),
             (
-                AgentSource::UserDefined,
+                AgentSource::Settings(protocol::SettingsScope::User),
                 mcp::McpAgentSource::UserSettings,
                 "userSettings",
             ),
             (
-                AgentSource::Project,
+                AgentSource::Settings(protocol::SettingsScope::Project),
                 mcp::McpAgentSource::ProjectSettings,
                 "projectSettings",
             ),
             (
-                AgentSource::PolicySettings,
+                AgentSource::Settings(protocol::SettingsScope::Managed),
                 mcp::McpAgentSource::PolicySettings,
                 "policySettings",
             ),
@@ -9377,7 +9381,7 @@ mod tests {
         let existing = mcp::build_server_from_json_entry(
             "shared",
             &serde_json::json!({"command": "same-mcp", "args": ["--stable"]}),
-            mcp::ConfigScope::User,
+            mcp::ConfigScope::Settings(protocol::SettingsScope::User),
         )
         .unwrap();
         let mut by_name = agent_def(AgentToolPolicy::All {
@@ -9499,7 +9503,7 @@ mod tests {
             use_exact_tools: false,
         });
         def.agent_type = "proj-agent".into();
-        def.source = AgentSource::Project;
+        def.source = AgentSource::Settings(protocol::SettingsScope::Project);
         def.color = Some("green".into());
         let catalog = Arc::new(RwLock::new(vec![def]));
         let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);

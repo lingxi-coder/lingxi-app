@@ -27,14 +27,14 @@
 //!
 //! This module also implements the separate project-`.mcp.json` approval
 //! gate (`enabledMcpjsonServers` / `disabledMcpjsonServers` /
-//! `enableAllProjectMcpServers`, applied only to `ConfigScope::Project` in
+//! `enableAllProjectMcpServers`, applied only to `ConfigScope::Settings(protocol::SettingsScope::Project)` in
 //! [`McpPolicyContext::decide`]). A now-deleted `mcp/src/approval.rs`
 //! (§25b) duplicated this with its own `McpApprovalPolicy`/`ApprovalStatus`
 //! and zero external callers; **do not revive it**. Its
 //! `ConfigScope::Dynamic -> PendingApproval` mapping would regress §27a,
 //! which made `--mcp-config` entries `Dynamic` specifically so they are
 //! NEVER approval-gated — `decide` below correctly gates only
-//! `ConfigScope::Project`, and `project_approval_is_scope_aware`'s
+//! `ConfigScope::Settings(protocol::SettingsScope::Project)`, and `project_approval_is_scope_aware`'s
 //! `ConfigScope::Dynamic` case pins that.
 
 use crate::connection::{ConfigScope, McpServerConfig};
@@ -157,7 +157,7 @@ impl McpPolicyContext {
         {
             return McpServerDecision::Block(McpServerBlockReason::NameDenied);
         }
-        if server.scope == ConfigScope::Project {
+        if server.scope == ConfigScope::Settings(protocol::SettingsScope::Project) {
             if self
                 .rejected_project_servers
                 .iter()
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "a",
-                ConfigScope::Project,
+                ConfigScope::Settings(protocol::SettingsScope::Project),
                 "${LINGXI_TEST_NEVER_SET_XYZ}/bin/srv",
                 &[]
             )),
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "b",
-                ConfigScope::Project,
+                ConfigScope::Settings(protocol::SettingsScope::Project),
                 "/bin/srv",
                 &["--token", "${LINGXI_TEST_NEVER_SET_XYZ}"]
             )),
@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "c",
-                ConfigScope::Project,
+                ConfigScope::Settings(protocol::SettingsScope::Project),
                 "${LINGXI_TEST_NEVER_SET_XYZ:-/bin/srv}",
                 &[]
             )),
@@ -458,7 +458,7 @@ mod tests {
 
         // No reference at all.
         assert_eq!(
-            policy.decide(&stdio("d", ConfigScope::Project, "/bin/srv", &[])),
+            policy.decide(&stdio("d", ConfigScope::Settings(protocol::SettingsScope::Project), "/bin/srv", &[])),
             McpServerDecision::Allow
         );
     }
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "u",
-                ConfigScope::User,
+                ConfigScope::Settings(protocol::SettingsScope::User),
                 "${LINGXI_TEST_NEVER_SET_XYZ}/bin/srv",
                 &[]
             )),
@@ -593,7 +593,7 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
             },
-            scope: ConfigScope::Project,
+            scope: ConfigScope::Settings(protocol::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -704,11 +704,11 @@ mod tests {
         std::fs::write(&global, serde_json::to_vec(&contents).unwrap()).unwrap();
 
         let mut servers = vec![
-            stdio("context7", ConfigScope::Project),
+            stdio("context7", ConfigScope::Settings(protocol::SettingsScope::Project)),
             // Same name but NON-project scope ⇒ the jsonServers reject list
             // (a `.mcp.json` trust model) must NOT touch it.
-            stdio("context7", ConfigScope::User),
-            stdio("linear", ConfigScope::Project),
+            stdio("context7", ConfigScope::Settings(protocol::SettingsScope::User)),
+            stdio("linear", ConfigScope::Settings(protocol::SettingsScope::Project)),
         ];
         apply_project_server_gate(&mut servers, &global, &cwd);
 
@@ -775,7 +775,7 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
             },
-            scope: ConfigScope::Project,
+            scope: ConfigScope::Settings(protocol::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -860,11 +860,11 @@ mod tests {
             metadata: Default::default(),
         };
         assert_eq!(
-            policy.decide(&make(ConfigScope::Project)),
+            policy.decide(&make(ConfigScope::Settings(protocol::SettingsScope::Project))),
             McpServerDecision::Block(McpServerBlockReason::ProjectPendingApproval)
         );
         assert_eq!(
-            policy.decide(&make(ConfigScope::User)),
+            policy.decide(&make(ConfigScope::Settings(protocol::SettingsScope::User))),
             McpServerDecision::Allow
         );
         assert_eq!(

@@ -2241,16 +2241,19 @@ fn hook_source_description(source: hooks::HookSource) -> String {
 /// (agents-08) claude-code `AGENT_SOURCE_GROUPS` label for an
 /// [`agent::AgentSource`] (`tools/AgentTool/agentDisplay.ts:24-32` ×
 /// `getSettingSourceName`). `UserDefined`→User, `Project`→Project,
-/// `Local`→Local (LingXi has no `Local` variant yet — `localSettings` maps
-/// from `Project` in claude-code's gitignored tier, so it's absent here),
 /// `PolicySettings`→Managed, `Plugin`→Plugin, `Flag`→CLI arg,
 /// `AdditionalDirectory`→User, `BuiltIn`→Built-in.
+///
+/// The local tier now exists on the shared ladder but no loader produces a
+/// local agent, so it is named here rather than caught by `_`.
 fn agent_source_group_label(source: agent::AgentSource) -> &'static str {
     use agent::AgentSource as S;
+    use protocol::SettingsScope as T;
     match source {
-        S::UserDefined => "User agents",
-        S::Project => "Project agents",
-        S::PolicySettings => "Managed agents",
+        S::Settings(T::User) => "User agents",
+        S::Settings(T::Project) => "Project agents",
+        S::Settings(T::Local) => "Local agents",
+        S::Settings(T::Managed) => "Managed agents",
         S::Plugin => "Plugin agents",
         S::Flag => "CLI arg agents",
         S::AdditionalDirectory => "User agents",
@@ -3073,7 +3076,7 @@ mod tests {
             max_turns: 4,
             model: agent::AgentModel::Inherit,
             permission_mode: agent::AgentPermissionMode::Bubble,
-            source: agent::AgentSource::UserDefined,
+            source: agent::AgentSource::Settings(protocol::SettingsScope::User),
             base_dir: std::env::temp_dir(),
             system_prompt: Some("review carefully".to_string()),
             mcp_servers: Vec::new(),
@@ -3182,7 +3185,7 @@ mod tests {
             max_turns: 4,
             model,
             permission_mode: agent::AgentPermissionMode::Bubble,
-            source: agent::AgentSource::UserDefined,
+            source: agent::AgentSource::Settings(protocol::SettingsScope::User),
             base_dir: std::env::temp_dir(),
             system_prompt: Some("do it".to_string()),
             mcp_servers: Vec::new(),

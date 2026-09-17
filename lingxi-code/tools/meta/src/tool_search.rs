@@ -1373,7 +1373,7 @@ mod tests {
                         args: vec![],
                         env: Default::default(),
                     },
-                    scope: mcp::ConfigScope::User,
+                    scope: mcp::ConfigScope::Settings(protocol::SettingsScope::User),
                     disabled: false,
                     timeout_ms: None,
                     always_load: false,

@@ -4342,7 +4342,7 @@ pub(crate) mod cached_resource_test_support {
             spec: McpTransportSpec::InProcess {
                 registry_key: name.into(),
             },
-            scope: ConfigScope::User,
+            scope: ConfigScope::Settings(protocol::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -5713,7 +5713,7 @@ mod resource_tool_gating_tests {
             spec: McpTransportSpec::InProcess {
                 registry_key: name.into(),
             },
-            scope: ConfigScope::User,
+            scope: ConfigScope::Settings(protocol::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,

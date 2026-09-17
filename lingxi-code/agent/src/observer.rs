@@ -311,7 +311,7 @@ mod tests {
             max_turns: 1,
             model: AgentModel::Inherit,
             permission_mode: AgentPermissionMode::Bubble,
-            source: AgentSource::UserDefined,
+            source: AgentSource::Settings(protocol::SettingsScope::User),
             base_dir: PathBuf::new(),
             system_prompt: None,
             mcp_servers: Vec::new(),

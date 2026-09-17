@@ -437,7 +437,7 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
         // CLI-provided servers carry Dynamic scope, matching the oracle's
         // `--mcp-config` handler, which stamps `{...ws, scope:"dynamic"}` on
         // every entry: they are never `.mcp.json` project-approval-gated
-        // (`mcp::server_gate` only gates `ConfigScope::Project`). Precedence
+        // (`mcp::server_gate` only gates `ConfigScope::Settings(protocol::SettingsScope::Project)`). Precedence
         // over discovered servers is enforced by the name-merge in
         // `engine_desktop::build`, not the scope.
         match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Dynamic) {
@@ -1686,7 +1686,7 @@ mod tests {
     /// unapproved `--mcp-config` server in a fresh project (no
     /// `enabledMcpjsonServers` record at all) must connect on the first
     /// launch, not sit `ProjectPendingApproval`. Before the fix this parsed at
-    /// `ConfigScope::Project` and `McpPolicyContext::decide` blocked it.
+    /// `ConfigScope::Settings(protocol::SettingsScope::Project)` and `McpPolicyContext::decide` blocked it.
     #[test]
     fn parse_cli_mcp_servers_are_never_project_approval_gated() {
         let raw = r#"{"mcpServers":{"docs":{"command":"docs-server"}}}"#.to_string();

@@ -723,7 +723,7 @@ mod tests {
                 spec: McpTransportSpec::InProcess {
                     registry_key: "local_apps".into(),
                 },
-                scope: mcp::ConfigScope::Managed,
+                scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Managed),
                 disabled: false,
                 timeout_ms: None,
                 always_load: true,
@@ -769,7 +769,7 @@ mod tests {
         let config = mcp::McpServerConfig {
             name: "mobile-cache".into(),
             spec: remote_spec("http", url),
-            scope: mcp::ConfigScope::Project,
+            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,

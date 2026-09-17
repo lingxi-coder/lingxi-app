@@ -197,24 +197,27 @@ pub enum AgentPermissionMode {
     Plan,
 }
 
-/// Origin of an [`AgentDefinition`]. Used by precedence rules at load time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Where an agent definition came from.
+///
+/// The settings rungs are the shared [`protocol::SettingsScope`]; the rest are
+/// this subsystem's own producers.
+///
+/// `AdditionalDirectory` stays a separate variant rather than collapsing into
+/// `Settings(Project)`: [`crate::hooks_trust::source_is_self_trusting`] is a
+/// security gate in which `Settings(Project)` is the ONLY value that must prove
+/// folder trust, and merging the two would drag `--add-dir` agents onto the
+/// wrong side of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentSource {
-    /// Built into the binary.
+    /// Compiled into the binary.
     BuiltIn,
-    /// Defined by the user (e.g. `~/.config/lingxi/agents/`).
-    UserDefined,
-    /// Defined inside the current project tree.
-    Project,
-    /// Provided by a plugin.
-    Plugin,
-    /// Sourced from policy settings (org-wide).
-    PolicySettings,
-    /// Sourced from a CLI flag / `--agents` JSON (claude `flagSettings`). This
-    /// is the default `source` for the JSON-agent parsers
-    /// ([`crate::catalog::parse_agent_from_json`]).
+    /// Read from a settings tier's `agents/` directory.
+    Settings(protocol::SettingsScope),
+    /// Supplied by the `--agents` flag for this run.
     Flag,
-    /// Loaded from an explicitly supplied additional agent directory.
+    /// Loaded by an installed plugin.
+    Plugin,
+    /// Discovered under an `--add-dir` directory.
     AdditionalDirectory,
 }
 

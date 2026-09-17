@@ -169,10 +169,11 @@ pub fn agent_mcp_specs_to_scoped_configs(
             let mut cfg = cfg;
             cfg.metadata.agent_source = Some(match def.source {
                 AgentSource::BuiltIn => mcp::McpAgentSource::BuiltIn,
-                AgentSource::UserDefined => mcp::McpAgentSource::UserSettings,
-                AgentSource::Project => mcp::McpAgentSource::ProjectSettings,
+                AgentSource::Settings(protocol::SettingsScope::User) => mcp::McpAgentSource::UserSettings,
+                AgentSource::Settings(protocol::SettingsScope::Project) => mcp::McpAgentSource::ProjectSettings,
+                AgentSource::Settings(protocol::SettingsScope::Local) => mcp::McpAgentSource::LocalSettings,
                 AgentSource::Plugin => mcp::McpAgentSource::Plugin,
-                AgentSource::PolicySettings => mcp::McpAgentSource::PolicySettings,
+                AgentSource::Settings(protocol::SettingsScope::Managed) => mcp::McpAgentSource::PolicySettings,
                 AgentSource::Flag => mcp::McpAgentSource::FlagSettings,
                 AgentSource::AdditionalDirectory => mcp::McpAgentSource::AdditionalDirectory,
             });
@@ -187,22 +188,19 @@ pub fn agent_mcp_specs_to_scoped_configs(
 pub(crate) fn plugin_trusted_source(source: AgentSource) -> bool {
     matches!(
         source,
-        AgentSource::Plugin | AgentSource::PolicySettings | AgentSource::BuiltIn
+        AgentSource::Plugin | AgentSource::Settings(protocol::SettingsScope::Managed) | AgentSource::BuiltIn
     )
 }
 
 /// Human label for the strict-lock debug line (claude interpolates the raw
-/// source string; ours maps the enum back to claude's wire names).
+/// source string).
+///
+/// Delegates rather than restating: this was a byte-identical copy of
+/// [`crate::handle::agent_source_to_claude_str`], and two hand-kept copies of
+/// one table are exactly how the `tengu_agent_tool_selected` telemetry field
+/// and this log line would drift apart without either test going red.
 fn source_label(source: AgentSource) -> &'static str {
-    match source {
-        AgentSource::BuiltIn => "built-in",
-        AgentSource::UserDefined => "userSettings",
-        AgentSource::Project => "projectSettings",
-        AgentSource::Plugin => "plugin",
-        AgentSource::PolicySettings => "policySettings",
-        AgentSource::Flag => "flagSettings",
-        AgentSource::AdditionalDirectory => "additionalDirectory",
-    }
+    crate::handle::agent_source_to_claude_str(source)
 }
 
 #[cfg(test)]
@@ -236,14 +234,14 @@ mod tests {
         mcp::build_server_from_json_entry(
             name,
             &serde_json::json!({"command": command}),
-            mcp::ConfigScope::User,
+            mcp::ConfigScope::Settings(protocol::SettingsScope::User),
         )
         .expect("well-formed stdio entry builds")
     }
 
     #[test]
     fn empty_specs_yield_no_configs() {
-        let def = def_with_specs(vec![], AgentSource::Project);
+        let def = def_with_specs(vec![], AgentSource::Settings(protocol::SettingsScope::Project));
         assert!(convert(&def, false).is_empty());
     }
 
@@ -254,7 +252,7 @@ mod tests {
         // siblings.
         let def = def_with_specs(
             vec![AgentMcpServerSpec::ByName("slack".into())],
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::Project),
         );
         assert!(agent_mcp_specs_to_scoped_configs(&def, false, false, &[]).is_empty());
     }
@@ -268,7 +266,7 @@ mod tests {
         let existing = vec![existing_stdio("slack", "slack-mcp")];
         let def = def_with_specs(
             vec![AgentMcpServerSpec::ByName("slack".into())],
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::Project),
         );
         let cfgs = agent_mcp_specs_to_scoped_configs(&def, false, false, &existing);
         assert_eq!(cfgs.len(), 1);
@@ -279,7 +277,7 @@ mod tests {
         );
         assert_eq!(
             cfgs[0].config.scope,
-            mcp::ConfigScope::User,
+            mcp::ConfigScope::Settings(protocol::SettingsScope::User),
             "the EXISTING config's scope is preserved verbatim, not overwritten to Agent"
         );
     }
@@ -300,7 +298,7 @@ mod tests {
         let existing = existing_stdio("shared", "shared-mcp");
         let by_name = def_with_specs(
             vec![AgentMcpServerSpec::ByName("shared".into())],
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::Project),
         );
         let converted = agent_mcp_specs_to_scoped_configs(&by_name, false, false, &[existing]);
         assert_eq!(converted.len(), 1);
@@ -314,7 +312,7 @@ mod tests {
         let existing = vec![existing_stdio("slack", "slack-mcp")];
         let def = def_with_specs(
             vec![AgentMcpServerSpec::ByName("slack".into())],
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::Project),
         );
         assert!(agent_mcp_specs_to_scoped_configs(&def, false, true, &existing).is_empty());
     }
@@ -326,7 +324,7 @@ mod tests {
                 "docs",
                 serde_json::json!({"command": "npx", "args": ["-y", "docs-mcp"]}),
             )],
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::Project),
         );
         let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
@@ -349,7 +347,7 @@ mod tests {
                 "remote",
                 serde_json::json!({"type": "http", "url": "https://mcp.example/api"}),
             )],
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
         );
         let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
@@ -366,7 +364,7 @@ mod tests {
         let mut map = serde_json::Map::new();
         map.insert("a".into(), serde_json::json!({"command": "x"}));
         map.insert("b".into(), serde_json::json!({"command": "y"}));
-        let def = def_with_specs(vec![AgentMcpServerSpec::Record(map)], AgentSource::Project);
+        let def = def_with_specs(vec![AgentMcpServerSpec::Record(map)], AgentSource::Settings(protocol::SettingsScope::Project));
         assert!(convert(&def, false).is_empty());
     }
 
@@ -375,7 +373,7 @@ mod tests {
         for reserved in ["computer-use", "workspace", "claude-in-chrome"] {
             let def = def_with_specs(
                 vec![record(reserved, serde_json::json!({"command": "x"}))],
-                AgentSource::Project,
+                AgentSource::Settings(protocol::SettingsScope::Project),
             );
             assert!(
                 convert(&def, false).is_empty(),
@@ -392,7 +390,7 @@ mod tests {
                     "ide",
                     serde_json::json!({"type": ty, "url": "http://127.0.0.1:1"}),
                 )],
-                AgentSource::Project,
+                AgentSource::Settings(protocol::SettingsScope::Project),
             );
             assert!(
                 convert(&def, false).is_empty(),
@@ -408,7 +406,7 @@ mod tests {
                 record("broken", serde_json::json!({"nope": true})),
                 record("ok", serde_json::json!({"command": "x"})),
             ],
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::Project),
         );
         let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
@@ -426,7 +424,7 @@ mod tests {
                 record("other", serde_json::json!({"command": "x"})),
                 record("docs", serde_json::json!({"command": "second"})),
             ],
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::Project),
         );
         let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 2, "one config per name");
@@ -443,8 +441,8 @@ mod tests {
         let specs = || vec![record("docs", serde_json::json!({"command": "x"}))];
         // Untrusted (user/project/flag) sources: locked out.
         for src in [
-            AgentSource::UserDefined,
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(protocol::SettingsScope::Project),
             AgentSource::Flag,
         ] {
             let def = def_with_specs(specs(), src);
@@ -456,7 +454,7 @@ mod tests {
         // wke-trusted sources pass the lock.
         for src in [
             AgentSource::Plugin,
-            AgentSource::PolicySettings,
+            AgentSource::Settings(protocol::SettingsScope::Managed),
             AgentSource::BuiltIn,
         ] {
             let def = def_with_specs(specs(), src);

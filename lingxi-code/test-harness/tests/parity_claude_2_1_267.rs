@@ -87,9 +87,9 @@ fn the_allowlist_exempt_scopes_match_the_ported_rule() {
     };
     for (scope, want) in [
         (mcp::connection::ConfigScope::Enterprise, true),
-        (mcp::connection::ConfigScope::Managed, true),
-        (mcp::connection::ConfigScope::User, false),
-        (mcp::connection::ConfigScope::Project, false),
+        (mcp::connection::ConfigScope::Settings(protocol::SettingsScope::Managed), true),
+        (mcp::connection::ConfigScope::Settings(protocol::SettingsScope::User), false),
+        (mcp::connection::ConfigScope::Settings(protocol::SettingsScope::Project), false),
     ] {
         let config = mcp::connection::McpServerConfig {
             name: "org-tool".to_string(),

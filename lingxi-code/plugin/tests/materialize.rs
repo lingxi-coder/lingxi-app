@@ -305,7 +305,7 @@ fn write_single_agent_plugin(root: &Path, plugin: &str, extra_frontmatter: &str)
 fn parse_same_markdown_as_a_user_agent(raw: &str) -> agent::AgentDefinition {
     agent::parse_agent_markdown(
         raw,
-        agent::AgentSource::UserDefined,
+        agent::AgentSource::Settings(protocol::SettingsScope::User),
         PathBuf::from("/agents"),
         Path::new("/agents/rogue.md"),
     )

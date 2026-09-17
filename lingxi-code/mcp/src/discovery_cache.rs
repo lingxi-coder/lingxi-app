@@ -426,6 +426,7 @@ pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> 
             crate::connection::McpAgentSource::Plugin => "plugin",
             crate::connection::McpAgentSource::UserSettings => "userSettings",
             crate::connection::McpAgentSource::ProjectSettings => "projectSettings",
+            crate::connection::McpAgentSource::LocalSettings => "localSettings",
             crate::connection::McpAgentSource::PolicySettings => "policySettings",
             crate::connection::McpAgentSource::FlagSettings => "flagSettings",
             crate::connection::McpAgentSource::AdditionalDirectory => "additionalDirectory",
@@ -2697,7 +2698,7 @@ mod tests {
         let mut base = crate::connection::McpServerConfig {
             name: "srv".into(),
             spec: http_spec("https://a.example", None),
-            scope: crate::connection::ConfigScope::User,
+            scope: crate::connection::ConfigScope::Settings(protocol::SettingsScope::User),
             disabled: false,
             timeout_ms: Some(10),
             discovery_cache: None,
@@ -2708,7 +2709,7 @@ mod tests {
             metadata: crate::connection::McpServerMetadata::default(),
         };
         let same = crate::connection::McpServerConfig {
-            scope: crate::connection::ConfigScope::Managed,
+            scope: crate::connection::ConfigScope::Settings(protocol::SettingsScope::Managed),
             config_error: Some("ignored".into()),
             ..base.clone()
         };
@@ -2744,7 +2745,7 @@ mod tests {
         let mut empty_oauth = crate::connection::McpServerConfig {
             name: "srv".into(),
             spec: http_spec("https://a.example", None),
-            scope: crate::connection::ConfigScope::User,
+            scope: crate::connection::ConfigScope::Settings(protocol::SettingsScope::User),
             disabled: false,
             timeout_ms: Some(10),
             discovery_cache: None,

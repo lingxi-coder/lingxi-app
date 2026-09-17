@@ -18,7 +18,7 @@ fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
         max_turns: 100,
         model: AgentModel::Inherit,
         permission_mode: AgentPermissionMode::Bubble,
-        source: AgentSource::UserDefined,
+        source: AgentSource::Settings(protocol::SettingsScope::User),
         base_dir: std::path::PathBuf::from("/tmp"),
         system_prompt: None,
         mcp_servers: vec![],
@@ -92,11 +92,11 @@ async fn list_agents_sorts_by_name() {
 async fn list_agents_maps_source_to_group_label() {
     // (agents-08) AgentSource → AGENT_SOURCE_GROUPS display label.
     let mut user = mk("u", "x", vec![]);
-    user.source = AgentSource::UserDefined;
+    user.source = AgentSource::Settings(protocol::SettingsScope::User);
     let mut builtin = mk("b", "x", vec![]);
     builtin.source = AgentSource::BuiltIn;
     let mut project = mk("p", "x", vec![]);
-    project.source = AgentSource::Project;
+    project.source = AgentSource::Settings(protocol::SettingsScope::Project);
     let cat = Arc::new(RwLock::new(vec![user, builtin, project]));
     let orch = Arc::new(build_orch().with_agent_catalog(cat));
     let v = orch.list_agents().await;

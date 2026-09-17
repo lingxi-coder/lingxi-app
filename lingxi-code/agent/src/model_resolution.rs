@@ -1622,7 +1622,7 @@ mod tests {
         // A USER-DEFINED agent literally named "Explore": source != built-in →
         // untouched (GAe early-return on source).
         let mut user_explore = builtin_explore_def();
-        user_explore.source = AgentSource::UserDefined;
+        user_explore.source = AgentSource::Settings(protocol::SettingsScope::User);
         user_explore.model = AgentModel::Alias("sonnet".to_string());
         assert!(matches!(
             resolve_builtin_explore_model(&user_explore, "claude-fable-5-1", true),

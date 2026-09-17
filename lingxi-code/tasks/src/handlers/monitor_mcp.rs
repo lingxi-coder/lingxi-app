@@ -752,7 +752,7 @@ mod tests {
             spec: McpTransportSpec::InProcess {
                 registry_key: "mock".into(),
             },
-            scope: mcp::ConfigScope::User,
+            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             discovery_cache: None,

@@ -275,9 +275,9 @@ impl MobileEngineHandle {
                 ("plugin", false)
             } else {
                 match config.as_ref().map(|config| &config.scope) {
-                    Some(mcp::ConfigScope::User) => ("user", true),
-                    Some(mcp::ConfigScope::Project) => ("project", true),
-                    Some(mcp::ConfigScope::Local) => ("local", true),
+                    Some(mcp::ConfigScope::Settings(protocol::SettingsScope::User)) => ("user", true),
+                    Some(mcp::ConfigScope::Settings(protocol::SettingsScope::Project)) => ("project", true),
+                    Some(mcp::ConfigScope::Settings(protocol::SettingsScope::Local)) => ("local", true),
                     _ => ("runtime", false),
                 }
             };

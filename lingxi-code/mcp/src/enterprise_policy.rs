@@ -1531,7 +1531,7 @@ pub fn entry_reads_environment(entry: &Value) -> bool {
 /// loaded at `Enterprise`/`Managed` scope, so the conjunct is vacuous here.
 #[must_use]
 fn org_delivered_needs_no_allowlist_entry(config: &McpServerConfig) -> bool {
-    matches!(config.scope, ConfigScope::Enterprise | ConfigScope::Managed)
+    matches!(config.scope, ConfigScope::Enterprise | ConfigScope::Settings(protocol::SettingsScope::Managed))
         && !config.metadata.expanded_from_env
 }
 
@@ -1648,7 +1648,7 @@ fn managed_settings_server_name_ok(name: &str) -> bool {
 ///   such an entry with the reference unexpanded and let it fail at dial time.
 /// * **Name shape**, byte-exact with [`MANAGED_MCP_SERVER_NAME_INVALID`].
 ///
-/// Scope is [`ConfigScope::Managed`], which is in claude's exempt set
+/// Scope is [`ConfigScope::Settings(protocol::SettingsScope::Managed)`], which is in claude's exempt set
 /// `XJ = ["enterprise","managed"]`, so these need no `allowedMcpServers` entry.
 /// `expanded_from_env` is never set for them — upstream only ever sets it at
 /// `enterprise` scope — which is consistent: an entry that reads the
@@ -1718,7 +1718,7 @@ pub fn load_managed_settings_servers_in(dir: &Path) -> Vec<McpServerConfig> {
             .into_iter()
             .collect(),
     );
-    crate::json_config::parse_mcp_json_string(&document.to_string(), ConfigScope::Managed)
+    crate::json_config::parse_mcp_json_string(&document.to_string(), ConfigScope::Settings(protocol::SettingsScope::Managed))
         .unwrap_or_default()
 }
 
@@ -2572,7 +2572,7 @@ mod tests {
         McpServerConfig {
             name: name.to_string(),
             spec,
-            scope: ConfigScope::User,
+            scope: ConfigScope::Settings(protocol::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -2599,7 +2599,7 @@ mod tests {
         let servers = super::load_managed_settings_servers_in(dir.path());
         assert_eq!(servers.len(), 2, "both remote entries load");
         for s in &servers {
-            assert_eq!(s.scope, ConfigScope::Managed);
+            assert_eq!(s.scope, ConfigScope::Settings(protocol::SettingsScope::Managed));
             assert!(
                 !s.metadata.expanded_from_env,
                 "a managed-settings entry never reads the environment"

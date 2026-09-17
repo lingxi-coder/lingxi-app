@@ -1928,7 +1928,7 @@ pub fn agent_dir_precedence(
     let mut project = project_agent_dirs(cwd, home, project_root);
     project.reverse();
 
-    let mut dirs = vec![(user_agents_dir, AgentSource::UserDefined)];
+    let mut dirs = vec![(user_agents_dir, AgentSource::Settings(protocol::SettingsScope::User))];
     let mut seen_additional: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for extra in additional_dirs {
         let dir = extra.join(branding::DOT_DIR).join("agents");
@@ -1937,7 +1937,7 @@ pub fn agent_dir_precedence(
         }
         dirs.push((dir, AgentSource::AdditionalDirectory));
     }
-    dirs.extend(project.into_iter().map(|d| (d, AgentSource::Project)));
+    dirs.extend(project.into_iter().map(|d| (d, AgentSource::Settings(protocol::SettingsScope::Project))));
     dirs
 }
 
@@ -1979,7 +1979,7 @@ mod tests {
         let raw = format!("---\nname: \"{name}\"\ndescription: d\n---\nBody");
         parse_agent_markdown(
             &raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("a.md"),
         )
@@ -2044,7 +2044,7 @@ mod tests {
         let raw = "---\nname: reviewer\ndescription: review code\n---\nBody";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("reviewer.md"),
         )
@@ -2059,7 +2059,7 @@ mod tests {
         let raw = "\u{feff}---\nname: reviewer\ndescription: review code\n---\nBody";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("reviewer.md"),
         )
@@ -2074,7 +2074,7 @@ mod tests {
         let raw = "---\nname: worker\ndescription: work\nobserver: reviewer\nobserverMessage: watch for unsupported claims\n---\nBody";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("worker.md"),
         )
@@ -2094,7 +2094,7 @@ mod tests {
         let raw = "---\nname: worker\ndescription: work\nobserver: reviewer\nobserveSubagents: false\n---\nBody";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("worker.md"),
         )
@@ -2142,7 +2142,7 @@ mod tests {
         let raw = "no frontmatter here";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2208,7 +2208,7 @@ mod tests {
         let raw = "---\nname: \"\"\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2223,7 +2223,7 @@ mod tests {
         let raw = "---\nname: \"a:b\"\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2238,7 +2238,7 @@ mod tests {
         let raw = "---\nname: \"a\u{FF1A}b\"\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2253,7 +2253,7 @@ mod tests {
         let raw = "---\nname: \"-x\"\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2277,7 +2277,7 @@ mod tests {
         )
         .unwrap();
         let defs =
-            load_agents_from_dirs(&[(dir.path().to_path_buf(), AgentSource::UserDefined)]).await;
+            load_agents_from_dirs(&[(dir.path().to_path_buf(), AgentSource::Settings(protocol::SettingsScope::User))]).await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].agent_type, "good");
     }
@@ -2296,7 +2296,7 @@ mod tests {
         let raw = "---\nname: a\ndescription: \"\"\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2309,7 +2309,7 @@ mod tests {
         let raw = "---\nname: r\ndescription: d\ntools: [Read, Grep]\n---\n";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::Project,
+            AgentSource::Settings(protocol::SettingsScope::Project),
             PathBuf::from("/tmp"),
             Path::new("r.md"),
         )
@@ -2361,7 +2361,7 @@ mod tests {
         .await
         .unwrap();
 
-        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Project)]).await;
+        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Settings(protocol::SettingsScope::Project))]).await;
         let names: Vec<&str> = loaded.iter().map(|a| a.agent_type.as_str()).collect();
         assert_eq!(
             names,
@@ -2388,7 +2388,7 @@ mod tests {
         // sub/loop -> agents, i.e. agents/sub/loop/sub/loop/...
         std::os::unix::fs::symlink(&agents, sub.join("loop")).unwrap();
 
-        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Project)]).await;
+        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Settings(protocol::SettingsScope::Project))]).await;
         assert_eq!(loaded.len(), 1, "the cycle must not duplicate or hang");
         assert_eq!(loaded[0].agent_type, "a");
     }
@@ -2412,14 +2412,14 @@ mod tests {
         std::os::unix::fs::symlink(&real, project.join("shared.md")).unwrap();
 
         let loaded = load_agents_from_dirs(&[
-            (user, AgentSource::UserDefined),
-            (project, AgentSource::Project),
+            (user, AgentSource::Settings(protocol::SettingsScope::User)),
+            (project, AgentSource::Settings(protocol::SettingsScope::Project)),
         ])
         .await;
         assert_eq!(loaded.len(), 1, "one inode, one definition: {loaded:?}");
         assert_eq!(
             loaded[0].source,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             "the FIRST occurrence is kept, matching `wQr`'s scan order",
         );
     }
@@ -2447,8 +2447,8 @@ mod tests {
         .unwrap();
 
         let loaded = load_agents_from_dirs(&[
-            (user, AgentSource::UserDefined),
-            (project, AgentSource::Project),
+            (user, AgentSource::Settings(protocol::SettingsScope::User)),
+            (project, AgentSource::Settings(protocol::SettingsScope::Project)),
         ])
         .await;
         assert_eq!(loaded.len(), 1);
@@ -2471,19 +2471,19 @@ mod tests {
         };
         let mut agents = vec![
             named("keeper", "FLAG", AgentSource::Flag),
-            named("other", "PROJECT", AgentSource::Project),
+            named("other", "PROJECT", AgentSource::Settings(protocol::SettingsScope::Project)),
         ];
         merge_agents_later_wins(
             &mut agents,
             vec![
-                named("keeper", "POLICY", AgentSource::PolicySettings),
-                named("fresh", "POLICY", AgentSource::PolicySettings),
+                named("keeper", "POLICY", AgentSource::Settings(protocol::SettingsScope::Managed)),
+                named("fresh", "POLICY", AgentSource::Settings(protocol::SettingsScope::Managed)),
             ],
         );
         assert_eq!(agents.len(), 3, "replace in place, then append: {agents:?}");
         let keeper = agents.iter().find(|a| a.agent_type == "keeper").unwrap();
         assert_eq!(keeper.when_to_use, "POLICY");
-        assert_eq!(keeper.source, AgentSource::PolicySettings);
+        assert_eq!(keeper.source, AgentSource::Settings(protocol::SettingsScope::Managed));
         assert_eq!(
             agents[1].agent_type, "other",
             "untouched entries keep order"
@@ -2570,8 +2570,8 @@ mod tests {
             ],
             "user first (lowest), then project shallow -> deep",
         );
-        assert_eq!(got[0].1, AgentSource::UserDefined);
-        assert!(got[1..].iter().all(|(_, s)| *s == AgentSource::Project));
+        assert_eq!(got[0].1, AgentSource::Settings(protocol::SettingsScope::User));
+        assert!(got[1..].iter().all(|(_, s)| *s == AgentSource::Settings(protocol::SettingsScope::Project)));
     }
 
     /// `--add-dir` agents rank between the user tier and the ordinary project
@@ -2592,9 +2592,9 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (d("/home/u/.lingxi/agents"), AgentSource::UserDefined),
+                (d("/home/u/.lingxi/agents"), AgentSource::Settings(protocol::SettingsScope::User)),
                 (agents("/other"), AgentSource::AdditionalDirectory),
-                (agents("/home/u/repo"), AgentSource::Project),
+                (agents("/home/u/repo"), AgentSource::Settings(protocol::SettingsScope::Project)),
             ],
             "user < additionalDirectory < projectSettings, deduped",
         );
@@ -2664,8 +2664,8 @@ mod tests {
         .unwrap();
 
         let defs = load_agents_from_dirs(&[
-            (user.clone(), AgentSource::UserDefined),
-            (project.clone(), AgentSource::Project),
+            (user.clone(), AgentSource::Settings(protocol::SettingsScope::User)),
+            (project.clone(), AgentSource::Settings(protocol::SettingsScope::Project)),
         ])
         .await;
 
@@ -2679,7 +2679,7 @@ mod tests {
     #[tokio::test]
     async fn load_agents_from_missing_dir_yields_empty() {
         let defs =
-            load_agents_from_dirs(&[(PathBuf::from("/does/not/exist"), AgentSource::UserDefined)])
+            load_agents_from_dirs(&[(PathBuf::from("/does/not/exist"), AgentSource::Settings(protocol::SettingsScope::User))])
                 .await;
         assert!(defs.is_empty());
     }
@@ -2689,7 +2689,7 @@ mod tests {
     fn md(body: &str) -> AgentDefinition {
         parse_agent_markdown(
             body,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("a.md"),
         )
@@ -2701,7 +2701,7 @@ mod tests {
         let raw = "---\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("notes.md"),
         )
@@ -2714,7 +2714,7 @@ mod tests {
         let raw = "---\nname: x\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::UserDefined,
+            AgentSource::Settings(protocol::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )

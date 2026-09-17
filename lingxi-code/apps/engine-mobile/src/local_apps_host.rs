@@ -1643,7 +1643,7 @@ impl LocalAppsHostBroker {
                     .scoped_registry_key(conversation_id)
                     .map_err(|error| error.to_string())?,
             },
-            scope: mcp::ConfigScope::Managed,
+            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Managed),
             disabled: false,
             timeout_ms: Some(crate::host::LOCAL_APPS_MCP_TIMEOUT_MS),
             always_load: true,

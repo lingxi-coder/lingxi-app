@@ -1610,15 +1610,15 @@ impl EngineCommandRouter {
                     ("plugin", false, Some("由插件注入；请在 Plugins 设置中管理"))
                 }
                 Some(config) => match config.scope {
-                    mcp::ConfigScope::User => ("user", true, None),
-                    mcp::ConfigScope::Local => ("local", true, None),
-                    mcp::ConfigScope::Project => ("project", true, None),
+                    mcp::ConfigScope::Settings(protocol::SettingsScope::User) => ("user", true, None),
+                    mcp::ConfigScope::Settings(protocol::SettingsScope::Local) => ("local", true, None),
+                    mcp::ConfigScope::Settings(protocol::SettingsScope::Project) => ("project", true, None),
                     mcp::ConfigScope::Dynamic => ("dynamic", false, Some("由当前会话动态注入")),
                     mcp::ConfigScope::Enterprise => ("enterprise", false, Some("由企业配置管理")),
                     mcp::ConfigScope::ClaudeAi => {
                         ("claude_ai", false, Some("由 Claude.ai 连接提供"))
                     }
-                    mcp::ConfigScope::Managed => ("managed", false, Some("由管理员策略管理")),
+                    mcp::ConfigScope::Settings(protocol::SettingsScope::Managed) => ("managed", false, Some("由管理员策略管理")),
                     mcp::ConfigScope::Agent => ("agent", false, Some("由 Agent frontmatter 注入")),
                 },
                 None => ("runtime", false, Some("仅存在于当前运行态")),

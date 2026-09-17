@@ -80,7 +80,7 @@ fn stdio_cfg(name: &str) -> McpServerConfig {
             args: vec![],
             env: std::collections::HashMap::new(),
         },
-        scope: ConfigScope::Project,
+        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,

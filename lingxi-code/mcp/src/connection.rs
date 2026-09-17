@@ -68,6 +68,11 @@ pub enum McpAgentSource {
     UserSettings,
     #[serde(rename = "projectSettings")]
     ProjectSettings,
+    /// No loader produces a local-tier agent today; present so the mapping from
+    /// `AgentSource` stays total, and spelled the way the reference's
+    /// `SettingSource` union spells it.
+    #[serde(rename = "localSettings")]
+    LocalSettings,
     #[serde(rename = "policySettings")]
     PolicySettings,
     #[serde(rename = "flagSettings")]
@@ -255,13 +260,15 @@ fn is_false(b: &bool) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub enum ConfigScope {
-    Local,
-    User,
-    Project,
+    /// A settings tier's `.mcp.json` / `settings.json` servers.
+    Settings(protocol::SettingsScope),
     Dynamic,
+    /// Enterprise-pushed servers. Kept separate from
+    /// `Settings(SettingsScope::Managed)`: this port splits the one
+    /// enterprise-managed tier in two, and `config_scope_wire` spells them
+    /// `"enterprise"` and `"managed"` distinctly.
     Enterprise,
     ClaudeAi,
-    Managed,
     /// Agent frontmatter `mcpServers` (claude scope `"agent"`, stamped by
     /// `agentMcpSpecsToScopedConfigs`). Session-scoped like [`Self::Dynamic`],
     /// but NEVER project-approval-gated (claude's approval prompt covers
@@ -458,7 +465,7 @@ mod tests {
         McpServerConfig {
             name: "srv".to_string(),
             spec,
-            scope: ConfigScope::User,
+            scope: ConfigScope::Settings(protocol::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             discovery_cache: None,

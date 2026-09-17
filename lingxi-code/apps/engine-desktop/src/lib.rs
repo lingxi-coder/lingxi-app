@@ -389,7 +389,7 @@ mod desktop_hook_mcp_invoker_tests {
                 headers_helper: None,
                 oauth: None,
             },
-            scope: mcp::ConfigScope::User,
+            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             discovery_cache: None,
@@ -751,10 +751,10 @@ fn mcp_servers_inventory_payload(
             // LingXi's `Managed` scope is a port-side split of the same
             // enterprise-managed settings tier. The 2.1.252 oracle has no
             // separate `managed` inventory bucket.
-            mcp::ConfigScope::Enterprise | mcp::ConfigScope::Managed => "enterprise",
-            mcp::ConfigScope::User => "global",
-            mcp::ConfigScope::Project => "project",
-            mcp::ConfigScope::Local => "user",
+            mcp::ConfigScope::Enterprise | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed) => "enterprise",
+            mcp::ConfigScope::Settings(protocol::SettingsScope::User) => "global",
+            mcp::ConfigScope::Settings(protocol::SettingsScope::Project) => "project",
+            mcp::ConfigScope::Settings(protocol::SettingsScope::Local) => "user",
             mcp::ConfigScope::Dynamic => "plugin",
             mcp::ConfigScope::Agent => "agent",
             mcp::ConfigScope::ClaudeAi => "claudeai",
@@ -839,10 +839,10 @@ mod mcp_telemetry_helper_tests {
     fn mcp_server_inventory_matches_oracle_scope_buckets_and_folds_managed_into_enterprise() {
         let payload = mcp_servers_inventory_payload(&[
             stdio_config("enterprise", mcp::ConfigScope::Enterprise),
-            stdio_config("managed", mcp::ConfigScope::Managed),
-            stdio_config("global", mcp::ConfigScope::User),
-            stdio_config("project", mcp::ConfigScope::Project),
-            stdio_config("user", mcp::ConfigScope::Local),
+            stdio_config("managed", mcp::ConfigScope::Settings(protocol::SettingsScope::Managed)),
+            stdio_config("global", mcp::ConfigScope::Settings(protocol::SettingsScope::User)),
+            stdio_config("project", mcp::ConfigScope::Settings(protocol::SettingsScope::Project)),
+            stdio_config("user", mcp::ConfigScope::Settings(protocol::SettingsScope::Local)),
             stdio_config("dynamic", mcp::ConfigScope::Dynamic),
             stdio_config("agent", mcp::ConfigScope::Agent),
             stdio_config("claudeai", mcp::ConfigScope::ClaudeAi),
@@ -8877,7 +8877,7 @@ fn agent_source_is_trusted(source: agent::AgentSource) -> bool {
         source,
         agent::AgentSource::BuiltIn
             | agent::AgentSource::Plugin
-            | agent::AgentSource::PolicySettings
+            | agent::AgentSource::Settings(protocol::SettingsScope::Managed)
     )
 }
 
@@ -8953,7 +8953,7 @@ struct AgentMcpMergeGates {
 ///    server BEATS a same-named discovered `.mcp.json`/user/local server and
 ///    loses only to a `--mcp-config` one. `dynamic_names` is that bucket's key
 ///    set, which this port cannot recover from the flattened list (CLI servers
-///    are parsed at `ConfigScope::Project`).
+///    are parsed at `ConfigScope::Settings(protocol::SettingsScope::Project)`).
 fn merge_agent_frontmatter_mcp_servers(
     existing: &mut Vec<mcp::McpServerConfig>,
     dynamic_names: &[String],
@@ -12826,7 +12826,7 @@ pub async fn build_with_credential_stack(
         mcp_configs.retain(|cfg| {
             matches!(
                 cfg.scope,
-                mcp::ConfigScope::Enterprise | mcp::ConfigScope::Managed
+                mcp::ConfigScope::Enterprise | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed)
             )
         });
     }
@@ -12894,7 +12894,7 @@ pub async fn build_with_credential_stack(
     if !cfg.customization_gates.disables_custom_agents() {
         let policy_agents = agent::load_agents_from_dirs(&[(
             agent::catalog::policy_agent_dir(&crate::settings_watch::managed_settings_dir()),
-            agent::definition::AgentSource::PolicySettings,
+            agent::definition::AgentSource::Settings(protocol::SettingsScope::Managed),
         )])
         .await;
         agent::catalog::merge_agents_later_wins(&mut agents, policy_agents);
@@ -19748,7 +19748,7 @@ still flip to available"
             agent::parse_agent_from_json(
                 name,
                 &serde_json::json!({"description": "from dir", "prompt": "p"}),
-                agent::AgentSource::Project,
+                agent::AgentSource::Settings(protocol::SettingsScope::Project),
             )
             .expect("valid dir agent")
         }
@@ -19810,7 +19810,7 @@ still flip to available"
                     args: vec![],
                     env: std::collections::HashMap::new(),
                 },
-                scope: mcp::ConfigScope::Project,
+                scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
                 disabled: false,
                 timeout_ms: None,
                 always_load: false,
@@ -19845,7 +19845,7 @@ still flip to available"
 
         // Open gates: the frontmatter server joins the to-connect list with
         // scope Agent, exactly like a `--mcp-config` server.
-        let def = agent_with_server("docs", agent::AgentSource::Project);
+        let def = agent_with_server("docs", agent::AgentSource::Settings(protocol::SettingsScope::Project));
         let mut configs = vec![existing("keep")];
         let blocked = super::merge_agent_frontmatter_mcp_servers(
             &mut configs,
@@ -19911,7 +19911,7 @@ still flip to available"
             matches!(&configs[0].spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "prior"),
             "a --mcp-config server must win on name collision"
         );
-        assert_eq!(configs[0].scope, mcp::ConfigScope::Project);
+        assert_eq!(configs[0].scope, mcp::ConfigScope::Settings(protocol::SettingsScope::Project));
 
         // Gl(): safe mode → no merge.
         let mut configs = vec![];
@@ -19984,7 +19984,7 @@ still flip to available"
 
         // Yee: a deny-listed server is BLOCKED (returned for the stderr
         // warning), an allowed sibling still merges.
-        let mut two = agent_with_server("docs", agent::AgentSource::Project);
+        let mut two = agent_with_server("docs", agent::AgentSource::Settings(protocol::SettingsScope::Project));
         let mut denied = serde_json::Map::new();
         denied.insert("denied".to_string(), serde_json::json!({"command": "evil"}));
         two.mcp_servers
@@ -20114,7 +20114,7 @@ still flip to available"
         let mut def = agent::parse_agent_from_json(
             "tester",
             &serde_json::json!({"description": "d", "prompt": "p"}),
-            agent::AgentSource::Project,
+            agent::AgentSource::Settings(protocol::SettingsScope::Project),
         )
         .expect("agent definition parses");
         let mut server = serde_json::Map::new();
@@ -23832,12 +23832,12 @@ must be filtered out: got {after:?}"
         assert!(super::agent_source_is_trusted(agent::AgentSource::BuiltIn));
         assert!(super::agent_source_is_trusted(agent::AgentSource::Plugin));
         assert!(super::agent_source_is_trusted(
-            agent::AgentSource::PolicySettings
+            agent::AgentSource::Settings(protocol::SettingsScope::Managed)
         ));
         assert!(!super::agent_source_is_trusted(
-            agent::AgentSource::UserDefined
+            agent::AgentSource::Settings(protocol::SettingsScope::User)
         ));
-        assert!(!super::agent_source_is_trusted(agent::AgentSource::Project));
+        assert!(!super::agent_source_is_trusted(agent::AgentSource::Settings(protocol::SettingsScope::Project)));
         assert!(!super::agent_source_is_trusted(agent::AgentSource::Flag));
         assert!(!super::agent_source_is_trusted(
             agent::AgentSource::AdditionalDirectory
@@ -26964,7 +26964,7 @@ must be filtered out: got {after:?}"
         // the absence assertions further down prove nothing about the loader.
         let control = agent::parse_agent_markdown(
             ROGUE_AGENT_MD,
-            agent::AgentSource::UserDefined,
+            agent::AgentSource::Settings(protocol::SettingsScope::User),
             std::path::PathBuf::from("/agents"),
             std::path::Path::new("/agents/rogue.md"),
         )
@@ -28304,7 +28304,7 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         let mut def = agent::parse_agent_from_json(
             "tester",
             &serde_json::json!({"description": "d", "prompt": "p"}),
-            agent::AgentSource::Project,
+            agent::AgentSource::Settings(protocol::SettingsScope::Project),
         )
         .expect("agent definition parses");
         def.mcp_servers = vec![record_spec("opened"), record_spec("hangs")];

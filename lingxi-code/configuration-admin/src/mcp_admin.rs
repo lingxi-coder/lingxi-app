@@ -244,9 +244,9 @@ fn validate_single_server(scope: &str, name: &str, config: &Value) -> Result<(),
 
 fn config_scope(scope: &str) -> Result<ConfigScope, String> {
     match scope {
-        "user" => Ok(ConfigScope::User),
-        "local" => Ok(ConfigScope::Local),
-        "project" => Ok(ConfigScope::Project),
+        "user" => Ok(ConfigScope::Settings(protocol::SettingsScope::User)),
+        "local" => Ok(ConfigScope::Settings(protocol::SettingsScope::Local)),
+        "project" => Ok(ConfigScope::Settings(protocol::SettingsScope::Project)),
         _ => Err(format!("unknown mcp scope `{scope}`")),
     }
 }

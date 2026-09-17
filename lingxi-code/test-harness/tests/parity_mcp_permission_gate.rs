@@ -49,7 +49,7 @@ fn mock_config() -> McpServerConfig {
         spec: McpTransportSpec::InProcess {
             registry_key: "mock".into(),
         },
-        scope: ConfigScope::User,
+        scope: ConfigScope::Settings(protocol::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,

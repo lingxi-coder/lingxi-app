@@ -7471,13 +7471,13 @@ fn server_config_invalid_payload(
 
 fn config_scope_wire(scope: ConfigScope) -> &'static str {
     match scope {
-        ConfigScope::Local => "local",
-        ConfigScope::User => "user",
-        ConfigScope::Project => "project",
+        ConfigScope::Settings(protocol::SettingsScope::Local) => "local",
+        ConfigScope::Settings(protocol::SettingsScope::User) => "user",
+        ConfigScope::Settings(protocol::SettingsScope::Project) => "project",
         ConfigScope::Dynamic => "dynamic",
         ConfigScope::Enterprise => "enterprise",
         ConfigScope::ClaudeAi => "claudeai",
-        ConfigScope::Managed => "managed",
+        ConfigScope::Settings(protocol::SettingsScope::Managed) => "managed",
         ConfigScope::Agent => "agent",
     }
 }
@@ -9161,7 +9161,7 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
             },
-            scope: ConfigScope::Project,
+            scope: ConfigScope::Settings(protocol::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -9504,7 +9504,7 @@ mod tests {
                 spec: McpTransportSpec::InProcess {
                     registry_key: "local_apps".into(),
                 },
-                scope: ConfigScope::Managed,
+                scope: ConfigScope::Settings(protocol::SettingsScope::Managed),
                 disabled: false,
                 timeout_ms: None,
                 always_load: true,
@@ -12739,7 +12739,7 @@ mod tests {
         env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         for (name, scope, source) in [
-            ("shared-grant", ConfigScope::User, None),
+            ("shared-grant", ConfigScope::Settings(protocol::SettingsScope::User), None),
             (
                 "agent-grant",
                 ConfigScope::Agent,
@@ -17672,7 +17672,7 @@ mod tests {
                     xaa: Some(true),
                 }),
             },
-            scope: ConfigScope::Project,
+            scope: ConfigScope::Settings(protocol::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -18120,7 +18120,7 @@ mod snapshot_tests {
                 args: vec![],
                 env: std::collections::HashMap::new(),
             },
-            scope: ConfigScope::Project,
+            scope: ConfigScope::Settings(protocol::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,

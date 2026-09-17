@@ -8211,7 +8211,7 @@ async fn permission_prompt_wait_updates_teammate_and_sdk_even_on_cancel() {
     };
     let rules = permission::loader::permission_rules_from_settings_json(
         r#"{"permissions":{}}"#,
-        permission::PermissionRuleSource::LocalSettings,
+        permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
     )
     .unwrap();
     let policy =

@@ -254,15 +254,15 @@ impl PermissionsSnapshot {
         for (dest, source) in [
             (
                 PermissionUpdateDestination::UserSettings,
-                PermissionRuleSource::UserSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
             ),
             (
                 PermissionUpdateDestination::ProjectSettings,
-                PermissionRuleSource::ProjectSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             ),
             (
                 PermissionUpdateDestination::LocalSettings,
-                PermissionRuleSource::LocalSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
             ),
         ] {
             let Some(path) = paths.destination_path(dest) else {
@@ -292,7 +292,7 @@ impl PermissionsSnapshot {
     }
 
     /// Project the managed (policy) settings tier under `managed_dir` into rules
-    /// tagged [`PermissionRuleSource::PolicySettings`] (rendered read-only).
+    /// tagged [`PermissionRuleSource::Settings(protocol::SettingsScope::Managed)`] (rendered read-only).
     /// Mirrors the engine settings watcher's managed tier: the base
     /// `managed-settings.json` first, then every `*.json` under
     /// `managed-settings.d/` in alphabetical order (dotfiles skipped). Split out
@@ -302,7 +302,7 @@ impl PermissionsSnapshot {
         fn read_into(path: &Path, rules: &mut Vec<PermissionRule>) {
             if let Ok(raw) = std::fs::read_to_string(path) {
                 if let Ok(mut projected) =
-                    permission_rules_from_settings_json(&raw, PermissionRuleSource::PolicySettings)
+                    permission_rules_from_settings_json(&raw, PermissionRuleSource::Settings(protocol::SettingsScope::Managed))
                 {
                     rules.append(&mut projected);
                 }
@@ -333,7 +333,7 @@ impl PermissionsSnapshot {
     fn append_managed_auto_mode(snapshot: &mut AutoModeSnapshot, managed_dir: &Path) {
         fn read_into(path: &Path, snapshot: &mut AutoModeSnapshot) {
             if let Ok(raw) = std::fs::read_to_string(path) {
-                snapshot.append_settings_json(&raw, PermissionRuleSource::PolicySettings);
+                snapshot.append_settings_json(&raw, PermissionRuleSource::Settings(protocol::SettingsScope::Managed));
             }
         }
         read_into(&managed_dir.join("managed-settings.json"), snapshot);
@@ -416,9 +416,9 @@ impl PermTab {
 #[must_use]
 fn source_to_destination(source: PermissionRuleSource) -> Option<PermissionUpdateDestination> {
     match source {
-        PermissionRuleSource::UserSettings => Some(PermissionUpdateDestination::UserSettings),
-        PermissionRuleSource::ProjectSettings => Some(PermissionUpdateDestination::ProjectSettings),
-        PermissionRuleSource::LocalSettings => Some(PermissionUpdateDestination::LocalSettings),
+        PermissionRuleSource::Settings(protocol::SettingsScope::User) => Some(PermissionUpdateDestination::UserSettings),
+        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => Some(PermissionUpdateDestination::ProjectSettings),
+        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => Some(PermissionUpdateDestination::LocalSettings),
         _ => None,
     }
 }
@@ -428,11 +428,11 @@ fn source_to_destination(source: PermissionRuleSource) -> Option<PermissionUpdat
 #[must_use]
 fn source_label(source: PermissionRuleSource) -> &'static str {
     match source {
-        PermissionRuleSource::UserSettings => "user",
-        PermissionRuleSource::ProjectSettings => "project",
-        PermissionRuleSource::LocalSettings => "local",
+        PermissionRuleSource::Settings(protocol::SettingsScope::User) => "user",
+        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => "project",
+        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => "local",
         PermissionRuleSource::FlagSettings => "flag",
-        PermissionRuleSource::PolicySettings => "managed",
+        PermissionRuleSource::Settings(protocol::SettingsScope::Managed) => "managed",
         PermissionRuleSource::CliArg => "cli",
         PermissionRuleSource::Command => "command",
         PermissionRuleSource::Session => "session",
@@ -447,10 +447,10 @@ fn source_label(source: PermissionRuleSource) -> &'static str {
 #[must_use]
 fn auto_source_label(source: PermissionRuleSource) -> &'static str {
     match source {
-        PermissionRuleSource::UserSettings => "user settings",
-        PermissionRuleSource::ProjectSettings => "project settings",
-        PermissionRuleSource::LocalSettings => "local settings",
-        PermissionRuleSource::PolicySettings => "managed policy",
+        PermissionRuleSource::Settings(protocol::SettingsScope::User) => "user settings",
+        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => "project settings",
+        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => "local settings",
+        PermissionRuleSource::Settings(protocol::SettingsScope::Managed) => "managed policy",
         _ => source_label(source),
     }
 }
@@ -1183,17 +1183,17 @@ mod tests {
                 rule(
                     "Read",
                     PermissionBehavior::Allow,
-                    PermissionRuleSource::LocalSettings,
+                    PermissionRuleSource::Settings(protocol::SettingsScope::Local),
                 ),
                 rule(
                     "Edit(src/**)",
                     PermissionBehavior::Allow,
-                    PermissionRuleSource::ProjectSettings,
+                    PermissionRuleSource::Settings(protocol::SettingsScope::Project),
                 ),
                 rule(
                     "Bash(rm:*)",
                     PermissionBehavior::Deny,
-                    PermissionRuleSource::LocalSettings,
+                    PermissionRuleSource::Settings(protocol::SettingsScope::Local),
                 ),
             ],
             auto_mode: AutoModeSnapshot::default(),
@@ -1359,7 +1359,7 @@ mod tests {
             rules: vec![rule(
                 "Bash(curl:*)",
                 PermissionBehavior::Allow,
-                PermissionRuleSource::PolicySettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
             )],
             auto_mode: AutoModeSnapshot::default(),
         });
@@ -1473,7 +1473,7 @@ mod tests {
                     rule(
                         &format!("Bash(cmd{i:02}:*)"),
                         PermissionBehavior::Allow,
-                        PermissionRuleSource::LocalSettings,
+                        PermissionRuleSource::Settings(protocol::SettingsScope::Local),
                     )
                 })
                 .collect(),
@@ -1520,7 +1520,7 @@ mod tests {
         // Every managed rule is tagged PolicySettings → rendered read-only.
         assert!(rules
             .iter()
-            .all(|r| r.source == PermissionRuleSource::PolicySettings));
+            .all(|r| r.source == PermissionRuleSource::Settings(protocol::SettingsScope::Managed)));
         let strs: Vec<String> = rules.iter().map(|r| r.value.to_rule_string()).collect();
         assert!(strs.contains(&"Bash(curl:*)".to_string()), "{strs:?}");
         assert!(strs.contains(&"Read".to_string()), "{strs:?}");
@@ -1535,7 +1535,7 @@ mod tests {
 
         // A PolicySettings rule has no writable destination, so the editor's
         // read-only handling (no remove) stays active for it.
-        assert!(source_to_destination(PermissionRuleSource::PolicySettings).is_none());
+        assert!(source_to_destination(PermissionRuleSource::Settings(protocol::SettingsScope::Managed)).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1616,7 +1616,7 @@ mod tests {
                 },
                 "permissions": {"allow": ["Read"]}
             }"#,
-            PermissionRuleSource::UserSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
         );
 
         assert!(!snapshot.builtin_enabled(AutoModeCategory::SoftAllow));
@@ -1667,13 +1667,13 @@ mod tests {
         let mut auto_mode = AutoModeSnapshot::default();
         auto_mode.append_settings_json(
             r#"{"autoMode":{"allow":["classifier sentence"]}}"#,
-            PermissionRuleSource::LocalSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         );
         let mut s = PermissionsEditorState::new(PermissionsSnapshot {
             rules: vec![rule(
                 "Read",
                 PermissionBehavior::Allow,
-                PermissionRuleSource::LocalSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
             )],
             auto_mode,
         });
@@ -1707,7 +1707,7 @@ mod tests {
         let mut auto_mode = AutoModeSnapshot::default();
         auto_mode.append_settings_json(
             r#"{"autoMode":{"allow":["$defaults","custom classifier rule"],"environment":["**Org**: internal"]}}"#,
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
         );
         let mut v = PermissionsEditorView::new(PermissionsSnapshot {
             rules: Vec::new(),
@@ -1735,7 +1735,7 @@ mod tests {
                 .auto_mode()
                 .entries_for_category(AutoModeCategory::SoftAllow)[0]
                 .source,
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         );
         assert!(text.contains("Environment"), "{text}");
         assert!(text.contains("Replaces the built-in default"), "{text}");
@@ -1778,13 +1778,13 @@ mod tests {
             .entries_for_category(AutoModeCategory::SoftAllow);
         assert_eq!(user.len(), 1);
         assert_eq!(user[0].value, "user classifier");
-        assert_eq!(user[0].source, PermissionRuleSource::UserSettings);
+        assert_eq!(user[0].source, PermissionRuleSource::Settings(protocol::SettingsScope::User));
         let local = snapshot
             .auto_mode
             .entries_for_category(AutoModeCategory::SoftDeny);
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].value, "local classifier");
-        assert_eq!(local[0].source, PermissionRuleSource::LocalSettings);
+        assert_eq!(local[0].source, PermissionRuleSource::Settings(protocol::SettingsScope::Local));
         assert!(snapshot
             .auto_mode
             .builtin_enabled(AutoModeCategory::SoftAllow));

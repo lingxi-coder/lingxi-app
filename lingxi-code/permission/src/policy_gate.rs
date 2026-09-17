@@ -186,9 +186,9 @@ impl PolicyPermissionGate {
 
     fn parse_update_destination(value: &Value) -> Option<PermissionRuleSource> {
         match value.as_str()? {
-            "userSettings" => Some(PermissionRuleSource::UserSettings),
-            "projectSettings" => Some(PermissionRuleSource::ProjectSettings),
-            "localSettings" => Some(PermissionRuleSource::LocalSettings),
+            "userSettings" => Some(PermissionRuleSource::Settings(protocol::SettingsScope::User)),
+            "projectSettings" => Some(PermissionRuleSource::Settings(protocol::SettingsScope::Project)),
+            "localSettings" => Some(PermissionRuleSource::Settings(protocol::SettingsScope::Local)),
             "cliArg" => Some(PermissionRuleSource::CliArg),
             "session" => Some(PermissionRuleSource::Session),
             _ => None,
@@ -3189,7 +3189,7 @@ mod plan_mode_divergence_test {
     fn gate_in(mode: PermissionMode, inner: Arc<CountingInner>) -> PolicyPermissionGate {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": {} }"#,
-            PermissionRuleSource::LocalSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         )
         .unwrap();
         let policy = Arc::new(PermissionPolicy::from_rules(mode, rules));
@@ -3356,7 +3356,7 @@ mod gate_sysmsg_test {
                 rule_content: None,
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::UserSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
         };
         let policy = Arc::new(PermissionPolicy::from_rules(
             PermissionMode::Default,
@@ -3419,7 +3419,7 @@ mod task_pause_tests {
     ) -> (PolicyPermissionGate, PermissionCheckContext, Arc<AtomicU64>) {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{"permissions":{}}"#,
-            PermissionRuleSource::LocalSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         )
         .unwrap();
         let total = Arc::new(AtomicU64::new(0));

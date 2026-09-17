@@ -1262,7 +1262,7 @@ struct BootPermissionTiers {
 ///   the allowed-source set, so managed rules can NEVER be excluded.
 /// - Managed tiers (`managed-settings.json` + `managed-settings.d/*.json`,
 ///   already ascending from `managed_settings_raw_tiers`) parse with
-///   `PermissionRuleSource::PolicySettings` (`RKt()→Fwt("policySettings")`),
+///   `PermissionRuleSource::Settings(protocol::SettingsScope::Managed)` (`RKt()→Fwt("policySettings")`),
 ///   so enterprise deny/ask/allow rules bind on the boot policy and decisions
 ///   cite "enterprise managed settings". Managed `defaultMode` /
 ///   `disableBypassPermissionsMode` / `additionalDirectories` fold like any
@@ -1303,17 +1303,17 @@ async fn load_boot_permission_tiers_with_flag(
     for (path, source, included) in [
         (
             lingxi_home.join("settings.json"),
-            permission::PermissionRuleSource::UserSettings,
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
             incl_user_settings,
         ),
         (
             cwd.join(branding::DOT_DIR).join("settings.json"),
-            permission::PermissionRuleSource::ProjectSettings,
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             incl_project_settings,
         ),
         (
             cwd.join(branding::DOT_DIR).join("settings.local.json"),
-            permission::PermissionRuleSource::LocalSettings,
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
             incl_project_settings,
         ),
     ] {
@@ -1439,7 +1439,7 @@ async fn load_boot_permission_tiers_with_flag(
     for raw in &managed_tiers {
         match permission::permission_rules_from_settings_json(
             raw,
-            permission::PermissionRuleSource::PolicySettings,
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
         ) {
             Ok(mut r) => {
                 // parity 2.1.210: same file-matcher warning for managed rules.
@@ -1471,7 +1471,7 @@ async fn load_boot_permission_tiers_with_flag(
         }
         additional_working_dirs.extend_from_source(
             permission::additional_directories_from_settings_json(raw),
-            permission::PermissionRuleSource::PolicySettings,
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
         );
         if permission::block_reads_outside_working_directories_from_settings_json(raw) {
             block_reads_outside_working_directories = true; // managed arming binds (sticky)
@@ -1481,7 +1481,7 @@ async fn load_boot_permission_tiers_with_flag(
         .iter()
         .any(|raw| permission::allow_managed_permission_rules_only_from_settings_json(raw));
     if allow_managed_permission_rules_only {
-        rules.retain(|r| r.source == permission::PermissionRuleSource::PolicySettings);
+        rules.retain(|r| r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed));
     }
     let mode_preference_allowed = !managed_tiers
         .iter()
@@ -25494,8 +25494,8 @@ must be filtered out: got {after:?}"
             tiers
                 .rules
                 .iter()
-                .any(|r| r.source == permission::PermissionRuleSource::PolicySettings),
-            "managed tier rules must parse with PermissionRuleSource::PolicySettings"
+                .any(|r| r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)),
+            "managed tier rules must parse with PermissionRuleSource::Settings(protocol::SettingsScope::Managed)"
         );
         // The managed raw text also feeds the sandbox derivation (appended last).
         assert_eq!(
@@ -25510,7 +25510,7 @@ must be filtered out: got {after:?}"
             permission::PermissionResult::Deny { reason, .. } => match reason {
                 permission::PermissionDecisionReason::MatchedRule { rule } => assert_eq!(
                     rule.source,
-                    permission::PermissionRuleSource::PolicySettings,
+                    permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
                     "the deny must cite the managed (enterprise) rule"
                 ),
                 other => panic!("expected MatchedRule reason, got {other:?}"),
@@ -25602,7 +25602,7 @@ must be filtered out: got {after:?}"
         assert_eq!(tiers.rules.len(), 1, "only the managed rule loads");
         assert_eq!(
             tiers.rules[0].source,
-            permission::PermissionRuleSource::PolicySettings
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
         );
 
         std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
@@ -25643,7 +25643,7 @@ must be filtered out: got {after:?}"
         assert!(tiers.allow_managed_permission_rules_only);
         assert_eq!(
             tiers.rules[0].source,
-            permission::PermissionRuleSource::PolicySettings
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
         );
         assert_eq!(tiers.rules[0].value.tool_name, "Bash");
 
@@ -25678,7 +25678,7 @@ must be filtered out: got {after:?}"
         assert!(tiers
             .rules
             .iter()
-            .all(|r| r.source == permission::PermissionRuleSource::PolicySettings));
+            .all(|r| r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)));
         assert_eq!(
             tiers.mode,
             permission::PermissionMode::Plan,

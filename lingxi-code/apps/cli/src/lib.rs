@@ -1646,10 +1646,10 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
     let mut skip_dangerous_mode_permission_prompt = false;
     let home = incl_user
         .then(|| crate::run::lingxi_home_dir().join("settings.json"))
-        .map(|p| (p, permission::PermissionRuleSource::UserSettings));
+        .map(|p| (p, permission::PermissionRuleSource::Settings(protocol::SettingsScope::User)));
     let proj = incl_project
         .then(|| project_dir.join(branding::DOT_DIR).join("settings.json"))
-        .map(|p| (p, permission::PermissionRuleSource::ProjectSettings));
+        .map(|p| (p, permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)));
     // User first, then project (ascending priority): project read last wins on
     // `defaultMode`; `bypass_disabled` / `auto_mode_disabled` are sticky across
     // tiers (any tier disabling wins — `Bpa()`).
@@ -1679,7 +1679,7 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
             // downgrade (same repo-trust threat MODE-SETTINGS-AUTO-TRUST-01
             // guards). Only the user tier is loaded here; local/flag/policy are
             // not read at this surface (their omission is over-ask-safe).
-            if source != permission::PermissionRuleSource::ProjectSettings
+            if source != permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)
                 && permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(
                     &raw,
                 )

@@ -1099,7 +1099,7 @@ mod tests {
         let allow_rule = |spec: &str| PermissionRule {
             value: PermissionRuleValue::from_rule_string(spec),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::UserSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
         };
         let seed = [allow_rule("Bash(rm:*)"), allow_rule("Read")];
         replace_permission_rules(

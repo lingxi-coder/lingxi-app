@@ -425,8 +425,8 @@ pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
 pub fn auto_mode_grantable_by_source(source: PermissionRuleSource) -> bool {
     matches!(
         source,
-        PermissionRuleSource::UserSettings
-            | PermissionRuleSource::PolicySettings
+        PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            | PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
             | PermissionRuleSource::FlagSettings
     )
 }
@@ -617,20 +617,20 @@ mod tests {
     fn auto_mode_grantable_only_from_trusted_tiers() {
         // `le` / `C(e)`: policy/user/flag may grant auto AND bypassPermissions.
         assert!(auto_mode_grantable_by_source(
-            PermissionRuleSource::UserSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
         ));
         assert!(auto_mode_grantable_by_source(
-            PermissionRuleSource::PolicySettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
         ));
         assert!(auto_mode_grantable_by_source(
             PermissionRuleSource::FlagSettings
         ));
         // Repo-controllable tiers may NOT.
         assert!(!auto_mode_grantable_by_source(
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         assert!(!auto_mode_grantable_by_source(
-            PermissionRuleSource::LocalSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local)
         ));
         // Runtime tiers never carry a settings defaultMode.
         assert!(!auto_mode_grantable_by_source(PermissionRuleSource::CliArg));
@@ -645,8 +645,8 @@ mod tests {
     #[test]
     fn default_mode_applies_from_source_trust_gates_auto_and_bypass_only() {
         use crate::mode::PermissionMode;
-        let project = PermissionRuleSource::ProjectSettings;
-        let user = PermissionRuleSource::UserSettings;
+        let project = PermissionRuleSource::Settings(protocol::SettingsScope::Project);
+        let user = PermissionRuleSource::Settings(protocol::SettingsScope::User);
         assert!(!default_mode_applies_from_source(
             PermissionMode::Auto,
             project
@@ -730,14 +730,14 @@ mod tests {
     #[test]
     fn no_permissions_block_is_empty() {
         assert!(
-            permission_rules_from_settings_json("{}", PermissionRuleSource::UserSettings)
+            permission_rules_from_settings_json("{}", PermissionRuleSource::Settings(protocol::SettingsScope::User))
                 .unwrap()
                 .is_empty()
         );
         // Other settings keys present, but no permissions → still empty.
         let raw = r#"{ "model": "claude-opus-4-7" }"#;
         assert!(
-            permission_rules_from_settings_json(raw, PermissionRuleSource::ProjectSettings)
+            permission_rules_from_settings_json(raw, PermissionRuleSource::Settings(protocol::SettingsScope::Project))
                 .unwrap()
                 .is_empty()
         );
@@ -747,7 +747,7 @@ mod tests {
     fn invalid_json_is_err() {
         assert!(permission_rules_from_settings_json(
             "{not json",
-            PermissionRuleSource::UserSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
         )
         .is_err());
     }
@@ -761,13 +761,13 @@ mod tests {
                 "ask": ["WebFetch"]
             }
         }"#;
-        let rules = permission_rules_from_settings_json(raw, PermissionRuleSource::ProjectSettings)
+        let rules = permission_rules_from_settings_json(raw, PermissionRuleSource::Settings(protocol::SettingsScope::Project))
             .unwrap();
         assert_eq!(rules.len(), 4);
         // Every rule carries the caller's source.
         assert!(rules
             .iter()
-            .all(|r| r.source == PermissionRuleSource::ProjectSettings));
+            .all(|r| r.source == PermissionRuleSource::Settings(protocol::SettingsScope::Project)));
 
         let find = |tool: &str, content: Option<&str>| {
             rules
@@ -800,7 +800,7 @@ mod tests {
     fn empty_arrays_yield_no_rules() {
         let raw = r#"{ "permissions": { "allow": [], "deny": [], "ask": [] } }"#;
         assert!(
-            permission_rules_from_settings_json(raw, PermissionRuleSource::UserSettings)
+            permission_rules_from_settings_json(raw, PermissionRuleSource::Settings(protocol::SettingsScope::User))
                 .unwrap()
                 .is_empty()
         );
@@ -967,17 +967,17 @@ mod tests {
     fn managed_only_lockdown_retain_drops_non_managed_rules() {
         let user = permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["WebFetch"] } }"#,
-            PermissionRuleSource::UserSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )
         .unwrap();
         let managed = permission_rules_from_settings_json(
             r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
-            PermissionRuleSource::PolicySettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
         )
         .unwrap();
         let mut rules: Vec<PermissionRule> = user.into_iter().chain(managed).collect();
         assert_eq!(rules.len(), 2);
-        rules.retain(|r| r.source == PermissionRuleSource::PolicySettings);
+        rules.retain(|r| r.source == PermissionRuleSource::Settings(protocol::SettingsScope::Managed));
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].value.tool_name, "Bash");
         assert!(matches!(rules[0].behavior, PermissionBehavior::Deny));
@@ -1020,7 +1020,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Write(src/foo.ts)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::ProjectSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
         };
         assert_eq!(
             permission_rule_startup_warning(&rule, ".lingxi/settings.json").as_deref(),
@@ -1032,7 +1032,7 @@ mod tests {
         let deny = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Glob(**/*.rs)"),
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::PolicySettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
         };
         assert_eq!(
             permission_rule_startup_warning(&deny, "managed policy settings").as_deref(),
@@ -1044,7 +1044,7 @@ mod tests {
         let ok = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Edit(src/foo.ts)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::UserSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
         };
         assert!(permission_rule_startup_warning(&ok, "settings.json").is_none());
     }
@@ -1054,7 +1054,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash(git -C * status *)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::ProjectSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
         };
         assert_eq!(
             permission_rule_startup_warning(&rule, ".lingxi/settings.json").as_deref(),
@@ -1067,7 +1067,7 @@ mod tests {
         let reduced = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash(git * main)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::UserSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
         };
         assert_eq!(
             permission_rule_startup_warning(&reduced, "settings.json").as_deref(),
@@ -1080,12 +1080,12 @@ mod tests {
     #[test]
     fn startup_warning_bash_wildcard_checks_all_settings_tier_prefixes() {
         let displays = [
-            (PermissionRuleSource::UserSettings, "user settings"),
-            (PermissionRuleSource::ProjectSettings, "project settings"),
-            (PermissionRuleSource::LocalSettings, "local settings"),
+            (PermissionRuleSource::Settings(protocol::SettingsScope::User), "user settings"),
+            (PermissionRuleSource::Settings(protocol::SettingsScope::Project), "project settings"),
+            (PermissionRuleSource::Settings(protocol::SettingsScope::Local), "local settings"),
             (PermissionRuleSource::CliArg, "CLI argument"),
             (
-                PermissionRuleSource::PolicySettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
                 "managed policy settings",
             ),
         ];
@@ -1112,7 +1112,7 @@ mod tests {
             let rule = PermissionRule {
                 value: PermissionRuleValue::from_rule_string(spec),
                 behavior,
-                source: PermissionRuleSource::ProjectSettings,
+                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             };
             permission_rule_startup_warning(&rule, "settings.json")
         };
@@ -1143,7 +1143,7 @@ mod tests {
             let rule = PermissionRule {
                 value: PermissionRuleValue::from_rule_string(spec),
                 behavior: PermissionBehavior::Allow,
-                source: PermissionRuleSource::ProjectSettings,
+                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             };
             permission_rule_startup_warning(&rule, "settings.json")
         };

@@ -233,7 +233,7 @@ async fn explicit_rules_still_outrank_the_classifier() {
             rule_content: None,
         },
         behavior: PermissionBehavior::Deny,
-        source: PermissionRuleSource::ProjectSettings,
+        source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
     };
     let prompt = Arc::new(Prompt(AtomicUsize::new(0)));
     let classifier = Arc::new(Recording {
@@ -279,7 +279,7 @@ fn allow_rule(tool: &str, content: Option<&str>) -> PermissionRule {
             rule_content: content.map(str::to_string),
         },
         behavior: PermissionBehavior::Allow,
-        source: PermissionRuleSource::ProjectSettings,
+        source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
     }
 }
 

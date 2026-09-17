@@ -143,7 +143,7 @@ mod tests {
     fn local_settings_policy(raw: &str) -> Arc<PermissionPolicy> {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::LocalSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         )
         .unwrap();
         Arc::new(
@@ -278,7 +278,7 @@ mod tests {
     async fn a_mode_deny_on_the_host_form_does_not_suppress_a_guest_allow() {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Edit(//workspace/ws/**)"] } }"#,
-            PermissionRuleSource::LocalSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         )
         .unwrap();
         let policy = Arc::new(
@@ -461,7 +461,7 @@ mod tests {
     async fn plan_mode_still_gates_a_mutating_local_app_tool() {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": {} }"#,
-            PermissionRuleSource::LocalSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         )
         .unwrap();
         let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Plan, rules));
@@ -518,7 +518,7 @@ mod tests {
     fn policy_with(raw: &str, mode: PermissionMode) -> Arc<PermissionPolicy> {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::UserSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )
         .unwrap();
         Arc::new(PermissionPolicy::from_rules(mode, rules))
@@ -527,7 +527,7 @@ mod tests {
     fn policy_with_roots(raw: &str, mode: PermissionMode) -> Arc<PermissionPolicy> {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::UserSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )
         .unwrap();
         Arc::new(
@@ -1429,7 +1429,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash"),
             behavior: crate::rule::PermissionBehavior::Ask,
-            source: PermissionRuleSource::UserSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
         };
         assert_eq!(
             serialize_decision_reason(&PermissionDecisionReason::MatchedRule { rule }),
@@ -1516,7 +1516,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash"),
             behavior: crate::rule::PermissionBehavior::Ask,
-            source: PermissionRuleSource::UserSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
         };
         // The four where decision_reason TEXT is None → the type carries the info.
         assert_eq!(
@@ -2597,7 +2597,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     async fn auto_mode_skips_dangerous_allow_rules_before_classifier() {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Bash(python:*)"] } }"#,
-            PermissionRuleSource::UserSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )
         .unwrap();
         let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Auto, rules));
@@ -3850,7 +3850,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     fn gate_with_rules(raw: &str) -> PolicyPermissionGate {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::LocalSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         )
         .expect("settings fixture parses");
         let policy = Arc::new(

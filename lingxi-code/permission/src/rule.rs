@@ -162,20 +162,22 @@ pub enum PermissionBehavior {
 
 /// The configuration source a `PermissionRule` came from.
 ///
-/// Priority increases down the list: `Session` overrides everything,
-/// `UserSettings` is the lowest. See `priority` for the canonical ordering.
+/// This type carries identity only. Do NOT read a precedence off the variant
+/// order: see [`PermissionRuleSource::priority`], which encodes the CITATION
+/// walk (`userSettings` highest) and is the exact reverse of the order in which
+/// these same tiers win a settings VALUE merge. Both are correct, for different
+/// questions, which is why neither is a property of the type.
+///
+/// (This doc comment previously said `Session` overrides everything and
+/// `UserSettings` is lowest — the inverted reading that #35 fixed in
+/// `priority` but left uncorrected here.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PermissionRuleSource {
-    /// `~/.lingxi/settings.json` (global user config).
-    UserSettings,
-    /// `.lingxi/settings.json` checked into the project.
-    ProjectSettings,
-    /// `.lingxi/settings.local.json` (gitignored per-clone overrides).
-    LocalSettings,
+    /// A settings tier — `~/.lingxi/settings.json`, the committed project file,
+    /// the gitignored per-clone override, or managed policy.
+    Settings(protocol::SettingsScope),
     /// Rules attached to a feature flag.
     FlagSettings,
-    /// Managed-policy rules (enterprise pushed).
-    PolicySettings,
     /// Rules supplied on the command line.
     CliArg,
     /// Rules emitted by a command (e.g. `/permissions add`).
@@ -210,11 +212,11 @@ impl PermissionRuleSource {
             Self::Session => 2,
             Self::Command => 3,
             Self::CliArg => 4,
-            Self::PolicySettings => 5,
+            Self::Settings(protocol::SettingsScope::Managed) => 5,
             Self::FlagSettings => 6,
-            Self::LocalSettings => 7,
-            Self::ProjectSettings => 8,
-            Self::UserSettings => 9,
+            Self::Settings(protocol::SettingsScope::Local) => 7,
+            Self::Settings(protocol::SettingsScope::Project) => 8,
+            Self::Settings(protocol::SettingsScope::User) => 9,
         }
     }
 
@@ -228,11 +230,11 @@ impl PermissionRuleSource {
     #[must_use]
     pub fn lingxi_settings_source(self) -> &'static str {
         match self {
-            Self::UserSettings => "userSettings",
-            Self::ProjectSettings => "projectSettings",
-            Self::LocalSettings => "localSettings",
+            Self::Settings(protocol::SettingsScope::User) => "userSettings",
+            Self::Settings(protocol::SettingsScope::Project) => "projectSettings",
+            Self::Settings(protocol::SettingsScope::Local) => "localSettings",
             Self::FlagSettings => "flagSettings",
-            Self::PolicySettings => "policySettings",
+            Self::Settings(protocol::SettingsScope::Managed) => "policySettings",
             Self::CliArg => "cliArg",
             Self::Command => "command",
             Self::Session => "session",
@@ -307,7 +309,7 @@ mod tests {
         // #35: claude-code's Szn cites userSettings before session, so
         // userSettings has the higher citation precedence (NOT session).
         assert!(
-            PermissionRuleSource::UserSettings.priority()
+            PermissionRuleSource::Settings(protocol::SettingsScope::User).priority()
                 > PermissionRuleSource::Session.priority()
         );
     }

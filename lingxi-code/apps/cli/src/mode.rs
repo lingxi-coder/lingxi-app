@@ -3251,9 +3251,9 @@ async fn run_permission_action(
     // (persist keys off `behavior` + `destination`, not `source`; this is for
     // the live `session_allow_rules` citation on an allow add).
     let dest_source = |d: PermissionUpdateDestination| match d {
-        PermissionUpdateDestination::UserSettings => PermissionRuleSource::UserSettings,
-        PermissionUpdateDestination::ProjectSettings => PermissionRuleSource::ProjectSettings,
-        PermissionUpdateDestination::LocalSettings => PermissionRuleSource::LocalSettings,
+        PermissionUpdateDestination::UserSettings => PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        PermissionUpdateDestination::ProjectSettings => PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        PermissionUpdateDestination::LocalSettings => PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         PermissionUpdateDestination::Session => PermissionRuleSource::Session,
         PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
     };

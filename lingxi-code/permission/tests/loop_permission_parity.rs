@@ -12,7 +12,7 @@ fn rule(name: &str, behavior: PermissionBehavior) -> PermissionRule {
             rule_content: None,
         },
         behavior,
-        source: PermissionRuleSource::ProjectSettings,
+        source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
     }
 }
 

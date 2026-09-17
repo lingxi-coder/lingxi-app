@@ -1291,7 +1291,7 @@ mod read_file_state_tests {
                 rule_content: None,
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::ProjectSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
         });
         let policy = Arc::new(PermissionPolicy::from_rules(
             permission::PermissionMode::Default,

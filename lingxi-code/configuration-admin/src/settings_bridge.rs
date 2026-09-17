@@ -363,9 +363,9 @@ pub fn permission_destination(
 /// matches the file it actually landed in.
 fn permission_rule_source(destination: SettingsDestinationDto) -> permission::PermissionRuleSource {
     match destination {
-        SettingsDestinationDto::User => permission::PermissionRuleSource::UserSettings,
-        SettingsDestinationDto::Project => permission::PermissionRuleSource::ProjectSettings,
-        SettingsDestinationDto::Local => permission::PermissionRuleSource::LocalSettings,
+        SettingsDestinationDto::User => permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        SettingsDestinationDto::Project => permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        SettingsDestinationDto::Local => permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
     }
 }
 
@@ -1885,7 +1885,7 @@ mod tests {
         assert_eq!(rule.behavior, permission::PermissionBehavior::Allow);
         assert_eq!(
             rule.source,
-            permission::PermissionRuleSource::ProjectSettings
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         );
     }
 

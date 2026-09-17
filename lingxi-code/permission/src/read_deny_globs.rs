@@ -301,7 +301,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "./secrets/**",
-                PermissionRuleSource::ProjectSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             )],
             "/proj",
         );
@@ -313,7 +313,7 @@ mod tests {
     fn bare_relative_rule_passes_through() {
         // `Read(.env)` → unrooted → `.env` (Grep will prefix `!**/`).
         let p = policy_with(
-            vec![read_deny(".env", PermissionRuleSource::ProjectSettings)],
+            vec![read_deny(".env", PermissionRuleSource::Settings(protocol::SettingsScope::Project))],
             "/proj",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/proj"));
@@ -327,7 +327,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "/secrets/**",
-                PermissionRuleSource::ProjectSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             )],
             "/proj",
         );
@@ -340,7 +340,7 @@ mod tests {
         // A UserSettings rule resolves against lingxi_home (/home/u/.claude).
         // If cwd is /home/u/.claude, `/x` rebases to `/x`.
         let p = policy_with(
-            vec![read_deny("/x/**", PermissionRuleSource::UserSettings)],
+            vec![read_deny("/x/**", PermissionRuleSource::Settings(protocol::SettingsScope::User))],
             "/home/u/.lingxi",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/home/u/.lingxi"));
@@ -352,7 +352,7 @@ mod tests {
         // A UserSettings rule rooted at /home/u/.claude, with cwd at /proj
         // (a sibling that does NOT contain .claude) → relative escapes → None.
         let p = policy_with(
-            vec![read_deny("/secret/**", PermissionRuleSource::UserSettings)],
+            vec![read_deny("/secret/**", PermissionRuleSource::Settings(protocol::SettingsScope::User))],
             "/proj",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/proj"));
@@ -364,7 +364,7 @@ mod tests {
         // UserSettings rule root = /home/u/.claude; cwd = /home/u. The root is a
         // subdir of cwd, so a `/c/**` pattern rebases to `/.lingxi/c/**`.
         let p = policy_with(
-            vec![read_deny("/c/**", PermissionRuleSource::UserSettings)],
+            vec![read_deny("/c/**", PermissionRuleSource::Settings(protocol::SettingsScope::User))],
             "/home/u",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/home/u"));
@@ -378,7 +378,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "~/private/**",
-                PermissionRuleSource::ProjectSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             )],
             "/home/u",
         );
@@ -395,7 +395,7 @@ mod tests {
                 rule_content: Some("/secrets/**".into()),
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::ProjectSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
         };
         let p = policy_with(vec![edit], "/proj");
         assert!(read_deny_exclude_globs(&p, Path::new("/proj")).is_empty());
@@ -410,7 +410,7 @@ mod tests {
                 rule_content: Some("/secrets/**".into()),
             },
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::ProjectSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
         };
         let p = policy_with(vec![allow], "/proj");
         assert!(read_deny_exclude_globs(&p, Path::new("/proj")).is_empty());
@@ -427,7 +427,7 @@ mod tests {
                     rule_content: None,
                 },
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::ProjectSettings,
+                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             }],
         )
         .with_roots(roots("/proj"));
@@ -446,8 +446,8 @@ mod tests {
     fn duplicate_patterns_dedup() {
         let p = policy_with(
             vec![
-                read_deny("./secrets/**", PermissionRuleSource::ProjectSettings),
-                read_deny("./secrets/**", PermissionRuleSource::LocalSettings),
+                read_deny("./secrets/**", PermissionRuleSource::Settings(protocol::SettingsScope::Project)),
+                read_deny("./secrets/**", PermissionRuleSource::Settings(protocol::SettingsScope::Local)),
             ],
             "/proj",
         );
@@ -460,7 +460,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "/a//b///c/**",
-                PermissionRuleSource::ProjectSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             )],
             "/proj",
         );

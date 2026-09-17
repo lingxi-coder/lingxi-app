@@ -196,7 +196,7 @@ mod tests {
         let settings = json!({
             "autoMode": { "allow": ["x"], "environment": ["y"], "soft_deny": [] }
         });
-        let r = scan_settings_tier(&settings, PermissionRuleSource::LocalSettings);
+        let r = scan_settings_tier(&settings, PermissionRuleSource::Settings(protocol::SettingsScope::Local));
         assert_eq!(r.auto_mode_entry_count, 3);
         assert!(r.dangerous_allow.is_empty());
     }
@@ -205,13 +205,13 @@ mod tests {
     fn no_automode_block_is_zero() {
         let r = scan_settings_tier(
             &json!({"model": "opus"}),
-            PermissionRuleSource::UserSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
         );
         assert_eq!(r.auto_mode_entry_count, 0);
         // A non-object autoMode also counts as zero (nothing to observe).
         let r2 = scan_settings_tier(
             &json!({"autoMode": "nope"}),
-            PermissionRuleSource::UserSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
         );
         assert_eq!(r2.auto_mode_entry_count, 0);
     }
@@ -221,7 +221,7 @@ mod tests {
         let settings = json!({
             "permissions": { "allow": ["Bash(*)", "Read", "Bash(rm:*)", "Edit(src/**)"] }
         });
-        let r = scan_settings_tier(&settings, PermissionRuleSource::UserSettings);
+        let r = scan_settings_tier(&settings, PermissionRuleSource::Settings(protocol::SettingsScope::User));
         let displays: Vec<&str> = r
             .dangerous_allow
             .iter()
@@ -238,11 +238,11 @@ mod tests {
     fn removal_offer_dedups_across_tiers() {
         let user = scan_settings_tier(
             &json!({"permissions": {"allow": ["Bash(*)"]}}),
-            PermissionRuleSource::UserSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
         );
         let project = scan_settings_tier(
             &json!({"permissions": {"allow": ["Bash(*)", "Bash(curl:*)"]}}),
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
         );
         let offer = removal_offer(&[user, project]);
         // `Bash(*)` appears in both tiers but is offered once, first-seen order.
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn empty_and_missing_sections_are_safe() {
-        let r = scan_settings_tier(&json!({}), PermissionRuleSource::UserSettings);
+        let r = scan_settings_tier(&json!({}), PermissionRuleSource::Settings(protocol::SettingsScope::User));
         assert_eq!(r.auto_mode_entry_count, 0);
         assert!(r.dangerous_allow.is_empty());
         assert!(removal_offer(&[r]).is_empty());

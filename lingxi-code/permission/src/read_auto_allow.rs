@@ -209,7 +209,7 @@ mod tests {
                 rule_content: Some("./secret/**".into()),
             },
             behavior: PermissionBehavior::Ask,
-            source: crate::rule::PermissionRuleSource::UserSettings,
+            source: crate::rule::PermissionRuleSource::Settings(protocol::SettingsScope::User),
         };
         let by_rule = ask(PermissionDecisionReason::MatchedRule { rule: rule.clone() });
         assert!(

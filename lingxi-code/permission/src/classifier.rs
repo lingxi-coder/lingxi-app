@@ -716,7 +716,7 @@ mod tests {
     fn explicit_rule_ask_is_not_classifier_eligible() {
         let rule = crate::PermissionRule {
             behavior: crate::PermissionBehavior::Ask,
-            source: crate::PermissionRuleSource::UserSettings,
+            source: crate::PermissionRuleSource::Settings(protocol::SettingsScope::User),
             value: crate::PermissionRuleValue {
                 tool_name: "Bash".to_string(),
                 rule_content: None,

@@ -826,7 +826,7 @@ mod tests {
             rule: PermissionRule {
                 value: PermissionRuleValue::from_rule_string(spec),
                 behavior: PermissionBehavior::Allow,
-                source: PermissionRuleSource::LocalSettings,
+                source: PermissionRuleSource::Settings(protocol::SettingsScope::Local),
             },
             destination: dest,
         }
@@ -949,7 +949,7 @@ mod tests {
         let deny_rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash(rm:*)"),
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::LocalSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         };
         assert!(replace_rules_in_settings_json(
             r#"{ "permissions": { "allow": ["Read"] } }"#,
@@ -972,7 +972,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Read(./secrets/**)"),
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::LocalSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         };
         let out = apply_rule_to_settings_json("{}", &rule).unwrap().unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();

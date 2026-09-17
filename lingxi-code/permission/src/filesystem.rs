@@ -177,10 +177,10 @@ pub fn input_path_for_tool<'a>(
 /// too, so every non-user source landing on `roots.cwd` is byte-correct.
 fn root_path_for_source(source: PermissionRuleSource, roots: &FsRoots) -> PathBuf {
     match source {
-        PermissionRuleSource::UserSettings => roots.lingxi_home.clone(),
-        PermissionRuleSource::ProjectSettings
-        | PermissionRuleSource::LocalSettings
-        | PermissionRuleSource::PolicySettings
+        PermissionRuleSource::Settings(protocol::SettingsScope::User) => roots.lingxi_home.clone(),
+        PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+        | PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+        | PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
         | PermissionRuleSource::FlagSettings
         | PermissionRuleSource::CliArg
         | PermissionRuleSource::Command
@@ -848,18 +848,18 @@ mod tests {
         assert!(matches(
             "/proj/src/main.rs",
             "src/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         assert!(matches(
             "src/lib.rs", // relative input → resolved against cwd
             "src/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         // Outside src → no match.
         assert!(!matches(
             "/proj/tests/x.rs",
             "src/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
     }
 
@@ -869,7 +869,7 @@ mod tests {
         assert!(matches(
             "/proj/secrets/key.pem",
             "./secrets/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
     }
 
@@ -878,13 +878,13 @@ mod tests {
         assert!(matches(
             "/proj/.env",
             ".env",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         // gitignore basename rule matches at any depth.
         assert!(matches(
             "/proj/nested/.env",
             ".env",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
     }
 
@@ -894,13 +894,13 @@ mod tests {
         assert!(matches(
             "/proj/src/a.rs",
             "/src/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         // anchored: a nested `src` does NOT match.
         assert!(!matches(
             "/proj/a/src/b.rs",
             "/src/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
     }
 
@@ -919,7 +919,7 @@ mod tests {
         assert!(matches_with(
             "/proj/a/src/b.rs",
             "src/**",
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             crate::rule::PermissionBehavior::Deny
         ));
     }
@@ -930,13 +930,13 @@ mod tests {
         assert!(matches(
             "/home/u/.lingxi/sub/x",
             "/sub/**",
-            PermissionRuleSource::UserSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
         ));
         // A cwd path is OUTSIDE the user-settings root → no match.
         assert!(!matches(
             "/proj/sub/x",
             "/sub/**",
-            PermissionRuleSource::UserSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
         ));
     }
 
@@ -945,13 +945,13 @@ mod tests {
         assert!(matches(
             "/home/u/.ssh/id_rsa",
             "~/.ssh/**",
-            PermissionRuleSource::UserSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
         ));
         // `~`-expanded input path also resolves to home.
         assert!(matches(
             "~/.ssh/id_rsa",
             "~/.ssh/**",
-            PermissionRuleSource::UserSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
         ));
     }
 
@@ -960,12 +960,12 @@ mod tests {
         assert!(matches(
             "/etc/passwd",
             "//etc/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         assert!(!matches(
             "/proj/etc/passwd",
             "//etc/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
     }
 
@@ -975,7 +975,7 @@ mod tests {
         assert!(!matches(
             "/other/x.rs",
             "src/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
     }
 
@@ -984,12 +984,12 @@ mod tests {
         assert!(matches(
             "/proj/a/b.test.ts",
             "**/*.test.ts",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         assert!(!matches(
             "/proj/a/b.ts",
             "**/*.test.ts",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
     }
 
@@ -1011,14 +1011,14 @@ mod tests {
         assert!(matches_with(
             "/proj/src/a.rs",
             "src/**",
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             Allow
         ));
         assert!(
             !matches_with(
                 "/proj/vendor/src/a.rs",
                 "src/**",
-                PermissionRuleSource::ProjectSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
                 Allow
             ),
             "an allow rule must not reach a nested directory of the same name"
@@ -1028,14 +1028,14 @@ mod tests {
         assert!(matches_with(
             "/proj/src/a.rs",
             "src/**",
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             Deny
         ));
         assert!(
             matches_with(
                 "/proj/vendor/src/a.rs",
                 "src/**",
-                PermissionRuleSource::ProjectSettings,
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
                 Deny
             ),
             "a deny rule must stay broad"
@@ -1047,13 +1047,13 @@ mod tests {
         assert!(matches_with(
             "/proj/a/b/x.rs",
             "a/b/**",
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             Allow
         ));
         assert!(!matches_with(
             "/proj/nested/a/b/x.rs",
             "a/b/**",
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             Allow
         ));
     }
@@ -1076,25 +1076,25 @@ mod tests {
         assert!(matches(
             "/proj/anything/deep.rs",
             "/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         assert!(matches(
             "/etc/x",
             "//**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         // A NON-empty unanchored `**` still matches everything (no strip).
         assert!(matches(
             "/proj/anything/deep.rs",
             "**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
         // The root anchor still BOUNDS the match: `/**` rooted at the project
         // must not reach a sibling directory outside it.
         assert!(!matches(
             "/elsewhere/secret.rs",
             "/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         ));
     }
 
@@ -1451,7 +1451,7 @@ mod tests {
             kind_of(
                 "/proj/src/public/index.html",
                 "!src/public/**",
-                PermissionRuleSource::ProjectSettings
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project)
             ),
             RulePatternMatch::Negated
         );
@@ -1460,7 +1460,7 @@ mod tests {
             kind_of(
                 "/proj/src/secret.rs",
                 "!src/public/**",
-                PermissionRuleSource::ProjectSettings
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project)
             ),
             RulePatternMatch::NoMatch
         );
@@ -1470,7 +1470,7 @@ mod tests {
         assert!(!path_matches_rule_pattern(
             "/proj/src/public/index.html",
             "!src/public/**",
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             crate::rule::PermissionBehavior::Deny,
             &roots(),
         ));
@@ -1487,7 +1487,7 @@ mod tests {
             kind_of(
                 "/etc/passwd",
                 "!/etc/**",
-                PermissionRuleSource::ProjectSettings
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project)
             ),
             RulePatternMatch::NoMatch
         );
@@ -1497,7 +1497,7 @@ mod tests {
             kind_of(
                 "/proj/etc/passwd",
                 "!/etc/**",
-                PermissionRuleSource::ProjectSettings
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project)
             ),
             RulePatternMatch::Negated
         );
@@ -1516,7 +1516,7 @@ mod tests {
                 kind_of(
                     "/proj/src/main.rs",
                     pattern,
-                    PermissionRuleSource::ProjectSettings
+                    PermissionRuleSource::Settings(protocol::SettingsScope::Project)
                 ),
                 RulePatternMatch::NoMatch,
                 "bare {pattern:?} must not cover anything"

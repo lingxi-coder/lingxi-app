@@ -1794,11 +1794,11 @@ mod fork_dispatch_tests {
         );
         // A different SOURCE is not frozen, even for the same tool.
         policy.deny_rules.insert(
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             vec![PermissionRule {
                 value: PermissionRuleValue::from_rule_string("Bash(curl:*)"),
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::ProjectSettings,
+                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
             }],
         );
         ctx.permission_policy = Arc::new(policy);

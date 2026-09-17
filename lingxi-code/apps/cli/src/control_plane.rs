@@ -1017,9 +1017,9 @@ fn parse_destination(s: &str) -> Option<PermissionUpdateDestination> {
 /// (the file it lives in determines its precedence on the next load).
 fn source_for_destination(dest: PermissionUpdateDestination) -> PermissionRuleSource {
     match dest {
-        PermissionUpdateDestination::UserSettings => PermissionRuleSource::UserSettings,
-        PermissionUpdateDestination::ProjectSettings => PermissionRuleSource::ProjectSettings,
-        PermissionUpdateDestination::LocalSettings => PermissionRuleSource::LocalSettings,
+        PermissionUpdateDestination::UserSettings => PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        PermissionUpdateDestination::ProjectSettings => PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        PermissionUpdateDestination::LocalSettings => PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
         PermissionUpdateDestination::Session => PermissionRuleSource::Session,
     }
@@ -1940,7 +1940,7 @@ mod tests {
             updates[0].destination,
             PermissionUpdateDestination::LocalSettings
         );
-        assert_eq!(updates[0].rule.source, PermissionRuleSource::LocalSettings);
+        assert_eq!(updates[0].rule.source, PermissionRuleSource::Settings(protocol::SettingsScope::Local));
         // Tool-wide rule keeps ruleContent None.
         assert_eq!(updates[1].rule.value.tool_name, "Read");
         assert!(updates[1].rule.value.rule_content.is_none());
@@ -1963,7 +1963,7 @@ mod tests {
         // "Task" is the legacy alias for "Agent".
         assert_eq!(updates[0].rule.value.tool_name, "Agent");
         assert_eq!(updates[0].rule.behavior, PermissionBehavior::Deny);
-        assert_eq!(updates[0].rule.source, PermissionRuleSource::UserSettings);
+        assert_eq!(updates[0].rule.source, PermissionRuleSource::Settings(protocol::SettingsScope::User));
     }
 
     #[test]

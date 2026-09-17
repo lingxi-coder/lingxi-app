@@ -41,11 +41,11 @@ const ACCEPT_EDITS_ALLOWED_COMMANDS: [&str; 7] =
 /// before allow), so the source order never changes the allow/deny DECISION —
 /// only which source's rule is reported. (Was the exact reverse of this.)
 const SOURCES_BY_PRIORITY: [PermissionRuleSource; 10] = [
-    PermissionRuleSource::UserSettings,
-    PermissionRuleSource::ProjectSettings,
-    PermissionRuleSource::LocalSettings,
+    PermissionRuleSource::Settings(protocol::SettingsScope::User),
+    PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+    PermissionRuleSource::Settings(protocol::SettingsScope::Local),
     PermissionRuleSource::FlagSettings,
-    PermissionRuleSource::PolicySettings,
+    PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
     PermissionRuleSource::CliArg,
     PermissionRuleSource::Command,
     PermissionRuleSource::Session,
@@ -4113,7 +4113,7 @@ mod classify_all_shell_policy_test {
                 rule_content: Some(content.into()),
             },
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::UserSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
         }
     }
 
@@ -4288,7 +4288,7 @@ mod restricted_policy_test {
         let allow = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Edit(.git/**)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::UserSettings,
+            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
         };
         let policy = PermissionPolicy::from_rules(PermissionMode::BypassPermissions, [allow])
             .with_roots(roots)

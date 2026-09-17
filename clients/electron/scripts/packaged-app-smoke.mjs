@@ -203,6 +203,7 @@ const SAFE_CREDENTIAL_METADATA_KEYS = new Set([
   'credentialPreview',
   'encryptionAvailable',
   'providerId',
+  'codexAccountEmail',
 ]);
 
 const SAFE_BOOTSTRAP_PROMPT_PLACEHOLDERS = new Set([
@@ -218,6 +219,11 @@ export function isSafeProviderCredentialSnapshot(providerCredentials) {
       if (Object.keys(entry).some((key) => !SAFE_CREDENTIAL_METADATA_KEYS.has(key))) return false;
       if (typeof entry.providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(entry.providerId)) return false;
       if (typeof entry.configured !== 'boolean' || entry.encryptionAvailable !== true) return false;
+      if (entry.codexAccountEmail !== undefined && (
+        entry.providerId !== 'openai-chatgpt'
+        || typeof entry.codexAccountEmail !== 'string'
+        || !/^[^\s@]+@[^\s@]+$/.test(entry.codexAccountEmail)
+      )) return false;
       if (entry.credentialPreview === undefined) return true;
       return typeof entry.credentialPreview === 'string'
         && entry.credentialPreview.startsWith('••••')

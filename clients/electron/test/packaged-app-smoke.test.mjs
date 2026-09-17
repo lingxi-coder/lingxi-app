@@ -91,6 +91,16 @@ test('packaged bootstrap accepts configured providers but rejects secret-bearing
   assert.equal(isSafeProviderCredentialSnapshot(undefined), false);
 });
 
+test('packaged Codex metadata accepts account email while rejecting OAuth secrets', () => {
+  const metadata = { providerId: 'openai-chatgpt', configured: true, encryptionAvailable: true, codexAccountEmail: 'user@example.com' };
+  assert.equal(isSafeProviderCredentialSnapshot([metadata]), true);
+  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, access_token: 'secret' }]), false);
+  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, refresh_token: 'secret' }]), false);
+  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, codexAccountEmail: { access_token: 'secret' } }]), false);
+  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, providerId: 'openai' }]), false);
+  assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, codexAccountEmail: 'secret' }]), false);
+});
+
 test('packaged renderer accepts both expected pre-ready credential states', () => {
   assert.equal(isExpectedBootstrapPromptPlaceholder('Connect a provider in Settings to start coding…'), true);
   assert.equal(isExpectedBootstrapPromptPlaceholder('Waiting for the local engine…'), true);
